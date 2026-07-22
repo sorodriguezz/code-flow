@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleDot,
   Cloud,
+  Eye,
   Folder,
   FolderInput,
   GitBranch,
@@ -34,12 +35,13 @@ import {
   autoLinkProjectAdo,
   unlinkProjectAdo,
 } from "../../lib/tauri/commands";
-import type { BranchInfo, Project, PullRequestSummary } from "../../types/domain";
+import type { BranchInfo, Project, PullRequestSummary, StashInfo } from "../../types/domain";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
+import { StashDiffModal } from "./StashDiffModal";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -746,6 +748,7 @@ function ProjectRow({ project }: { project: Project }) {
   const [expanded, setExpanded] = useState(isActive);
   const [showCreateBranch, setShowCreateBranch] = useState(false);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
+  const [revealing, setRevealing] = useState(false);
 
   const select = () => {
     setActiveProject(project.id);
@@ -765,14 +768,19 @@ function ProjectRow({ project }: { project: Project }) {
       >
         <button
           title={t("sidebar.revealInFileManager")}
-          onClick={(e) => {
+          onClick={async (e) => {
             e.stopPropagation();
-            void revealInFileManager(project.local_path);
+            setRevealing(true);
+            try {
+              await revealInFileManager(project.local_path);
+            } finally {
+              setRevealing(false);
+            }
           }}
           className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-white"
           style={{ background: project.color }}
         >
-          <Folder size={12} />
+          {revealing ? <Loader2 size={12} className="animate-spin" /> : <Folder size={12} />}
         </button>
         <button onClick={select} className="flex flex-1 min-w-0 items-center gap-2 text-left">
           <span className="flex-1 min-w-0 truncate font-medium">{project.name}</span>

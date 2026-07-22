@@ -163,30 +163,33 @@ export function DiffView({ files }: { files: FileDiffInfo[] }) {
 
   if (mode === "split") {
     return (
-      <div className="h-full overflow-auto">
-        <div className="flex items-center justify-end border-b border-[var(--cf-border)] px-3 py-1.5">{modeToggle}</div>
-        <div className="divide-y divide-[var(--cf-border)]">
-          {files.map((file, i) => {
-            const color = statusColor(file.status);
-            return (
-              <div key={i}>
-                <div
-                  className="sticky top-0 z-10 flex items-center gap-2 border-b-2 bg-[var(--cf-surface-raised)] px-3 py-2 text-[12px] font-semibold shadow-sm"
-                  style={{ borderBottomColor: color, willChange: "transform", contain: "paint" }}
-                >
-                  <span
-                    className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
-                    style={{ background: `color-mix(in oklab, ${color} 18%, transparent)`, color }}
+      <div className="flex h-full">
+        <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
+          <div className="flex items-center justify-end border-b border-[var(--cf-border)] px-3 py-1.5">{modeToggle}</div>
+          <div className="divide-y divide-[var(--cf-border)]">
+            {files.map((file, i) => {
+              const color = statusColor(file.status);
+              return (
+                <div key={i}>
+                  <div
+                    className="sticky top-0 z-10 flex items-center gap-2 border-b-2 bg-[var(--cf-surface-raised)] px-3 py-2 text-[12px] font-semibold shadow-sm"
+                    style={{ borderBottomColor: color, willChange: "transform", contain: "paint" }}
                   >
-                    {file.status}
-                  </span>
-                  <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
+                    <span
+                      className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                      style={{ background: `color-mix(in oklab, ${color} 18%, transparent)`, color }}
+                    >
+                      {file.status}
+                    </span>
+                    <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
+                  </div>
+                  <SplitFileDiff file={file} />
                 </div>
-                <SplitFileDiff file={file} />
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
+        <ChangeMap files={files} containerRef={scrollRef} />
       </div>
     );
   }
