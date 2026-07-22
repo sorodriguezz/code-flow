@@ -1,0 +1,145 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+:root {
+  --cf-bg: #f7f7fb;
+  --cf-surface: #ffffff;
+  --cf-surface-raised: #ffffff;
+  --cf-border: #e7e7ef;
+  --cf-text: #1c1c26;
+  --cf-text-muted: #6b6b7d;
+  --cf-accent: #6366f1;
+  --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 14%, var(--cf-surface));
+  --cf-success: #16a34a;
+  --cf-danger: #dc2626;
+  --cf-warning: #d97706;
+  --cf-titlebar-gradient: linear-gradient(120deg, #c9e9e6 0%, #d8c9ec 45%, #f3c9d8 100%);
+  --cf-shadow: 0 1px 2px rgba(20, 20, 40, 0.04), 0 8px 24px rgba(20, 20, 40, 0.06);
+}
+
+:root[data-theme="dark"] {
+  --cf-bg: #16161d;
+  --cf-surface: #1e1e27;
+  --cf-surface-raised: #262632;
+  --cf-border: #313140;
+  --cf-text: #eceef5;
+  --cf-text-muted: #9797ab;
+  --cf-accent: #818cf8;
+  --cf-accent-soft: #2a2a44;
+  --cf-success: #4ade80;
+  --cf-danger: #f87171;
+  --cf-warning: #fbbf24;
+  --cf-titlebar-gradient: linear-gradient(120deg, #163a3a 0%, #2a2148 45%, #3a1f30 100%);
+  --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --cf-bg: #16161d;
+    --cf-surface: #1e1e27;
+    --cf-surface-raised: #262632;
+    --cf-border: #313140;
+    --cf-text: #eceef5;
+    --cf-text-muted: #9797ab;
+    --cf-accent: #818cf8;
+    --cf-accent-soft: #2a2a44;
+    --cf-success: #4ade80;
+    --cf-danger: #f87171;
+    --cf-warning: #fbbf24;
+    --cf-titlebar-gradient: linear-gradient(120deg, #163a3a 0%, #2a2148 45%, #3a1f30 100%);
+    --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.4);
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--cf-bg);
+  color: var(--cf-text);
+  font-family: var(--font-sans);
+  overflow: hidden;
+  user-select: none;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--cf-border);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+[data-tauri-drag-region] {
+  -webkit-app-region: drag;
+}
+
+/* Lightweight, GPU-only animations (opacity/transform) — no JS animation loop. */
+
+@keyframes cf-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.cf-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--cf-border) 25%,
+    color-mix(in oklab, var(--cf-border) 50%, var(--cf-surface)) 50%,
+    var(--cf-border) 75%
+  );
+  background-size: 200% 100%;
+  animation: cf-shimmer 1.4s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+@keyframes cf-bounce {
+  0%,
+  80%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.5;
+  }
+  40% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+
+.cf-bounce-dot {
+  animation: cf-bounce 1s ease-in-out infinite;
+}
+
+@keyframes cf-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.cf-fade-in {
+  animation: cf-fade-in 0.15s ease-out;
+}
