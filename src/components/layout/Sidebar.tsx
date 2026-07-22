@@ -154,6 +154,7 @@ function StashesSection() {
   const stashDrop = useRepoStore((s) => s.stashDrop);
   const [showInput, setShowInput] = useState(false);
   const [message, setMessage] = useState("");
+  const [viewingStash, setViewingStash] = useState<StashInfo | null>(null);
   const t = useT();
 
   return (
@@ -205,26 +206,46 @@ function StashesSection() {
         {stashes.map((s) => (
           <div
             key={s.index}
-            className="group flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            onClick={() => setViewingStash(s)}
+            className="group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
           >
             <span className="flex-1 truncate text-[var(--cf-text-muted)]">{s.message}</span>
             <button
+              title={t("sidebar.viewStash")}
+              onClick={(e) => {
+                e.stopPropagation();
+                setViewingStash(s);
+              }}
+              className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+            >
+              <Eye size={12} />
+            </button>
+            <button
               title={t("sidebar.apply")}
-              onClick={() => stashApply(s.index)}
+              onClick={(e) => {
+                e.stopPropagation();
+                stashApply(s.index);
+              }}
               className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
             >
               <Check size={12} />
             </button>
             <button
               title={t("sidebar.pop")}
-              onClick={() => stashPop(s.index)}
+              onClick={(e) => {
+                e.stopPropagation();
+                stashPop(s.index);
+              }}
               className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
             >
               <Undo2 size={12} />
             </button>
             <button
               title={t("sidebar.drop")}
-              onClick={() => stashDrop(s.index)}
+              onClick={(e) => {
+                e.stopPropagation();
+                stashDrop(s.index);
+              }}
               className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] group-hover:block"
             >
               <Trash2 size={12} />
@@ -235,6 +256,7 @@ function StashesSection() {
           <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noStashes")}</p>
         )}
       </div>
+      {viewingStash && <StashDiffModal stash={viewingStash} onClose={() => setViewingStash(null)} />}
     </CollapsibleSection>
   );
 }

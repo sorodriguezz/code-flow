@@ -264,6 +264,8 @@ export const translations = {
 
     "diff.noChanges": "No changes",
     "diff.noChangesHint": "Nothing to show for this selection.",
+    "diff.unifiedView": "Unified view",
+    "diff.splitView": "Side-by-side view",
 
     "conflicts.title": "Merge in progress — conflicts to resolve",
     "conflicts.keepOurs": "Keep ours",
@@ -583,6 +585,8 @@ export const translations = {
 
     "diff.noChanges": "Sin cambios",
     "diff.noChangesHint": "No hay nada que mostrar para esta selección.",
+    "diff.unifiedView": "Vista unificada",
+    "diff.splitView": "Vista en paralelo",
 
     "conflicts.title": "Merge en curso — conflictos por resolver",
     "conflicts.keepOurs": "Mantener lo nuestro",

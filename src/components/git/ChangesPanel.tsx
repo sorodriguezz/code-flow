@@ -1,5 +1,17 @@
 import { useMemo, useState } from "react";
-import { Clock, ExternalLink, FileText, GitCommitHorizontal, Loader2, Minus, Plus, RotateCcw, Sparkles } from "lucide-react";
+import {
+  Clock,
+  ExternalLink,
+  FileText,
+  GitCommitHorizontal,
+  ListMinus,
+  ListPlus,
+  Loader2,
+  Minus,
+  Plus,
+  RotateCcw,
+  Sparkles,
+} from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -66,6 +78,11 @@ interface RowAction {
   title: string;
   onClick: () => void;
   danger?: boolean;
+  /** This specific action is the one currently in flight — swaps its icon for a spinner. */
+  pending?: boolean;
+  /** A *different* action (on this row or another) is in flight — dims and blocks clicks
+   * so two git-index-mutating actions can never race each other. */
+  disabled?: boolean;
 }
 
 function FileRow({
@@ -90,18 +107,25 @@ function FileRow({
         {entry.status[0]}
       </span>
       <span className="flex-1 min-w-0 truncate font-mono text-[12px]">{entry.path}</span>
-      <span className="flex shrink-0 items-center gap-1 opacity-0 group-hover:opacity-100">
+      <span
+        className={`flex shrink-0 items-center gap-1 ${
+          actions.some((a) => a.pending) ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+        }`}
+      >
         {actions.map((action, i) => (
           <button
             key={i}
             title={action.title}
+            disabled={action.disabled}
             onClick={(e) => {
               e.stopPropagation();
               action.onClick();
             }}
-            className={`text-[var(--cf-text-muted)] ${action.danger ? "hover:text-[var(--cf-danger)]" : "hover:text-[var(--cf-accent)]"}`}
+            className={`text-[var(--cf-text-muted)] disabled:opacity-30 ${
+              action.danger ? "hover:text-[var(--cf-danger)]" : "hover:text-[var(--cf-accent)]"
+            }`}
           >
-            <action.icon size={13} />
+            {action.pending ? <Loader2 size={13} className="animate-spin" /> : <action.icon size={13} />}
           </button>
         ))}
       </span>
@@ -130,7 +154,23 @@ export function ChangesPanel() {
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<ClaudeErrorInfo | null>(null);
+  const [pending, setPending] = useState<{ path: string; kind: "stage" | "unstage" | "discard" | "all" } | null>(
+    null,
+  );
   const t = useT();
+
+  // Feedback for the row action buttons is otherwise invisible until refreshStatus() comes
+  // back (stage/unstage/discard all trigger a full status+diff refresh) — set the pending
+  // state synchronously on click so the button shows a spinner immediately, and block the
+  // other git-mutating buttons meanwhile so two of them can never race the same index.
+  const runAction = async (path: string, kind: "stage" | "unstage" | "discard" | "all", fn: () => Promise<void>) => {
+    setPending({ path, kind });
+    try {
+      await fn();
+    } finally {
+      setPending(null);
+    }
+  };
 
   const unstagedAndUntracked = useMemo(
     () => [...(status?.unstaged ?? []), ...(status?.untracked ?? [])],
@@ -183,23 +223,42 @@ export function ChangesPanel() {
                 {t("changes.staged")} ({status.staged.length})
               </span>
               {status.staged.length > 0 && (
-                <button onClick={() => unstageAll()} className="text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]">
-                  {t("changes.unstageAll")}
+                <button
+                  onClick={() => runAction("__unstage_all__", "all", () => unstageAll())}
+                  disabled={pending !== null && pending.path !== "__unstage_all__"}
+                  title={t("changes.unstageAll")}
+                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-30"
+                >
+                  {pending?.path === "__unstage_all__" ? (
+                    <Loader2 size={13} className="animate-spin" />
+                  ) : (
+                    <ListMinus size={13} />
+                  )}
                 </button>
               )}
             </div>
-            {status.staged.map((entry) => (
-              <FileRow
-                key={entry.path}
-                entry={entry}
-                selected={selected?.path === entry.path && selected.staged}
-                onSelect={() => setSelected({ path: entry.path, staged: true })}
-                actions={[
-                  { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
-                  { icon: Minus, title: t("changes.unstage"), onClick: () => unstageFile(entry.path) },
-                ]}
-              />
-            ))}
+            {status.staged.map((entry) => {
+              const isPending = pending?.path === entry.path;
+              const blocked = pending !== null && !isPending;
+              return (
+                <FileRow
+                  key={entry.path}
+                  entry={entry}
+                  selected={selected?.path === entry.path && selected.staged}
+                  onSelect={() => setSelected({ path: entry.path, staged: true })}
+                  actions={[
+                    { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
+                    {
+                      icon: Minus,
+                      title: t("changes.unstage"),
+                      onClick: () => runAction(entry.path, "unstage", () => unstageFile(entry.path)),
+                      pending: isPending && pending?.kind === "unstage",
+                      disabled: blocked,
+                    },
+                  ]}
+                />
+              );
+            })}
           </div>
 
           <div>
@@ -208,24 +267,50 @@ export function ChangesPanel() {
                 {t("changes.changes")} ({unstagedAndUntracked.length})
               </span>
               {unstagedAndUntracked.length > 0 && (
-                <button onClick={() => stageAll()} className="text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]">
-                  {t("changes.stageAll")}
+                <button
+                  onClick={() => runAction("__stage_all__", "all", () => stageAll())}
+                  disabled={pending !== null && pending.path !== "__stage_all__"}
+                  title={t("changes.stageAll")}
+                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-30"
+                >
+                  {pending?.path === "__stage_all__" ? (
+                    <Loader2 size={13} className="animate-spin" />
+                  ) : (
+                    <ListPlus size={13} />
+                  )}
                 </button>
               )}
             </div>
-            {unstagedAndUntracked.map((entry) => (
-              <FileRow
-                key={entry.path}
-                entry={entry}
-                selected={selected?.path === entry.path && !selected.staged}
-                onSelect={() => setSelected({ path: entry.path, staged: false })}
-                actions={[
-                  { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
-                  { icon: Plus, title: t("changes.stage"), onClick: () => stageFile(entry.path) },
-                  { icon: RotateCcw, title: t("changes.discardChanges"), danger: true, onClick: () => discardFile(entry.path) },
-                ]}
-              />
-            ))}
+            {unstagedAndUntracked.map((entry) => {
+              const isPending = pending?.path === entry.path;
+              const blocked = pending !== null && !isPending;
+              return (
+                <FileRow
+                  key={entry.path}
+                  entry={entry}
+                  selected={selected?.path === entry.path && !selected.staged}
+                  onSelect={() => setSelected({ path: entry.path, staged: false })}
+                  actions={[
+                    { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
+                    {
+                      icon: Plus,
+                      title: t("changes.stage"),
+                      onClick: () => runAction(entry.path, "stage", () => stageFile(entry.path)),
+                      pending: isPending && pending?.kind === "stage",
+                      disabled: blocked,
+                    },
+                    {
+                      icon: RotateCcw,
+                      title: t("changes.discardChanges"),
+                      danger: true,
+                      onClick: () => runAction(entry.path, "discard", () => discardFile(entry.path)),
+                      pending: isPending && pending?.kind === "discard",
+                      disabled: blocked,
+                    },
+                  ]}
+                />
+              );
+            })}
           </div>
         </div>
 
@@ -282,7 +367,7 @@ export function ChangesPanel() {
         onCommit={(w) => commitSize("changesListWidth", w)}
       />
 
-      <div className="flex-1 overflow-auto">
+      <div className="min-h-0 flex-1">
         {selected ? (
           <DiffView files={selectedDiff} />
         ) : (
