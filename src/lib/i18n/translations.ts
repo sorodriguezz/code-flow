@@ -1,6 +1,15 @@
 export const translations = {
   en: {
     "titlebar.aiActions": "AI Actions",
+    "titlebar.search": "Search",
+    "titlebar.searchPlaceholder": "Search projects, branches, views, settings…",
+    "titlebar.noResults": "No matches",
+    "titlebar.goTo": "Go to",
+    "titlebar.goBack": "Back",
+    "titlebar.goForward": "Forward",
+    "titlebar.openChat": "Open chat with Claude",
+    "titlebar.reviewCurrentPr": "Review \"{title}\"",
+    "titlebar.noPrSelected": "No pull request selected",
 
     "sidebar.projects": "Projects",
     "sidebar.addProject": "Add a local repository",
@@ -51,6 +60,10 @@ export const translations = {
     "sidebar.prLoadError": "Couldn't load pull requests",
     "sidebar.retry": "Retry",
     "sidebar.noPRsInSection": "None",
+    "sidebar.needsTokenFor": 'This repo needs a token for organization "{org}" —',
+    "sidebar.unlinkRepo": "Disconnect from Azure DevOps",
+    "sidebar.unlinkConfirm":
+      "Disconnect this project from Azure DevOps? You can reconnect it (auto-detected or picked manually) right after.",
 
     "clone.title": "Clone repository",
     "clone.url": "Repository URL",
@@ -89,7 +102,12 @@ export const translations = {
     "settings.azure": "Azure DevOps",
     "settings.claude": "Claude Code",
     "settings.context": "PR review context",
+    "settings.mdFiles": "Instructions (.md)",
     "settings.skills": "Skills",
+    "settings.mcps": "MCPs",
+    "settings.globalGroup": "Global",
+    "settings.workspaceGroup": "Workspace — {name}",
+    "settings.workspaceGroupGeneric": "Workspace",
     "settings.general": "General",
     "settings.language": "Language",
     "settings.accentColor": "Accent color",
@@ -124,7 +142,7 @@ export const translations = {
     "settings.azureTitle": "Azure DevOps",
     "settings.azureHint":
       "Connect an organization so CodeFlow can list and review pull requests. The token is stored in your OS keychain, never on disk in plain text.",
-    "settings.organization": "Organization (e.g. achsdev)",
+    "settings.organization": "Organization (e.g. contoso)",
     "settings.personalAccessToken": "Personal Access Token",
     "settings.saveToken": "Save token",
     "settings.savingToken": "Saving…",
@@ -159,27 +177,53 @@ export const translations = {
     "settings.commitTemplate": "Commit message template",
     "settings.commitTemplateHint":
       "The instruction sent to Claude (Haiku) when generating a commit message from your staged diff. Customize it to restrict which Conventional Commits types it should use, enforce a scope, or match your team's convention.",
+    "settings.reviewTemplate": "PR review template",
+    "settings.reviewTemplateHint":
+      "The instruction sent to Claude when reviewing a pull request's diff. Controls the format of each finding (severity, why, suggestion, solution example, confidence) — the model, date, and \"automated review\" footer are always added by CodeFlow itself, not by this prompt.",
     "settings.reset": "Reset",
     "settings.saved": "Saved",
 
     "settings.contextTitle": "PR review context",
     "settings.contextTitleForProject": "PR review context — {name}",
-    "settings.contextSelectProject": "Select a project to configure its review rules.",
+    "settings.contextSelectWorkspace": "Select a workspace to configure its review rules.",
     "settings.addContext": "Add context",
     "settings.newContextName": "New context",
     "settings.contextHint":
-      "Free-form rules and background CodeFlow will feed to Claude alongside the diff when reviewing PRs for this project.",
+      "Free-form rules and background CodeFlow will feed to Claude alongside the diff when reviewing PRs for any project in this workspace.",
     "settings.contextPlaceholder":
       "e.g. Flag any Prisma query without a bounded select(). Enforce SRP in NestJS services…",
-    "settings.noContexts": "No review contexts yet for this project.",
+    "settings.noContexts": "No review contexts yet for this workspace.",
     "settings.enabled": "Enabled",
 
+    "settings.mdFilesTitle": "Instructions (.md)",
+    "settings.mdFilesSelectWorkspace": "Select a workspace to manage its instruction files.",
+    "settings.mdFilesHint":
+      "Markdown documents (a CLAUDE.md-style file, or anything else you add) folded into the review prompt as background — never written into a project's own working tree.",
+    "settings.addMdFile": "Add file",
+    "settings.noMdFiles": "No instruction files yet for this workspace.",
+    "settings.untitledMdFile": "Untitled",
+    "settings.mdFileContentPlaceholder": "# Project conventions\n\n…",
+
+    "settings.mcpsTitle": "MCPs",
+    "settings.mcpsSelectWorkspace": "Select a workspace to manage its MCP servers.",
+    "settings.mcpsHint":
+      "MCP servers made available to Claude while reviewing PRs for any project in this workspace.",
+    "settings.addMcp": "Add server",
+    "settings.newMcpName": "New server",
+    "settings.mcpCommandPlaceholder": "Command (e.g. npx)",
+    "settings.mcpArgsPlaceholder": "Args (space-separated)",
+    "settings.mcpEnvPlaceholder": "KEY=value (one per line)",
+    "settings.noMcps": "No MCP servers configured yet for this workspace.",
+
     "settings.skillsTitle": "Skills",
-    "settings.skillsHint": "Install skills from skills.sh. Running the installer from CodeFlow lands in a later phase — this list will populate once that's wired up.",
+    "settings.skillsSelectWorkspace": "Select a workspace to manage its skills.",
     "settings.skillsHintPrefix": "Install skills from",
     "settings.skillsHintSuffix":
-      "Running the installer from CodeFlow lands in a later phase — this list will populate once that's wired up.",
-    "settings.skillsComingSoon": "Adding skills from within CodeFlow is coming soon.",
+      "into this workspace. They're synced into whichever project you're reviewing a PR for, so Claude can actually discover them.",
+    "settings.skillRepoPlaceholder": "Repo (e.g. owner/skills-repo)",
+    "settings.skillNamePlaceholder": "Skill name",
+    "settings.installSkill": "Install",
+    "settings.installingSkill": "Installing…",
     "settings.noSkills": "No skills installed yet.",
 
     "changes.staged": "Staged",
@@ -276,6 +320,15 @@ export const translations = {
   },
   es: {
     "titlebar.aiActions": "Acciones IA",
+    "titlebar.search": "Buscar",
+    "titlebar.searchPlaceholder": "Busca proyectos, ramas, vistas, configuración…",
+    "titlebar.noResults": "Sin resultados",
+    "titlebar.goTo": "Ir a",
+    "titlebar.goBack": "Atrás",
+    "titlebar.goForward": "Adelante",
+    "titlebar.openChat": "Abrir chat con Claude",
+    "titlebar.reviewCurrentPr": "Revisar \"{title}\"",
+    "titlebar.noPrSelected": "Ningún pull request seleccionado",
 
     "sidebar.projects": "Proyectos",
     "sidebar.addProject": "Agregar un repositorio local",
@@ -326,6 +379,10 @@ export const translations = {
     "sidebar.prLoadError": "No se pudieron cargar los pull requests",
     "sidebar.retry": "Reintentar",
     "sidebar.noPRsInSection": "Ninguno",
+    "sidebar.needsTokenFor": 'Este repo necesita un token para la organización "{org}" —',
+    "sidebar.unlinkRepo": "Desconectar de Azure DevOps",
+    "sidebar.unlinkConfirm":
+      "¿Desconectar este proyecto de Azure DevOps? Puedes volver a conectarlo (auto-detectado o eligiéndolo manualmente) justo después.",
 
     "clone.title": "Clonar repositorio",
     "clone.url": "URL del repositorio",
@@ -364,7 +421,12 @@ export const translations = {
     "settings.azure": "Azure DevOps",
     "settings.claude": "Claude Code",
     "settings.context": "Contexto de revisión de PR",
+    "settings.mdFiles": "Instrucciones (.md)",
     "settings.skills": "Skills",
+    "settings.mcps": "MCPs",
+    "settings.globalGroup": "Global",
+    "settings.workspaceGroup": "Workspace — {name}",
+    "settings.workspaceGroupGeneric": "Workspace",
     "settings.general": "General",
     "settings.language": "Idioma",
     "settings.accentColor": "Color de acento",
@@ -399,7 +461,7 @@ export const translations = {
     "settings.azureTitle": "Azure DevOps",
     "settings.azureHint":
       "Conecta una organización para que CodeFlow pueda listar y revisar pull requests. El token se guarda en el keychain del sistema operativo, nunca en disco como texto plano.",
-    "settings.organization": "Organización (ej. achsdev)",
+    "settings.organization": "Organización (ej. contoso)",
     "settings.personalAccessToken": "Personal Access Token",
     "settings.saveToken": "Guardar token",
     "settings.savingToken": "Guardando…",
@@ -434,27 +496,53 @@ export const translations = {
     "settings.commitTemplate": "Plantilla del mensaje de commit",
     "settings.commitTemplateHint":
       "La instrucción que se envía a Claude (Haiku) al generar un mensaje de commit desde tu diff en stage. Personalízala para restringir qué tipos de Conventional Commits debe usar, forzar un scope, o seguir la convención de tu equipo.",
+    "settings.reviewTemplate": "Plantilla de revisión de PR",
+    "settings.reviewTemplateHint":
+      "La instrucción que se envía a Claude al revisar el diff de un pull request. Controla el formato de cada hallazgo (severidad, por qué, sugerencia, ejemplo de solución, confianza) — el modelo, la fecha y el pie de \"revisión automatizada\" siempre los agrega CodeFlow, no este prompt.",
     "settings.reset": "Restablecer",
     "settings.saved": "Guardado",
 
     "settings.contextTitle": "Contexto de revisión de PR",
     "settings.contextTitleForProject": "Contexto de revisión de PR — {name}",
-    "settings.contextSelectProject": "Selecciona un proyecto para configurar sus reglas de revisión.",
+    "settings.contextSelectWorkspace": "Selecciona un workspace para configurar sus reglas de revisión.",
     "settings.addContext": "Agregar contexto",
     "settings.newContextName": "Nuevo contexto",
     "settings.contextHint":
-      "Reglas y contexto libre que CodeFlow le entregará a Claude junto al diff al revisar PRs de este proyecto.",
+      "Reglas y contexto libre que CodeFlow le entregará a Claude junto al diff al revisar PRs de cualquier proyecto de este workspace.",
     "settings.contextPlaceholder":
       "ej. marca cualquier consulta de Prisma sin un select() acotado. Refuerza el SRP en los servicios de NestJS…",
-    "settings.noContexts": "Aún no hay contextos de revisión para este proyecto.",
+    "settings.noContexts": "Aún no hay contextos de revisión para este workspace.",
     "settings.enabled": "Habilitado",
 
+    "settings.mdFilesTitle": "Instrucciones (.md)",
+    "settings.mdFilesSelectWorkspace": "Selecciona un workspace para gestionar sus archivos de instrucciones.",
+    "settings.mdFilesHint":
+      "Documentos markdown (un archivo estilo CLAUDE.md, o cualquier otro que agregues) que se incluyen en el prompt de revisión como contexto — nunca se escriben en el working tree de ningún proyecto.",
+    "settings.addMdFile": "Agregar archivo",
+    "settings.noMdFiles": "Aún no hay archivos de instrucciones para este workspace.",
+    "settings.untitledMdFile": "Sin título",
+    "settings.mdFileContentPlaceholder": "# Convenciones del proyecto\n\n…",
+
+    "settings.mcpsTitle": "MCPs",
+    "settings.mcpsSelectWorkspace": "Selecciona un workspace para gestionar sus servidores MCP.",
+    "settings.mcpsHint":
+      "Servidores MCP disponibles para Claude al revisar PRs de cualquier proyecto de este workspace.",
+    "settings.addMcp": "Agregar servidor",
+    "settings.newMcpName": "Nuevo servidor",
+    "settings.mcpCommandPlaceholder": "Comando (ej. npx)",
+    "settings.mcpArgsPlaceholder": "Argumentos (separados por espacio)",
+    "settings.mcpEnvPlaceholder": "CLAVE=valor (uno por línea)",
+    "settings.noMcps": "Aún no hay servidores MCP configurados para este workspace.",
+
     "settings.skillsTitle": "Skills",
-    "settings.skillsHint": "Instala skills desde skills.sh. Ejecutar el instalador desde CodeFlow llega en una fase posterior — esta lista se completará cuando esté conectado.",
+    "settings.skillsSelectWorkspace": "Selecciona un workspace para gestionar sus skills.",
     "settings.skillsHintPrefix": "Instala skills desde",
     "settings.skillsHintSuffix":
-      "Ejecutar el instalador desde CodeFlow llega en una fase posterior — esta lista se completará cuando esté conectado.",
-    "settings.skillsComingSoon": "Agregar skills desde CodeFlow estará disponible pronto.",
+      "en este workspace. Se sincronizan con el proyecto que estés revisando para que Claude realmente pueda encontrarlas.",
+    "settings.skillRepoPlaceholder": "Repo (ej. owner/skills-repo)",
+    "settings.skillNamePlaceholder": "Nombre de la skill",
+    "settings.installSkill": "Instalar",
+    "settings.installingSkill": "Instalando…",
     "settings.noSkills": "Aún no hay skills instaladas.",
 
     "changes.staged": "En stage",

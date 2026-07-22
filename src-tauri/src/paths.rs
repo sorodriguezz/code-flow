@@ -31,6 +31,12 @@ pub fn clone_root() -> PathBuf {
     base_dir().join("repos")
 }
 
+/// Where a workspace's skills (installed via `npx skills add`) live before being synced
+/// into whichever project is actually being reviewed — the canonical, workspace-scoped copy.
+pub fn workspace_skills_dir(workspace_id: &str) -> PathBuf {
+    base_dir().join("workspaces").join(workspace_id).join("skills")
+}
+
 pub fn ensure_dirs() -> std::io::Result<()> {
     std::fs::create_dir_all(base_dir())?;
     std::fs::create_dir_all(logs_dir())?;

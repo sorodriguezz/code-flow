@@ -2,7 +2,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use super::models::{InstalledSkill, NewProject, Project, ReviewContext, Workspace};
+use super::models::{NewProject, Project, ReviewContext, Workspace, WorkspaceMcp, WorkspaceMdFile, WorkspaceSkill};
 
 fn now() -> String {
     Utc::now().to_rfc3339()
@@ -164,41 +164,41 @@ pub fn delete_project(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-// ---------- review contexts ----------
+// ---------- review contexts (per workspace) ----------
 
 pub fn upsert_review_context(
     conn: &Connection,
     id: Option<String>,
-    project_id: &str,
+    workspace_id: &str,
     name: &str,
     content: &str,
     enabled: bool,
 ) -> rusqlite::Result<ReviewContext> {
     let ctx = ReviewContext {
         id: id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-        project_id: project_id.to_string(),
+        workspace_id: workspace_id.to_string(),
         name: name.to_string(),
         content: content.to_string(),
         enabled,
         created_at: now(),
     };
     conn.execute(
-        "INSERT INTO review_contexts (id, project_id, name, content, enabled, created_at)
+        "INSERT INTO review_contexts (id, workspace_id, name, content, enabled, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(id) DO UPDATE SET name = excluded.name, content = excluded.content, enabled = excluded.enabled",
-        params![ctx.id, ctx.project_id, ctx.name, ctx.content, ctx.enabled, ctx.created_at],
+        params![ctx.id, ctx.workspace_id, ctx.name, ctx.content, ctx.enabled, ctx.created_at],
     )?;
     Ok(ctx)
 }
 
-pub fn list_review_contexts(conn: &Connection, project_id: &str) -> rusqlite::Result<Vec<ReviewContext>> {
+pub fn list_review_contexts(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<ReviewContext>> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, name, content, enabled, created_at FROM review_contexts WHERE project_id = ?1 ORDER BY created_at",
+        "SELECT id, workspace_id, name, content, enabled, created_at FROM review_contexts WHERE workspace_id = ?1 ORDER BY created_at",
     )?;
-    let rows = stmt.query_map(params![project_id], |row| {
+    let rows = stmt.query_map(params![workspace_id], |row| {
         Ok(ReviewContext {
             id: row.get(0)?,
-            project_id: row.get(1)?,
+            workspace_id: row.get(1)?,
             name: row.get(2)?,
             content: row.get(3)?,
             enabled: row.get(4)?,
@@ -213,21 +213,193 @@ pub fn delete_review_context(conn: &Connection, id: &str) -> rusqlite::Result<()
     Ok(())
 }
 
-// ---------- installed skills ----------
+// ---------- workspace MD files ----------
 
-pub fn list_installed_skills(conn: &Connection) -> rusqlite::Result<Vec<InstalledSkill>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, source_url, installed_at FROM installed_skills ORDER BY installed_at DESC",
+pub fn upsert_workspace_md_file(
+    conn: &Connection,
+    id: Option<String>,
+    workspace_id: &str,
+    filename: &str,
+    content: &str,
+    enabled: bool,
+) -> rusqlite::Result<WorkspaceMdFile> {
+    let existing_created_at = id.as_ref().and_then(|existing_id| {
+        conn.query_row(
+            "SELECT created_at FROM workspace_md_files WHERE id = ?1",
+            params![existing_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    });
+    let now_str = now();
+    let file = WorkspaceMdFile {
+        id: id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+        workspace_id: workspace_id.to_string(),
+        filename: filename.to_string(),
+        content: content.to_string(),
+        enabled,
+        created_at: existing_created_at.unwrap_or_else(|| now_str.clone()),
+        updated_at: now_str,
+    };
+    conn.execute(
+        "INSERT INTO workspace_md_files (id, workspace_id, filename, content, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET filename = excluded.filename, content = excluded.content,
+            enabled = excluded.enabled, updated_at = excluded.updated_at",
+        params![
+            file.id,
+            file.workspace_id,
+            file.filename,
+            file.content,
+            file.enabled,
+            file.created_at,
+            file.updated_at,
+        ],
     )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(InstalledSkill {
+    Ok(file)
+}
+
+pub fn list_workspace_md_files(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceMdFile>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, filename, content, enabled, created_at, updated_at
+         FROM workspace_md_files WHERE workspace_id = ?1 ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |row| {
+        Ok(WorkspaceMdFile {
             id: row.get(0)?,
-            name: row.get(1)?,
-            source_url: row.get(2)?,
-            installed_at: row.get(3)?,
+            workspace_id: row.get(1)?,
+            filename: row.get(2)?,
+            content: row.get(3)?,
+            enabled: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
         })
     })?;
     rows.collect()
+}
+
+pub fn delete_workspace_md_file(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM workspace_md_files WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+// ---------- workspace skills ----------
+
+pub fn add_workspace_skill(
+    conn: &Connection,
+    workspace_id: &str,
+    skill_name: &str,
+    source_repo: &str,
+) -> rusqlite::Result<WorkspaceSkill> {
+    let skill = WorkspaceSkill {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: workspace_id.to_string(),
+        skill_name: skill_name.to_string(),
+        source_repo: source_repo.to_string(),
+        installed_at: now(),
+    };
+    conn.execute(
+        "INSERT INTO workspace_skills (id, workspace_id, skill_name, source_repo, installed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![skill.id, skill.workspace_id, skill.skill_name, skill.source_repo, skill.installed_at],
+    )?;
+    Ok(skill)
+}
+
+pub fn list_workspace_skills(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceSkill>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, skill_name, source_repo, installed_at
+         FROM workspace_skills WHERE workspace_id = ?1 ORDER BY installed_at",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |row| {
+        Ok(WorkspaceSkill {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            skill_name: row.get(2)?,
+            source_repo: row.get(3)?,
+            installed_at: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_workspace_skill(conn: &Connection, id: &str) -> rusqlite::Result<Option<WorkspaceSkill>> {
+    conn.query_row(
+        "SELECT id, workspace_id, skill_name, source_repo, installed_at FROM workspace_skills WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(WorkspaceSkill {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                skill_name: row.get(2)?,
+                source_repo: row.get(3)?,
+                installed_at: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn delete_workspace_skill(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM workspace_skills WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+// ---------- workspace MCP servers ----------
+
+pub fn upsert_workspace_mcp(
+    conn: &Connection,
+    id: Option<String>,
+    workspace_id: &str,
+    name: &str,
+    command: &str,
+    args: &str,
+    env: &str,
+    enabled: bool,
+) -> rusqlite::Result<WorkspaceMcp> {
+    let mcp = WorkspaceMcp {
+        id: id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+        workspace_id: workspace_id.to_string(),
+        name: name.to_string(),
+        command: command.to_string(),
+        args: args.to_string(),
+        env: env.to_string(),
+        enabled,
+        created_at: now(),
+    };
+    conn.execute(
+        "INSERT INTO workspace_mcps (id, workspace_id, name, command, args, env, enabled, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, command = excluded.command,
+            args = excluded.args, env = excluded.env, enabled = excluded.enabled",
+        params![mcp.id, mcp.workspace_id, mcp.name, mcp.command, mcp.args, mcp.env, mcp.enabled, mcp.created_at],
+    )?;
+    Ok(mcp)
+}
+
+pub fn list_workspace_mcps(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceMcp>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, name, command, args, env, enabled, created_at
+         FROM workspace_mcps WHERE workspace_id = ?1 ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |row| {
+        Ok(WorkspaceMcp {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            name: row.get(2)?,
+            command: row.get(3)?,
+            args: row.get(4)?,
+            env: row.get(5)?,
+            enabled: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn delete_workspace_mcp(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM workspace_mcps WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 // ---------- app settings (key/value) ----------

@@ -9,8 +9,8 @@ fn auth_header(pat: &str) -> String {
 }
 
 /// Accepts whatever the user actually typed/saved as their "organization" — a bare name
-/// like `achsdev`, a full `https://dev.azure.com/achsdev` URL, or a legacy
-/// `https://achsdev.visualstudio.com` URL — and reduces it to the bare org name. Azure
+/// like `contoso`, a full `https://dev.azure.com/contoso` URL, or a legacy
+/// `https://contoso.visualstudio.com` URL — and reduces it to the bare org name. Azure
 /// DevOps' server rejects any literal `:` in the request path (IIS request validation), so
 /// interpolating a raw URL straight into the path 404s/400s in a confusing way; normalizing
 /// here means it works no matter which form ended up saved.
@@ -32,8 +32,8 @@ fn normalize_org(org: &str) -> String {
 }
 
 /// Percent-encodes a single URL path segment (org/project names routinely contain spaces —
-/// e.g. "Ficha Clinica - Coding Discovery" — which a raw, unencoded `format!` would send
-/// straight through and break just as badly as the `:` case above).
+/// e.g. "Marketing Website" — which a raw, unencoded `format!` would send straight through
+/// and break just as badly as the `:` case above).
 fn encode_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -47,6 +47,76 @@ fn encode_segment(s: &str) -> String {
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DetectedAdoRepo {
+    pub org: String,
+    pub project: String,
+    /// Azure DevOps' Git REST API accepts either the repository's GUID or its plain name
+    /// in place of `{repositoryId}` — so the name parsed straight out of the remote URL is
+    /// enough to call the API with, no extra "resolve the repo" round-trip needed.
+    pub repo: String,
+}
+
+fn decode_path_segment(s: &str) -> String {
+    s.replace("%20", " ")
+}
+
+/// Recognizes the shapes an Azure Repos git remote actually comes in — HTTPS via
+/// `dev.azure.com`, the legacy `<org>.visualstudio.com` HTTPS form (with or without
+/// `/DefaultCollection`), and the SSH form — and pulls org/project/repo straight out of it.
+/// Returns `None` for anything else (GitHub, GitLab, a bare local repo, etc.).
+pub fn detect_from_remote_url(remote_url: &str) -> Option<DetectedAdoRepo> {
+    let url = remote_url.trim().trim_end_matches(".git");
+
+    if let Some(rest) = url.strip_prefix("git@ssh.dev.azure.com:v3/") {
+        let parts: Vec<&str> = rest.split('/').filter(|s| !s.is_empty()).collect();
+        return match parts.as_slice() {
+            [org, project, repo] => Some(DetectedAdoRepo {
+                org: decode_path_segment(org),
+                project: decode_path_segment(project),
+                repo: decode_path_segment(repo),
+            }),
+            _ => None,
+        };
+    }
+
+    let without_scheme = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
+    let without_userinfo = without_scheme.rsplit('@').next().unwrap_or(without_scheme);
+    let mut split = without_userinfo.splitn(2, '/');
+    let host = split.next()?;
+    let path_parts: Vec<&str> = split.next().unwrap_or("").split('/').filter(|s| !s.is_empty()).collect();
+
+    if host.eq_ignore_ascii_case("dev.azure.com") {
+        // {org}/{project}/_git/{repo}
+        if let [org, project, "_git", repo] = path_parts.as_slice() {
+            return Some(DetectedAdoRepo {
+                org: decode_path_segment(org),
+                project: decode_path_segment(project),
+                repo: decode_path_segment(repo),
+            });
+        }
+        return None;
+    }
+
+    if let Some(org) = host.strip_suffix(".visualstudio.com") {
+        let parts: &[&str] = if path_parts.first() == Some(&"DefaultCollection") {
+            &path_parts[1..]
+        } else {
+            &path_parts
+        };
+        if let [project, "_git", repo] = parts {
+            return Some(DetectedAdoRepo {
+                org: org.to_string(),
+                project: decode_path_segment(project),
+                repo: decode_path_segment(repo),
+            });
+        }
+        return None;
+    }
+
+    None
 }
 
 async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, pat: &str) -> Result<T, String> {

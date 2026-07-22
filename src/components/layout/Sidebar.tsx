@@ -26,7 +26,14 @@ import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
-import { pickFolder, revealInFileManager, getSetting, getAdoPat } from "../../lib/tauri/commands";
+import {
+  pickFolder,
+  revealInFileManager,
+  getSetting,
+  getAdoPat,
+  autoLinkProjectAdo,
+  unlinkProjectAdo,
+} from "../../lib/tauri/commands";
 import type { BranchInfo, Project, PullRequestSummary } from "../../types/domain";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
@@ -467,6 +474,12 @@ const PR_STATUS_ICON: Record<string, typeof CircleDot> = {
 // which spins the component into an infinite re-render loop.
 const EMPTY_PRS: PullRequestSummary[] = [];
 
+type AdoLinkState =
+  | { status: "checking" }
+  | { status: "linked" }
+  | { status: "needsToken"; org: string }
+  | { status: "notDetected" };
+
 function PullRequestsSection({ project }: { project: Project }) {
   const t = useT();
   const prs = usePrStore((s) => s.prsByProject[project.id] ?? EMPTY_PRS);
@@ -476,10 +489,14 @@ function PullRequestsSection({ project }: { project: Project }) {
   const selectPr = usePrStore((s) => s.selectPr);
   const selectedPr = usePrStore((s) => s.selectedPr);
   const setActiveView = useUiStore((s) => s.setActiveView);
+  const openSettings = useUiStore((s) => s.openSettings);
   const [connectedOrg, setConnectedOrg] = useState<string | null | undefined>(undefined);
   const [showConnect, setShowConnect] = useState(false);
 
-  const linked = Boolean(project.ado_org && project.ado_project && project.ado_repo_id);
+  const initiallyLinked = Boolean(project.ado_org && project.ado_project && project.ado_repo_id);
+  const [linkState, setLinkState] = useState<AdoLinkState>(
+    initiallyLinked ? { status: "linked" } : { status: "checking" },
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -497,13 +514,79 @@ function PullRequestsSection({ project }: { project: Project }) {
     };
   }, []);
 
+  // Tries to derive the Azure DevOps org/project/repo straight from this repo's own
+  // remote URL — since it's an Azure Repos clone, git already knows where it lives, so
+  // there's no reason to make the user pick it again from dropdowns.
+  const runAutoDetect = async (cancelledRef: { current: boolean }) => {
+    try {
+      const result = await autoLinkProjectAdo(project.id);
+      if (cancelledRef.current) return;
+      if (result.status === "Linked") setLinkState({ status: "linked" });
+      else if (result.status === "NeedsToken") setLinkState({ status: "needsToken", org: result.org });
+      else setLinkState({ status: "notDetected" });
+    } catch {
+      if (!cancelledRef.current) setLinkState({ status: "notDetected" });
+    }
+  };
+
   useEffect(() => {
-    if (linked) void loadPullRequests(project.id);
-  }, [linked, project.id]);
+    if (initiallyLinked) {
+      setLinkState({ status: "linked" });
+      return;
+    }
+    const cancelledRef = { current: false };
+    void runAutoDetect(cancelledRef);
+    return () => {
+      cancelledRef.current = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id]);
 
-  if (connectedOrg === undefined) return null;
+  useEffect(() => {
+    if (linkState.status === "linked") void loadPullRequests(project.id);
+  }, [linkState.status, project.id]);
 
-  if (connectedOrg === null) {
+  // Escape hatch for a link that turned out wrong — an auto-detected org whose token got
+  // replaced/removed in Settings, or a repo that got manually pointed at the wrong project.
+  // Re-runs the same auto-detect used on mount (so a repo that genuinely belongs to Azure
+  // DevOps reconnects to its own PRs on its own); the manual picker is only a fallback for
+  // when that still doesn't resolve it.
+  const handleUnlink = async () => {
+    if (!window.confirm(t("sidebar.unlinkConfirm"))) return;
+    await unlinkProjectAdo(project.id);
+    setLinkState({ status: "checking" });
+    await runAutoDetect({ current: false });
+  };
+
+  if (connectedOrg === undefined || linkState.status === "checking") {
+    return (
+      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
+        <SkeletonRows count={2} className="p-0" />
+      </CollapsibleSection>
+    );
+  }
+
+  if (linkState.status === "needsToken") {
+    return (
+      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
+        <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">
+          {t("sidebar.needsTokenFor", { org: linkState.org })}{" "}
+          <button onClick={() => openSettings("azure")} className="text-[var(--cf-accent)] hover:underline">
+            {t("statusbar.settings")}
+          </button>
+        </p>
+        <button
+          onClick={handleUnlink}
+          className="mt-1 flex items-center gap-1.5 px-1.5 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+        >
+          <Unlink size={10} />
+          {t("sidebar.unlinkRepo")}
+        </button>
+      </CollapsibleSection>
+    );
+  }
+
+  if (linkState.status === "notDetected" && connectedOrg === null) {
     return (
       <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
         <div className="space-y-0.5">
@@ -522,7 +605,7 @@ function PullRequestsSection({ project }: { project: Project }) {
     );
   }
 
-  if (!linked) {
+  if (linkState.status === "notDetected") {
     return (
       <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
         <button
@@ -532,11 +615,14 @@ function PullRequestsSection({ project }: { project: Project }) {
           <Cloud size={12} />
           {t("sidebar.linkAdoRepo")}
         </button>
-        {showConnect && (
+        {showConnect && connectedOrg && (
           <ConnectAdoModal
             projectId={project.id}
             org={connectedOrg}
-            onConnected={() => void loadPullRequests(project.id)}
+            onConnected={() => {
+              setLinkState({ status: "linked" });
+              void loadPullRequests(project.id);
+            }}
             onClose={() => setShowConnect(false)}
           />
         )}
@@ -551,18 +637,32 @@ function PullRequestsSection({ project }: { project: Project }) {
       action={
         loading ? (
           <Loader2 size={12} className="animate-spin text-[var(--cf-text-muted)]" />
-        ) : undefined
+        ) : (
+          <button
+            onClick={handleUnlink}
+            title={t("sidebar.unlinkRepo")}
+            className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+          >
+            <Unlink size={11} />
+          </button>
+        )
       }
     >
       {loadError ? (
         <div className="space-y-1 px-1.5">
           <p className="text-[12px] text-[var(--cf-danger)]">{t("sidebar.prLoadError")}</p>
-          <button
-            onClick={() => void loadPullRequests(project.id)}
-            className="text-[11px] text-[var(--cf-accent)] hover:underline"
-          >
-            {t("sidebar.retry")}
-          </button>
+          <p className="text-[11px] text-[var(--cf-text-muted)]">{loadError}</p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => void loadPullRequests(project.id)}
+              className="text-[11px] text-[var(--cf-accent)] hover:underline"
+            >
+              {t("sidebar.retry")}
+            </button>
+            <button onClick={handleUnlink} className="text-[11px] text-[var(--cf-text-muted)] hover:underline">
+              {t("sidebar.unlinkRepo")}
+            </button>
+          </div>
         </div>
       ) : (
         <div className="space-y-2">
@@ -667,15 +767,17 @@ function ProjectRow({ project }: { project: Project }) {
             <FolderInput size={13} />
           </button>
         )}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            setExpanded((v) => !v);
-          }}
-          className="opacity-0 group-hover:opacity-100"
-        >
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </button>
+        {isActive && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+            className="opacity-0 group-hover:opacity-100"
+          >
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        )}
 
         {showMoveMenu && (
           <div className="absolute right-0 top-full z-20 mt-1 w-44 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">

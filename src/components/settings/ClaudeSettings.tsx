@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Check, FolderOpen, RotateCcw, X } from "lucide-react";
-import { defaultCommitTemplate, getSetting, setSetting } from "../../lib/tauri/commands";
+import { defaultCommitTemplate, defaultReviewTemplate, getSetting, setSetting } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Checkbox } from "../common/Checkbox";
@@ -11,6 +11,7 @@ const KEYS = {
   model: "claude_model",
   tools: "claude_allowed_tools",
   commitTemplate: "claude_commit_template",
+  reviewTemplate: "claude_review_template",
 };
 
 const CUSTOM_MODEL = "__custom__";
@@ -54,17 +55,27 @@ export function ClaudeSettings() {
   const [customTool, setCustomTool] = useState("");
   const [commitTemplate, setCommitTemplate] = useState("");
   const [defaultTemplate, setDefaultTemplate] = useState("");
+  const [reviewTemplate, setReviewTemplate] = useState("");
+  const [defaultReviewTemplateText, setDefaultReviewTemplateText] = useState("");
   const [saved, setSaved] = useState(false);
-  const [snapshot, setSnapshot] = useState({ binaryPath: "claude", model: "", tools: DEFAULT_TOOLS, commitTemplate: "" });
+  const [snapshot, setSnapshot] = useState({
+    binaryPath: "claude",
+    model: "",
+    tools: DEFAULT_TOOLS,
+    commitTemplate: "",
+    reviewTemplate: "",
+  });
 
   useEffect(() => {
     (async () => {
-      const [b, m, t, ct, fallback] = await Promise.all([
+      const [b, m, t, ct, fallback, rt, reviewFallback] = await Promise.all([
         getSetting(KEYS.binary),
         getSetting(KEYS.model),
         getSetting(KEYS.tools),
         getSetting(KEYS.commitTemplate),
         defaultCommitTemplate(),
+        getSetting(KEYS.reviewTemplate),
+        defaultReviewTemplate(),
       ]);
       const loadedBinary = b || "claude";
       let loadedModelChoice = "";
@@ -79,6 +90,7 @@ export function ClaudeSettings() {
       }
       const loadedTools = t ? t.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_TOOLS;
       const loadedTemplate = ct || fallback;
+      const loadedReviewTemplate = rt || reviewFallback;
 
       setBinaryPath(loadedBinary);
       setModelChoice(loadedModelChoice);
@@ -86,11 +98,14 @@ export function ClaudeSettings() {
       setTools(loadedTools);
       setDefaultTemplate(fallback);
       setCommitTemplate(loadedTemplate);
+      setDefaultReviewTemplateText(reviewFallback);
+      setReviewTemplate(loadedReviewTemplate);
       setSnapshot({
         binaryPath: loadedBinary,
         model: loadedModelChoice === CUSTOM_MODEL ? loadedCustomModel : loadedModelChoice,
         tools: loadedTools,
         commitTemplate: loadedTemplate,
+        reviewTemplate: loadedReviewTemplate,
       });
     })();
   }, []);
@@ -120,6 +135,7 @@ export function ClaudeSettings() {
     binaryPath !== snapshot.binaryPath ||
     resolvedModel !== snapshot.model ||
     commitTemplate !== snapshot.commitTemplate ||
+    reviewTemplate !== snapshot.reviewTemplate ||
     sortedTools.join(",") !== [...snapshot.tools].sort().join(",");
 
   const save = async () => {
@@ -128,8 +144,15 @@ export function ClaudeSettings() {
       setSetting(KEYS.model, resolvedModel),
       setSetting(KEYS.tools, tools.join(",")),
       setSetting(KEYS.commitTemplate, commitTemplate.trim()),
+      setSetting(KEYS.reviewTemplate, reviewTemplate.trim()),
     ]);
-    setSnapshot({ binaryPath, model: resolvedModel, tools, commitTemplate: commitTemplate.trim() });
+    setSnapshot({
+      binaryPath,
+      model: resolvedModel,
+      tools,
+      commitTemplate: commitTemplate.trim(),
+      reviewTemplate: reviewTemplate.trim(),
+    });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   };
@@ -263,6 +286,29 @@ export function ClaudeSettings() {
             onChange={(e) => setCommitTemplate(e.target.value)}
             rows={5}
             className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+          />
+        </div>
+
+        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <label className="block text-[12px] font-medium text-[var(--cf-text-muted)]">
+              {t("settings.reviewTemplate")}
+            </label>
+            <button
+              onClick={() => setReviewTemplate(defaultReviewTemplateText)}
+              title={t("settings.reset")}
+              className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+            >
+              <RotateCcw size={11} />
+              {t("settings.reset")}
+            </button>
+          </div>
+          <p className="mb-2 text-[11px] text-[var(--cf-text-muted)]">{t("settings.reviewTemplateHint")}</p>
+          <textarea
+            value={reviewTemplate}
+            onChange={(e) => setReviewTemplate(e.target.value)}
+            rows={10}
+            className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
           />
         </div>
 

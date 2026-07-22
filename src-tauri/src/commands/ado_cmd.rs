@@ -1,10 +1,100 @@
+use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::ado;
 use crate::claude;
-use crate::db::{queries, Db};
+use crate::commands::skills_cmd;
+use crate::db::{models::WorkspaceMcp, queries, Db};
 use crate::git;
+use crate::paths;
 use crate::secrets;
+
+/// Builds a `--mcp-config` JSON file for whichever of a workspace's MCP servers are
+/// enabled — persisted under the workspace's own CodeFlow folder rather than a tempfile so
+/// it's easy to find/inspect, and gets overwritten on every review anyway.
+fn build_mcp_config(mcps: &[WorkspaceMcp], workspace_id: &str) -> Result<Option<String>, String> {
+    let enabled: Vec<&WorkspaceMcp> = mcps.iter().filter(|m| m.enabled).collect();
+    if enabled.is_empty() {
+        return Ok(None);
+    }
+
+    let mut servers = serde_json::Map::new();
+    for mcp in enabled {
+        let args: Vec<String> = mcp.args.split_whitespace().map(|s| s.to_string()).collect();
+        let mut env = serde_json::Map::new();
+        for line in mcp.env.lines() {
+            if let Some((key, value)) = line.split_once('=') {
+                env.insert(key.trim().to_string(), serde_json::Value::String(value.trim().to_string()));
+            }
+        }
+        servers.insert(
+            mcp.name.clone(),
+            serde_json::json!({ "command": mcp.command, "args": args, "env": env }),
+        );
+    }
+
+    let config = serde_json::json!({ "mcpServers": servers });
+    let path = paths::base_dir().join("workspaces").join(workspace_id).join("mcp.json");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(Some(path.to_string_lossy().to_string()))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status")]
+pub enum AutoLinkResult {
+    /// Detected an Azure Repos remote and a PAT for its org was already saved — linked
+    /// automatically, no user action needed.
+    Linked { project: crate::db::models::Project },
+    /// Detected an Azure Repos remote, but no PAT is saved for that org yet.
+    NeedsToken { org: String },
+    /// The remote isn't an Azure Repos URL (or there's no remote at all) — falls back to
+    /// manual linking.
+    NotDetected,
+}
+
+/// Called once per project when its Pull Requests section first needs data: tries to
+/// derive the Azure DevOps org/project/repo straight from the local repo's own remote URL
+/// instead of making the user hunt through dropdowns for something git already knows.
+///
+/// Reads the remote straight from the repo's actual git config rather than the `projects`
+/// table's `remote_url` column — that column is only populated at "Clone repository" time,
+/// so a repo added via "Add a local repository" (or one whose origin changed since) would
+/// otherwise never be detectable even though `git remote -v` has the answer right there.
+#[tauri::command]
+pub fn auto_link_project_ado(db: State<Db>, project_id: String) -> Result<AutoLinkResult, String> {
+    let project = load_project(&db, &project_id)?;
+    if ado_link(&project).is_ok() {
+        return Ok(AutoLinkResult::Linked { project });
+    }
+    let remotes = git::remotes::list_remotes(&project.local_path)?;
+    let remote_url = remotes
+        .iter()
+        .find(|r| r.name == "origin")
+        .or_else(|| remotes.first())
+        .map(|r| r.url.as_str());
+    let Some(remote_url) = remote_url else {
+        return Ok(AutoLinkResult::NotDetected);
+    };
+    let Some(detected) = ado::detect_from_remote_url(remote_url) else {
+        return Ok(AutoLinkResult::NotDetected);
+    };
+    let has_token = secrets::get_secret(&secrets::ado_pat_key(&detected.org))?.is_some();
+    if !has_token {
+        return Ok(AutoLinkResult::NeedsToken { org: detected.org });
+    }
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::link_project_ado(&conn, &project_id, &detected.org, &detected.project, &detected.repo)
+        .map_err(|e| e.to_string())?;
+    let linked = queries::get_project(&conn, &project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Project not found".to_string())?;
+    Ok(AutoLinkResult::Linked { project: linked })
+}
 
 fn ado_link(project: &crate::db::models::Project) -> Result<(String, String, String), String> {
     match (
@@ -75,10 +165,13 @@ pub async fn review_pull_request(app: AppHandle, db: State<'_, Db>, project_id: 
     let project = load_project(&db, &project_id)?;
     let (org, ado_project, repo_id) = ado_link(&project)?;
     let pat = pat_for_org(&org)?;
+    let workspace_id = project.workspace_id.clone();
 
-    let (contexts, binary, model, tools_setting) = {
+    let (contexts, md_files, mcps, binary, model, tools_setting, review_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let contexts = queries::list_review_contexts(&conn, &project_id).map_err(|e| e.to_string())?;
+        let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let md_files = queries::list_workspace_md_files(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let binary = queries::get_setting(&conn, "claude_binary_path")
             .map_err(|e| e.to_string())?
             .unwrap_or_else(|| "claude".to_string());
@@ -88,7 +181,10 @@ pub async fn review_pull_request(app: AppHandle, db: State<'_, Db>, project_id: 
         let tools = queries::get_setting(&conn, "claude_allowed_tools")
             .map_err(|e| e.to_string())?
             .unwrap_or_default();
-        (contexts, binary, model, tools)
+        let review_template = queries::get_setting(&conn, "claude_review_template")
+            .map_err(|e| e.to_string())?
+            .unwrap_or_default();
+        (contexts, md_files, mcps, binary, model, tools, review_template)
     };
 
     let prs = ado::list_pull_requests(&org, &ado_project, &repo_id, &pat).await?;
@@ -101,19 +197,32 @@ pub async fn review_pull_request(app: AppHandle, db: State<'_, Db>, project_id: 
     // against whatever refs are already local rather than blocking the review outright.
     let _ = crate::remote::fetch(app, project.local_path.clone(), None).await;
 
+    // Also best-effort: skills are a nice-to-have for the review, not a precondition —
+    // don't block the review if e.g. the project directory is read-only.
+    let _ = skills_cmd::sync_skills_into_project(&workspace_id, &project.local_path);
+
     let diff_files = git::diff::get_branch_diff(&project.local_path, &pr.target_branch, &pr.source_branch)?;
     let diff_text = git::diff::render_diff_for_prompt(&diff_files);
 
-    let enabled_contexts: Vec<(String, String)> = contexts
+    let mut enabled_contexts: Vec<(String, String)> = contexts
         .into_iter()
         .filter(|c| c.enabled)
         .map(|c| (c.name, c.content))
         .collect();
+    enabled_contexts.extend(
+        md_files
+            .into_iter()
+            .filter(|f| f.enabled)
+            .map(|f| (f.filename, f.content)),
+    );
+
     let allowed_tools: Vec<String> = tools_setting
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+
+    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
     claude::review_pull_request(
         &binary,
@@ -124,6 +233,8 @@ pub async fn review_pull_request(app: AppHandle, db: State<'_, Db>, project_id: 
         &diff_text,
         &allowed_tools,
         &project.local_path,
+        &review_template,
+        mcp_config_path.as_deref(),
     )
     .await
 }

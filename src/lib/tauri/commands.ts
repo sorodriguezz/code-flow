@@ -2,13 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AdoProject,
   AdoRepo,
+  AutoLinkResult,
   BranchInfo,
   CommitInfo,
   ConflictFile,
   FileDiffInfo,
   FileEntry,
   GitIdentity,
-  InstalledSkill,
   MergeOutcome,
   NewProject,
   Project,
@@ -18,6 +18,9 @@ import type {
   ReviewContext,
   StashInfo,
   Workspace,
+  WorkspaceMcp,
+  WorkspaceMdFile,
+  WorkspaceSkill,
 } from "../../types/domain";
 
 // ---------- workspaces / projects ----------
@@ -198,19 +201,19 @@ export const getSetting = (key: string) => invoke<string | null>("get_setting", 
 
 export const setSetting = (key: string, value: string) => invoke<void>("set_setting", { key, value });
 
-export const listReviewContexts = (projectId: string) =>
-  invoke<ReviewContext[]>("list_review_contexts", { projectId });
+export const listReviewContexts = (workspaceId: string) =>
+  invoke<ReviewContext[]>("list_review_contexts", { workspaceId });
 
 export const upsertReviewContext = (
   id: string | undefined,
-  projectId: string,
+  workspaceId: string,
   name: string,
   content: string,
   enabled: boolean,
 ) =>
   invoke<ReviewContext>("upsert_review_context", {
     id: id ?? null,
-    projectId,
+    workspaceId,
     name,
     content,
     enabled,
@@ -218,7 +221,63 @@ export const upsertReviewContext = (
 
 export const deleteReviewContext = (id: string) => invoke<void>("delete_review_context", { id });
 
-export const listInstalledSkills = () => invoke<InstalledSkill[]>("list_installed_skills");
+// ---------- workspace MD files (CLAUDE.md-style instructions) ----------
+
+export const listWorkspaceMdFiles = (workspaceId: string) =>
+  invoke<WorkspaceMdFile[]>("list_workspace_md_files", { workspaceId });
+
+export const upsertWorkspaceMdFile = (
+  id: string | undefined,
+  workspaceId: string,
+  filename: string,
+  content: string,
+  enabled: boolean,
+) =>
+  invoke<WorkspaceMdFile>("upsert_workspace_md_file", {
+    id: id ?? null,
+    workspaceId,
+    filename,
+    content,
+    enabled,
+  });
+
+export const deleteWorkspaceMdFile = (id: string) => invoke<void>("delete_workspace_md_file", { id });
+
+// ---------- workspace skills ----------
+
+export const listWorkspaceSkills = (workspaceId: string) =>
+  invoke<WorkspaceSkill[]>("list_workspace_skills", { workspaceId });
+
+export const installWorkspaceSkill = (workspaceId: string, sourceRepo: string, skillName: string) =>
+  invoke<WorkspaceSkill>("install_workspace_skill", { workspaceId, sourceRepo, skillName });
+
+export const removeWorkspaceSkill = (id: string) => invoke<void>("remove_workspace_skill", { id });
+
+// ---------- workspace MCP servers ----------
+
+export const listWorkspaceMcps = (workspaceId: string) =>
+  invoke<WorkspaceMcp[]>("list_workspace_mcps", { workspaceId });
+
+export const upsertWorkspaceMcp = (
+  id: string | undefined,
+  workspaceId: string,
+  name: string,
+  command: string,
+  args: string,
+  env: string,
+  enabled: boolean,
+) =>
+  invoke<WorkspaceMcp>("upsert_workspace_mcp", {
+    id: id ?? null,
+    workspaceId,
+    name,
+    command,
+    args,
+    env,
+    enabled,
+  });
+
+export const deleteWorkspaceMcp = (id: string) => invoke<void>("delete_workspace_mcp", { id });
 
 // ---------- secrets ----------
 
@@ -235,12 +294,17 @@ export const generateCommitMessage = (diff: string) =>
 
 export const defaultCommitTemplate = () => invoke<string>("default_commit_template");
 
+export const defaultReviewTemplate = () => invoke<string>("default_review_template");
+
 // ---------- Azure DevOps pull requests ----------
 
 export const adoListProjects = (org: string) => invoke<AdoProject[]>("ado_list_projects", { org });
 
 export const adoListRepos = (org: string, project: string) =>
   invoke<AdoRepo[]>("ado_list_repos", { org, project });
+
+export const autoLinkProjectAdo = (projectId: string) =>
+  invoke<AutoLinkResult>("auto_link_project_ado", { projectId });
 
 export const linkProjectAdo = (id: string, adoOrg: string, adoProject: string, adoRepoId: string) =>
   invoke<void>("link_project_ado", { id, adoOrg, adoProject, adoRepoId });

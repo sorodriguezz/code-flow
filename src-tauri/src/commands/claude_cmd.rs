@@ -20,3 +20,8 @@ pub async fn generate_commit_message(db: State<'_, Db>, diff: String) -> Result<
 pub fn default_commit_template() -> String {
     claude::DEFAULT_COMMIT_TEMPLATE.to_string()
 }
+
+#[tauri::command]
+pub fn default_review_template() -> String {
+    claude::DEFAULT_REVIEW_PROMPT.to_string()
+}

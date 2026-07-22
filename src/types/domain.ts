@@ -121,18 +121,40 @@ export interface FileDiffInfo {
 
 export interface ReviewContext {
   id: string;
-  project_id: string;
+  workspace_id: string;
   name: string;
   content: string;
   enabled: boolean;
   created_at: string;
 }
 
-export interface InstalledSkill {
+export interface WorkspaceMdFile {
   id: string;
-  name: string;
-  source_url: string;
+  workspace_id: string;
+  filename: string;
+  content: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceSkill {
+  id: string;
+  workspace_id: string;
+  skill_name: string;
+  source_repo: string;
   installed_at: string;
+}
+
+export interface WorkspaceMcp {
+  id: string;
+  workspace_id: string;
+  name: string;
+  command: string;
+  args: string;
+  env: string;
+  enabled: boolean;
+  created_at: string;
 }
 
 export interface GitProgressEvent {
@@ -169,3 +191,8 @@ export interface PullRequestSummary {
   created_at: string;
   url: string;
 }
+
+export type AutoLinkResult =
+  | { status: "Linked"; project: Project }
+  | { status: "NeedsToken"; org: string }
+  | { status: "NotDetected" };

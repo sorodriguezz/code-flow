@@ -40,23 +40,44 @@ pub const DEFAULT_COMMIT_TEMPLATE: &str =
      Respond with ONLY the commit message text — no quotes, no markdown, no explanation.";
 
 pub const DEFAULT_REVIEW_PROMPT: &str =
-    "You are reviewing a pull request. Read the PR title, description, project-specific \
-     review context, and diff piped on stdin, then write a concise code review in Markdown: \
-     a short summary, then a bulleted list of concrete issues (bugs, risks, style problems), \
-     each pointing at the relevant file. Call out anything you'd block the PR on. If \
-     everything looks fine, say so briefly instead of inventing nitpicks. Do not restate \
-     the whole diff back.";
+    "Eres un revisor de código senior revisando un pull request. Se te entrega el título, la \
+     descripción, el contexto del proyecto y el diff por stdin.\n\n\
+     Para cada problema real que encuentres (bugs, riesgos de seguridad, rendimiento, \
+     integración, estilo importante — no inventes hallazgos triviales si el código está bien), \
+     responde en Markdown con EXACTAMENTE este formato, uno por hallazgo, en este orden:\n\n\
+     ### {emoji} [{Severidad} · {Tipo}] {Categoría corta} · F-{número correlativo de 3 dígitos}\n\n\
+     {Un subtítulo de una línea, algo más largo que el título, describiendo el problema puntual}\n\n\
+     💭 Por qué: {explicación concreta del problema, citando archivo y línea/función relevante}\n\n\
+     💡 Sugerencia: {qué cambiar exactamente para resolverlo}\n\n\
+     🛠️ Ejemplo de solución:\n\
+     ```{lenguaje}\n\
+     {fragmento de código mostrando la solución concreta}\n\
+     ```\n\n\
+     🎯 Confianza: {0-100}/100\n\n\
+     ---\n\n\
+     Reglas:\n\
+     - Responde SIEMPRE en español — el subtítulo, el \"Por qué\", la \"Sugerencia\" y \
+     cualquier otro texto libre deben estar en español, sin importar el idioma del título, la \
+     descripción del PR, el diff, o los comentarios/nombres en el código.\n\
+     - Usa 🚨 para Crítico, ⚠️ para Advertencia/Mayor, ℹ️ para Menor/Sugerencia.\n\
+     - Numera los hallazgos F-001, F-002, etc. en el orden en que aparecen en el diff.\n\
+     - Sé específico y cita archivos/líneas reales del diff — no generalices.\n\
+     - No repitas el diff completo ni resumas cambios que no son problemáticos.\n\
+     - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅, sin \
+     inventar hallazgos ni usar la plantilla anterior.";
 
 /// Shared subprocess plumbing for every headless Claude invocation: spawns the binary,
 /// pipes `stdin_content` in, and interprets `--output-format json` output — including
 /// detecting a quota/rate-limit failure so the frontend can show a dedicated notice
 /// instead of a generic error banner.
+#[allow(clippy::too_many_arguments)]
 async fn invoke_claude(
     binary_path: &str,
     prompt: &str,
     model: &str,
     allowed_tools: &[String],
     cwd: Option<&str>,
+    mcp_config_path: Option<&str>,
     stdin_content: &str,
 ) -> Result<String, String> {
     let mut cmd = Command::new(binary_path);
@@ -67,6 +88,9 @@ async fn invoke_claude(
     cmd.arg("--output-format").arg("json");
     if !allowed_tools.is_empty() {
         cmd.arg("--allowedTools").arg(allowed_tools.join(","));
+    }
+    if let Some(path) = mcp_config_path {
+        cmd.arg("--mcp-config").arg(path).arg("--strict-mcp-config");
     }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -137,12 +161,14 @@ pub async fn generate_commit_message(binary_path: &str, diff: &str, prompt_templ
         prompt_template
     };
 
-    invoke_claude(binary_path, prompt, COMMIT_MESSAGE_MODEL, &[], None, &truncated).await
+    invoke_claude(binary_path, prompt, COMMIT_MESSAGE_MODEL, &[], None, None, &truncated).await
 }
 
 /// Reviews a pull request's diff with the user's configured review model/tools, folding
-/// in the project's enabled review contexts as extra background. Returns a Markdown
-/// review body — nothing gets posted to Azure DevOps here, that's a separate explicit step.
+/// in the workspace's enabled review contexts/MD instructions as extra background. Returns
+/// a Markdown review body — nothing gets posted to Azure DevOps here, that's a separate
+/// explicit step.
+#[allow(clippy::too_many_arguments)]
 pub async fn review_pull_request(
     binary_path: &str,
     model: &str,
@@ -152,6 +178,8 @@ pub async fn review_pull_request(
     diff_text: &str,
     allowed_tools: &[String],
     cwd: &str,
+    prompt_template: &str,
+    mcp_config_path: Option<&str>,
 ) -> Result<String, String> {
     if diff_text.trim().is_empty() {
         return Err("This pull request has no changes to review".to_string());
@@ -175,5 +203,21 @@ pub async fn review_pull_request(
     stdin_payload.push_str("DIFF:\n");
     stdin_payload.push_str(&truncated);
 
-    invoke_claude(binary_path, DEFAULT_REVIEW_PROMPT, model, allowed_tools, Some(cwd), &stdin_payload).await
+    let prompt = if prompt_template.trim().is_empty() {
+        DEFAULT_REVIEW_PROMPT
+    } else {
+        prompt_template
+    };
+
+    let review =
+        invoke_claude(binary_path, prompt, model, allowed_tools, Some(cwd), mcp_config_path, &stdin_payload).await?;
+
+    // Claude can't reliably know the real wall-clock time or which model string it was
+    // actually launched with, so the app stamps that footer on itself rather than asking
+    // the prompt to fabricate it.
+    let model_label = if model.trim().is_empty() { "modelo predeterminado" } else { model };
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M");
+    Ok(format!(
+        "{review}\n\n---\n🤖 Revisión automatizada (pr-review) · Claude Code ({model_label}) · {timestamp}"
+    ))
 }
