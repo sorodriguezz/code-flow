@@ -1,15 +1,30 @@
 import { useEffect } from "react";
-import { Bot, Cloud, FolderGit2, GitBranch, Globe, MessageSquareText, PackagePlus, Palette, X } from "lucide-react";
+import {
+  Bot,
+  Cloud,
+  FileText,
+  FolderGit2,
+  GitBranch,
+  Globe,
+  MessageSquareText,
+  PackagePlus,
+  Palette,
+  Plug,
+  X,
+} from "lucide-react";
 import { ThemeSettings } from "./ThemeSettings";
 import { ProjectsSettings } from "./ProjectsSettings";
 import { AzureDevOpsSettings } from "./AzureDevOpsSettings";
 import { ClaudeSettings } from "./ClaudeSettings";
 import { ReviewContextEditor } from "./ReviewContextEditor";
 import { SkillsSettings } from "./SkillsSettings";
+import { McpSettings } from "./McpSettings";
+import { MdFilesSettings } from "./MdFilesSettings";
 import { GitSettings } from "./GitSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { useLayoutStore } from "../../state/layoutStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -17,15 +32,23 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 const NAV_MIN = 160;
 const NAV_MAX = 320;
 
-const SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
+// Global settings apply across every workspace/project. Workspace settings — everything
+// Claude reads when reviewing a PR (context, instructions, skills, MCP servers) — apply
+// only to whichever workspace is currently active, per the user's explicit scoping model.
+const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
   { id: "appearance", labelKey: "settings.appearance", icon: Palette },
   { id: "general", labelKey: "settings.general", icon: Globe },
   { id: "projects", labelKey: "settings.projects", icon: FolderGit2 },
   { id: "git", labelKey: "settings.git", icon: GitBranch },
   { id: "azure", labelKey: "settings.azure", icon: Cloud },
   { id: "claude", labelKey: "settings.claude", icon: Bot },
+];
+
+const WORKSPACE_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
   { id: "context", labelKey: "settings.context", icon: MessageSquareText },
+  { id: "mdFiles", labelKey: "settings.mdFiles", icon: FileText },
   { id: "skills", labelKey: "settings.skills", icon: PackagePlus },
+  { id: "mcps", labelKey: "settings.mcps", icon: Plug },
 ];
 
 export function SettingsView() {
@@ -36,6 +59,10 @@ export function SettingsView() {
   const navWidth = useLayoutStore((s) => s.sizes.settingsNavWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const activeWorkspaceName = useWorkspaceStore(
+    (s) => s.workspaces.find((w) => w.id === activeWorkspaceId)?.name,
+  );
   const t = useT();
 
   // Closable via Escape, but deliberately NOT by clicking the backdrop — settings can hold
@@ -70,7 +97,30 @@ export function SettingsView() {
 
         <div className="flex min-h-0 flex-1">
           <nav style={{ width: navWidth }} className="shrink-0 overflow-y-auto border-r border-[var(--cf-border)] p-3">
-            {SECTIONS.map(({ id, labelKey, icon: Icon }) => (
+            <p className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              {t("settings.globalGroup")}
+            </p>
+            {GLOBAL_SECTIONS.map(({ id, labelKey, icon: Icon }) => (
+              <button
+                key={id}
+                onClick={() => setSection(id)}
+                className={`mb-0.5 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] ${
+                  section === id
+                    ? "bg-[var(--cf-accent-soft)] font-medium text-[var(--cf-accent)]"
+                    : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                }`}
+              >
+                <Icon size={14} />
+                {t(labelKey)}
+              </button>
+            ))}
+
+            <p className="mb-1 mt-4 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              {activeWorkspaceName
+                ? t("settings.workspaceGroup", { name: activeWorkspaceName })
+                : t("settings.workspaceGroupGeneric")}
+            </p>
+            {WORKSPACE_SECTIONS.map(({ id, labelKey, icon: Icon }) => (
               <button
                 key={id}
                 onClick={() => setSection(id)}
@@ -102,7 +152,9 @@ export function SettingsView() {
               {section === "azure" && <AzureDevOpsSettings />}
               {section === "claude" && <ClaudeSettings />}
               {section === "context" && <ReviewContextEditor />}
+              {section === "mdFiles" && <MdFilesSettings />}
               {section === "skills" && <SkillsSettings />}
+              {section === "mcps" && <McpSettings />}
             </div>
           </div>
         </div>

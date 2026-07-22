@@ -10,7 +10,9 @@ export type SettingsSectionId =
   | "azure"
   | "claude"
   | "context"
-  | "skills";
+  | "mdFiles"
+  | "skills"
+  | "mcps";
 
 interface UiState {
   sidebarCollapsed: boolean;

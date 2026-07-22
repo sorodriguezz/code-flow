@@ -1,8 +1,24 @@
+import { useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ChevronLeft, ChevronRight, Minus, Search, Sidebar as SidebarIcon, Square, X, Zap } from "lucide-react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  MessageCircle,
+  Minus,
+  Search,
+  Sidebar as SidebarIcon,
+  Sparkles,
+  Square,
+  X,
+  Zap,
+} from "lucide-react";
 import { usePlatform } from "../../lib/platform";
 import { useUiStore } from "../../state/uiStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useNavigationStore } from "../../state/navigationStore";
+import { usePrStore } from "../../state/prStore";
 import { useT } from "../../state/languageStore";
+import { CommandPalette } from "./CommandPalette";
 
 const win = getCurrentWindow();
 
@@ -56,11 +72,76 @@ function WindowsControls() {
   );
 }
 
+function AiActionsMenu({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  const setActiveView = useUiStore((s) => s.setActiveView);
+  const project = useWorkspaceStore((s) => s.activeProject());
+  const selectedPr = usePrStore((s) => s.selectedPr);
+  const reviewPr = usePrStore((s) => s.reviewPr);
+
+  const openChat = () => {
+    setActiveView("chat");
+    onClose();
+  };
+
+  const reviewCurrentPr = () => {
+    if (!project || !selectedPr) return;
+    setActiveView("chat");
+    void reviewPr(project.id, selectedPr.id);
+    onClose();
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-10" onClick={onClose} />
+      <div className="absolute right-0 top-full z-20 mt-1 w-60 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
+        <button
+          onClick={openChat}
+          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        >
+          <MessageCircle size={13} />
+          {t("titlebar.openChat")}
+        </button>
+        <button
+          onClick={reviewCurrentPr}
+          disabled={!selectedPr}
+          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.04]"
+        >
+          <Sparkles size={13} />
+          <span className="min-w-0 flex-1 truncate">
+            {selectedPr ? t("titlebar.reviewCurrentPr", { title: selectedPr.title }) : t("titlebar.noPrSelected")}
+          </span>
+        </button>
+      </div>
+    </>
+  );
+}
+
 export function TitleBar() {
   const platform = usePlatform();
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
+  const setActiveView = useUiStore((s) => s.setActiveView);
+  const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
+  const canGoBack = useNavigationStore((s) => s.canGoBack);
+  const canGoForward = useNavigationStore((s) => s.canGoForward);
   const isMac = platform === "macos";
   const t = useT();
+  const [showSearch, setShowSearch] = useState(false);
+  const [showAiMenu, setShowAiMenu] = useState(false);
+
+  const goBack = () => {
+    const entry = useNavigationStore.getState().back();
+    if (!entry) return;
+    setActiveView(entry.view);
+    if (entry.projectId) setActiveProject(entry.projectId);
+  };
+
+  const goForward = () => {
+    const entry = useNavigationStore.getState().forward();
+    if (!entry) return;
+    setActiveView(entry.view);
+    if (entry.projectId) setActiveProject(entry.projectId);
+  };
 
   return (
     <header
@@ -76,26 +157,48 @@ export function TitleBar() {
         >
           <SidebarIcon size={16} />
         </button>
-        <button className="flex h-7 w-7 items-center justify-center rounded-md text-black/60 hover:bg-black/10 dark:text-white/70">
+        <button
+          onClick={() => setShowSearch(true)}
+          title={t("titlebar.search")}
+          className="flex h-7 w-7 items-center justify-center rounded-md text-black/60 hover:bg-black/10 dark:text-white/70"
+        >
           <Search size={16} />
         </button>
         <div className="flex items-center gap-0.5">
-          <button className="flex h-7 w-7 items-center justify-center rounded-md text-black/40 hover:bg-black/10 dark:text-white/50">
+          <button
+            onClick={goBack}
+            disabled={!canGoBack}
+            title={t("titlebar.goBack")}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-black/40 hover:bg-black/10 disabled:opacity-30 disabled:hover:bg-transparent dark:text-white/50"
+          >
             <ChevronLeft size={16} />
           </button>
-          <button className="flex h-7 w-7 items-center justify-center rounded-md text-black/40 hover:bg-black/10 dark:text-white/50">
+          <button
+            onClick={goForward}
+            disabled={!canGoForward}
+            title={t("titlebar.goForward")}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-black/40 hover:bg-black/10 disabled:opacity-30 disabled:hover:bg-transparent dark:text-white/50"
+          >
             <ChevronRight size={16} />
           </button>
         </div>
       </div>
 
       <div className="flex items-center gap-2">
-        <button className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-black/60 hover:bg-black/10 dark:text-white/70">
-          <Zap size={13} />
-          {t("titlebar.aiActions")}
-        </button>
+        <div className="relative">
+          <button
+            onClick={() => setShowAiMenu((v) => !v)}
+            className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-black/60 hover:bg-black/10 dark:text-white/70"
+          >
+            <Zap size={13} />
+            {t("titlebar.aiActions")}
+          </button>
+          {showAiMenu && <AiActionsMenu onClose={() => setShowAiMenu(false)} />}
+        </div>
         {!isMac && <WindowsControls />}
       </div>
+
+      {showSearch && <CommandPalette onClose={() => setShowSearch(false)} />}
     </header>
   );
 }

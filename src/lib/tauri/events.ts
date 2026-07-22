@@ -20,3 +20,6 @@ export const onTerminalExit = (handler: (event: { id: string }) => void) =>
 
 export const onRepoFsChanged = (handler: (event: { repo_path: string }) => void) =>
   listen<{ repo_path: string }>("repo:fs-changed", (e) => handler(e.payload));
+
+export const onSkillsProgress = (handler: (event: { line: string }) => void) =>
+  listen<{ line: string }>("skills:progress", (e) => handler(e.payload));

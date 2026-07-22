@@ -22,6 +22,7 @@ import { usePreferencesStore } from "./state/preferencesStore";
 import { useLanguageStore } from "./state/languageStore";
 import { useAccentStore } from "./state/accentStore";
 import { useFetchTimerStore } from "./state/fetchTimerStore";
+import { useNavigationStore } from "./state/navigationStore";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
 import { onRepoFsChanged } from "./lib/tauri/events";
 
@@ -76,6 +77,7 @@ export default function App() {
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
   const resolvedTheme = useThemeStore((s) => s.resolved);
   const accentId = useAccentStore((s) => s.accentId);
+  const activeView = useUiStore((s) => s.activeView);
 
   useEffect(() => {
     (async () => {
@@ -96,6 +98,12 @@ export default function App() {
   useEffect(() => {
     void setRepoPath(project?.local_path ?? null);
   }, [project?.local_path, setRepoPath]);
+
+  // Records every view/project change onto the back/forward history — TitleBar's
+  // chevrons just replay entries from this stack.
+  useEffect(() => {
+    useNavigationStore.getState().push({ view: activeView, projectId: project?.id ?? null });
+  }, [activeView, project?.id]);
 
   // Watch the active project's working tree so external changes — an edit made in the
   // embedded Editor, in VS Code, from a terminal `git` command, anything — show up in

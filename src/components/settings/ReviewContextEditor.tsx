@@ -8,47 +8,48 @@ import { Checkbox } from "../common/Checkbox";
 
 export function ReviewContextEditor() {
   const t = useT();
-  const project = useWorkspaceStore((s) => s.activeProject());
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const workspaceName = useWorkspaceStore((s) => s.workspaces.find((w) => w.id === workspaceId)?.name ?? "");
   const [contexts, setContexts] = useState<ReviewContext[]>([]);
 
-  const reload = async (projectId: string) => {
-    setContexts(await listReviewContexts(projectId));
+  const reload = async (id: string) => {
+    setContexts(await listReviewContexts(id));
   };
 
   useEffect(() => {
-    if (project) void reload(project.id);
+    if (workspaceId) void reload(workspaceId);
     else setContexts([]);
-  }, [project?.id]);
+  }, [workspaceId]);
 
-  if (!project) {
+  if (!workspaceId) {
     return (
       <section>
         <h3 className="mb-1 text-sm font-semibold">{t("settings.contextTitle")}</h3>
-        <p className="text-[13px] text-[var(--cf-text-muted)]">{t("settings.contextSelectProject")}</p>
+        <p className="text-[13px] text-[var(--cf-text-muted)]">{t("settings.contextSelectWorkspace")}</p>
       </section>
     );
   }
 
   const addContext = async () => {
-    await upsertReviewContext(undefined, project.id, t("settings.newContextName"), "", true);
-    await reload(project.id);
+    await upsertReviewContext(undefined, workspaceId, t("settings.newContextName"), "", true);
+    await reload(workspaceId);
   };
 
   const update = async (ctx: ReviewContext, patch: Partial<ReviewContext>) => {
     const next = { ...ctx, ...patch };
     setContexts((prev) => prev.map((c) => (c.id === ctx.id ? next : c)));
-    await upsertReviewContext(ctx.id, project.id, next.name, next.content, next.enabled);
+    await upsertReviewContext(ctx.id, workspaceId, next.name, next.content, next.enabled);
   };
 
   const remove = async (id: string) => {
     await deleteReviewContext(id);
-    await reload(project.id);
+    await reload(workspaceId);
   };
 
   return (
     <section>
       <div className="mb-1 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">{t("settings.contextTitleForProject", { name: project.name })}</h3>
+        <h3 className="text-sm font-semibold">{t("settings.contextTitleForProject", { name: workspaceName })}</h3>
         <button
           onClick={addContext}
           className="flex items-center gap-1 text-[12px] text-[var(--cf-accent)] hover:underline"
