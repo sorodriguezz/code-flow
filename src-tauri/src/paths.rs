@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 /// Root directory where CodeFlow keeps its database and local config.
 /// Windows: literally `C:\CodeFlow` (explicit product requirement, not `%LOCALAPPDATA%`).
-/// macOS/Linux: there is no `C:` drive, so we fall back to the OS-standard app-data
-/// directory with a `CodeFlow` subfolder (e.g. `~/Library/Application Support/CodeFlow`).
+/// macOS/Linux: the user's home root, i.e. `~/CodeFlow` — same rationale as Windows (a
+/// fixed, predictable location the installer's keep/wipe prompt can target) and one that
+/// never needs elevated permissions, unlike writing under `/Applications` or `/Library`.
 pub fn base_dir() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
@@ -11,8 +12,8 @@ pub fn base_dir() -> PathBuf {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        dirs::data_dir()
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
             .join("CodeFlow")
     }
 }
@@ -42,4 +43,13 @@ pub fn ensure_dirs() -> std::io::Result<()> {
     std::fs::create_dir_all(logs_dir())?;
     std::fs::create_dir_all(clone_root())?;
     Ok(())
+}
+
+/// A "please wipe everything" request has to be handled on the *next* launch, before the
+/// database is opened — deleting `codeflow.db` out from under this process's own open SQLite
+/// connection would fail on Windows (can't remove a file that's still locked open). Requesting
+/// a reset just drops this marker and quits; `run()` checks for it first thing on startup, when
+/// nothing has touched the directory yet, and deletes it then.
+pub fn reset_marker_path() -> PathBuf {
+    base_dir().join(".reset-pending")
 }

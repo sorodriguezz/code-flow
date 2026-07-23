@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, RefreshCw, Settings, Upload } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, RefreshCw, Settings, TerminalSquare, Upload } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
+import { useTerminalStore } from "../../state/terminalStore";
 import { useFetchTimerStore } from "../../state/fetchTimerStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { useT } from "../../state/languageStore";
@@ -18,6 +19,8 @@ export function StatusBar() {
   const push = useRepoStore((s) => s.push);
   const settingsOpen = useUiStore((s) => s.settingsOpen);
   const toggleSettings = useUiStore((s) => s.toggleSettings);
+  const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
+  const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
   const remainingSeconds = useFetchTimerStore((s) => s.remainingSeconds);
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
   const [showBranchModal, setShowBranchModal] = useState(false);
@@ -35,10 +38,23 @@ export function StatusBar() {
     </button>
   );
 
+  const terminalButton = (
+    <button
+      onClick={toggleTerminalPanel}
+      title={t("terminal.toggle")}
+      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
+        terminalPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+      }`}
+    >
+      <TerminalSquare size={13} />
+    </button>
+  );
+
   if (!project) {
     return (
       <footer className="flex h-8 shrink-0 items-center gap-2 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[12px] text-[var(--cf-text-muted)]">
         {settingsButton}
+        {terminalButton}
         <span>{t("statusbar.openProject")}</span>
       </footer>
     );
@@ -57,6 +73,7 @@ export function StatusBar() {
   return (
     <footer className="flex h-8 shrink-0 items-center gap-3 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[12px] text-[var(--cf-text-muted)]">
       {settingsButton}
+      {terminalButton}
 
       <span
         className="flex shrink-0 items-center gap-1 truncate font-medium text-[var(--cf-text)]"

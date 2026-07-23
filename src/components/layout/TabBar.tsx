@@ -1,4 +1,4 @@
-import { Code2, GitBranch, History, MessageCircle, TerminalSquare } from "lucide-react";
+import { Code2, GitBranch, History } from "lucide-react";
 import { useUiStore, type MainView } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -7,8 +7,6 @@ const TABS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBranch }[]
   { id: "graph", labelKey: "tabbar.graph", icon: History },
   { id: "changes", labelKey: "tabbar.changes", icon: GitBranch },
   { id: "editor", labelKey: "tabbar.editor", icon: Code2 },
-  { id: "terminal", labelKey: "tabbar.terminal", icon: TerminalSquare },
-  { id: "chat", labelKey: "tabbar.chat", icon: MessageCircle },
 ];
 
 export function TabBar() {

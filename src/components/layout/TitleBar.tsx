@@ -74,20 +74,20 @@ function WindowsControls() {
 
 function AiActionsMenu({ onClose }: { onClose: () => void }) {
   const t = useT();
-  const setActiveView = useUiStore((s) => s.setActiveView);
+  const openAiPanel = useUiStore((s) => s.openAiPanel);
   const project = useWorkspaceStore((s) => s.activeProject());
   const selectedPr = usePrStore((s) => s.selectedPr);
   const reviewPr = usePrStore((s) => s.reviewPr);
 
   const openChat = () => {
-    setActiveView("chat");
+    openAiPanel();
     onClose();
   };
 
   const reviewCurrentPr = () => {
     if (!project || !selectedPr) return;
-    setActiveView("chat");
-    void reviewPr(project.id, selectedPr.id);
+    openAiPanel();
+    reviewPr(project.id, selectedPr.id);
     onClose();
   };
 

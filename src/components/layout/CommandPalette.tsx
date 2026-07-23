@@ -3,6 +3,7 @@ import { Cloud, Cog, FolderGit2, GitBranch, History, MessageCircle, TerminalSqua
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore, type MainView, type SettingsSectionId } from "../../state/uiStore";
+import { useTerminalStore } from "../../state/terminalStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -18,8 +19,6 @@ const VIEW_ITEMS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBran
   { id: "graph", labelKey: "tabbar.graph", icon: History },
   { id: "changes", labelKey: "tabbar.changes", icon: GitBranch },
   { id: "editor", labelKey: "tabbar.editor", icon: FolderGit2 },
-  { id: "terminal", labelKey: "tabbar.terminal", icon: TerminalSquare },
-  { id: "chat", labelKey: "tabbar.chat", icon: MessageCircle },
 ];
 
 const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [
@@ -47,15 +46,20 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   const [query, setQuery] = useState("");
 
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const projects = useWorkspaceStore((s) =>
-    activeWorkspaceId ? s.projectsByWorkspace[activeWorkspaceId] ?? [] : [],
-  );
+  // Selecting the raw (stably-referenced) map and only applying the `?? []` fallback in the
+  // render body — not inside the selector — avoids handing useSyncExternalStore a brand-new
+  // array on every store update, which previously caused a real infinite-render loop elsewhere
+  // in this app (see prStore's EMPTY_PRS fix).
+  const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
+  const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const branches = useRepoStore((s) => s.branches);
   const checkoutBranch = useRepoStore((s) => s.checkoutBranch);
   const checkoutRemoteBranch = useRepoStore((s) => s.checkoutRemoteBranch);
   const setActiveView = useUiStore((s) => s.setActiveView);
   const openSettings = useUiStore((s) => s.openSettings);
+  const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
+  const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
 
   const items = useMemo<PaletteItem[]>(() => {
     const projectItems: PaletteItem[] = projects.map((p) => ({
@@ -74,13 +78,29 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       onSelect: () => (b.is_remote ? checkoutRemoteBranch(b.name) : checkoutBranch(b.name)),
     }));
 
-    const viewItems: PaletteItem[] = VIEW_ITEMS.map(({ id, labelKey, icon }) => ({
-      key: `view:${id}`,
-      icon,
-      label: t(labelKey),
-      group: "views",
-      onSelect: () => setActiveView(id),
-    }));
+    const viewItems: PaletteItem[] = [
+      ...VIEW_ITEMS.map(({ id, labelKey, icon }) => ({
+        key: `view:${id}`,
+        icon,
+        label: t(labelKey),
+        group: "views" as const,
+        onSelect: () => setActiveView(id),
+      })),
+      {
+        key: "view:ai-panel",
+        icon: MessageCircle,
+        label: t("chat.title"),
+        group: "views" as const,
+        onSelect: () => toggleAiPanel(),
+      },
+      {
+        key: "view:terminal",
+        icon: TerminalSquare,
+        label: t("tabbar.terminal"),
+        group: "views" as const,
+        onSelect: () => toggleTerminalPanel(),
+      },
+    ];
 
     const settingsItems: PaletteItem[] = SETTINGS_ITEMS.map(({ id, labelKey }) => ({
       key: `settings:${id}`,
@@ -91,7 +111,18 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     }));
 
     return [...projectItems, ...branchItems, ...viewItems, ...settingsItems];
-  }, [projects, branches, t, setActiveProject, checkoutBranch, checkoutRemoteBranch, setActiveView, openSettings]);
+  }, [
+    projects,
+    branches,
+    t,
+    setActiveProject,
+    checkoutBranch,
+    checkoutRemoteBranch,
+    setActiveView,
+    openSettings,
+    toggleAiPanel,
+    toggleTerminalPanel,
+  ]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();

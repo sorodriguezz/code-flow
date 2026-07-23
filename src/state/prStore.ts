@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
 import { pushErrorToast } from "./toastStore";
-import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
+import { useJobsStore } from "./jobsStore";
 import type { PullRequestSummary } from "../types/domain";
 
 interface PrState {
@@ -10,27 +10,23 @@ interface PrState {
   loadErrorByProject: Record<string, string>;
 
   selectedPr: PullRequestSummary | null;
-  reviewText: string | null;
-  reviewLoading: boolean;
-  reviewError: ClaudeErrorInfo | null;
   posting: boolean;
   posted: boolean;
 
   loadPullRequests: (projectId: string) => Promise<void>;
   selectPr: (pr: PullRequestSummary | null) => void;
-  reviewPr: (projectId: string, prId: number) => Promise<void>;
+  /** Fire-and-forget — the run is tracked in `jobsStore`, not here, precisely so it survives
+   * switching away from this PR (or this project) before it finishes. */
+  reviewPr: (projectId: string, prId: number) => void;
   postReview: (projectId: string, prId: number, content: string) => Promise<void>;
 }
 
-export const usePrStore = create<PrState>((set) => ({
+export const usePrStore = create<PrState>((set, get) => ({
   prsByProject: {},
   loadingProjectId: null,
   loadErrorByProject: {},
 
   selectedPr: null,
-  reviewText: null,
-  reviewLoading: false,
-  reviewError: null,
   posting: false,
   posted: false,
 
@@ -46,18 +42,17 @@ export const usePrStore = create<PrState>((set) => ({
     }
   },
 
-  selectPr: (pr) => set({ selectedPr: pr, reviewText: null, reviewError: null, posted: false }),
+  selectPr: (pr) => set({ selectedPr: pr, posted: false }),
 
-  reviewPr: async (projectId, prId) => {
-    set({ reviewLoading: true, reviewError: null, reviewText: null, posted: false });
-    try {
-      const text = await api.reviewPullRequest(projectId, prId);
-      set({ reviewText: text });
-    } catch (e) {
-      set({ reviewError: parseClaudeError(String(e)) });
-    } finally {
-      set({ reviewLoading: false });
-    }
+  reviewPr: (projectId, prId) => {
+    const pr = get().prsByProject[projectId]?.find((p) => p.id === prId);
+    useJobsStore.getState().run({
+      projectId,
+      kind: "pr-review",
+      label: pr ? `#${pr.id} ${pr.title}` : `PR #${prId}`,
+      meta: { prId },
+      task: () => api.reviewPullRequest(projectId, prId),
+    });
   },
 
   postReview: async (projectId, prId, content) => {

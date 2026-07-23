@@ -29,8 +29,29 @@ struct TerminalExitEvent {
 
 #[cfg(target_os = "windows")]
 fn windows_git_bash() -> Option<std::path::PathBuf> {
-    // Common install locations; also honor where the `git` on PATH actually lives,
-    // since Git for Windows ships bash.exe alongside it under mingw64\bin or usr\bin.
+    // Ask git itself where it's installed rather than guessing — this app already requires
+    // `git` on PATH for clone/fetch/pull/push, so this resolves regardless of whether it's a
+    // standard Program Files install, a custom drive, scoop/chocolatey, or a portable copy.
+    // `--exec-path` prints something like `<root>\mingw64\libexec\git-core`; walk up from
+    // there looking for `<ancestor>\bin\bash.exe`.
+    if let Ok(output) = std::process::Command::new("git").arg("--exec-path").output() {
+        if output.status.success() {
+            let exec_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let mut dir = std::path::PathBuf::from(exec_path);
+            for _ in 0..6 {
+                let candidate = dir.join("bin").join("bash.exe");
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                if !dir.pop() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Common install locations, as a fallback if `git --exec-path` didn't resolve (e.g. `git`
+    // not actually on PATH despite being installed).
     let candidates = [
         r"C:\Program Files\Git\bin\bash.exe",
         r"C:\Program Files (x86)\Git\bin\bash.exe",
@@ -44,19 +65,29 @@ fn windows_git_bash() -> Option<std::path::PathBuf> {
     None
 }
 
-fn default_shell() -> CommandBuilder {
+fn default_shell() -> Result<CommandBuilder, String> {
     if cfg!(target_os = "windows") {
         #[cfg(target_os = "windows")]
-        if let Some(bash) = windows_git_bash() {
+        {
+            // Terminals are always Git Bash on Windows — PowerShell is not an acceptable
+            // fallback here (it was previously used silently when bash.exe wasn't found at
+            // one of two hardcoded paths, which is exactly the case `windows_git_bash` above
+            // now resolves properly). If Git for Windows truly isn't installed, this surfaces
+            // as a normal command error instead of silently handing back a different shell.
+            let bash = windows_git_bash().ok_or_else(|| {
+                "Git Bash not found — install Git for Windows (https://git-scm.com/download/win)"
+                    .to_string()
+            })?;
             let mut cmd = CommandBuilder::new(bash);
             cmd.arg("--login");
             cmd.arg("-i");
-            return cmd;
+            return Ok(cmd);
         }
-        CommandBuilder::new("powershell.exe")
+        #[cfg(not(target_os = "windows"))]
+        unreachable!()
     } else {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        CommandBuilder::new(shell)
+        Ok(CommandBuilder::new(shell))
     }
 }
 
@@ -71,7 +102,7 @@ pub fn open_terminal(app: AppHandle, registry: &TerminalRegistry, cwd: String) -
         })
         .map_err(|e| e.to_string())?;
 
-    let mut cmd = default_shell();
+    let mut cmd = default_shell()?;
     cmd.cwd(&cwd);
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;

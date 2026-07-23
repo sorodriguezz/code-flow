@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type MainView = "graph" | "changes" | "chat" | "editor" | "terminal";
+export type MainView = "graph" | "changes" | "editor";
 
 export type SettingsSectionId =
   | "appearance"
@@ -23,6 +23,10 @@ interface UiState {
   settingsSection: SettingsSectionId;
   /** Repo-relative path the Editor tab should jump to open next; consumed once then cleared. */
   pendingEditorPath: string | null;
+  /** The AI panel (PRs / open questions / change analysis) is a persistent left-docked panel,
+   * not a tab — it stays mounted and scoped to whatever project is active regardless of which
+   * main view or project the user switches to. */
+  aiPanelOpen: boolean;
   toggleSidebar: () => void;
   setActiveView: (view: MainView) => void;
   openSettings: (section: SettingsSectionId) => void;
@@ -30,6 +34,8 @@ interface UiState {
   closeSettings: () => void;
   openInEditor: (relPath: string) => void;
   clearPendingEditorPath: () => void;
+  toggleAiPanel: () => void;
+  openAiPanel: () => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -38,6 +44,7 @@ export const useUiStore = create<UiState>((set) => ({
   settingsOpen: false,
   settingsSection: "appearance",
   pendingEditorPath: null,
+  aiPanelOpen: false,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setActiveView: (view) => set({ activeView: view, settingsOpen: false }),
   openSettings: (section) => set({ settingsOpen: true, settingsSection: section }),
@@ -45,4 +52,6 @@ export const useUiStore = create<UiState>((set) => ({
   closeSettings: () => set({ settingsOpen: false }),
   openInEditor: (relPath) => set({ activeView: "editor", pendingEditorPath: relPath, settingsOpen: false }),
   clearPendingEditorPath: () => set({ pendingEditorPath: null }),
+  toggleAiPanel: () => set((s) => ({ aiPanelOpen: !s.aiPanelOpen })),
+  openAiPanel: () => set({ aiPanelOpen: true }),
 }));
