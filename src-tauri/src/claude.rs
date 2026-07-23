@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -29,12 +30,65 @@ struct ClaudeCliResult {
     is_error: bool,
     #[serde(default)]
     session_id: Option<String>,
+    /// Token accounting keyed by the model id the CLI *actually* used. This is the only way to
+    /// report a concrete version when no `--model` was passed and the CLI picked for itself.
+    #[serde(default, rename = "modelUsage")]
+    model_usage: BTreeMap<String, serde_json::Value>,
+}
+
+/// One finished Claude run: the reply plus the metadata a caller may want to keep.
+#[derive(Debug)]
+pub struct ClaudeRun {
+    pub text: String,
+    /// Session to `--resume` on the next turn of a multi-turn conversation.
+    pub session_id: Option<String>,
+    /// Model the CLI actually ran, when it reported exactly one. A turn that fanned out to
+    /// several models (a subagent on a different one, say) is left as `None` rather than
+    /// arbitrarily naming one of them — callers fall back to the configured setting.
+    pub model: Option<String>,
+}
+
+fn model_used(parsed: &ClaudeCliResult) -> Option<String> {
+    match parsed.model_usage.len() {
+        1 => parsed.model_usage.keys().next().cloned(),
+        _ => None,
+    }
 }
 
 fn quota_signal(text: &str) -> bool {
     let lower = text.to_lowercase();
     QUOTA_SIGNALS.iter().any(|s| lower.contains(s))
 }
+
+/// macOS GUI apps inherit launchd's minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) rather
+/// than the one from the user's shell profile, so a bare `claude` that resolves fine in a
+/// terminal isn't found at all when CodeFlow is launched from Finder — while on Windows GUI
+/// processes *do* get the user's full PATH, which is why this never showed up there. Prepend
+/// the directories the Claude Code installers actually use so the lookup succeeds either way
+/// (a `binary_path` that's already absolute ignores PATH and is unaffected).
+#[cfg(not(target_os = "windows"))]
+fn augment_path(cmd: &mut Command) {
+    use std::path::PathBuf;
+
+    let Some(home) = dirs::home_dir() else { return };
+    let mut search: Vec<PathBuf> = vec![
+        home.join(".local/bin"),
+        home.join(".claude/local"),
+        home.join(".bun/bin"),
+        home.join("Library/pnpm"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ];
+    if let Some(current) = std::env::var_os("PATH") {
+        search.extend(std::env::split_paths(&current));
+    }
+    if let Ok(joined) = std::env::join_paths(search) {
+        cmd.env("PATH", joined);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn augment_path(_cmd: &mut Command) {}
 
 pub const DEFAULT_COMMIT_TEMPLATE: &str =
     "Write a single concise git commit message (Conventional Commits style, imperative \
@@ -129,9 +183,9 @@ pub const DEFAULT_ANALYZE_TEMPLATE: &str =
 /// Shared subprocess plumbing for every headless Claude invocation: spawns the binary,
 /// pipes `stdin_content` in, and interprets `--output-format json` output — including
 /// detecting a quota/rate-limit failure so the frontend can show a dedicated notice
-/// instead of a generic error banner. Returns the reply text plus the session id Claude
-/// Code assigned this run, so a caller doing multi-turn conversation (chat) can pass it
-/// back in via `resume_session_id` on the next call.
+/// instead of a generic error banner. Returns the reply plus the session id Claude Code
+/// assigned this run, so a caller doing multi-turn conversation (chat) can pass it back in via
+/// `resume_session_id` on the next call, and the model that actually answered.
 #[allow(clippy::too_many_arguments)]
 async fn invoke_claude(
     binary_path: &str,
@@ -143,7 +197,7 @@ async fn invoke_claude(
     mcp_config_path: Option<&str>,
     stdin_content: &str,
     resume_session_id: Option<&str>,
-) -> Result<(String, Option<String>), String> {
+) -> Result<ClaudeRun, String> {
     let mut cmd = Command::new(binary_path);
     cmd.arg("-p").arg(prompt);
     if let Some(sp) = system_prompt {
@@ -168,6 +222,7 @@ async fn invoke_claude(
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    augment_path(&mut cmd);
 
     let mut child = cmd
         .spawn()
@@ -181,32 +236,64 @@ async fn invoke_claude(
     }
 
     let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    interpret_output(
+        output.status.success(),
+        &output.status.to_string(),
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if quota_signal(&stderr) {
-            return Err(format!("{QUOTA_MARKER}{}", stderr.trim()));
+/// Turns one finished `claude --output-format json` run into either its reply text (plus the
+/// session id) or an error message for the frontend.
+///
+/// Under `--output-format json` the CLI reports its *own* failures on stdout — as
+/// `{"is_error":true,"result":"<reason>"}` — and exits non-zero leaving stderr **empty**. So
+/// stdout has to be parsed before the exit status is judged: branching on the status first and
+/// reporting stderr discarded the only copy of the reason (expired auth, unknown model, …) and
+/// left the user staring at a bare "claude exited with an error:" with nothing after it.
+fn interpret_output(
+    success: bool,
+    status_label: &str,
+    stdout: &str,
+    stderr: &str,
+) -> Result<ClaudeRun, String> {
+    let parsed = serde_json::from_str::<ClaudeCliResult>(stdout).ok();
+    let result_text = parsed
+        .as_ref()
+        .and_then(|p| p.result.as_deref())
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+
+    if let Some(text) = result_text {
+        if quota_signal(text) {
+            return Err(format!("{QUOTA_MARKER}{text}"));
         }
-        if quota_signal(&stdout) {
-            return Err(format!("{QUOTA_MARKER}{}", stdout.trim()));
+        if !success || parsed.as_ref().is_some_and(|p| p.is_error) {
+            return Err(text.to_string());
         }
-        return Err(format!("claude exited with an error: {stderr}"));
+        let model = parsed.as_ref().and_then(model_used);
+        return Ok(ClaudeRun {
+            text: text.to_string(),
+            session_id: parsed.and_then(|p| p.session_id),
+            model,
+        });
     }
 
-    if let Ok(parsed) = serde_json::from_str::<ClaudeCliResult>(&stdout) {
-        if let Some(text) = &parsed.result {
-            let trimmed = text.trim();
-            if parsed.is_error || quota_signal(trimmed) {
-                if quota_signal(trimmed) {
-                    return Err(format!("{QUOTA_MARKER}{trimmed}"));
-                }
-                return Err(trimmed.to_string());
-            }
-            if !trimmed.is_empty() {
-                return Ok((trimmed.to_string(), parsed.session_id.clone()));
-            }
+    if !success {
+        if quota_signal(stderr) {
+            return Err(format!("{QUOTA_MARKER}{}", stderr.trim()));
         }
+        if quota_signal(stdout) {
+            return Err(format!("{QUOTA_MARKER}{}", stdout.trim()));
+        }
+        // Neither stream carried a usable message — report the exit status rather than an
+        // error string that trails off into nothing.
+        let detail = [stderr.trim(), stdout.trim()]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or("sin salida en stdout ni stderr");
+        return Err(format!("claude exited with an error ({status_label}): {detail}"));
     }
 
     let fallback = stdout.trim();
@@ -216,7 +303,7 @@ async fn invoke_claude(
     if quota_signal(fallback) {
         return Err(format!("{QUOTA_MARKER}{fallback}"));
     }
-    Ok((fallback.to_string(), None))
+    Ok(ClaudeRun { text: fallback.to_string(), session_id: None, model: None })
 }
 
 pub async fn generate_commit_message(binary_path: &str, diff: &str, prompt_template: &str) -> Result<String, String> {
@@ -231,9 +318,9 @@ pub async fn generate_commit_message(binary_path: &str, diff: &str, prompt_templ
         prompt_template
     };
 
-    let (text, _) =
+    let run =
         invoke_claude(binary_path, prompt, None, COMMIT_MESSAGE_MODEL, &[], None, None, &truncated, None).await?;
-    Ok(text)
+    Ok(run.text)
 }
 
 /// Reviews a pull request's diff with the user's configured review model/tools, folding
@@ -281,7 +368,7 @@ pub async fn review_pull_request(
         prompt_template
     };
 
-    let (review, _) = invoke_claude(
+    let run = invoke_claude(
         binary_path,
         prompt,
         None,
@@ -293,7 +380,9 @@ pub async fn review_pull_request(
         None,
     )
     .await?;
-    Ok(stamp_footer(&review, "pr-review", model))
+    // Prefer what the CLI reports it actually ran over what was configured — they differ
+    // whenever `model` is empty and the CLI picked its own default.
+    Ok(stamp_footer(&run.text, "pr-review", run.model.as_deref().unwrap_or(model)))
 }
 
 /// Claude can't reliably know the real wall-clock time or which model string it was
@@ -342,7 +431,7 @@ pub async fn analyze_changes(
         prompt_template
     };
 
-    let (result, _) = invoke_claude(
+    let run = invoke_claude(
         binary_path,
         prompt,
         None,
@@ -354,7 +443,7 @@ pub async fn analyze_changes(
         None,
     )
     .await?;
-    Ok(stamp_footer(&result, "análisis pre-commit", model))
+    Ok(stamp_footer(&run.text, "análisis pre-commit", run.model.as_deref().unwrap_or(model)))
 }
 
 const DEFAULT_CHAT_SYSTEM_PROMPT: &str =
@@ -380,7 +469,7 @@ pub async fn chat_with_repo(
     allowed_tools: &[String],
     cwd: &str,
     mcp_config_path: Option<&str>,
-) -> Result<(String, Option<String>), String> {
+) -> Result<ClaudeRun, String> {
     // Project context and the system prompt only need to be established once — a resumed
     // session already carries the earlier turns (and Claude's own system prompt) forward.
     // `-p` below carries the user's actual message; stdin is just the one-time context, same
@@ -443,7 +532,7 @@ pub async fn apply_finding_fix(
         "Grep".to_string(),
         "Glob".to_string(),
     ];
-    let (text, _) = invoke_claude(
+    let run = invoke_claude(
         binary_path,
         "Aplica la corrección para el hallazgo entregado por stdin.",
         Some(FIX_FINDING_SYSTEM_PROMPT),
@@ -455,5 +544,87 @@ pub async fn apply_finding_fix(
         None,
     )
     .await?;
-    Ok(text)
+    Ok(run.text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Real payload from a failing `claude -p … --output-format json` run on macOS: exit
+    /// status 1, **empty stderr**, and the actual reason only present on stdout. The old
+    /// status-first branch reported stderr here, which is what produced the truncated
+    /// "claude exited with an error:" the user saw.
+    const FAILED_RUN_STDOUT: &str = r#"{"is_error":true,"stop_reason":"stop_sequence",
+        "session_id":"8c166654-4807-4d62-a1d7-33909c2efd55","subtype":"success",
+        "result":"Failed to authenticate: OAuth session expired and could not be refreshed"}"#;
+
+    #[test]
+    fn surfaces_the_reason_json_carries_when_stderr_is_empty() {
+        let err = interpret_output(false, "exit status: 1", FAILED_RUN_STDOUT, "").unwrap_err();
+        assert_eq!(
+            err,
+            "Failed to authenticate: OAuth session expired and could not be refreshed"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_exit_status_when_nothing_explains_the_failure() {
+        let err = interpret_output(false, "exit status: 127", "", "").unwrap_err();
+        assert_eq!(
+            err,
+            "claude exited with an error (exit status: 127): sin salida en stdout ni stderr"
+        );
+    }
+
+    #[test]
+    fn a_quota_failure_still_gets_the_marker_the_frontend_looks_for() {
+        let stdout = r#"{"is_error":true,"result":"Claude usage limit reached, resets at 5pm"}"#;
+        let err = interpret_output(false, "exit status: 1", stdout, "").unwrap_err();
+        assert!(err.starts_with(QUOTA_MARKER), "got {err}");
+    }
+
+    #[test]
+    fn a_successful_run_still_returns_the_reply_and_session_id() {
+        let stdout = r#"{"is_error":false,"session_id":"abc-123","result":"  feat: add thing  "}"#;
+        let run = interpret_output(true, "exit status: 0", stdout, "").unwrap();
+        assert_eq!(run.text, "feat: add thing");
+        assert_eq!(run.session_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn non_json_stdout_on_a_clean_exit_is_passed_through() {
+        let run = interpret_output(true, "exit status: 0", "plain text\n", "").unwrap();
+        assert_eq!(run.text, "plain text");
+        assert_eq!(run.session_id, None);
+        assert_eq!(run.model, None);
+    }
+
+    /// The whole point of reading `modelUsage`: with no `--model` passed the CLI picks its own
+    /// model, and this is the only place the run says which one it actually was.
+    #[test]
+    fn reports_the_model_the_cli_actually_ran() {
+        let stdout = r#"{"result":"ok","modelUsage":{"claude-opus-4-8":{"outputTokens":12}}}"#;
+        let run = interpret_output(true, "exit status: 0", stdout, "").unwrap();
+        assert_eq!(run.model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    /// A turn that fanned out across models has no single honest answer, so it reports none
+    /// and the UI falls back to whatever is configured.
+    #[test]
+    fn stays_silent_when_more_than_one_model_ran() {
+        let stdout =
+            r#"{"result":"ok","modelUsage":{"claude-opus-4-8":{},"claude-haiku-4-5-20251001":{}}}"#;
+        let run = interpret_output(true, "exit status: 0", stdout, "").unwrap();
+        assert_eq!(run.model, None);
+    }
+
+    /// Older/edge payloads simply omit the field — that must not break parsing.
+    #[test]
+    fn a_missing_model_usage_field_is_not_an_error() {
+        let stdout = r#"{"result":"ok","session_id":"s1"}"#;
+        let run = interpret_output(true, "exit status: 0", stdout, "").unwrap();
+        assert_eq!(run.model, None);
+        assert_eq!(run.text, "ok");
+    }
 }

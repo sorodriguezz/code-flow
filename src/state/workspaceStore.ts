@@ -3,6 +3,10 @@ import * as api from "../lib/tauri/commands";
 import type { NewProject, Project, Workspace } from "../types/domain";
 
 const LAST_WORKSPACE_KEY = "last_active_workspace_id";
+
+/// Name of the workspace seeded on a fresh install, on every platform. Only applies when the
+/// database has no workspaces at all — an existing install keeps whatever it already has.
+const DEFAULT_WORKSPACE_NAME = "Flow";
 const LAST_PROJECT_KEY = "last_active_project_id";
 
 interface WorkspaceState {
@@ -39,10 +43,10 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     try {
       // Atomic: query then (only if truly empty) create the default, all in one async
       // flow. This used to be a separate effect keyed on workspaces.length, which raced
-      // with this load and created a duplicate "Work" workspace on every app start.
+      // with this load and created a duplicate default workspace on every app start.
       let workspaces = await api.listWorkspaces();
       if (workspaces.length === 0) {
-        const defaultWorkspace = await api.createWorkspace("Work", "briefcase", "#6366f1");
+        const defaultWorkspace = await api.createWorkspace(DEFAULT_WORKSPACE_NAME, "briefcase", "#6366f1");
         workspaces = [defaultWorkspace];
       }
       set({ workspaces });

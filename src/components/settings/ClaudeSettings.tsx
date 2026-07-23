@@ -13,7 +13,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import { Checkbox } from "../common/Checkbox";
 import { ProviderTabs } from "../common/ProviderTabs";
 import { useAiProviderStore } from "../../state/aiProviderStore";
-import { AI_PROVIDERS } from "../../lib/aiProviders";
+import { AI_PROVIDERS, PROVIDER_MODELS } from "../../lib/aiProviders";
 
 const KEYS = {
   binary: "claude_binary_path",
@@ -26,12 +26,11 @@ const KEYS = {
 
 const CUSTOM_MODEL = "__custom__";
 
+// The real models come from the shared catalog so this dropdown and the chat's model chip
+// can't drift apart; the two entries around them are UI-only (no `--model` flag / free text).
 const MODEL_OPTIONS: { id: string; labelKey?: TranslationKey; label?: string }[] = [
   { id: "", labelKey: "settings.modelDefault" },
-  { id: "claude-sonnet-5", label: "Sonnet 5" },
-  { id: "claude-opus-4-8", label: "Opus 4.8" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
-  { id: "claude-fable-5", label: "Fable 5" },
+  ...PROVIDER_MODELS.claude,
   { id: CUSTOM_MODEL, labelKey: "settings.modelCustom" },
 ];
 
@@ -169,6 +168,7 @@ export function ClaudeSettings() {
       setSetting(KEYS.reviewTemplate, reviewTemplate.trim()),
       setSetting(KEYS.analyzeTemplate, analyzeTemplate.trim()),
     ]);
+    useAiProviderStore.getState().setModel(resolvedModel);
     setSnapshot({
       binaryPath,
       model: resolvedModel,

@@ -4,12 +4,20 @@ use tauri_plugin_dialog::DialogExt;
 use crate::db::{models::*, queries, Db};
 use crate::paths;
 
+/// Non-async `#[tauri::command]`s run on the main thread, and `blocking_pick_folder`
+/// parks the calling thread on a rendezvous channel until the picker answers — but on
+/// macOS the picker itself needs the main thread to show up and pump events, so the two
+/// deadlock and the whole app hangs ("no responde"). Use the callback API and await the
+/// result instead, which keeps the main thread free.
 #[tauri::command]
-pub fn pick_folder(app: AppHandle) -> Option<String> {
+pub async fn pick_folder(app: AppHandle) -> Option<String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .blocking_pick_folder()
-        .map(|p| p.to_string())
+        .pick_folder(move |folder| {
+            let _ = tx.send(folder.map(|p| p.to_string()));
+        });
+    rx.await.ok().flatten()
 }
 
 /// Where a "Clone repository" flow should default to: `C:\CodeFlow\repos\<name>` on

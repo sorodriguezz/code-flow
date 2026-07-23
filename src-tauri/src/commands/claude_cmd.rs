@@ -11,6 +11,9 @@ use crate::git;
 pub struct ChatReply {
     text: String,
     session_id: Option<String>,
+    /// Model that actually answered this turn, when the CLI reported one — shown as-is in the
+    /// chat's "who am I talking to" chip. `None` falls back to the configured setting there.
+    model: Option<String>,
 }
 
 #[tauri::command]
@@ -197,7 +200,7 @@ pub async fn send_chat_message(
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
-    let (text, new_session_id) = claude::chat_with_repo(
+    let run = claude::chat_with_repo(
         &binary,
         &model,
         &enabled_contexts,
@@ -209,10 +212,10 @@ pub async fn send_chat_message(
     )
     .await?;
 
-    if let Some(sid) = &new_session_id {
+    if let Some(sid) = &run.session_id {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let _ = queries::add_activity_log(&conn, &project_id, sid, &message, &text);
+        let _ = queries::add_activity_log(&conn, &project_id, sid, &message, &run.text);
     }
 
-    Ok(ChatReply { text, session_id: new_session_id })
+    Ok(ChatReply { text: run.text, session_id: run.session_id, model: run.model })
 }

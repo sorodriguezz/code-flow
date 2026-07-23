@@ -22,26 +22,13 @@ import { CommandPalette } from "./CommandPalette";
 
 const win = getCurrentWindow();
 
-function MacControls() {
-  return (
-    <div className="flex items-center gap-2 pl-4">
-      <button
-        aria-label="Close"
-        onClick={() => win.close()}
-        className="h-3 w-3 rounded-full bg-[#ff5f57] hover:brightness-90"
-      />
-      <button
-        aria-label="Minimize"
-        onClick={() => win.minimize()}
-        className="h-3 w-3 rounded-full bg-[#febc2e] hover:brightness-90"
-      />
-      <button
-        aria-label="Maximize"
-        onClick={() => win.toggleMaximize()}
-        className="h-3 w-3 rounded-full bg-[#28c840] hover:brightness-90"
-      />
-    </div>
-  );
+/// On macOS the traffic lights are the real system buttons (see `tauri.macos.conf.json`:
+/// `titleBarStyle: Overlay` keeps native decorations — and with them the rounded window
+/// corners and the green button's real fullscreen behavior — while letting the webview draw
+/// under the title bar). They're drawn by AppKit *over* the webview, so all this bar has to do
+/// is leave a gap wide enough not to collide with them: they run from x=20 to roughly x=74.
+function MacControlsSpacer() {
+  return <div aria-hidden className="w-[62px]" />;
 }
 
 function WindowsControls() {
@@ -150,7 +137,7 @@ export function TitleBar() {
       style={{ background: "var(--cf-titlebar-gradient)" }}
     >
       <div className="flex items-center gap-3">
-        {isMac ? <MacControls /> : <div className="w-2" />}
+        {isMac ? <MacControlsSpacer /> : <div className="w-2" />}
         <button
           onClick={toggleSidebar}
           className="flex h-7 w-7 items-center justify-center rounded-md text-black/60 hover:bg-black/10 dark:text-white/70"

@@ -359,6 +359,7 @@ export const translations = {
     "terminal.new": "New terminal",
     "terminal.split": "Split terminal",
     "terminal.close": "Close terminal",
+    "terminal.rename": "Rename tab (or double-click it)",
     "terminal.hide": "Hide panel",
     "terminal.toggle": "Toggle terminal panel",
 
@@ -391,6 +392,8 @@ export const translations = {
     "ai.noProject": "No project open",
     "ai.closePanel": "Close panel",
     "ai.working": "Working…",
+    "ai.modelDefault": "Default",
+    "ai.modelInUse": "Answering with {provider} · {model}",
     "chatHistory.newChat": "New chat",
     "chatHistory.delete": "Delete entry",
     "chatHistory.confirmDelete": "Delete this chat history entry? This cannot be undone.",
@@ -773,6 +776,7 @@ export const translations = {
     "terminal.new": "Nueva terminal",
     "terminal.split": "Dividir terminal",
     "terminal.close": "Cerrar terminal",
+    "terminal.rename": "Renombrar pestaña (o doble clic)",
     "terminal.hide": "Ocultar panel",
     "terminal.toggle": "Mostrar/ocultar panel de terminal",
 
@@ -805,6 +809,8 @@ export const translations = {
     "ai.noProject": "No hay proyecto abierto",
     "ai.closePanel": "Cerrar panel",
     "ai.working": "Trabajando…",
+    "ai.modelDefault": "Predeterminado",
+    "ai.modelInUse": "Respondiendo con {provider} · {model}",
     "chatHistory.newChat": "Nuevo chat",
     "chatHistory.delete": "Eliminar entrada",
     "chatHistory.confirmDelete": "¿Eliminar esta entrada del historial? No se puede deshacer.",

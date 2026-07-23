@@ -321,6 +321,8 @@ export const resolveFindingWithAi = (projectId: string, findingPrompt: string) =
 export interface ChatReply {
   text: string;
   session_id: string | null;
+  /** Model id the CLI reported for this turn, or `null` when it didn't report exactly one. */
+  model: string | null;
 }
 
 export const sendChatMessage = (projectId: string, message: string, sessionId: string | null) =>

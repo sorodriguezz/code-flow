@@ -3,6 +3,9 @@ import { closeTerminal, getSetting, openTerminal, setSetting } from "../lib/taur
 
 export interface TerminalTab {
   id: string;
+  /** `Terminal N` until the user renames it. Deliberately *not* persisted anywhere: a title
+   * describes a live shell, so it's meaningless once that shell is gone. It therefore lives
+   * exactly as long as this store does — until the tab is closed or the app exits. */
   title: string;
 }
 
@@ -43,6 +46,9 @@ interface TerminalState {
   close: (projectId: string, id: string) => Promise<void>;
   /** Shows the group `id` belongs to — never changes group membership by itself. */
   focus: (projectId: string, id: string) => void;
+  /** Retitles a tab. A blank/whitespace-only title is ignored rather than blanking the tab,
+   * so cancelling out of the inline editor with an empty field is harmless. */
+  rename: (projectId: string, id: string, title: string) => void;
 }
 
 export const useTerminalStore = create<TerminalState>((set, get) => ({
@@ -105,6 +111,17 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       const proj = s.byProject[projectId];
       if (!proj) return s;
       return { byProject: { ...s.byProject, [projectId]: { ...proj, focusedId: id } } };
+    });
+  },
+
+  rename: (projectId, id, title) => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    set((s) => {
+      const proj = s.byProject[projectId];
+      if (!proj) return s;
+      const tabs = proj.tabs.map((tab) => (tab.id === id ? { ...tab, title: trimmed } : tab));
+      return { byProject: { ...s.byProject, [projectId]: { ...proj, tabs } } };
     });
   },
 }));

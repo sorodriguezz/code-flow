@@ -13,12 +13,16 @@ interface ProjectChat {
   /** Claude Code session id to `--resume` — `null` means the next message starts a fresh
    * conversation (there isn't one yet, or it was explicitly cleared). */
   sessionId: string | null;
+  /** Model that answered the most recent turn, as reported by the CLI. Beats the configured
+   * setting for the panel's model chip, since a blank setting lets the CLI choose and only
+   * the reply says what it chose. `null` until the first answer of a conversation. */
+  model: string | null;
   sending: boolean;
   error: ClaudeErrorInfo | null;
 }
 
 function emptyChat(): ProjectChat {
-  return { messages: [], sessionId: null, sending: false, error: null };
+  return { messages: [], sessionId: null, model: null, sending: false, error: null };
 }
 
 const EMPTY_CHAT: ProjectChat = emptyChat();
@@ -67,6 +71,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...proj,
                 messages: [...proj.messages, { role: "assistant", content: reply.text }],
                 sessionId: reply.session_id,
+                model: reply.model ?? proj.model,
                 sending: false,
               },
             },
@@ -98,7 +103,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       { role: "assistant" as const, content: e.answer },
     ]);
     set((s) => ({
-      byProject: { ...s.byProject, [projectId]: { messages, sessionId, sending: false, error: null } },
+      // No model recorded for archived turns — the chip falls back to the configured setting
+      // until this conversation gets a fresh reply.
+      byProject: {
+        ...s.byProject,
+        [projectId]: { messages, sessionId, model: null, sending: false, error: null },
+      },
     }));
   },
 }));

@@ -35,7 +35,7 @@ import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { useAiProviderStore } from "../../state/aiProviderStore";
-import { AI_PROVIDERS } from "../../lib/aiProviders";
+import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -406,8 +406,12 @@ function ChatSection({ projectId }: { projectId: string }) {
   const send = useChatStore((s) => s.send);
   const clearChat = useChatStore((s) => s.clear);
   const providerId = useAiProviderStore((s) => s.providerId);
+  const configuredModel = useAiProviderStore((s) => s.model);
   const provider = AI_PROVIDERS.find((p) => p.id === providerId) ?? AI_PROVIDERS[0];
   const providerLabel = provider.labelKey ? t(provider.labelKey) : provider.label;
+  // What the CLI reported for the last turn wins: with no model configured it picks its own,
+  // so the setting alone can only say "default" while the reply names the actual version.
+  const modelLabel = modelDisplayLabel(providerId, chat.model ?? configuredModel, t);
   const [input, setInput] = useState("");
   const openSettings = useUiStore((s) => s.openSettings);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -504,8 +508,17 @@ function ChatSection({ projectId }: { projectId: string }) {
             className="resize-none bg-transparent px-1.5 py-1 text-[12px] outline-none"
           />
           <div className="flex items-center gap-1.5 px-0.5">
-            <span className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+            {/* Purely informational: which engine and which model version this chat is
+                actually talking to. Reads from the shared provider/model catalog, so it keeps
+                being accurate once Codex/Gemini become selectable. */}
+            <span
+              title={t("ai.modelInUse", { provider: providerLabel ?? "", model: modelLabel })}
+              className="flex items-center gap-1 rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.08]"
+            >
+              <provider.icon size={10} />
               {providerLabel}
+              <span className="text-[var(--cf-text-muted)]/50">·</span>
+              <span className="font-medium text-[var(--cf-text)]/70">{modelLabel}</span>
             </span>
             <button
               onClick={submit}

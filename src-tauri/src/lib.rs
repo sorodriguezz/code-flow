@@ -15,6 +15,43 @@ use tauri::Manager;
 use terminal::TerminalRegistry;
 use watcher::WatcherRegistry;
 
+/// Hides the window for the "keep running in the background" close path.
+///
+/// macOS gives a fullscreened window its own Space, and hiding it there leaves that Space
+/// standing but empty — the user lands on a black screen with nothing to click. So the window
+/// has to leave fullscreen *first* and only hide once AppKit finishes the (animated, roughly
+/// half-second) transition. tao clears its fullscreen flag inside `windowDidExitFullScreen`,
+/// so polling `is_fullscreen()` is an exact "transition finished" signal rather than a guess
+/// at the animation's duration.
+///
+/// Only reachable since macOS switched to native decorations: a borderless window has no
+/// working green button, so there was no way to be in fullscreen when closing.
+#[cfg(target_os = "macos")]
+fn hide_to_background(window: &tauri::Window) {
+    if !window.is_fullscreen().unwrap_or(false) {
+        let _ = window.hide();
+        return;
+    }
+    let _ = window.set_fullscreen(false);
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        // Bounded (~2s) so a transition that never reports completion still ends with a
+        // hidden window instead of one stuck on screen.
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if !window.is_fullscreen().unwrap_or(false) {
+                break;
+            }
+        }
+        let _ = window.hide();
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_to_background(window: &tauri::Window) {
+    let _ = window.hide();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Must happen before `db::init()` opens the SQLite connection below — see
@@ -44,7 +81,7 @@ pub fn run() {
                 let app = window.app_handle();
                 if !app.state::<tray::QuittingFlag>().is_quitting() {
                     api.prevent_close();
-                    let _ = window.hide();
+                    hide_to_background(window);
                 }
             }
         })
