@@ -11,6 +11,7 @@ import type {
   FileDiffInfo,
   FileEntry,
   GitIdentity,
+  JobHistoryEntry,
   MergeOutcome,
   NewProject,
   Project,
@@ -24,6 +25,7 @@ import type {
   WorkspaceMdFile,
   WorkspaceSkill,
 } from "../../types/domain";
+import type { ReviewCommentInput } from "../parseAnalysis";
 
 // ---------- app lifecycle ----------
 
@@ -312,6 +314,9 @@ export const defaultAnalyzeTemplate = () => invoke<string>("default_analyze_temp
 export const analyzeWorkingChanges = (projectId: string) =>
   invoke<string>("analyze_working_changes", { projectId });
 
+export const resolveFindingWithAi = (projectId: string, findingPrompt: string) =>
+  invoke<string>("resolve_finding_with_ai", { projectId, findingPrompt });
+
 export interface ChatReply {
   text: string;
   session_id: string | null;
@@ -341,8 +346,8 @@ export const listPullRequests = (projectId: string) =>
 export const reviewPullRequest = (projectId: string, prId: number) =>
   invoke<string>("review_pull_request", { projectId, prId });
 
-export const postPrReviewComment = (projectId: string, prId: number, content: string) =>
-  invoke<void>("post_pr_review_comment", { projectId, prId, content });
+export const postPrReviewComment = (projectId: string, prId: number, comments: ReviewCommentInput[]) =>
+  invoke<void>("post_pr_review_comment", { projectId, prId, comments });
 
 // ---------- filesystem (embedded editor) ----------
 
@@ -372,6 +377,8 @@ export const getChatConversation = (projectId: string, sessionId: string) =>
 
 export const deleteChatConversation = (projectId: string, sessionId: string) =>
   invoke<void>("delete_chat_conversation", { projectId, sessionId });
+
+export const listJobHistory = (projectId: string) => invoke<JobHistoryEntry[]>("list_job_history", { projectId });
 
 // ---------- filesystem watcher ----------
 

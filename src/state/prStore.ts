@@ -3,6 +3,7 @@ import * as api from "../lib/tauri/commands";
 import { pushErrorToast } from "./toastStore";
 import { useJobsStore } from "./jobsStore";
 import type { PullRequestSummary } from "../types/domain";
+import type { ReviewCommentInput } from "../lib/parseAnalysis";
 
 interface PrState {
   prsByProject: Record<string, PullRequestSummary[]>;
@@ -18,7 +19,9 @@ interface PrState {
   /** Fire-and-forget — the run is tracked in `jobsStore`, not here, precisely so it survives
    * switching away from this PR (or this project) before it finishes. */
   reviewPr: (projectId: string, prId: number) => void;
-  postReview: (projectId: string, prId: number, content: string) => Promise<void>;
+  /** One Azure DevOps comment thread per finding (anchored to its file/line when known) plus
+   * a summary thread — not one comment with the whole review. */
+  postReview: (projectId: string, prId: number, comments: ReviewCommentInput[]) => Promise<void>;
 }
 
 export const usePrStore = create<PrState>((set, get) => ({
@@ -55,10 +58,10 @@ export const usePrStore = create<PrState>((set, get) => ({
     });
   },
 
-  postReview: async (projectId, prId, content) => {
+  postReview: async (projectId, prId, comments) => {
     set({ posting: true });
     try {
-      await api.postPrReviewComment(projectId, prId, content);
+      await api.postPrReviewComment(projectId, prId, comments);
       set({ posted: true });
     } catch (e) {
       pushErrorToast(String(e));

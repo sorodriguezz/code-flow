@@ -79,6 +79,22 @@ pub struct ActivityLogEntry {
     pub created_at: String,
 }
 
+/// A finished PR review or pre-commit analysis run — `meta` is a small JSON blob (e.g.
+/// `{"prId": 123}`) rather than its own columns, since it varies by `kind` and nothing
+/// queries into it at the SQL level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobHistoryEntry {
+    pub id: String,
+    pub project_id: String,
+    pub kind: String,
+    pub label: String,
+    pub status: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub meta: String,
+    pub created_at: String,
+}
+
 /// One row per Claude Code `session_id` seen in `activity_log` for a project — the
 /// conversation-level view the "Chat history" sidebar/modal actually lists, as opposed to
 /// the individual question/answer turns underneath it.

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Briefcase, Check, ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
@@ -10,6 +10,7 @@ export function ProjectsSettings() {
   const t = useT();
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
+  const loadProjects = useWorkspaceStore((s) => s.loadProjects);
   const removeProject = useWorkspaceStore((s) => s.removeProject);
   const removeWorkspace = useWorkspaceStore((s) => s.removeWorkspace);
   const addWorkspace = useWorkspaceStore((s) => s.addWorkspace);
@@ -17,6 +18,15 @@ export function ProjectsSettings() {
   const setProjectColor = useWorkspaceStore((s) => s.setProjectColor);
   const [newName, setNewName] = useState("");
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
+
+  // `projectsByWorkspace` is normally only populated for whichever workspace is/was active
+  // (the sidebar only ever needs that one) — this overview lists every workspace's projects
+  // at once, so it has to fetch the ones nobody's switched into yet itself.
+  useEffect(() => {
+    for (const ws of workspaces) {
+      if (!projectsByWorkspace[ws.id]) void loadProjects(ws.id);
+    }
+  }, [workspaces, projectsByWorkspace, loadProjects]);
   // Collapsed by default — a workspace with dozens of repos would otherwise dump all of
   // them on screen the moment Settings opens. Membership means "expanded", so any workspace
   // not yet toggled (including newly added ones) starts collapsed.

@@ -20,7 +20,6 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
-import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
@@ -34,7 +33,9 @@ import { fileStatusLabelKey } from "../../lib/fileStatus";
 import { buildFileTree, type FileTreeNode } from "../../lib/buildFileTree";
 import { useT } from "../../state/languageStore";
 import { ConflictsBanner } from "./ConflictsBanner";
-import { AnalyzeChangesModal } from "./AnalyzeChangesModal";
+import { useUiStore } from "../../state/uiStore";
+import { usePrStore } from "../../state/prStore";
+import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import type { FileStatusEntry } from "../../types/domain";
 
 const LIST_MIN = 220;
@@ -213,7 +214,6 @@ function FileTreeSection({
 
 export function ChangesPanel() {
   const repoPath = useRepoStore((s) => s.repoPath);
-  const projectId = useWorkspaceStore((s) => s.activeProject()?.id ?? null);
   const status = useRepoStore((s) => s.status);
   const workingDiff = useRepoStore((s) => s.workingDiff);
   const stagedDiff = useRepoStore((s) => s.stagedDiff);
@@ -231,7 +231,7 @@ export function ChangesPanel() {
 
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "tree">("list");
-  const [showAnalyze, setShowAnalyze] = useState(false);
+  const openAiPanel = useUiStore((s) => s.openAiPanel);
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<ClaudeErrorInfo | null>(null);
@@ -408,7 +408,11 @@ export function ChangesPanel() {
               <div className="flex items-center gap-1">
                 {unstagedAndUntracked.length > 0 && (
                   <button
-                    onClick={() => setShowAnalyze(true)}
+                    onClick={() => {
+                      usePrStore.getState().selectPr(null);
+                      useAnalyzeUiStore.getState().show();
+                      openAiPanel();
+                    }}
                     title={t("analyze.button")}
                     className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                   >
@@ -513,9 +517,6 @@ export function ChangesPanel() {
         )}
       </div>
       </div>
-      {showAnalyze && projectId && (
-        <AnalyzeChangesModal projectId={projectId} onClose={() => setShowAnalyze(false)} />
-      )}
     </div>
   );
 }

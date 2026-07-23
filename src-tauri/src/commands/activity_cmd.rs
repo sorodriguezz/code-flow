@@ -1,7 +1,7 @@
 use tauri::State;
 
 use crate::db::{
-    models::{ActivityLogEntry, ChatConversationSummary},
+    models::{ActivityLogEntry, ChatConversationSummary, JobHistoryEntry},
     queries, Db,
 };
 
@@ -29,4 +29,10 @@ pub fn get_chat_conversation(
 pub fn delete_chat_conversation(db: State<'_, Db>, project_id: String, session_id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::delete_chat_conversation(&conn, &project_id, &session_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_job_history(db: State<'_, Db>, project_id: String) -> Result<Vec<JobHistoryEntry>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_job_history(&conn, &project_id).map_err(|e| e.to_string())
 }

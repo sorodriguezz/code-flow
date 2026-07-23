@@ -28,6 +28,7 @@ import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
+import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import {
   pickFolder,
   revealInFileManager,
@@ -747,6 +748,7 @@ function PullRequestsSection({ project }: { project: Project }) {
                     <button
                       key={pr.id}
                       onClick={() => {
+                        useAnalyzeUiStore.getState().hide();
                         selectPr(pr);
                         openAiPanel();
                       }}

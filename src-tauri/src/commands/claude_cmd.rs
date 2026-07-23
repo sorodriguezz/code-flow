@@ -97,7 +97,7 @@ pub async fn analyze_working_changes(db: State<'_, Db>, project_id: String) -> R
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
-    claude::analyze_changes(
+    let result = claude::analyze_changes(
         &binary,
         &model,
         &enabled_contexts,
@@ -107,7 +107,41 @@ pub async fn analyze_working_changes(db: State<'_, Db>, project_id: String) -> R
         &analyze_template,
         mcp_config_path.as_deref(),
     )
-    .await
+    .await;
+
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let _ = match &result {
+            Ok(text) => queries::add_job_history(&conn, &project_id, "analyze-changes", "Análisis de cambios", "done", Some(text), None, "{}"),
+            Err(e) => queries::add_job_history(&conn, &project_id, "analyze-changes", "Análisis de cambios", "error", None, Some(e), "{}"),
+        };
+    }
+
+    result
+}
+
+/// Asks Claude to apply one finding's fix (from a PR review or a pre-commit analysis)
+/// directly to the working tree — `finding_prompt` is the finding's location/why/suggestion,
+/// pre-formatted by the frontend from the already-parsed finding. Leaves the result as
+/// uncommitted changes; nothing here stages, commits, or pushes anything.
+#[tauri::command]
+pub async fn resolve_finding_with_ai(db: State<'_, Db>, project_id: String, finding_prompt: String) -> Result<String, String> {
+    let project = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_project(&conn, &project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Project not found".to_string())?
+    };
+    let (binary, model) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let binary = queries::get_setting(&conn, "claude_binary_path")
+            .map_err(|e| e.to_string())?
+            .unwrap_or_else(|| "claude".to_string());
+        let model = queries::get_setting(&conn, "claude_model").map_err(|e| e.to_string())?.unwrap_or_default();
+        (binary, model)
+    };
+
+    claude::apply_finding_fix(&binary, &model, &finding_prompt, &project.local_path).await
 }
 
 /// Open-ended chat about the project — "preguntas abiertas del repositorio", the free-text

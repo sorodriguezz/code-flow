@@ -261,9 +261,79 @@ pub async fn list_pull_requests(
         .collect())
 }
 
-/// Posts a general (non-file-anchored) comment thread on the PR — the MVP form of
-/// publishing a review. Anchoring comments to specific files/lines would need Azure
-/// DevOps' iteration/changes API on top of this, which isn't wired up yet.
+#[derive(Deserialize)]
+struct RawIteration {
+    id: i64,
+}
+
+/// The most recent iteration id for this PR — anchoring a comment to a file/line requires
+/// telling Azure DevOps which iteration's diff the line numbers refer to
+/// (`pullRequestThreadContext.iterationContext`). Falls back to `1` for a PR with no
+/// iterations reported (shouldn't happen for a real PR, but a comment landing on iteration 1
+/// beats the whole review failing to post).
+async fn get_latest_iteration_id(org: &str, project: &str, repo_id: &str, pr_id: i64, pat: &str) -> Result<i64, String> {
+    let org = encode_segment(&normalize_org(org));
+    let project = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/iterations\
+         ?api-version={API_VERSION}"
+    );
+    let parsed: ListResponse<RawIteration> = get_json(&url, pat).await?;
+    Ok(parsed.value.last().map(|i| i.id).unwrap_or(1))
+}
+
+/// Posts a comment thread anchored to a specific file and line range on the PR's latest
+/// iteration — this is what makes the comment show up attached to the actual diff hunk
+/// (like `debe-ser.png`) instead of as a general PR-level remark.
+#[allow(clippy::too_many_arguments)]
+pub async fn post_pr_comment_anchored(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    content: &str,
+    file_path: &str,
+    start_line: i64,
+    end_line: i64,
+    pat: &str,
+) -> Result<(), String> {
+    let iteration_id = get_latest_iteration_id(org, project, repo_id, pr_id, pat).await?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/threads\
+         ?api-version={API_VERSION}"
+    );
+    let normalized_path = if file_path.starts_with('/') { file_path.to_string() } else { format!("/{file_path}") };
+    let body = serde_json::json!({
+        "comments": [{ "parentCommentId": 0, "content": content, "commentType": 1 }],
+        "status": 1,
+        "threadContext": {
+            "filePath": normalized_path,
+            "rightFileStart": { "line": start_line, "offset": 1 },
+            "rightFileEnd": { "line": end_line.max(start_line), "offset": 1 },
+        },
+        "pullRequestThreadContext": {
+            "iterationContext": { "firstComparingIteration": 1, "secondComparingIteration": iteration_id },
+        },
+    });
+    let res = client()
+        .post(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {body}"));
+    }
+    Ok(())
+}
+
+/// Posts a general (non-file-anchored) comment thread on the PR — used for the summary
+/// comment and as a fallback for any finding whose location couldn't be parsed.
 pub async fn post_pr_comment(
     org: &str,
     project: &str,

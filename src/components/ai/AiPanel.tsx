@@ -3,10 +3,8 @@ import { motion } from "framer-motion";
 import {
   ArrowUp,
   Check,
-  CheckCircle2,
   ChevronDown,
   ChevronRight,
-  Clock,
   Copy,
   ExternalLink,
   History,
@@ -14,25 +12,37 @@ import {
   Plus,
   Sparkles,
   X,
-  XCircle,
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
+import { parseAnalysis, buildReviewComments } from "../../lib/parseAnalysis";
+import { FindingCard, QualityGateBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
+import {
+  mergeActivityEntries,
+  entryKey,
+  entryTitle,
+  entryTimestamp,
+  entryVisual,
+  findActiveEntryKey,
+  type ActivityEntry,
+} from "../../lib/activityEntries";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
-import { useJobsStore, EMPTY_JOBS, type Job } from "../../state/jobsStore";
+import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
+import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
 import { ThinkingOrb } from "../common/ThinkingOrb";
-import { ChatHistoryModal } from "./ChatHistoryModal";
+import { ActivityModal } from "./ActivityModal";
+import { AnalyzeSection } from "./AnalyzeSection";
 import type { PullRequestSummary } from "../../types/domain";
 
 const PANEL_MIN = 280;
@@ -47,21 +57,61 @@ function relativeTime(ts: number, t: (key: TranslationKey, vars?: Record<string,
   return t("ai.daysAgo", { n: Math.round(hours / 24) });
 }
 
-function JobsHistory({ projectId }: { projectId: string }) {
+/** Unified "Activity" list — background jobs (PR review / pre-commit analysis) and past
+ * chat conversations combined and sorted by recency, so there's one place to reopen anything
+ * Claude has done for this project instead of two separate sections. */
+function ActivitySection({ projectId }: { projectId: string }) {
   const t = useT();
   const jobs = useJobsStore((s) => s.byProject[projectId] ?? EMPTY_JOBS);
+  const jobsLoaded = useJobsStore((s) => s.loaded[projectId]);
+  const loadJobHistory = useJobsStore((s) => s.load);
   const prsByProject = usePrStore((s) => s.prsByProject);
+  const selectedPr = usePrStore((s) => s.selectedPr);
   const selectPr = usePrStore((s) => s.selectPr);
-  const [collapsed, setCollapsed] = useState(false);
+  const analyzeOpen = useAnalyzeUiStore((s) => s.open);
+  const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
+  const chatLoaded = useChatHistoryStore((s) => s.loaded[projectId]);
+  const loadChatHistory = useChatHistoryStore((s) => s.load);
+  const activeSessionId = useChatStore((s) => s.byProject[projectId]?.sessionId ?? null);
+  const switchTo = useChatStore((s) => s.switchTo);
+  const [collapsed, setCollapsed] = useState(true);
+  const [showModal, setShowModal] = useState(false);
 
-  if (jobs.length === 0) return null;
+  useEffect(() => {
+    if (!chatLoaded) void loadChatHistory(projectId);
+    if (!jobsLoaded) void loadJobHistory(projectId);
+  }, [projectId, chatLoaded, loadChatHistory, jobsLoaded, loadJobHistory]);
+
+  const entries = useMemo(() => mergeActivityEntries(jobs, conversations), [jobs, conversations]);
+  if (entries.length === 0) return null;
+
+  const activeEntryKey = findActiveEntryKey(entries, {
+    selectedPrId: selectedPr?.id ?? null,
+    analyzeOpen,
+    activeSessionId,
+  });
 
   const runningCount = jobs.filter((j) => j.status === "running").length;
+  const topFive = entries.slice(0, 5);
 
-  const openJob = (job: Job) => {
-    if (job.kind === "pr-review") {
-      const pr = prsByProject[projectId]?.find((p) => p.id === job.meta.prId);
-      if (pr) selectPr(pr);
+  const openEntry = (entry: ActivityEntry) => {
+    if (entry.type === "chat") {
+      // Clear whatever else the panel might currently be showing — otherwise the chat
+      // switches underneath a still-visible PR review or analysis section.
+      selectPr(null);
+      useAnalyzeUiStore.getState().hide();
+      void switchTo(projectId, entry.conv.session_id);
+      return;
+    }
+    if (entry.job.kind === "pr-review") {
+      const pr = prsByProject[projectId]?.find((p) => p.id === entry.job.meta.prId);
+      if (pr) {
+        useAnalyzeUiStore.getState().hide();
+        selectPr(pr);
+      }
+    } else if (entry.job.kind === "analyze-changes") {
+      selectPr(null);
+      useAnalyzeUiStore.getState().show();
     }
   };
 
@@ -83,92 +133,36 @@ function JobsHistory({ projectId }: { projectId: string }) {
         </span>
       </button>
       {!collapsed && (
-        <div className="max-h-44 space-y-0.5 overflow-y-auto px-1.5 pb-2">
-          {jobs.map((job) => {
-            const Icon =
-              job.status === "running" ? Loader2 : job.status === "error" ? XCircle : CheckCircle2;
-            const color =
-              job.status === "running"
-                ? "var(--cf-accent)"
-                : job.status === "error"
-                  ? "var(--cf-danger)"
-                  : "var(--cf-success)";
+        <div className="space-y-0.5 px-1.5 pb-2">
+          {topFive.map((entry) => {
+            const { icon: Icon, color, spinning } = entryVisual(entry);
+            const isActive = entryKey(entry) === activeEntryKey;
             return (
               <button
-                key={job.id}
-                onClick={() => openJob(job)}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                key={entryKey(entry)}
+                title={entryTitle(entry)}
+                onClick={() => openEntry(entry)}
+                className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${
+                  isActive ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                }`}
               >
-                <Icon size={12} className={job.status === "running" ? "animate-spin shrink-0" : "shrink-0"} style={{ color }} />
-                <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{job.label}</span>
-                <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{relativeTime(job.createdAt, t)}</span>
+                <Icon size={12} className={spinning ? "shrink-0 animate-spin" : "shrink-0"} style={{ color }} />
+                <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{entryTitle(entry)}</span>
+                <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">
+                  {relativeTime(entryTimestamp(entry), t)}
+                </span>
               </button>
             );
           })}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ChatHistorySection({ projectId }: { projectId: string }) {
-  const t = useT();
-  const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
-  const loaded = useChatHistoryStore((s) => s.loaded[projectId]);
-  const load = useChatHistoryStore((s) => s.load);
-  const activeSessionId = useChatStore((s) => s.byProject[projectId]?.sessionId ?? null);
-  const switchTo = useChatStore((s) => s.switchTo);
-  const [collapsed, setCollapsed] = useState(false);
-  const [showModal, setShowModal] = useState(false);
-
-  useEffect(() => {
-    if (!loaded) void load(projectId);
-  }, [projectId, loaded, load]);
-
-  if (conversations.length === 0) return null;
-
-  const topFive = conversations.slice(0, 5);
-
-  return (
-    <div className="shrink-0 border-b border-[var(--cf-border)]">
-      <button
-        onClick={() => setCollapsed((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
-      >
-        <Clock size={11} />
-        {t("chatHistory.title")}
-        <span className="ml-auto">
-          {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-        </span>
-      </button>
-      {!collapsed && (
-        <div className="space-y-0.5 px-1.5 pb-2">
-          {topFive.map((conv) => (
-            <button
-              key={conv.session_id}
-              title={conv.title}
-              onClick={() => void switchTo(projectId, conv.session_id)}
-              className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${
-                conv.session_id === activeSessionId
-                  ? "bg-[var(--cf-accent-soft)]"
-                  : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-              }`}
-            >
-              <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{conv.title}</span>
-              <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">
-                {relativeTime(new Date(conv.updated_at).getTime(), t)}
-              </span>
-            </button>
-          ))}
           <button
             onClick={() => setShowModal(true)}
             className="w-full rounded-md px-2 py-1 text-center text-[11px] font-medium text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
           >
-            {t("chatHistory.viewAll")}
+            {t("ai.viewAll")}
           </button>
         </div>
       )}
-      {showModal && <ChatHistoryModal projectId={projectId} onClose={() => setShowModal(false)} />}
+      {showModal && <ActivityModal projectId={projectId} onClose={() => setShowModal(false)} />}
     </div>
   );
 }
@@ -189,12 +183,23 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
   const loading = job?.status === "running";
   const error = job?.status === "error" ? job.error : null;
   const reviewText = job?.status === "done" ? job.result : null;
+  const parsed = useMemo(() => (reviewText ? parseAnalysis(reviewText) : null), [reviewText]);
+  const findings = parsed?.findings ?? [];
+  const summary = parsed?.summary ?? "";
+
+  // One Azure DevOps comment thread per finding (anchored to its file/line) plus a summary
+  // thread with the Quality Gate and a findings table — instead of one comment dumping the
+  // whole review.
+  const comments = useMemo(() => {
+    if (!reviewText || !parsed) return [];
+    return buildReviewComments(parsed, new Date().toISOString().slice(0, 10));
+  }, [reviewText, parsed]);
 
   const runReview = () => reviewPr(projectId, pr.id);
   const publish = async () => {
-    if (!reviewText) return;
-    if (!(await confirmAction(t("chat.confirmPost", { id: pr.id }), false))) return;
-    void postReview(projectId, pr.id, reviewText);
+    if (comments.length === 0) return;
+    if (!(await confirmAction(t("chat.confirmPost", { id: pr.id, n: comments.length }), false))) return;
+    void postReview(projectId, pr.id, comments);
   };
 
   return (
@@ -217,6 +222,11 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
               <ExternalLink size={10} />
               {t("chat.viewOnAdo")}
             </a>
+            {!loading && !error && parsed && (
+              <div className="mt-1.5">
+                <QualityGateBadges grades={parsed.grades} findings={findings} />
+              </div>
+            )}
           </div>
           <button
             onClick={() => selectPr(null)}
@@ -247,9 +257,38 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
           </div>
         )}
 
-        {!loading && !error && reviewText && (
-          <div className="whitespace-pre-wrap rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 text-[12px] leading-relaxed text-[var(--cf-text)]">
-            {reviewText}
+        {!loading && !error && reviewText && findings.length === 0 && (
+          summary.length > SHORT_SUMMARY_MAX ? (
+            <div
+              className="cf-markdown-preview rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4"
+              dangerouslySetInnerHTML={{ __html: renderMarkdown(summary) }}
+            />
+          ) : (
+            <p className="rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 text-[12px] leading-relaxed text-[var(--cf-text)]">
+              {summary}
+            </p>
+          )
+        )}
+
+        {!loading && !error && reviewText && findings.length > 0 && (
+          <div className="space-y-3">
+            {summary && (
+              <div
+                className="cf-markdown-preview rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3.5 py-2.5"
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(summary) }}
+              />
+            )}
+            <div className="space-y-2">
+              {findings.map((finding) => (
+                <FindingCard
+                  key={finding.id}
+                  finding={finding}
+                  defaultOpen={finding.severity !== "info"}
+                  projectId={projectId}
+                  prSourceBranch={pr.source_branch}
+                />
+              ))}
+            </div>
           </div>
         )}
 
@@ -458,6 +497,7 @@ export function AiPanel() {
   const t = useT();
   const project = useWorkspaceStore((s) => s.activeProject());
   const selectedPr = usePrStore((s) => s.selectedPr);
+  const analyzeOpen = useAnalyzeUiStore((s) => s.open);
   const toggle = useUiStore((s) => s.toggleAiPanel);
   const width = useLayoutStore((s) => s.sizes.aiPanelWidth);
   const setSize = useLayoutStore((s) => s.setSize);
@@ -499,11 +539,12 @@ export function AiPanel() {
           <EmptyState icon={Sparkles} title={t("ai.noProject")} />
         ) : (
           <>
-            <JobsHistory projectId={project.id} />
-            <ChatHistorySection projectId={project.id} />
+            <ActivitySection projectId={project.id} />
             <div className="min-h-0 flex-1">
               {selectedPr ? (
                 <PrReviewSection projectId={project.id} pr={selectedPr} />
+              ) : analyzeOpen ? (
+                <AnalyzeSection projectId={project.id} />
               ) : (
                 <ChatSection projectId={project.id} />
               )}

@@ -44,11 +44,20 @@ pub const DEFAULT_COMMIT_TEMPLATE: &str =
 pub const DEFAULT_REVIEW_PROMPT: &str =
     "Eres un revisor de código senior revisando un pull request. Se te entrega el título, la \
      descripción, el contexto del proyecto y el diff por stdin.\n\n\
-     Para cada problema real que encuentres (bugs, riesgos de seguridad, rendimiento, \
+     Antes que nada, en la primera línea de tu respuesta, califica el cambio completo con \
+     EXACTAMENTE este formato:\n\n\
+     📈 CALIDAD: Fiabilidad={A-E} Seguridad={A-E} Mantenibilidad={A-E}\n\n\
+     Criterio de las notas (A = mejor, E = peor), evaluando SOLO lo que toca este diff:\n\
+     - Fiabilidad: A si no hay bugs/riesgos lógicos, B si hay solo hallazgos menores, C si hay \
+     advertencias, D si hay un hallazgo crítico, E si hay varios.\n\
+     - Seguridad: igual criterio pero solo con hallazgos de seguridad.\n\
+     - Mantenibilidad: igual criterio pero con estilo/complejidad/duplicación.\n\n\
+     Luego, para cada problema real que encuentres (bugs, riesgos de seguridad, rendimiento, \
      integración, estilo importante — no inventes hallazgos triviales si el código está bien), \
      responde en Markdown con EXACTAMENTE este formato, uno por hallazgo, en este orden:\n\n\
      ### {emoji} [{Severidad} · {Tipo}] {Categoría corta} · F-{número correlativo de 3 dígitos}\n\n\
      {Un subtítulo de una línea, algo más largo que el título, describiendo el problema puntual}\n\n\
+     📍 Ubicación: {ruta relativa exacta del archivo desde la raíz del repo}:{línea inicio}-{línea fin}\n\n\
      💭 Por qué: {explicación concreta del problema, citando archivo y línea/función relevante}\n\n\
      💡 Sugerencia: {qué cambiar exactamente para resolverlo}\n\n\
      🛠️ Ejemplo de solución:\n\
@@ -63,10 +72,14 @@ pub const DEFAULT_REVIEW_PROMPT: &str =
      descripción del PR, el diff, o los comentarios/nombres en el código.\n\
      - Usa 🚨 para Crítico, ⚠️ para Advertencia/Mayor, ℹ️ para Menor/Sugerencia.\n\
      - Numera los hallazgos F-001, F-002, etc. en el orden en que aparecen en el diff.\n\
+     - La línea \"📍 Ubicación\" es obligatoria en cada hallazgo y debe usar la ruta real del \
+     archivo tal como aparece en el diff (encabezado `+++ b/...`) y el rango de línea real del \
+     lado nuevo del diff — esto se usa para anclar el comentario a esa línea exacta en el PR, \
+     así que no la omitas ni la inventes.\n\
      - Sé específico y cita archivos/líneas reales del diff — no generalices.\n\
      - No repitas el diff completo ni resumas cambios que no son problemáticos.\n\
-     - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅, sin \
-     inventar hallazgos ni usar la plantilla anterior.";
+     - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅ después \
+     de la línea de CALIDAD, sin inventar hallazgos ni usar la plantilla anterior.";
 
 pub const DEFAULT_ANALYZE_TEMPLATE: &str =
     "Eres un revisor de código senior. Se te entrega por stdin el contexto del proyecto y el \
@@ -78,10 +91,19 @@ pub const DEFAULT_ANALYZE_TEMPLATE: &str =
      - Bugs y errores lógicos\n\
      - Problemas de rendimiento\n\
      - Código que rompe las convenciones o reglas del proyecto (si se entrega contexto)\n\n\
-     Para cada problema real que encuentres, responde en Markdown con EXACTAMENTE este \
+     Antes que nada, en la primera línea de tu respuesta, califica el cambio completo con \
+     EXACTAMENTE este formato:\n\n\
+     📈 CALIDAD: Fiabilidad={A-E} Seguridad={A-E} Mantenibilidad={A-E}\n\n\
+     Criterio de las notas (A = mejor, E = peor), evaluando SOLO lo que toca este diff:\n\
+     - Fiabilidad: A si no hay bugs/riesgos lógicos, B si hay solo hallazgos menores, C si hay \
+     advertencias, D si hay un hallazgo crítico, E si hay varios.\n\
+     - Seguridad: igual criterio pero solo con hallazgos de seguridad.\n\
+     - Mantenibilidad: igual criterio pero con estilo/complejidad/duplicación.\n\n\
+     Luego, para cada problema real que encuentres, responde en Markdown con EXACTAMENTE este \
      formato, uno por hallazgo, en este orden:\n\n\
      ### {emoji} [{Severidad} · {Tipo}] {Categoría corta} · F-{número correlativo de 3 dígitos}\n\n\
      {Un subtítulo de una línea, algo más largo que el título, describiendo el problema puntual}\n\n\
+     📍 Ubicación: {ruta relativa exacta del archivo desde la raíz del repo}:{línea inicio}-{línea fin}\n\n\
      💭 Por qué: {explicación concreta del problema, citando archivo y línea/función relevante}\n\n\
      💡 Sugerencia: {qué cambiar exactamente para resolverlo}\n\n\
      🛠️ Ejemplo de solución:\n\
@@ -94,10 +116,12 @@ pub const DEFAULT_ANALYZE_TEMPLATE: &str =
      - Responde SIEMPRE en español, sin importar el idioma del código, nombres o comentarios.\n\
      - Usa 🚨 para Crítico, ⚠️ para Advertencia/Mayor, ℹ️ para Menor/Sugerencia.\n\
      - Numera los hallazgos F-001, F-002, etc. en el orden en que aparecen en el diff.\n\
+     - La línea \"📍 Ubicación\" es obligatoria en cada hallazgo, con la ruta real del archivo y \
+     el rango de línea real del lado nuevo del diff.\n\
      - Sé específico y cita archivos/líneas reales del diff — no generalices.\n\
      - No repitas el diff completo ni resumas cambios que no son problemáticos.\n\
-     - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅, sin \
-     inventar hallazgos ni usar la plantilla anterior.";
+     - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅ después \
+     de la línea de CALIDAD, sin inventar hallazgos ni usar la plantilla anterior.";
 
 /// Shared subprocess plumbing for every headless Claude invocation: spawns the binary,
 /// pipes `stdin_content` in, and interprets `--output-format json` output — including
@@ -381,4 +405,52 @@ pub async fn chat_with_repo(
         session_id,
     )
     .await
+}
+
+const FIX_FINDING_SYSTEM_PROMPT: &str =
+    "Eres un desarrollador senior aplicando una corrección de code review directamente en el \
+     repositorio abierto. Se te entrega por stdin el hallazgo específico a corregir: su \
+     ubicación (archivo y línea), por qué es un problema, y la sugerencia de solución.\n\n\
+     Instrucciones:\n\
+     - Abre el archivo indicado y aplica el fix exactamente en esa ubicación — no toques otros \
+     archivos ni código no relacionado con este hallazgo puntual.\n\
+     - Sigue el estilo y las convenciones ya usadas en ese archivo/proyecto.\n\
+     - NO hagas commit ni ejecutes git — limítate a modificar el/los archivo(s) en el working \
+     directory; el usuario decide cuándo comitear.\n\
+     - Si al mirar el código el problema ya no existe (cambió desde que se generó el hallazgo), \
+     no modifiques nada y dilo brevemente.\n\
+     - Responde en una o dos líneas en español confirmando qué cambiaste (o que no hiciste \
+     cambios y por qué) — no repitas el diff ni el hallazgo completo.";
+
+/// Applies a single code-review finding's fix directly to the working tree — unlike every
+/// other Claude invocation in this file (review/analyze/chat), this one needs write access,
+/// so it always runs with a fixed `Read/Edit/Write/Grep/Glob` tool set regardless of the
+/// user's general chat `allowedTools` setting (that setting is for the read-only chat/review
+/// flows; clicking "fix with AI" is itself the write-access opt-in for this one action).
+pub async fn apply_finding_fix(
+    binary_path: &str,
+    model: &str,
+    finding_prompt: &str,
+    cwd: &str,
+) -> Result<String, String> {
+    let allowed_tools = [
+        "Read".to_string(),
+        "Edit".to_string(),
+        "Write".to_string(),
+        "Grep".to_string(),
+        "Glob".to_string(),
+    ];
+    let (text, _) = invoke_claude(
+        binary_path,
+        "Aplica la corrección para el hallazgo entregado por stdin.",
+        Some(FIX_FINDING_SYSTEM_PROMPT),
+        model,
+        &allowed_tools,
+        Some(cwd),
+        None,
+        finding_prompt,
+        None,
+    )
+    .await?;
+    Ok(text)
 }

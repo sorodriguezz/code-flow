@@ -3,8 +3,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::models::{
-    ActivityLogEntry, ChatConversationSummary, NewProject, Project, ReviewContext, Workspace, WorkspaceMcp,
-    WorkspaceMdFile, WorkspaceSkill,
+    ActivityLogEntry, ChatConversationSummary, JobHistoryEntry, NewProject, Project, ReviewContext, Workspace,
+    WorkspaceMcp, WorkspaceMdFile, WorkspaceSkill,
 };
 
 fn now() -> String {
@@ -532,6 +532,69 @@ pub fn delete_chat_conversation(conn: &Connection, project_id: &str, session_id:
         params![project_id, session_id],
     )?;
     Ok(())
+}
+
+// ---------- job history (PR reviews / pre-commit analyses) ----------
+
+#[allow(clippy::too_many_arguments)]
+pub fn add_job_history(
+    conn: &Connection,
+    project_id: &str,
+    kind: &str,
+    label: &str,
+    status: &str,
+    result: Option<&str>,
+    error: Option<&str>,
+    meta: &str,
+) -> rusqlite::Result<JobHistoryEntry> {
+    let entry = JobHistoryEntry {
+        id: Uuid::new_v4().to_string(),
+        project_id: project_id.to_string(),
+        kind: kind.to_string(),
+        label: label.to_string(),
+        status: status.to_string(),
+        result: result.map(str::to_string),
+        error: error.map(str::to_string),
+        meta: meta.to_string(),
+        created_at: now(),
+    };
+    conn.execute(
+        "INSERT INTO job_history (id, project_id, kind, label, status, result, error, meta, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            entry.id,
+            entry.project_id,
+            entry.kind,
+            entry.label,
+            entry.status,
+            entry.result,
+            entry.error,
+            entry.meta,
+            entry.created_at
+        ],
+    )?;
+    Ok(entry)
+}
+
+pub fn list_job_history(conn: &Connection, project_id: &str) -> rusqlite::Result<Vec<JobHistoryEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, kind, label, status, result, error, meta, created_at
+         FROM job_history WHERE project_id = ?1 ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        Ok(JobHistoryEntry {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            kind: row.get(2)?,
+            label: row.get(3)?,
+            status: row.get(4)?,
+            result: row.get(5)?,
+            error: row.get(6)?,
+            meta: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    rows.collect()
 }
 
 // ---------- app settings (key/value) ----------

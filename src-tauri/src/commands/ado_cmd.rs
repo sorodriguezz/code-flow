@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::ado;
@@ -224,7 +224,7 @@ pub async fn review_pull_request(app: AppHandle, db: State<'_, Db>, project_id: 
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
-    claude::review_pull_request(
+    let result = claude::review_pull_request(
         &binary,
         &model,
         &pr.title,
@@ -236,13 +236,80 @@ pub async fn review_pull_request(app: AppHandle, db: State<'_, Db>, project_id: 
         &review_template,
         mcp_config_path.as_deref(),
     )
-    .await
+    .await;
+
+    {
+        let label = format!("#{} {}", pr.id, pr.title);
+        let meta = serde_json::json!({ "prId": pr.id, "prTitle": pr.title }).to_string();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let _ = match &result {
+            Ok(text) => queries::add_job_history(&conn, &project_id, "pr-review", &label, "done", Some(text), None, &meta),
+            Err(e) => queries::add_job_history(&conn, &project_id, "pr-review", &label, "error", None, Some(e), &meta),
+        };
+    }
+
+    result
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentLocation {
+    pub file: String,
+    pub start_line: i64,
+    pub end_line: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewComment {
+    pub content: String,
+    /// Present for a per-finding comment (anchors it to that file/line via the PR's latest
+    /// iteration); absent for the summary comment or a finding whose location the model
+    /// didn't provide in a parseable form, which just posts as a general PR comment.
+    pub location: Option<CommentLocation>,
+}
+
+/// Posts each finding as its own comment thread — anchored to its file/line when the model
+/// reported one (`debe-ser.png`-style inline review), a general PR comment otherwise —
+/// rather than a single comment dumping the whole review. Posted sequentially (not
+/// concurrently) to avoid bursting Azure DevOps' API, and every thread is attempted even if
+/// an earlier one fails so one bad comment doesn't silently swallow the rest of the review.
 #[tauri::command]
-pub async fn post_pr_review_comment(db: State<'_, Db>, project_id: String, pr_id: i64, content: String) -> Result<(), String> {
+pub async fn post_pr_review_comment(
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+    comments: Vec<ReviewComment>,
+) -> Result<(), String> {
     let project = load_project(&db, &project_id)?;
     let (org, ado_project, repo_id) = ado_link(&project)?;
     let pat = pat_for_org(&org)?;
-    ado::post_pr_comment(&org, &ado_project, &repo_id, pr_id, &content, &pat).await
+
+    let mut failures = Vec::new();
+    for (i, comment) in comments.iter().enumerate() {
+        let result = match &comment.location {
+            Some(loc) => {
+                ado::post_pr_comment_anchored(
+                    &org,
+                    &ado_project,
+                    &repo_id,
+                    pr_id,
+                    &comment.content,
+                    &loc.file,
+                    loc.start_line,
+                    loc.end_line,
+                    &pat,
+                )
+                .await
+            }
+            None => ado::post_pr_comment(&org, &ado_project, &repo_id, pr_id, &comment.content, &pat).await,
+        };
+        if let Err(e) = result {
+            failures.push(format!("#{} of {}: {e}", i + 1, comments.len()));
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!("{} comment(s) failed to post — {}", failures.len(), failures.join("; ")));
+    }
+    Ok(())
 }

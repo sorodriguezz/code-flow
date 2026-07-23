@@ -166,6 +166,18 @@ export interface ActivityLogEntry {
   created_at: string;
 }
 
+export interface JobHistoryEntry {
+  id: string;
+  project_id: string;
+  kind: string;
+  label: string;
+  status: string;
+  result: string | null;
+  error: string | null;
+  meta: string;
+  created_at: string;
+}
+
 export interface ChatConversationSummary {
   session_id: string;
   project_id: string;

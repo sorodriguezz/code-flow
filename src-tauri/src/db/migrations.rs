@@ -96,6 +96,23 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             answer      TEXT NOT NULL,
             created_at  TEXT NOT NULL
         );
+
+        -- Persisted record of every finished PR review / pre-commit analysis run — like
+        -- `activity_log` above, `jobsStore` on the frontend only lives in memory for the
+        -- session, so without this a restart silently loses every past review/analysis
+        -- result. Only successful/errored *completed* runs are recorded (there's nothing
+        -- meaningful to reopen from a run that was still in flight when the app closed).
+        CREATE TABLE IF NOT EXISTS job_history (
+            id          TEXT PRIMARY KEY,
+            project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            kind        TEXT NOT NULL,
+            label       TEXT NOT NULL,
+            status      TEXT NOT NULL,
+            result      TEXT,
+            error       TEXT,
+            meta        TEXT NOT NULL DEFAULT '{}',
+            created_at  TEXT NOT NULL
+        );
         "#,
     )?;
 
