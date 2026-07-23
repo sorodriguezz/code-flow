@@ -3,6 +3,8 @@ import { Cloud, Loader2, X } from "lucide-react";
 import { adoListProjects, adoListRepos, linkProjectAdo } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { ProviderTabs } from "../common/ProviderTabs";
+import { VCS_PROVIDERS } from "../../lib/vcsProviders";
 import type { AdoProject, AdoRepo } from "../../types/domain";
 
 interface ConnectAdoModalProps {
@@ -74,6 +76,8 @@ export function ConnectAdoModal({ projectId, org, onConnected, onClose }: Connec
             </button>
           )}
         </div>
+
+        <ProviderTabs options={VCS_PROVIDERS} activeId="azure" onSelect={() => {}} />
 
         <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
           {t("settings.organization")}

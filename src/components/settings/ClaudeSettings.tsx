@@ -11,6 +11,9 @@ import {
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Checkbox } from "../common/Checkbox";
+import { ProviderTabs } from "../common/ProviderTabs";
+import { useAiProviderStore } from "../../state/aiProviderStore";
+import { AI_PROVIDERS } from "../../lib/aiProviders";
 
 const KEYS = {
   binary: "claude_binary_path",
@@ -55,6 +58,8 @@ const DEFAULT_TOOLS = TOOL_OPTIONS.filter((t) => t.recommended).map((t) => t.id)
 
 export function ClaudeSettings() {
   const t = useT();
+  const providerId = useAiProviderStore((s) => s.providerId);
+  const setProvider = useAiProviderStore((s) => s.setProvider);
   const [binaryPath, setBinaryPath] = useState("claude");
   const [modelChoice, setModelChoice] = useState("");
   const [customModel, setCustomModel] = useState("");
@@ -178,6 +183,10 @@ export function ClaudeSettings() {
 
   return (
     <section>
+      <h3 className="mb-1 text-sm font-semibold">{t("settings.aiSectionTitle")}</h3>
+      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.aiSectionHint")}</p>
+      <ProviderTabs options={AI_PROVIDERS} activeId={providerId} onSelect={setProvider} />
+
       <h3 className="mb-1 text-sm font-semibold">{t("settings.claudeTitle")}</h3>
       <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.claudeHint")}</p>
 

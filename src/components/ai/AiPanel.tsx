@@ -13,7 +13,6 @@ import {
   Loader2,
   Plus,
   Sparkles,
-  Wrench,
   X,
   XCircle,
 } from "lucide-react";
@@ -25,6 +24,8 @@ import { usePrStore } from "../../state/prStore";
 import { useJobsStore, EMPTY_JOBS, type Job } from "../../state/jobsStore";
 import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
+import { useAiProviderStore } from "../../state/aiProviderStore";
+import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -334,6 +335,9 @@ function ChatSection({ projectId }: { projectId: string }) {
   const chat = useChatStore((s) => s.byProject[projectId] ?? EMPTY_CHAT);
   const send = useChatStore((s) => s.send);
   const clearChat = useChatStore((s) => s.clear);
+  const providerId = useAiProviderStore((s) => s.providerId);
+  const provider = AI_PROVIDERS.find((p) => p.id === providerId) ?? AI_PROVIDERS[0];
+  const providerLabel = provider.labelKey ? t(provider.labelKey) : provider.label;
   const [input, setInput] = useState("");
   const openSettings = useUiStore((s) => s.openSettings);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -431,11 +435,7 @@ function ChatSection({ projectId }: { projectId: string }) {
           />
           <div className="flex items-center gap-1.5 px-0.5">
             <span className="rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-              {t("settings.claude")}
-            </span>
-            <span className="flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
-              <Wrench size={10} />
-              {t("chat.tools")}
+              {providerLabel}
             </span>
             <button
               onClick={submit}

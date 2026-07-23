@@ -22,7 +22,7 @@ export function ColorSwatchPicker({ value, onChange }: { value: string; onChange
   }, [open]);
 
   return (
-    <div ref={ref} className="relative">
+    <div ref={ref} className="relative flex shrink-0">
       <button
         onClick={(e) => {
           e.stopPropagation();

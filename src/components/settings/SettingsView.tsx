@@ -40,8 +40,8 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
   { id: "general", labelKey: "settings.general", icon: Globe },
   { id: "projects", labelKey: "settings.projects", icon: FolderGit2 },
   { id: "git", labelKey: "settings.git", icon: GitBranch },
-  { id: "azure", labelKey: "settings.azure", icon: Cloud },
-  { id: "claude", labelKey: "settings.claude", icon: Bot },
+  { id: "azure", labelKey: "settings.gitHostingSection", icon: Cloud },
+  { id: "claude", labelKey: "settings.aiSection", icon: Bot },
 ];
 
 const WORKSPACE_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [

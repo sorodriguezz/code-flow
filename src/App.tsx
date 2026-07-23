@@ -21,6 +21,7 @@ import { useWorkspaceStore } from "./state/workspaceStore";
 import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
 import { usePreferencesStore } from "./state/preferencesStore";
+import { useAiProviderStore } from "./state/aiProviderStore";
 import { useLanguageStore } from "./state/languageStore";
 import { useAccentStore } from "./state/accentStore";
 import { useFetchTimerStore } from "./state/fetchTimerStore";
@@ -74,6 +75,7 @@ export default function App() {
   const initLanguage = useLanguageStore((s) => s.init);
   const initAccent = useAccentStore((s) => s.init);
   const initTerminal = useTerminalStore((s) => s.init);
+  const initAiProvider = useAiProviderStore((s) => s.init);
   const project = useWorkspaceStore((s) => s.activeProject());
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
@@ -85,10 +87,18 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      await Promise.all([initTheme(), initLayout(), initPreferences(), initLanguage(), initAccent(), initTerminal()]);
+      await Promise.all([
+        initTheme(),
+        initLayout(),
+        initPreferences(),
+        initLanguage(),
+        initAccent(),
+        initTerminal(),
+        initAiProvider(),
+      ]);
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
     })();
-  }, [initTheme, initLayout, initPreferences, initLanguage, initAccent, initTerminal]);
+  }, [initTheme, initLayout, initPreferences, initLanguage, initAccent, initTerminal, initAiProvider]);
 
   // Re-apply the chosen accent whenever the resolved theme or the accent selection changes,
   // since the actual hex differs per theme (a lighter shade is used on dark backgrounds).

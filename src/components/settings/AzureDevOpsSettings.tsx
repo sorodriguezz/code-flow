@@ -3,6 +3,8 @@ import { Check, KeyRound, Loader2, Pencil, Trash2 } from "lucide-react";
 import { deleteAdoPat, getAdoPat, getSetting, setAdoPat, setSetting } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { ProviderTabs } from "../common/ProviderTabs";
+import { VCS_PROVIDERS } from "../../lib/vcsProviders";
 
 const ORG_SETTING_KEY = "ado_default_org";
 
@@ -80,6 +82,10 @@ export function AzureDevOpsSettings() {
 
   return (
     <section>
+      <h3 className="mb-1 text-sm font-semibold">{t("settings.gitHostingTitle")}</h3>
+      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.gitHostingHint")}</p>
+      <ProviderTabs options={VCS_PROVIDERS} activeId="azure" onSelect={() => {}} />
+
       <h3 className="mb-1 text-sm font-semibold">{t("settings.azureTitle")}</h3>
       <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.azureHint")}</p>
 

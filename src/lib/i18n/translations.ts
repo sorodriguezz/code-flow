@@ -102,8 +102,8 @@ export const translations = {
     "settings.appearance": "Appearance",
     "settings.projects": "Workspaces & projects",
     "settings.git": "Git behavior",
-    "settings.azure": "Azure DevOps",
-    "settings.claude": "Claude Code",
+    "settings.gitHostingSection": "Git hosting",
+    "settings.aiSection": "AI assistant",
     "settings.context": "PR review context",
     "settings.mdFiles": "Instructions (.md)",
     "settings.skills": "Skills",
@@ -141,8 +141,10 @@ export const translations = {
     "settings.addWorkspace": "Add workspace",
     "settings.removeWorkspace": "Remove workspace",
     "settings.removeWorkspaceConfirm": 'Remove workspace "{name}"? Its projects stay on disk, but CodeFlow forgets about them.',
+    "settings.removeProject": "Remove project",
     "settings.removeProjectConfirm": 'Remove "{name}" from CodeFlow? Nothing is deleted from disk — this just stops tracking it here.',
     "settings.onlyWorkspace": "Can't remove the only workspace",
+    "settings.removeWorkspaceHasProjects": "Remove its projects first before removing this workspace",
 
     "settings.gitTitle": "Git behavior",
     "settings.gitIdentityHint": "Identity used for commits made through CodeFlow (writes to your global git config).",
@@ -154,6 +156,9 @@ export const translations = {
     "settings.seconds": "seconds",
     "settings.autoFetchHint": "Minimum {n}s, to avoid hammering the remote.",
 
+    "settings.gitHostingTitle": "Git hosting",
+    "settings.gitHostingHint": "Choose which platform hosts your repositories and pull requests.",
+    "settings.comingSoon": "Coming soon",
     "settings.azureTitle": "Azure DevOps",
     "settings.azureHint":
       "Connect an organization so CodeFlow can list and review pull requests. The token is stored in your OS keychain, never on disk in plain text.",
@@ -165,6 +170,9 @@ export const translations = {
     "settings.changeToken": "Change token",
     "settings.remove": "Remove",
 
+    "settings.aiSectionTitle": "AI assistant",
+    "settings.aiSectionHint": "Choose which AI powers chat, PR review, and pre-commit analysis.",
+    "settings.localModel": "Local model",
     "settings.claudeTitle": "Claude Code (headless)",
     "settings.claudeHint":
       "CodeFlow invokes Claude Code in headless mode to review pull requests using your existing subscription — these settings control how it's launched.",
@@ -351,7 +359,6 @@ export const translations = {
     "chat.copied": "Copied",
     "chat.you": "You",
     "chat.placeholder": "⌘L to focus chat",
-    "chat.tools": "Tools",
     "chat.backToChat": "Back to chat",
     "chat.reviewWithClaude": "Review with Claude",
     "chat.reviewing": "Reviewing…",
@@ -497,8 +504,8 @@ export const translations = {
     "settings.appearance": "Apariencia",
     "settings.projects": "Workspaces y proyectos",
     "settings.git": "Comportamiento Git",
-    "settings.azure": "Azure DevOps",
-    "settings.claude": "Claude Code",
+    "settings.gitHostingSection": "Alojamiento Git",
+    "settings.aiSection": "Asistente de IA",
     "settings.context": "Contexto de revisión de PR",
     "settings.mdFiles": "Instrucciones (.md)",
     "settings.skills": "Skills",
@@ -536,8 +543,10 @@ export const translations = {
     "settings.addWorkspace": "Agregar workspace",
     "settings.removeWorkspace": "Eliminar workspace",
     "settings.removeWorkspaceConfirm": '¿Eliminar el workspace "{name}"? Sus proyectos quedan intactos en disco, pero CodeFlow deja de rastrearlos.',
+    "settings.removeProject": "Eliminar proyecto",
     "settings.removeProjectConfirm": '¿Quitar "{name}" de CodeFlow? No se borra nada del disco, solo deja de rastrearse aquí.',
     "settings.onlyWorkspace": "No puedes eliminar el único workspace",
+    "settings.removeWorkspaceHasProjects": "Elimina primero sus proyectos antes de eliminar este workspace",
 
     "settings.gitTitle": "Comportamiento Git",
     "settings.gitIdentityHint": "Identidad usada para los commits hechos desde CodeFlow (escribe en tu git config global).",
@@ -549,6 +558,9 @@ export const translations = {
     "settings.seconds": "segundos",
     "settings.autoFetchHint": "Mínimo {n}s, para no saturar el remoto.",
 
+    "settings.gitHostingTitle": "Alojamiento Git",
+    "settings.gitHostingHint": "Elige qué plataforma aloja tus repositorios y pull requests.",
+    "settings.comingSoon": "Próximamente",
     "settings.azureTitle": "Azure DevOps",
     "settings.azureHint":
       "Conecta una organización para que CodeFlow pueda listar y revisar pull requests. El token se guarda en el keychain del sistema operativo, nunca en disco como texto plano.",
@@ -560,6 +572,9 @@ export const translations = {
     "settings.changeToken": "Cambiar token",
     "settings.remove": "Eliminar",
 
+    "settings.aiSectionTitle": "Asistente de IA",
+    "settings.aiSectionHint": "Elige qué IA impulsa el chat, la revisión de PRs y el análisis pre-commit.",
+    "settings.localModel": "Modelo local",
     "settings.claudeTitle": "Claude Code (headless)",
     "settings.claudeHint":
       "CodeFlow invoca a Claude Code en modo headless para revisar pull requests usando tu suscripción actual — esta configuración controla cómo se lanza.",
@@ -746,7 +761,6 @@ export const translations = {
     "chat.copied": "Copiado",
     "chat.you": "Tú",
     "chat.placeholder": "⌘L para enfocar el chat",
-    "chat.tools": "Herramientas",
     "chat.backToChat": "Volver al chat",
     "chat.reviewWithClaude": "Revisar con Claude",
     "chat.reviewing": "Revisando…",
