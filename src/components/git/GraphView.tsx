@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { computeGraphLayout, laneColor } from "../../lib/graphLayout";
 import { useRepoStore } from "../../state/repoStore";
 import { useLayoutStore } from "../../state/layoutStore";
+import { confirmAction } from "../../state/confirmStore";
 import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -188,9 +189,9 @@ export function GraphView() {
                   {isHead && r.commit.parent_ids.length > 0 && (
                     <button
                       title={t("graph.undoCommit")}
-                      onClick={(e) => {
+                      onClick={async (e) => {
                         e.stopPropagation();
-                        if (window.confirm(t("graph.undoConfirm"))) {
+                        if (await confirmAction(t("graph.undoConfirm"))) {
                           void undoCommit(r.commit.id);
                         }
                       }}

@@ -1,7 +1,13 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Check, FolderOpen, RotateCcw, X } from "lucide-react";
-import { defaultCommitTemplate, defaultReviewTemplate, getSetting, setSetting } from "../../lib/tauri/commands";
+import {
+  defaultAnalyzeTemplate,
+  defaultCommitTemplate,
+  defaultReviewTemplate,
+  getSetting,
+  setSetting,
+} from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Checkbox } from "../common/Checkbox";
@@ -12,6 +18,7 @@ const KEYS = {
   tools: "claude_allowed_tools",
   commitTemplate: "claude_commit_template",
   reviewTemplate: "claude_review_template",
+  analyzeTemplate: "claude_analyze_template",
 };
 
 const CUSTOM_MODEL = "__custom__";
@@ -57,6 +64,8 @@ export function ClaudeSettings() {
   const [defaultTemplate, setDefaultTemplate] = useState("");
   const [reviewTemplate, setReviewTemplate] = useState("");
   const [defaultReviewTemplateText, setDefaultReviewTemplateText] = useState("");
+  const [analyzeTemplate, setAnalyzeTemplate] = useState("");
+  const [defaultAnalyzeTemplateText, setDefaultAnalyzeTemplateText] = useState("");
   const [saved, setSaved] = useState(false);
   const [snapshot, setSnapshot] = useState({
     binaryPath: "claude",
@@ -64,11 +73,12 @@ export function ClaudeSettings() {
     tools: DEFAULT_TOOLS,
     commitTemplate: "",
     reviewTemplate: "",
+    analyzeTemplate: "",
   });
 
   useEffect(() => {
     (async () => {
-      const [b, m, t, ct, fallback, rt, reviewFallback] = await Promise.all([
+      const [b, m, t, ct, fallback, rt, reviewFallback, at, analyzeFallback] = await Promise.all([
         getSetting(KEYS.binary),
         getSetting(KEYS.model),
         getSetting(KEYS.tools),
@@ -76,6 +86,8 @@ export function ClaudeSettings() {
         defaultCommitTemplate(),
         getSetting(KEYS.reviewTemplate),
         defaultReviewTemplate(),
+        getSetting(KEYS.analyzeTemplate),
+        defaultAnalyzeTemplate(),
       ]);
       const loadedBinary = b || "claude";
       let loadedModelChoice = "";
@@ -91,6 +103,7 @@ export function ClaudeSettings() {
       const loadedTools = t ? t.split(",").map((s) => s.trim()).filter(Boolean) : DEFAULT_TOOLS;
       const loadedTemplate = ct || fallback;
       const loadedReviewTemplate = rt || reviewFallback;
+      const loadedAnalyzeTemplate = at || analyzeFallback;
 
       setBinaryPath(loadedBinary);
       setModelChoice(loadedModelChoice);
@@ -100,12 +113,15 @@ export function ClaudeSettings() {
       setCommitTemplate(loadedTemplate);
       setDefaultReviewTemplateText(reviewFallback);
       setReviewTemplate(loadedReviewTemplate);
+      setDefaultAnalyzeTemplateText(analyzeFallback);
+      setAnalyzeTemplate(loadedAnalyzeTemplate);
       setSnapshot({
         binaryPath: loadedBinary,
         model: loadedModelChoice === CUSTOM_MODEL ? loadedCustomModel : loadedModelChoice,
         tools: loadedTools,
         commitTemplate: loadedTemplate,
         reviewTemplate: loadedReviewTemplate,
+        analyzeTemplate: loadedAnalyzeTemplate,
       });
     })();
   }, []);
@@ -136,6 +152,7 @@ export function ClaudeSettings() {
     resolvedModel !== snapshot.model ||
     commitTemplate !== snapshot.commitTemplate ||
     reviewTemplate !== snapshot.reviewTemplate ||
+    analyzeTemplate !== snapshot.analyzeTemplate ||
     sortedTools.join(",") !== [...snapshot.tools].sort().join(",");
 
   const save = async () => {
@@ -145,6 +162,7 @@ export function ClaudeSettings() {
       setSetting(KEYS.tools, tools.join(",")),
       setSetting(KEYS.commitTemplate, commitTemplate.trim()),
       setSetting(KEYS.reviewTemplate, reviewTemplate.trim()),
+      setSetting(KEYS.analyzeTemplate, analyzeTemplate.trim()),
     ]);
     setSnapshot({
       binaryPath,
@@ -152,6 +170,7 @@ export function ClaudeSettings() {
       tools,
       commitTemplate: commitTemplate.trim(),
       reviewTemplate: reviewTemplate.trim(),
+      analyzeTemplate: analyzeTemplate.trim(),
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
@@ -307,6 +326,29 @@ export function ClaudeSettings() {
           <textarea
             value={reviewTemplate}
             onChange={(e) => setReviewTemplate(e.target.value)}
+            rows={10}
+            className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          />
+        </div>
+
+        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <label className="block text-[12px] font-medium text-[var(--cf-text-muted)]">
+              {t("settings.analyzeTemplate")}
+            </label>
+            <button
+              onClick={() => setAnalyzeTemplate(defaultAnalyzeTemplateText)}
+              title={t("settings.reset")}
+              className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+            >
+              <RotateCcw size={11} />
+              {t("settings.reset")}
+            </button>
+          </div>
+          <p className="mb-2 text-[11px] text-[var(--cf-text-muted)]">{t("settings.analyzeTemplateHint")}</p>
+          <textarea
+            value={analyzeTemplate}
+            onChange={(e) => setAnalyzeTemplate(e.target.value)}
             rows={10}
             className="w-full resize-none rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
           />

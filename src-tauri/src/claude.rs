@@ -27,6 +27,8 @@ struct ClaudeCliResult {
     result: Option<String>,
     #[serde(default)]
     is_error: bool,
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 fn quota_signal(text: &str) -> bool {
@@ -66,22 +68,60 @@ pub const DEFAULT_REVIEW_PROMPT: &str =
      - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅, sin \
      inventar hallazgos ni usar la plantilla anterior.";
 
+pub const DEFAULT_ANALYZE_TEMPLATE: &str =
+    "Eres un revisor de código senior. Se te entrega por stdin el contexto del proyecto y el \
+     diff de cambios que TODAVÍA NO SE HAN COMMITEADO (working directory), justo antes de que \
+     el usuario los comitee.\n\n\
+     Analiza el diff buscando específicamente:\n\
+     - Vulnerabilidades de seguridad (inyección, secretos hardcodeados, validación de entrada \
+     faltante, uso inseguro de APIs, etc.)\n\
+     - Bugs y errores lógicos\n\
+     - Problemas de rendimiento\n\
+     - Código que rompe las convenciones o reglas del proyecto (si se entrega contexto)\n\n\
+     Para cada problema real que encuentres, responde en Markdown con EXACTAMENTE este \
+     formato, uno por hallazgo, en este orden:\n\n\
+     ### {emoji} [{Severidad} · {Tipo}] {Categoría corta} · F-{número correlativo de 3 dígitos}\n\n\
+     {Un subtítulo de una línea, algo más largo que el título, describiendo el problema puntual}\n\n\
+     💭 Por qué: {explicación concreta del problema, citando archivo y línea/función relevante}\n\n\
+     💡 Sugerencia: {qué cambiar exactamente para resolverlo}\n\n\
+     🛠️ Ejemplo de solución:\n\
+     ```{lenguaje}\n\
+     {fragmento de código mostrando la solución concreta}\n\
+     ```\n\n\
+     🎯 Confianza: {0-100}/100\n\n\
+     ---\n\n\
+     Reglas:\n\
+     - Responde SIEMPRE en español, sin importar el idioma del código, nombres o comentarios.\n\
+     - Usa 🚨 para Crítico, ⚠️ para Advertencia/Mayor, ℹ️ para Menor/Sugerencia.\n\
+     - Numera los hallazgos F-001, F-002, etc. en el orden en que aparecen en el diff.\n\
+     - Sé específico y cita archivos/líneas reales del diff — no generalices.\n\
+     - No repitas el diff completo ni resumas cambios que no son problemáticos.\n\
+     - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅, sin \
+     inventar hallazgos ni usar la plantilla anterior.";
+
 /// Shared subprocess plumbing for every headless Claude invocation: spawns the binary,
 /// pipes `stdin_content` in, and interprets `--output-format json` output — including
 /// detecting a quota/rate-limit failure so the frontend can show a dedicated notice
-/// instead of a generic error banner.
+/// instead of a generic error banner. Returns the reply text plus the session id Claude
+/// Code assigned this run, so a caller doing multi-turn conversation (chat) can pass it
+/// back in via `resume_session_id` on the next call.
 #[allow(clippy::too_many_arguments)]
 async fn invoke_claude(
     binary_path: &str,
     prompt: &str,
+    system_prompt: Option<&str>,
     model: &str,
     allowed_tools: &[String],
     cwd: Option<&str>,
     mcp_config_path: Option<&str>,
     stdin_content: &str,
-) -> Result<String, String> {
+    resume_session_id: Option<&str>,
+) -> Result<(String, Option<String>), String> {
     let mut cmd = Command::new(binary_path);
     cmd.arg("-p").arg(prompt);
+    if let Some(sp) = system_prompt {
+        cmd.arg("--append-system-prompt").arg(sp);
+    }
     if !model.trim().is_empty() {
         cmd.arg("--model").arg(model);
     }
@@ -91,6 +131,9 @@ async fn invoke_claude(
     }
     if let Some(path) = mcp_config_path {
         cmd.arg("--mcp-config").arg(path).arg("--strict-mcp-config");
+    }
+    if let Some(id) = resume_session_id {
+        cmd.arg("--resume").arg(id);
     }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
@@ -134,7 +177,7 @@ async fn invoke_claude(
                 return Err(trimmed.to_string());
             }
             if !trimmed.is_empty() {
-                return Ok(trimmed.to_string());
+                return Ok((trimmed.to_string(), parsed.session_id.clone()));
             }
         }
     }
@@ -146,7 +189,7 @@ async fn invoke_claude(
     if quota_signal(fallback) {
         return Err(format!("{QUOTA_MARKER}{fallback}"));
     }
-    Ok(fallback.to_string())
+    Ok((fallback.to_string(), None))
 }
 
 pub async fn generate_commit_message(binary_path: &str, diff: &str, prompt_template: &str) -> Result<String, String> {
@@ -161,7 +204,9 @@ pub async fn generate_commit_message(binary_path: &str, diff: &str, prompt_templ
         prompt_template
     };
 
-    invoke_claude(binary_path, prompt, COMMIT_MESSAGE_MODEL, &[], None, None, &truncated).await
+    let (text, _) =
+        invoke_claude(binary_path, prompt, None, COMMIT_MESSAGE_MODEL, &[], None, None, &truncated, None).await?;
+    Ok(text)
 }
 
 /// Reviews a pull request's diff with the user's configured review model/tools, folding
@@ -209,15 +254,131 @@ pub async fn review_pull_request(
         prompt_template
     };
 
-    let review =
-        invoke_claude(binary_path, prompt, model, allowed_tools, Some(cwd), mcp_config_path, &stdin_payload).await?;
+    let (review, _) = invoke_claude(
+        binary_path,
+        prompt,
+        None,
+        model,
+        allowed_tools,
+        Some(cwd),
+        mcp_config_path,
+        &stdin_payload,
+        None,
+    )
+    .await?;
+    Ok(stamp_footer(&review, "pr-review", model))
+}
 
-    // Claude can't reliably know the real wall-clock time or which model string it was
-    // actually launched with, so the app stamps that footer on itself rather than asking
-    // the prompt to fabricate it.
+/// Claude can't reliably know the real wall-clock time or which model string it was
+/// actually launched with, so the app stamps this footer on itself rather than asking the
+/// prompt to fabricate it.
+fn stamp_footer(body: &str, kind: &str, model: &str) -> String {
     let model_label = if model.trim().is_empty() { "modelo predeterminado" } else { model };
     let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M");
-    Ok(format!(
-        "{review}\n\n---\n🤖 Revisión automatizada (pr-review) · Claude Code ({model_label}) · {timestamp}"
-    ))
+    format!("{body}\n\n---\n🤖 Análisis automatizado ({kind}) · Claude Code ({model_label}) · {timestamp}")
+}
+
+/// Scans the working directory's not-yet-committed diff for bugs/vulnerabilities/perf
+/// issues before the user commits — same idea as `review_pull_request` but scoped to local
+/// changes instead of a PR, and with no title/description to fold in.
+#[allow(clippy::too_many_arguments)]
+pub async fn analyze_changes(
+    binary_path: &str,
+    model: &str,
+    contexts: &[(String, String)],
+    diff_text: &str,
+    allowed_tools: &[String],
+    cwd: &str,
+    prompt_template: &str,
+    mcp_config_path: Option<&str>,
+) -> Result<String, String> {
+    if diff_text.trim().is_empty() {
+        return Err("No hay cambios sin commitear para analizar".to_string());
+    }
+
+    let truncated: String = diff_text.chars().take(MAX_REVIEW_DIFF_CHARS).collect();
+
+    let mut stdin_payload = String::new();
+    if !contexts.is_empty() {
+        stdin_payload.push_str("PROJECT CONTEXT:\n");
+        for (name, content) in contexts {
+            stdin_payload.push_str(&format!("- {name}: {content}\n"));
+        }
+        stdin_payload.push('\n');
+    }
+    stdin_payload.push_str("DIFF:\n");
+    stdin_payload.push_str(&truncated);
+
+    let prompt = if prompt_template.trim().is_empty() {
+        DEFAULT_ANALYZE_TEMPLATE
+    } else {
+        prompt_template
+    };
+
+    let (result, _) = invoke_claude(
+        binary_path,
+        prompt,
+        None,
+        model,
+        allowed_tools,
+        Some(cwd),
+        mcp_config_path,
+        &stdin_payload,
+        None,
+    )
+    .await?;
+    Ok(stamp_footer(&result, "análisis pre-commit", model))
+}
+
+const DEFAULT_CHAT_SYSTEM_PROMPT: &str =
+    "Eres el asistente de IA integrado en CodeFlow, un cliente Git de escritorio. Estás \
+     conversando con el usuario sobre el repositorio que tiene abierto — usa las herramientas \
+     disponibles (leer archivos, buscar código, revisar el estado de git, etc.) cuando haga \
+     falta para responder con precisión en lugar de adivinar. Responde en el mismo idioma en \
+     el que te escribe el usuario. Sé conciso y directo: esto es una conversación, no un \
+     reporte formal — no uses el formato de hallazgos estructurados que usarías en una revisión \
+     de PR a menos que el usuario lo pida explícitamente.";
+
+/// Open-ended, multi-turn chat about the currently open repository — unlike
+/// `review_pull_request`/`analyze_changes` this isn't a one-shot "analyze this diff" call, so
+/// it resumes the same Claude Code session across turns (via `session_id`) instead of
+/// re-explaining the whole conversation from scratch every message.
+#[allow(clippy::too_many_arguments)]
+pub async fn chat_with_repo(
+    binary_path: &str,
+    model: &str,
+    contexts: &[(String, String)],
+    message: &str,
+    session_id: Option<&str>,
+    allowed_tools: &[String],
+    cwd: &str,
+    mcp_config_path: Option<&str>,
+) -> Result<(String, Option<String>), String> {
+    // Project context and the system prompt only need to be established once — a resumed
+    // session already carries the earlier turns (and Claude's own system prompt) forward.
+    // `-p` below carries the user's actual message; stdin is just the one-time context, same
+    // division of labor as `review_pull_request`/`analyze_changes` (stdin = data, `-p` = ask).
+    let is_first_turn = session_id.is_none();
+    let mut stdin_payload = String::new();
+    if is_first_turn && !contexts.is_empty() {
+        stdin_payload.push_str("PROJECT CONTEXT:\n");
+        for (name, content) in contexts {
+            stdin_payload.push_str(&format!("- {name}: {content}\n"));
+        }
+    }
+
+    let system_prompt = if is_first_turn { Some(DEFAULT_CHAT_SYSTEM_PROMPT) } else { None };
+
+    invoke_claude(
+        binary_path,
+        message,
+        system_prompt,
+        model,
+        allowed_tools,
+        Some(cwd),
+        mcp_config_path,
+        &stdin_payload,
+        session_id,
+    )
+    .await
 }

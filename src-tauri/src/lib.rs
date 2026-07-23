@@ -8,13 +8,21 @@ mod paths;
 mod remote;
 mod secrets;
 mod terminal;
+mod tray;
 mod watcher;
 
+use tauri::Manager;
 use terminal::TerminalRegistry;
 use watcher::WatcherRegistry;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Must happen before `db::init()` opens the SQLite connection below — see
+    // `paths::reset_marker_path`'s doc comment for why the delete can't happen live.
+    if paths::reset_marker_path().exists() {
+        let _ = std::fs::remove_dir_all(paths::base_dir());
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -22,7 +30,27 @@ pub fn run() {
         .manage(db::init().expect("failed to initialize CodeFlow database"))
         .manage(TerminalRegistry::default())
         .manage(WatcherRegistry::default())
+        .manage(tray::QuittingFlag::default())
+        .setup(|app| {
+            tray::setup(&app.handle())?;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // The custom title bar's close button and the OS's own close paths (Alt+F4, the
+            // red traffic light, right-click "Close window" on the taskbar) all raise this
+            // same event — hiding instead of exiting is what keeps background jobs (Claude
+            // reviews, terminals) alive while the window is "closed", Docker Desktop–style.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                if !app.state::<tray::QuittingFlag>().is_quitting() {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            commands::app_cmd::quit_app,
+            commands::app_cmd::reset_app_data,
             commands::repos::pick_folder,
             commands::repos::default_clone_dir,
             commands::repos::create_workspace,
@@ -50,6 +78,7 @@ pub fn run() {
             commands::git_ops::stash_apply,
             commands::git_ops::stash_pop,
             commands::git_ops::stash_drop,
+            commands::git_ops::rename_stash,
             commands::git_ops::get_working_diff,
             commands::git_ops::get_staged_diff,
             commands::git_ops::get_commit_diff,
@@ -94,6 +123,9 @@ pub fn run() {
             commands::claude_cmd::generate_commit_message,
             commands::claude_cmd::default_commit_template,
             commands::claude_cmd::default_review_template,
+            commands::claude_cmd::default_analyze_template,
+            commands::claude_cmd::analyze_working_changes,
+            commands::claude_cmd::send_chat_message,
             commands::ado_cmd::ado_list_projects,
             commands::ado_cmd::ado_list_repos,
             commands::ado_cmd::auto_link_project_ado,
@@ -114,6 +146,15 @@ pub fn run() {
             commands::watcher_cmd::start_watching,
             commands::watcher_cmd::stop_watching,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, _event| {
+            // macOS: clicking the Dock icon while the window is hidden (but the app is still
+            // running in the background) should reopen it, same as any normal Mac app. This
+            // variant only exists in the macOS build of `RunEvent` at all.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                tray::show_main_window(_app_handle);
+            }
+        });
 }

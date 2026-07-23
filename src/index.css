@@ -143,3 +143,137 @@ body {
 .cf-fade-in {
   animation: cf-fade-in 0.15s ease-out;
 }
+
+.cf-editor-changed-gutter {
+  border-left: 3px solid var(--cf-success);
+  margin-left: 3px;
+}
+
+.cf-editor-changed-line {
+  background: color-mix(in oklab, var(--cf-success) 6%, transparent);
+}
+
+.cf-markdown-preview {
+  color: var(--cf-text);
+  font-size: 13.5px;
+  line-height: 1.65;
+}
+.cf-markdown-preview h1,
+.cf-markdown-preview h2,
+.cf-markdown-preview h3,
+.cf-markdown-preview h4 {
+  font-weight: 600;
+  margin: 1.4em 0 0.6em;
+  line-height: 1.3;
+}
+.cf-markdown-preview h1 {
+  font-size: 1.6em;
+  border-bottom: 1px solid var(--cf-border);
+  padding-bottom: 0.3em;
+}
+.cf-markdown-preview h2 {
+  font-size: 1.3em;
+  border-bottom: 1px solid var(--cf-border);
+  padding-bottom: 0.25em;
+}
+.cf-markdown-preview h3 {
+  font-size: 1.1em;
+}
+.cf-markdown-preview p,
+.cf-markdown-preview ul,
+.cf-markdown-preview ol,
+.cf-markdown-preview blockquote,
+.cf-markdown-preview table,
+.cf-markdown-preview pre {
+  margin: 0.7em 0;
+}
+.cf-markdown-preview ul,
+.cf-markdown-preview ol {
+  padding-left: 1.5em;
+}
+.cf-markdown-preview li {
+  margin: 0.2em 0;
+}
+.cf-markdown-preview a {
+  color: var(--cf-accent);
+  text-decoration: underline;
+}
+.cf-markdown-preview code {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9em;
+  background: color-mix(in oklab, var(--cf-text) 8%, transparent);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.cf-markdown-preview pre {
+  background: color-mix(in oklab, var(--cf-text) 6%, transparent);
+  border-radius: 8px;
+  padding: 0.8em 1em;
+  overflow-x: auto;
+}
+.cf-markdown-preview pre code {
+  background: none;
+  padding: 0;
+}
+.cf-markdown-preview blockquote {
+  border-left: 3px solid var(--cf-border);
+  padding-left: 1em;
+  color: var(--cf-text-muted);
+}
+.cf-markdown-preview img {
+  max-width: 100%;
+  border-radius: 6px;
+}
+.cf-markdown-preview table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.92em;
+}
+.cf-markdown-preview th,
+.cf-markdown-preview td {
+  border: 1px solid var(--cf-border);
+  padding: 0.4em 0.7em;
+  text-align: left;
+}
+.cf-markdown-preview th {
+  background: color-mix(in oklab, var(--cf-text) 5%, transparent);
+  font-weight: 600;
+}
+.cf-markdown-preview hr {
+  border: none;
+  border-top: 1px solid var(--cf-border);
+  margin: 1.5em 0;
+}
+
+/* Compact variant for chat bubbles — same rules, just tighter to fit a narrow panel. */
+.cf-markdown-chat {
+  font-size: 12px;
+  line-height: 1.55;
+}
+.cf-markdown-chat h1,
+.cf-markdown-chat h2,
+.cf-markdown-chat h3,
+.cf-markdown-chat h4 {
+  margin: 0.8em 0 0.4em;
+  font-size: 1.05em;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.cf-markdown-chat p,
+.cf-markdown-chat ul,
+.cf-markdown-chat ol,
+.cf-markdown-chat blockquote,
+.cf-markdown-chat table,
+.cf-markdown-chat pre {
+  margin: 0.5em 0;
+}
+.cf-markdown-chat p:first-child {
+  margin-top: 0;
+}
+.cf-markdown-chat p:last-child {
+  margin-bottom: 0;
+}
+.cf-markdown-chat pre {
+  padding: 0.6em 0.8em;
+  font-size: 0.95em;
+}

@@ -5,6 +5,7 @@ import { onSkillsProgress } from "../../lib/tauri/events";
 import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { WorkspaceSkill } from "../../types/domain";
+import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 
 export function SkillsSettings() {
@@ -52,9 +53,10 @@ export function SkillsSettings() {
     }
   };
 
-  const remove = async (id: string) => {
+  const remove = async (skill: WorkspaceSkill) => {
+    if (!(await confirmAction(t("settings.removeSkillConfirm", { name: skill.skill_name })))) return;
     try {
-      await removeWorkspaceSkill(id);
+      await removeWorkspaceSkill(skill.id);
       await reload(workspaceId);
     } catch (e) {
       pushErrorToast(String(e));
@@ -121,7 +123,7 @@ export function SkillsSettings() {
           >
             <span className="font-medium">{s.skill_name}</span>
             <span className="flex-1 truncate text-[var(--cf-text-muted)]">{s.source_repo}</span>
-            <button onClick={() => remove(s.id)} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]">
+            <button onClick={() => remove(s)} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]">
               <Trash2 size={13} />
             </button>
           </div>

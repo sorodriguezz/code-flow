@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactElement } from "react";
+import { AnimatePresence } from "framer-motion";
 import { FolderGit2 } from "lucide-react";
 import { useT } from "./state/languageStore";
 import { TitleBar } from "./components/layout/TitleBar";
@@ -7,12 +8,13 @@ import { TabBar } from "./components/layout/TabBar";
 import { StatusBar } from "./components/layout/StatusBar";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
-import { ChatPanel } from "./components/chat/ChatPanel";
+import { AiPanel } from "./components/ai/AiPanel";
 import { EditorView } from "./components/editor/EditorView";
-import { TerminalView } from "./components/terminal/TerminalView";
+import { TerminalDock } from "./components/terminal/TerminalDock";
 import { SettingsView } from "./components/settings/SettingsView";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
+import { ConfirmModal } from "./components/common/ConfirmModal";
 import { useThemeStore } from "./state/themeStore";
 import { useUiStore, type MainView } from "./state/uiStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
@@ -23,6 +25,7 @@ import { useLanguageStore } from "./state/languageStore";
 import { useAccentStore } from "./state/accentStore";
 import { useFetchTimerStore } from "./state/fetchTimerStore";
 import { useNavigationStore } from "./state/navigationStore";
+import { useTerminalStore } from "./state/terminalStore";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
 import { onRepoFsChanged } from "./lib/tauri/events";
 
@@ -30,8 +33,6 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "graph", render: () => <GraphView /> },
   { id: "changes", render: () => <ChangesPanel /> },
   { id: "editor", render: () => <EditorView /> },
-  { id: "terminal", render: () => <TerminalView /> },
-  { id: "chat", render: () => <ChatPanel /> },
 ];
 
 function MainContent() {
@@ -72,19 +73,22 @@ export default function App() {
   const initPreferences = usePreferencesStore((s) => s.init);
   const initLanguage = useLanguageStore((s) => s.init);
   const initAccent = useAccentStore((s) => s.init);
+  const initTerminal = useTerminalStore((s) => s.init);
   const project = useWorkspaceStore((s) => s.activeProject());
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
   const resolvedTheme = useThemeStore((s) => s.resolved);
   const accentId = useAccentStore((s) => s.accentId);
   const activeView = useUiStore((s) => s.activeView);
+  const aiPanelOpen = useUiStore((s) => s.aiPanelOpen);
+  const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
 
   useEffect(() => {
     (async () => {
-      await Promise.all([initTheme(), initLayout(), initPreferences(), initLanguage(), initAccent()]);
+      await Promise.all([initTheme(), initLayout(), initPreferences(), initLanguage(), initAccent(), initTerminal()]);
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
     })();
-  }, [initTheme, initLayout, initPreferences, initLanguage, initAccent]);
+  }, [initTheme, initLayout, initPreferences, initLanguage, initAccent, initTerminal]);
 
   // Re-apply the chosen accent whenever the resolved theme or the accent selection changes,
   // since the actual hex differs per theme (a lighter shade is used on dark backgrounds).
@@ -161,11 +165,16 @@ export default function App() {
           <div className="min-h-0 flex-1 overflow-hidden">
             <MainContent />
           </div>
+          <AnimatePresence initial={false}>
+            {terminalPanelOpen && <TerminalDock key="terminal-dock" />}
+          </AnimatePresence>
         </div>
+        <AnimatePresence initial={false}>{aiPanelOpen && <AiPanel key="ai-panel" />}</AnimatePresence>
       </div>
       <StatusBar />
       <SettingsView />
       <ToastContainer />
+      <ConfirmModal />
     </div>
   );
 }

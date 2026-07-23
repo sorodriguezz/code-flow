@@ -3,6 +3,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { deleteReviewContext, listReviewContexts, upsertReviewContext } from "../../lib/tauri/commands";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { ReviewContext } from "../../types/domain";
+import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
 
@@ -41,8 +42,9 @@ export function ReviewContextEditor() {
     await upsertReviewContext(ctx.id, workspaceId, next.name, next.content, next.enabled);
   };
 
-  const remove = async (id: string) => {
-    await deleteReviewContext(id);
+  const remove = async (ctx: ReviewContext) => {
+    if (!(await confirmAction(t("settings.removeContextConfirm", { name: ctx.name })))) return;
+    await deleteReviewContext(ctx.id);
     await reload(workspaceId);
   };
 
@@ -72,7 +74,7 @@ export function ReviewContextEditor() {
                 <Checkbox checked={ctx.enabled} onChange={(checked) => update(ctx, { enabled: checked })} />
                 {t("settings.enabled")}
               </label>
-              <button onClick={() => remove(ctx.id)} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]">
+              <button onClick={() => remove(ctx)} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]">
                 <Trash2 size={13} />
               </button>
             </div>

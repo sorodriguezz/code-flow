@@ -2,6 +2,7 @@ import { useState } from "react";
 import { AlertTriangle, Check, Code2, GitMerge, X } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
+import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 
 export function ConflictsBanner() {
@@ -82,8 +83,8 @@ export function ConflictsBanner() {
         </button>
         <button
           disabled={busy}
-          onClick={() => {
-            if (window.confirm(t("conflicts.abortConfirm"))) void abortMerge();
+          onClick={async () => {
+            if (await confirmAction(t("conflicts.abortConfirm"))) void abortMerge();
           }}
           className="flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] text-[var(--cf-danger)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
         >

@@ -6,6 +6,7 @@ import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
 import { useThemeStore } from "../../state/themeStore";
 import { languageForPath } from "../../lib/monacoLanguage";
+import { fileStatusLabelKey, fileStatusColor as statusColor } from "../../lib/fileStatus";
 
 type ViewMode = "unified" | "split";
 
@@ -13,21 +14,6 @@ function lineClasses(origin: string): string {
   if (origin === "+") return "bg-[color-mix(in_oklab,var(--cf-success)_14%,transparent)] text-[var(--cf-text)]";
   if (origin === "-") return "bg-[color-mix(in_oklab,var(--cf-danger)_14%,transparent)] text-[var(--cf-text)]";
   return "text-[var(--cf-text-muted)]";
-}
-
-function statusColor(status: string): string {
-  switch (status) {
-    case "added":
-    case "untracked":
-      return "var(--cf-success)";
-    case "deleted":
-      return "var(--cf-danger)";
-    case "renamed":
-    case "copied":
-      return "var(--cf-accent)";
-    default:
-      return "var(--cf-warning)";
-  }
 }
 
 /** Rebuilds the two full-text sides of a file's diff from its hunks — the diff commands
@@ -68,7 +54,16 @@ function SplitFileDiff({ file }: { file: FileDiffInfo }) {
       original={original}
       modified={modified}
       theme={resolved === "dark" ? "vs-dark" : "vs"}
-      options={{ readOnly: true, fontSize: 13, renderSideBySide: true, automaticLayout: true }}
+      options={{
+        readOnly: true,
+        fontSize: 13,
+        renderSideBySide: true,
+        // Monaco silently collapses side-by-side into a unified-looking layout below ~900px
+        // wide (e.g. inside a modal) unless told not to — the whole point of this toggle is
+        // an actual two-pane view, so never let it fall back on its own.
+        useInlineViewWhenSpaceIsLimited: false,
+        automaticLayout: true,
+      }}
     />
   );
 }
@@ -179,7 +174,7 @@ export function DiffView({ files }: { files: FileDiffInfo[] }) {
                       className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
                       style={{ background: `color-mix(in oklab, ${color} 18%, transparent)`, color }}
                     >
-                      {file.status}
+                      {t(fileStatusLabelKey(file.status))}
                     </span>
                     <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
                   </div>
@@ -211,7 +206,7 @@ export function DiffView({ files }: { files: FileDiffInfo[] }) {
                     className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
                     style={{ background: `color-mix(in oklab, ${color} 18%, transparent)`, color }}
                   >
-                    {file.status}
+                    {t(fileStatusLabelKey(file.status))}
                   </span>
                   <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
                 </div>

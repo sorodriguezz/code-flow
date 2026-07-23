@@ -23,6 +23,12 @@ import type {
   WorkspaceSkill,
 } from "../../types/domain";
 
+// ---------- app lifecycle ----------
+
+export const quitApp = () => invoke<void>("quit_app");
+
+export const resetAppData = () => invoke<void>("reset_app_data");
+
 // ---------- workspaces / projects ----------
 
 export const pickFolder = () => invoke<string | null>("pick_folder");
@@ -109,6 +115,9 @@ export const stashPop = (repoPath: string, index: number) => invoke<void>("stash
 
 export const stashDrop = (repoPath: string, index: number) =>
   invoke<void>("stash_drop", { repoPath, index });
+
+export const renameStash = (repoPath: string, index: number, newMessage: string) =>
+  invoke<void>("rename_stash", { repoPath, index, newMessage });
 
 // ---------- git: staging / commit ----------
 
@@ -295,6 +304,19 @@ export const generateCommitMessage = (diff: string) =>
 export const defaultCommitTemplate = () => invoke<string>("default_commit_template");
 
 export const defaultReviewTemplate = () => invoke<string>("default_review_template");
+
+export const defaultAnalyzeTemplate = () => invoke<string>("default_analyze_template");
+
+export const analyzeWorkingChanges = (projectId: string) =>
+  invoke<string>("analyze_working_changes", { projectId });
+
+export interface ChatReply {
+  text: string;
+  session_id: string | null;
+}
+
+export const sendChatMessage = (projectId: string, message: string, sessionId: string | null) =>
+  invoke<ChatReply>("send_chat_message", { projectId, message, sessionId });
 
 // ---------- Azure DevOps pull requests ----------
 

@@ -12,7 +12,7 @@ use crate::secrets;
 /// Builds a `--mcp-config` JSON file for whichever of a workspace's MCP servers are
 /// enabled — persisted under the workspace's own CodeFlow folder rather than a tempfile so
 /// it's easy to find/inspect, and gets overwritten on every review anyway.
-fn build_mcp_config(mcps: &[WorkspaceMcp], workspace_id: &str) -> Result<Option<String>, String> {
+pub(crate) fn build_mcp_config(mcps: &[WorkspaceMcp], workspace_id: &str) -> Result<Option<String>, String> {
     let enabled: Vec<&WorkspaceMcp> = mcps.iter().filter(|m| m.enabled).collect();
     if enabled.is_empty() {
         return Ok(None);

@@ -1,19 +1,26 @@
 import { useMemo, useState } from "react";
 import {
+  ChevronDown,
+  ChevronRight,
   Clock,
   ExternalLink,
   FileText,
+  Folder,
+  FolderTree,
   GitCommitHorizontal,
+  List,
   ListMinus,
   ListPlus,
   Loader2,
   Minus,
   Plus,
   RotateCcw,
+  ShieldCheck,
   Sparkles,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
@@ -22,8 +29,12 @@ import { CollapsibleSection } from "../common/CollapsibleSection";
 import { generateCommitMessage, openInDefaultApp } from "../../lib/tauri/commands";
 import { diffToText } from "../../lib/diffText";
 import { parseClaudeError, type ClaudeErrorInfo } from "../../lib/claudeError";
+import { confirmAction } from "../../state/confirmStore";
+import { fileStatusLabelKey } from "../../lib/fileStatus";
+import { buildFileTree, type FileTreeNode } from "../../lib/buildFileTree";
 import { useT } from "../../state/languageStore";
 import { ConflictsBanner } from "./ConflictsBanner";
+import { AnalyzeChangesModal } from "./AnalyzeChangesModal";
 import type { FileStatusEntry } from "../../types/domain";
 
 const LIST_MIN = 220;
@@ -56,8 +67,8 @@ function UnpushedCommitsSection() {
               <button
                 disabled={i !== 0 || busy}
                 title={i === 0 ? t("changes.undoThis") : t("changes.undoAboveFirst")}
-                onClick={() => {
-                  if (window.confirm(t("changes.undoConfirm", { summary: c.summary }))) {
+                onClick={async () => {
+                  if (await confirmAction(t("changes.undoConfirm", { summary: c.summary }))) {
                     void undoCommit(c.id);
                   }
                 }}
@@ -90,23 +101,34 @@ function FileRow({
   selected,
   onSelect,
   actions,
+  depth = 0,
+  displayName,
 }: {
   entry: FileStatusEntry;
   selected: boolean;
   onSelect: () => void;
   actions: RowAction[];
+  /** Tree mode nests files under their directory, so indent by depth instead of showing
+   * the full path — and show just the filename, since the path is implied by the nesting. */
+  depth?: number;
+  displayName?: string;
 }) {
+  const t = useT();
   return (
     <div
       onClick={onSelect}
+      style={depth ? { paddingLeft: depth * 14 } : undefined}
       className={`group flex items-center gap-2 rounded-md px-2 py-1 text-[13px] cursor-pointer ${
         selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       }`}
     >
-      <span className="w-4 shrink-0 text-center text-[10px] uppercase text-[var(--cf-text-muted)]">
+      <span
+        title={t(fileStatusLabelKey(entry.status))}
+        className="w-4 shrink-0 text-center text-[10px] uppercase text-[var(--cf-text-muted)]"
+      >
         {entry.status[0]}
       </span>
-      <span className="flex-1 min-w-0 truncate font-mono text-[12px]">{entry.path}</span>
+      <span className="flex-1 min-w-0 truncate font-mono text-[12px]">{displayName ?? entry.path}</span>
       <span
         className={`flex shrink-0 items-center gap-1 ${
           actions.some((a) => a.pending) ? "opacity-100" : "opacity-0 group-hover:opacity-100"
@@ -133,8 +155,65 @@ function FileRow({
   );
 }
 
+function FileTreeSection({
+  entries,
+  isSelected,
+  onSelectEntry,
+  buildActions,
+}: {
+  entries: FileStatusEntry[];
+  isSelected: (entry: FileStatusEntry) => boolean;
+  onSelectEntry: (entry: FileStatusEntry) => void;
+  buildActions: (entry: FileStatusEntry) => RowAction[];
+}) {
+  const [collapsedDirs, setCollapsedDirs] = useState<Set<string>>(new Set());
+  const tree = useMemo(() => buildFileTree(entries), [entries]);
+
+  const toggleDir = (path: string) =>
+    setCollapsedDirs((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+  const renderNode = (node: FileTreeNode, depth: number): React.ReactNode => {
+    if (node.type === "file") {
+      return (
+        <FileRow
+          key={node.entry.path}
+          entry={node.entry}
+          selected={isSelected(node.entry)}
+          onSelect={() => onSelectEntry(node.entry)}
+          actions={buildActions(node.entry)}
+          depth={depth}
+          displayName={node.name}
+        />
+      );
+    }
+    const collapsed = collapsedDirs.has(node.path);
+    return (
+      <div key={node.path}>
+        <div
+          onClick={() => toggleDir(node.path)}
+          style={{ paddingLeft: depth * 14 }}
+          className="flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        >
+          {collapsed ? <ChevronRight size={12} className="shrink-0" /> : <ChevronDown size={12} className="shrink-0" />}
+          <Folder size={12} className="shrink-0" />
+          <span className="truncate">{node.name}</span>
+        </div>
+        {!collapsed && node.children.map((child) => renderNode(child, depth + 1))}
+      </div>
+    );
+  };
+
+  return <>{tree.map((node) => renderNode(node, 0))}</>;
+}
+
 export function ChangesPanel() {
   const repoPath = useRepoStore((s) => s.repoPath);
+  const projectId = useWorkspaceStore((s) => s.activeProject()?.id ?? null);
   const status = useRepoStore((s) => s.status);
   const workingDiff = useRepoStore((s) => s.workingDiff);
   const stagedDiff = useRepoStore((s) => s.stagedDiff);
@@ -151,6 +230,8 @@ export function ChangesPanel() {
   const commitSize = useLayoutStore((s) => s.commitSize);
 
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null);
+  const [viewMode, setViewMode] = useState<"list" | "tree">("list");
+  const [showAnalyze, setShowAnalyze] = useState(false);
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<ClaudeErrorInfo | null>(null);
@@ -192,6 +273,48 @@ export function ChangesPanel() {
     return <EmptyState icon={FileText} title={t("changes.noRepo")} />;
   }
 
+  const buildStagedActions = (entry: FileStatusEntry): RowAction[] => {
+    const isPending = pending?.path === entry.path;
+    const blocked = pending !== null && !isPending;
+    return [
+      { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
+      {
+        icon: Minus,
+        title: t("changes.unstage"),
+        onClick: () => runAction(entry.path, "unstage", () => unstageFile(entry.path)),
+        pending: isPending && pending?.kind === "unstage",
+        disabled: blocked,
+      },
+    ];
+  };
+
+  const buildUnstagedActions = (entry: FileStatusEntry): RowAction[] => {
+    const isPending = pending?.path === entry.path;
+    const blocked = pending !== null && !isPending;
+    return [
+      { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
+      {
+        icon: Plus,
+        title: t("changes.stage"),
+        onClick: () => runAction(entry.path, "stage", () => stageFile(entry.path)),
+        pending: isPending && pending?.kind === "stage",
+        disabled: blocked,
+      },
+      {
+        icon: RotateCcw,
+        title: t("changes.discardChanges"),
+        danger: true,
+        onClick: async () => {
+          if (await confirmAction(t("changes.discardConfirm", { path: entry.path }))) {
+            void runAction(entry.path, "discard", () => discardFile(entry.path));
+          }
+        },
+        pending: isPending && pending?.kind === "discard",
+        disabled: blocked,
+      },
+    ];
+  };
+
   const generateWithAi = async () => {
     setAiError(null);
     setAiBusy(true);
@@ -212,6 +335,26 @@ export function ChangesPanel() {
       <div style={{ width: listWidth }} className="flex shrink-0 flex-col border-r border-[var(--cf-border)]">
         <div className="flex items-center justify-between border-b border-[var(--cf-border)] px-3 py-2">
           <span className="text-[12px] font-semibold text-[var(--cf-text-muted)]">{t("changes.changes")}</span>
+          <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
+            <button
+              onClick={() => setViewMode("list")}
+              title={t("changes.listView")}
+              className={`flex h-5 w-5 items-center justify-center rounded ${
+                viewMode === "list" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+              }`}
+            >
+              <List size={12} />
+            </button>
+            <button
+              onClick={() => setViewMode("tree")}
+              title={t("changes.treeView")}
+              className={`flex h-5 w-5 items-center justify-center rounded ${
+                viewMode === "tree" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+              }`}
+            >
+              <FolderTree size={12} />
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-auto p-2">
@@ -237,28 +380,24 @@ export function ChangesPanel() {
                 </button>
               )}
             </div>
-            {status.staged.map((entry) => {
-              const isPending = pending?.path === entry.path;
-              const blocked = pending !== null && !isPending;
-              return (
+            {viewMode === "tree" ? (
+              <FileTreeSection
+                entries={status.staged}
+                isSelected={(entry) => selected?.path === entry.path && !!selected.staged}
+                onSelectEntry={(entry) => setSelected({ path: entry.path, staged: true })}
+                buildActions={(entry) => buildStagedActions(entry)}
+              />
+            ) : (
+              status.staged.map((entry) => (
                 <FileRow
                   key={entry.path}
                   entry={entry}
                   selected={selected?.path === entry.path && selected.staged}
                   onSelect={() => setSelected({ path: entry.path, staged: true })}
-                  actions={[
-                    { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
-                    {
-                      icon: Minus,
-                      title: t("changes.unstage"),
-                      onClick: () => runAction(entry.path, "unstage", () => unstageFile(entry.path)),
-                      pending: isPending && pending?.kind === "unstage",
-                      disabled: blocked,
-                    },
-                  ]}
+                  actions={buildStagedActions(entry)}
                 />
-              );
-            })}
+              ))
+            )}
           </div>
 
           <div>
@@ -266,51 +405,50 @@ export function ChangesPanel() {
               <span className="text-[11px] font-semibold uppercase text-[var(--cf-text-muted)]">
                 {t("changes.changes")} ({unstagedAndUntracked.length})
               </span>
-              {unstagedAndUntracked.length > 0 && (
-                <button
-                  onClick={() => runAction("__stage_all__", "all", () => stageAll())}
-                  disabled={pending !== null && pending.path !== "__stage_all__"}
-                  title={t("changes.stageAll")}
-                  className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-30"
-                >
-                  {pending?.path === "__stage_all__" ? (
-                    <Loader2 size={13} className="animate-spin" />
-                  ) : (
-                    <ListPlus size={13} />
-                  )}
-                </button>
-              )}
+              <div className="flex items-center gap-1">
+                {unstagedAndUntracked.length > 0 && (
+                  <button
+                    onClick={() => setShowAnalyze(true)}
+                    title={t("analyze.button")}
+                    className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                  >
+                    <ShieldCheck size={13} />
+                  </button>
+                )}
+                {unstagedAndUntracked.length > 0 && (
+                  <button
+                    onClick={() => runAction("__stage_all__", "all", () => stageAll())}
+                    disabled={pending !== null && pending.path !== "__stage_all__"}
+                    title={t("changes.stageAll")}
+                    className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-30"
+                  >
+                    {pending?.path === "__stage_all__" ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <ListPlus size={13} />
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
-            {unstagedAndUntracked.map((entry) => {
-              const isPending = pending?.path === entry.path;
-              const blocked = pending !== null && !isPending;
-              return (
+            {viewMode === "tree" ? (
+              <FileTreeSection
+                entries={unstagedAndUntracked}
+                isSelected={(entry) => selected?.path === entry.path && !selected.staged}
+                onSelectEntry={(entry) => setSelected({ path: entry.path, staged: false })}
+                buildActions={(entry) => buildUnstagedActions(entry)}
+              />
+            ) : (
+              unstagedAndUntracked.map((entry) => (
                 <FileRow
                   key={entry.path}
                   entry={entry}
                   selected={selected?.path === entry.path && !selected.staged}
                   onSelect={() => setSelected({ path: entry.path, staged: false })}
-                  actions={[
-                    { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
-                    {
-                      icon: Plus,
-                      title: t("changes.stage"),
-                      onClick: () => runAction(entry.path, "stage", () => stageFile(entry.path)),
-                      pending: isPending && pending?.kind === "stage",
-                      disabled: blocked,
-                    },
-                    {
-                      icon: RotateCcw,
-                      title: t("changes.discardChanges"),
-                      danger: true,
-                      onClick: () => runAction(entry.path, "discard", () => discardFile(entry.path)),
-                      pending: isPending && pending?.kind === "discard",
-                      disabled: blocked,
-                    },
-                  ]}
+                  actions={buildUnstagedActions(entry)}
                 />
-              );
-            })}
+              ))
+            )}
           </div>
         </div>
 
@@ -375,6 +513,9 @@ export function ChangesPanel() {
         )}
       </div>
       </div>
+      {showAnalyze && projectId && (
+        <AnalyzeChangesModal projectId={projectId} onClose={() => setShowAnalyze(false)} />
+      )}
     </div>
   );
 }

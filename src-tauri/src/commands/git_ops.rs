@@ -74,6 +74,11 @@ pub fn stash_drop(repo_path: String, index: usize) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn rename_stash(repo_path: String, index: usize, new_message: String) -> Result<(), String> {
+    stash::rename_stash(&repo_path, index, &new_message)
+}
+
+#[tauri::command]
 pub fn get_working_diff(repo_path: String) -> Result<Vec<diff::FileDiffInfo>, String> {
     diff::get_working_diff(&repo_path)
 }

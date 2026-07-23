@@ -3,6 +3,7 @@ import { Plus, Trash2 } from "lucide-react";
 import { deleteWorkspaceMcp, listWorkspaceMcps, upsertWorkspaceMcp } from "../../lib/tauri/commands";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { WorkspaceMcp } from "../../types/domain";
+import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
 
@@ -40,8 +41,9 @@ export function McpSettings() {
     await upsertWorkspaceMcp(mcp.id, workspaceId, next.name, next.command, next.args, next.env, next.enabled);
   };
 
-  const remove = async (id: string) => {
-    await deleteWorkspaceMcp(id);
+  const remove = async (mcp: WorkspaceMcp) => {
+    if (!(await confirmAction(t("settings.removeMcpConfirm", { name: mcp.name })))) return;
+    await deleteWorkspaceMcp(mcp.id);
     await reload(workspaceId);
   };
 
@@ -68,7 +70,7 @@ export function McpSettings() {
                 <Checkbox checked={mcp.enabled} onChange={(checked) => update(mcp, { enabled: checked })} />
                 {t("settings.enabled")}
               </label>
-              <button onClick={() => remove(mcp.id)} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]">
+              <button onClick={() => remove(mcp)} className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]">
                 <Trash2 size={13} />
               </button>
             </div>

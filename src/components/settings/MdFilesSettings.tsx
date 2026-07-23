@@ -3,6 +3,7 @@ import { FileText, Plus, Trash2 } from "lucide-react";
 import { deleteWorkspaceMdFile, listWorkspaceMdFiles, upsertWorkspaceMdFile } from "../../lib/tauri/commands";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import type { WorkspaceMdFile } from "../../types/domain";
+import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
 
@@ -50,8 +51,11 @@ export function MdFilesSettings() {
     await upsertWorkspaceMdFile(file.id, workspaceId, next.filename, next.content, next.enabled);
   };
 
-  const remove = async (id: string) => {
-    await deleteWorkspaceMdFile(id);
+  const remove = async (file: WorkspaceMdFile) => {
+    if (!(await confirmAction(t("settings.removeMdFileConfirm", { name: file.filename || t("settings.untitledMdFile") })))) {
+      return;
+    }
+    await deleteWorkspaceMdFile(file.id);
     await reload(workspaceId, false);
   };
 
@@ -101,7 +105,7 @@ export function MdFilesSettings() {
                   {t("settings.enabled")}
                 </label>
                 <button
-                  onClick={() => remove(selected.id)}
+                  onClick={() => remove(selected)}
                   className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
                 >
                   <Trash2 size={13} />

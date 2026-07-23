@@ -32,7 +32,7 @@ export function StashDiffModal({ stash, onClose }: { stash: StashInfo; onClose: 
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex h-[70vh] w-[720px] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+        className="flex h-[80vh] w-[92vw] max-w-[1200px] flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
       >
         <div className="flex items-center justify-between border-b border-[var(--cf-border)] px-3 py-2">
           <span className="truncate text-[13px] font-medium text-[var(--cf-text)]">{stash.message}</span>

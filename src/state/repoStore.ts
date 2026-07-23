@@ -74,6 +74,7 @@ interface RepoState {
   stashApply: (index: number) => Promise<void>;
   stashPop: (index: number) => Promise<void>;
   stashDrop: (index: number) => Promise<void>;
+  renameStash: (index: number, newMessage: string) => Promise<void>;
 
   fetch: () => Promise<void>;
   pull: () => Promise<void>;
@@ -434,6 +435,15 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     if (!repoPath) return;
     await guarded(set, async () => {
       await api.stashDrop(repoPath, index);
+      await get().refreshStashes();
+    });
+  },
+
+  renameStash: async (index, newMessage) => {
+    const { repoPath } = get();
+    if (!repoPath) return;
+    await guarded(set, async () => {
+      await api.renameStash(repoPath, index, newMessage);
       await get().refreshStashes();
     });
   },

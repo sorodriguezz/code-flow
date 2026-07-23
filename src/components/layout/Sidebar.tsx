@@ -42,6 +42,7 @@ import { SkeletonRows } from "../common/Skeleton";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { StashDiffModal } from "./StashDiffModal";
+import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -154,10 +155,20 @@ function StashesSection() {
   const stashApply = useRepoStore((s) => s.stashApply);
   const stashPop = useRepoStore((s) => s.stashPop);
   const stashDrop = useRepoStore((s) => s.stashDrop);
+  const renameStash = useRepoStore((s) => s.renameStash);
   const [showInput, setShowInput] = useState(false);
   const [message, setMessage] = useState("");
   const [viewingStash, setViewingStash] = useState<StashInfo | null>(null);
+  const [renamingIndex, setRenamingIndex] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState("");
   const t = useT();
+
+  const commitRename = async () => {
+    if (renamingIndex === null) return;
+    const value = renameValue.trim();
+    setRenamingIndex(null);
+    if (value) await renameStash(renamingIndex, value);
+  };
 
   return (
     <CollapsibleSection
@@ -205,55 +216,85 @@ function StashesSection() {
       )}
 
       <div className="space-y-0.5">
-        {stashes.map((s) => (
-          <div
-            key={s.index}
-            onClick={() => setViewingStash(s)}
-            className="group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-          >
-            <span className="flex-1 truncate text-[var(--cf-text-muted)]">{s.message}</span>
-            <button
-              title={t("sidebar.viewStash")}
-              onClick={(e) => {
-                e.stopPropagation();
-                setViewingStash(s);
-              }}
-              className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+        {stashes.map((s) =>
+          renamingIndex === s.index ? (
+            <div key={s.index} className="flex items-center gap-1 px-1.5 py-0.5">
+              <input
+                autoFocus
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={async (e) => {
+                  if (e.key === "Enter") await commitRename();
+                  else if (e.key === "Escape") setRenamingIndex(null);
+                }}
+                onBlur={commitRename}
+                className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-1.5 py-0.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+              />
+            </div>
+          ) : (
+            <div
+              key={s.index}
+              onClick={() => setViewingStash(s)}
+              className="group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
             >
-              <Eye size={12} />
-            </button>
-            <button
-              title={t("sidebar.apply")}
-              onClick={(e) => {
-                e.stopPropagation();
-                stashApply(s.index);
-              }}
-              className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
-            >
-              <Check size={12} />
-            </button>
-            <button
-              title={t("sidebar.pop")}
-              onClick={(e) => {
-                e.stopPropagation();
-                stashPop(s.index);
-              }}
-              className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
-            >
-              <Undo2 size={12} />
-            </button>
-            <button
-              title={t("sidebar.drop")}
-              onClick={(e) => {
-                e.stopPropagation();
-                stashDrop(s.index);
-              }}
-              className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] group-hover:block"
-            >
-              <Trash2 size={12} />
-            </button>
-          </div>
-        ))}
+              <span className="flex-1 truncate text-[var(--cf-text-muted)]">{s.message}</span>
+              <button
+                title={t("sidebar.viewStash")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setViewingStash(s);
+                }}
+                className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+              >
+                <Eye size={12} />
+              </button>
+              <button
+                title={t("sidebar.renameStash")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setRenameValue(s.message);
+                  setRenamingIndex(s.index);
+                }}
+                className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+              >
+                <Pencil size={12} />
+              </button>
+              <button
+                title={t("sidebar.apply")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  stashApply(s.index);
+                }}
+                className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+              >
+                <Check size={12} />
+              </button>
+              <button
+                title={t("sidebar.pop")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  stashPop(s.index);
+                }}
+                className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+              >
+                <Undo2 size={12} />
+              </button>
+              <button
+                title={t("sidebar.drop")}
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (await confirmAction(t("sidebar.dropStashConfirm", { message: s.message }))) {
+                    stashDrop(s.index);
+                  }
+                }}
+                className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] group-hover:block"
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ),
+        )}
         {stashes.length === 0 && !showInput && (
           <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noStashes")}</p>
         )}
@@ -512,7 +553,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   const loadPullRequests = usePrStore((s) => s.loadPullRequests);
   const selectPr = usePrStore((s) => s.selectPr);
   const selectedPr = usePrStore((s) => s.selectedPr);
-  const setActiveView = useUiStore((s) => s.setActiveView);
+  const openAiPanel = useUiStore((s) => s.openAiPanel);
   const openSettings = useUiStore((s) => s.openSettings);
   const [connectedOrg, setConnectedOrg] = useState<string | null | undefined>(undefined);
   const [showConnect, setShowConnect] = useState(false);
@@ -576,7 +617,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   // DevOps reconnects to its own PRs on its own); the manual picker is only a fallback for
   // when that still doesn't resolve it.
   const handleUnlink = async () => {
-    if (!window.confirm(t("sidebar.unlinkConfirm"))) return;
+    if (!(await confirmAction(t("sidebar.unlinkConfirm"), false))) return;
     await unlinkProjectAdo(project.id);
     setLinkState({ status: "checking" });
     await runAutoDetect({ current: false });
@@ -704,7 +745,7 @@ function PullRequestsSection({ project }: { project: Project }) {
                       key={pr.id}
                       onClick={() => {
                         selectPr(pr);
-                        setActiveView("chat");
+                        openAiPanel();
                       }}
                       className={`flex w-full items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[12px] ${
                         selectedPr?.id === pr.id
@@ -908,8 +949,8 @@ function ProjectRow({ project }: { project: Project }) {
                       {!b.is_head && (
                         <button
                           title={t("sidebar.deleteBranch")}
-                          onClick={() => {
-                            if (window.confirm(t("sidebar.deleteBranchConfirm", { name: b.name }))) {
+                          onClick={async () => {
+                            if (await confirmAction(t("sidebar.deleteBranchConfirm", { name: b.name }))) {
                               deleteBranch(b.name, false);
                             }
                           }}
