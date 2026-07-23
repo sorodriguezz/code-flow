@@ -498,8 +498,32 @@ pub fn list_chat_conversations(
         .filter(|sid| needle.is_none() || matched.contains(sid))
         .filter_map(|sid| by_session.remove(&sid))
         .collect();
+
+    let custom_titles = conversation_titles(conn, project_id)?;
+    for summary in &mut result {
+        if let Some(title) = custom_titles.get(&summary.session_id) {
+            summary.title = title.clone();
+        }
+    }
+
     result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     Ok(result)
+}
+
+fn conversation_titles(conn: &Connection, project_id: &str) -> rusqlite::Result<std::collections::HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT session_id, title FROM conversation_titles WHERE project_id = ?1")?;
+    let rows = stmt.query_map(params![project_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    rows.collect()
+}
+
+pub fn rename_chat_conversation(conn: &Connection, project_id: &str, session_id: &str, title: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO conversation_titles (session_id, project_id, title, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at",
+        params![session_id, project_id, title, now()],
+    )?;
+    Ok(())
 }
 
 /// Every turn of one conversation, oldest first — flattened into `[user, assistant, user,
@@ -531,14 +555,23 @@ pub fn delete_chat_conversation(conn: &Connection, project_id: &str, session_id:
         "DELETE FROM activity_log WHERE project_id = ?1 AND session_id = ?2",
         params![project_id, session_id],
     )?;
+    conn.execute(
+        "DELETE FROM conversation_titles WHERE project_id = ?1 AND session_id = ?2",
+        params![project_id, session_id],
+    )?;
     Ok(())
 }
 
 // ---------- job history (PR reviews / pre-commit analyses) ----------
 
+/// `id` is supplied by the caller (the same id the frontend's in-memory job already has)
+/// rather than generated here — that's what lets a job just run this session and the same
+/// job reloaded from history after a restart share one identity, so renaming/deleting either
+/// one always hits the right row.
 #[allow(clippy::too_many_arguments)]
 pub fn add_job_history(
     conn: &Connection,
+    id: &str,
     project_id: &str,
     kind: &str,
     label: &str,
@@ -548,10 +581,11 @@ pub fn add_job_history(
     meta: &str,
 ) -> rusqlite::Result<JobHistoryEntry> {
     let entry = JobHistoryEntry {
-        id: Uuid::new_v4().to_string(),
+        id: id.to_string(),
         project_id: project_id.to_string(),
         kind: kind.to_string(),
         label: label.to_string(),
+        custom_label: None,
         status: status.to_string(),
         result: result.map(str::to_string),
         error: error.map(str::to_string),
@@ -578,7 +612,7 @@ pub fn add_job_history(
 
 pub fn list_job_history(conn: &Connection, project_id: &str) -> rusqlite::Result<Vec<JobHistoryEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, kind, label, status, result, error, meta, created_at
+        "SELECT id, project_id, kind, label, custom_label, status, result, error, meta, created_at
          FROM job_history WHERE project_id = ?1 ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map(params![project_id], |row| {
@@ -587,14 +621,28 @@ pub fn list_job_history(conn: &Connection, project_id: &str) -> rusqlite::Result
             project_id: row.get(1)?,
             kind: row.get(2)?,
             label: row.get(3)?,
-            status: row.get(4)?,
-            result: row.get(5)?,
-            error: row.get(6)?,
-            meta: row.get(7)?,
-            created_at: row.get(8)?,
+            custom_label: row.get(4)?,
+            status: row.get(5)?,
+            result: row.get(6)?,
+            error: row.get(7)?,
+            meta: row.get(8)?,
+            created_at: row.get(9)?,
         })
     })?;
     rows.collect()
+}
+
+pub fn rename_job_history(conn: &Connection, id: &str, label: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE job_history SET custom_label = ?1 WHERE id = ?2", params![label, id])?;
+    Ok(())
+}
+
+/// Best-effort by design — deleting a job that's still running (no `job_history` row exists
+/// for it yet) simply affects 0 rows, which is fine; the frontend removes it from memory
+/// regardless.
+pub fn delete_job_history(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM job_history WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 // ---------- app settings (key/value) ----------

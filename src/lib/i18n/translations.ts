@@ -378,6 +378,7 @@ export const translations = {
     "chat.posted": "Posted to Azure DevOps",
     "chat.confirmPost": "Post {n} comment(s) as separate threads on PR #{id} in Azure DevOps?",
     "chat.viewOnAdo": "View on Azure DevOps",
+    "pr.openComments": "Open comments ({n})",
     "chat.prBy": "by {author}",
     "chat.prBranches": "{source} → {target}",
     "chat.awaitingReview": "Run a review to see Claude's feedback on this pull request here.",
@@ -396,6 +397,7 @@ export const translations = {
     "ai.activityModalTitle": "Activity",
     "ai.activitySearch": "Search activity…",
     "ai.noMatches": "No matching entries",
+    "ai.rename": "Rename",
 
     "common.save": "Save",
     "common.cancel": "Cancel",
@@ -789,6 +791,7 @@ export const translations = {
     "chat.posted": "Publicado en Azure DevOps",
     "chat.confirmPost": "¿Publicar {n} comentario(s) como hilos separados en el PR #{id} en Azure DevOps?",
     "chat.viewOnAdo": "Ver en Azure DevOps",
+    "pr.openComments": "Comentarios abiertos ({n})",
     "chat.prBy": "por {author}",
     "chat.prBranches": "{source} → {target}",
     "chat.awaitingReview": "Ejecuta una revisión para ver aquí la retroalimentación de Claude sobre este pull request.",
@@ -807,6 +810,7 @@ export const translations = {
     "ai.activityModalTitle": "Actividad",
     "ai.activitySearch": "Buscar en la actividad…",
     "ai.noMatches": "Sin resultados",
+    "ai.rename": "Renombrar",
 
     "common.save": "Guardar",
     "common.cancel": "Cancelar",

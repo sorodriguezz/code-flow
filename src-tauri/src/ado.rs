@@ -366,3 +366,109 @@ pub async fn post_pr_comment(
     }
     Ok(())
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrThreadComment {
+    pub author: String,
+    pub content: String,
+    pub published_date: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrCommentThread {
+    pub id: i64,
+    pub file_path: Option<String>,
+    pub start_line: Option<i64>,
+    pub end_line: Option<i64>,
+    pub comments: Vec<PrThreadComment>,
+}
+
+#[derive(Deserialize)]
+struct RawThreadComment {
+    content: Option<String>,
+    #[serde(rename = "commentType", default)]
+    comment_type: Option<String>,
+    author: RawIdentity,
+    #[serde(rename = "publishedDate")]
+    published_date: String,
+}
+
+#[derive(Deserialize)]
+struct RawFilePosition {
+    line: i64,
+}
+
+#[derive(Deserialize)]
+struct RawThreadContext {
+    #[serde(rename = "filePath", default)]
+    file_path: Option<String>,
+    #[serde(rename = "rightFileStart", default)]
+    right_file_start: Option<RawFilePosition>,
+    #[serde(rename = "rightFileEnd", default)]
+    right_file_end: Option<RawFilePosition>,
+}
+
+#[derive(Deserialize)]
+struct RawThread {
+    id: i64,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    comments: Vec<RawThreadComment>,
+    #[serde(rename = "threadContext", default)]
+    thread_context: Option<RawThreadContext>,
+}
+
+/// Fetches the PR's still-open comment threads — e.g. from a human reviewer (a tech lead
+/// leaving feedback directly on the PR, not through CodeFlow) — so they can be resolved with
+/// AI the same way a finding from our own review can. Threads already marked fixed / closed /
+/// won't-fix / by-design are left out (Azure DevOps' own UI treats those as done), and
+/// system-generated comments (vote changes, iteration notices) are filtered out so only real
+/// reviewer text remains; a thread left with no real comments after that is dropped entirely.
+pub async fn list_pr_comment_threads(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    pat: &str,
+) -> Result<Vec<PrCommentThread>, String> {
+    let org = encode_segment(&normalize_org(org));
+    let project = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/threads\
+         ?api-version={API_VERSION}"
+    );
+    let parsed: ListResponse<RawThread> = get_json(&url, pat).await?;
+
+    Ok(parsed
+        .value
+        .into_iter()
+        .filter(|t| matches!(t.status.as_deref().map(str::to_lowercase).as_deref(), Some("active") | Some("pending") | None))
+        .filter_map(|t| {
+            let comments: Vec<PrThreadComment> = t
+                .comments
+                .into_iter()
+                .filter(|c| c.comment_type.as_deref().unwrap_or("text") == "text")
+                .filter_map(|c| {
+                    let content = c.content?.trim().to_string();
+                    if content.is_empty() {
+                        return None;
+                    }
+                    Some(PrThreadComment { author: c.author.display_name, content, published_date: c.published_date })
+                })
+                .collect();
+            if comments.is_empty() {
+                return None;
+            }
+            let (file_path, start_line, end_line) = match t.thread_context {
+                Some(ctx) => (
+                    ctx.file_path,
+                    ctx.right_file_start.as_ref().map(|p| p.line),
+                    ctx.right_file_end.as_ref().map(|p| p.line),
+                ),
+                None => (None, None, None),
+            };
+            Some(PrCommentThread { id: t.id, file_path, start_line, end_line, comments })
+        })
+        .collect())
+}

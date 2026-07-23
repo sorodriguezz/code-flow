@@ -103,15 +103,26 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         -- result. Only successful/errored *completed* runs are recorded (there's nothing
         -- meaningful to reopen from a run that was still in flight when the app closed).
         CREATE TABLE IF NOT EXISTS job_history (
-            id          TEXT PRIMARY KEY,
+            id           TEXT PRIMARY KEY,
+            project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            kind         TEXT NOT NULL,
+            label        TEXT NOT NULL,
+            custom_label TEXT,
+            status       TEXT NOT NULL,
+            result       TEXT,
+            error        TEXT,
+            meta         TEXT NOT NULL DEFAULT '{}',
+            created_at   TEXT NOT NULL
+        );
+
+        -- A user-given rename for a chat conversation (`activity_log` rows grouped by
+        -- `session_id`) — conversations don't otherwise have a row of their own to attach a
+        -- title to, since they're just a GROUP BY over individual question/answer turns.
+        CREATE TABLE IF NOT EXISTS conversation_titles (
+            session_id  TEXT PRIMARY KEY,
             project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-            kind        TEXT NOT NULL,
-            label       TEXT NOT NULL,
-            status      TEXT NOT NULL,
-            result      TEXT,
-            error       TEXT,
-            meta        TEXT NOT NULL DEFAULT '{}',
-            created_at  TEXT NOT NULL
+            title       TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
         );
         "#,
     )?;
@@ -119,6 +130,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     migrate_review_contexts_to_workspace(conn)?;
     drop_legacy_installed_skills(conn)?;
     add_session_id_to_activity_log(conn)?;
+    add_custom_label_to_job_history(conn)?;
     Ok(())
 }
 
@@ -167,4 +179,14 @@ fn add_session_id_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE activity_log ADD COLUMN session_id TEXT;")
+}
+
+/// `job_history` originally had no `custom_label` column — for a database created before
+/// renaming was supported, add it (existing rows just have no override, falling back to
+/// their auto-derived label, which is exactly the pre-rename behavior).
+fn add_custom_label_to_job_history(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "job_history", "custom_label")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE job_history ADD COLUMN custom_label TEXT;")
 }

@@ -32,7 +32,25 @@ pub fn delete_chat_conversation(db: State<'_, Db>, project_id: String, session_i
 }
 
 #[tauri::command]
+pub fn rename_chat_conversation(db: State<'_, Db>, project_id: String, session_id: String, title: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::rename_chat_conversation(&conn, &project_id, &session_id, &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn list_job_history(db: State<'_, Db>, project_id: String) -> Result<Vec<JobHistoryEntry>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::list_job_history(&conn, &project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_job_history_entry(db: State<'_, Db>, id: String, label: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::rename_job_history(&conn, &id, &label).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_job_history_entry(db: State<'_, Db>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::delete_job_history(&conn, &id).map_err(|e| e.to_string())
 }

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
-import { listJobHistory } from "../lib/tauri/commands";
+import { listJobHistory, renameJobHistoryEntry, deleteJobHistoryEntry } from "../lib/tauri/commands";
 import { useLanguageStore } from "./languageStore";
 import { translations } from "../lib/i18n/translations";
 
@@ -28,19 +28,27 @@ interface JobsState {
   /** Kicks off `task` immediately and tracks it as a job entry that survives project/view
    * switches — the promise itself already keeps running in the background regardless of what
    * the UI shows (Tauri's `invoke` doesn't get cancelled by React unmounting), this just makes
-   * that fact visible instead of silently discarding the result if nobody's watching. */
+   * that fact visible instead of silently discarding the result if nobody's watching. `task`
+   * receives the job's own id so the backend can persist its `job_history` row under that
+   * same id — that's what lets a job just run this session and the same job reloaded from
+   * history after a restart be the same identity, so renaming/deleting either always works. */
   run: (args: {
     projectId: string;
     kind: JobKind;
     label: string;
     meta?: Record<string, unknown>;
-    task: () => Promise<string>;
+    task: (jobId: string) => Promise<string>;
   }) => string;
   /** Hydrates this project's finished PR reviews / pre-commit analyses from disk — `run()`
    * only ever lived in memory, so without this every past result vanished on restart. Runs
    * once per project per session; a job already in memory (freshly run before this resolves)
    * is merged in rather than replaced. */
   load: (projectId: string) => Promise<void>;
+  rename: (projectId: string, jobId: string, label: string) => Promise<void>;
+  /** Best-effort against the persisted row — a job still `running` has no `job_history` row
+   * yet, so there's nothing there to delete, but it's removed from the in-memory list either
+   * way. */
+  remove: (projectId: string, jobId: string) => Promise<void>;
   jobsFor: (projectId: string) => Job[];
   latestOfKind: (projectId: string, kind: JobKind, meta?: Record<string, unknown>) => Job | null;
 }
@@ -94,7 +102,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       }));
     };
 
-    void task()
+    void task(id)
       .then((result) => settle({ status: "done", result, finishedAt: Date.now() }))
       .catch((e) => settle({ status: "error", error: parseClaudeError(String(e)), finishedAt: Date.now() }));
 
@@ -114,11 +122,12 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     const loadedJobs: Job[] = rows.map((row) => {
       const meta = safeParseMeta(row.meta);
       const label =
-        row.kind === "analyze-changes"
+        row.custom_label ??
+        (row.kind === "analyze-changes"
           ? translate("analyze.title")
           : row.kind === "pr-review" && typeof meta.prTitle === "string"
             ? `#${meta.prId} ${meta.prTitle}`
-            : row.label;
+            : row.label);
       const createdAt = new Date(row.created_at).getTime();
       return {
         id: row.id,
@@ -141,6 +150,23 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       );
       return { byProject: { ...s.byProject, [projectId]: merged } };
     });
+  },
+
+  rename: async (projectId, jobId, label) => {
+    await renameJobHistoryEntry(jobId, label);
+    set((s) => ({
+      byProject: {
+        ...s.byProject,
+        [projectId]: (s.byProject[projectId] ?? []).map((j) => (j.id === jobId ? { ...j, label } : j)),
+      },
+    }));
+  },
+
+  remove: async (projectId, jobId) => {
+    await deleteJobHistoryEntry(jobId).catch(() => {});
+    set((s) => ({
+      byProject: { ...s.byProject, [projectId]: (s.byProject[projectId] ?? []).filter((j) => j.id !== jobId) },
+    }));
   },
 
   jobsFor: (projectId) => get().byProject[projectId] ?? EMPTY_JOBS,

@@ -35,6 +35,85 @@ export function InlineMarkdown({ text, className }: { text: string; className?: 
   return <span className={className} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
+/** Shared by `FindingCard` and `PrCommentCard` — applies a fix via Claude for whatever
+ * instruction text `resolve()` is given. For a PR finding/comment (`prSourceBranch` set),
+ * makes sure the local checkout is actually on the PR's branch first: blocks with an error if
+ * there are uncommitted changes (switching branches would risk them), otherwise confirms and
+ * checks out that branch (local if it already exists, remote-tracking otherwise) before
+ * asking Claude to apply the fix. */
+export function useResolveWithAi(projectId: string | undefined, prSourceBranch: string | undefined) {
+  const t = useT();
+  const [resolving, setResolving] = useState(false);
+  const [resolution, setResolution] = useState<string | null>(null);
+
+  const resolve = async (promptText: string) => {
+    if (prSourceBranch) {
+      const { status, branches, checkoutBranch, checkoutRemoteBranch } = useRepoStore.getState();
+      if (status?.current_branch !== prSourceBranch) {
+        const dirty =
+          !!status &&
+          (status.staged.length > 0 || status.unstaged.length > 0 || status.untracked.length > 0 || status.conflicted.length > 0);
+        if (dirty) {
+          pushErrorToast(t("finding.dirtyBranchSwitch"));
+          return;
+        }
+        if (!(await confirmAction(t("finding.confirmBranchSwitch", { branch: prSourceBranch }), false))) return;
+        try {
+          const hasLocal = branches.some((b) => b.name === prSourceBranch && !b.is_remote);
+          if (hasLocal) await checkoutBranch(prSourceBranch);
+          else await checkoutRemoteBranch(`origin/${prSourceBranch}`);
+        } catch (e) {
+          pushErrorToast(t("finding.branchSwitchFailed", { error: String(e) }));
+          return;
+        }
+      }
+    }
+
+    if (!projectId) return;
+    setResolving(true);
+    setResolution(null);
+    try {
+      const result = await resolveFindingWithAi(projectId, promptText);
+      setResolution(result);
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setResolving(false);
+    }
+  };
+
+  return { resolving, resolution, resolve };
+}
+
+/** The button + result text for `useResolveWithAi` — identical markup in `FindingCard` and
+ * `PrCommentCard`, just pulled out so the two don't drift. */
+export function ResolveWithAiButton({
+  resolving,
+  resolution,
+  onClick,
+}: {
+  resolving: boolean;
+  resolution: string | null;
+  onClick: () => void;
+}) {
+  const t = useT();
+  return (
+    <>
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          onClick={onClick}
+          disabled={resolving}
+          className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+        >
+          {resolving ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
+          {resolving ? t("finding.resolving") : t("finding.resolve")}
+        </button>
+      </div>
+      {resolution && <p className="rounded-md bg-[var(--cf-accent-soft)] px-2.5 py-1.5 text-[var(--cf-text)]">{resolution}</p>}
+    </>
+  );
+}
+
 /** Quality Gate pill + the model's own A–E grades — shown once per review, above the
  * findings list, in both the pre-commit analysis view and the PR review view. */
 export function QualityGateBadges({ grades, findings }: { grades: QualityGrades | null; findings: AnalysisFinding[] }) {
@@ -79,45 +158,8 @@ export function FindingCard({
 }) {
   const t = useT();
   const [open, setOpen] = useState(defaultOpen);
-  const [resolving, setResolving] = useState(false);
-  const [resolution, setResolution] = useState<string | null>(null);
   const { icon: Icon, color } = SEVERITY_STYLE[finding.severity];
-
-  const resolveWithAi = async () => {
-    if (prSourceBranch) {
-      const { status, branches, checkoutBranch, checkoutRemoteBranch } = useRepoStore.getState();
-      if (status?.current_branch !== prSourceBranch) {
-        const dirty =
-          !!status &&
-          (status.staged.length > 0 || status.unstaged.length > 0 || status.untracked.length > 0 || status.conflicted.length > 0);
-        if (dirty) {
-          pushErrorToast(t("finding.dirtyBranchSwitch"));
-          return;
-        }
-        if (!(await confirmAction(t("finding.confirmBranchSwitch", { branch: prSourceBranch }), false))) return;
-        try {
-          const hasLocal = branches.some((b) => b.name === prSourceBranch && !b.is_remote);
-          if (hasLocal) await checkoutBranch(prSourceBranch);
-          else await checkoutRemoteBranch(`origin/${prSourceBranch}`);
-        } catch (e) {
-          pushErrorToast(t("finding.branchSwitchFailed", { error: String(e) }));
-          return;
-        }
-      }
-    }
-
-    if (!projectId) return;
-    setResolving(true);
-    setResolution(null);
-    try {
-      const result = await resolveFindingWithAi(projectId, formatFindingAsFixPrompt(finding));
-      setResolution(result);
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setResolving(false);
-    }
-  };
+  const { resolving, resolution, resolve } = useResolveWithAi(projectId, prSourceBranch);
 
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
@@ -183,19 +225,11 @@ export function FindingCard({
           )}
 
           {projectId && (
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                onClick={resolveWithAi}
-                disabled={resolving}
-                className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
-              >
-                {resolving ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
-                {resolving ? t("finding.resolving") : t("finding.resolve")}
-              </button>
-            </div>
-          )}
-          {resolution && (
-            <p className="rounded-md bg-[var(--cf-accent-soft)] px-2.5 py-1.5 text-[var(--cf-text)]">{resolution}</p>
+            <ResolveWithAiButton
+              resolving={resolving}
+              resolution={resolution}
+              onClick={() => void resolve(formatFindingAsFixPrompt(finding))}
+            />
           )}
         </div>
       )}

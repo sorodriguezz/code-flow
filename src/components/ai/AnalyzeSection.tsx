@@ -23,7 +23,7 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
       projectId,
       kind: "analyze-changes",
       label: t("analyze.title"),
-      task: () => analyzeWorkingChanges(projectId),
+      task: (jobId) => analyzeWorkingChanges(projectId, jobId),
     });
   };
 

@@ -46,7 +46,7 @@ pub fn default_analyze_template() -> String {
 /// user commits it. Folds in the same workspace-level context/instructions/skills/MCPs as
 /// a PR review, just pointed at the local diff instead of a pull request.
 #[tauri::command]
-pub async fn analyze_working_changes(db: State<'_, Db>, project_id: String) -> Result<String, String> {
+pub async fn analyze_working_changes(db: State<'_, Db>, project_id: String, job_id: String) -> Result<String, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::get_project(&conn, &project_id)
@@ -112,8 +112,8 @@ pub async fn analyze_working_changes(db: State<'_, Db>, project_id: String) -> R
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let _ = match &result {
-            Ok(text) => queries::add_job_history(&conn, &project_id, "analyze-changes", "Análisis de cambios", "done", Some(text), None, "{}"),
-            Err(e) => queries::add_job_history(&conn, &project_id, "analyze-changes", "Análisis de cambios", "error", None, Some(e), "{}"),
+            Ok(text) => queries::add_job_history(&conn, &job_id, &project_id, "analyze-changes", "Análisis de cambios", "done", Some(text), None, "{}"),
+            Err(e) => queries::add_job_history(&conn, &job_id, &project_id, "analyze-changes", "Análisis de cambios", "error", None, Some(e), "{}"),
         };
     }
 

@@ -171,6 +171,7 @@ export interface JobHistoryEntry {
   project_id: string;
   kind: string;
   label: string;
+  custom_label: string | null;
   status: string;
   result: string | null;
   error: string | null;
@@ -185,6 +186,20 @@ export interface ChatConversationSummary {
   created_at: string;
   updated_at: string;
   turn_count: number;
+}
+
+export interface PrThreadComment {
+  author: string;
+  content: string;
+  published_date: string;
+}
+
+export interface PrCommentThread {
+  id: number;
+  file_path: string | null;
+  start_line: number | null;
+  end_line: number | null;
+  comments: PrThreadComment[];
 }
 
 export interface GitProgressEvent {

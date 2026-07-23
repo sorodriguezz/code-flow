@@ -88,6 +88,9 @@ pub struct JobHistoryEntry {
     pub project_id: String,
     pub kind: String,
     pub label: String,
+    /// A user-given rename, taking priority over `label` (and over whatever the frontend
+    /// would otherwise auto-derive, e.g. the PR title) when set.
+    pub custom_label: Option<String>,
     pub status: String,
     pub result: Option<String>,
     pub error: Option<String>,

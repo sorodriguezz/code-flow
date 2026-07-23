@@ -160,8 +160,28 @@ pub async fn list_pull_requests(
     ado::list_pull_requests(&org, &ado_project, &repo_id, &pat).await
 }
 
+/// Existing PR comment threads — e.g. from a human reviewer — so they can be shown alongside
+/// CodeFlow's own AI findings and resolved with AI the same way.
 #[tauri::command]
-pub async fn review_pull_request(app: AppHandle, db: State<'_, Db>, project_id: String, pr_id: i64) -> Result<String, String> {
+pub async fn list_pr_comment_threads(
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+) -> Result<Vec<ado::PrCommentThread>, String> {
+    let project = load_project(&db, &project_id)?;
+    let (org, ado_project, repo_id) = ado_link(&project)?;
+    let pat = pat_for_org(&org)?;
+    ado::list_pr_comment_threads(&org, &ado_project, &repo_id, pr_id, &pat).await
+}
+
+#[tauri::command]
+pub async fn review_pull_request(
+    app: AppHandle,
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+    job_id: String,
+) -> Result<String, String> {
     let project = load_project(&db, &project_id)?;
     let (org, ado_project, repo_id) = ado_link(&project)?;
     let pat = pat_for_org(&org)?;
@@ -243,8 +263,8 @@ pub async fn review_pull_request(app: AppHandle, db: State<'_, Db>, project_id: 
         let meta = serde_json::json!({ "prId": pr.id, "prTitle": pr.title }).to_string();
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let _ = match &result {
-            Ok(text) => queries::add_job_history(&conn, &project_id, "pr-review", &label, "done", Some(text), None, &meta),
-            Err(e) => queries::add_job_history(&conn, &project_id, "pr-review", &label, "error", None, Some(e), &meta),
+            Ok(text) => queries::add_job_history(&conn, &job_id, &project_id, "pr-review", &label, "done", Some(text), None, &meta),
+            Err(e) => queries::add_job_history(&conn, &job_id, &project_id, "pr-review", &label, "error", None, Some(e), &meta),
         };
     }
 

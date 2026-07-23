@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Search, Trash2, X } from "lucide-react";
+import { Pencil, Search, Trash2, X } from "lucide-react";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { usePrStore } from "../../state/prStore";
@@ -19,8 +19,11 @@ import {
 export function ActivityModal({ projectId, onClose }: { projectId: string; onClose: () => void }) {
   const t = useT();
   const jobs = useJobsStore((s) => s.byProject[projectId] ?? EMPTY_JOBS);
+  const renameJob = useJobsStore((s) => s.rename);
+  const removeJob = useJobsStore((s) => s.remove);
   const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
   const removeConversation = useChatHistoryStore((s) => s.remove);
+  const renameConversation = useChatHistoryStore((s) => s.rename);
   const prsByProject = usePrStore((s) => s.prsByProject);
   const selectedPr = usePrStore((s) => s.selectedPr);
   const selectPr = usePrStore((s) => s.selectPr);
@@ -28,6 +31,8 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
   const activeSessionId = useChatStore((s) => s.byProject[projectId]?.sessionId ?? null);
   const switchTo = useChatStore((s) => s.switchTo);
   const [query, setQuery] = useState("");
+  const [renamingKey, setRenamingKey] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
 
   const entries = useMemo(() => mergeActivityEntries(jobs, conversations), [jobs, conversations]);
   const filtered = useMemo(() => {
@@ -61,9 +66,23 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
     onClose();
   };
 
-  const handleDelete = async (sessionId: string) => {
+  const handleDelete = async (entry: ActivityEntry) => {
     if (!(await confirmAction(t("chatHistory.confirmDelete")))) return;
-    await removeConversation(projectId, sessionId);
+    if (entry.type === "chat") await removeConversation(projectId, entry.conv.session_id);
+    else await removeJob(projectId, entry.job.id);
+  };
+
+  const startRename = (entry: ActivityEntry) => {
+    setRenamingKey(entryKey(entry));
+    setRenameValue(entryTitle(entry));
+  };
+
+  const commitRename = async (entry: ActivityEntry) => {
+    const title = renameValue.trim();
+    setRenamingKey(null);
+    if (!title || title === entryTitle(entry)) return;
+    if (entry.type === "chat") await renameConversation(projectId, entry.conv.session_id, title);
+    else await renameJob(projectId, entry.job.id, title);
   };
 
   return (
@@ -99,6 +118,7 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
               {filtered.map((entry) => {
                 const { icon: Icon, color, spinning } = entryVisual(entry);
                 const isActive = entryKey(entry) === activeEntryKey;
+                const isRenaming = renamingKey === entryKey(entry);
                 return (
                   <div
                     key={entryKey(entry)}
@@ -108,25 +128,48 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
                         : "border-[var(--cf-border)] hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
                     }`}
                   >
-                    <button onClick={() => open(entry)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-                      <Icon size={13} className={spinning ? "shrink-0 animate-spin" : "shrink-0"} style={{ color }} />
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-[12px] font-medium text-[var(--cf-text)]">{entryTitle(entry)}</p>
-                        <p className="mt-0.5 text-[10px] text-[var(--cf-text-muted)]">
-                          {new Date(
-                            entry.type === "job" ? entry.job.createdAt : entry.conv.updated_at,
-                          ).toLocaleString()}
-                        </p>
-                      </div>
-                    </button>
-                    {entry.type === "chat" && (
-                      <button
-                        onClick={() => void handleDelete(entry.conv.session_id)}
-                        title={t("chatHistory.delete")}
-                        className="shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-danger)] group-hover:opacity-100"
-                      >
-                        <Trash2 size={12} />
+                    {isRenaming ? (
+                      <input
+                        autoFocus
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onBlur={() => void commitRename(entry)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") void commitRename(entry);
+                          else if (e.key === "Escape") setRenamingKey(null);
+                        }}
+                        className="min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-transparent px-1.5 py-0.5 text-[12px] font-medium text-[var(--cf-text)] outline-none"
+                      />
+                    ) : (
+                      <button onClick={() => open(entry)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                        <Icon size={13} className={spinning ? "shrink-0 animate-spin" : "shrink-0"} style={{ color }} />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[12px] font-medium text-[var(--cf-text)]">{entryTitle(entry)}</p>
+                          <p className="mt-0.5 text-[10px] text-[var(--cf-text-muted)]">
+                            {new Date(
+                              entry.type === "job" ? entry.job.createdAt : entry.conv.updated_at,
+                            ).toLocaleString()}
+                          </p>
+                        </div>
                       </button>
+                    )}
+                    {!isRenaming && (
+                      <div className="flex shrink-0 items-center gap-1 opacity-0 group-hover:opacity-100">
+                        <button
+                          onClick={() => startRename(entry)}
+                          title={t("ai.rename")}
+                          className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                        >
+                          <Pencil size={12} />
+                        </button>
+                        <button
+                          onClick={() => void handleDelete(entry)}
+                          title={t("chatHistory.delete")}
+                          className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
                     )}
                   </div>
                 );

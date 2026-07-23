@@ -15,7 +15,9 @@ import {
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
 import { parseAnalysis, buildReviewComments } from "../../lib/parseAnalysis";
+import { listPrCommentThreads } from "../../lib/tauri/commands";
 import { FindingCard, QualityGateBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
+import { PrCommentCard } from "./PrCommentCard";
 import {
   mergeActivityEntries,
   entryKey,
@@ -43,7 +45,7 @@ import { EmptyState } from "../common/EmptyState";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { ActivityModal } from "./ActivityModal";
 import { AnalyzeSection } from "./AnalyzeSection";
-import type { PullRequestSummary } from "../../types/domain";
+import type { PullRequestSummary, PrCommentThread } from "../../types/domain";
 
 const PANEL_MIN = 280;
 const PANEL_MAX = 520;
@@ -202,6 +204,24 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
     void postReview(projectId, pr.id, comments);
   };
 
+  // Existing comment threads on the PR — e.g. from a human reviewer — refetched fresh every
+  // time this PR is opened rather than cached, since they can change outside of CodeFlow at
+  // any time (someone replies, resolves a thread, etc.).
+  const [openThreads, setOpenThreads] = useState<PrCommentThread[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void listPrCommentThreads(projectId, pr.id)
+      .then((threads) => {
+        if (!cancelled) setOpenThreads(threads);
+      })
+      .catch(() => {
+        if (!cancelled) setOpenThreads([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, pr.id]);
+
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 overflow-auto p-4">
@@ -236,6 +256,17 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
             <X size={14} />
           </button>
         </div>
+
+        {openThreads.length > 0 && (
+          <div className="mb-4 space-y-2">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              {t("pr.openComments", { n: openThreads.length })}
+            </p>
+            {openThreads.map((thread) => (
+              <PrCommentCard key={thread.id} thread={thread} projectId={projectId} prSourceBranch={pr.source_branch} />
+            ))}
+          </div>
+        )}
 
         {loading && (
           <div className="flex items-center gap-3 rounded-lg border border-[var(--cf-border)] p-4 text-[12px] text-[var(--cf-text-muted)]">

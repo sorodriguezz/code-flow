@@ -54,7 +54,7 @@ export const usePrStore = create<PrState>((set, get) => ({
       kind: "pr-review",
       label: pr ? `#${pr.id} ${pr.title}` : `PR #${prId}`,
       meta: { prId },
-      task: () => api.reviewPullRequest(projectId, prId),
+      task: (jobId) => api.reviewPullRequest(projectId, prId, jobId),
     });
   },
 

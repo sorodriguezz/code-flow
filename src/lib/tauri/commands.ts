@@ -14,6 +14,7 @@ import type {
   JobHistoryEntry,
   MergeOutcome,
   NewProject,
+  PrCommentThread,
   Project,
   PullRequestSummary,
   RemoteInfo,
@@ -311,8 +312,8 @@ export const defaultReviewTemplate = () => invoke<string>("default_review_templa
 
 export const defaultAnalyzeTemplate = () => invoke<string>("default_analyze_template");
 
-export const analyzeWorkingChanges = (projectId: string) =>
-  invoke<string>("analyze_working_changes", { projectId });
+export const analyzeWorkingChanges = (projectId: string, jobId: string) =>
+  invoke<string>("analyze_working_changes", { projectId, jobId });
 
 export const resolveFindingWithAi = (projectId: string, findingPrompt: string) =>
   invoke<string>("resolve_finding_with_ai", { projectId, findingPrompt });
@@ -343,8 +344,11 @@ export const unlinkProjectAdo = (id: string) => invoke<void>("unlink_project_ado
 export const listPullRequests = (projectId: string) =>
   invoke<PullRequestSummary[]>("list_pull_requests", { projectId });
 
-export const reviewPullRequest = (projectId: string, prId: number) =>
-  invoke<string>("review_pull_request", { projectId, prId });
+export const listPrCommentThreads = (projectId: string, prId: number) =>
+  invoke<PrCommentThread[]>("list_pr_comment_threads", { projectId, prId });
+
+export const reviewPullRequest = (projectId: string, prId: number, jobId: string) =>
+  invoke<string>("review_pull_request", { projectId, prId, jobId });
 
 export const postPrReviewComment = (projectId: string, prId: number, comments: ReviewCommentInput[]) =>
   invoke<void>("post_pr_review_comment", { projectId, prId, comments });
@@ -378,7 +382,14 @@ export const getChatConversation = (projectId: string, sessionId: string) =>
 export const deleteChatConversation = (projectId: string, sessionId: string) =>
   invoke<void>("delete_chat_conversation", { projectId, sessionId });
 
+export const renameChatConversation = (projectId: string, sessionId: string, title: string) =>
+  invoke<void>("rename_chat_conversation", { projectId, sessionId, title });
+
 export const listJobHistory = (projectId: string) => invoke<JobHistoryEntry[]>("list_job_history", { projectId });
+
+export const renameJobHistoryEntry = (id: string, label: string) => invoke<void>("rename_job_history_entry", { id, label });
+
+export const deleteJobHistoryEntry = (id: string) => invoke<void>("delete_job_history_entry", { id });
 
 // ---------- filesystem watcher ----------
 

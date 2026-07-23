@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { listChatConversations, deleteChatConversation } from "../lib/tauri/commands";
+import { listChatConversations, deleteChatConversation, renameChatConversation } from "../lib/tauri/commands";
 import type { ChatConversationSummary } from "../types/domain";
 
 interface ChatHistoryState {
@@ -7,6 +7,7 @@ interface ChatHistoryState {
   loaded: Record<string, boolean>;
   load: (projectId: string) => Promise<void>;
   remove: (projectId: string, sessionId: string) => Promise<void>;
+  rename: (projectId: string, sessionId: string, title: string) => Promise<void>;
 }
 
 export const useChatHistoryStore = create<ChatHistoryState>((set) => ({
@@ -27,6 +28,16 @@ export const useChatHistoryStore = create<ChatHistoryState>((set) => ({
       byProject: {
         ...s.byProject,
         [projectId]: (s.byProject[projectId] ?? []).filter((c) => c.session_id !== sessionId),
+      },
+    }));
+  },
+
+  rename: async (projectId, sessionId, title) => {
+    await renameChatConversation(projectId, sessionId, title);
+    set((s) => ({
+      byProject: {
+        ...s.byProject,
+        [projectId]: (s.byProject[projectId] ?? []).map((c) => (c.session_id === sessionId ? { ...c, title } : c)),
       },
     }));
   },
