@@ -70,6 +70,29 @@ pub struct WorkspaceSkill {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityLogEntry {
+    pub id: String,
+    pub project_id: String,
+    pub session_id: Option<String>,
+    pub question: String,
+    pub answer: String,
+    pub created_at: String,
+}
+
+/// One row per Claude Code `session_id` seen in `activity_log` for a project — the
+/// conversation-level view the "Chat history" sidebar/modal actually lists, as opposed to
+/// the individual question/answer turns underneath it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatConversationSummary {
+    pub session_id: String,
+    pub project_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub turn_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMcp {
     pub id: String,
     pub workspace_id: String,

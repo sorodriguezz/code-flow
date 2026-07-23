@@ -1,3 +1,4 @@
+pub mod activity_cmd;
 pub mod ado_cmd;
 pub mod app_cmd;
 pub mod claude_cmd;

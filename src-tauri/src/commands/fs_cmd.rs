@@ -24,3 +24,8 @@ pub fn open_in_default_app(repo_path: String, rel_path: String) -> Result<(), St
 pub fn reveal_in_file_manager(path: String) -> Result<(), String> {
     fsops::reveal_in_file_manager(&path)
 }
+
+#[tauri::command]
+pub fn open_in_vscode(path: String) -> Result<(), String> {
+    fsops::open_in_vscode(&path)
+}

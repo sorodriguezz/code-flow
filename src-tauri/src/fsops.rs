@@ -86,3 +86,20 @@ pub fn open_in_default_app(repo_path: &str, rel_path: &str) -> Result<(), String
 pub fn reveal_in_file_manager(path: &str) -> Result<(), String> {
     open::that(path).map_err(|e| e.to_string())
 }
+
+/// Opens a directory in VS Code via the `code` CLI. `code` is a `.cmd` shim on Windows —
+/// spawning it directly (rather than through `cmd /C`) fails to launch, the same issue as
+/// `npx` in `skills_cmd.rs`.
+pub fn open_in_vscode(path: &str) -> Result<(), String> {
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/C", "code"]);
+        cmd
+    } else {
+        std::process::Command::new("code")
+    };
+    cmd.arg(path)
+        .spawn()
+        .map_err(|e| format!("failed to launch VS Code (is `code` on PATH?): {e}"))?;
+    Ok(())
+}

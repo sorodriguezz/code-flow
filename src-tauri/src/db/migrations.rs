@@ -81,11 +81,27 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        -- Persisted record of every AI chat question/answer turn, scoped per project — the
+        -- chat itself (chatStore) only lives in memory for the session, so without this a
+        -- restart silently loses everything that was ever asked. `session_id` is the Claude
+        -- Code session these turns can be `--resume`d under; rows sharing one `session_id`
+        -- reconstruct a full conversation, letting the UI list/reopen/continue past chats
+        -- instead of only ever having one ongoing conversation per project.
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id          TEXT PRIMARY KEY,
+            project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            session_id  TEXT,
+            question    TEXT NOT NULL,
+            answer      TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        );
         "#,
     )?;
 
     migrate_review_contexts_to_workspace(conn)?;
     drop_legacy_installed_skills(conn)?;
+    add_session_id_to_activity_log(conn)?;
     Ok(())
 }
 
@@ -124,4 +140,14 @@ fn migrate_review_contexts_to_workspace(conn: &Connection) -> rusqlite::Result<(
 /// (skills management wasn't implemented yet), so there's no data worth preserving.
 fn drop_legacy_installed_skills(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("DROP TABLE IF EXISTS installed_skills;")
+}
+
+/// `activity_log` originally had no `session_id` column — for a database created before
+/// conversations were grouped by session, add it (existing rows just become un-groupable
+/// single turns, which is fine, there's no old session id to backfill them with).
+fn add_session_id_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "activity_log", "session_id")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE activity_log ADD COLUMN session_id TEXT;")
 }

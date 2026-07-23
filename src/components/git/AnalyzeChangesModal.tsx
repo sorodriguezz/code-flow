@@ -5,7 +5,6 @@ import {
   ChevronDown,
   ChevronRight,
   Info,
-  Loader2,
   RefreshCw,
   ShieldCheck,
   X,
@@ -14,6 +13,7 @@ import { analyzeWorkingChanges } from "../../lib/tauri/commands";
 import { parseAnalysis, type AnalysisFinding } from "../../lib/parseAnalysis";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useT } from "../../state/languageStore";
+import { ThinkingOrb } from "../common/ThinkingOrb";
 
 const SEVERITY_STYLE: Record<AnalysisFinding["severity"], { icon: typeof AlertOctagon; color: string }> = {
   critical: { icon: AlertOctagon, color: "var(--cf-danger)" },
@@ -178,9 +178,9 @@ export function AnalyzeChangesModal({ projectId, onClose }: { projectId: string;
 
         <div className="flex-1 overflow-auto p-4">
           {loading && (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-              <Loader2 size={20} className="animate-spin text-[var(--cf-accent)]" />
-              <p className="text-[13px] text-[var(--cf-text-muted)]">{t("analyze.analyzing")}</p>
+            <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
+              <ThinkingOrb size="lg" />
+              <p className="text-[13px] text-[var(--cf-text-muted)]">{t("ai.working")}</p>
             </div>
           )}
 

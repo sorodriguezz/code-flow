@@ -2,7 +2,10 @@ use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use super::models::{NewProject, Project, ReviewContext, Workspace, WorkspaceMcp, WorkspaceMdFile, WorkspaceSkill};
+use super::models::{
+    ActivityLogEntry, ChatConversationSummary, NewProject, Project, ReviewContext, Workspace, WorkspaceMcp,
+    WorkspaceMdFile, WorkspaceSkill,
+};
 
 fn now() -> String {
     Utc::now().to_rfc3339()
@@ -399,6 +402,135 @@ pub fn list_workspace_mcps(conn: &Connection, workspace_id: &str) -> rusqlite::R
 
 pub fn delete_workspace_mcp(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM workspace_mcps WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+// ---------- activity log (AI chat history / conversations) ----------
+
+pub fn add_activity_log(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+    question: &str,
+    answer: &str,
+) -> rusqlite::Result<ActivityLogEntry> {
+    let entry = ActivityLogEntry {
+        id: Uuid::new_v4().to_string(),
+        project_id: project_id.to_string(),
+        session_id: Some(session_id.to_string()),
+        question: question.to_string(),
+        answer: answer.to_string(),
+        created_at: now(),
+    };
+    conn.execute(
+        "INSERT INTO activity_log (id, project_id, session_id, question, answer, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![entry.id, entry.project_id, entry.session_id, entry.question, entry.answer, entry.created_at],
+    )?;
+    Ok(entry)
+}
+
+fn all_activity_log_entries(conn: &Connection, project_id: &str) -> rusqlite::Result<Vec<ActivityLogEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, session_id, question, answer, created_at
+         FROM activity_log WHERE project_id = ?1 AND session_id IS NOT NULL ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        Ok(ActivityLogEntry {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            session_id: row.get(2)?,
+            question: row.get(3)?,
+            answer: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Groups every turn into one summary per `session_id` (title = first question asked,
+/// `updated_at` = latest turn) — the conversation-level list the history sidebar/modal show.
+/// `search`, when given, keeps only conversations where *any* turn's question or answer
+/// contains it, so search covers full past exchanges, not just the title.
+pub fn list_chat_conversations(
+    conn: &Connection,
+    project_id: &str,
+    search: Option<&str>,
+) -> rusqlite::Result<Vec<ChatConversationSummary>> {
+    let entries = all_activity_log_entries(conn, project_id)?;
+    let needle = search.map(|s| s.to_lowercase());
+
+    let mut order: Vec<String> = Vec::new();
+    let mut by_session: std::collections::HashMap<String, ChatConversationSummary> = std::collections::HashMap::new();
+    let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for e in &entries {
+        let Some(sid) = e.session_id.clone() else { continue };
+        if let Some(q) = &needle {
+            if e.question.to_lowercase().contains(q.as_str()) || e.answer.to_lowercase().contains(q.as_str()) {
+                matched.insert(sid.clone());
+            }
+        }
+        match by_session.get_mut(&sid) {
+            Some(summary) => {
+                summary.updated_at = e.created_at.clone();
+                summary.turn_count += 1;
+            }
+            None => {
+                order.push(sid.clone());
+                by_session.insert(
+                    sid.clone(),
+                    ChatConversationSummary {
+                        session_id: sid,
+                        project_id: project_id.to_string(),
+                        title: e.question.clone(),
+                        created_at: e.created_at.clone(),
+                        updated_at: e.created_at.clone(),
+                        turn_count: 1,
+                    },
+                );
+            }
+        }
+    }
+
+    let mut result: Vec<ChatConversationSummary> = order
+        .into_iter()
+        .filter(|sid| needle.is_none() || matched.contains(sid))
+        .filter_map(|sid| by_session.remove(&sid))
+        .collect();
+    result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(result)
+}
+
+/// Every turn of one conversation, oldest first — flattened into `[user, assistant, user,
+/// assistant, ...]` by the frontend to redisplay exactly like a live chat.
+pub fn get_conversation_messages(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+) -> rusqlite::Result<Vec<ActivityLogEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, session_id, question, answer, created_at
+         FROM activity_log WHERE project_id = ?1 AND session_id = ?2 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![project_id, session_id], |row| {
+        Ok(ActivityLogEntry {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            session_id: row.get(2)?,
+            question: row.get(3)?,
+            answer: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn delete_chat_conversation(conn: &Connection, project_id: &str, session_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM activity_log WHERE project_id = ?1 AND session_id = ?2",
+        params![project_id, session_id],
+    )?;
     Ok(())
 }
 

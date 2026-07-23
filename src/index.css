@@ -144,6 +144,81 @@ body {
   animation: cf-fade-in 0.15s ease-out;
 }
 
+/* "Thinking" orb — a living, morphing gradient blob standing in for a plain spinner
+   wherever Claude is actually working (chat, PR review, pre-commit analysis). Pure CSS
+   (transform/filter only, no canvas/JS loop) to stay consistent with the animations above. */
+@keyframes cf-orb-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes cf-orb-morph {
+  0%,
+  100% {
+    border-radius: 42% 58% 63% 37% / 41% 44% 56% 59%;
+  }
+  33% {
+    border-radius: 58% 42% 39% 61% / 59% 52% 48% 41%;
+  }
+  66% {
+    border-radius: 63% 37% 54% 46% / 38% 62% 38% 62%;
+  }
+}
+@keyframes cf-orb-pulse {
+  0%,
+  100% {
+    transform: scale(0.92);
+  }
+  50% {
+    transform: scale(1.06);
+  }
+}
+
+.cf-orb {
+  --cf-orb-size: 22px;
+  --cf-orb-gradient: conic-gradient(from 0deg, var(--cf-accent), #d946ef, #22d3ee, var(--cf-accent));
+  position: relative;
+  display: inline-block;
+  width: var(--cf-orb-size);
+  height: var(--cf-orb-size);
+  flex-shrink: 0;
+}
+.cf-orb-sm {
+  --cf-orb-size: 14px;
+}
+.cf-orb-md {
+  --cf-orb-size: 22px;
+}
+.cf-orb-lg {
+  --cf-orb-size: 44px;
+}
+.cf-orb-glow,
+.cf-orb-core {
+  position: absolute;
+  inset: 0;
+  border-radius: 42% 58% 63% 37% / 41% 44% 56% 59%;
+  background: var(--cf-orb-gradient);
+  transform-origin: center;
+  animation:
+    cf-orb-spin 3.6s linear infinite,
+    cf-orb-morph 5s ease-in-out infinite,
+    cf-orb-pulse 2.2s ease-in-out infinite;
+}
+.cf-orb-glow {
+  filter: blur(calc(var(--cf-orb-size) * 0.45));
+  opacity: 0.6;
+}
+.cf-orb-core {
+  filter: saturate(1.2);
+  box-shadow: 0 0 calc(var(--cf-orb-size) * 0.25) color-mix(in oklab, var(--cf-accent) 55%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-orb-glow,
+  .cf-orb-core {
+    animation: none;
+  }
+}
+
 .cf-editor-changed-gutter {
   border-left: 3px solid var(--cf-success);
   margin-left: 3px;

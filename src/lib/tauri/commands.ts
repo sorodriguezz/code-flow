@@ -1,9 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ActivityLogEntry,
   AdoProject,
   AdoRepo,
   AutoLinkResult,
   BranchInfo,
+  ChatConversationSummary,
   CommitInfo,
   ConflictFile,
   FileDiffInfo,
@@ -357,6 +359,19 @@ export const openInDefaultApp = (repoPath: string, relPath: string) =>
   invoke<void>("open_in_default_app", { repoPath, relPath });
 
 export const revealInFileManager = (path: string) => invoke<void>("reveal_in_file_manager", { path });
+
+export const openInVsCode = (path: string) => invoke<void>("open_in_vscode", { path });
+
+// ---------- activity log (AI chat history / conversations) ----------
+
+export const listChatConversations = (projectId: string, search?: string) =>
+  invoke<ChatConversationSummary[]>("list_chat_conversations", { projectId, search: search ?? null });
+
+export const getChatConversation = (projectId: string, sessionId: string) =>
+  invoke<ActivityLogEntry[]>("get_chat_conversation", { projectId, sessionId });
+
+export const deleteChatConversation = (projectId: string, sessionId: string) =>
+  invoke<void>("delete_chat_conversation", { projectId, sessionId });
 
 // ---------- filesystem watcher ----------
 

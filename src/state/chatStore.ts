@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import { sendChatMessage } from "../lib/tauri/commands";
+import { sendChatMessage, getChatConversation } from "../lib/tauri/commands";
 import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
+import { useChatHistoryStore } from "./activityStore";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -28,6 +29,10 @@ interface ChatState {
    * if the user switches projects or closes the AI panel while Claude is still answering. */
   send: (projectId: string, message: string) => void;
   clear: (projectId: string) => void;
+  /** Reopens a past conversation from `activity_log` — replaces the live chat with its turns
+   * and resumes its `session_id`, so sending another message continues that same Claude Code
+   * session instead of starting a new one. */
+  switchTo: (projectId: string, sessionId: string) => Promise<void>;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -67,6 +72,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             },
           };
         });
+        void useChatHistoryStore.getState().load(projectId);
       })
       .catch((e) => {
         set((s) => {
@@ -83,6 +89,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   clear: (projectId) => {
     set((s) => ({ byProject: { ...s.byProject, [projectId]: emptyChat() } }));
+  },
+
+  switchTo: async (projectId, sessionId) => {
+    const entries = await getChatConversation(projectId, sessionId);
+    const messages: ChatMessage[] = entries.flatMap((e) => [
+      { role: "user" as const, content: e.question },
+      { role: "assistant" as const, content: e.answer },
+    ]);
+    set((s) => ({
+      byProject: { ...s.byProject, [projectId]: { messages, sessionId, sending: false, error: null } },
+    }));
   },
 }));
 

@@ -6,10 +6,12 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  Clock,
   Copy,
   ExternalLink,
   History,
   Loader2,
+  Plus,
   Sparkles,
   Wrench,
   X,
@@ -22,11 +24,14 @@ import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
 import { useJobsStore, EMPTY_JOBS, type Job } from "../../state/jobsStore";
 import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
+import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
+import { ThinkingOrb } from "../common/ThinkingOrb";
+import { ChatHistoryModal } from "./ChatHistoryModal";
 import type { PullRequestSummary } from "../../types/domain";
 
 const PANEL_MIN = 280;
@@ -105,6 +110,68 @@ function JobsHistory({ projectId }: { projectId: string }) {
   );
 }
 
+function ChatHistorySection({ projectId }: { projectId: string }) {
+  const t = useT();
+  const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
+  const loaded = useChatHistoryStore((s) => s.loaded[projectId]);
+  const load = useChatHistoryStore((s) => s.load);
+  const activeSessionId = useChatStore((s) => s.byProject[projectId]?.sessionId ?? null);
+  const switchTo = useChatStore((s) => s.switchTo);
+  const [collapsed, setCollapsed] = useState(false);
+  const [showModal, setShowModal] = useState(false);
+
+  useEffect(() => {
+    if (!loaded) void load(projectId);
+  }, [projectId, loaded, load]);
+
+  if (conversations.length === 0) return null;
+
+  const topFive = conversations.slice(0, 5);
+
+  return (
+    <div className="shrink-0 border-b border-[var(--cf-border)]">
+      <button
+        onClick={() => setCollapsed((v) => !v)}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+      >
+        <Clock size={11} />
+        {t("chatHistory.title")}
+        <span className="ml-auto">
+          {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+        </span>
+      </button>
+      {!collapsed && (
+        <div className="space-y-0.5 px-1.5 pb-2">
+          {topFive.map((conv) => (
+            <button
+              key={conv.session_id}
+              title={conv.title}
+              onClick={() => void switchTo(projectId, conv.session_id)}
+              className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${
+                conv.session_id === activeSessionId
+                  ? "bg-[var(--cf-accent-soft)]"
+                  : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              }`}
+            >
+              <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{conv.title}</span>
+              <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">
+                {relativeTime(new Date(conv.updated_at).getTime(), t)}
+              </span>
+            </button>
+          ))}
+          <button
+            onClick={() => setShowModal(true)}
+            className="w-full rounded-md px-2 py-1 text-center text-[11px] font-medium text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          >
+            {t("chatHistory.viewAll")}
+          </button>
+        </div>
+      )}
+      {showModal && <ChatHistoryModal projectId={projectId} onClose={() => setShowModal(false)} />}
+    </div>
+  );
+}
+
 function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequestSummary }) {
   const t = useT();
   const reviewPr = usePrStore((s) => s.reviewPr);
@@ -160,9 +227,9 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
         </div>
 
         {loading && (
-          <div className="flex items-center gap-2 rounded-lg border border-[var(--cf-border)] p-4 text-[12px] text-[var(--cf-text-muted)]">
-            <Loader2 size={13} className="animate-spin" />
-            {t("chat.reviewing")}
+          <div className="flex items-center gap-3 rounded-lg border border-[var(--cf-border)] p-4 text-[12px] text-[var(--cf-text-muted)]">
+            <ThinkingOrb size="sm" />
+            {t("ai.working")}
           </div>
         )}
 
@@ -266,6 +333,7 @@ function ChatSection({ projectId }: { projectId: string }) {
   const t = useT();
   const chat = useChatStore((s) => s.byProject[projectId] ?? EMPTY_CHAT);
   const send = useChatStore((s) => s.send);
+  const clearChat = useChatStore((s) => s.clear);
   const [input, setInput] = useState("");
   const openSettings = useUiStore((s) => s.openSettings);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -291,7 +359,15 @@ function ChatSection({ projectId }: { projectId: string }) {
   return (
     <div className="flex h-full flex-col">
       {chat.messages.length > 0 && (
-        <div className="flex shrink-0 justify-end border-b border-[var(--cf-border)] px-2 py-1">
+        <div className="flex shrink-0 items-center justify-end gap-1 border-b border-[var(--cf-border)] px-2 py-1">
+          <button
+            onClick={() => clearChat(projectId)}
+            title={t("chatHistory.newChat")}
+            className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          >
+            <Plus size={11} />
+            {t("chatHistory.newChat")}
+          </button>
           <button
             onClick={copyConversation}
             title={t("chat.copyAll")}
@@ -322,9 +398,9 @@ function ChatSection({ projectId }: { projectId: string }) {
               <ChatBubble key={i} message={m} />
             ))}
             {chat.sending && (
-              <div className="mr-auto flex max-w-[85%] items-center gap-1.5 rounded-lg bg-[var(--cf-surface-raised)] px-2.5 py-1.5">
-                <Loader2 size={11} className="animate-spin text-[var(--cf-text-muted)]" />
-                <span className="text-[11px] text-[var(--cf-text-muted)]">{t("chat.thinking")}</span>
+              <div className="mr-auto flex max-w-[85%] items-center gap-2 rounded-lg bg-[var(--cf-surface-raised)] px-2.5 py-1.5">
+                <ThinkingOrb size="sm" />
+                <span className="text-[11px] text-[var(--cf-text-muted)]">{t("ai.working")}</span>
               </div>
             )}
             {chat.error && (
@@ -424,6 +500,7 @@ export function AiPanel() {
         ) : (
           <>
             <JobsHistory projectId={project.id} />
+            <ChatHistorySection projectId={project.id} />
             <div className="min-h-0 flex-1">
               {selectedPr ? (
                 <PrReviewSection projectId={project.id} pr={selectedPr} />

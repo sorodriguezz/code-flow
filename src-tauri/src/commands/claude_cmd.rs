@@ -175,5 +175,10 @@ pub async fn send_chat_message(
     )
     .await?;
 
+    if let Some(sid) = &new_session_id {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let _ = queries::add_activity_log(&conn, &project_id, sid, &message, &text);
+    }
+
     Ok(ChatReply { text, session_id: new_session_id })
 }

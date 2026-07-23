@@ -7,6 +7,7 @@ import {
   ChevronRight,
   CircleDot,
   Cloud,
+  Code2,
   Eye,
   Folder,
   FolderInput,
@@ -30,6 +31,7 @@ import { usePrStore } from "../../state/prStore";
 import {
   pickFolder,
   revealInFileManager,
+  openInVsCode,
   getSetting,
   getAdoPat,
   autoLinkProjectAdo,
@@ -43,6 +45,7 @@ import { CloneRepoModal } from "./CloneRepoModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { StashDiffModal } from "./StashDiffModal";
 import { confirmAction } from "../../state/confirmStore";
+import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -790,6 +793,7 @@ function ProjectRow({ project }: { project: Project }) {
   const [showCreateBranch, setShowCreateBranch] = useState(false);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
   const [revealing, setRevealing] = useState(false);
+  const [openingVsCode, setOpeningVsCode] = useState(false);
 
   const select = () => {
     setActiveProject(project.id);
@@ -825,6 +829,23 @@ function ProjectRow({ project }: { project: Project }) {
         </button>
         <button onClick={select} className="flex flex-1 min-w-0 items-center gap-2 text-left">
           <span className="flex-1 min-w-0 truncate font-medium">{project.name}</span>
+        </button>
+        <button
+          title={t("sidebar.openInVsCode")}
+          onClick={async (e) => {
+            e.stopPropagation();
+            setOpeningVsCode(true);
+            try {
+              await openInVsCode(project.local_path);
+            } catch (err) {
+              pushErrorToast(String(err));
+            } finally {
+              setOpeningVsCode(false);
+            }
+          }}
+          className="opacity-0 group-hover:opacity-100"
+        >
+          {openingVsCode ? <Loader2 size={13} className="animate-spin" /> : <Code2 size={13} />}
         </button>
         {otherWorkspaces.length > 0 && (
           <button

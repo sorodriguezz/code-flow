@@ -157,6 +157,24 @@ export interface WorkspaceMcp {
   created_at: string;
 }
 
+export interface ActivityLogEntry {
+  id: string;
+  project_id: string;
+  session_id: string | null;
+  question: string;
+  answer: string;
+  created_at: string;
+}
+
+export interface ChatConversationSummary {
+  session_id: string;
+  project_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  turn_count: number;
+}
+
 export interface GitProgressEvent {
   op: string;
   line: string;
