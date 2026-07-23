@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Briefcase, Check, Plus, Trash2 } from "lucide-react";
+import { Briefcase, Check, ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
 import { useToastStore } from "../../state/toastStore";
@@ -17,6 +17,17 @@ export function ProjectsSettings() {
   const setProjectColor = useWorkspaceStore((s) => s.setProjectColor);
   const [newName, setNewName] = useState("");
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  // Collapsed by default — a workspace with dozens of repos would otherwise dump all of
+  // them on screen the moment Settings opens. Membership means "expanded", so any workspace
+  // not yet toggled (including newly added ones) starts collapsed.
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+  const toggleExpanded = (id: string) =>
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
   const copyPath = async (path: string) => {
     await navigator.clipboard.writeText(path);
@@ -43,11 +54,28 @@ export function ProjectsSettings() {
               ? t("settings.removeWorkspaceHasProjects")
               : t("settings.removeWorkspace");
 
+          const expanded = expandedIds.has(ws.id);
+
           return (
             <div key={ws.id} className="rounded-lg border border-[var(--cf-border)] p-2.5">
-              <div className="mb-2 flex items-start gap-2 text-[13px] font-medium">
-                <Briefcase size={13} style={{ color: ws.color }} className="mt-0.5" />
-                <span className="flex-1">{ws.name}</span>
+              <div className={`flex items-center gap-2 text-[13px] font-medium ${expanded ? "mb-2" : ""}`}>
+                <button
+                  onClick={() => toggleExpanded(ws.id)}
+                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                >
+                  {expanded ? (
+                    <ChevronDown size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  ) : (
+                    <ChevronRight size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  )}
+                  <Briefcase size={13} style={{ color: ws.color }} className="shrink-0" />
+                  <span className="flex-1 truncate">{ws.name}</span>
+                  {!expanded && (
+                    <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+                      {projects.length}
+                    </span>
+                  )}
+                </button>
                 <div className="flex items-center gap-1.5">
                   <ColorSwatchPicker value={ws.color} onChange={(color) => setWorkspaceColor(ws.id, color)} />
                   <button
@@ -65,38 +93,40 @@ export function ProjectsSettings() {
                 </div>
               </div>
 
-              <div className="space-y-1.5">
-                {projects.map((p) => (
-                  <div key={p.id} className="rounded-md border border-[var(--cf-border)] px-2.5 py-1.5">
-                    <div className="flex items-center gap-2 text-[12px]">
-                      <ColorSwatchPicker value={p.color} onChange={(color) => setProjectColor(p.id, ws.id, color)} />
-                      <span className="flex-1 truncate font-medium">{p.name}</span>
+              {expanded && (
+                <div className="space-y-1.5">
+                  {projects.map((p) => (
+                    <div key={p.id} className="rounded-md border border-[var(--cf-border)] px-2.5 py-1.5">
+                      <div className="flex items-center gap-2 text-[12px]">
+                        <ColorSwatchPicker value={p.color} onChange={(color) => setProjectColor(p.id, ws.id, color)} />
+                        <span className="flex-1 truncate font-medium">{p.name}</span>
+                        <button
+                          onClick={async () => {
+                            if (await confirmAction(t("settings.removeProjectConfirm", { name: p.name }))) {
+                              void removeProject(p.id, ws.id);
+                            }
+                          }}
+                          title={t("settings.removeProject")}
+                          className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
                       <button
-                        onClick={async () => {
-                          if (await confirmAction(t("settings.removeProjectConfirm", { name: p.name }))) {
-                            void removeProject(p.id, ws.id);
-                          }
-                        }}
-                        title={t("settings.removeProject")}
-                        className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                        onClick={() => copyPath(p.local_path)}
+                        title={t("settings.copyPath")}
+                        className="mt-1.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                       >
-                        <Trash2 size={13} />
+                        {copiedPath === p.local_path && <Check size={11} className="shrink-0 text-[var(--cf-success)]" />}
+                        <span className="truncate">{copiedPath === p.local_path ? t("settings.pathCopied") : p.local_path}</span>
                       </button>
                     </div>
-                    <button
-                      onClick={() => copyPath(p.local_path)}
-                      title={t("settings.copyPath")}
-                      className="mt-1.5 flex w-full min-w-0 items-center gap-1 truncate text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-                    >
-                      {copiedPath === p.local_path && <Check size={11} className="shrink-0 text-[var(--cf-success)]" />}
-                      <span className="truncate">{copiedPath === p.local_path ? t("settings.pathCopied") : p.local_path}</span>
-                    </button>
-                  </div>
-                ))}
-                {projects.length === 0 && (
-                  <p className="text-[12px] text-[var(--cf-text-muted)]">{t("settings.noProjectsInWorkspace")}</p>
-                )}
-              </div>
+                  ))}
+                  {projects.length === 0 && (
+                    <p className="text-[12px] text-[var(--cf-text-muted)]">{t("settings.noProjectsInWorkspace")}</p>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}

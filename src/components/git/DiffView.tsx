@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { memo, useMemo, useRef, useState } from "react";
 import { DiffEditor } from "@monaco-editor/react";
 import { Columns2, FileDiff, Rows3 } from "lucide-react";
 import type { FileDiffInfo } from "../../types/domain";
@@ -124,7 +124,7 @@ function ChangeMap({
   );
 }
 
-export function DiffView({ files }: { files: FileDiffInfo[] }) {
+function DiffViewImpl({ files }: { files: FileDiffInfo[] }) {
   const t = useT();
   const [mode, setMode] = useState<ViewMode>("unified");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -238,3 +238,9 @@ export function DiffView({ files }: { files: FileDiffInfo[] }) {
     </div>
   );
 }
+
+/** Memoized on `files` — dragging the diff panel's resize handle only changes the panel's
+ * width in the parent (`GraphView`/`ChangesPanel`), which re-renders every drag tick; without
+ * this, a large commit's whole line-by-line diff tree (or several Monaco `DiffEditor`s in
+ * split mode) would get rebuilt on every pointermove instead of just resizing. */
+export const DiffView = memo(DiffViewImpl);
