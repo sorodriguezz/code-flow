@@ -485,7 +485,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     try {
       await guarded(set, async () => {
         await api.gitPush(repoPath, setUpstream);
-        await get().refreshBranches();
+        await Promise.all([get().refreshBranches(), get().refreshUnpushedCommits()]);
       });
     } finally {
       set({ remoteOp: null });

@@ -331,8 +331,11 @@ export function ChangesPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {merging && <ConflictsBanner />}
-      <div className="relative flex min-h-0 flex-1">
-      <div style={{ width: listWidth }} className="flex shrink-0 flex-col border-r border-[var(--cf-border)]">
+      <div className="relative flex min-h-0 flex-1 gap-1.5 p-2">
+      <div
+        style={{ width: listWidth }}
+        className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+      >
         <div className="flex items-center justify-between border-b border-[var(--cf-border)] px-3 py-2">
           <span className="text-[12px] font-semibold text-[var(--cf-text-muted)]">{t("changes.changes")}</span>
           <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
@@ -509,7 +512,7 @@ export function ChangesPanel() {
         onCommit={(w) => commitSize("changesListWidth", w)}
       />
 
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
         {selected ? (
           <DiffView files={selectedDiff} />
         ) : (

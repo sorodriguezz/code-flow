@@ -20,6 +20,11 @@
   --cf-warning: #d97706;
   --cf-titlebar-gradient: linear-gradient(120deg, #c9e9e6 0%, #d8c9ec 45%, #f3c9d8 100%);
   --cf-shadow: 0 1px 2px rgba(20, 20, 40, 0.04), 0 8px 24px rgba(20, 20, 40, 0.06);
+  /* Same hue family as the titlebar gradient, just as faint washes rather than a solid
+     band — the ambient background behind Graph/Changes/Editor (see .cf-ambient-bg below). */
+  --cf-ambient-1: color-mix(in oklab, #6fd0c8 20%, transparent);
+  --cf-ambient-2: color-mix(in oklab, #b79ae8 18%, transparent);
+  --cf-ambient-3: color-mix(in oklab, #f0a8c4 16%, transparent);
 }
 
 :root[data-theme="dark"] {
@@ -36,6 +41,9 @@
   --cf-warning: #fbbf24;
   --cf-titlebar-gradient: linear-gradient(120deg, #163a3a 0%, #2a2148 45%, #3a1f30 100%);
   --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.4);
+  --cf-ambient-1: color-mix(in oklab, #2dd4c4 16%, transparent);
+  --cf-ambient-2: color-mix(in oklab, #8b6fd9 16%, transparent);
+  --cf-ambient-3: color-mix(in oklab, #d9527d 12%, transparent);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -53,6 +61,9 @@
     --cf-warning: #fbbf24;
     --cf-titlebar-gradient: linear-gradient(120deg, #163a3a 0%, #2a2148 45%, #3a1f30 100%);
     --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.4);
+    --cf-ambient-1: color-mix(in oklab, #2dd4c4 16%, transparent);
+    --cf-ambient-2: color-mix(in oklab, #8b6fd9 16%, transparent);
+    --cf-ambient-3: color-mix(in oklab, #d9527d 12%, transparent);
   }
 }
 
@@ -87,6 +98,28 @@ body {
 
 [data-tauri-drag-region] {
   -webkit-app-region: drag;
+}
+
+/* Fixed, viewport-sized wash behind Graph/Changes/Editor — those views previously sat on
+   plain solid `--cf-bg` with nothing else painted behind them, which read as flat and
+   monotonous. Soft corner blobs in the titlebar's own hue family break that up without
+   competing with foreground content (kept faint, and `fixed` so it doesn't scroll/repeat
+   oddly with the content beneath it). */
+.cf-ambient-bg {
+  position: relative;
+  isolation: isolate;
+}
+.cf-ambient-bg::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse 900px 520px at 6% -8%, var(--cf-ambient-1), transparent 60%),
+    radial-gradient(ellipse 820px 620px at 102% -4%, var(--cf-ambient-2), transparent 60%),
+    radial-gradient(ellipse 760px 520px at 46% 112%, var(--cf-ambient-3), transparent 62%),
+    var(--cf-bg);
 }
 
 /* Lightweight, GPU-only animations (opacity/transform) — no JS animation loop. */

@@ -75,7 +75,9 @@ pub const DEFAULT_REVIEW_PROMPT: &str =
      - La línea \"📍 Ubicación\" es obligatoria en cada hallazgo y debe usar la ruta real del \
      archivo tal como aparece en el diff (encabezado `+++ b/...`) y el rango de línea real del \
      lado nuevo del diff — esto se usa para anclar el comentario a esa línea exacta en el PR, \
-     así que no la omitas ni la inventes.\n\
+     así que no la omitas ni la inventes. Escríbela en TEXTO PLANO, sin backticks ni ningún \
+     otro formato Markdown (a diferencia del resto de la respuesta, donde sí puedes usar \
+     backticks para código) — el valor se parsea literalmente para ubicar el comentario.\n\
      - Sé específico y cita archivos/líneas reales del diff — no generalices.\n\
      - No repitas el diff completo ni resumas cambios que no son problemáticos.\n\
      - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅ después \
@@ -117,7 +119,8 @@ pub const DEFAULT_ANALYZE_TEMPLATE: &str =
      - Usa 🚨 para Crítico, ⚠️ para Advertencia/Mayor, ℹ️ para Menor/Sugerencia.\n\
      - Numera los hallazgos F-001, F-002, etc. en el orden en que aparecen en el diff.\n\
      - La línea \"📍 Ubicación\" es obligatoria en cada hallazgo, con la ruta real del archivo y \
-     el rango de línea real del lado nuevo del diff.\n\
+     el rango de línea real del lado nuevo del diff, en TEXTO PLANO sin backticks ni ningún \
+     otro formato Markdown — el valor se parsea literalmente.\n\
      - Sé específico y cita archivos/líneas reales del diff — no generalices.\n\
      - No repitas el diff completo ni resumas cambios que no son problemáticos.\n\
      - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅ después \

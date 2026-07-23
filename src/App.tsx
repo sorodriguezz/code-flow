@@ -135,9 +135,10 @@ export default function App() {
     const unlisten = onRepoFsChanged((e) => {
       const activePath = useWorkspaceStore.getState().activeProject()?.local_path;
       if (e.repo_path !== activePath) return;
-      void useRepoStore.getState().refreshStatus();
-      void useRepoStore.getState().refreshCommits();
-      void useRepoStore.getState().refreshUnpushedCommits();
+      // Full refresh, not just status/commits — an external change can just as easily be a
+      // branch switch, a stash, or a merge (all of which used to go stale until something
+      // else happened to trigger a refresh).
+      void useRepoStore.getState().refreshAll();
     });
     return () => {
       void unlisten.then((f) => f());
@@ -172,7 +173,7 @@ export default function App() {
         <Sidebar />
         <div className="flex min-w-0 flex-1 flex-col">
           <TabBar />
-          <div className="min-h-0 flex-1 overflow-hidden">
+          <div className="cf-ambient-bg min-h-0 flex-1 overflow-hidden">
             <MainContent />
           </div>
           <AnimatePresence initial={false}>

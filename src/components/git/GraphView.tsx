@@ -222,8 +222,10 @@ export function GraphView() {
   const selectedCommit = commits.find((c) => c.id === selectedCommitId) ?? null;
 
   return (
-    <div className="flex h-full min-h-0">
-      <CommitTable />
+    <div className="flex h-full min-h-0 gap-1.5 p-2">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
+        <CommitTable />
+      </div>
 
       {selectedCommit && (
         <>
@@ -236,7 +238,10 @@ export function GraphView() {
             onChange={(w) => setSize("graphDiffWidth", w)}
             onCommit={(w) => commitSize("graphDiffWidth", w)}
           />
-          <div style={{ width: diffWidth }} className="flex shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)]">
+          <div
+            style={{ width: diffWidth }}
+            className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+          >
             <div className="flex items-center justify-between border-b border-[var(--cf-border)] px-3 py-1.5">
               <span className="truncate text-[12px] font-medium text-[var(--cf-text-muted)]">
                 {selectedCommit.short_id} — {selectedCommit.summary}

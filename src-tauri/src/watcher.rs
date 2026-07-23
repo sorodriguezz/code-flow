@@ -46,20 +46,37 @@ pub fn start_watching(app: AppHandle, registry: &WatcherRegistry, repo_path: Str
     }
 
     std::thread::spawn(move || {
-        // Leading-edge throttle: emit on the first event of a burst, then ignore
-        // anything else for a short window so e.g. a save-triggered rewrite of several
-        // files only causes one refresh instead of a flood of them.
+        // Leading-edge-with-trailing-catchup throttle: the first event of a burst emits
+        // immediately; anything else within 400ms just marks a change as pending instead of
+        // being dropped outright. Once the burst goes quiet, the next poll tick (at most
+        // ~200ms later, and only once 400ms has actually elapsed since the last emit) flushes
+        // that pending change — a plain leading-edge throttle (emit-then-ignore-for-400ms,
+        // nothing after) silently lost whatever event landed inside that window with no
+        // later event to "wake it back up", which is exactly what happened when e.g. Claude's
+        // Edit tool wrote several files in a row: everything but the first write vanished
+        // until something unrelated (switching projects and back) forced a fresh reload.
+        //
+        // `Err` results (e.g. a `ReadDirectoryChangesW` buffer overflow on Windows when too
+        // many changes land at once) are treated the same as a real change rather than
+        // silently ignored — we don't know what changed, so the safe move is to refresh.
         let mut last_emit = Instant::now() - Duration::from_secs(10);
-        while let Ok(result) = rx.recv() {
-            let Ok(event) = result else { continue };
-            if is_noise(&event) {
-                continue;
+        let mut pending = false;
+        loop {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(Ok(event)) => {
+                    if !is_noise(&event) {
+                        pending = true;
+                    }
+                }
+                Ok(Err(_)) => pending = true,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            if last_emit.elapsed() < Duration::from_millis(400) {
-                continue;
+            if pending && last_emit.elapsed() >= Duration::from_millis(400) {
+                pending = false;
+                last_emit = Instant::now();
+                let _ = app.emit("repo:fs-changed", RepoChangedEvent { repo_path: repo_path.clone() });
             }
-            last_emit = Instant::now();
-            let _ = app.emit("repo:fs-changed", RepoChangedEvent { repo_path: repo_path.clone() });
         }
     });
 

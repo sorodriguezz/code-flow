@@ -94,7 +94,15 @@ const FULL_FILE_CONTEXT_LINES: u32 = 1_000_000;
 pub fn get_working_diff(path: &str) -> Result<Vec<FileDiffInfo>, String> {
     let repo = open(path)?;
     let mut opts = DiffOptions::new();
-    opts.include_untracked(true).context_lines(FULL_FILE_CONTEXT_LINES);
+    // `include_untracked` alone only makes a new file *appear* in the diff as a bare
+    // "untracked" delta with no hunks — `show_untracked_content` is what actually makes
+    // libgit2 diff it against empty content so every line shows up as added, and
+    // `recurse_untracked_dirs` does the same for a file sitting inside a brand-new untracked
+    // directory (otherwise only the directory itself is reported, not the file in it).
+    opts.include_untracked(true)
+        .show_untracked_content(true)
+        .recurse_untracked_dirs(true)
+        .context_lines(FULL_FILE_CONTEXT_LINES);
     let diff = repo
         .diff_index_to_workdir(None, Some(&mut opts))
         .map_err(|e| e.message().to_string())?;

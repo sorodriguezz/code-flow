@@ -47,10 +47,15 @@ function severityFromEmoji(emoji: string): AnalysisFinding["severity"] {
 }
 
 /** Parses "{file}:{startLine}-{endLine}" (or a single "{file}:{line}") from the finding's
- * "📍 Ubicación" field — the file/line this comment gets anchored to when posted to the PR. */
+ * "📍 Ubicación" field — the file/line this comment gets anchored to when posted to the PR.
+ * The model markdown-formats file paths/identifiers everywhere else in its output (it isn't
+ * told not to here either), so e.g. "`src/foo.ts:24-27`" is just as likely as the plain form
+ * the prompt actually asks for — strip that wrapping before matching, or a location that
+ * parses to nothing silently falls back to an unanchored comment. */
 function parseLocation(raw: string | undefined): FindingLocation | null {
   if (!raw) return null;
-  const m = raw.trim().match(/^(.+?):(\d+)(?:-(\d+))?\s*$/);
+  const cleaned = raw.trim().replace(/[`*_]+/g, "").trim();
+  const m = cleaned.match(/^(.+?):(\d+)(?:-(\d+))?\s*$/);
   if (!m) return null;
   const startLine = Number(m[2]);
   const endLine = m[3] ? Number(m[3]) : startLine;

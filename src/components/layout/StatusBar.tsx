@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowDown, ArrowUp, ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, RefreshCw, Settings, TerminalSquare, Upload } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
@@ -21,6 +21,8 @@ export function StatusBar() {
   const toggleSettings = useUiStore((s) => s.toggleSettings);
   const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
   const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
+  const aiPanelOpen = useUiStore((s) => s.aiPanelOpen);
+  const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
   const remainingSeconds = useFetchTimerStore((s) => s.remainingSeconds);
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
   const [showBranchModal, setShowBranchModal] = useState(false);
@@ -50,11 +52,24 @@ export function StatusBar() {
     </button>
   );
 
+  const aiPanelButton = (
+    <button
+      onClick={toggleAiPanel}
+      title={t("statusbar.aiPanel")}
+      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
+        aiPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+      }`}
+    >
+      <Sparkles size={13} />
+    </button>
+  );
+
   if (!project) {
     return (
       <footer className="flex h-8 shrink-0 items-center gap-2 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[12px] text-[var(--cf-text-muted)]">
         {settingsButton}
         {terminalButton}
+        {aiPanelButton}
         <span>{t("statusbar.openProject")}</span>
       </footer>
     );
@@ -74,6 +89,7 @@ export function StatusBar() {
     <footer className="flex h-8 shrink-0 items-center gap-3 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[12px] text-[var(--cf-text-muted)]">
       {settingsButton}
       {terminalButton}
+      {aiPanelButton}
 
       <span
         className="flex shrink-0 items-center gap-1 truncate font-medium text-[var(--cf-text)]"

@@ -6,6 +6,7 @@ import { FileTree } from "./FileTree";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { DbmlDiagram } from "./DbmlDiagram";
 import { readFileText, writeFileText } from "../../lib/tauri/commands";
+import { onRepoFsChanged } from "../../lib/tauri/events";
 import { languageForPath } from "../../lib/monacoLanguage";
 import { parseDbml } from "../../lib/dbml";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -258,6 +259,26 @@ export function EditorView() {
     setViewMode("code");
   }, [selectedPath]);
 
+  // Reload the open file from disk when it changes externally — a terminal `git` command, an
+  // edit in another editor, a branch checkout — instead of silently showing stale content
+  // until the user happens to reopen it. Skipped while there are unsaved local edits so this
+  // never clobbers work in progress; the user's own edit wins until they save or discard it.
+  useEffect(() => {
+    if (!project || !selectedPath) return;
+    const unlisten = onRepoFsChanged((e) => {
+      if (e.repo_path !== project.local_path || dirty) return;
+      void readFileText(project.local_path, selectedPath)
+        .then((text) => {
+          setContent(text);
+          setOriginalContent(text);
+        })
+        .catch(() => {});
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, [project, selectedPath, dirty]);
+
   useEffect(() => {
     if (pendingEditorPath) {
       void openFile(pendingEditorPath);
@@ -283,8 +304,11 @@ export function EditorView() {
           </span>
         )}
       </div>
-      <div className="flex min-h-0 flex-1">
-        <div style={{ width: treeWidth }} className="shrink-0 overflow-auto border-r border-[var(--cf-border)]">
+      <div className="flex min-h-0 flex-1 gap-1.5 p-2">
+        <div
+          style={{ width: treeWidth }}
+          className="shrink-0 overflow-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+        >
           <FileTree
             repoPath={project.local_path}
             selectedPath={selectedPath}
@@ -300,7 +324,7 @@ export function EditorView() {
           onChange={(w) => setSize("editorTreeWidth", w)}
           onCommit={(w) => commitSize("editorTreeWidth", w)}
         />
-        <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
           {selectedPath ? (
           <>
             <div className="flex items-center justify-between border-b border-[var(--cf-border)] px-3 py-1.5">

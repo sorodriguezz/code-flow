@@ -379,7 +379,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
       className={`group relative rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
         message.role === "user"
           ? "ml-auto max-w-[85%] whitespace-pre-wrap bg-[var(--cf-accent)] text-white"
-          : "mr-auto max-w-[85%] bg-[var(--cf-surface-raised)] text-[var(--cf-text)]"
+          : "mr-auto max-w-[85%] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] text-[var(--cf-text)]"
       }`}
     >
       {html !== null ? (

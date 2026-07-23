@@ -46,4 +46,10 @@ keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+# The universal-apple-darwin release build cross-compiles the x86_64 slice on an
+# aarch64 GitHub runner; git2's default OpenSSL backend then fails to find a
+# matching OpenSSL via pkg-config for the non-host target ("could not find
+# directory of OpenSSL installation"). Scoped to macOS only (not Windows/Linux)
+# so local dev builds don't need Perl/NASM to build OpenSSL from source.
+git2 = { version = "0.19", features = ["vendored-openssl"] }
 
