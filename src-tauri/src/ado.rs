@@ -371,6 +371,92 @@ pub async fn post_pr_comment(
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct ConnectionData {
+    #[serde(rename = "authenticatedUser")]
+    authenticated_user: RawConnectionUser,
+}
+
+#[derive(Deserialize)]
+struct RawConnectionUser {
+    id: String,
+}
+
+/// The signed-in user's Azure DevOps id (a GUID), needed to cast a reviewer vote — Azure votes
+/// are keyed by reviewer id, not inferred from the token like GitHub's reviews are. Read from the
+/// org-scoped `connectionData` endpoint.
+async fn authenticated_user_id(org: &str, pat: &str) -> Result<String, String> {
+    let org = encode_segment(&normalize_org(org));
+    let url = format!("https://dev.azure.com/{org}/_apis/connectionData?api-version={API_VERSION}");
+    let data: ConnectionData = get_json(&url, pat).await?;
+    Ok(data.authenticated_user.id)
+}
+
+/// Casts the current user's review vote on a PR. Azure's reviewer vote: `10` = approve,
+/// `-10` = reject (also `5`/`0`/`-5` for approve-with-suggestions/reset/waiting). PUT-ing to
+/// `reviewers/{id}` adds the user as a reviewer if they aren't one yet, so this works whether or
+/// not they were already assigned. Fetches the user's id first.
+pub async fn set_reviewer_vote(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    vote: i32,
+    pat: &str,
+) -> Result<(), String> {
+    let user_id = authenticated_user_id(org, pat).await?;
+    let org = encode_segment(&normalize_org(org));
+    let project = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/reviewers/{user_id}\
+         ?api-version={API_VERSION}"
+    );
+    let body = serde_json::json!({ "vote": vote });
+    let res = client()
+        .put(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {body}"));
+    }
+    Ok(())
+}
+
+/// Abandons the PR — Azure DevOps' equivalent of closing without merging.
+pub async fn abandon_pull_request(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    pat: &str,
+) -> Result<(), String> {
+    let org = encode_segment(&normalize_org(org));
+    let project = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}\
+         ?api-version={API_VERSION}"
+    );
+    let body = serde_json::json!({ "status": "abandoned" });
+    let res = client()
+        .patch(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {body}"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PrThreadComment {
     pub author: String,

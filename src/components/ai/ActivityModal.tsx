@@ -28,6 +28,7 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
   const selectedPr = usePrStore((s) => s.selectedPr);
   const selectPr = usePrStore((s) => s.selectPr);
   const analyzeOpen = useAnalyzeUiStore((s) => s.open);
+  const analyzeJobId = useAnalyzeUiStore((s) => s.selectedJobId);
   const activeSessionId = useChatStore((s) => s.byProject[projectId]?.sessionId ?? null);
   const switchTo = useChatStore((s) => s.switchTo);
   const [query, setQuery] = useState("");
@@ -44,6 +45,7 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
   const activeEntryKey = findActiveEntryKey(entries, {
     selectedPrId: selectedPr?.id ?? null,
     analyzeOpen,
+    analyzeJobId,
     activeSessionId,
   });
 
@@ -61,13 +63,16 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
       selectPr(pr);
     } else if (entry.job.kind === "analyze-changes") {
       selectPr(null);
-      useAnalyzeUiStore.getState().show();
+      useAnalyzeUiStore.getState().showJob(entry.job.id);
     }
     onClose();
   };
 
   const handleDelete = async (entry: ActivityEntry) => {
     if (!(await confirmAction(t("chatHistory.confirmDelete")))) return;
+    // Deleting a chat updates the persisted conversation list; the chat panel reconciles against
+    // that list and resets itself if the open conversation no longer exists (see AiPanel
+    // ChatSection) — which also covers a chat that spans several session ids.
     if (entry.type === "chat") await removeConversation(projectId, entry.conv.session_id);
     else await removeJob(projectId, entry.job.id);
   };

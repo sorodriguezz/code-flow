@@ -1,7 +1,15 @@
+//! Tauri commands for the AI features (commit messages, pre-commit analysis, chat, "fix with
+//! AI"). Despite the file name — kept stable so the frontend command bindings don't move — these
+//! are provider-neutral: each resolves the active engine from the `ai_provider` setting via
+//! [`load_ai_config`] and dispatches through [`crate::ai`], so switching Claude ⇆ Gemini ⇆ … is a
+//! settings change, not a code change. The PR-review command lives in `ado_cmd` (it needs the VCS
+//! dispatch first) but shares these same helpers.
+
+use rusqlite::Connection;
 use serde::Serialize;
 use tauri::State;
 
-use crate::claude;
+use crate::ai::{self, AiEngine};
 use crate::commands::ado_cmd::build_mcp_config;
 use crate::commands::skills_cmd::sync_skills_into_project;
 use crate::db::{queries, Db};
@@ -16,32 +24,114 @@ pub struct ChatReply {
     model: Option<String>,
 }
 
+/// The active AI provider id, from the `ai_provider` setting. Falls back to Claude when unset or
+/// blank so a fresh install (or a cleared setting) always has a working engine.
+pub(crate) fn active_provider(conn: &Connection) -> Result<String, String> {
+    Ok(queries::get_setting(conn, "ai_provider")
+        .map_err(|e| e.to_string())?
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| "claude".to_string()))
+}
+
+/// Which AI action a command is performing — selects the per-task model. Each provider keeps a
+/// base model plus optional per-task overrides, so the same repo can generate commits on a fast
+/// model while reviewing PRs on a bigger one.
+#[derive(Clone, Copy)]
+pub(crate) enum AiTask {
+    /// Commit-message generation — defaults to the engine's fast model, not the base model.
+    Commit,
+    /// Pre-commit "Analyze changes" — defaults to the base model.
+    Analyze,
+    /// Pull-request review — defaults to the base model.
+    Review,
+    /// Open-ended chat and "fix with AI" — always the base model.
+    Chat,
+    Fix,
+}
+
+/// The active engine plus its resolved per-provider binary/model/tools. Binary/model/tools are
+/// namespaced per provider (`{provider}_binary_path`, `{provider}_model`, `{provider}_allowed_tools`)
+/// because they're intrinsically provider-specific — a binary path and model id only mean
+/// something for one CLI, and tool names differ between CLIs. `model` is resolved for the specific
+/// [`AiTask`] requested (per-task override → base model → engine default). The prompt *templates*,
+/// by contrast, are shared across providers (see [`shared_template`]).
+pub(crate) struct AiConfig {
+    pub engine: Box<dyn AiEngine>,
+    pub binary: String,
+    pub model: String,
+    pub tools: Vec<String>,
+}
+
+pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig, String> {
+    let provider = active_provider(conn)?;
+    let engine = ai::engine_for(&provider);
+
+    let get = |suffix: &str| -> Result<Option<String>, String> {
+        queries::get_setting(conn, &format!("{provider}_{suffix}")).map_err(|e| e.to_string())
+    };
+    // A stored setting that's blank counts as "unset" — falls through to the next fallback.
+    let nonblank = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+
+    let binary = nonblank(get("binary_path")?).unwrap_or_else(|| engine.default_binary().to_string());
+    let base_model = get("model")?.unwrap_or_default();
+    let tools = get("allowed_tools")?
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Per-task model: the user's override for this action, else the sensible per-task default.
+    let model = match task {
+        AiTask::Commit => {
+            nonblank(get("commit_model")?).unwrap_or_else(|| engine.commit_message_model().to_string())
+        }
+        AiTask::Analyze => nonblank(get("analyze_model")?).unwrap_or_else(|| base_model.clone()),
+        AiTask::Review => nonblank(get("review_model")?).unwrap_or_else(|| base_model.clone()),
+        AiTask::Chat | AiTask::Fix => base_model.clone(),
+    };
+
+    Ok(AiConfig { engine, binary, model, tools })
+}
+
+/// Reads a shared (provider-independent) prompt template. New installs store these under an
+/// unprefixed key (`commit_template`); older ones stored them under the legacy `claude_*` key —
+/// so we read the new key and fall back to the legacy one, preserving a user's existing
+/// customization without a migration step. Empty means "use the engine's built-in default".
+pub(crate) fn shared_template(conn: &Connection, key: &str, legacy_key: &str) -> Result<String, String> {
+    let current = queries::get_setting(conn, key).map_err(|e| e.to_string())?;
+    if let Some(v) = current.filter(|s| !s.trim().is_empty()) {
+        return Ok(v);
+    }
+    Ok(queries::get_setting(conn, legacy_key)
+        .map_err(|e| e.to_string())?
+        .unwrap_or_default())
+}
+
 #[tauri::command]
 pub async fn generate_commit_message(db: State<'_, Db>, diff: String) -> Result<String, String> {
-    let (binary, template) = {
+    let (config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let binary = queries::get_setting(&conn, "claude_binary_path").map_err(|e| e.to_string())?;
-        let template = queries::get_setting(&conn, "claude_commit_template").map_err(|e| e.to_string())?;
-        (binary, template)
+        let config = load_ai_config(&conn, AiTask::Commit)?;
+        let template = shared_template(&conn, "commit_template", "claude_commit_template")?;
+        (config, template)
     };
-    let binary = binary.unwrap_or_else(|| "claude".to_string());
-    let template = template.unwrap_or_default();
-    claude::generate_commit_message(&binary, &diff, &template).await
+    ai::generate_commit_message(&*config.engine, &config.binary, &config.model, &diff, &template).await
 }
 
 #[tauri::command]
 pub fn default_commit_template() -> String {
-    claude::DEFAULT_COMMIT_TEMPLATE.to_string()
+    ai::DEFAULT_COMMIT_TEMPLATE.to_string()
 }
 
 #[tauri::command]
 pub fn default_review_template() -> String {
-    claude::DEFAULT_REVIEW_PROMPT.to_string()
+    ai::DEFAULT_REVIEW_PROMPT.to_string()
 }
 
 #[tauri::command]
 pub fn default_analyze_template() -> String {
-    claude::DEFAULT_ANALYZE_TEMPLATE.to_string()
+    ai::DEFAULT_ANALYZE_TEMPLATE.to_string()
 }
 
 /// Scans whatever's currently sitting in the working directory (the "Changes" list —
@@ -58,24 +148,14 @@ pub async fn analyze_working_changes(db: State<'_, Db>, project_id: String, job_
     };
     let workspace_id = project.workspace_id.clone();
 
-    let (contexts, md_files, mcps, binary, model, tools_setting, analyze_template) = {
+    let (contexts, md_files, mcps, config, analyze_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let md_files = queries::list_workspace_md_files(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let binary = queries::get_setting(&conn, "claude_binary_path")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_else(|| "claude".to_string());
-        let model = queries::get_setting(&conn, "claude_model")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        let tools = queries::get_setting(&conn, "claude_allowed_tools")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        let analyze_template = queries::get_setting(&conn, "claude_analyze_template")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        (contexts, md_files, mcps, binary, model, tools, analyze_template)
+        let config = load_ai_config(&conn, AiTask::Analyze)?;
+        let analyze_template = shared_template(&conn, "analyze_template", "claude_analyze_template")?;
+        (contexts, md_files, mcps, config, analyze_template)
     };
 
     // Best-effort, same as the PR review path — a missing/unwritable skills dir shouldn't
@@ -92,20 +172,15 @@ pub async fn analyze_working_changes(db: State<'_, Db>, project_id: String, job_
         .collect();
     enabled_contexts.extend(md_files.into_iter().filter(|f| f.enabled).map(|f| (f.filename, f.content)));
 
-    let allowed_tools: Vec<String> = tools_setting
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
-    let result = claude::analyze_changes(
-        &binary,
-        &model,
+    let result = ai::analyze_changes(
+        &*config.engine,
+        &config.binary,
+        &config.model,
         &enabled_contexts,
         &diff_text,
-        &allowed_tools,
+        &config.tools,
         &project.local_path,
         &analyze_template,
         mcp_config_path.as_deref(),
@@ -123,7 +198,7 @@ pub async fn analyze_working_changes(db: State<'_, Db>, project_id: String, job_
     result
 }
 
-/// Asks Claude to apply one finding's fix (from a PR review or a pre-commit analysis)
+/// Asks the active engine to apply one finding's fix (from a PR review or a pre-commit analysis)
 /// directly to the working tree — `finding_prompt` is the finding's location/why/suggestion,
 /// pre-formatted by the frontend from the already-parsed finding. Leaves the result as
 /// uncommitted changes; nothing here stages, commits, or pushes anything.
@@ -135,22 +210,18 @@ pub async fn resolve_finding_with_ai(db: State<'_, Db>, project_id: String, find
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Project not found".to_string())?
     };
-    let (binary, model) = {
+    let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let binary = queries::get_setting(&conn, "claude_binary_path")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_else(|| "claude".to_string());
-        let model = queries::get_setting(&conn, "claude_model").map_err(|e| e.to_string())?.unwrap_or_default();
-        (binary, model)
+        load_ai_config(&conn, AiTask::Fix)?
     };
 
-    claude::apply_finding_fix(&binary, &model, &finding_prompt, &project.local_path).await
+    ai::apply_finding_fix(&*config.engine, &config.binary, &config.model, &finding_prompt, &project.local_path).await
 }
 
 /// Open-ended chat about the project — "preguntas abiertas del repositorio", the free-text
 /// half of the AI panel alongside PR review and change analysis. `session_id` is `None` for a
 /// brand new conversation and whatever the previous call returned for every turn after that,
-/// so Claude Code resumes the same session instead of losing prior context each message.
+/// so the engine resumes the same session instead of losing prior context each message.
 #[tauri::command]
 pub async fn send_chat_message(
     db: State<'_, Db>,
@@ -166,21 +237,13 @@ pub async fn send_chat_message(
     };
     let workspace_id = project.workspace_id.clone();
 
-    let (contexts, md_files, mcps, binary, model, tools_setting) = {
+    let (contexts, md_files, mcps, config) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let md_files = queries::list_workspace_md_files(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let binary = queries::get_setting(&conn, "claude_binary_path")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_else(|| "claude".to_string());
-        let model = queries::get_setting(&conn, "claude_model")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        let tools = queries::get_setting(&conn, "claude_allowed_tools")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        (contexts, md_files, mcps, binary, model, tools)
+        let config = load_ai_config(&conn, AiTask::Chat)?;
+        (contexts, md_files, mcps, config)
     };
 
     let _ = sync_skills_into_project(&workspace_id, &project.local_path);
@@ -192,21 +255,16 @@ pub async fn send_chat_message(
         .collect();
     enabled_contexts.extend(md_files.into_iter().filter(|f| f.enabled).map(|f| (f.filename, f.content)));
 
-    let allowed_tools: Vec<String> = tools_setting
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
-    let run = claude::chat_with_repo(
-        &binary,
-        &model,
+    let run = ai::chat_with_repo(
+        &*config.engine,
+        &config.binary,
+        &config.model,
         &enabled_contexts,
         &message,
         session_id.as_deref(),
-        &allowed_tools,
+        &config.tools,
         &project.local_path,
         mcp_config_path.as_deref(),
     )

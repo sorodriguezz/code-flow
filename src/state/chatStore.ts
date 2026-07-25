@@ -13,6 +13,12 @@ interface ProjectChat {
   /** Claude Code session id to `--resume` — `null` means the next message starts a fresh
    * conversation (there isn't one yet, or it was explicitly cleared). */
   sessionId: string | null;
+  /** Every session id this live chat has spanned. The CLI can mint a *new* session id on each
+   * resumed turn, so one visible conversation may map to several `activity_log` session ids.
+   * Tracking them all lets the panel reconcile against the persisted conversation list: when
+   * none of these remain (the conversation was deleted), the panel resets — instead of keeping
+   * a deleted chat on screen or re-creating it on the next message. */
+  sessionIds: string[];
   /** Model that answered the most recent turn, as reported by the CLI. Beats the configured
    * setting for the panel's model chip, since a blank setting lets the CLI choose and only
    * the reply says what it chose. `null` until the first answer of a conversation. */
@@ -22,7 +28,7 @@ interface ProjectChat {
 }
 
 function emptyChat(): ProjectChat {
-  return { messages: [], sessionId: null, model: null, sending: false, error: null };
+  return { messages: [], sessionId: null, sessionIds: [], model: null, sending: false, error: null };
 }
 
 const EMPTY_CHAT: ProjectChat = emptyChat();
@@ -64,6 +70,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       .then((reply) => {
         set((s) => {
           const proj = s.byProject[projectId] ?? emptyChat();
+          const sessionIds =
+            reply.session_id && !proj.sessionIds.includes(reply.session_id)
+              ? [...proj.sessionIds, reply.session_id]
+              : proj.sessionIds;
           return {
             byProject: {
               ...s.byProject,
@@ -71,6 +81,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 ...proj,
                 messages: [...proj.messages, { role: "assistant", content: reply.text }],
                 sessionId: reply.session_id,
+                sessionIds,
                 model: reply.model ?? proj.model,
                 sending: false,
               },
@@ -107,7 +118,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // until this conversation gets a fresh reply.
       byProject: {
         ...s.byProject,
-        [projectId]: { messages, sessionId, model: null, sending: false, error: null },
+        [projectId]: { messages, sessionId, sessionIds: [sessionId], model: null, sending: false, error: null },
       },
     }));
   },

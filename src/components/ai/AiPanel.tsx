@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ArrowUp,
+  Ban,
   Check,
   ChevronDown,
   ChevronRight,
@@ -11,6 +12,8 @@ import {
   Loader2,
   Plus,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
   X,
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
@@ -71,6 +74,7 @@ function ActivitySection({ projectId }: { projectId: string }) {
   const selectedPr = usePrStore((s) => s.selectedPr);
   const selectPr = usePrStore((s) => s.selectPr);
   const analyzeOpen = useAnalyzeUiStore((s) => s.open);
+  const analyzeJobId = useAnalyzeUiStore((s) => s.selectedJobId);
   const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
   const chatLoaded = useChatHistoryStore((s) => s.loaded[projectId]);
   const loadChatHistory = useChatHistoryStore((s) => s.load);
@@ -90,6 +94,7 @@ function ActivitySection({ projectId }: { projectId: string }) {
   const activeEntryKey = findActiveEntryKey(entries, {
     selectedPrId: selectedPr?.id ?? null,
     analyzeOpen,
+    analyzeJobId,
     activeSessionId,
   });
 
@@ -113,7 +118,7 @@ function ActivitySection({ projectId }: { projectId: string }) {
       }
     } else if (entry.job.kind === "analyze-changes") {
       selectPr(null);
-      useAnalyzeUiStore.getState().show();
+      useAnalyzeUiStore.getState().showJob(entry.job.id);
     }
   };
 
@@ -176,6 +181,8 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
   const selectPr = usePrStore((s) => s.selectPr);
   const posting = usePrStore((s) => s.posting);
   const posted = usePrStore((s) => s.posted);
+  const actOnPr = usePrStore((s) => s.actOnPr);
+  const prActionBusy = usePrStore((s) => s.prActionBusy);
   const jobs = useJobsStore((s) => s.byProject[projectId] ?? EMPTY_JOBS);
   const job = useMemo(
     () => jobs.find((j) => j.kind === "pr-review" && j.meta.prId === pr.id) ?? null,
@@ -203,6 +210,21 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
     const confirmKey = pr.provider === "github" ? "chat.confirmPostGithub" : "chat.confirmPost";
     if (!(await confirmAction(t(confirmKey, { id: pr.id, n: comments.length }), false))) return;
     void postReview(projectId, pr.id, comments);
+  };
+
+  // Approve / request changes / close aren't available once the PR is already merged or closed.
+  const prClosed = pr.status === "merged" || pr.status === "closed";
+  const doPrAction = async (action: "approve" | "request_changes" | "close") => {
+    const confirmKey =
+      action === "approve"
+        ? "pr.confirmApprove"
+        : action === "request_changes"
+          ? "pr.confirmRequestChanges"
+          : "pr.confirmClose";
+    // Request-changes and close are destructive-ish (they push a state the author sees), so they
+    // get the emphasized confirm; approve gets the plain one.
+    if (!(await confirmAction(t(confirmKey, { id: pr.id }), action !== "approve"))) return;
+    void actOnPr(projectId, pr.id, action);
   };
 
   // Existing comment threads on the PR — e.g. from a human reviewer — refetched fresh every
@@ -329,7 +351,35 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
         )}
       </div>
 
-      <div className="border-t border-[var(--cf-border)] p-3">
+      <div className="border-t border-[var(--cf-border)] p-3 space-y-2">
+        {!prClosed && (
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => doPrAction("approve")}
+              disabled={prActionBusy !== null}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-success)] hover:bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] disabled:opacity-40"
+            >
+              {prActionBusy === "approve" ? <Loader2 size={12} className="animate-spin" /> : <ThumbsUp size={12} />}
+              {t("pr.approve")}
+            </button>
+            <button
+              onClick={() => doPrAction("request_changes")}
+              disabled={prActionBusy !== null}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-warning)] hover:bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] disabled:opacity-40"
+            >
+              {prActionBusy === "request_changes" ? <Loader2 size={12} className="animate-spin" /> : <ThumbsDown size={12} />}
+              {t("pr.requestChanges")}
+            </button>
+            <button
+              onClick={() => doPrAction("close")}
+              disabled={prActionBusy !== null}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-danger)] hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] disabled:opacity-40"
+            >
+              {prActionBusy === "close" ? <Loader2 size={12} className="animate-spin" /> : <Ban size={12} />}
+              {t("pr.close")}
+            </button>
+          </div>
+        )}
         <div className="flex items-center justify-end gap-2">
           {reviewText && !loading && (
             <button
@@ -412,6 +462,8 @@ function ChatSection({ projectId }: { projectId: string }) {
   const chat = useChatStore((s) => s.byProject[projectId] ?? EMPTY_CHAT);
   const send = useChatStore((s) => s.send);
   const clearChat = useChatStore((s) => s.clear);
+  const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
+  const chatLoaded = useChatHistoryStore((s) => s.loaded[projectId] ?? false);
   const providerId = useAiProviderStore((s) => s.providerId);
   const configuredModel = useAiProviderStore((s) => s.model);
   const provider = AI_PROVIDERS.find((p) => p.id === providerId) ?? AI_PROVIDERS[0];
@@ -427,6 +479,21 @@ function ChatSection({ projectId }: { projectId: string }) {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [chat.messages.length, chat.sending]);
+
+  // Self-heal a chat whose conversation was deleted from history: once the persisted list is
+  // loaded and none of this chat's sessions remain in it, the conversation is gone — reset the
+  // panel so a deleted chat can't keep showing (or get re-created on the next message). Keyed on
+  // `conversations` (not on `chat`) so it evaluates against the freshest list and never races a
+  // just-arrived reply whose session hasn't been reloaded into the list yet.
+  useEffect(() => {
+    if (!chatLoaded) return;
+    const current = useChatStore.getState().byProject[projectId];
+    if (!current || current.sending || current.messages.length === 0) return;
+    const ids = current.sessionIds.length > 0 ? current.sessionIds : current.sessionId ? [current.sessionId] : [];
+    if (ids.length === 0) return;
+    const stillExists = ids.some((id) => conversations.some((c) => c.session_id === id));
+    if (!stillExists) clearChat(projectId);
+  }, [conversations, chatLoaded, clearChat, projectId]);
 
   const submit = () => {
     if (!input.trim() || chat.sending) return;

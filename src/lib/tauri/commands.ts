@@ -375,6 +375,11 @@ export const reviewPullRequest = (projectId: string, prId: number, jobId: string
 export const postPrReviewComment = (projectId: string, prId: number, comments: ReviewCommentInput[]) =>
   invoke<void>("post_pr_review_comment", { projectId, prId, comments });
 
+export type PrAction = "approve" | "request_changes" | "close";
+
+export const actOnPullRequest = (projectId: string, prId: number, action: PrAction, body?: string) =>
+  invoke<void>("act_on_pull_request", { projectId, prId, action, body });
+
 // ---------- filesystem (embedded editor) ----------
 
 export const listDir = (repoPath: string, subPath?: string) =>

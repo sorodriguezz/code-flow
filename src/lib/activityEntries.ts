@@ -49,14 +49,18 @@ export function entryVisual(entry: ActivityEntry): { icon: LucideIcon; color: st
  * selected PR hasn't been reviewed yet and so has no job entry). */
 export function findActiveEntryKey(
   entries: ActivityEntry[],
-  state: { selectedPrId: number | null; analyzeOpen: boolean; activeSessionId: string | null },
+  state: { selectedPrId: number | null; analyzeOpen: boolean; analyzeJobId: string | null; activeSessionId: string | null },
 ): string | null {
   if (state.selectedPrId !== null) {
     const match = entries.find((e) => e.type === "job" && e.job.kind === "pr-review" && e.job.meta.prId === state.selectedPrId);
     return match ? entryKey(match) : null;
   }
   if (state.analyzeOpen) {
-    const match = entries.find((e) => e.type === "job" && e.job.kind === "analyze-changes");
+    // A pinned run highlights that exact entry; with none pinned (fresh open) the newest
+    // analysis is the one shown, so highlight that.
+    const match = state.analyzeJobId
+      ? entries.find((e) => e.type === "job" && e.job.id === state.analyzeJobId)
+      : entries.find((e) => e.type === "job" && e.job.kind === "analyze-changes");
     return match ? entryKey(match) : null;
   }
   if (state.activeSessionId) {

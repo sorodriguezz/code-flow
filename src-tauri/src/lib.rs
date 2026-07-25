@@ -1,8 +1,10 @@
 mod ado;
+mod ai;
 mod claude;
 mod commands;
 mod db;
 mod fsops;
+mod gemini;
 mod git;
 mod github;
 mod paths;
@@ -178,6 +180,7 @@ pub fn run() {
             commands::ado_cmd::list_pr_comment_threads,
             commands::ado_cmd::review_pull_request,
             commands::ado_cmd::post_pr_review_comment,
+            commands::ado_cmd::act_on_pull_request,
             commands::github_cmd::link_project_github,
             commands::github_cmd::github_authenticated_user,
             commands::fs_cmd::list_dir,

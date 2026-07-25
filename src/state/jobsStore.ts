@@ -124,7 +124,9 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       const label =
         row.custom_label ??
         (row.kind === "analyze-changes"
-          ? translate("analyze.title")
+          ? // Same "title · time" shape as a freshly-run analysis (see AnalyzeSection.runAnalysis),
+            // so reloaded entries stay distinguishable instead of all reading the plain title.
+            `${translate("analyze.title")} · ${new Date(row.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
           : row.kind === "pr-review" && typeof meta.prTitle === "string"
             ? `#${meta.prId} ${meta.prTitle}`
             : row.label);

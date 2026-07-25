@@ -15,32 +15,46 @@ import { FindingCard, QualityGateBadges, SHORT_SUMMARY_MAX } from "./FindingCard
 export function AnalyzeSection({ projectId }: { projectId: string }) {
   const t = useT();
   const hide = useAnalyzeUiStore((s) => s.hide);
+  const selectedJobId = useAnalyzeUiStore((s) => s.selectedJobId);
   const jobs = useJobsStore((s) => s.byProject[projectId] ?? EMPTY_JOBS);
-  const job = useMemo(() => jobs.find((j) => j.kind === "analyze-changes") ?? null, [jobs]);
+  // A specific past run is pinned by id when opened from the Activity list; otherwise show the
+  // project's most recent analysis. Selecting by id is what stops every analyze entry from
+  // aliasing onto the newest run.
+  const job = useMemo(
+    () =>
+      (selectedJobId
+        ? jobs.find((j) => j.id === selectedJobId)
+        : jobs.find((j) => j.kind === "analyze-changes")) ?? null,
+    [jobs, selectedJobId],
+  );
 
   const runAnalysis = () => {
-    useJobsStore.getState().run({
+    const id = useJobsStore.getState().run({
       projectId,
       kind: "analyze-changes",
-      label: t("analyze.title"),
+      // A per-run time stamp in the label so each analysis is identifiable in the Activity
+      // list instead of every entry reading the same "Análisis de cambios".
+      label: `${t("analyze.title")} · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
       task: (jobId) => analyzeWorkingChanges(projectId, jobId),
     });
+    // Pin this section to the run it just started, so its own result shows here and the
+    // Activity list highlights the right row.
+    useAnalyzeUiStore.getState().showJob(id);
   };
 
-  // Reuses the project's existing analyze-changes job instead of always starting a new one —
-  // reopening this section (or landing on it from the AI panel's Activity list) should show
-  // whatever last ran, not silently kick off another Claude invocation. Guarded with a ref
-  // rather than just checking `job`: React StrictMode double-invokes effects in dev, and both
-  // invocations would otherwise see the same (still-null) `job` and each start their own
-  // analysis — producing two job entries for one open.
+  // Auto-start only when landing on the section fresh (no pinned historical run) with nothing to
+  // show yet — reopening, or selecting a past run, must never kick off a new Claude invocation.
+  // Guarded with a ref rather than just checking `job`: React StrictMode double-invokes effects
+  // in dev, and both invocations would otherwise see the same (still-null) `job` and each start
+  // their own analysis — producing two job entries for one open.
   const startedRef = useRef(false);
   useEffect(() => {
-    if (!job && !startedRef.current) {
+    if (!selectedJobId && !job && !startedRef.current) {
       startedRef.current = true;
       runAnalysis();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [projectId, selectedJobId]);
 
   const loading = job?.status === "running" || !job;
   const error = job?.status === "error" ? job.error : null;

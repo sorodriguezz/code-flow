@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::ado;
-use crate::claude;
+use crate::ai;
+use crate::commands::claude_cmd::{load_ai_config, shared_template, AiTask};
 use crate::commands::skills_cmd;
 use crate::db::{
     models::{Project, WorkspaceMcp},
@@ -325,24 +326,14 @@ pub async fn review_pull_request(
     let link = linked_repo(&project)?;
     let workspace_id = project.workspace_id.clone();
 
-    let (contexts, md_files, mcps, binary, model, tools_setting, review_template) = {
+    let (contexts, md_files, mcps, config, review_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let md_files = queries::list_workspace_md_files(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let binary = queries::get_setting(&conn, "claude_binary_path")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_else(|| "claude".to_string());
-        let model = queries::get_setting(&conn, "claude_model")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        let tools = queries::get_setting(&conn, "claude_allowed_tools")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        let review_template = queries::get_setting(&conn, "claude_review_template")
-            .map_err(|e| e.to_string())?
-            .unwrap_or_default();
-        (contexts, md_files, mcps, binary, model, tools, review_template)
+        let config = load_ai_config(&conn, AiTask::Review)?;
+        let review_template = shared_template(&conn, "review_template", "claude_review_template")?;
+        (contexts, md_files, mcps, config, review_template)
     };
 
     let prs = match &link {
@@ -399,22 +390,17 @@ pub async fn review_pull_request(
             .map(|f| (f.filename, f.content)),
     );
 
-    let allowed_tools: Vec<String> = tools_setting
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
-    let result = claude::review_pull_request(
-        &binary,
-        &model,
+    let result = ai::review_pull_request(
+        &*config.engine,
+        &config.binary,
+        &config.model,
         &pr.title,
         &pr.description,
         &enabled_contexts,
         &diff_text,
-        &allowed_tools,
+        &config.tools,
         &project.local_path,
         &review_template,
         mcp_config_path.as_deref(),
@@ -533,4 +519,44 @@ pub async fn post_pr_review_comment(
         return Err(format!("{} comment(s) failed to post — {}", failures.len(), failures.join("; ")));
     }
     Ok(())
+}
+
+/// Approve / request-changes / close a pull request on whichever host it's linked to. `action`
+/// is one of `"approve"` | `"request_changes"` | `"close"`; the provider-specific mapping lives
+/// here (GitHub review events / state vs Azure reviewer vote / abandon). `body` is an optional
+/// comment carried on a GitHub review (GitHub requires a non-empty body to request changes, so a
+/// default is substituted when blank); Azure votes carry no message.
+#[tauri::command]
+pub async fn act_on_pull_request(
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+    action: String,
+    body: Option<String>,
+) -> Result<(), String> {
+    let project = load_project(&db, &project_id)?;
+    let comment = body.unwrap_or_default();
+    match linked_repo(&project)? {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(&org)?;
+            match action.as_str() {
+                "approve" => ado::set_reviewer_vote(&org, &ado_project, &repo_id, pr_id, 10, &pat).await,
+                "request_changes" => ado::set_reviewer_vote(&org, &ado_project, &repo_id, pr_id, -10, &pat).await,
+                "close" => ado::abandon_pull_request(&org, &ado_project, &repo_id, pr_id, &pat).await,
+                other => Err(format!("unknown PR action: {other}")),
+            }
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            match action.as_str() {
+                "approve" => github::submit_pr_review(&host, &owner, &repo, pr_id, "APPROVE", &comment, &token).await,
+                "request_changes" => {
+                    let text = if comment.trim().is_empty() { "Cambios solicitados desde CodeFlow." } else { &comment };
+                    github::submit_pr_review(&host, &owner, &repo, pr_id, "REQUEST_CHANGES", text, &token).await
+                }
+                "close" => github::close_pull_request(&host, &owner, &repo, pr_id, &token).await,
+                other => Err(format!("unknown PR action: {other}")),
+            }
+        }
+    }
 }

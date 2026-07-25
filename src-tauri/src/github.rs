@@ -124,6 +124,25 @@ async fn post_json(url: &str, token: &str, body: &serde_json::Value) -> Result<(
     Ok(())
 }
 
+async fn patch_json(url: &str, token: &str, body: &serde_json::Value) -> Result<(), String> {
+    let res = client()
+        .patch(url)
+        .header("Authorization", bearer(token))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", USER_AGENT)
+        .header("X-GitHub-Api-Version", API_VERSION)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach GitHub: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("GitHub returned {status}: {body}"));
+    }
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct RawUser {
     login: String,
@@ -258,6 +277,34 @@ pub async fn post_pr_comment(host: &str, owner: &str, repo: &str, pr_number: i64
     let url = format!("{}/repos/{owner}/{repo}/issues/{pr_number}/comments", api_root(host));
     let body = serde_json::json!({ "body": content });
     post_json(&url, token, &body).await
+}
+
+/// Submits a review on the PR — `event` is GitHub's review verb (`"APPROVE"` or
+/// `"REQUEST_CHANGES"`). GitHub infers the reviewer from the token, so no user-id lookup is
+/// needed. A `REQUEST_CHANGES` review requires a non-empty body; `body` is omitted when blank so
+/// an approval can carry no comment.
+pub async fn submit_pr_review(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: i64,
+    event: &str,
+    body: &str,
+    token: &str,
+) -> Result<(), String> {
+    let url = format!("{}/repos/{owner}/{repo}/pulls/{pr_number}/reviews", api_root(host));
+    let mut payload = serde_json::json!({ "event": event });
+    if !body.trim().is_empty() {
+        payload["body"] = serde_json::Value::String(body.to_string());
+    }
+    post_json(&url, token, &payload).await
+}
+
+/// Closes the PR without merging (GitHub's `state = "closed"`).
+pub async fn close_pull_request(host: &str, owner: &str, repo: &str, pr_number: i64, token: &str) -> Result<(), String> {
+    let url = format!("{}/repos/{owner}/{repo}/pulls/{pr_number}", api_root(host));
+    let body = serde_json::json!({ "state": "closed" });
+    patch_json(&url, token, &body).await
 }
 
 #[derive(Deserialize)]
