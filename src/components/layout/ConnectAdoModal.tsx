@@ -3,19 +3,19 @@ import { Cloud, Loader2, X } from "lucide-react";
 import { adoListProjects, adoListRepos, linkProjectAdo } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import { ProviderTabs } from "../common/ProviderTabs";
-import { VCS_PROVIDERS } from "../../lib/vcsProviders";
 import type { AdoProject, AdoRepo } from "../../types/domain";
 
 interface ConnectAdoModalProps {
   projectId: string;
-  org: string;
+  /** Orgs the user has a PAT for — the manual link picks one of these. */
+  orgs: string[];
   onConnected: () => void;
   onClose: () => void;
 }
 
-export function ConnectAdoModal({ projectId, org, onConnected, onClose }: ConnectAdoModalProps) {
+export function ConnectAdoModal({ projectId, orgs, onConnected, onClose }: ConnectAdoModalProps) {
   const t = useT();
+  const [org, setOrg] = useState(orgs[0] ?? "");
   const [adoProjects, setAdoProjects] = useState<AdoProject[]>([]);
   const [repos, setRepos] = useState<AdoRepo[]>([]);
   const [adoProjectId, setAdoProjectId] = useState("");
@@ -25,6 +25,9 @@ export function ConnectAdoModal({ projectId, org, onConnected, onClose }: Connec
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if (!org) return;
+    setAdoProjectId("");
+    setAdoProjects([]);
     setLoadingProjects(true);
     adoListProjects(org)
       .then(setAdoProjects)
@@ -46,7 +49,7 @@ export function ConnectAdoModal({ projectId, org, onConnected, onClose }: Connec
   const adoProjectName = adoProjects.find((p) => p.id === adoProjectId)?.name ?? "";
 
   const connect = async () => {
-    if (!adoProjectId || !repoId) return;
+    if (!org || !adoProjectId || !repoId) return;
     setSaving(true);
     try {
       await linkProjectAdo(projectId, org, adoProjectName, repoId);
@@ -77,14 +80,26 @@ export function ConnectAdoModal({ projectId, org, onConnected, onClose }: Connec
           )}
         </div>
 
-        <ProviderTabs options={VCS_PROVIDERS} activeId="azure" onSelect={() => {}} />
-
         <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
           {t("settings.organization")}
         </label>
-        <p className="mb-3 rounded-md border border-[var(--cf-border)] bg-black/[0.02] px-2.5 py-1.5 text-[13px] dark:bg-white/[0.03]">
-          {org}
-        </p>
+        {orgs.length > 1 ? (
+          <select
+            value={org}
+            onChange={(e) => setOrg(e.target.value)}
+            className="mb-3 w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+          >
+            {orgs.map((o) => (
+              <option key={o} value={o}>
+                {o}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <p className="mb-3 rounded-md border border-[var(--cf-border)] bg-black/[0.02] px-2.5 py-1.5 text-[13px] dark:bg-white/[0.03]">
+            {org}
+          </p>
+        )}
 
         <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
           {t("sidebar.adoProject")}

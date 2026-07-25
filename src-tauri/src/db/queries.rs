@@ -70,12 +70,15 @@ pub fn create_project(conn: &Connection, input: NewProject) -> rusqlite::Result<
         ado_org: input.ado_org,
         ado_project: input.ado_project,
         ado_repo_id: input.ado_repo_id,
+        github_owner: input.github_owner,
+        github_repo: input.github_repo,
+        github_host: input.github_host,
         sort_order: 0,
         created_at: now(),
     };
     conn.execute(
-        "INSERT INTO projects (id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, sort_order, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        "INSERT INTO projects (id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, github_owner, github_repo, github_host, sort_order, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             project.id,
             project.workspace_id,
@@ -87,6 +90,9 @@ pub fn create_project(conn: &Connection, input: NewProject) -> rusqlite::Result<
             project.ado_org,
             project.ado_project,
             project.ado_repo_id,
+            project.github_owner,
+            project.github_repo,
+            project.github_host,
             project.sort_order,
             project.created_at,
         ],
@@ -106,12 +112,15 @@ fn map_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
         ado_org: row.get(7)?,
         ado_project: row.get(8)?,
         ado_repo_id: row.get(9)?,
-        sort_order: row.get(10)?,
-        created_at: row.get(11)?,
+        github_owner: row.get(10)?,
+        github_repo: row.get(11)?,
+        github_host: row.get(12)?,
+        sort_order: row.get(13)?,
+        created_at: row.get(14)?,
     })
 }
 
-const PROJECT_COLUMNS: &str = "id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, sort_order, created_at";
+const PROJECT_COLUMNS: &str = "id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, github_owner, github_repo, github_host, sort_order, created_at";
 
 pub fn list_projects(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<Project>> {
     let sql = format!(
@@ -146,9 +155,27 @@ pub fn link_project_ado(
     Ok(())
 }
 
-pub fn unlink_project_ado(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+pub fn link_project_github(
+    conn: &Connection,
+    id: &str,
+    github_owner: &str,
+    github_repo: &str,
+    github_host: &str,
+) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE projects SET ado_org = NULL, ado_project = NULL, ado_repo_id = NULL WHERE id = ?1",
+        "UPDATE projects SET github_owner = ?1, github_repo = ?2, github_host = ?3 WHERE id = ?4",
+        params![github_owner, github_repo, github_host, id],
+    )?;
+    Ok(())
+}
+
+/// Clears every VCS link (Azure DevOps *and* GitHub) on a project — a project is linked to at
+/// most one host at a time, so "disconnect" wipes whichever one is set without the caller
+/// needing to know which provider it was.
+pub fn unlink_project(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE projects SET ado_org = NULL, ado_project = NULL, ado_repo_id = NULL, \
+         github_owner = NULL, github_repo = NULL, github_host = NULL WHERE id = ?1",
         params![id],
     )?;
     Ok(())

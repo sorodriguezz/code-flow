@@ -22,6 +22,9 @@ pub struct Project {
     pub ado_org: Option<String>,
     pub ado_project: Option<String>,
     pub ado_repo_id: Option<String>,
+    pub github_owner: Option<String>,
+    pub github_repo: Option<String>,
+    pub github_host: Option<String>,
     pub sort_order: i64,
     pub created_at: String,
 }
@@ -34,9 +37,18 @@ pub struct NewProject {
     pub remote_url: Option<String>,
     pub color: String,
     pub icon: String,
+    #[serde(default)]
     pub ado_org: Option<String>,
+    #[serde(default)]
     pub ado_project: Option<String>,
+    #[serde(default)]
     pub ado_repo_id: Option<String>,
+    #[serde(default)]
+    pub github_owner: Option<String>,
+    #[serde(default)]
+    pub github_repo: Option<String>,
+    #[serde(default)]
+    pub github_host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

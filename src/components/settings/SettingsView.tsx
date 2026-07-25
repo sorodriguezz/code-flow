@@ -14,7 +14,7 @@ import {
 } from "lucide-react";
 import { ThemeSettings } from "./ThemeSettings";
 import { ProjectsSettings } from "./ProjectsSettings";
-import { AzureDevOpsSettings } from "./AzureDevOpsSettings";
+import { GitHostingSettings } from "./GitHostingSettings";
 import { ClaudeSettings } from "./ClaudeSettings";
 import { ReviewContextEditor } from "./ReviewContextEditor";
 import { SkillsSettings } from "./SkillsSettings";
@@ -149,7 +149,7 @@ export function SettingsView() {
               {section === "general" && <GeneralSettings />}
               {section === "projects" && <ProjectsSettings />}
               {section === "git" && <GitSettings />}
-              {section === "azure" && <AzureDevOpsSettings />}
+              {section === "azure" && <GitHostingSettings />}
               {section === "claude" && <ClaudeSettings />}
               {section === "context" && <ReviewContextEditor />}
               {section === "mdFiles" && <MdFilesSettings />}

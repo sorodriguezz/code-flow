@@ -4,6 +4,7 @@ pub mod app_cmd;
 pub mod claude_cmd;
 pub mod fs_cmd;
 pub mod git_ops;
+pub mod github_cmd;
 pub mod repos;
 pub mod secrets_cmd;
 pub mod settings;

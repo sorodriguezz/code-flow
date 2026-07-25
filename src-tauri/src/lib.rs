@@ -4,6 +4,7 @@ mod commands;
 mod db;
 mod fsops;
 mod git;
+mod github;
 mod paths;
 mod remote;
 mod secrets;
@@ -157,6 +158,9 @@ pub fn run() {
             commands::secrets_cmd::set_ado_pat,
             commands::secrets_cmd::get_ado_pat,
             commands::secrets_cmd::delete_ado_pat,
+            commands::secrets_cmd::set_github_token,
+            commands::secrets_cmd::get_github_token,
+            commands::secrets_cmd::delete_github_token,
             commands::claude_cmd::generate_commit_message,
             commands::claude_cmd::default_commit_template,
             commands::claude_cmd::default_review_template,
@@ -166,13 +170,16 @@ pub fn run() {
             commands::claude_cmd::send_chat_message,
             commands::ado_cmd::ado_list_projects,
             commands::ado_cmd::ado_list_repos,
-            commands::ado_cmd::auto_link_project_ado,
+            commands::ado_cmd::auto_link_project,
             commands::ado_cmd::link_project_ado,
-            commands::ado_cmd::unlink_project_ado,
+            commands::ado_cmd::unlink_project,
+            commands::ado_cmd::open_repo_in_browser,
             commands::ado_cmd::list_pull_requests,
             commands::ado_cmd::list_pr_comment_threads,
             commands::ado_cmd::review_pull_request,
             commands::ado_cmd::post_pr_review_comment,
+            commands::github_cmd::link_project_github,
+            commands::github_cmd::github_authenticated_user,
             commands::fs_cmd::list_dir,
             commands::fs_cmd::read_file_text,
             commands::fs_cmd::write_file_text,

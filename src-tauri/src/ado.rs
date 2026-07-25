@@ -160,6 +160,9 @@ pub struct PullRequestSummary {
     pub author: String,
     pub created_at: String,
     pub url: String,
+    /// Which VCS this PR came from — "azure" | "github" — so the UI can label the "view on…"
+    /// link and post-confirmation correctly without inspecting the URL.
+    pub provider: String,
 }
 
 #[derive(Deserialize)]
@@ -257,6 +260,7 @@ pub async fn list_pull_requests(
                 encode_segment(&pr.repository.name),
                 pr.pull_request_id
             ),
+            provider: "azure".to_string(),
         })
         .collect())
 }

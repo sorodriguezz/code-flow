@@ -32,6 +32,13 @@ pub fn ado_pat_key(org: &str) -> String {
     format!("ado-pat:{org}")
 }
 
+/// GitHub's REST API authenticates one token against every repo/org the account can see, so
+/// the token is stored per host (`github.com`) rather than per owner the way Azure DevOps is
+/// keyed per org — leaving room for a GitHub Enterprise host later without changing the shape.
+pub fn github_token_key(host: &str) -> String {
+    format!("github-token:{host}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

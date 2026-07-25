@@ -301,6 +301,17 @@ export const getAdoPat = (org: string) => invoke<string | null>("get_ado_pat", {
 
 export const deleteAdoPat = (org: string) => invoke<void>("delete_ado_pat", { org });
 
+export const setGithubToken = (host: string, token: string) =>
+  invoke<void>("set_github_token", { host, token });
+
+export const getGithubToken = (host: string) => invoke<string | null>("get_github_token", { host });
+
+export const deleteGithubToken = (host: string) => invoke<void>("delete_github_token", { host });
+
+/** Validates the token saved for `host`, returning the login it authenticates as. */
+export const githubAuthenticatedUser = (host: string) =>
+  invoke<string>("github_authenticated_user", { host });
+
 // ---------- claude ----------
 
 export const generateCommitMessage = (diff: string) =>
@@ -328,20 +339,29 @@ export interface ChatReply {
 export const sendChatMessage = (projectId: string, message: string, sessionId: string | null) =>
   invoke<ChatReply>("send_chat_message", { projectId, message, sessionId });
 
-// ---------- Azure DevOps pull requests ----------
+// ---------- pull requests (Azure DevOps / GitHub) ----------
 
 export const adoListProjects = (org: string) => invoke<AdoProject[]>("ado_list_projects", { org });
 
 export const adoListRepos = (org: string, project: string) =>
   invoke<AdoRepo[]>("ado_list_repos", { org, project });
 
-export const autoLinkProjectAdo = (projectId: string) =>
-  invoke<AutoLinkResult>("auto_link_project_ado", { projectId });
+/** Auto-detects the PR host (Azure DevOps or GitHub) straight from the repo's git remote. */
+export const autoLinkProject = (projectId: string) =>
+  invoke<AutoLinkResult>("auto_link_project", { projectId });
 
 export const linkProjectAdo = (id: string, adoOrg: string, adoProject: string, adoRepoId: string) =>
   invoke<void>("link_project_ado", { id, adoOrg, adoProject, adoRepoId });
 
-export const unlinkProjectAdo = (id: string) => invoke<void>("unlink_project_ado", { id });
+export const linkProjectGithub = (id: string, githubOwner: string, githubRepo: string, githubHost: string) =>
+  invoke<void>("link_project_github", { id, githubOwner, githubRepo, githubHost });
+
+/** Clears whichever VCS link (Azure DevOps or GitHub) the project currently has. */
+export const unlinkProject = (id: string) => invoke<void>("unlink_project", { id });
+
+/** Opens the project's repository home page (GitHub / Azure DevOps) in the default browser. */
+export const openRepoInBrowser = (projectId: string) =>
+  invoke<void>("open_repo_in_browser", { projectId });
 
 export const listPullRequests = (projectId: string) =>
   invoke<PullRequestSummary[]>("list_pull_requests", { projectId });

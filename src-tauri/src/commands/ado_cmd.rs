@@ -4,10 +4,70 @@ use tauri::{AppHandle, State};
 use crate::ado;
 use crate::claude;
 use crate::commands::skills_cmd;
-use crate::db::{models::WorkspaceMcp, queries, Db};
+use crate::db::{
+    models::{Project, WorkspaceMcp},
+    queries, Db,
+};
 use crate::git;
+use crate::github;
 use crate::paths;
 use crate::secrets;
+
+/// Which VCS host a project's PR features talk to, resolved from whichever set of link columns
+/// is populated. A project links to at most one host; GitHub wins if both were somehow set.
+/// This is the single dispatch point the shared PR commands (list / review / comment) branch
+/// on, so the frontend, the `prStore`, and the whole Claude review pipeline stay provider-neutral.
+enum LinkedRepo {
+    Azure { org: String, project: String, repo_id: String },
+    /// `host` is "github.com" or a GitHub Enterprise hostname — picks both the token to use and
+    /// the REST base URL.
+    GitHub { host: String, owner: String, repo: String },
+}
+
+fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
+    if let (Some(owner), Some(repo)) = (project.github_owner.clone(), project.github_repo.clone()) {
+        let host = project.github_host.clone().unwrap_or_else(|| github::GITHUB_COM.to_string());
+        return Ok(LinkedRepo::GitHub { host, owner, repo });
+    }
+    if let (Some(org), Some(ado_project), Some(repo_id)) =
+        (project.ado_org.clone(), project.ado_project.clone(), project.ado_repo_id.clone())
+    {
+        return Ok(LinkedRepo::Azure { org, project: ado_project, repo_id });
+    }
+    Err("This project isn't linked to a pull-request host yet".to_string())
+}
+
+fn github_token(host: &str) -> Result<String, String> {
+    secrets::get_secret(&secrets::github_token_key(host))?
+        .ok_or_else(|| format!("No GitHub token saved for \"{host}\" — connect it in Settings first"))
+}
+
+#[derive(Deserialize)]
+struct GithubConnectionHost {
+    host: String,
+}
+
+/// The GitHub hosts we're allowed to auto-detect: `github.com` always, plus every Enterprise
+/// host the user has connected (persisted by Settings as the `github_connections` JSON list).
+/// Without this allowlist an Enterprise remote is indistinguishable from any other self-hosted
+/// git server, so only configured hosts are recognized.
+fn github_known_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
+    let mut hosts = vec![github::GITHUB_COM.to_string()];
+    let raw = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_setting(&conn, "github_connections").map_err(|e| e.to_string())?
+    };
+    if let Some(raw) = raw {
+        if let Ok(conns) = serde_json::from_str::<Vec<GithubConnectionHost>>(&raw) {
+            for c in conns {
+                if !hosts.iter().any(|h| h.eq_ignore_ascii_case(&c.host)) {
+                    hosts.push(c.host);
+                }
+            }
+        }
+    }
+    Ok(hosts)
+}
 
 /// Builds a `--mcp-config` JSON file for whichever of a workspace's MCP servers are
 /// enabled — persisted under the workspace's own CodeFlow folder rather than a tempfile so
@@ -46,65 +106,82 @@ pub(crate) fn build_mcp_config(mcps: &[WorkspaceMcp], workspace_id: &str) -> Res
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status")]
 pub enum AutoLinkResult {
-    /// Detected an Azure Repos remote and a PAT for its org was already saved — linked
-    /// automatically, no user action needed.
-    Linked { project: crate::db::models::Project },
-    /// Detected an Azure Repos remote, but no PAT is saved for that org yet.
-    NeedsToken { org: String },
-    /// The remote isn't an Azure Repos URL (or there's no remote at all) — falls back to
+    /// Detected a supported remote (Azure Repos or GitHub) and a token for it was already
+    /// saved — linked automatically, no user action needed.
+    Linked { project: Project },
+    /// Detected a supported remote, but no token is saved for it yet. `provider` is
+    /// "azure" | "github"; `identifier` is the org (Azure) or owner (GitHub) it was detected
+    /// under, shown in the "needs a token" hint.
+    NeedsToken { provider: String, identifier: String },
+    /// The remote isn't a recognized host (or there's no remote at all) — falls back to
     /// manual linking.
     NotDetected,
 }
 
-/// Called once per project when its Pull Requests section first needs data: tries to
-/// derive the Azure DevOps org/project/repo straight from the local repo's own remote URL
-/// instead of making the user hunt through dropdowns for something git already knows.
+/// Called once per project when its Pull Requests section first needs data: tries to derive
+/// the host org/project/repo (Azure) or owner/repo (GitHub) straight from the local repo's own
+/// remote URL instead of making the user hunt through dropdowns for something git already knows.
 ///
 /// Reads the remote straight from the repo's actual git config rather than the `projects`
 /// table's `remote_url` column — that column is only populated at "Clone repository" time,
 /// so a repo added via "Add a local repository" (or one whose origin changed since) would
 /// otherwise never be detectable even though `git remote -v` has the answer right there.
 #[tauri::command]
-pub fn auto_link_project_ado(db: State<Db>, project_id: String) -> Result<AutoLinkResult, String> {
+pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkResult, String> {
     let project = load_project(&db, &project_id)?;
-    if ado_link(&project).is_ok() {
+    if linked_repo(&project).is_ok() {
         return Ok(AutoLinkResult::Linked { project });
     }
+
+    // Scan every remote, not just `origin` — a repo whose PR host lives on a differently-named
+    // remote (upstream, fork, …) should still bind on its own. `origin` is checked first as the
+    // canonical upstream, then the rest.
     let remotes = git::remotes::list_remotes(&project.local_path)?;
-    let remote_url = remotes
-        .iter()
-        .find(|r| r.name == "origin")
-        .or_else(|| remotes.first())
-        .map(|r| r.url.as_str());
-    let Some(remote_url) = remote_url else {
-        return Ok(AutoLinkResult::NotDetected);
-    };
-    let Some(detected) = ado::detect_from_remote_url(remote_url) else {
-        return Ok(AutoLinkResult::NotDetected);
-    };
-    let has_token = secrets::get_secret(&secrets::ado_pat_key(&detected.org))?.is_some();
-    if !has_token {
-        return Ok(AutoLinkResult::NeedsToken { org: detected.org });
+    let mut ordered: Vec<&git::remotes::RemoteInfo> = Vec::new();
+    if let Some(origin) = remotes.iter().find(|r| r.name == "origin") {
+        ordered.push(origin);
+    }
+    ordered.extend(remotes.iter().filter(|r| r.name != "origin"));
+
+    let known_github_hosts = github_known_hosts(&db)?;
+
+    // The repo binds to the first remote we recognize *and* already have a token for — so with
+    // both GitHub and Azure DevOps connected, each repo auto-links to the host that's actually
+    // its own, with no manual "pick one" step. If a remote is recognized but its token is
+    // missing, remember the first such case to report which token to add (only if nothing turns
+    // out to be linkable outright).
+    let mut needs_token: Option<AutoLinkResult> = None;
+
+    for remote in &ordered {
+        let url = remote.url.as_str();
+        if let Some(detected) = github::detect_from_remote_url(url, &known_github_hosts) {
+            if secrets::get_secret(&secrets::github_token_key(&detected.host))?.is_some() {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                queries::link_project_github(&conn, &project_id, &detected.owner, &detected.repo, &detected.host)
+                    .map_err(|e| e.to_string())?;
+                let linked = queries::get_project(&conn, &project_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Project not found".to_string())?;
+                return Ok(AutoLinkResult::Linked { project: linked });
+            } else if needs_token.is_none() {
+                needs_token = Some(AutoLinkResult::NeedsToken { provider: "github".to_string(), identifier: detected.owner });
+            }
+        } else if let Some(detected) = ado::detect_from_remote_url(url) {
+            if secrets::get_secret(&secrets::ado_pat_key(&detected.org))?.is_some() {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                queries::link_project_ado(&conn, &project_id, &detected.org, &detected.project, &detected.repo)
+                    .map_err(|e| e.to_string())?;
+                let linked = queries::get_project(&conn, &project_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Project not found".to_string())?;
+                return Ok(AutoLinkResult::Linked { project: linked });
+            } else if needs_token.is_none() {
+                needs_token = Some(AutoLinkResult::NeedsToken { provider: "azure".to_string(), identifier: detected.org });
+            }
+        }
     }
 
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::link_project_ado(&conn, &project_id, &detected.org, &detected.project, &detected.repo)
-        .map_err(|e| e.to_string())?;
-    let linked = queries::get_project(&conn, &project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Project not found".to_string())?;
-    Ok(AutoLinkResult::Linked { project: linked })
-}
-
-fn ado_link(project: &crate::db::models::Project) -> Result<(String, String, String), String> {
-    match (
-        project.ado_org.clone(),
-        project.ado_project.clone(),
-        project.ado_repo_id.clone(),
-    ) {
-        (Some(org), Some(ado_project), Some(repo_id)) => Ok((org, ado_project, repo_id)),
-        _ => Err("This project isn't linked to an Azure DevOps repository yet".to_string()),
-    }
+    Ok(needs_token.unwrap_or(AutoLinkResult::NotDetected))
 }
 
 fn pat_for_org(org: &str) -> Result<String, String> {
@@ -136,10 +213,58 @@ pub fn link_project_ado(
     queries::link_project_ado(&conn, &id, &ado_org, &ado_project, &ado_repo_id).map_err(|e| e.to_string())
 }
 
+/// Clears whichever VCS link (Azure DevOps or GitHub) a project currently has — the sidebar's
+/// "Disconnect" doesn't need to know which provider it was.
 #[tauri::command]
-pub fn unlink_project_ado(db: State<Db>, id: String) -> Result<(), String> {
+pub fn unlink_project(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::unlink_project_ado(&conn, &id).map_err(|e| e.to_string())
+    queries::unlink_project(&conn, &id).map_err(|e| e.to_string())
+}
+
+/// Percent-encodes spaces in an Azure DevOps org/project/repo path segment for a browser URL
+/// (those names routinely contain spaces — "Marketing Website"). GitHub owner/repo can't
+/// contain spaces, so they need no encoding.
+fn web_encode(s: &str) -> String {
+    s.replace(' ', "%20")
+}
+
+/// The project's repository home page on its host, reconstructed from the repo's own git
+/// remote (the reliable source of the human-readable names) rather than the stored link
+/// columns — which may hold an Azure DevOps repo GUID from the manual picker, or be briefly
+/// stale for a repo auto-linked this session. Returns `None` if no remote is recognized.
+fn repo_web_url(db: &State<'_, Db>, project_id: &str) -> Result<Option<String>, String> {
+    let project = load_project(db, project_id)?;
+    let remotes = git::remotes::list_remotes(&project.local_path)?;
+    let mut ordered: Vec<&git::remotes::RemoteInfo> = Vec::new();
+    if let Some(origin) = remotes.iter().find(|r| r.name == "origin") {
+        ordered.push(origin);
+    }
+    ordered.extend(remotes.iter().filter(|r| r.name != "origin"));
+
+    let known_github_hosts = github_known_hosts(db)?;
+    for remote in &ordered {
+        if let Some(d) = github::detect_from_remote_url(&remote.url, &known_github_hosts) {
+            return Ok(Some(format!("https://{}/{}/{}", d.host, d.owner, d.repo)));
+        }
+        if let Some(d) = ado::detect_from_remote_url(&remote.url) {
+            return Ok(Some(format!(
+                "https://dev.azure.com/{}/{}/_git/{}",
+                web_encode(&d.org),
+                web_encode(&d.project),
+                web_encode(&d.repo)
+            )));
+        }
+    }
+    Ok(None)
+}
+
+/// Opens the project's repository home page in the default browser — the "open on the web"
+/// shortcut next to the Pull Requests section.
+#[tauri::command]
+pub fn open_repo_in_browser(db: State<Db>, project_id: String) -> Result<(), String> {
+    let url = repo_web_url(&db, &project_id)?
+        .ok_or_else(|| "Couldn't determine this repository's web address from its remote".to_string())?;
+    open::that(&url).map_err(|e| format!("couldn't open the browser: {e}"))
 }
 
 fn load_project(db: &State<'_, Db>, project_id: &str) -> Result<crate::db::models::Project, String> {
@@ -155,9 +280,16 @@ pub async fn list_pull_requests(
     project_id: String,
 ) -> Result<Vec<ado::PullRequestSummary>, String> {
     let project = load_project(&db, &project_id)?;
-    let (org, ado_project, repo_id) = ado_link(&project)?;
-    let pat = pat_for_org(&org)?;
-    ado::list_pull_requests(&org, &ado_project, &repo_id, &pat).await
+    match linked_repo(&project)? {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(&org)?;
+            ado::list_pull_requests(&org, &ado_project, &repo_id, &pat).await
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            github::list_pull_requests(&host, &owner, &repo, &token).await
+        }
+    }
 }
 
 /// Existing PR comment threads — e.g. from a human reviewer — so they can be shown alongside
@@ -169,9 +301,16 @@ pub async fn list_pr_comment_threads(
     pr_id: i64,
 ) -> Result<Vec<ado::PrCommentThread>, String> {
     let project = load_project(&db, &project_id)?;
-    let (org, ado_project, repo_id) = ado_link(&project)?;
-    let pat = pat_for_org(&org)?;
-    ado::list_pr_comment_threads(&org, &ado_project, &repo_id, pr_id, &pat).await
+    match linked_repo(&project)? {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(&org)?;
+            ado::list_pr_comment_threads(&org, &ado_project, &repo_id, pr_id, &pat).await
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            github::list_pr_comment_threads(&host, &owner, &repo, pr_id, &token).await
+        }
+    }
 }
 
 #[tauri::command]
@@ -183,8 +322,7 @@ pub async fn review_pull_request(
     job_id: String,
 ) -> Result<String, String> {
     let project = load_project(&db, &project_id)?;
-    let (org, ado_project, repo_id) = ado_link(&project)?;
-    let pat = pat_for_org(&org)?;
+    let link = linked_repo(&project)?;
     let workspace_id = project.workspace_id.clone();
 
     let (contexts, md_files, mcps, binary, model, tools_setting, review_template) = {
@@ -207,7 +345,16 @@ pub async fn review_pull_request(
         (contexts, md_files, mcps, binary, model, tools, review_template)
     };
 
-    let prs = ado::list_pull_requests(&org, &ado_project, &repo_id, &pat).await?;
+    let prs = match &link {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(org)?;
+            ado::list_pull_requests(org, ado_project, repo_id, &pat).await?
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(host)?;
+            github::list_pull_requests(host, owner, repo, &token).await?
+        }
+    };
     let pr = prs
         .into_iter()
         .find(|p| p.id == pr_id)
@@ -215,13 +362,29 @@ pub async fn review_pull_request(
 
     // Best-effort — if the fetch fails (offline, auth hiccup) we still try to diff
     // against whatever refs are already local rather than blocking the review outright.
-    let _ = crate::remote::fetch(app, project.local_path.clone(), None).await;
+    let _ = crate::remote::fetch(app.clone(), project.local_path.clone(), None).await;
+
+    // For GitHub, also fetch the PR's canonical head ref (`refs/pull/<n>/head`) into a local
+    // tracking ref and diff against that — so the review reflects the PR's exact head commit
+    // even when it comes from a fork or a head branch that isn't a normal origin branch. Falls
+    // back to the head branch name if that targeted fetch fails.
+    let head_ref = match &link {
+        LinkedRepo::GitHub { .. } => {
+            let local_ref = format!("refs/remotes/origin/codeflow-pr-{pr_id}");
+            let refspec = format!("+refs/pull/{pr_id}/head:{local_ref}");
+            match crate::remote::fetch_refspec(app.clone(), project.local_path.clone(), "origin".to_string(), refspec).await {
+                Ok(_) => local_ref,
+                Err(_) => pr.source_branch.clone(),
+            }
+        }
+        LinkedRepo::Azure { .. } => pr.source_branch.clone(),
+    };
 
     // Also best-effort: skills are a nice-to-have for the review, not a precondition —
     // don't block the review if e.g. the project directory is read-only.
     let _ = skills_cmd::sync_skills_into_project(&workspace_id, &project.local_path);
 
-    let diff_files = git::diff::get_branch_diff(&project.local_path, &pr.target_branch, &pr.source_branch)?;
+    let diff_files = git::diff::get_branch_diff(&project.local_path, &pr.target_branch, &head_ref)?;
     let diff_text = git::diff::render_diff_for_prompt(&diff_files);
 
     let mut enabled_contexts: Vec<(String, String)> = contexts
@@ -302,30 +465,68 @@ pub async fn post_pr_review_comment(
     comments: Vec<ReviewComment>,
 ) -> Result<(), String> {
     let project = load_project(&db, &project_id)?;
-    let (org, ado_project, repo_id) = ado_link(&project)?;
-    let pat = pat_for_org(&org)?;
+    let link = linked_repo(&project)?;
 
     let mut failures = Vec::new();
-    for (i, comment) in comments.iter().enumerate() {
-        let result = match &comment.location {
-            Some(loc) => {
-                ado::post_pr_comment_anchored(
-                    &org,
-                    &ado_project,
-                    &repo_id,
-                    pr_id,
-                    &comment.content,
-                    &loc.file,
-                    loc.start_line,
-                    loc.end_line,
-                    &pat,
-                )
-                .await
+    match link {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(&org)?;
+            for (i, comment) in comments.iter().enumerate() {
+                let result = match &comment.location {
+                    Some(loc) => {
+                        ado::post_pr_comment_anchored(
+                            &org,
+                            &ado_project,
+                            &repo_id,
+                            pr_id,
+                            &comment.content,
+                            &loc.file,
+                            loc.start_line,
+                            loc.end_line,
+                            &pat,
+                        )
+                        .await
+                    }
+                    None => ado::post_pr_comment(&org, &ado_project, &repo_id, pr_id, &comment.content, &pat).await,
+                };
+                if let Err(e) = result {
+                    failures.push(format!("#{} of {}: {e}", i + 1, comments.len()));
+                }
             }
-            None => ado::post_pr_comment(&org, &ado_project, &repo_id, pr_id, &comment.content, &pat).await,
-        };
-        if let Err(e) = result {
-            failures.push(format!("#{} of {}: {e}", i + 1, comments.len()));
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            // One head-SHA fetch for the whole batch (anchored comments all pin to the same
+            // commit). Best-effort: if it fails, anchored comments fall back to general PR
+            // comments rather than aborting the whole post.
+            let head_sha = if comments.iter().any(|c| c.location.is_some()) {
+                github::head_sha_for(&host, &owner, &repo, pr_id, &token).await.ok()
+            } else {
+                None
+            };
+            for (i, comment) in comments.iter().enumerate() {
+                let result = match (&comment.location, &head_sha) {
+                    (Some(loc), Some(sha)) => {
+                        github::post_pr_comment_anchored(
+                            &host,
+                            &owner,
+                            &repo,
+                            pr_id,
+                            &comment.content,
+                            &loc.file,
+                            loc.start_line,
+                            loc.end_line,
+                            sha,
+                            &token,
+                        )
+                        .await
+                    }
+                    _ => github::post_pr_comment(&host, &owner, &repo, pr_id, &comment.content, &token).await,
+                };
+                if let Err(e) = result {
+                    failures.push(format!("#{} of {}: {e}", i + 1, comments.len()));
+                }
+            }
         }
     }
     if !failures.is_empty() {

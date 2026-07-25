@@ -22,11 +22,14 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             remote_url  TEXT,
             color       TEXT NOT NULL DEFAULT '#6366f1',
             icon        TEXT NOT NULL DEFAULT 'git-branch',
-            ado_org     TEXT,
-            ado_project TEXT,
-            ado_repo_id TEXT,
-            sort_order  INTEGER NOT NULL DEFAULT 0,
-            created_at  TEXT NOT NULL
+            ado_org      TEXT,
+            ado_project  TEXT,
+            ado_repo_id  TEXT,
+            github_owner TEXT,
+            github_repo  TEXT,
+            github_host  TEXT,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL
         );
 
         -- Review context is scoped per WORKSPACE (see migrate_review_contexts_to_workspace
@@ -131,6 +134,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     drop_legacy_installed_skills(conn)?;
     add_session_id_to_activity_log(conn)?;
     add_custom_label_to_job_history(conn)?;
+    add_github_columns_to_projects(conn)?;
+    add_github_host_to_projects(conn)?;
     Ok(())
 }
 
@@ -189,4 +194,28 @@ fn add_custom_label_to_job_history(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE job_history ADD COLUMN custom_label TEXT;")
+}
+
+/// `projects` gained `github_owner`/`github_repo` when GitHub was added alongside Azure DevOps
+/// as a PR host — for a database created before that, add the columns (existing rows simply
+/// have no GitHub link, exactly the pre-GitHub behavior). Added together since they're always
+/// set/cleared as a pair.
+fn add_github_columns_to_projects(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "projects", "github_owner")? {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN github_owner TEXT;")?;
+    }
+    if !has_column(conn, "projects", "github_repo")? {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN github_repo TEXT;")?;
+    }
+    Ok(())
+}
+
+/// `github_host` records which GitHub server a linked project lives on (github.com or an
+/// Enterprise host), so the API base URL and per-host token can be resolved. Added after
+/// `github_owner`/`github_repo` — a row with those set but a NULL host defaults to github.com.
+fn add_github_host_to_projects(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "projects", "github_host")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE projects ADD COLUMN github_host TEXT;")
 }

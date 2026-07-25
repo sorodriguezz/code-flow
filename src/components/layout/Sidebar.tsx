@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Archive,
   Briefcase,
@@ -13,8 +13,11 @@ import {
   FolderInput,
   GitBranch,
   GitBranchPlus,
+  GitFork,
   GitMerge,
   GitPullRequest,
+  Globe,
+  RefreshCw,
   Loader2,
   Lock,
   Pencil,
@@ -33,17 +36,18 @@ import {
   pickFolder,
   revealInFileManager,
   openInVsCode,
-  getSetting,
-  getAdoPat,
-  autoLinkProjectAdo,
-  unlinkProjectAdo,
+  autoLinkProject,
+  openRepoInBrowser,
 } from "../../lib/tauri/commands";
-import type { BranchInfo, Project, PullRequestSummary, StashInfo } from "../../types/domain";
+import { loadGithubConnections } from "../../lib/githubConnections";
+import { loadAdoConnections } from "../../lib/adoConnections";
+import type { BranchInfo, GithubConnection, Project, PullRequestSummary, StashInfo, VcsProvider } from "../../types/domain";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
+import { ConnectGithubModal } from "./ConnectGithubModal";
 import { StashDiffModal } from "./StashDiffModal";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -543,11 +547,20 @@ const PR_STATUS_ICON: Record<string, typeof CircleDot> = {
 // which spins the component into an infinite re-render loop.
 const EMPTY_PRS: PullRequestSummary[] = [];
 
-type AdoLinkState =
+type LinkState =
   | { status: "checking" }
   | { status: "linked" }
-  | { status: "needsToken"; org: string }
+  | { status: "needsToken"; provider: VcsProvider; identifier: string }
   | { status: "notDetected" };
+
+// Which PR hosts have a saved token — decides whether a repo whose host couldn't be
+// auto-detected can still be linked manually, and to which provider(s)/host(s).
+interface HostingState {
+  /** Connected Azure DevOps organizations (empty if none have a saved PAT). */
+  ado: string[];
+  /** Configured GitHub connections (github.com and/or Enterprise hosts). */
+  github: GithubConnection[];
+}
 
 function PullRequestsSection({ project }: { project: Project }) {
   const t = useT();
@@ -559,39 +572,40 @@ function PullRequestsSection({ project }: { project: Project }) {
   const selectedPr = usePrStore((s) => s.selectedPr);
   const openAiPanel = useUiStore((s) => s.openAiPanel);
   const openSettings = useUiStore((s) => s.openSettings);
-  const [connectedOrg, setConnectedOrg] = useState<string | null | undefined>(undefined);
-  const [showConnect, setShowConnect] = useState(false);
+  const settingsOpen = useUiStore((s) => s.settingsOpen);
+  const [hosting, setHosting] = useState<HostingState | undefined>(undefined);
+  const [showConnect, setShowConnect] = useState<false | VcsProvider>(false);
 
-  const initiallyLinked = Boolean(project.ado_org && project.ado_project && project.ado_repo_id);
-  const [linkState, setLinkState] = useState<AdoLinkState>(
+  const initiallyLinked = Boolean(
+    (project.ado_org && project.ado_project && project.ado_repo_id) ||
+      (project.github_owner && project.github_repo),
+  );
+  const [linkState, setLinkState] = useState<LinkState>(
     initiallyLinked ? { status: "linked" } : { status: "checking" },
   );
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const org = await getSetting("ado_default_org");
-      if (!org) {
-        if (!cancelled) setConnectedOrg(null);
-        return;
-      }
-      const pat = await getAdoPat(org).catch(() => null);
-      if (!cancelled) setConnectedOrg(pat ? org : null);
+      const ado = await loadAdoConnections().catch(() => []);
+      const github = await loadGithubConnections().catch(() => []);
+      if (!cancelled) setHosting({ ado: ado.map((c) => c.org), github });
     })();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Tries to derive the Azure DevOps org/project/repo straight from this repo's own
-  // remote URL — since it's an Azure Repos clone, git already knows where it lives, so
-  // there's no reason to make the user pick it again from dropdowns.
+  // Tries to derive the PR host (Azure DevOps org/project/repo or GitHub owner/repo) straight
+  // from this repo's own remote URL — git already knows where the repo lives, so there's no
+  // reason to make the user pick it again.
   const runAutoDetect = async (cancelledRef: { current: boolean }) => {
     try {
-      const result = await autoLinkProjectAdo(project.id);
+      const result = await autoLinkProject(project.id);
       if (cancelledRef.current) return;
       if (result.status === "Linked") setLinkState({ status: "linked" });
-      else if (result.status === "NeedsToken") setLinkState({ status: "needsToken", org: result.org });
+      else if (result.status === "NeedsToken")
+        setLinkState({ status: "needsToken", provider: result.provider, identifier: result.identifier });
       else setLinkState({ status: "notDetected" });
     } catch {
       if (!cancelledRef.current) setLinkState({ status: "notDetected" });
@@ -615,19 +629,44 @@ function PullRequestsSection({ project }: { project: Project }) {
     if (linkState.status === "linked") void loadPullRequests(project.id);
   }, [linkState.status, project.id]);
 
-  // Escape hatch for a link that turned out wrong — an auto-detected org whose token got
-  // replaced/removed in Settings, or a repo that got manually pointed at the wrong project.
-  // Re-runs the same auto-detect used on mount (so a repo that genuinely belongs to Azure
-  // DevOps reconnects to its own PRs on its own); the manual picker is only a fallback for
-  // when that still doesn't resolve it.
-  const handleUnlink = async () => {
-    if (!(await confirmAction(t("sidebar.unlinkConfirm"), false))) return;
-    await unlinkProjectAdo(project.id);
-    setLinkState({ status: "checking" });
-    await runAutoDetect({ current: false });
+  // Re-detect when Settings closes: a token/connection may have just been added there, so the
+  // repo should bind to its host on its own — no manual "connect" click and no switching away
+  // and back to trigger it.
+  const wasSettingsOpen = useRef(settingsOpen);
+  useEffect(() => {
+    const justClosed = wasSettingsOpen.current && !settingsOpen;
+    wasSettingsOpen.current = settingsOpen;
+    if (!justClosed || linkState.status === "linked") return;
+    const ref = { current: false };
+    (async () => {
+      const ado = await loadAdoConnections().catch(() => []);
+      const github = await loadGithubConnections().catch(() => []);
+      if (ref.current) return;
+      setHosting({ ado: ado.map((c) => c.org), github });
+      await runAutoDetect(ref);
+    })();
+    return () => {
+      ref.current = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settingsOpen]);
+
+  const onConnected = () => {
+    setLinkState({ status: "linked" });
+    void loadPullRequests(project.id);
   };
 
-  if (connectedOrg === undefined || linkState.status === "checking") {
+  // The "planet" shortcut — open this repo's home page on its host (GitHub / Azure DevOps) in
+  // the browser. The backend derives the URL from the repo's actual remote.
+  const openRepo = async () => {
+    try {
+      await openRepoInBrowser(project.id);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
+  if (hosting === undefined || linkState.status === "checking") {
     return (
       <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
         <SkeletonRows count={2} className="p-0" />
@@ -636,26 +675,22 @@ function PullRequestsSection({ project }: { project: Project }) {
   }
 
   if (linkState.status === "needsToken") {
+    const provider = linkState.provider;
     return (
       <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
         <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">
-          {t("sidebar.needsTokenFor", { org: linkState.org })}{" "}
-          <button onClick={() => openSettings("azure")} className="text-[var(--cf-accent)] hover:underline">
+          {provider === "github"
+            ? t("sidebar.needsGithubToken")
+            : t("sidebar.needsTokenFor", { org: linkState.identifier })}{" "}
+          <button onClick={() => openSettings("azure", provider)} className="text-[var(--cf-accent)] hover:underline">
             {t("statusbar.settings")}
           </button>
         </p>
-        <button
-          onClick={handleUnlink}
-          className="mt-1 flex items-center gap-1.5 px-1.5 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-        >
-          <Unlink size={10} />
-          {t("sidebar.unlinkRepo")}
-        </button>
       </CollapsibleSection>
     );
   }
 
-  if (linkState.status === "notDetected" && connectedOrg === null) {
+  if (linkState.status === "notDetected" && hosting.ado.length === 0 && hosting.github.length === 0) {
     return (
       <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
         <div className="space-y-0.5">
@@ -677,21 +712,37 @@ function PullRequestsSection({ project }: { project: Project }) {
   if (linkState.status === "notDetected") {
     return (
       <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
-        <button
-          onClick={() => setShowConnect(true)}
-          className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-        >
-          <Cloud size={12} />
-          {t("sidebar.linkAdoRepo")}
-        </button>
-        {showConnect && connectedOrg && (
+        {hosting.github.length > 0 && (
+          <button
+            onClick={() => setShowConnect("github")}
+            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          >
+            <GitFork size={12} />
+            {t("sidebar.linkGithubRepo")}
+          </button>
+        )}
+        {hosting.ado.length > 0 && (
+          <button
+            onClick={() => setShowConnect("azure")}
+            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          >
+            <Cloud size={12} />
+            {t("sidebar.linkAdoRepo")}
+          </button>
+        )}
+        {showConnect === "azure" && hosting.ado.length > 0 && (
           <ConnectAdoModal
             projectId={project.id}
-            org={connectedOrg}
-            onConnected={() => {
-              setLinkState({ status: "linked" });
-              void loadPullRequests(project.id);
-            }}
+            orgs={hosting.ado}
+            onConnected={onConnected}
+            onClose={() => setShowConnect(false)}
+          />
+        )}
+        {showConnect === "github" && (
+          <ConnectGithubModal
+            projectId={project.id}
+            hosts={hosting.github.map((c) => c.host)}
+            onConnected={onConnected}
             onClose={() => setShowConnect(false)}
           />
         )}
@@ -704,17 +755,23 @@ function PullRequestsSection({ project }: { project: Project }) {
       icon={GitPullRequest}
       title={t("sidebar.pullRequests")}
       action={
-        loading ? (
-          <Loader2 size={12} className="animate-spin text-[var(--cf-text-muted)]" />
-        ) : (
+        <div className="flex items-center gap-1.5">
           <button
-            onClick={handleUnlink}
-            title={t("sidebar.unlinkRepo")}
-            className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+            onClick={openRepo}
+            title={t("sidebar.openRepoInBrowser")}
+            className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
           >
-            <Unlink size={11} />
+            <Globe size={11} />
           </button>
-        )
+          <button
+            onClick={() => void loadPullRequests(project.id)}
+            disabled={loading}
+            title={t("sidebar.refreshPrs")}
+            className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-50"
+          >
+            <RefreshCw size={11} className={loading ? "animate-spin" : undefined} />
+          </button>
+        </div>
       }
     >
       {loadError ? (
@@ -727,9 +784,6 @@ function PullRequestsSection({ project }: { project: Project }) {
               className="text-[11px] text-[var(--cf-accent)] hover:underline"
             >
               {t("sidebar.retry")}
-            </button>
-            <button onClick={handleUnlink} className="text-[11px] text-[var(--cf-text-muted)] hover:underline">
-              {t("sidebar.unlinkRepo")}
             </button>
           </div>
         </div>
@@ -1039,6 +1093,9 @@ export function Sidebar() {
       ado_org: null,
       ado_project: null,
       ado_repo_id: null,
+      github_owner: null,
+      github_repo: null,
+      github_host: null,
     });
   };
 

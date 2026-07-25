@@ -54,6 +54,9 @@ export function CloneRepoModal({ workspaceId, onClose }: { workspaceId: string; 
         ado_org: null,
         ado_project: null,
         ado_repo_id: null,
+        github_owner: null,
+        github_repo: null,
+        github_host: null,
       });
       onClose();
     } catch (e) {

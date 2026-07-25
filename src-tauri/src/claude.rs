@@ -197,6 +197,12 @@ async fn invoke_claude(
     mcp_config_path: Option<&str>,
     stdin_content: &str,
     resume_session_id: Option<&str>,
+    // Claude Code permission mode. Runs headless (`-p`) with no TTY, so an interactive
+    // permission prompt can never be answered — a tool that needs one is silently denied.
+    // `Some("acceptEdits")` auto-approves file create/edit tools so the flows that are meant
+    // to change the working tree (chat, "fix with AI") actually can; read-only flows pass
+    // `None` and keep the default (prompt-gated) behavior.
+    permission_mode: Option<&str>,
 ) -> Result<ClaudeRun, String> {
     let mut cmd = Command::new(binary_path);
     cmd.arg("-p").arg(prompt);
@@ -209,6 +215,9 @@ async fn invoke_claude(
     cmd.arg("--output-format").arg("json");
     if !allowed_tools.is_empty() {
         cmd.arg("--allowedTools").arg(allowed_tools.join(","));
+    }
+    if let Some(mode) = permission_mode {
+        cmd.arg("--permission-mode").arg(mode);
     }
     if let Some(path) = mcp_config_path {
         cmd.arg("--mcp-config").arg(path).arg("--strict-mcp-config");
@@ -319,7 +328,7 @@ pub async fn generate_commit_message(binary_path: &str, diff: &str, prompt_templ
     };
 
     let run =
-        invoke_claude(binary_path, prompt, None, COMMIT_MESSAGE_MODEL, &[], None, None, &truncated, None).await?;
+        invoke_claude(binary_path, prompt, None, COMMIT_MESSAGE_MODEL, &[], None, None, &truncated, None, None).await?;
     Ok(run.text)
 }
 
@@ -377,6 +386,7 @@ pub async fn review_pull_request(
         Some(cwd),
         mcp_config_path,
         &stdin_payload,
+        None,
         None,
     )
     .await?;
@@ -441,6 +451,7 @@ pub async fn analyze_changes(
         mcp_config_path,
         &stdin_payload,
         None,
+        None,
     )
     .await?;
     Ok(stamp_footer(&run.text, "análisis pre-commit", run.model.as_deref().unwrap_or(model)))
@@ -495,6 +506,10 @@ pub async fn chat_with_repo(
         mcp_config_path,
         &stdin_payload,
         session_id,
+        // The chat is meant to help work on the repo, so let it create/edit files without an
+        // (unanswerable, headless) permission prompt. Running commands still needs the `Bash`
+        // tool enabled in Settings.
+        Some("acceptEdits"),
     )
     .await
 }
@@ -542,6 +557,7 @@ pub async fn apply_finding_fix(
         None,
         finding_prompt,
         None,
+        Some("acceptEdits"),
     )
     .await?;
     Ok(run.text)

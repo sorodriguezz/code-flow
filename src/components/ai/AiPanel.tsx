@@ -200,7 +200,8 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
   const runReview = () => reviewPr(projectId, pr.id);
   const publish = async () => {
     if (comments.length === 0) return;
-    if (!(await confirmAction(t("chat.confirmPost", { id: pr.id, n: comments.length }), false))) return;
+    const confirmKey = pr.provider === "github" ? "chat.confirmPostGithub" : "chat.confirmPost";
+    if (!(await confirmAction(t(confirmKey, { id: pr.id, n: comments.length }), false))) return;
     void postReview(projectId, pr.id, comments);
   };
 
@@ -240,7 +241,7 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
               className="mt-1 inline-flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
             >
               <ExternalLink size={10} />
-              {t("chat.viewOnAdo")}
+              {pr.provider === "github" ? t("chat.viewOnGithub") : t("chat.viewOnAdo")}
             </a>
             {!loading && !error && parsed && (
               <div className="mt-1.5">
@@ -337,7 +338,13 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
               className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
             >
               {posting ? <Loader2 size={12} className="animate-spin" /> : null}
-              {posted ? t("chat.posted") : posting ? t("chat.posting") : t("chat.postToPr")}
+              {posted
+                ? pr.provider === "github"
+                  ? t("chat.postedGithub")
+                  : t("chat.posted")
+                : posting
+                  ? t("chat.posting")
+                  : t("chat.postToPr")}
             </button>
           )}
           <button

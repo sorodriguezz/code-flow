@@ -18,6 +18,9 @@ export interface Project {
   ado_org: string | null;
   ado_project: string | null;
   ado_repo_id: string | null;
+  github_owner: string | null;
+  github_repo: string | null;
+  github_host: string | null;
   sort_order: number;
   created_at: string;
 }
@@ -32,6 +35,22 @@ export interface NewProject {
   ado_org: string | null;
   ado_project: string | null;
   ado_repo_id: string | null;
+  github_owner: string | null;
+  github_repo: string | null;
+  github_host: string | null;
+}
+
+/** A saved GitHub connection — one per host (github.com or an Enterprise Server). Persisted as
+ * the `github_connections` app-setting (JSON); the token itself lives in the OS keychain. */
+export interface GithubConnection {
+  host: string;
+  username: string;
+}
+
+/** A saved Azure DevOps connection — one per organization. Persisted as the `ado_connections`
+ * app-setting (JSON); the PAT itself lives in the OS keychain, keyed per org. */
+export interface AdoConnection {
+  org: string;
 }
 
 export interface FileStatusEntry {
@@ -225,6 +244,8 @@ export interface AdoRepo {
   name: string;
 }
 
+export type VcsProvider = "azure" | "github";
+
 export interface PullRequestSummary {
   id: number;
   title: string;
@@ -235,9 +256,11 @@ export interface PullRequestSummary {
   author: string;
   created_at: string;
   url: string;
+  /** Which host this PR came from — drives the "view on…" link and post-confirmation copy. */
+  provider: VcsProvider;
 }
 
 export type AutoLinkResult =
   | { status: "Linked"; project: Project }
-  | { status: "NeedsToken"; org: string }
+  | { status: "NeedsToken"; provider: VcsProvider; identifier: string }
   | { status: "NotDetected" };

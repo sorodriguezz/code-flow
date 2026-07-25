@@ -99,6 +99,13 @@ pub async fn fetch(app: AppHandle, repo_path: String, remote: Option<String>) ->
     run_streamed(&app, "fetch", Some(&repo_path), &["fetch", &remote]).await
 }
 
+/// Fetches a single explicit refspec (e.g. a GitHub `refs/pull/<n>/head` pull-request ref)
+/// rather than the remote's default branches — used to pull a PR's exact head commit for
+/// review, which works even when the PR comes from a fork.
+pub async fn fetch_refspec(app: AppHandle, repo_path: String, remote: String, refspec: String) -> Result<(), String> {
+    run_streamed(&app, "fetch", Some(&repo_path), &["fetch", &remote, &refspec]).await
+}
+
 pub async fn pull(app: AppHandle, repo_path: String) -> Result<(), String> {
     run_streamed(&app, "pull", Some(&repo_path), &["pull"]).await
 }

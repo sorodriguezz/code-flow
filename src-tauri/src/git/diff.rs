@@ -132,10 +132,18 @@ pub fn get_commit_diff(path: &str, oid: &str) -> Result<Vec<FileDiffInfo>, Strin
     collect_diff(&diff)
 }
 
-/// Tries the branch name locally first, then as a remote-tracking ref — covers both
-/// "you already have this branch checked out" and "it only exists on origin so far".
+/// Resolves a PR's base/head to a commit. Since those are branch names as they exist on the
+/// remote, the remote-tracking ref (`origin/<name>`) is preferred over a same-named local
+/// branch that may be stale — a stale local branch is exactly what makes an up-to-date PR diff
+/// come back empty. A caller may also pass a full ref path (e.g. a freshly-fetched
+/// `refs/pull/<n>/head` PR ref), which is used verbatim.
 fn resolve_branch_commit<'a>(repo: &'a git2::Repository, name: &str) -> Result<git2::Commit<'a>, String> {
-    for candidate in [name.to_string(), format!("origin/{name}"), format!("refs/remotes/origin/{name}")] {
+    let candidates: Vec<String> = if name.starts_with("refs/") {
+        vec![name.to_string()]
+    } else {
+        vec![format!("origin/{name}"), format!("refs/remotes/origin/{name}"), name.to_string()]
+    };
+    for candidate in candidates {
         if let Ok(obj) = repo.revparse_single(&candidate) {
             if let Ok(commit) = obj.peel_to_commit() {
                 return Ok(commit);
