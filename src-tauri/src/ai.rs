@@ -19,6 +19,9 @@ use tokio::process::Command;
 
 pub const MAX_DIFF_CHARS: usize = 20_000;
 pub const MAX_REVIEW_DIFF_CHARS: usize = 120_000;
+/// Per-side cap for conflict resolution — a file whose one side is bigger than this is better
+/// merged by hand than fed whole to the model.
+pub const MAX_CONFLICT_SIDE_CHARS: usize = 40_000;
 
 /// Prefix the frontend looks for to render a dedicated "you're out of quota" notice instead of
 /// a generic error banner. Both engines emit it, so it lives here.
@@ -288,6 +291,10 @@ fn install_dirs() -> Vec<std::path::PathBuf> {
     if let Some(appdata) = dirs::data_dir() {
         dirs.push(appdata.join("npm"));
     }
+    // Antigravity CLI (`agy`) installs to `%LOCALAPPDATA%\agy\bin`.
+    if let Some(local) = dirs::data_local_dir() {
+        dirs.push(local.join("agy").join("bin"));
+    }
     dirs
 }
 
@@ -424,6 +431,55 @@ fn stamp_footer(body: &str, kind: &str, label: &str, model: &str) -> String {
     format!("{body}\n\n---\n🤖 Análisis automatizado ({kind}) · {label} ({model_label}) · {timestamp}")
 }
 
+pub const DEFAULT_PR_DESCRIPTION_TEMPLATE: &str =
+    "Eres un desarrollador experimentado redactando la descripción de un pull request. Se te \
+     entrega la rama origen, la rama destino y el diff por stdin.\n\n\
+     Devuelve EXACTAMENTE este formato, empezando por la línea del título:\n\n\
+     TITLE: {un título conciso en imperativo, estilo Conventional Commits, máximo 72 caracteres}\n\n\
+     ## Resumen\n\
+     {1-3 frases explicando qué hace este PR y por qué}\n\n\
+     ## Cambios\n\
+     - {un punto por cada cambio relevante del diff}\n\n\
+     ## Notas\n\
+     {riesgos, pendientes o consideraciones para el revisor; escribe \"Ninguna\" si no hay}\n\n\
+     Reglas:\n\
+     - Responde SIEMPRE en español.\n\
+     - Básate ÚNICAMENTE en el diff; no inventes cambios que no aparezcan.\n\
+     - La primera línea DEBE empezar con \"TITLE: \" seguido del título.\n\
+     - No incluyas el diff crudo ni bloques de código salvo que sean imprescindibles.\n\
+     - Responde solo con la descripción, sin texto adicional antes o después.";
+
+pub const DEFAULT_RESOLVE_CONFLICT_TEMPLATE: &str =
+    "Eres un ingeniero de software resolviendo un conflicto de merge de git. Se te entregan por \
+     stdin tres versiones de un mismo archivo: BASE (el ancestro común), OURS (la rama actual) y \
+     THEIRS (la rama entrante).\n\n\
+     Tu tarea: producir el contenido final del archivo integrando de forma coherente los cambios \
+     de ambos lados (OURS y THEIRS) y preservando la intención de cada uno. Usa BASE para entender \
+     qué cambió cada lado respecto al original.\n\n\
+     Reglas ESTRICTAS de salida:\n\
+     - Responde ÚNICAMENTE con el contenido COMPLETO del archivo ya resuelto.\n\
+     - NO incluyas marcadores de conflicto (<<<<<<<, =======, >>>>>>>).\n\
+     - NO envuelvas la respuesta en bloques de código markdown (```), ni añadas explicaciones, \
+     comentarios ni texto antes o después del contenido.\n\
+     - Conserva el estilo, la indentación y el formato del archivo.\n\
+     - Si ambos lados hacen cambios compatibles, inclúyelos ambos; si son incompatibles, elige la \
+     integración más razonable sin perder funcionalidad.";
+
+/// Some models wrap their answer in a ```lang fence despite being told not to — strip a single
+/// outer fence so what gets written to disk is the raw file content.
+fn strip_code_fence(text: &str) -> String {
+    let t = text.trim();
+    if !t.starts_with("```") {
+        return t.to_string();
+    }
+    let after_open = match t.find('\n') {
+        Some(nl) => &t[nl + 1..],
+        None => return String::new(),
+    };
+    let body = after_open.trim_end().strip_suffix("```").unwrap_or(after_open);
+    body.trim_end().to_string()
+}
+
 // ---------- high-level, provider-neutral operations ----------
 
 pub async fn generate_commit_message(
@@ -450,6 +506,75 @@ pub async fn generate_commit_message(
     inv.model = model;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
+}
+
+/// Drafts a pull-request description from the diff between two branches, with the active engine.
+/// Returns the raw model text (a `TITLE:` line followed by a Markdown body) — the command layer
+/// splits it into title/body. No footer is stamped: this text goes straight into a PR field.
+pub async fn generate_pr_description(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    source_branch: &str,
+    target_branch: &str,
+    diff_text: &str,
+    prompt_template: &str,
+) -> Result<String, String> {
+    if diff_text.trim().is_empty() {
+        return Err("No hay diferencias entre las ramas para describir".to_string());
+    }
+
+    let truncated: String = diff_text.chars().take(MAX_REVIEW_DIFF_CHARS).collect();
+    let stdin_payload =
+        format!("RAMA ORIGEN: {source_branch}\nRAMA DESTINO: {target_branch}\n\nDIFF:\n{truncated}");
+
+    let prompt = if prompt_template.trim().is_empty() {
+        DEFAULT_PR_DESCRIPTION_TEMPLATE
+    } else {
+        prompt_template
+    };
+
+    let mut inv = AiInvocation::new(prompt, &stdin_payload);
+    inv.model = model;
+    let run = run(engine, binary, inv).await?;
+    Ok(run.text)
+}
+
+/// Proposes a merged version of a conflicted file from its base/ours/theirs versions. Returns the
+/// full resolved file content (conflict markers and any wrapping code fence stripped) — the caller
+/// writes it to disk only after the user accepts.
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_conflict(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    file_path: &str,
+    base: &str,
+    ours: &str,
+    theirs: &str,
+    prompt_template: &str,
+) -> Result<String, String> {
+    let cap = |s: &str| -> String { s.chars().take(MAX_CONFLICT_SIDE_CHARS).collect() };
+    let stdin_payload = format!(
+        "ARCHIVO: {file_path}\n\n\
+         === BASE (ancestro común) ===\n{}\n\n\
+         === OURS (rama actual) ===\n{}\n\n\
+         === THEIRS (rama entrante) ===\n{}",
+        cap(base),
+        cap(ours),
+        cap(theirs),
+    );
+
+    let prompt = if prompt_template.trim().is_empty() {
+        DEFAULT_RESOLVE_CONFLICT_TEMPLATE
+    } else {
+        prompt_template
+    };
+
+    let mut inv = AiInvocation::new(prompt, &stdin_payload);
+    inv.model = model;
+    let run = run(engine, binary, inv).await?;
+    Ok(strip_code_fence(&run.text))
 }
 
 /// Reviews a pull request's diff with the active engine, folding in the workspace's enabled

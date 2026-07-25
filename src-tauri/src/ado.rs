@@ -265,6 +265,66 @@ pub async fn list_pull_requests(
         .collect())
 }
 
+/// Opens a pull request via `POST .../pullrequests`. Azure DevOps requires the branch names with
+/// their full `refs/heads/` prefix (the inverse of [`strip_ref`]). Returns the created PR mapped
+/// to the shared summary shape.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_pull_request(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    title: &str,
+    description: &str,
+    source_branch: &str,
+    target_branch: &str,
+    draft: bool,
+    pat: &str,
+) -> Result<PullRequestSummary, String> {
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{repo_id}/pullrequests\
+         ?api-version={API_VERSION}"
+    );
+    let body = serde_json::json!({
+        "sourceRefName": format!("refs/heads/{source_branch}"),
+        "targetRefName": format!("refs/heads/{target_branch}"),
+        "title": title,
+        "description": description,
+        "isDraft": draft,
+    });
+    let res = client()
+        .post(&url)
+        .header("Authorization", auth_header(pat))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {text}"));
+    }
+    let pr: RawPullRequest =
+        res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
+    Ok(PullRequestSummary {
+        id: pr.pull_request_id,
+        title: pr.title,
+        description: pr.description,
+        status: bucket_status(&pr.status, pr.is_draft),
+        source_branch: strip_ref(&pr.source_ref_name),
+        target_branch: strip_ref(&pr.target_ref_name),
+        author: pr.created_by.display_name,
+        created_at: pr.creation_date,
+        url: format!(
+            "https://dev.azure.com/{org_enc}/{project_enc}/_git/{}/pullrequest/{}",
+            encode_segment(&pr.repository.name),
+            pr.pull_request_id
+        ),
+        provider: "azure".to_string(),
+    })
+}
+
 #[derive(Deserialize)]
 struct RawIteration {
     id: i64,

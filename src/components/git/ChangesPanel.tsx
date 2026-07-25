@@ -25,7 +25,7 @@ import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
-import { generateCommitMessage, openInDefaultApp } from "../../lib/tauri/commands";
+import { generateCommitMessage, openInDefaultApp, scanStagedSecrets } from "../../lib/tauri/commands";
 import { diffToText } from "../../lib/diffText";
 import { parseClaudeError, type ClaudeErrorInfo } from "../../lib/claudeError";
 import { confirmAction } from "../../state/confirmStore";
@@ -33,10 +33,12 @@ import { fileStatusLabelKey } from "../../lib/fileStatus";
 import { buildFileTree, type FileTreeNode } from "../../lib/buildFileTree";
 import { useT } from "../../state/languageStore";
 import { ConflictsBanner } from "./ConflictsBanner";
+import { SecretScanModal } from "./SecretScanModal";
 import { useUiStore } from "../../state/uiStore";
 import { usePrStore } from "../../state/prStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
-import type { FileStatusEntry } from "../../types/domain";
+import { usePreferencesStore } from "../../state/preferencesStore";
+import type { FileStatusEntry, SecretHit } from "../../types/domain";
 
 const LIST_MIN = 220;
 const LIST_MAX = 520;
@@ -235,6 +237,9 @@ export function ChangesPanel() {
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<ClaudeErrorInfo | null>(null);
+  const [scanning, setScanning] = useState(false);
+  const [secretHits, setSecretHits] = useState<SecretHit[] | null>(null);
+  const secretScanEnabled = usePreferencesStore((s) => s.secretScanEnabled);
   const [pending, setPending] = useState<{ path: string; kind: "stage" | "unstage" | "discard" | "all" } | null>(
     null,
   );
@@ -326,6 +331,32 @@ export function ChangesPanel() {
     } finally {
       setAiBusy(false);
     }
+  };
+
+  const performCommit = async () => {
+    await commitChanges(message.trim());
+    setMessage("");
+  };
+
+  // Commit entry point: run the pre-commit secret scan first (when enabled). If it finds
+  // credential-looking content, hold the commit and surface the SecretScanModal instead. A scan
+  // that itself errors must not block committing — fall through to the commit in that case.
+  const handleCommit = async () => {
+    if (secretScanEnabled && repoPath) {
+      setScanning(true);
+      try {
+        const hits = await scanStagedSecrets(repoPath);
+        if (hits.length > 0) {
+          setSecretHits(hits);
+          return;
+        }
+      } catch {
+        // scan failed — don't stand in the way of the commit
+      } finally {
+        setScanning(false);
+      }
+    }
+    await performCommit();
   };
 
   return (
@@ -491,14 +522,13 @@ export function ChangesPanel() {
               <p className="mt-1 text-[11px] text-[var(--cf-danger)]">{aiError.message}</p>
             ))}
           <button
-            disabled={busy || aiBusy || !message.trim() || status.staged.length === 0}
-            onClick={async () => {
-              await commitChanges(message.trim());
-              setMessage("");
-            }}
-            className="mt-2 w-full rounded-md bg-[var(--cf-accent)] py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
+            disabled={busy || aiBusy || scanning || !message.trim() || status.staged.length === 0}
+            onClick={handleCommit}
+            className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
           >
-            {t("changes.commit")} {status.staged.length > 0 ? `(${status.staged.length})` : ""}
+            {scanning && <Loader2 size={13} className="animate-spin" />}
+            {scanning ? t("secrets.scanning") : t("changes.commit")}{" "}
+            {!scanning && status.staged.length > 0 ? `(${status.staged.length})` : ""}
           </button>
         </div>
       </div>
@@ -520,6 +550,16 @@ export function ChangesPanel() {
         )}
       </div>
       </div>
+      {secretHits && (
+        <SecretScanModal
+          hits={secretHits}
+          onCancel={() => setSecretHits(null)}
+          onCommitAnyway={async () => {
+            setSecretHits(null);
+            await performCommit();
+          }}
+        />
+      )}
     </div>
   );
 }

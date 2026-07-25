@@ -83,12 +83,12 @@ const CommitTable = memo(function CommitTable() {
   return (
     <div className="flex-1 overflow-auto">
       <div
-        className="sticky top-0 z-10 flex h-6 items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[10px]"
+        className="sticky top-0 z-10 flex h-6 min-w-full items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[10px]"
         style={{ width: totalWidth + 24, willChange: "transform", contain: "paint" }}
       >
         {columns.map((col) => (
           <div key={col.key} style={{ width: col.width }} className="flex shrink-0 items-center">
-            <span className="truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            <span className="min-w-0 flex-1 truncate text-center text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {col.label}
             </span>
             <ResizeHandle
@@ -101,12 +101,17 @@ const CommitTable = memo(function CommitTable() {
             />
           </div>
         ))}
-        <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        {/* GRAFO has no fixed width — `flex-1` lets it absorb whatever space is left so the column
+            always fills to the panel's right edge (with `min-w-full` above keeping the whole header
+            at least as wide as the panel), instead of ending at content width and looking cut off.
+            Left-aligned (not centered like the others) so the label sits over the graph's lane line,
+            which is anchored to the left of this column rather than its middle. */}
+        <span className="flex-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("graph.colGraph")}
         </span>
       </div>
 
-      <div className="relative" style={{ width: totalWidth + 24, minHeight: svgHeight }}>
+      <div className="relative min-w-full" style={{ width: totalWidth + 24, minHeight: svgHeight }}>
         <svg
           width={svgWidth}
           height={svgHeight}

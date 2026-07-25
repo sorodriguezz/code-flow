@@ -15,11 +15,13 @@ import type {
   MergeOutcome,
   NewProject,
   PrCommentThread,
+  PrDescriptionDraft,
   Project,
   PullRequestSummary,
   RemoteInfo,
   RepoStatusInfo,
   ReviewContext,
+  SecretHit,
   StashInfo,
   Workspace,
   WorkspaceMcp,
@@ -152,6 +154,10 @@ export const commitChanges = (
     authorEmail: authorEmail ?? null,
   });
 
+/** Scans the staged diff for hardcoded credentials. Empty array = clean. */
+export const scanStagedSecrets = (repoPath: string) =>
+  invoke<SecretHit[]>("scan_staged_secrets", { repoPath });
+
 // ---------- git: remotes ----------
 
 export const listRemotes = (repoPath: string) => invoke<RemoteInfo[]>("list_remotes", { repoPath });
@@ -180,6 +186,10 @@ export const resolveConflictSide = (repoPath: string, relPath: string, side: "ou
 
 export const markConflictResolved = (repoPath: string, relPath: string) =>
   invoke<void>("mark_conflict_resolved", { repoPath, relPath });
+
+/** Proposes an AI-merged version of a conflicted file. Returns the resolved content (no markers). */
+export const resolveConflictWithAi = (repoPath: string, relPath: string) =>
+  invoke<string>("resolve_conflict_with_ai", { repoPath, relPath });
 
 export const completeMerge = (repoPath: string, message: string) =>
   invoke<string>("complete_merge", { repoPath, message });
@@ -383,6 +393,20 @@ export type PrAction = "approve" | "request_changes" | "close";
 
 export const actOnPullRequest = (projectId: string, prId: number, action: PrAction, body?: string) =>
   invoke<void>("act_on_pull_request", { projectId, prId, action, body });
+
+/** AI-drafts a PR title + body from the diff between two branches (no host call — local git). */
+export const generatePrDescription = (projectId: string, sourceBranch: string, targetBranch: string) =>
+  invoke<PrDescriptionDraft>("generate_pr_description", { projectId, sourceBranch, targetBranch });
+
+/** Opens a PR on the project's linked host. Returns the created PR. */
+export const createPullRequest = (
+  projectId: string,
+  title: string,
+  description: string,
+  sourceBranch: string,
+  targetBranch: string,
+  draft: boolean,
+) => invoke<PullRequestSummary>("create_pull_request", { projectId, title, description, sourceBranch, targetBranch, draft });
 
 // ---------- filesystem (embedded editor) ----------
 

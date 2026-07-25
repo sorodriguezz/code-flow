@@ -6,6 +6,7 @@ pub mod fs_cmd;
 pub mod git_ops;
 pub mod github_cmd;
 pub mod repos;
+pub mod secret_scan_cmd;
 pub mod secrets_cmd;
 pub mod settings;
 pub mod skills_cmd;

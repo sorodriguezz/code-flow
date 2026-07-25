@@ -17,12 +17,12 @@ export interface AiProviderOption {
 export const AI_PROVIDERS: AiProviderOption[] = [
   { id: "claude", label: "Claude Code", icon: Bot, available: true, defaultBinary: "claude" },
   { id: "codex", label: "Codex", icon: Cpu, available: false },
-  // Gemini runs against a Google-account OAuth login (Google AI Pro / Ultra subscription, or the
-  // free Code Assist tier) — the CLI's own login, same model as Claude's. See `gemini.rs`.
-  { id: "gemini", label: "Gemini", icon: Gem, available: true, defaultBinary: "gemini" },
+  // Gemini now runs through Google's Antigravity CLI (`agy`), the successor to the retired
+  // `gemini` CLI, against a Google-account login. Headless via `agy -p`. See `gemini.rs`.
+  { id: "gemini", label: "Gemini", icon: Gem, available: true, defaultBinary: "agy" },
   // opencode is provider-agnostic: it drives whatever model providers the user configured inside
   // it, addressed as `provider/model`. Headless via `opencode run`. See `opencode.rs`.
-  { id: "opencode", label: "opencode", icon: SquareTerminal, available: true, defaultBinary: "opencode" },
+  { id: "opencode", label: "Open Code", icon: SquareTerminal, available: true, defaultBinary: "opencode" },
   { id: "deepseek", label: "DeepSeek", icon: Waves, available: false },
   { id: "local", labelKey: "settings.localModel", icon: HardDrive, available: false },
 ];
@@ -47,12 +47,12 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
     { id: "claude-fable-5", label: "Fable 5" },
   ],
-  // Gemini model ids move fast; these are the common ones. The "custom" option in Settings lets
-  // the user type whatever their subscription/CLI actually exposes if these drift.
+  // Fallback only — shown when `agy models` can't be queried (agy not installed / not signed in).
+  // When it can, the Settings picker is populated live from the CLI, so these need not stay current.
   gemini: [
-    { id: "gemini-3-pro", label: "Gemini 3 Pro" },
-    { id: "gemini-2.5-pro", label: "2.5 Pro" },
-    { id: "gemini-2.5-flash", label: "2.5 Flash" },
+    { id: "gemini-3.6-flash-high", label: "Gemini 3.6 Flash (High)" },
+    { id: "gemini-3.1-pro-high", label: "Gemini 3.1 Pro (High)" },
+    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
   ],
   // opencode addresses models as `provider/model`, and which are available depends entirely on the
   // providers the user configured inside opencode — so these are just format examples. The

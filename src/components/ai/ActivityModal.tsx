@@ -70,12 +70,18 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
   };
 
   const handleDelete = async (entry: ActivityEntry) => {
-    if (!(await confirmAction(t("chatHistory.confirmDelete")))) return;
+    const runs = entry.type === "job" ? entry.runs.length : 1;
+    // When the activity bundles history (a PR / pre-commit with several runs) spell that out, so a
+    // single click deleting the whole thing isn't a surprise.
+    const message = runs > 1 ? t("ai.confirmDeleteWithHistory", { n: runs }) : t("chatHistory.confirmDelete");
+    if (!(await confirmAction(message))) return;
     // Deleting a chat updates the persisted conversation list; the chat panel reconciles against
     // that list and resets itself if the open conversation no longer exists (see AiPanel
     // ChatSection) — which also covers a chat that spans several session ids.
     if (entry.type === "chat") await removeConversation(projectId, entry.conv.session_id);
-    else await removeJob(projectId, entry.job.id);
+    // A job row owns every run of that activity — remove them all so the whole history goes, not
+    // just the latest run (which would leave the row behind with one fewer run each click).
+    else await Promise.all(entry.runs.map((j) => removeJob(projectId, j.id)));
   };
 
   const startRename = (entry: ActivityEntry) => {

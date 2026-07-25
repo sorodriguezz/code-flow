@@ -109,6 +109,51 @@ pub fn list_conflicts(path: &str) -> Result<Vec<ConflictFile>, String> {
     Ok(conflict_paths(&index)?.into_iter().map(|path| ConflictFile { path }).collect())
 }
 
+/// The three conflicting versions of a single file, decoded to text from the merge index stages.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConflictVersions {
+    /// Common ancestor (stage 1). Empty when the file was newly added on both sides.
+    pub base: String,
+    /// Our side (stage 2 — the branch merged into). Empty if we deleted the file.
+    pub ours: String,
+    /// Their side (stage 3 — the incoming branch). Empty if they deleted the file.
+    pub theirs: String,
+}
+
+/// Reads a conflicted file's base/ours/theirs versions straight from the merge index stages so the
+/// AI resolver gets each side whole — rather than having to reverse-engineer them from the
+/// `<<<<<<<`/`=======`/`>>>>>>>` markers in the working copy.
+pub fn conflict_versions(path: &str, rel_path: &str) -> Result<ConflictVersions, String> {
+    let repo = open(path)?;
+    let index = repo.index().map_err(|e| e.message().to_string())?;
+    let conflict = index
+        .conflicts()
+        .map_err(|e| e.message().to_string())?
+        .filter_map(|c| c.ok())
+        .find(|c| {
+            c.our
+                .as_ref()
+                .or(c.their.as_ref())
+                .or(c.ancestor.as_ref())
+                .is_some_and(|e| e.path == rel_path.as_bytes())
+        })
+        .ok_or("no conflict for this path")?;
+
+    let read = |entry: &Option<git2::IndexEntry>| -> String {
+        entry
+            .as_ref()
+            .and_then(|e| repo.find_blob(e.id).ok())
+            .map(|b| String::from_utf8_lossy(b.content()).to_string())
+            .unwrap_or_default()
+    };
+
+    Ok(ConflictVersions {
+        base: read(&conflict.ancestor),
+        ours: read(&conflict.our),
+        theirs: read(&conflict.their),
+    })
+}
+
 /// Resolves a conflicted file by taking one side wholesale ("ours" or "theirs"),
 /// writing it to disk and staging it.
 pub fn resolve_conflict_side(path: &str, rel_path: &str, side: &str) -> Result<(), String> {

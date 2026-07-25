@@ -124,6 +124,31 @@ async fn post_json(url: &str, token: &str, body: &serde_json::Value) -> Result<(
     Ok(())
 }
 
+/// Like [`post_json`] but deserializes the created resource from the response body — used by
+/// endpoints (create PR) whose returned object we actually need (its number, URL).
+async fn post_json_returning<T: for<'de> Deserialize<'de>>(
+    url: &str,
+    token: &str,
+    body: &serde_json::Value,
+) -> Result<T, String> {
+    let res = client()
+        .post(url)
+        .header("Authorization", bearer(token))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", USER_AGENT)
+        .header("X-GitHub-Api-Version", API_VERSION)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach GitHub: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("GitHub returned {status}: {body}"));
+    }
+    res.json::<T>().await.map_err(|e| format!("unexpected response from GitHub: {e}"))
+}
+
 async fn patch_json(url: &str, token: &str, body: &serde_json::Value) -> Result<(), String> {
     let res = client()
         .patch(url)
@@ -221,6 +246,33 @@ pub async fn list_pull_requests(host: &str, owner: &str, repo: &str, token: &str
     );
     let raw: Vec<RawPull> = get_json(&url, token).await?;
     Ok(raw.into_iter().map(map_pull).collect())
+}
+
+/// Opens a pull request via `POST /repos/{owner}/{repo}/pulls`. `head`/`base` are branch names
+/// (`head` is the source/compare branch, `base` the target) — the branch must already exist on
+/// the remote. Returns the created PR mapped to the shared summary shape.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_pull_request(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    title: &str,
+    body: &str,
+    head: &str,
+    base: &str,
+    draft: bool,
+    token: &str,
+) -> Result<PullRequestSummary, String> {
+    let url = format!("{}/repos/{owner}/{repo}/pulls", api_root(host));
+    let payload = serde_json::json!({
+        "title": title,
+        "head": head,
+        "base": base,
+        "body": body,
+        "draft": draft,
+    });
+    let raw: RawPull = post_json_returning(&url, token, &payload).await?;
+    Ok(map_pull(raw))
 }
 
 /// The head commit SHA a new inline comment must be anchored to — GitHub requires `commit_id`

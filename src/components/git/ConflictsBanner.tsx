@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { AlertTriangle, Check, Code2, GitMerge, X } from "lucide-react";
+import { AlertTriangle, Check, Code2, GitMerge, Sparkles, X } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { ConflictResolveModal } from "./ConflictResolveModal";
 
 export function ConflictsBanner() {
   const conflicts = useRepoStore((s) => s.conflicts);
@@ -15,6 +16,7 @@ export function ConflictsBanner() {
   const openInEditor = useUiStore((s) => s.openInEditor);
   const t = useT();
   const [message, setMessage] = useState("Merge");
+  const [aiFile, setAiFile] = useState<string | null>(null);
 
   return (
     <div className="border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] p-3">
@@ -30,6 +32,14 @@ export function ConflictsBanner() {
             className="flex items-center gap-2 rounded-md bg-[var(--cf-surface)] px-2 py-1.5 text-[12px]"
           >
             <span className="flex-1 min-w-0 truncate font-mono">{c.path}</span>
+            <button
+              title={t("conflicts.aiResolveTitle")}
+              onClick={() => setAiFile(c.path)}
+              className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)]"
+            >
+              <Sparkles size={12} />
+              {t("conflicts.aiResolve")}
+            </button>
             <button
               title={t("conflicts.keepOurs")}
               onClick={() => resolveConflict(c.path, "ours")}
@@ -92,6 +102,7 @@ export function ConflictsBanner() {
           {t("conflicts.abortMerge")}
         </button>
       </div>
+      {aiFile && <ConflictResolveModal filePath={aiFile} onClose={() => setAiFile(null)} />}
     </div>
   );
 }

@@ -36,7 +36,7 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   changesListWidth: 288,
   settingsNavWidth: 208,
   editorTreeWidth: 260,
-  graphColRefs: 130,
+  graphColRefs: 200,
   graphColAuthor: 130,
   graphColHash: 70,
   graphColDate: 70,

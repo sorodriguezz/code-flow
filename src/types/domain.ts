@@ -138,6 +138,16 @@ export interface FileDiffInfo {
   hunks: DiffHunkInfo[];
 }
 
+/** A credential-looking match found in the staged diff by the pre-commit secret scanner. */
+export interface SecretHit {
+  file: string;
+  line: number;
+  rule: string;
+  rule_name: string;
+  severity: "critical" | "warning";
+  preview: string;
+}
+
 export interface ReviewContext {
   id: string;
   workspace_id: string;
@@ -245,6 +255,12 @@ export interface AdoRepo {
 }
 
 export type VcsProvider = "azure" | "github";
+
+/** AI-drafted PR title + body, returned by `generate_pr_description` to prefill the create form. */
+export interface PrDescriptionDraft {
+  title: string;
+  body: string;
+}
 
 export interface PullRequestSummary {
   id: number;

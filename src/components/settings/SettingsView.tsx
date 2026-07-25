@@ -36,8 +36,8 @@ const NAV_MAX = 320;
 // Claude reads when reviewing a PR (context, instructions, skills, MCP servers) — apply
 // only to whichever workspace is currently active, per the user's explicit scoping model.
 const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
-  { id: "appearance", labelKey: "settings.appearance", icon: Palette },
   { id: "general", labelKey: "settings.general", icon: Globe },
+  { id: "appearance", labelKey: "settings.appearance", icon: Palette },
   { id: "projects", labelKey: "settings.projects", icon: FolderGit2 },
   { id: "git", labelKey: "settings.git", icon: GitBranch },
   { id: "azure", labelKey: "settings.gitHostingSection", icon: Cloud },

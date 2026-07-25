@@ -2,37 +2,44 @@ import { GitPullRequest, Loader2, MessageSquare, ShieldCheck, XCircle, type Luci
 import type { Job } from "../state/jobsStore";
 import type { ChatConversationSummary } from "../types/domain";
 
-/** One row in the unified "Activity" list — a background job (PR review / pre-commit
- * analysis) or a past chat conversation, shown side by side sorted by recency instead of in
- * two separate sections. A job row can stand for several runs collapsed together (`runCount`),
- * see [`mergeActivityEntries`]. */
+/** One row in the unified "Activity" list — one *activity*: a chat conversation, or a background
+ * job that may collapse several runs of the same thing (`runs`, newest first; `job` is the
+ * representative latest run). See [`mergeActivityEntries`]. Because a row owns *all* its runs,
+ * deleting it can remove the whole thing + history in one go, not one run at a time. */
 export type ActivityEntry =
-  | { type: "job"; job: Job; runCount: number }
+  | { type: "job"; job: Job; runs: Job[] }
   | { type: "chat"; conv: ChatConversationSummary };
 
-/** Reviewing the *same* PR again is the common case (fix findings → re-review), and each run is a
- * separate job — which used to stack up as N identical "#3 Tests" rows that looked like a bug
- * ("¿por qué está cinco veces?"). Collapse every `pr-review` run of one PR into a single row
- * standing for its latest run, tagged with how many runs there were; pre-commit analyses and
- * chats stay individual (each is a distinct point-in-time result the user may want to reopen). */
+/** Collapses repeated runs of the *same activity* into one row: every `pr-review` run of a given
+ * PR (fix findings → re-review) becomes one "#3 Tests" row, and every `analyze-changes` run of the
+ * project becomes one "pre-commit" row — instead of N identical rows that looked like a bug. The
+ * row carries all its runs (newest first) so the trash can wipe the whole history at once; the
+ * representative `job` is the newest run. Chats are one activity each already. */
 export function mergeActivityEntries(jobs: Job[], conversations: ChatConversationSummary[]): ActivityEntry[] {
   const prRuns = new Map<number, Job[]>();
+  const analyzeRuns: Job[] = [];
   const standalone: Job[] = [];
   for (const job of jobs) {
-    const prId = job.kind === "pr-review" && typeof job.meta.prId === "number" ? job.meta.prId : null;
-    if (prId === null) {
+    if (job.kind === "pr-review" && typeof job.meta.prId === "number") {
+      const runs = prRuns.get(job.meta.prId);
+      if (runs) runs.push(job);
+      else prRuns.set(job.meta.prId, [job]);
+    } else if (job.kind === "analyze-changes") {
+      analyzeRuns.push(job);
+    } else {
       standalone.push(job);
-      continue;
     }
-    const runs = prRuns.get(prId);
-    if (runs) runs.push(job);
-    else prRuns.set(prId, [job]);
   }
 
-  const jobEntries: ActivityEntry[] = standalone.map((job) => ({ type: "job", job, runCount: 1 }));
+  const byNewest = (runs: Job[]) => [...runs].sort((a, b) => b.createdAt - a.createdAt);
+  const jobEntries: ActivityEntry[] = standalone.map((job) => ({ type: "job", job, runs: [job] }));
   for (const runs of prRuns.values()) {
-    const latest = runs.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
-    jobEntries.push({ type: "job", job: latest, runCount: runs.length });
+    const sorted = byNewest(runs);
+    jobEntries.push({ type: "job", job: sorted[0], runs: sorted });
+  }
+  if (analyzeRuns.length > 0) {
+    const sorted = byNewest(analyzeRuns);
+    jobEntries.push({ type: "job", job: sorted[0], runs: sorted });
   }
 
   const entries: ActivityEntry[] = [
@@ -42,9 +49,9 @@ export function mergeActivityEntries(jobs: Job[], conversations: ChatConversatio
   return entries.sort((a, b) => entryTimestamp(b) - entryTimestamp(a));
 }
 
-/** How many runs a job row stands for (1 unless it's a collapsed PR-review group). */
+/** How many runs a job row stands for (1 for a chat or a single-run job). */
 export function entryRunCount(entry: ActivityEntry): number {
-  return entry.type === "job" ? entry.runCount : 1;
+  return entry.type === "job" ? entry.runs.length : 1;
 }
 
 export function entryTimestamp(entry: ActivityEntry): number {
@@ -88,10 +95,10 @@ export function findActiveEntryKey(
     return match ? entryKey(match) : null;
   }
   if (state.analyzeOpen) {
-    // A pinned run highlights that exact entry; with none pinned (fresh open) the newest
-    // analysis is the one shown, so highlight that.
+    // A pinned run highlights its group (match against *any* run, since analyses are now collapsed
+    // into one row); with none pinned (fresh open) the newest analysis is shown, so highlight that.
     const match = state.analyzeJobId
-      ? entries.find((e) => e.type === "job" && e.job.id === state.analyzeJobId)
+      ? entries.find((e) => e.type === "job" && e.runs.some((r) => r.id === state.analyzeJobId))
       : entries.find((e) => e.type === "job" && e.job.kind === "analyze-changes");
     return match ? entryKey(match) : null;
   }

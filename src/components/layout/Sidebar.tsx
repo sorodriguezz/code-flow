@@ -48,6 +48,7 @@ import { SkeletonRows } from "../common/Skeleton";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
+import { CreatePrModal } from "./CreatePrModal";
 import { StashDiffModal } from "./StashDiffModal";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -575,6 +576,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   const settingsOpen = useUiStore((s) => s.settingsOpen);
   const [hosting, setHosting] = useState<HostingState | undefined>(undefined);
   const [showConnect, setShowConnect] = useState<false | VcsProvider>(false);
+  const [showCreatePr, setShowCreatePr] = useState(false);
 
   const initiallyLinked = Boolean(
     (project.ado_org && project.ado_project && project.ado_repo_id) ||
@@ -757,6 +759,13 @@ function PullRequestsSection({ project }: { project: Project }) {
       action={
         <div className="flex items-center gap-1.5">
           <button
+            onClick={() => setShowCreatePr(true)}
+            title={t("createPr.title")}
+            className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+          >
+            <Plus size={12} />
+          </button>
+          <button
             onClick={openRepo}
             title={t("sidebar.openRepoInBrowser")}
             className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
@@ -824,6 +833,16 @@ function PullRequestsSection({ project }: { project: Project }) {
             );
           })}
         </div>
+      )}
+      {showCreatePr && (
+        <CreatePrModal
+          project={project}
+          onClose={() => setShowCreatePr(false)}
+          onCreated={() => {
+            useAnalyzeUiStore.getState().hide();
+            openAiPanel();
+          }}
+        />
       )}
     </CollapsibleSection>
   );

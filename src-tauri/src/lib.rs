@@ -10,6 +10,7 @@ mod github;
 mod opencode;
 mod paths;
 mod remote;
+mod secret_scan;
 mod secrets;
 mod terminal;
 mod tray;
@@ -129,6 +130,7 @@ pub fn run() {
             commands::git_ops::unstage_all,
             commands::git_ops::discard_file_changes,
             commands::git_ops::commit,
+            commands::secret_scan_cmd::scan_staged_secrets,
             commands::git_ops::list_remotes,
             commands::git_ops::set_remote_url,
             commands::git_ops::get_git_identity,
@@ -170,6 +172,7 @@ pub fn run() {
             commands::claude_cmd::default_review_template,
             commands::claude_cmd::default_analyze_template,
             commands::claude_cmd::analyze_working_changes,
+            commands::claude_cmd::resolve_conflict_with_ai,
             commands::claude_cmd::resolve_finding_with_ai,
             commands::claude_cmd::send_chat_message,
             commands::ado_cmd::ado_list_projects,
@@ -179,6 +182,8 @@ pub fn run() {
             commands::ado_cmd::unlink_project,
             commands::ado_cmd::open_repo_in_browser,
             commands::ado_cmd::list_pull_requests,
+            commands::ado_cmd::generate_pr_description,
+            commands::ado_cmd::create_pull_request,
             commands::ado_cmd::list_pr_comment_threads,
             commands::ado_cmd::review_pull_request,
             commands::ado_cmd::post_pr_review_comment,

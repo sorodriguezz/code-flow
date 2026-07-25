@@ -38,6 +38,12 @@ interface PrState {
   /** Approve / request changes / close the PR on its host (GitHub or Azure DevOps). Refreshes
    * the PR list afterward so the new status shows, and drops the selection when it was closed. */
   actOnPr: (projectId: string, prId: number, action: PrAction) => Promise<void>;
+  /** Opens a PR on the project's linked host, then refreshes the list and selects the new PR.
+   * Throws on failure so the caller (the modal) can keep itself open and surface the error. */
+  createPr: (
+    projectId: string,
+    input: { title: string; description: string; sourceBranch: string; targetBranch: string; draft: boolean },
+  ) => Promise<PullRequestSummary>;
 }
 
 export const usePrStore = create<PrState>((set, get) => ({
@@ -108,5 +114,20 @@ export const usePrStore = create<PrState>((set, get) => ({
     } finally {
       set({ prActionBusy: null });
     }
+  },
+
+  createPr: async (projectId, input) => {
+    const pr = await api.createPullRequest(
+      projectId,
+      input.title,
+      input.description,
+      input.sourceBranch,
+      input.targetBranch,
+      input.draft,
+    );
+    await get().loadPullRequests(projectId);
+    set({ selectedPr: pr });
+    useToastStore.getState().pushToast(translate("createPr.created"), "success");
+    return pr;
   },
 }));

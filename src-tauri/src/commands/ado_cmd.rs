@@ -293,6 +293,99 @@ pub async fn list_pull_requests(
     }
 }
 
+/// A drafted PR title + body, produced by the AI from the branch diff. The frontend fills the
+/// "Create PR" form with these.
+#[derive(Serialize)]
+pub struct PrDescriptionDraft {
+    pub title: String,
+    pub body: String,
+}
+
+/// Splits the model's raw output ("TITLE: …" first line, then the Markdown body) into the two
+/// form fields. When no `TITLE:` marker is present, the whole text becomes the body.
+fn parse_pr_draft(raw: &str) -> PrDescriptionDraft {
+    let trimmed = raw.trim();
+    let mut title = String::new();
+    let mut found_title = false;
+    let mut body_lines: Vec<&str> = Vec::new();
+    for line in trimmed.lines() {
+        if !found_title {
+            if let Some(rest) = line.trim_start().strip_prefix("TITLE:") {
+                title = rest.trim().to_string();
+                found_title = true;
+                continue;
+            }
+        }
+        body_lines.push(line);
+    }
+    if !found_title {
+        return PrDescriptionDraft { title: String::new(), body: trimmed.to_string() };
+    }
+    PrDescriptionDraft { title, body: body_lines.join("\n").trim().to_string() }
+}
+
+/// Drafts a PR title + description from the diff between two branches, using the active engine.
+/// Generation only needs the local repo (the diff is computed from git), so it works even before
+/// the source branch is pushed.
+#[tauri::command]
+pub async fn generate_pr_description(
+    db: State<'_, Db>,
+    project_id: String,
+    source_branch: String,
+    target_branch: String,
+) -> Result<PrDescriptionDraft, String> {
+    let project = load_project(&db, &project_id)?;
+    let (config, template) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let config = load_ai_config(&conn, AiTask::PrDescription)?;
+        let template = shared_template(&conn, "pr_description_template", "claude_pr_description_template")?;
+        (config, template)
+    };
+    let diff_files = git::diff::get_branch_diff(&project.local_path, &target_branch, &source_branch)?;
+    let diff_text = git::diff::render_diff_for_prompt(&diff_files);
+    let raw = ai::generate_pr_description(
+        &*config.engine,
+        &config.binary,
+        &config.model,
+        &source_branch,
+        &target_branch,
+        &diff_text,
+        &template,
+    )
+    .await?;
+    Ok(parse_pr_draft(&raw))
+}
+
+/// Creates a pull request on whichever host the project is linked to.
+#[tauri::command]
+pub async fn create_pull_request(
+    db: State<'_, Db>,
+    project_id: String,
+    title: String,
+    description: String,
+    source_branch: String,
+    target_branch: String,
+    draft: bool,
+) -> Result<ado::PullRequestSummary, String> {
+    let project = load_project(&db, &project_id)?;
+    match linked_repo(&project)? {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(&org)?;
+            ado::create_pull_request(
+                &org, &ado_project, &repo_id, &title, &description, &source_branch, &target_branch, draft, &pat,
+            )
+            .await
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            github::create_pull_request(
+                &host, &owner, &repo, &title, &description, &source_branch, &target_branch, draft, &token,
+            )
+            .await
+        }
+    }
+}
+
 /// Existing PR comment threads — e.g. from a human reviewer — so they can be shown alongside
 /// CodeFlow's own AI findings and resolved with AI the same way.
 #[tauri::command]

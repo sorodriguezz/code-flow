@@ -9,6 +9,8 @@ export function GitSettings() {
   const t = useT();
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
   const setAutoFetchSeconds = usePreferencesStore((s) => s.setAutoFetchSeconds);
+  const secretScanEnabled = usePreferencesStore((s) => s.secretScanEnabled);
+  const setSecretScanEnabled = usePreferencesStore((s) => s.setSecretScanEnabled);
   const [draft, setDraft] = useState(autoFetchSeconds || 30);
 
   const [name, setName] = useState("");
@@ -88,6 +90,13 @@ export function GitSettings() {
       <p className="text-[11px] text-[var(--cf-text-muted)]">
         {t("settings.autoFetchHint", { n: MIN_AUTO_FETCH_SECONDS })}
       </p>
+
+      <p className="mb-2 mt-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.secretScanDescription")}</p>
+      <label className="mb-1 flex items-center gap-2 text-[13px]">
+        <Checkbox checked={secretScanEnabled} onChange={(checked) => setSecretScanEnabled(checked)} />
+        {t("settings.secretScanLabel")}
+      </label>
+      <p className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.secretScanHint")}</p>
     </section>
   );
 }

@@ -211,7 +211,11 @@ function DiffViewImpl({ files }: { files: FileDiffInfo[] }) {
                   <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
                 </div>
                 {file.hunks.map((hunk, hIdx) => (
-                  <div key={hIdx} className="font-mono text-[12px] leading-5">
+                  // `select-text` re-enables selection here (the app-wide `body { user-select: none }`
+                  // otherwise makes this custom-rendered diff feel like an image). The line-number
+                  // gutters keep `select-none`, so a copy grabs the code without the line numbers —
+                  // matching what the Monaco-backed split view already allows.
+                  <div key={hIdx} className="select-text font-mono text-[12px] leading-5">
                     <div className="bg-[var(--cf-accent-soft)] px-3 py-1 text-[var(--cf-accent)]">{hunk.header}</div>
                     {hunk.lines.map((line, lIdx) => (
                       <div key={lIdx} className={`flex gap-3 px-3 ${lineClasses(line.origin)}`}>

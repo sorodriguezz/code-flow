@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   Bot,
   Check,
+  ChevronDown,
   Cpu,
   FileText,
   FolderOpen,
@@ -24,10 +25,12 @@ import {
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Checkbox } from "../common/Checkbox";
+import { Skeleton } from "../common/Skeleton";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { ProviderTabs } from "../common/ProviderTabs";
 import { useAiProviderStore } from "../../state/aiProviderStore";
-import { AI_PROVIDERS, PROVIDER_MODELS, type AiModelOption } from "../../lib/aiProviders";
+import { useToastStore } from "../../state/toastStore";
+import { AI_PROVIDERS, PROVIDER_MODELS, modelDisplayLabel, type AiModelOption } from "../../lib/aiProviders";
 
 /** Per-provider settings live under `${providerId}_${suffix}` — binary/model/tools are
  * intrinsically provider-specific, so switching the provider tab loads that provider's own. */
@@ -122,30 +125,81 @@ async function loadSharedTemplate(spec: { key: string; legacy: string }): Promis
 }
 
 /** A titled card that visually groups a set of settings, with an icon chip + subtitle header —
- * the same card language used elsewhere in the app (connection cards, the AI panel headers). */
+ * the same card language used elsewhere in the app (connection cards, the AI panel headers).
+ * When `collapsible`, the header toggles the body open/closed (a chevron marks the state); the
+ * per-provider config uses this so the tall binary/model/tools block stays folded away by default. */
 function GroupCard({
   icon: Icon,
   title,
   subtitle,
   children,
+  collapsible = false,
+  defaultOpen = true,
 }: {
   icon: LucideIcon;
   title: string;
   subtitle?: string;
   children: ReactNode;
+  collapsible?: boolean;
+  defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const expanded = !collapsible || open;
+
+  const header = (
+    <>
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">
+        <Icon size={14} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="text-[13px] font-semibold leading-tight">{title}</p>
+        {subtitle && <p className="mt-0.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{subtitle}</p>}
+      </div>
+      {collapsible && (
+        <ChevronDown
+          size={16}
+          className={`mt-0.5 shrink-0 text-[var(--cf-text-muted)] transition-transform ${open ? "" : "-rotate-90"}`}
+        />
+      )}
+    </>
+  );
+
   return (
     <div className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4">
-      <div className="mb-4 flex items-start gap-2.5">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">
-          <Icon size={14} />
-        </span>
-        <div className="min-w-0">
-          <p className="text-[13px] font-semibold leading-tight">{title}</p>
-          {subtitle && <p className="mt-0.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{subtitle}</p>}
-        </div>
+      {collapsible ? (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className={`flex w-full items-start gap-2.5 text-left ${expanded ? "mb-4" : ""}`}
+        >
+          {header}
+        </button>
+      ) : (
+        <div className="mb-4 flex items-start gap-2.5">{header}</div>
+      )}
+      {expanded && children}
+    </div>
+  );
+}
+
+/** Placeholder shown in the per-provider card while its binary/model/tools load — chiefly the
+ * CLI's live model list (`listAiModels`), which can take a beat, so the switch feels responsive. */
+function ProviderConfigSkeleton() {
+  return (
+    <div className="space-y-4" aria-hidden>
+      <div className="space-y-1.5">
+        <Skeleton className="h-3 w-32" />
+        <Skeleton className="h-8 w-full" />
       </div>
-      {children}
+      <div className="space-y-1.5">
+        <Skeleton className="h-3 w-24" />
+        <Skeleton className="h-8 w-full" />
+      </div>
+      <Skeleton className="h-9 w-full" />
+      <div className="space-y-1.5">
+        <Skeleton className="h-3 w-28" />
+        <Skeleton className="h-24 w-full" />
+      </div>
     </div>
   );
 }
@@ -170,6 +224,8 @@ function ModelField({
   choice,
   custom,
   defaultLabel,
+  customHint,
+  customPlaceholder,
   onChoice,
   onCustom,
 }: {
@@ -177,6 +233,9 @@ function ModelField({
   choice: string;
   custom: string;
   defaultLabel: string;
+  /** Per-provider "where to find the ID" note, shown under the custom input. */
+  customHint?: ReactNode;
+  customPlaceholder?: string;
   onChoice: (v: string) => void;
   onCustom: (v: string) => void;
 }) {
@@ -197,12 +256,15 @@ function ModelField({
         <option value={CUSTOM_MODEL}>{t("settings.modelCustom")}</option>
       </select>
       {choice === CUSTOM_MODEL && (
-        <input
-          value={custom}
-          onChange={(e) => onCustom(e.target.value)}
-          placeholder="e.g. claude-sonnet-5-20260115"
-          className="mt-1.5 w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] font-mono outline-none focus:border-[var(--cf-accent)]"
-        />
+        <>
+          <input
+            value={custom}
+            onChange={(e) => onCustom(e.target.value)}
+            placeholder={customPlaceholder ?? "model ID"}
+            className="mt-1.5 w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] font-mono outline-none focus:border-[var(--cf-accent)]"
+          />
+          {customHint && <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">{customHint}</p>}
+        </>
       )}
     </>
   );
@@ -226,6 +288,7 @@ export function ClaudeSettings() {
   const t = useT();
   const providerId = useAiProviderStore((s) => s.providerId);
   const setProvider = useAiProviderStore((s) => s.setProvider);
+  const pushToast = useToastStore((s) => s.pushToast);
   const activeProvider = AI_PROVIDERS.find((p) => p.id === providerId);
   const providerLabel = activeProvider
     ? activeProvider.label ?? (activeProvider.labelKey ? t(activeProvider.labelKey) : providerId)
@@ -234,6 +297,13 @@ export function ClaudeSettings() {
   const showToolPresets = providerId === "claude";
 
   const [binaryPath, setBinaryPath] = useState("claude");
+  // True while the active provider's binary/model/tools (and its live model list) are being
+  // fetched — drives the skeleton so switching providers gives immediate feedback.
+  const [loading, setLoading] = useState(true);
+  // Which provider the binary/model/tools state currently belongs to. The auto-save effect only
+  // runs once this matches the active provider, so it never fires mid-switch (when the state still
+  // holds the previous provider's values) and never writes them under the wrong provider's keys.
+  const [hydratedProvider, setHydratedProvider] = useState<string | null>(null);
   // The provider CLI's live model list (e.g. `opencode models`), when it exposes one. Empty → the
   // dropdowns fall back to the curated `PROVIDER_MODELS` list for this provider.
   const [dynamicModels, setDynamicModels] = useState<string[]>([]);
@@ -269,6 +339,30 @@ export function ClaudeSettings() {
   const setCustomFor = (key: ModelKey, v: string) => setModelCustom((prev) => ({ ...prev, [key]: v }));
   // The list every model dropdown shows: the CLI's live models when available, else the curated one.
   const modelOptions = modelOptionsFor(providerId, dynamicModels);
+
+  // Where to find a valid model ID for the "Custom" field — command to list them for CLIs that can
+  // (opencode / agy), or how Claude names them (it has no list command).
+  const modelsListCommand = providerId === "gemini" ? "agy models" : providerId === "opencode" ? "opencode models" : null;
+  const customModelHint: ReactNode = modelsListCommand ? (
+    <>
+      {t("settings.modelIdHintRun")}{" "}
+      <code className="rounded bg-black/[0.06] px-1 py-0.5 font-mono text-[10.5px] dark:bg-white/[0.1]">
+        {modelsListCommand}
+      </code>
+    </>
+  ) : providerId === "claude" ? (
+    t("settings.modelIdHintClaude")
+  ) : (
+    t("settings.modelIdHintGeneric")
+  );
+  const customModelPlaceholder =
+    providerId === "gemini"
+      ? "e.g. gemini-3.6-flash-high"
+      : providerId === "opencode"
+        ? "e.g. opencode/claude-sonnet-5"
+        : providerId === "claude"
+          ? "e.g. sonnet — or claude-sonnet-5"
+          : t("settings.modelIdPlaceholder");
 
   // Shared templates load once — they don't change when the provider tab does.
   useEffect(() => {
@@ -307,6 +401,7 @@ export function ClaudeSettings() {
   // Per-provider binary/models/tools reload whenever the active provider changes.
   useEffect(() => {
     let cancelled = false;
+    setLoading(true);
     (async () => {
       const [b, base, commit, analyze, review, toolsRaw, dyn] = await Promise.all([
         getSetting(providerKey(providerId, "binary_path")).catch(() => null),
@@ -359,6 +454,8 @@ export function ClaudeSettings() {
         },
         tools: loadedTools,
       }));
+      setHydratedProvider(providerId);
+      setLoading(false);
     })();
     return () => {
       cancelled = true;
@@ -383,19 +480,37 @@ export function ClaudeSettings() {
     if (typeof file === "string") setBinaryPath(file);
   };
 
+  // Switching the provider tab persists `ai_provider` immediately — so the confirmation toast is
+  // honest ("selected — now powering …"). No-ops for the already-active tab to avoid a repeat toast.
+  const handleSelectProvider = async (id: string) => {
+    if (id === providerId) return;
+    await setProvider(id);
+    const p = AI_PROVIDERS.find((x) => x.id === id);
+    const label = p ? (p.label ?? (p.labelKey ? t(p.labelKey) : id)) : id;
+    pushToast(t("settings.providerAppliedToast", { provider: label }), "success");
+  };
+
   // For Claude the "custom" chips are tools outside its preset checklist; for other providers,
   // every tool is a custom chip (they have no preset).
   const customTools = showToolPresets ? tools.filter((t) => !KNOWN_TOOL_IDS.has(t)) : tools;
   const sortedTools = [...tools].sort();
-  const dirty =
+  // The per-provider config (binary/models/tools) auto-applies as you change it; this tracks a
+  // pending diff so the auto-save effect knows what to persist.
+  const providerDirty =
     binaryPath !== snapshot.binaryPath ||
     MODEL_KEYS.some((k) => models[k] !== snapshot.models[k]) ||
+    sortedTools.join(",") !== [...snapshot.tools].sort().join(",");
+  // The Save button owns only the shared prompt templates now.
+  const templatesDirty =
     commitTemplate !== snapshot.commitTemplate ||
     reviewTemplate !== snapshot.reviewTemplate ||
-    analyzeTemplate !== snapshot.analyzeTemplate ||
-    sortedTools.join(",") !== [...snapshot.tools].sort().join(",");
+    analyzeTemplate !== snapshot.analyzeTemplate;
 
-  const save = async () => {
+  // Persist the per-provider config the moment the user changes it — binary, models and tools now
+  // apply on the spot, so the Save button is no longer involved. Runs synchronously (no debounce)
+  // so nothing is lost if Settings is closed right after a change; the effect below gates it so it
+  // only ever writes the hydrated provider's own keys.
+  const persistProviderConfig = async () => {
     await Promise.all([
       setSetting(providerKey(providerId, "binary_path"), binaryPath),
       setSetting(providerKey(providerId, MODEL_SUFFIX.base), models.base),
@@ -403,20 +518,52 @@ export function ClaudeSettings() {
       setSetting(providerKey(providerId, MODEL_SUFFIX.analyze), models.analyze),
       setSetting(providerKey(providerId, MODEL_SUFFIX.review), models.review),
       setSetting(providerKey(providerId, "allowed_tools"), tools.join(",")),
+    ]);
+    // Keep the chat chip's model in sync with the base model.
+    useAiProviderStore.getState().setModel(models.base);
+    setSnapshot((prev) => ({ ...prev, binaryPath, models: { ...models }, tools }));
+  };
+
+  // Auto-apply per-provider changes. Gated on hydration + no in-flight load so it never runs with
+  // stale/mismatched state; the value deps make it re-fire on every change (a bare `providerDirty`
+  // wouldn't, since it stays `true` across successive edits).
+  useEffect(() => {
+    if (loading || hydratedProvider !== providerId || !providerDirty) return;
+    void persistProviderConfig();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    loading,
+    hydratedProvider,
+    providerId,
+    providerDirty,
+    binaryPath,
+    models.base,
+    models.commit,
+    models.analyze,
+    models.review,
+    sortedTools.join(","),
+  ]);
+
+  // Success toast confirming a model is now live, by its friendly name (raw id if custom/unknown).
+  const notifyModelApplied = (resolved: string) =>
+    pushToast(
+      t("settings.modelAppliedToast", { model: modelDisplayLabel(providerId, resolved, t), provider: providerLabel }),
+      "success",
+    );
+
+  // The Save button owns only the shared prompt templates.
+  const saveTemplates = async () => {
+    await Promise.all([
       setSetting(SHARED_TEMPLATE_KEYS.commit.key, commitTemplate.trim()),
       setSetting(SHARED_TEMPLATE_KEYS.review.key, reviewTemplate.trim()),
       setSetting(SHARED_TEMPLATE_KEYS.analyze.key, analyzeTemplate.trim()),
     ]);
-    // The chat chip tracks the base model.
-    useAiProviderStore.getState().setModel(models.base);
-    setSnapshot({
-      binaryPath,
-      models: { ...models },
-      tools,
+    setSnapshot((prev) => ({
+      ...prev,
       commitTemplate: commitTemplate.trim(),
       reviewTemplate: reviewTemplate.trim(),
       analyzeTemplate: analyzeTemplate.trim(),
-    });
+    }));
     setSaved(true);
     setTimeout(() => setSaved(false), 1500);
   };
@@ -428,11 +575,20 @@ export function ClaudeSettings() {
     <section>
       <h3 className="mb-1 text-sm font-semibold">{t("settings.aiSectionTitle")}</h3>
       <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.aiSectionHint")}</p>
-      <ProviderTabs options={AI_PROVIDERS} activeId={providerId} onSelect={setProvider} />
+      <ProviderTabs options={AI_PROVIDERS} activeId={providerId} onSelect={handleSelectProvider} />
 
       <div className="mt-5 space-y-4">
         {/* ── Per-provider configuration: binary, models, tools ── */}
-        <GroupCard icon={ProviderIcon} title={providerLabel} subtitle={t("settings.providerConfigHint")}>
+        <GroupCard
+          icon={ProviderIcon}
+          title={providerLabel}
+          subtitle={t("settings.providerConfigHint")}
+          collapsible
+          defaultOpen={false}
+        >
+          {loading ? (
+            <ProviderConfigSkeleton />
+          ) : (
           <div className="space-y-4">
             <Field label={t("settings.binaryLabel")} hint={t("settings.binaryHint")}>
               <div className="flex gap-1.5">
@@ -458,7 +614,14 @@ export function ClaudeSettings() {
                 choice={modelChoice.base}
                 custom={modelCustom.base}
                 defaultLabel={t("settings.modelDefault")}
-                onChoice={(v) => setChoiceFor("base", v)}
+                customHint={customModelHint}
+                customPlaceholder={customModelPlaceholder}
+                onChoice={(v) => {
+                  setChoiceFor("base", v);
+                  // Concrete pick (a listed model or "default") applies immediately — confirm it.
+                  // "Custom" waits until the user types the id, so no premature toast there.
+                  if (v !== CUSTOM_MODEL) notifyModelApplied(v);
+                }}
                 onCustom={(v) => setCustomFor("base", v)}
               />
             </Field>
@@ -473,6 +636,8 @@ export function ClaudeSettings() {
                       choice={modelChoice.commit}
                       custom={modelCustom.commit}
                       defaultLabel={t("settings.modelFastDefault")}
+                      customHint={customModelHint}
+                      customPlaceholder={customModelPlaceholder}
                       onChoice={(v) => setChoiceFor("commit", v)}
                       onCustom={(v) => setCustomFor("commit", v)}
                     />
@@ -483,6 +648,8 @@ export function ClaudeSettings() {
                       choice={modelChoice.analyze}
                       custom={modelCustom.analyze}
                       defaultLabel={t("settings.modelSameAsBase")}
+                      customHint={customModelHint}
+                      customPlaceholder={customModelPlaceholder}
                       onChoice={(v) => setChoiceFor("analyze", v)}
                       onCustom={(v) => setCustomFor("analyze", v)}
                     />
@@ -493,6 +660,8 @@ export function ClaudeSettings() {
                       choice={modelChoice.review}
                       custom={modelCustom.review}
                       defaultLabel={t("settings.modelSameAsBase")}
+                      customHint={customModelHint}
+                      customPlaceholder={customModelPlaceholder}
                       onChoice={(v) => setChoiceFor("review", v)}
                       onCustom={(v) => setCustomFor("review", v)}
                     />
@@ -565,6 +734,7 @@ export function ClaudeSettings() {
               </div>
             </div>
           </div>
+          )}
         </GroupCard>
 
         {/* ── Shared prompt templates: one set used by every provider ── */}
@@ -619,16 +789,16 @@ export function ClaudeSettings() {
               />
             </CollapsibleSection>
           </div>
-        </GroupCard>
 
-        <button
-          onClick={save}
-          disabled={!dirty}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
-        >
-          {saved ? <Check size={13} /> : null}
-          {saved ? t("settings.saved") : t("common.save")}
-        </button>
+          <button
+            onClick={saveTemplates}
+            disabled={!templatesDirty}
+            className="mt-4 flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-40"
+          >
+            {saved ? <Check size={13} /> : null}
+            {saved ? t("settings.saved") : t("common.save")}
+          </button>
+        </GroupCard>
       </div>
     </section>
   );

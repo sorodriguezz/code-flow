@@ -44,6 +44,8 @@ pub(crate) enum AiTask {
     Analyze,
     /// Pull-request review — defaults to the base model.
     Review,
+    /// Pull-request description drafting — defaults to the base model.
+    PrDescription,
     /// Open-ended chat and "fix with AI" — always the base model.
     Chat,
     Fix,
@@ -88,6 +90,9 @@ pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig
         }
         AiTask::Analyze => nonblank(get("analyze_model")?).unwrap_or_else(|| base_model.clone()),
         AiTask::Review => nonblank(get("review_model")?).unwrap_or_else(|| base_model.clone()),
+        AiTask::PrDescription => {
+            nonblank(get("pr_description_model")?).unwrap_or_else(|| base_model.clone())
+        }
         AiTask::Chat | AiTask::Fix => base_model.clone(),
     };
 
@@ -140,6 +145,35 @@ pub async fn list_ai_models(db: State<'_, Db>, provider: Option<String>) -> Resu
         (engine, binary)
     };
     ai::list_models(&*engine, &binary).await
+}
+
+/// Proposes an AI-merged version of a conflicted file (from its base/ours/theirs index stages).
+/// Returns the resolved file content as a string — nothing is written to disk here; the frontend
+/// shows it for review and only writes + stages it once the user accepts.
+#[tauri::command]
+pub async fn resolve_conflict_with_ai(
+    db: State<'_, Db>,
+    repo_path: String,
+    rel_path: String,
+) -> Result<String, String> {
+    let (config, template) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let config = load_ai_config(&conn, AiTask::Fix)?;
+        let template = shared_template(&conn, "resolve_conflict_template", "claude_resolve_conflict_template")?;
+        (config, template)
+    };
+    let versions = git::merge::conflict_versions(&repo_path, &rel_path)?;
+    ai::resolve_conflict(
+        &*config.engine,
+        &config.binary,
+        &config.model,
+        &rel_path,
+        &versions.base,
+        &versions.ours,
+        &versions.theirs,
+        &template,
+    )
+    .await
 }
 
 #[tauri::command]
