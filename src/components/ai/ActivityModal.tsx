@@ -12,6 +12,7 @@ import {
   entryKey,
   entryTitle,
   entryVisual,
+  entryRunCount,
   findActiveEntryKey,
   type ActivityEntry,
 } from "../../lib/activityEntries";
@@ -149,7 +150,17 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
                       <button onClick={() => open(entry)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
                         <Icon size={13} className={spinning ? "shrink-0 animate-spin" : "shrink-0"} style={{ color }} />
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-[12px] font-medium text-[var(--cf-text)]">{entryTitle(entry)}</p>
+                          <div className="flex items-center gap-1.5">
+                            <p className="truncate text-[12px] font-medium text-[var(--cf-text)]">{entryTitle(entry)}</p>
+                            {entryRunCount(entry) > 1 && (
+                              <span
+                                title={t("ai.runCount", { n: entryRunCount(entry) })}
+                                className="shrink-0 rounded-full bg-black/[0.06] px-1.5 text-[10px] font-semibold text-[var(--cf-text-muted)] dark:bg-white/[0.1]"
+                              >
+                                ×{entryRunCount(entry)}
+                              </span>
+                            )}
+                          </div>
                           <p className="mt-0.5 text-[10px] text-[var(--cf-text-muted)]">
                             {new Date(
                               entry.type === "job" ? entry.job.createdAt : entry.conv.updated_at,
