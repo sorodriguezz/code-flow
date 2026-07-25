@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { AlertOctagon, AlertTriangle, ChevronDown, ChevronRight, Info, Loader2, MapPin, Wand2 } from "lucide-react";
+import { AlertOctagon, AlertTriangle, Check, ChevronDown, ChevronRight, Info, Loader2, MapPin, Wand2, X } from "lucide-react";
 import {
   computeQualityGatePassed,
   formatFindingAsFixPrompt,
@@ -10,6 +10,7 @@ import {
 import { renderInlineMarkdown } from "../../lib/markdown";
 import { resolveFindingWithAi } from "../../lib/tauri/commands";
 import { useRepoStore } from "../../state/repoStore";
+import { useResolutionsStore } from "../../state/resolutionsStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
@@ -40,11 +41,32 @@ export function InlineMarkdown({ text, className }: { text: string; className?: 
  * makes sure the local checkout is actually on the PR's branch first: blocks with an error if
  * there are uncommitted changes (switching branches would risk them), otherwise confirms and
  * checks out that branch (local if it already exists, remote-tracking otherwise) before
- * asking Claude to apply the fix. */
-export function useResolveWithAi(projectId: string | undefined, prSourceBranch: string | undefined) {
+ * asking Claude to apply the fix.
+ *
+ * When `resolutionKey` is given the outcome is remembered in the persistent
+ * [`useResolutionsStore`] keyed by it, so it survives unmounting the card (switching repos,
+ * reopening the PR, restarting). Without a key it falls back to ephemeral local state. */
+export function useResolveWithAi(
+  projectId: string | undefined,
+  prSourceBranch: string | undefined,
+  resolutionKey?: string,
+) {
   const t = useT();
   const [resolving, setResolving] = useState(false);
-  const [resolution, setResolution] = useState<string | null>(null);
+  const [localResolution, setLocalResolution] = useState<string | null>(null);
+  const persisted = useResolutionsStore((s) =>
+    projectId && resolutionKey ? s.byProject[projectId]?.[resolutionKey]?.text ?? null : null,
+  );
+  const resolution = resolutionKey ? persisted : localResolution;
+
+  const record = (text: string) => {
+    if (projectId && resolutionKey) useResolutionsStore.getState().save(projectId, resolutionKey, text);
+    else setLocalResolution(text);
+  };
+  const clearResolution = () => {
+    if (projectId && resolutionKey) useResolutionsStore.getState().clear(projectId, resolutionKey);
+    else setLocalResolution(null);
+  };
 
   const resolve = async (promptText: string) => {
     if (prSourceBranch) {
@@ -71,10 +93,9 @@ export function useResolveWithAi(projectId: string | undefined, prSourceBranch: 
 
     if (!projectId) return;
     setResolving(true);
-    setResolution(null);
     try {
       const result = await resolveFindingWithAi(projectId, promptText);
-      setResolution(result);
+      record(result);
     } catch (e) {
       pushErrorToast(String(e));
     } finally {
@@ -82,19 +103,22 @@ export function useResolveWithAi(projectId: string | undefined, prSourceBranch: 
     }
   };
 
-  return { resolving, resolution, resolve };
+  return { resolving, resolution, resolve, clearResolution };
 }
 
 /** The button + result text for `useResolveWithAi` — identical markup in `FindingCard` and
- * `PrCommentCard`, just pulled out so the two don't drift. */
+ * `PrCommentCard`, just pulled out so the two don't drift. Once resolved the button flips to
+ * "resolve again" and the outcome is shown in a persistent, dismissable "resolved" card. */
 export function ResolveWithAiButton({
   resolving,
   resolution,
   onClick,
+  onClear,
 }: {
   resolving: boolean;
   resolution: string | null;
   onClick: () => void;
+  onClear?: () => void;
 }) {
   const t = useT();
   return (
@@ -106,11 +130,70 @@ export function ResolveWithAiButton({
           className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
         >
           {resolving ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
-          {resolving ? t("finding.resolving") : t("finding.resolve")}
+          {resolving ? t("finding.resolving") : resolution ? t("finding.resolveAgain") : t("finding.resolve")}
         </button>
       </div>
-      {resolution && <p className="rounded-md bg-[var(--cf-accent-soft)] px-2.5 py-1.5 text-[var(--cf-text)]">{resolution}</p>}
+      {resolution && (
+        <div className="relative rounded-md border border-[color-mix(in_oklab,var(--cf-success)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_9%,transparent)] px-2.5 py-1.5 pr-6">
+          <span className="mb-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-success)]">
+            <Check size={11} />
+            {t("finding.resolved")}
+          </span>
+          <p className="text-[12px] leading-relaxed text-[var(--cf-text)]">{resolution}</p>
+          {onClear && (
+            <button
+              onClick={onClear}
+              title={t("finding.dismissResolution")}
+              className="absolute right-1.5 top-1.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
+      )}
     </>
+  );
+}
+
+/** Small green "resolved" pill shown in a collapsed finding/comment header so the user can see at
+ * a glance which items have already been handled without expanding each one. */
+export function ResolvedChip() {
+  const t = useT();
+  return (
+    <span
+      title={t("finding.resolved")}
+      className="flex shrink-0 items-center gap-0.5 rounded-full bg-[color-mix(in_oklab,var(--cf-success)_16%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-success)]"
+    >
+      <Check size={10} />
+    </span>
+  );
+}
+
+/** Severity tally pills (`3 Critical · 2 Warning · …`) — a scannable summary of a findings list,
+ * shown in the PR-review findings header and the pre-commit analysis header so the two read the
+ * same. Renders nothing when there are no findings. */
+export function SeverityCountBadges({ findings }: { findings: AnalysisFinding[] }) {
+  const t = useT();
+  const items = [
+    { severity: "critical" as const, label: t("analyze.critical"), color: "var(--cf-danger)" },
+    { severity: "warning" as const, label: t("analyze.warning"), color: "var(--cf-warning)" },
+    { severity: "info" as const, label: t("analyze.info"), color: "var(--cf-accent)" },
+  ]
+    .map((i) => ({ ...i, n: findings.filter((f) => f.severity === i.severity).length }))
+    .filter((i) => i.n > 0);
+  if (items.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+      {items.map((i) => (
+        <span
+          key={i.severity}
+          className="rounded-full px-1.5 py-0.5 font-medium"
+          style={{ background: `color-mix(in oklab, ${i.color} 16%, transparent)`, color: i.color }}
+        >
+          {i.n} {i.label}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -146,6 +229,7 @@ export function FindingCard({
   defaultOpen,
   projectId,
   prSourceBranch,
+  resolutionKey,
 }: {
   finding: AnalysisFinding;
   defaultOpen: boolean;
@@ -155,11 +239,14 @@ export function FindingCard({
   /** Only set for a PR-review finding — the PR's source branch, so the fix flow can offer to
    * switch to it first if the local checkout doesn't already match. */
   prSourceBranch?: string;
+  /** Stable id under which this finding's "resolve with AI" outcome is persisted (see
+   * [`useResolveWithAi`]). Omit to keep the outcome session-only. */
+  resolutionKey?: string;
 }) {
   const t = useT();
   const [open, setOpen] = useState(defaultOpen);
   const { icon: Icon, color } = SEVERITY_STYLE[finding.severity];
-  const { resolving, resolution, resolve } = useResolveWithAi(projectId, prSourceBranch);
+  const { resolving, resolution, resolve, clearResolution } = useResolveWithAi(projectId, prSourceBranch, resolutionKey);
 
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
@@ -189,6 +276,7 @@ export function FindingCard({
             </p>
           )}
         </div>
+        {resolution && <ResolvedChip />}
         {finding.confidence !== null && (
           <span
             className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
@@ -229,6 +317,7 @@ export function FindingCard({
               resolving={resolving}
               resolution={resolution}
               onClick={() => void resolve(formatFindingAsFixPrompt(finding))}
+              onClear={clearResolution}
             />
           )}
         </div>

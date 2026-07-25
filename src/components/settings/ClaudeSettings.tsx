@@ -18,6 +18,7 @@ import {
   defaultCommitTemplate,
   defaultReviewTemplate,
   getSetting,
+  listAiModels,
   setSetting,
 } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
@@ -26,7 +27,7 @@ import { Checkbox } from "../common/Checkbox";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { ProviderTabs } from "../common/ProviderTabs";
 import { useAiProviderStore } from "../../state/aiProviderStore";
-import { AI_PROVIDERS, PROVIDER_MODELS } from "../../lib/aiProviders";
+import { AI_PROVIDERS, PROVIDER_MODELS, type AiModelOption } from "../../lib/aiProviders";
 
 /** Per-provider settings live under `${providerId}_${suffix}` — binary/model/tools are
  * intrinsically provider-specific, so switching the provider tab loads that provider's own. */
@@ -92,13 +93,23 @@ function defaultBinaryFor(providerId: string): string {
   return AI_PROVIDERS.find((p) => p.id === providerId)?.defaultBinary ?? providerId;
 }
 
-/** Splits a stored model id into the dropdown choice + custom-text buffer: a known id selects
- * its option, a blank means "default", and anything else is a custom id the user typed. */
-function parseModel(raw: string | null | undefined, providerId: string): { choice: string; custom: string } {
+/** Splits a stored model id into the dropdown choice + custom-text buffer: an id present in
+ * `knownIds` selects its option, a blank means "default", and anything else is a custom id the
+ * user typed. `knownIds` is the effective option set (the CLI's live list when available, else the
+ * curated fallback), so a model that really exists doesn't get mislabelled "custom". */
+function parseModel(raw: string | null | undefined, knownIds: string[]): { choice: string; custom: string } {
   const trimmed = (raw ?? "").trim();
   if (!trimmed) return { choice: "", custom: "" };
-  if ((PROVIDER_MODELS[providerId] ?? []).some((o) => o.id === trimmed)) return { choice: trimmed, custom: "" };
+  if (knownIds.includes(trimmed)) return { choice: trimmed, custom: "" };
   return { choice: CUSTOM_MODEL, custom: trimmed };
+}
+
+/** The option set to show for a provider: the CLI's live models when we got them, else the curated
+ * fallback list. Live ids (e.g. `opencode/claude-sonnet-5`) are shown verbatim — they're already
+ * the exact string the CLI expects. */
+function modelOptionsFor(providerId: string, dynamicModels: string[]): AiModelOption[] {
+  if (dynamicModels.length > 0) return dynamicModels.map((id) => ({ id, label: id }));
+  return PROVIDER_MODELS[providerId] ?? [];
 }
 
 /** Reads the shared template's new key, falling back to the legacy `claude_*` key. */
@@ -151,17 +162,18 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
   );
 }
 
-/** A model picker: default option → preset list for the provider → custom id. Fully controlled;
- * the parent owns the choice + custom-text buffer so provider switches reload cleanly. */
+/** A model picker: default option → option list → custom id. Fully controlled; the parent owns
+ * the choice + custom-text buffer (so provider switches reload cleanly) and the `options` list
+ * (the CLI's live models when available, else the curated fallback). */
 function ModelField({
-  providerId,
+  options,
   choice,
   custom,
   defaultLabel,
   onChoice,
   onCustom,
 }: {
-  providerId: string;
+  options: AiModelOption[];
   choice: string;
   custom: string;
   defaultLabel: string;
@@ -169,7 +181,6 @@ function ModelField({
   onCustom: (v: string) => void;
 }) {
   const t = useT();
-  const options = PROVIDER_MODELS[providerId] ?? [];
   return (
     <>
       <select
@@ -223,6 +234,9 @@ export function ClaudeSettings() {
   const showToolPresets = providerId === "claude";
 
   const [binaryPath, setBinaryPath] = useState("claude");
+  // The provider CLI's live model list (e.g. `opencode models`), when it exposes one. Empty → the
+  // dropdowns fall back to the curated `PROVIDER_MODELS` list for this provider.
+  const [dynamicModels, setDynamicModels] = useState<string[]>([]);
   const [modelChoice, setModelChoice] = useState<Record<ModelKey, string>>(emptyModels());
   const [modelCustom, setModelCustom] = useState<Record<ModelKey, string>>(emptyModels());
   const [tools, setTools] = useState<string[]>(DEFAULT_CLAUDE_TOOLS);
@@ -253,6 +267,8 @@ export function ClaudeSettings() {
   };
   const setChoiceFor = (key: ModelKey, v: string) => setModelChoice((prev) => ({ ...prev, [key]: v }));
   const setCustomFor = (key: ModelKey, v: string) => setModelCustom((prev) => ({ ...prev, [key]: v }));
+  // The list every model dropdown shows: the CLI's live models when available, else the curated one.
+  const modelOptions = modelOptionsFor(providerId, dynamicModels);
 
   // Shared templates load once — they don't change when the provider tab does.
   useEffect(() => {
@@ -292,22 +308,28 @@ export function ClaudeSettings() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [b, base, commit, analyze, review, toolsRaw] = await Promise.all([
+      const [b, base, commit, analyze, review, toolsRaw, dyn] = await Promise.all([
         getSetting(providerKey(providerId, "binary_path")).catch(() => null),
         getSetting(providerKey(providerId, MODEL_SUFFIX.base)).catch(() => null),
         getSetting(providerKey(providerId, MODEL_SUFFIX.commit)).catch(() => null),
         getSetting(providerKey(providerId, MODEL_SUFFIX.analyze)).catch(() => null),
         getSetting(providerKey(providerId, MODEL_SUFFIX.review)).catch(() => null),
         getSetting(providerKey(providerId, "allowed_tools")).catch(() => null),
+        // Ask the provider's CLI for its real model list (empty for CLIs that don't expose one).
+        listAiModels(providerId).catch(() => [] as string[]),
       ]);
       if (cancelled) return;
       const loadedBinary = b || defaultBinaryFor(providerId);
+      // Classify stored models against the effective option set (live list if we got one, else the
+      // curated fallback) so a real model isn't mislabelled as a custom id.
+      const knownIds = modelOptionsFor(providerId, dyn).map((o) => o.id);
       const parsed: Record<ModelKey, { choice: string; custom: string }> = {
-        base: parseModel(base, providerId),
-        commit: parseModel(commit, providerId),
-        analyze: parseModel(analyze, providerId),
-        review: parseModel(review, providerId),
+        base: parseModel(base, knownIds),
+        commit: parseModel(commit, knownIds),
+        analyze: parseModel(analyze, knownIds),
+        review: parseModel(review, knownIds),
       };
+      setDynamicModels(dyn);
       const loadedTools = toolsRaw
         ? toolsRaw.split(",").map((s) => s.trim()).filter(Boolean)
         : defaultToolsFor(providerId);
@@ -432,7 +454,7 @@ export function ClaudeSettings() {
 
             <Field label={t("settings.baseModel")} hint={t("settings.baseModelHint")}>
               <ModelField
-                providerId={providerId}
+                options={modelOptions}
                 choice={modelChoice.base}
                 custom={modelCustom.base}
                 defaultLabel={t("settings.modelDefault")}
@@ -447,7 +469,7 @@ export function ClaudeSettings() {
                 <div className="space-y-3 pb-1">
                   <Field label={t("settings.commitModelLabel")}>
                     <ModelField
-                      providerId={providerId}
+                      options={modelOptions}
                       choice={modelChoice.commit}
                       custom={modelCustom.commit}
                       defaultLabel={t("settings.modelFastDefault")}
@@ -457,7 +479,7 @@ export function ClaudeSettings() {
                   </Field>
                   <Field label={t("settings.analyzeModelLabel")}>
                     <ModelField
-                      providerId={providerId}
+                      options={modelOptions}
                       choice={modelChoice.analyze}
                       custom={modelCustom.analyze}
                       defaultLabel={t("settings.modelSameAsBase")}
@@ -467,7 +489,7 @@ export function ClaudeSettings() {
                   </Field>
                   <Field label={t("settings.reviewModelLabel")}>
                     <ModelField
-                      providerId={providerId}
+                      options={modelOptions}
                       choice={modelChoice.review}
                       custom={modelCustom.review}
                       defaultLabel={t("settings.modelSameAsBase")}

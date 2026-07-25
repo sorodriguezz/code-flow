@@ -7,6 +7,7 @@ mod fsops;
 mod gemini;
 mod git;
 mod github;
+mod opencode;
 mod paths;
 mod remote;
 mod secrets;
@@ -164,6 +165,7 @@ pub fn run() {
             commands::secrets_cmd::get_github_token,
             commands::secrets_cmd::delete_github_token,
             commands::claude_cmd::generate_commit_message,
+            commands::claude_cmd::list_ai_models,
             commands::claude_cmd::default_commit_template,
             commands::claude_cmd::default_review_template,
             commands::claude_cmd::default_analyze_template,

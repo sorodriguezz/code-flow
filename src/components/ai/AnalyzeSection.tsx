@@ -163,7 +163,13 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
             )}
             <div className="space-y-2">
               {findings.map((finding) => (
-                <FindingCard key={finding.id} finding={finding} defaultOpen={finding.severity !== "info"} projectId={projectId} />
+                <FindingCard
+                  key={finding.id}
+                  finding={finding}
+                  defaultOpen={false}
+                  projectId={projectId}
+                  resolutionKey={job ? `job:${job.id}:${finding.id}` : undefined}
+                />
               ))}
             </div>
           </div>

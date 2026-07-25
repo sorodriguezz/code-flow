@@ -4,15 +4,47 @@ import type { ChatConversationSummary } from "../types/domain";
 
 /** One row in the unified "Activity" list — a background job (PR review / pre-commit
  * analysis) or a past chat conversation, shown side by side sorted by recency instead of in
- * two separate sections. */
-export type ActivityEntry = { type: "job"; job: Job } | { type: "chat"; conv: ChatConversationSummary };
+ * two separate sections. A job row can stand for several runs collapsed together (`runCount`),
+ * see [`mergeActivityEntries`]. */
+export type ActivityEntry =
+  | { type: "job"; job: Job; runCount: number }
+  | { type: "chat"; conv: ChatConversationSummary };
 
+/** Reviewing the *same* PR again is the common case (fix findings → re-review), and each run is a
+ * separate job — which used to stack up as N identical "#3 Tests" rows that looked like a bug
+ * ("¿por qué está cinco veces?"). Collapse every `pr-review` run of one PR into a single row
+ * standing for its latest run, tagged with how many runs there were; pre-commit analyses and
+ * chats stay individual (each is a distinct point-in-time result the user may want to reopen). */
 export function mergeActivityEntries(jobs: Job[], conversations: ChatConversationSummary[]): ActivityEntry[] {
+  const prRuns = new Map<number, Job[]>();
+  const standalone: Job[] = [];
+  for (const job of jobs) {
+    const prId = job.kind === "pr-review" && typeof job.meta.prId === "number" ? job.meta.prId : null;
+    if (prId === null) {
+      standalone.push(job);
+      continue;
+    }
+    const runs = prRuns.get(prId);
+    if (runs) runs.push(job);
+    else prRuns.set(prId, [job]);
+  }
+
+  const jobEntries: ActivityEntry[] = standalone.map((job) => ({ type: "job", job, runCount: 1 }));
+  for (const runs of prRuns.values()) {
+    const latest = runs.reduce((a, b) => (b.createdAt > a.createdAt ? b : a));
+    jobEntries.push({ type: "job", job: latest, runCount: runs.length });
+  }
+
   const entries: ActivityEntry[] = [
-    ...jobs.map((job): ActivityEntry => ({ type: "job", job })),
+    ...jobEntries,
     ...conversations.map((conv): ActivityEntry => ({ type: "chat", conv })),
   ];
   return entries.sort((a, b) => entryTimestamp(b) - entryTimestamp(a));
+}
+
+/** How many runs a job row stands for (1 unless it's a collapsed PR-review group). */
+export function entryRunCount(entry: ActivityEntry): number {
+  return entry.type === "job" ? entry.runCount : 1;
 }
 
 export function entryTimestamp(entry: ActivityEntry): number {

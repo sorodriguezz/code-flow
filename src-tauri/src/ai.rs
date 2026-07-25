@@ -234,6 +234,14 @@ pub trait AiEngine: Send + Sync {
     /// Turn a finished run into its reply (plus session/model) or a user-facing error. `success`
     /// is the process exit status; `stdout`/`stderr` are lossy-UTF-8 decoded.
     fn interpret(&self, success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String>;
+    /// CLI args that make the binary print its available models, one id per line — or `None` if the
+    /// CLI has no such command, in which case the frontend falls back to a curated list. This is
+    /// how the model picker shows what's *actually* installed/configured rather than a hardcoded
+    /// guess. opencode has `opencode models`; the Claude/Gemini CLIs don't expose a stable
+    /// machine-readable list, so they stay `None`.
+    fn list_models_args(&self) -> Option<Vec<String>> {
+        None
+    }
 }
 
 /// Resolves the engine for a provider id. Unknown/empty ids fall back to Claude so a corrupt or
@@ -241,66 +249,170 @@ pub trait AiEngine: Send + Sync {
 pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
     match provider {
         "gemini" => Box::new(crate::gemini::GeminiEngine),
+        "opencode" => Box::new(crate::opencode::OpenCodeEngine),
         _ => Box::new(crate::claude::ClaudeEngine),
     }
 }
 
-/// macOS GUI apps inherit launchd's minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) rather than
-/// the one from the user's shell profile, so a bare `claude`/`gemini` that resolves fine in a
-/// terminal isn't found at all when CodeFlow is launched from Finder — while on Windows GUI
-/// processes *do* get the user's full PATH, which is why this never showed up there. Prepend the
-/// directories the CLI installers actually use (npm/bun/pnpm globals, Homebrew) so the lookup
-/// succeeds either way (a `binary_path` that's already absolute ignores PATH and is unaffected).
+/// The directories the AI CLI installers drop their binaries in — prepended to `PATH` (and
+/// searched by [`resolve_binary`]) so a bare `claude`/`gemini`/`opencode` resolves regardless of
+/// how the app inherited its environment. On macOS a GUI app launched from Finder gets launchd's
+/// minimal `PATH`; on Windows an app already running when the CLI was installed keeps the stale
+/// pre-install `PATH`. An absolute `binary_path` set in Settings ignores all this and is unaffected.
 #[cfg(not(target_os = "windows"))]
-fn augment_path(cmd: &mut Command) {
+fn install_dirs() -> Vec<std::path::PathBuf> {
     use std::path::PathBuf;
-
-    let Some(home) = dirs::home_dir() else { return };
-    let mut search: Vec<PathBuf> = vec![
-        home.join(".local/bin"),
-        home.join(".claude/local"),
-        home.join(".bun/bin"),
-        home.join("Library/pnpm"),
-        home.join(".npm-global/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        PathBuf::from("/usr/local/bin"),
-    ];
-    if let Some(current) = std::env::var_os("PATH") {
-        search.extend(std::env::split_paths(&current));
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".claude/local"));
+        dirs.push(home.join(".opencode/bin"));
+        dirs.push(home.join(".bun/bin"));
+        dirs.push(home.join("Library/pnpm"));
+        dirs.push(home.join(".npm-global/bin"));
     }
-    if let Ok(joined) = std::env::join_paths(search) {
+    dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    dirs.push(PathBuf::from("/usr/local/bin"));
+    dirs
+}
+
+#[cfg(target_os = "windows")]
+fn install_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local").join("bin")); // native installer (Claude)
+        dirs.push(home.join(".claude").join("local"));
+        dirs.push(home.join(".opencode").join("bin")); // opencode install script
+    }
+    // npm global bin on Windows is `%APPDATA%\npm` (dirs::data_dir() == Roaming AppData).
+    if let Some(appdata) = dirs::data_dir() {
+        dirs.push(appdata.join("npm"));
+    }
+    dirs
+}
+
+/// The install dirs followed by the process's current `PATH` — the ordered search space for both
+/// setting the child's `PATH` and resolving the program name.
+fn search_dirs() -> Vec<std::path::PathBuf> {
+    let mut dirs = install_dirs();
+    if let Some(current) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&current));
+    }
+    dirs
+}
+
+fn apply_path(cmd: &mut Command, dirs: &[std::path::PathBuf]) {
+    if let Ok(joined) = std::env::join_paths(dirs) {
         cmd.env("PATH", joined);
     }
 }
 
+/// Non-Windows: nothing to resolve — the child's augmented `PATH` finds the binary and Unix has no
+/// executable-extension quirk.
+#[cfg(not(target_os = "windows"))]
+fn resolve_binary(binary: &str, _dirs: &[std::path::PathBuf]) -> String {
+    binary.to_string()
+}
+
+/// Windows: turn a bare command name into a full path *including its extension*. `CreateProcess`
+/// (what `Command` uses) only auto-appends `.exe`, so a Node CLI installed as a `<name>.cmd` shim —
+/// which is how `opencode` and `gemini` land when installed via npm — is invisible to a bare
+/// `Command::new("opencode")`, and being a batch file can't be executed directly anyway. Resolving
+/// to the full `.cmd` path lets `std::process::Command` route it through `cmd.exe` with correct
+/// argument escaping (Rust ≥1.77). A real `.exe` (e.g. Claude's native installer) is preferred over
+/// the `.cmd`/`.bat` shim. A name that already has a path separator or extension is trusted as-is.
 #[cfg(target_os = "windows")]
-fn augment_path(_cmd: &mut Command) {}
+fn resolve_binary(binary: &str, dirs: &[std::path::PathBuf]) -> String {
+    use std::path::Path;
+    if binary.contains('/') || binary.contains('\\') || Path::new(binary).extension().is_some() {
+        return binary.to_string();
+    }
+    for dir in dirs {
+        for ext in ["exe", "cmd", "bat"] {
+            let candidate = dir.join(format!("{binary}.{ext}"));
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    binary.to_string()
+}
 
 /// Shared subprocess plumbing for every headless AI invocation: builds the engine's command,
 /// pipes `stdin_content` in, waits for it, and hands the output back to the engine to interpret.
 async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Result<AiRun, String> {
-    let mut cmd = engine.build_command(binary, &inv);
+    let dirs = search_dirs();
+    let program = resolve_binary(binary, &dirs);
+    let mut cmd = engine.build_command(&program, &inv);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    augment_path(&mut cmd);
+    apply_path(&mut cmd, &dirs);
 
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to launch '{binary}': {e}"))?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(inv.stdin_content.as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-    }
+    // Feed stdin from a separate task, concurrently with waiting for the output, for two reasons:
+    // (1) an engine that *ignores* stdin (opencode delivers its payload via `--file` instead)
+    //     would otherwise deadlock — once the OS pipe buffer fills, an inline `write_all().await`
+    //     never completes because nothing drains it, and we'd never reach `wait_with_output`. Here
+    //     the write just fails with `BrokenPipe` when the child exits, which we ignore.
+    // (2) an engine that *does* read stdin still needs EOF to start producing output — dropping the
+    //     handle at the end of the task sends it. Doing both concurrently is correct either way.
+    let stdin_content = inv.stdin_content.to_string();
+    let mut stdin_handle = child.stdin.take();
+    let writer = tokio::spawn(async move {
+        if let Some(mut stdin) = stdin_handle.take() {
+            let _ = stdin.write_all(stdin_content.as_bytes()).await;
+            // `stdin` drops here → EOF.
+        }
+    });
 
     let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
+    let _ = writer.await;
     engine.interpret(
         output.status.success(),
         &output.status.to_string(),
         &String::from_utf8_lossy(&output.stdout),
         &String::from_utf8_lossy(&output.stderr),
     )
+}
+
+/// Runs a quick, read-only auxiliary CLI command (e.g. listing models) and captures its output,
+/// reusing [`run`]'s binary resolution + `PATH` augmentation. No stdin plumbing — this isn't for
+/// model invocations, just for asking the CLI about itself.
+async fn capture(binary: &str, args: &[String]) -> Result<std::process::Output, String> {
+    let dirs = search_dirs();
+    let program = resolve_binary(binary, &dirs);
+    let mut cmd = Command::new(&program);
+    cmd.args(args);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    apply_path(&mut cmd, &dirs);
+    cmd.output().await.map_err(|e| format!("failed to launch '{binary}': {e}"))
+}
+
+/// Lists the models the engine's CLI reports as available (one id per line). Returns an empty list
+/// for engines with no listing command ([`AiEngine::list_models_args`] is `None`) — no process is
+/// spawned in that case — so the frontend can fall back to its curated per-provider list.
+pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<String>, String> {
+    let Some(args) = engine.list_models_args() else {
+        return Ok(Vec::new());
+    };
+    let output = capture(binary, &args).await?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr);
+        let detail = detail.trim();
+        return Err(format!(
+            "'{binary} {}' failed: {}",
+            args.join(" "),
+            if detail.is_empty() { "no output" } else { detail }
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// The engine can't reliably know the real wall-clock time or which model string it was actually

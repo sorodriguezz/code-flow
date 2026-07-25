@@ -215,6 +215,10 @@ export const getSetting = (key: string) => invoke<string | null>("get_setting", 
 
 export const setSetting = (key: string, value: string) => invoke<void>("set_setting", { key, value });
 
+/** Models the given provider's CLI reports as available (e.g. `opencode models`). Empty for
+ * providers whose CLI has no listing command — the caller falls back to a curated list. */
+export const listAiModels = (provider: string) => invoke<string[]>("list_ai_models", { provider });
+
 export const listReviewContexts = (workspaceId: string) =>
   invoke<ReviewContext[]>("list_review_contexts", { workspaceId });
 

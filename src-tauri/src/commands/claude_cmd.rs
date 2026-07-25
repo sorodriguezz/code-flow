@@ -119,6 +119,29 @@ pub async fn generate_commit_message(db: State<'_, Db>, diff: String) -> Result<
     ai::generate_commit_message(&*config.engine, &config.binary, &config.model, &diff, &template).await
 }
 
+/// Lists the models a provider's CLI reports as actually available (e.g. `opencode models`), so the
+/// Settings model picker shows the real set instead of a hardcoded guess. `provider` is the tab the
+/// user is looking at; it defaults to the active provider when omitted. Returns an empty list for
+/// providers whose CLI has no such command (Claude/Gemini) — the frontend falls back to its curated
+/// list there.
+#[tauri::command]
+pub async fn list_ai_models(db: State<'_, Db>, provider: Option<String>) -> Result<Vec<String>, String> {
+    let (engine, binary) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let provider = provider
+            .filter(|p| !p.trim().is_empty())
+            .map(Ok)
+            .unwrap_or_else(|| active_provider(&conn))?;
+        let engine = ai::engine_for(&provider);
+        let binary = queries::get_setting(&conn, &format!("{provider}_binary_path"))
+            .map_err(|e| e.to_string())?
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| engine.default_binary().to_string());
+        (engine, binary)
+    };
+    ai::list_models(&*engine, &binary).await
+}
+
 #[tauri::command]
 pub fn default_commit_template() -> String {
     ai::DEFAULT_COMMIT_TEMPLATE.to_string()

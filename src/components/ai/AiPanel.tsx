@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ArrowUp,
@@ -11,6 +11,7 @@ import {
   History,
   Loader2,
   Plus,
+  RefreshCw,
   Sparkles,
   ThumbsDown,
   ThumbsUp,
@@ -19,14 +20,15 @@ import {
 import { renderMarkdown } from "../../lib/markdown";
 import { parseAnalysis, buildReviewComments } from "../../lib/parseAnalysis";
 import { listPrCommentThreads } from "../../lib/tauri/commands";
-import { FindingCard, QualityGateBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
-import { PrCommentCard } from "./PrCommentCard";
+import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
+import { PrCommentCard, PrCommentsSkeleton } from "./PrCommentCard";
 import {
   mergeActivityEntries,
   entryKey,
   entryTitle,
   entryTimestamp,
   entryVisual,
+  entryRunCount,
   findActiveEntryKey,
   type ActivityEntry,
 } from "../../lib/activityEntries";
@@ -37,6 +39,7 @@ import { usePrStore } from "../../state/prStore";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
+import { useResolutionsStore } from "../../state/resolutionsStore";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
@@ -78,6 +81,7 @@ function ActivitySection({ projectId }: { projectId: string }) {
   const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
   const chatLoaded = useChatHistoryStore((s) => s.loaded[projectId]);
   const loadChatHistory = useChatHistoryStore((s) => s.load);
+  const loadResolutions = useResolutionsStore((s) => s.load);
   const activeSessionId = useChatStore((s) => s.byProject[projectId]?.sessionId ?? null);
   const switchTo = useChatStore((s) => s.switchTo);
   const [collapsed, setCollapsed] = useState(true);
@@ -86,7 +90,10 @@ function ActivitySection({ projectId }: { projectId: string }) {
   useEffect(() => {
     if (!chatLoaded) void loadChatHistory(projectId);
     if (!jobsLoaded) void loadJobHistory(projectId);
-  }, [projectId, chatLoaded, loadChatHistory, jobsLoaded, loadJobHistory]);
+    // Hydrate persisted "resolve with AI" outcomes so an already-resolved finding/comment shows
+    // its ✓ state immediately when a PR/analysis is opened, instead of looking un-actioned.
+    void loadResolutions(projectId);
+  }, [projectId, chatLoaded, loadChatHistory, jobsLoaded, loadJobHistory, loadResolutions]);
 
   const entries = useMemo(() => mergeActivityEntries(jobs, conversations), [jobs, conversations]);
   if (entries.length === 0) return null;
@@ -144,6 +151,7 @@ function ActivitySection({ projectId }: { projectId: string }) {
           {topFive.map((entry) => {
             const { icon: Icon, color, spinning } = entryVisual(entry);
             const isActive = entryKey(entry) === activeEntryKey;
+            const runCount = entryRunCount(entry);
             return (
               <button
                 key={entryKey(entry)}
@@ -155,6 +163,14 @@ function ActivitySection({ projectId }: { projectId: string }) {
               >
                 <Icon size={12} className={spinning ? "shrink-0 animate-spin" : "shrink-0"} style={{ color }} />
                 <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{entryTitle(entry)}</span>
+                {runCount > 1 && (
+                  <span
+                    title={t("ai.runCount", { n: runCount })}
+                    className="shrink-0 rounded-full bg-black/[0.06] px-1.5 text-[10px] font-semibold text-[var(--cf-text-muted)] dark:bg-white/[0.1]"
+                  >
+                    ×{runCount}
+                  </span>
+                )}
                 <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">
                   {relativeTime(entryTimestamp(entry), t)}
                 </span>
@@ -231,19 +247,27 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
   // time this PR is opened rather than cached, since they can change outside of CodeFlow at
   // any time (someone replies, resolves a thread, etc.).
   const [openThreads, setOpenThreads] = useState<PrCommentThread[]>([]);
-  useEffect(() => {
-    let cancelled = false;
-    void listPrCommentThreads(projectId, pr.id)
+  const [threadsLoading, setThreadsLoading] = useState(true);
+  // A monotonic token so only the newest fetch writes state: switching PRs or hitting the manual
+  // reload while a request is still in flight bumps the token, and the stale response is ignored.
+  const threadsReqRef = useRef(0);
+  const loadThreads = useCallback(() => {
+    const token = ++threadsReqRef.current;
+    setThreadsLoading(true);
+    return listPrCommentThreads(projectId, pr.id)
       .then((threads) => {
-        if (!cancelled) setOpenThreads(threads);
+        if (threadsReqRef.current === token) setOpenThreads(threads);
       })
       .catch(() => {
-        if (!cancelled) setOpenThreads([]);
+        if (threadsReqRef.current === token) setOpenThreads([]);
+      })
+      .finally(() => {
+        if (threadsReqRef.current === token) setThreadsLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [projectId, pr.id]);
+  useEffect(() => {
+    void loadThreads();
+  }, [loadThreads]);
 
   return (
     <div className="flex h-full flex-col">
@@ -280,13 +304,33 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
           </button>
         </div>
 
-        {openThreads.length > 0 && (
+        {threadsLoading ? (
+          <PrCommentsSkeleton label={t("pr.loadingComments")} />
+        ) : (
           <div className="mb-4 space-y-2">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("pr.openComments", { n: openThreads.length })}
-            </p>
+            <div className="flex items-center gap-1.5">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                {openThreads.length > 0 ? t("pr.openComments", { n: openThreads.length }) : t("pr.noComments")}
+              </p>
+              {/* The git host is the source of truth for comments and it changes outside CodeFlow
+                  (someone replies or resolves a thread), so this lets the user pull the latest
+                  without reopening the PR. */}
+              <button
+                onClick={() => void loadThreads()}
+                title={t("pr.refreshComments")}
+                className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+              >
+                <RefreshCw size={11} />
+              </button>
+            </div>
             {openThreads.map((thread) => (
-              <PrCommentCard key={thread.id} thread={thread} projectId={projectId} prSourceBranch={pr.source_branch} />
+              <PrCommentCard
+                key={thread.id}
+                thread={thread}
+                projectId={projectId}
+                prSourceBranch={pr.source_branch}
+                resolutionKey={`pr:${pr.id}:thread:${thread.id}`}
+              />
             ))}
           </div>
         )}
@@ -332,16 +376,29 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(summary) }}
               />
             )}
-            <div className="space-y-2">
-              {findings.map((finding) => (
-                <FindingCard
-                  key={finding.id}
-                  finding={finding}
-                  defaultOpen={finding.severity !== "info"}
-                  projectId={projectId}
-                  prSourceBranch={pr.source_branch}
-                />
-              ))}
+            {/* Explicit "Claude's findings" header (with a severity tally) so the AI-generated
+                findings read as a distinct section from the human "Open comments" above them —
+                previously they ran together with no divider and looked like one blurry list. */}
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-2 border-t border-[var(--cf-border)] pt-3">
+                <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                  <Sparkles size={11} className="text-[var(--cf-accent)]" />
+                  {t("pr.findingsHeader", { n: findings.length })}
+                </p>
+                <SeverityCountBadges findings={findings} />
+              </div>
+              <div className="space-y-2">
+                {findings.map((finding) => (
+                  <FindingCard
+                    key={finding.id}
+                    finding={finding}
+                    defaultOpen={false}
+                    projectId={projectId}
+                    prSourceBranch={pr.source_branch}
+                    resolutionKey={job ? `job:${job.id}:${finding.id}` : undefined}
+                  />
+                ))}
+              </div>
             </div>
           </div>
         )}
@@ -621,6 +678,17 @@ export function AiPanel() {
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
 
+  // "New chat" from the panel header works from *any* view: reviewing a PR or looking at an
+  // analysis, one click drops those and lands on a fresh, empty free-form conversation — so the
+  // user isn't stuck hunting for the little × on the PR card (which only closed the PR, it didn't
+  // start a new chat) to get back to open-ended chat.
+  const startNewChat = () => {
+    if (!project) return;
+    usePrStore.getState().selectPr(null);
+    useAnalyzeUiStore.getState().hide();
+    useChatStore.getState().clear(project.id);
+  };
+
   return (
     <motion.div
       initial={{ width: 0, opacity: 0 }}
@@ -645,13 +713,25 @@ export function AiPanel() {
         <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3">
           <Sparkles size={13} className="text-[var(--cf-accent)]" />
           <span className="text-[12px] font-semibold">{t("chat.title")}</span>
-          <button
-            onClick={toggle}
-            title={t("ai.closePanel")}
-            className="ml-auto flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
-            <X size={13} />
-          </button>
+          <div className="ml-auto flex items-center gap-1">
+            {project && (
+              <button
+                onClick={startNewChat}
+                title={t("chatHistory.newChat")}
+                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+              >
+                <Plus size={12} />
+                {t("chatHistory.newChat")}
+              </button>
+            )}
+            <button
+              onClick={toggle}
+              title={t("ai.closePanel")}
+              className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            >
+              <X size={13} />
+            </button>
+          </div>
         </div>
         {!project ? (
           <EmptyState icon={Sparkles} title={t("ai.noProject")} />

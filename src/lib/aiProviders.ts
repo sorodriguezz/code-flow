@@ -1,4 +1,4 @@
-import { Bot, Cpu, Gem, HardDrive, Waves, type LucideIcon } from "lucide-react";
+import { Bot, Cpu, Gem, HardDrive, SquareTerminal, Waves, type LucideIcon } from "lucide-react";
 import type { TranslationKey } from "./i18n/translations";
 
 export interface AiProviderOption {
@@ -20,6 +20,9 @@ export const AI_PROVIDERS: AiProviderOption[] = [
   // Gemini runs against a Google-account OAuth login (Google AI Pro / Ultra subscription, or the
   // free Code Assist tier) — the CLI's own login, same model as Claude's. See `gemini.rs`.
   { id: "gemini", label: "Gemini", icon: Gem, available: true, defaultBinary: "gemini" },
+  // opencode is provider-agnostic: it drives whatever model providers the user configured inside
+  // it, addressed as `provider/model`. Headless via `opencode run`. See `opencode.rs`.
+  { id: "opencode", label: "opencode", icon: SquareTerminal, available: true, defaultBinary: "opencode" },
   { id: "deepseek", label: "DeepSeek", icon: Waves, available: false },
   { id: "local", labelKey: "settings.localModel", icon: HardDrive, available: false },
 ];
@@ -50,6 +53,14 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "gemini-3-pro", label: "Gemini 3 Pro" },
     { id: "gemini-2.5-pro", label: "2.5 Pro" },
     { id: "gemini-2.5-flash", label: "2.5 Flash" },
+  ],
+  // opencode addresses models as `provider/model`, and which are available depends entirely on the
+  // providers the user configured inside opencode — so these are just format examples. The
+  // "custom" field in Settings (and leaving it on "default") is the real path.
+  opencode: [
+    { id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5" },
+    { id: "openai/gpt-5", label: "GPT-5" },
+    { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
   ],
 };
 
