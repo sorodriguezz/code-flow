@@ -84,8 +84,9 @@ impl AiEngine for CodexEngine {
         cmd.arg("--sandbox")
             .arg(if inv.auto_approve_edits { "workspace-write" } else { "read-only" });
         // Headless runs can't answer an approval prompt — without this the agent can stop and wait
-        // forever. `never` is what the CLI's own help recommends for non-interactive use.
-        cmd.arg("--ask-for-approval").arg("never");
+        // forever. Set through `-c` rather than `--ask-for-approval`, which `codex exec` dropped
+        // (it errors with "unexpected argument" on 0.145+); the config key works on every version.
+        cmd.arg("-c").arg("approval_policy=\"never\"");
         if let Some(dir) = inv.cwd {
             // `--cd` sets the workspace root the sandbox is scoped to, so it must be set even
             // though `current_dir` below already points there.
