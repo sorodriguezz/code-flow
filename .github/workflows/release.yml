@@ -67,6 +67,11 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `beforeBuildCommand` runs `vite build`, which bundles Monaco (a ~20 MB chunk) and
+          # peaks well above Node's default heap on the macOS runner — it died at ~2 GB there
+          # with "Ineffective mark-compacts near heap limit". The runner has 7 GB, so 4 GB is
+          # headroom without risking swap. Raise this if the bundle grows a lot.
+          NODE_OPTIONS: --max-old-space-size=4096
           # Updater signing — required so the app can verify and auto-install updates.
           # Add ONE repository secret (Settings › Secrets and variables › Actions):
           #   TAURI_SIGNING_PRIVATE_KEY → contents of ~/.tauri/codeflow-updater.key
