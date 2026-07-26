@@ -268,6 +268,18 @@ pub fn open_repo_in_browser(db: State<Db>, project_id: String) -> Result<(), Str
     open::that(&url).map_err(|e| format!("couldn't open the browser: {e}"))
 }
 
+/// Opens an external URL in the default browser. Used for links the app surfaces from a provider's
+/// own message (e.g. opencode's billing page when it reports an empty balance), so the user can act
+/// on it without copying the URL out of an error banner. Restricted to http(s) so a malformed or
+/// hostile string from a CLI can't launch an arbitrary local handler.
+#[tauri::command]
+pub fn open_external_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("only http(s) links can be opened".to_string());
+    }
+    open::that(&url).map_err(|e| format!("couldn't open the browser: {e}"))
+}
+
 fn load_project(db: &State<'_, Db>, project_id: &str) -> Result<crate::db::models::Project, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::get_project(&conn, project_id)

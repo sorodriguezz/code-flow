@@ -4,6 +4,7 @@ import type { Language } from "../../lib/i18n/translations";
 import { quitApp, resetAppData } from "../../lib/tauri/commands";
 import { confirmAction } from "../../state/confirmStore";
 import { usePlatform } from "../../lib/platform";
+import { UpdateSection } from "./UpdateSection";
 
 // Language names stay in their own language (endonyms) — "English"/"Español" don't change
 // depending on the currently selected UI language, same as any language picker.
@@ -39,6 +40,8 @@ export function GeneralSettings() {
         ))}
       </div>
       <p className="mt-2 text-[11px] text-[var(--cf-text-muted)]">{t("settings.translationNote")}</p>
+
+      <UpdateSection />
 
       <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
         <h3 className="mb-1 text-sm font-semibold">{t("settings.appLifecycle")}</h3>

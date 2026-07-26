@@ -22,6 +22,8 @@ pub struct ChatReply {
     /// Model that actually answered this turn, when the CLI reported one — shown as-is in the
     /// chat's "who am I talking to" chip. `None` falls back to the configured setting there.
     model: Option<String>,
+    /// How long the engine took to answer, in milliseconds — shown under the reply.
+    response_time_ms: i64,
 }
 
 /// The active AI provider id, from the `ai_provider` setting. Falls back to Claude when unset or
@@ -33,22 +35,57 @@ pub(crate) fn active_provider(conn: &Connection) -> Result<String, String> {
         .unwrap_or_else(|| "claude".to_string()))
 }
 
-/// Which AI action a command is performing — selects the per-task model. Each provider keeps a
-/// base model plus optional per-task overrides, so the same repo can generate commits on a fast
-/// model while reviewing PRs on a bigger one.
+/// Which AI action a command is performing — selects both the provider and the model for it.
+/// Each task can be routed to its own provider (`ai_provider_{key}`, falling back to the global
+/// `ai_provider`) and its own model within that provider (`{provider}_{key}_model`, falling back
+/// to that provider's base model). That's what lets one repo draft commits on a local Ollama
+/// model, review PRs on Opus, and fix findings through opencode.
 #[derive(Clone, Copy)]
 pub(crate) enum AiTask {
     /// Commit-message generation — defaults to the engine's fast model, not the base model.
     Commit,
-    /// Pre-commit "Analyze changes" — defaults to the base model.
+    /// Pre-commit "Analyze changes" (bugs/vulnerabilities in the working diff).
     Analyze,
-    /// Pull-request review — defaults to the base model.
+    /// Pull-request review.
     Review,
-    /// Pull-request description drafting — defaults to the base model.
+    /// Pull-request description drafting.
     PrDescription,
-    /// Open-ended chat and "fix with AI" — always the base model.
+    /// Open-ended chat.
     Chat,
+    /// "Fix with AI" on a finding — the only task that needs an agentic, write-capable engine.
     Fix,
+    /// AI-proposed merge-conflict resolution. Split from [`AiTask::Fix`] because it only returns
+    /// text (no tool use), so it can be routed to a local model that `Fix` can't use.
+    Conflict,
+}
+
+impl AiTask {
+    /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
+    /// The four original values (`commit`/`analyze`/`review`/`pr_description`) are unchanged, so
+    /// model overrides saved before per-task routing existed keep working.
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            AiTask::Commit => "commit",
+            AiTask::Analyze => "analyze",
+            AiTask::Review => "review",
+            AiTask::PrDescription => "pr_description",
+            AiTask::Chat => "chat",
+            AiTask::Fix => "fix",
+            AiTask::Conflict => "conflict",
+        }
+    }
+}
+
+/// The provider that should handle `task`: its own routing override when set, else the global
+/// `ai_provider` default. Blank counts as unset, so clearing a row in the UI means "inherit".
+fn provider_for(conn: &Connection, task: AiTask) -> Result<String, String> {
+    let routed = queries::get_setting(conn, &format!("ai_provider_{}", task.key()))
+        .map_err(|e| e.to_string())?
+        .filter(|p| !p.trim().is_empty());
+    match routed {
+        Some(p) => Ok(p),
+        None => active_provider(conn),
+    }
 }
 
 /// The active engine plus its resolved per-provider binary/model/tools. Binary/model/tools are
@@ -65,7 +102,7 @@ pub(crate) struct AiConfig {
 }
 
 pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig, String> {
-    let provider = active_provider(conn)?;
+    let provider = provider_for(conn, task)?;
     let engine = ai::engine_for(&provider);
 
     let get = |suffix: &str| -> Result<Option<String>, String> {
@@ -83,17 +120,18 @@ pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig
         .filter(|s| !s.is_empty())
         .collect();
 
-    // Per-task model: the user's override for this action, else the sensible per-task default.
-    let model = match task {
-        AiTask::Commit => {
-            nonblank(get("commit_model")?).unwrap_or_else(|| engine.commit_message_model().to_string())
-        }
-        AiTask::Analyze => nonblank(get("analyze_model")?).unwrap_or_else(|| base_model.clone()),
-        AiTask::Review => nonblank(get("review_model")?).unwrap_or_else(|| base_model.clone()),
-        AiTask::PrDescription => {
-            nonblank(get("pr_description_model")?).unwrap_or_else(|| base_model.clone())
-        }
-        AiTask::Chat | AiTask::Fix => base_model.clone(),
+    // Per-task model override → (for commits) the engine's dedicated fast model → the base model.
+    // The last fallback matters for engines with no fast model (Ollama), which need *some* explicit
+    // model or the request fails.
+    let model = match nonblank(get(&format!("{}_model", task.key()))?) {
+        Some(override_model) => override_model,
+        None => match task {
+            AiTask::Commit => {
+                let dedicated = engine.commit_message_model();
+                if dedicated.is_empty() { base_model.clone() } else { dedicated.to_string() }
+            }
+            _ => base_model.clone(),
+        },
     };
 
     Ok(AiConfig { engine, binary, model, tools })
@@ -147,6 +185,35 @@ pub async fn list_ai_models(db: State<'_, Db>, provider: Option<String>) -> Resu
     ai::list_models(&*engine, &binary).await
 }
 
+/// Whether a provider is ready to use, for the Settings status badge.
+#[derive(Serialize)]
+pub struct ProviderStatus {
+    available: bool,
+    /// Resolved binary path / endpoint when available; the missing binary name or the connection
+    /// error when not. The frontend pairs this with a translated label.
+    detail: String,
+    /// The binary path or endpoint that was checked — echoed back so the UI can show what it tried.
+    binary: String,
+}
+
+/// Checks whether `provider`'s CLI is actually installed (or, for Ollama, whether its endpoint
+/// answers), so Settings can show "available / not found" instead of letting the user discover it
+/// when an action fails.
+#[tauri::command]
+pub async fn check_ai_provider(db: State<'_, Db>, provider: String) -> Result<ProviderStatus, String> {
+    let (engine, binary) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let engine = ai::engine_for(&provider);
+        let binary = queries::get_setting(&conn, &format!("{provider}_binary_path"))
+            .map_err(|e| e.to_string())?
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| engine.default_binary().to_string());
+        (engine, binary)
+    };
+    let (available, detail) = ai::probe(&*engine, &binary).await;
+    Ok(ProviderStatus { available, detail, binary })
+}
+
 /// Proposes an AI-merged version of a conflicted file (from its base/ours/theirs index stages).
 /// Returns the resolved file content as a string — nothing is written to disk here; the frontend
 /// shows it for review and only writes + stages it once the user accepts.
@@ -158,7 +225,7 @@ pub async fn resolve_conflict_with_ai(
 ) -> Result<String, String> {
     let (config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let config = load_ai_config(&conn, AiTask::Fix)?;
+        let config = load_ai_config(&conn, AiTask::Conflict)?;
         let template = shared_template(&conn, "resolve_conflict_template", "claude_resolve_conflict_template")?;
         (config, template)
     };
@@ -189,6 +256,16 @@ pub fn default_review_template() -> String {
 #[tauri::command]
 pub fn default_analyze_template() -> String {
     ai::DEFAULT_ANALYZE_TEMPLATE.to_string()
+}
+
+#[tauri::command]
+pub fn default_pr_description_template() -> String {
+    ai::DEFAULT_PR_DESCRIPTION_TEMPLATE.to_string()
+}
+
+#[tauri::command]
+pub fn default_resolve_conflict_template() -> String {
+    ai::DEFAULT_RESOLVE_CONFLICT_TEMPLATE.to_string()
 }
 
 /// Scans whatever's currently sitting in the working directory (the "Changes" list —
@@ -314,7 +391,10 @@ pub async fn send_chat_message(
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
-    let run = ai::chat_with_repo(
+    // Timed around the engine call only, so it reflects how long the model actually took —
+    // not the surrounding DB reads or IPC.
+    let started = std::time::Instant::now();
+    let result = ai::chat_with_repo(
         &*config.engine,
         &config.binary,
         &config.model,
@@ -325,12 +405,29 @@ pub async fn send_chat_message(
         &project.local_path,
         mcp_config_path.as_deref(),
     )
-    .await?;
+    .await;
+    let response_time_ms = started.elapsed().as_millis() as i64;
+
+    let run = match result {
+        Ok(run) => run,
+        Err(e) => {
+            // Record the failure too. Otherwise the panel's error vanishes the moment the next
+            // message is sent, and days later there's nothing left explaining why a run died
+            // (out of credit, CLI gone). A first-turn failure has no session yet, so mint one so
+            // it still groups as its own entry in the activity list.
+            let sid = session_id.unwrap_or_else(|| format!("failed-{}", uuid::Uuid::new_v4()));
+            if let Ok(conn) = db.0.lock() {
+                let _ =
+                    queries::add_activity_log(&conn, &project_id, &sid, &message, &e, Some(response_time_ms), true);
+            }
+            return Err(e);
+        }
+    };
 
     if let Some(sid) = &run.session_id {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let _ = queries::add_activity_log(&conn, &project_id, sid, &message, &run.text);
+        let _ = queries::add_activity_log(&conn, &project_id, sid, &message, &run.text, Some(response_time_ms), false);
     }
 
-    Ok(ChatReply { text: run.text, session_id: run.session_id, model: run.model })
+    Ok(ChatReply { text: run.text, session_id: run.session_id, model: run.model, response_time_ms })
 }

@@ -6,10 +6,15 @@ import type { WorkspaceMcp } from "../../types/domain";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
+import { useTaskProvider } from "../../state/aiProviderStore";
+import { isAgenticProvider } from "../../lib/aiProviders";
 
 export function McpSettings() {
   const t = useT();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  // MCP servers are handed to the review/analyze/chat flows; the chat task is the representative
+  // one for "will MCP be used at all".
+  const agentic = isAgenticProvider(useTaskProvider("chat"));
   const [mcps, setMcps] = useState<WorkspaceMcp[]>([]);
 
   const reload = async (id: string) => {
@@ -56,6 +61,12 @@ export function McpSettings() {
         </button>
       </div>
       <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.mcpsHint")}</p>
+
+      {!agentic && (
+        <p className="mb-3 rounded-md border border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text-muted)]">
+          {t("settings.mcpsNotAgentic")}
+        </p>
+      )}
 
       <div className="space-y-3">
         {mcps.map((mcp) => (

@@ -1,11 +1,15 @@
 import { create } from "zustand";
 import { sendChatMessage, getChatConversation } from "../lib/tauri/commands";
-import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
 import { useChatHistoryStore } from "./activityStore";
 
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
+  /** Response time in milliseconds — only set for assistant messages */
+  responseTimeMs?: number;
+  /** This turn failed; `content` is the raw engine error (still carrying the quota marker, so the
+   * bubble can re-derive the billing link when a past conversation is reopened). */
+  isError?: boolean;
 }
 
 interface ProjectChat {
@@ -24,11 +28,10 @@ interface ProjectChat {
    * the reply says what it chose. `null` until the first answer of a conversation. */
   model: string | null;
   sending: boolean;
-  error: ClaudeErrorInfo | null;
 }
 
 function emptyChat(): ProjectChat {
-  return { messages: [], sessionId: null, sessionIds: [], model: null, sending: false, error: null };
+  return { messages: [], sessionId: null, sessionIds: [], model: null, sending: false };
 }
 
 const EMPTY_CHAT: ProjectChat = emptyChat();
@@ -61,7 +64,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...existing,
           messages: [...existing.messages, { role: "user", content: trimmed }],
           sending: true,
-          error: null,
         },
       },
     }));
@@ -79,7 +81,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ...s.byProject,
               [projectId]: {
                 ...proj,
-                messages: [...proj.messages, { role: "assistant", content: reply.text }],
+                messages: [
+                  ...proj.messages,
+                  { role: "assistant", content: reply.text, responseTimeMs: reply.response_time_ms },
+                ],
                 sessionId: reply.session_id,
                 sessionIds,
                 model: reply.model ?? proj.model,
@@ -96,10 +101,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return {
             byProject: {
               ...s.byProject,
-              [projectId]: { ...proj, sending: false, error: parseClaudeError(String(e)) },
+              [projectId]: {
+                ...proj,
+                // The failure joins the transcript rather than sitting in a separate banner that
+                // the next message would wipe. The backend persists it too, so it's still here
+                // tomorrow. Raw text is kept so the bubble can re-parse the quota marker.
+                messages: [...proj.messages, { role: "assistant", content: String(e), isError: true }],
+                sending: false,
+              },
             },
           };
         });
+        // The failed turn was logged server-side — pick it up so it shows in the activity list.
+        void useChatHistoryStore.getState().load(projectId);
       });
   },
 
@@ -111,14 +125,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const entries = await getChatConversation(projectId, sessionId);
     const messages: ChatMessage[] = entries.flatMap((e) => [
       { role: "user" as const, content: e.question },
-      { role: "assistant" as const, content: e.answer },
+      {
+        role: "assistant" as const,
+        content: e.answer,
+        responseTimeMs: e.response_time_ms ?? undefined,
+        isError: e.is_error,
+      },
     ]);
     set((s) => ({
       // No model recorded for archived turns — the chip falls back to the configured setting
       // until this conversation gets a fresh reply.
       byProject: {
         ...s.byProject,
-        [projectId]: { messages, sessionId, sessionIds: [sessionId], model: null, sending: false, error: null },
+        [projectId]: { messages, sessionId, sessionIds: [sessionId], model: null, sending: false },
       },
     }));
   },

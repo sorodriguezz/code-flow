@@ -440,6 +440,8 @@ pub fn add_activity_log(
     session_id: &str,
     question: &str,
     answer: &str,
+    response_time_ms: Option<i64>,
+    is_error: bool,
 ) -> rusqlite::Result<ActivityLogEntry> {
     let entry = ActivityLogEntry {
         id: Uuid::new_v4().to_string(),
@@ -448,18 +450,29 @@ pub fn add_activity_log(
         question: question.to_string(),
         answer: answer.to_string(),
         created_at: now(),
+        response_time_ms,
+        is_error,
     };
     conn.execute(
-        "INSERT INTO activity_log (id, project_id, session_id, question, answer, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![entry.id, entry.project_id, entry.session_id, entry.question, entry.answer, entry.created_at],
+        "INSERT INTO activity_log (id, project_id, session_id, question, answer, created_at, response_time_ms, is_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            entry.id,
+            entry.project_id,
+            entry.session_id,
+            entry.question,
+            entry.answer,
+            entry.created_at,
+            entry.response_time_ms,
+            entry.is_error
+        ],
     )?;
     Ok(entry)
 }
 
 fn all_activity_log_entries(conn: &Connection, project_id: &str) -> rusqlite::Result<Vec<ActivityLogEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, session_id, question, answer, created_at
+        "SELECT id, project_id, session_id, question, answer, created_at, response_time_ms, is_error
          FROM activity_log WHERE project_id = ?1 AND session_id IS NOT NULL ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map(params![project_id], |row| {
@@ -470,6 +483,8 @@ fn all_activity_log_entries(conn: &Connection, project_id: &str) -> rusqlite::Re
             question: row.get(3)?,
             answer: row.get(4)?,
             created_at: row.get(5)?,
+            response_time_ms: row.get(6)?,
+            is_error: row.get(7)?,
         })
     })?;
     rows.collect()
@@ -561,7 +576,7 @@ pub fn get_conversation_messages(
     session_id: &str,
 ) -> rusqlite::Result<Vec<ActivityLogEntry>> {
     let mut stmt = conn.prepare(
-        "SELECT id, project_id, session_id, question, answer, created_at
+        "SELECT id, project_id, session_id, question, answer, created_at, response_time_ms, is_error
          FROM activity_log WHERE project_id = ?1 AND session_id = ?2 ORDER BY created_at ASC",
     )?;
     let rows = stmt.query_map(params![project_id, session_id], |row| {
@@ -572,6 +587,8 @@ pub fn get_conversation_messages(
             question: row.get(3)?,
             answer: row.get(4)?,
             created_at: row.get(5)?,
+            response_time_ms: row.get(6)?,
+            is_error: row.get(7)?,
         })
     })?;
     rows.collect()

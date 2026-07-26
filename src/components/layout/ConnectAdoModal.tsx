@@ -3,6 +3,7 @@ import { Cloud, Loader2, X } from "lucide-react";
 import { adoListProjects, adoListRepos, linkProjectAdo } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { Select } from "../common/Select";
 import type { AdoProject, AdoRepo } from "../../types/domain";
 
 interface ConnectAdoModalProps {
@@ -84,17 +85,13 @@ export function ConnectAdoModal({ projectId, orgs, onConnected, onClose }: Conne
           {t("settings.organization")}
         </label>
         {orgs.length > 1 ? (
-          <select
+          <Select
             value={org}
-            onChange={(e) => setOrg(e.target.value)}
-            className="mb-3 w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
-          >
-            {orgs.map((o) => (
-              <option key={o} value={o}>
-                {o}
-              </option>
-            ))}
-          </select>
+            onChange={setOrg}
+            className="mb-3"
+            ariaLabel={t("settings.organization")}
+            options={orgs.map((o) => ({ value: o, label: o }))}
+          />
         ) : (
           <p className="mb-3 rounded-md border border-[var(--cf-border)] bg-black/[0.02] px-2.5 py-1.5 text-[13px] dark:bg-white/[0.03]">
             {org}
@@ -104,36 +101,32 @@ export function ConnectAdoModal({ projectId, orgs, onConnected, onClose }: Conne
         <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
           {t("sidebar.adoProject")}
         </label>
-        <select
+        <Select
           disabled={loadingProjects}
           value={adoProjectId}
-          onChange={(e) => setAdoProjectId(e.target.value)}
-          className="mb-3 w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
-        >
-          <option value="">{loadingProjects ? t("editor.loading") : t("sidebar.selectAdoProject")}</option>
-          {adoProjects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
+          onChange={setAdoProjectId}
+          className="mb-3"
+          ariaLabel={t("sidebar.adoProject")}
+          options={[
+            { value: "", label: loadingProjects ? t("editor.loading") : t("sidebar.selectAdoProject") },
+            ...adoProjects.map((p) => ({ value: p.id, label: p.name })),
+          ]}
+        />
 
         <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
           {t("sidebar.adoRepo")}
         </label>
-        <select
+        <Select
           disabled={!adoProjectId || loadingRepos}
           value={repoId}
-          onChange={(e) => setRepoId(e.target.value)}
-          className="mb-4 w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
-        >
-          <option value="">{loadingRepos ? t("editor.loading") : t("sidebar.selectAdoRepo")}</option>
-          {repos.map((r) => (
-            <option key={r.id} value={r.id}>
-              {r.name}
-            </option>
-          ))}
-        </select>
+          onChange={setRepoId}
+          className="mb-4"
+          ariaLabel={t("sidebar.adoRepo")}
+          options={[
+            { value: "", label: loadingRepos ? t("editor.loading") : t("sidebar.selectAdoRepo") },
+            ...repos.map((r) => ({ value: r.id, label: r.name })),
+          ]}
+        />
 
         <div className="flex justify-end gap-2">
           <button

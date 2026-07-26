@@ -89,6 +89,12 @@ pub struct ActivityLogEntry {
     pub question: String,
     pub answer: String,
     pub created_at: String,
+    /// How long the engine took to answer this turn, in milliseconds. `None` for turns recorded
+    /// before this was tracked.
+    pub response_time_ms: Option<i64>,
+    /// Whether this turn failed — `answer` then holds the engine's error rather than a reply, so
+    /// a run that died (out of credit, CLI missing) is still there tomorrow.
+    pub is_error: bool,
 }
 
 /// A finished PR review or pre-commit analysis run — `meta` is a small JSON blob (e.g.

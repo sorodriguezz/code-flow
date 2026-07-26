@@ -67,10 +67,19 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing — required so the app can verify and auto-install updates.
+          # Add ONE repository secret (Settings › Secrets and variables › Actions):
+          #   TAURI_SIGNING_PRIVATE_KEY → contents of ~/.tauri/codeflow-updater.key
+          # The key was generated without a password, so the password is an empty string.
+          # (If you later regenerate the key WITH a password, move this to a secret instead.)
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
           tagName: v${{ needs.check-version.outputs.version }}
           releaseName: CodeFlow v${{ needs.check-version.outputs.version }}
           releaseBody: See the commit history for what changed in this release.
-          releaseDraft: true
+          # Published (not draft) so the updater's `releases/latest/download/latest.json`
+          # endpoint can resolve — draft releases aren't served there.
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}

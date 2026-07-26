@@ -10,24 +10,48 @@ export interface AiProviderOption {
    * "coming soon" badge so the picker reads as real infrastructure, not a placeholder. */
   available: boolean;
   /** Default binary name shown in Settings when the user hasn't set a path — mirrors each
-   * engine's `default_binary()` on the Rust side. */
+   * engine's `default_binary()` on the Rust side. For Ollama this is the HTTP endpoint. */
   defaultBinary?: string;
+  /** Whether this provider can run an agentic tool loop (edit/write files, MCP). A local
+   * completion model (Ollama) can't, so the "fix with AI" buttons, tool settings and MCP notes
+   * key off this. Absent → treated as `true` (every CLI engine is agentic). */
+  agentic?: boolean;
 }
 
+// Ordered so the selectable engines come first and the not-yet-wired ones (shown disabled with a
+// "coming soon" badge) sit together at the end — the picker reads as "what you can use" then
+// "what's on the way", not an interleaved mix.
 export const AI_PROVIDERS: AiProviderOption[] = [
+  // ── Available now ──
   { id: "claude", label: "Claude Code", icon: Bot, available: true, defaultBinary: "claude" },
-  { id: "codex", label: "Codex", icon: Cpu, available: false },
   // Gemini now runs through Google's Antigravity CLI (`agy`), the successor to the retired
   // `gemini` CLI, against a Google-account login. Headless via `agy -p`. See `gemini.rs`.
   { id: "gemini", label: "Gemini", icon: Gem, available: true, defaultBinary: "agy" },
   // opencode is provider-agnostic: it drives whatever model providers the user configured inside
   // it, addressed as `provider/model`. Headless via `opencode run`. See `opencode.rs`.
   { id: "opencode", label: "Open Code", icon: SquareTerminal, available: true, defaultBinary: "opencode" },
+  // Local models via Ollama (HTTP, not a CLI). Non-agentic: no tool use / MCP, so those features
+  // are hidden when it's active. `defaultBinary` is the endpoint. See `ollama.rs`.
+  {
+    id: "ollama",
+    label: "Ollama",
+    icon: HardDrive,
+    available: true,
+    defaultBinary: "http://localhost:11434",
+    agentic: false,
+  },
+  // ── Coming soon (disabled) ──
+  { id: "codex", label: "Codex", icon: Cpu, available: false },
   { id: "deepseek", label: "DeepSeek", icon: Waves, available: false },
-  { id: "local", labelKey: "settings.localModel", icon: HardDrive, available: false },
 ];
 
 export const DEFAULT_AI_PROVIDER = "claude";
+
+/** Whether a provider can run agentic write/tool flows. Unknown or unset → `true` (the CLI
+ * engines all are); only a provider explicitly marked `agentic: false` (Ollama) gates off. */
+export function isAgenticProvider(providerId: string): boolean {
+  return AI_PROVIDERS.find((p) => p.id === providerId)?.agentic !== false;
+}
 
 export interface AiModelOption {
   /** Exactly what gets passed to the CLI's `--model`. */
@@ -41,7 +65,11 @@ export interface AiModelOption {
  * one more entry rather than a second list to keep in sync. Providers that aren't invokable
  * yet have no entry; `modelDisplayLabel` degrades to showing the raw id for them. */
 export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
+  // Claude Code has no "list models" command, so unlike the other providers this list can't be
+  // populated live — it's maintained by hand. The "Custom" field is the escape hatch for anything
+  // newer than the last release.
   claude: [
+    { id: "claude-opus-5", label: "Opus 5" },
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-opus-4-8", label: "Opus 4.8" },
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
@@ -61,6 +89,13 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5" },
     { id: "openai/gpt-5", label: "GPT-5" },
     { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+  ],
+  // Fallback only — the real list is fetched live from the local server's `/api/tags`. These are
+  // common coding models the user may have pulled; shown when Ollama isn't reachable.
+  ollama: [
+    { id: "qwen2.5-coder", label: "Qwen2.5 Coder" },
+    { id: "llama3.1", label: "Llama 3.1" },
+    { id: "deepseek-coder-v2", label: "DeepSeek Coder V2" },
   ],
 };
 

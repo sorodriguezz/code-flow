@@ -4,6 +4,7 @@ import { linkProjectGithub } from "../../lib/tauri/commands";
 import { githubHostLabel } from "../../lib/githubConnections";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { Select } from "../common/Select";
 
 interface ConnectGithubModalProps {
   projectId: string;
@@ -60,17 +61,13 @@ export function ConnectGithubModal({ projectId, hosts, onConnected, onClose }: C
             <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
               {t("settings.githubHostLabel")}
             </label>
-            <select
+            <Select
               value={host}
-              onChange={(e) => setHost(e.target.value)}
-              className="mb-3 w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
-            >
-              {hosts.map((h) => (
-                <option key={h} value={h}>
-                  {githubHostLabel(h)}
-                </option>
-              ))}
-            </select>
+              onChange={setHost}
+              className="mb-3"
+              ariaLabel={t("settings.githubHostLabel")}
+              options={hosts.map((h) => ({ value: h, label: githubHostLabel(h) }))}
+            />
           </>
         )}
 

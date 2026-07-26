@@ -229,6 +229,22 @@ export const setSetting = (key: string, value: string) => invoke<void>("set_sett
  * providers whose CLI has no listing command — the caller falls back to a curated list. */
 export const listAiModels = (provider: string) => invoke<string[]>("list_ai_models", { provider });
 
+/** Opens an http(s) link in the default browser — e.g. a provider's billing page from its own
+ * error message. Non-http schemes are rejected backend-side. */
+export const openExternalUrl = (url: string) => invoke<void>("open_external_url", { url });
+
+export interface ProviderStatus {
+  available: boolean;
+  /** Resolved path/endpoint when available; the missing binary name or connection error when not. */
+  detail: string;
+  /** What was actually checked — the configured binary path or endpoint. */
+  binary: string;
+}
+
+/** Whether a provider's CLI is installed (or Ollama's endpoint answers), for the Settings badge. */
+export const checkAiProvider = (provider: string) =>
+  invoke<ProviderStatus>("check_ai_provider", { provider });
+
 export const listReviewContexts = (workspaceId: string) =>
   invoke<ReviewContext[]>("list_review_contexts", { workspaceId });
 
@@ -337,6 +353,10 @@ export const defaultReviewTemplate = () => invoke<string>("default_review_templa
 
 export const defaultAnalyzeTemplate = () => invoke<string>("default_analyze_template");
 
+export const defaultPrDescriptionTemplate = () => invoke<string>("default_pr_description_template");
+
+export const defaultResolveConflictTemplate = () => invoke<string>("default_resolve_conflict_template");
+
 export const analyzeWorkingChanges = (projectId: string, jobId: string) =>
   invoke<string>("analyze_working_changes", { projectId, jobId });
 
@@ -348,6 +368,8 @@ export interface ChatReply {
   session_id: string | null;
   /** Model id the CLI reported for this turn, or `null` when it didn't report exactly one. */
   model: string | null;
+  /** How long the engine took to answer, in milliseconds. */
+  response_time_ms: number;
 }
 
 export const sendChatMessage = (projectId: string, message: string, sessionId: string | null) =>

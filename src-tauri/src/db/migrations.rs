@@ -133,6 +133,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     migrate_review_contexts_to_workspace(conn)?;
     drop_legacy_installed_skills(conn)?;
     add_session_id_to_activity_log(conn)?;
+    add_response_time_to_activity_log(conn)?;
+    add_is_error_to_activity_log(conn)?;
     add_custom_label_to_job_history(conn)?;
     add_github_columns_to_projects(conn)?;
     add_github_host_to_projects(conn)?;
@@ -184,6 +186,25 @@ fn add_session_id_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE activity_log ADD COLUMN session_id TEXT;")
+}
+
+/// `activity_log` originally didn't record how long a reply took — for a database created before
+/// that, add the column (existing rows stay NULL and simply show no timing, which is exactly the
+/// pre-change behavior).
+fn add_response_time_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "activity_log", "response_time_ms")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE activity_log ADD COLUMN response_time_ms INTEGER;")
+}
+
+/// Failed turns used not to be recorded at all — for a database created before that, add the flag
+/// (every existing row is a successful turn, which is what the `0` default says).
+fn add_is_error_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "activity_log", "is_error")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE activity_log ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0;")
 }
 
 /// `job_history` originally had no `custom_label` column — for a database created before

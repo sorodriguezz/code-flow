@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
+import { parseClaudeError } from "../../lib/claudeError";
 import { parseAnalysis, buildReviewComments } from "../../lib/parseAnalysis";
 import { listPrCommentThreads } from "../../lib/tauri/commands";
 import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
@@ -40,8 +41,6 @@ import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { useResolutionsStore } from "../../state/resolutionsStore";
-import { useAiProviderStore } from "../../state/aiProviderStore";
-import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -51,6 +50,8 @@ import { EmptyState } from "../common/EmptyState";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { ActivityModal } from "./ActivityModal";
 import { AnalyzeSection } from "./AnalyzeSection";
+import { ChatModelPicker } from "./ChatModelPicker";
+import { AiErrorBanner } from "./AiErrorBanner";
 import type { PullRequestSummary, PrCommentThread } from "../../types/domain";
 
 const PANEL_MIN = 280;
@@ -342,18 +343,7 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
           </div>
         )}
 
-        {!loading && error && (
-          <div className="rounded-lg border border-[var(--cf-danger)]/30 bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] p-4">
-            <p className="text-[12px] text-[var(--cf-danger)]">
-              {error.isQuotaExceeded ? t("changes.quotaMessage") : error.message}
-            </p>
-            {error.isQuotaExceeded && (
-              <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">
-                {error.resetHint ? t("changes.quotaRetry", { hint: error.resetHint }) : t("changes.quotaRetryLater")}
-              </p>
-            )}
-          </div>
-        )}
+        {!loading && error && <AiErrorBanner error={error} compact />}
 
         {!loading && !error && reviewText && findings.length === 0 && (
           summary.length > SHORT_SUMMARY_MAX ? (
@@ -484,32 +474,56 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   const t = useT();
   const [copied, copy] = useCopy();
   const html = useMemo(
-    () => (message.role === "assistant" ? renderMarkdown(message.content) : null),
-    [message.role, message.content],
+    () => (message.role === "assistant" && !message.isError ? renderMarkdown(message.content) : null),
+    [message.role, message.content, message.isError],
+  );
+  // Parsed at render, not stored: a reopened conversation gets the same billing link and retry
+  // advice as the moment it failed, from the raw text kept in the transcript.
+  const parsedError = useMemo(
+    () => (message.isError ? parseClaudeError(message.content) : null),
+    [message.isError, message.content],
   );
 
+  if (parsedError) {
+    return (
+      <div className="mr-auto max-w-[95%]">
+        <AiErrorBanner error={parsedError} compact />
+      </div>
+    );
+  }
+
+  const formatResponseTime = (ms: number) => {
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  };
+
   return (
-    <div
-      className={`group relative rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
-        message.role === "user"
-          ? "ml-auto max-w-[85%] whitespace-pre-wrap bg-[var(--cf-accent)] text-white"
-          : "mr-auto max-w-[85%] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] text-[var(--cf-text)]"
-      }`}
-    >
-      {html !== null ? (
-        <div className="cf-markdown-preview cf-markdown-chat" dangerouslySetInnerHTML={{ __html: html }} />
-      ) : (
-        message.content
-      )}
-      <button
-        onClick={() => copy(message.content)}
-        title={t("chat.copyMessage")}
-        className={`absolute -top-2 flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] opacity-0 shadow-sm group-hover:opacity-100 ${
-          message.role === "user" ? "-left-2" : "-right-2"
+    <div className="space-y-1">
+      <div
+        className={`group relative rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
+          message.role === "user"
+            ? "ml-auto max-w-[85%] whitespace-pre-wrap bg-[var(--cf-accent)] text-white"
+            : "mr-auto max-w-[85%] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] text-[var(--cf-text)]"
         }`}
       >
-        {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} className="text-[var(--cf-text-muted)]" />}
-      </button>
+        {html !== null ? (
+          <div className="cf-markdown-preview cf-markdown-chat" dangerouslySetInnerHTML={{ __html: html }} />
+        ) : (
+          message.content
+        )}
+        <button
+          onClick={() => copy(message.content)}
+          title={t("chat.copyMessage")}
+          className={`absolute -top-2 flex h-5 w-5 items-center justify-center rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] opacity-0 shadow-sm group-hover:opacity-100 ${
+            message.role === "user" ? "-left-2" : "-right-2"
+          }`}
+        >
+          {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} className="text-[var(--cf-text-muted)]" />}
+        </button>
+      </div>
+      {message.role === "assistant" && message.responseTimeMs !== undefined && (
+        <div className="pl-0.5 text-[10px] text-[var(--cf-text-muted)]">⏱ {formatResponseTime(message.responseTimeMs)}</div>
+      )}
     </div>
   );
 }
@@ -521,17 +535,9 @@ function ChatSection({ projectId }: { projectId: string }) {
   const clearChat = useChatStore((s) => s.clear);
   const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
   const chatLoaded = useChatHistoryStore((s) => s.loaded[projectId] ?? false);
-  const providerId = useAiProviderStore((s) => s.providerId);
-  const configuredModel = useAiProviderStore((s) => s.model);
-  const provider = AI_PROVIDERS.find((p) => p.id === providerId) ?? AI_PROVIDERS[0];
-  const providerLabel = provider.labelKey ? t(provider.labelKey) : provider.label;
-  // What the CLI reported for the last turn wins: with no model configured it picks its own,
-  // so the setting alone can only say "default" while the reply names the actual version.
-  const modelLabel = modelDisplayLabel(providerId, chat.model ?? configuredModel, t);
   const [input, setInput] = useState("");
   const openSettings = useUiStore((s) => s.openSettings);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [copiedAll, copyAll] = useCopy();
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -558,35 +564,8 @@ function ChatSection({ projectId }: { projectId: string }) {
     setInput("");
   };
 
-  const copyConversation = () => {
-    const transcript = chat.messages
-      .map((m) => `${m.role === "user" ? t("chat.you") : t("chat.title")}: ${m.content}`)
-      .join("\n\n");
-    copyAll(transcript);
-  };
-
   return (
     <div className="flex h-full flex-col">
-      {chat.messages.length > 0 && (
-        <div className="flex shrink-0 items-center justify-end gap-1 border-b border-[var(--cf-border)] px-2 py-1">
-          <button
-            onClick={() => clearChat(projectId)}
-            title={t("chatHistory.newChat")}
-            className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
-            <Plus size={11} />
-            {t("chatHistory.newChat")}
-          </button>
-          <button
-            onClick={copyConversation}
-            title={t("chat.copyAll")}
-            className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-          >
-            {copiedAll ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} />}
-            {copiedAll ? t("chat.copied") : t("chat.copyAll")}
-          </button>
-        </div>
-      )}
       <div ref={scrollRef} className="flex-1 overflow-auto p-4">
         {chat.messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
@@ -612,13 +591,6 @@ function ChatSection({ projectId }: { projectId: string }) {
                 <span className="text-[11px] text-[var(--cf-text-muted)]">{t("ai.working")}</span>
               </div>
             )}
-            {chat.error && (
-              <div className="rounded-lg border border-[var(--cf-danger)]/30 bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] p-2.5">
-                <p className="text-[11px] text-[var(--cf-danger)]">
-                  {chat.error.isQuotaExceeded ? t("changes.quotaMessage") : chat.error.message}
-                </p>
-              </div>
-            )}
           </div>
         )}
       </div>
@@ -639,18 +611,10 @@ function ChatSection({ projectId }: { projectId: string }) {
             className="resize-none bg-transparent px-1.5 py-1 text-[12px] outline-none"
           />
           <div className="flex items-center gap-1.5 px-0.5">
-            {/* Purely informational: which engine and which model version this chat is
-                actually talking to. Reads from the shared provider/model catalog, so it keeps
-                being accurate once Codex/Gemini become selectable. */}
-            <span
-              title={t("ai.modelInUse", { provider: providerLabel ?? "", model: modelLabel })}
-              className="flex items-center gap-1 rounded-md bg-black/[0.05] px-1.5 py-0.5 text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.08]"
-            >
-              <provider.icon size={10} />
-              {providerLabel}
-              <span className="text-[var(--cf-text-muted)]/50">·</span>
-              <span className="font-medium text-[var(--cf-text)]/70">{modelLabel}</span>
-            </span>
+            {/* Which engine this chat talks to — and the control that changes it. Picking here
+                rewrites the *chat* task's routing, so it's a real settings change, not a
+                per-conversation override. */}
+            <ChatModelPicker liveModel={chat.model} />
             <button
               onClick={submit}
               disabled={!input.trim() || chat.sending}

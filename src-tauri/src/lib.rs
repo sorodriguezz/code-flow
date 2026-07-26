@@ -7,6 +7,7 @@ mod fsops;
 mod gemini;
 mod git;
 mod github;
+mod ollama;
 mod opencode;
 mod paths;
 mod remote;
@@ -69,6 +70,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(db::init().expect("failed to initialize CodeFlow database"))
         .manage(TerminalRegistry::default())
         .manage(WatcherRegistry::default())
@@ -168,9 +171,13 @@ pub fn run() {
             commands::secrets_cmd::delete_github_token,
             commands::claude_cmd::generate_commit_message,
             commands::claude_cmd::list_ai_models,
+            commands::claude_cmd::check_ai_provider,
+            commands::ado_cmd::open_external_url,
             commands::claude_cmd::default_commit_template,
             commands::claude_cmd::default_review_template,
             commands::claude_cmd::default_analyze_template,
+            commands::claude_cmd::default_pr_description_template,
+            commands::claude_cmd::default_resolve_conflict_template,
             commands::claude_cmd::analyze_working_changes,
             commands::claude_cmd::resolve_conflict_with_ai,
             commands::claude_cmd::resolve_finding_with_ai,

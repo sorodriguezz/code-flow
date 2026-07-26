@@ -27,20 +27,67 @@ pub const MAX_CONFLICT_SIDE_CHARS: usize = 40_000;
 /// a generic error banner. Both engines emit it, so it lives here.
 pub const QUOTA_MARKER: &str = "QUOTA_EXCEEDED::";
 
-const QUOTA_SIGNALS: [&str; 6] = [
+/// Phrases that mean "the provider refused because of a limit or your account balance", not that
+/// something is broken. The billing ones matter for the credit-based CLIs (opencode bills per
+/// token, so it answers with "Insufficient balance" rather than a rate limit).
+const QUOTA_SIGNALS: [&str; 11] = [
     "usage limit",
     "rate limit",
     "quota exceeded",
     "resets at",
     "try again in",
     "limit reached",
+    "insufficient balance",
+    "insufficient credit",
+    "out of credit",
+    "payment required",
+    "billing",
 ];
 
-/// Whether a CLI's message reads like a quota/rate-limit refusal rather than a genuine error —
+/// Whether a CLI's message reads like a quota/billing refusal rather than a genuine error —
 /// shared by every engine's output interpreter.
 pub(crate) fn quota_signal(text: &str) -> bool {
     let lower = text.to_lowercase();
     QUOTA_SIGNALS.iter().any(|s| lower.contains(s))
+}
+
+/// Removes terminal escape sequences from a CLI's output. The engines run headless but still
+/// colourize (opencode paints its errors red), and those raw `ESC[91m` bytes would otherwise be
+/// rendered literally in the UI. Handles CSI (colour/cursor) and OSC (hyperlink/title) sequences.
+pub(crate) fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: ESC [ params… final byte in @–~
+            Some('[') => {
+                for byte in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&byte) {
+                        break;
+                    }
+                }
+            }
+            // OSC: ESC ] … terminated by BEL or ESC \
+            Some(']') => {
+                while let Some(byte) = chars.next() {
+                    if byte == '\u{7}' {
+                        break;
+                    }
+                    if byte == '\u{1b}' {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            // Any other two-byte escape: the second char is already consumed.
+            _ => {}
+        }
+    }
+    out
 }
 
 // ---------- provider-independent prompt templates ----------
@@ -218,6 +265,15 @@ impl<'a> AiInvocation<'a> {
     }
 }
 
+/// How an engine actually talks to its model. Almost every engine is a headless CLI subprocess;
+/// Ollama is the exception — a local HTTP server — so [`run`] branches on this instead of forcing
+/// an HTTP engine to masquerade as a process. For `Http`, the `binary` argument threaded through
+/// [`run`]/[`list_models`] carries the base URL (e.g. `http://localhost:11434`) rather than a path.
+pub enum Transport {
+    Subprocess,
+    Http,
+}
+
 /// A headless AI CLI. Implementors describe how to launch their binary and how to read its
 /// output; everything else (spawning, piping stdin, quota handling) is shared in [`run`].
 pub trait AiEngine: Send + Sync {
@@ -245,6 +301,27 @@ pub trait AiEngine: Send + Sync {
     fn list_models_args(&self) -> Option<Vec<String>> {
         None
     }
+
+    /// How this engine reaches its model. Defaults to a CLI subprocess; only the local Ollama
+    /// engine overrides this to [`Transport::Http`].
+    fn transport(&self) -> Transport {
+        Transport::Subprocess
+    }
+
+    /// Whether this engine can run an agentic tool loop (read/edit/write files, MCP). The CLI
+    /// engines can; a plain local completion model (Ollama) cannot, so the "fix with AI" and MCP
+    /// features are hidden for it in the UI and refused defensively in the backend.
+    fn agentic(&self) -> bool {
+        true
+    }
+
+    /// Whether the engine carries a conversation forward on its own side between turns (the CLIs'
+    /// `--resume` / `--continue` sessions). Ollama doesn't — each HTTP request stands alone — so
+    /// [`chat_with_repo`] re-sends the system prompt and project context on every turn for it,
+    /// instead of only on the first.
+    fn resumes_sessions(&self) -> bool {
+        true
+    }
 }
 
 /// Resolves the engine for a provider id. Unknown/empty ids fall back to Claude so a corrupt or
@@ -253,6 +330,7 @@ pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
     match provider {
         "gemini" => Box::new(crate::gemini::GeminiEngine),
         "opencode" => Box::new(crate::opencode::OpenCodeEngine),
+        "ollama" | "local" => Box::new(crate::ollama::OllamaEngine),
         _ => Box::new(crate::claude::ClaudeEngine),
     }
 }
@@ -345,9 +423,56 @@ fn resolve_binary(binary: &str, dirs: &[std::path::PathBuf]) -> String {
     binary.to_string()
 }
 
+/// Locates `binary` the same way [`run`] will: an explicit path is checked as-is, a bare name is
+/// looked up across the install dirs and `PATH` (trying Windows' executable extensions, since the
+/// npm-installed CLIs land as `.cmd` shims). `None` means launching it would fail.
+fn find_on_path(binary: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(binary);
+    if path.is_absolute() || binary.contains('/') || binary.contains('\\') {
+        return path.is_file().then(|| path.to_path_buf());
+    }
+    #[cfg(target_os = "windows")]
+    let extensions: &[&str] = &["exe", "cmd", "bat", ""];
+    #[cfg(not(target_os = "windows"))]
+    let extensions: &[&str] = &[""];
+
+    for dir in search_dirs() {
+        for ext in extensions {
+            let candidate = if ext.is_empty() { dir.join(binary) } else { dir.join(format!("{binary}.{ext}")) };
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Whether a provider is usable *right now*, for the Settings "available / not found" badge.
+/// Subprocess engines are checked by locating their binary; the HTTP engine by asking its endpoint
+/// for models. `detail` is the resolved path (or endpoint) when available, and a short raw reason
+/// when not — the frontend wraps it in a translated label rather than showing it bare.
+pub async fn probe(engine: &dyn AiEngine, binary: &str) -> (bool, String) {
+    match engine.transport() {
+        Transport::Http => match crate::ollama::fetch_tags(binary).await {
+            Ok(models) => (true, format!("{} · {} modelos", binary, models.len())),
+            Err(e) => (false, e),
+        },
+        Transport::Subprocess => match find_on_path(binary) {
+            Some(path) => (true, path.to_string_lossy().into_owned()),
+            None => (false, binary.to_string()),
+        },
+    }
+}
+
 /// Shared subprocess plumbing for every headless AI invocation: builds the engine's command,
 /// pipes `stdin_content` in, waits for it, and hands the output back to the engine to interpret.
 async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Result<AiRun, String> {
+    // HTTP engines (Ollama) don't spawn a process — `binary` is the base URL. Everything below
+    // (binary resolution, PATH, stdin piping) is subprocess-only, so hand off before any of it.
+    if let Transport::Http = engine.transport() {
+        return crate::ollama::complete(binary, &inv).await;
+    }
+
     let dirs = search_dirs();
     let program = resolve_binary(binary, &dirs);
     let mut cmd = engine.build_command(&program, &inv);
@@ -376,11 +501,13 @@ async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Resu
 
     let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
     let _ = writer.await;
+    // Stripped here rather than per-engine: every CLI colourizes, and no interpreter wants to see
+    // escape bytes — least of all the UI, which would render them as literal `[91m` noise.
     engine.interpret(
         output.status.success(),
         &output.status.to_string(),
-        &String::from_utf8_lossy(&output.stdout),
-        &String::from_utf8_lossy(&output.stderr),
+        &strip_ansi(&String::from_utf8_lossy(&output.stdout)),
+        &strip_ansi(&String::from_utf8_lossy(&output.stderr)),
     )
 }
 
@@ -401,6 +528,10 @@ async fn capture(binary: &str, args: &[String]) -> Result<std::process::Output, 
 /// for engines with no listing command ([`AiEngine::list_models_args`] is `None`) — no process is
 /// spawned in that case — so the frontend can fall back to its curated per-provider list.
 pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<String>, String> {
+    // Ollama lists its installed models over HTTP (`/api/tags`), not via a CLI subcommand.
+    if let Transport::Http = engine.transport() {
+        return crate::ollama::list_models(binary).await;
+    }
     let Some(args) = engine.list_models_args() else {
         return Ok(Vec::new());
     };
@@ -696,17 +827,18 @@ pub async fn chat_with_repo(
 ) -> Result<AiRun, String> {
     // Project context and the system prompt only need to be established once — a resumed session
     // already carries the earlier turns forward. `-p` carries the user's actual message; stdin
-    // is just the one-time context (stdin = data, `-p` = ask).
-    let is_first_turn = session_id.is_none();
+    // is just the one-time context (stdin = data, `-p` = ask). An engine that doesn't resume
+    // sessions server-side (Ollama) has nothing carrying them forward, so it gets them every turn.
+    let needs_context = session_id.is_none() || !engine.resumes_sessions();
     let mut stdin_payload = String::new();
-    if is_first_turn && !contexts.is_empty() {
+    if needs_context && !contexts.is_empty() {
         stdin_payload.push_str("PROJECT CONTEXT:\n");
         for (name, content) in contexts {
             stdin_payload.push_str(&format!("- {name}: {content}\n"));
         }
     }
 
-    let system_prompt = if is_first_turn { Some(DEFAULT_CHAT_SYSTEM_PROMPT) } else { None };
+    let system_prompt = if needs_context { Some(DEFAULT_CHAT_SYSTEM_PROMPT) } else { None };
 
     let mut inv = AiInvocation::new(message, &stdin_payload);
     inv.system_prompt = system_prompt;
@@ -733,6 +865,13 @@ pub async fn apply_finding_fix(
     finding_prompt: &str,
     cwd: &str,
 ) -> Result<String, String> {
+    // Defensive: the UI hides "fix with AI" for non-agentic providers, but never let a local model
+    // silently "fix" nothing (it has no write tools) if the command is reached some other way.
+    if !engine.agentic() {
+        return Err(
+            "Este proveedor local no puede aplicar cambios automáticamente. Usa Claude, Gemini u Open Code para \"Corregir con IA\".".to_string(),
+        );
+    }
     let tools = engine.fix_tools();
     let mut inv = AiInvocation::new("Aplica la corrección para el hallazgo entregado por stdin.", finding_prompt);
     inv.system_prompt = Some(FIX_FINDING_SYSTEM_PROMPT);
@@ -742,4 +881,36 @@ pub async fn apply_finding_fix(
     inv.auto_approve_edits = true;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strips_colour_codes_from_a_cli_error() {
+        let raw = "\u{1b}[0m\u{1b}[91m\u{1b}[1mError: \u{1b}[0mInsufficient balance.";
+        assert_eq!(strip_ansi(raw), "Error: Insufficient balance.");
+    }
+
+    #[test]
+    fn strips_osc_hyperlink_sequences() {
+        let raw = "see \u{1b}]8;;https://example.com\u{7}the docs\u{1b}]8;;\u{7}";
+        assert_eq!(strip_ansi(raw), "see the docs");
+    }
+
+    #[test]
+    fn leaves_ordinary_text_untouched() {
+        assert_eq!(strip_ansi("feat: add thing [skip ci]"), "feat: add thing [skip ci]");
+    }
+
+    #[test]
+    fn a_credit_balance_refusal_counts_as_a_quota_signal() {
+        assert!(quota_signal("Error: Insufficient balance. Manage your billing here: https://x/billing"));
+    }
+
+    #[test]
+    fn a_genuine_failure_is_not_a_quota_signal() {
+        assert!(!quota_signal("error: unknown flag --nope"));
+    }
 }

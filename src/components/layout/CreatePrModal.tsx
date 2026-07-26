@@ -4,6 +4,7 @@ import { listBranches, generatePrDescription } from "../../lib/tauri/commands";
 import { usePrStore } from "../../state/prStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { Select } from "../common/Select";
 import type { BranchInfo, Project } from "../../types/domain";
 
 const PREFERRED_TARGETS = ["main", "master", "develop", "development"];
@@ -126,36 +127,26 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
                 <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
                   {t("createPr.source")}
                 </label>
-                <select
+                <Select
                   value={source}
-                  onChange={(e) => setSource(e.target.value)}
+                  onChange={setSource}
                   disabled={busy || branches === null}
-                  className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
-                >
-                  {localBranches.map((b) => (
-                    <option key={b.name} value={b.name}>
-                      {b.name}
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel={t("createPr.source")}
+                  options={localBranches.map((b) => ({ value: b.name, label: b.name }))}
+                />
               </div>
               <span className="mt-5 text-[var(--cf-text-muted)]">→</span>
               <div className="flex-1">
                 <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
                   {t("createPr.target")}
                 </label>
-                <select
+                <Select
                   value={target}
-                  onChange={(e) => setTarget(e.target.value)}
+                  onChange={setTarget}
                   disabled={busy || branches === null}
-                  className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
-                >
-                  {localBranches.map((b) => (
-                    <option key={b.name} value={b.name}>
-                      {b.name}
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel={t("createPr.target")}
+                  options={localBranches.map((b) => ({ value: b.name, label: b.name }))}
+                />
               </div>
             </div>
             {sameBranch && <p className="-mt-2 mb-2 text-[11px] text-[var(--cf-danger)]">{t("createPr.sameBranch")}</p>}

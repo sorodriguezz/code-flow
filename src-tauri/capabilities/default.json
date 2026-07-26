@@ -13,6 +13,8 @@
     "core:window:allow-set-theme",
     "opener:default",
     "dialog:allow-open",
-    "os:allow-platform"
+    "os:allow-platform",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

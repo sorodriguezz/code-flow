@@ -14,6 +14,8 @@ import { useResolutionsStore } from "../../state/resolutionsStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { useTaskProvider } from "../../state/aiProviderStore";
+import { isAgenticProvider } from "../../lib/aiProviders";
 
 // Above this length a summary with no parsed findings is treated as an unparsed raw
 // response (the model didn't follow the expected "### finding" format) rather than a short
@@ -121,6 +123,11 @@ export function ResolveWithAiButton({
   onClear?: () => void;
 }) {
   const t = useT();
+  // "Fix with AI" needs a write-capable agentic engine — hidden entirely for local models (Ollama)
+  // so there's no dead button, unless there's already a resolution to show from an earlier run.
+  // Keyed on the *fix* task's provider, which routing may point somewhere other than the default.
+  const providerId = useTaskProvider("fix");
+  if (!isAgenticProvider(providerId) && !resolution) return null;
   return (
     <>
       <div className="flex items-center gap-2 pt-1">

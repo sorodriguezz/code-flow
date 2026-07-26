@@ -193,6 +193,10 @@ export interface ActivityLogEntry {
   question: string;
   answer: string;
   created_at: string;
+  /** How long the engine took to answer, in ms. `null` for turns recorded before this was tracked. */
+  response_time_ms: number | null;
+  /** True when the turn failed — `answer` then holds the engine's error text. */
+  is_error: boolean;
 }
 
 export interface JobHistoryEntry {

@@ -8,6 +8,7 @@ import { useT } from "../../state/languageStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { renderMarkdown } from "../../lib/markdown";
 import { FindingCard, QualityGateBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
+import { AiErrorBanner } from "./AiErrorBanner";
 
 /** Pre-commit change analysis, shown inline in the AI panel (alongside chat and PR review)
  * instead of a separate modal — so it shares the same "Activity" job tracking and the same
@@ -121,18 +122,7 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
           </div>
         )}
 
-        {!loading && error && (
-          <div className="rounded-lg border border-[var(--cf-danger)]/30 bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] p-4">
-            <p className="text-[13px] text-[var(--cf-danger)]">
-              {error.isQuotaExceeded ? t("changes.quotaMessage") : error.message}
-            </p>
-            {error.isQuotaExceeded && (
-              <p className="mt-1 text-[12px] text-[var(--cf-text-muted)]">
-                {error.resetHint ? t("changes.quotaRetry", { hint: error.resetHint }) : t("changes.quotaRetryLater")}
-              </p>
-            )}
-          </div>
-        )}
+        {!loading && error && <AiErrorBanner error={error} />}
 
         {!loading && !error && findings.length === 0 && (
           summary.length > 0 && summary.length > SHORT_SUMMARY_MAX ? (

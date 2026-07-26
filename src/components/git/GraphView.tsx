@@ -103,10 +103,8 @@ const CommitTable = memo(function CommitTable() {
         ))}
         {/* GRAFO has no fixed width — `flex-1` lets it absorb whatever space is left so the column
             always fills to the panel's right edge (with `min-w-full` above keeping the whole header
-            at least as wide as the panel), instead of ending at content width and looking cut off.
-            Left-aligned (not centered like the others) so the label sits over the graph's lane line,
-            which is anchored to the left of this column rather than its middle. */}
-        <span className="flex-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            at least as wide as the panel), instead of ending at content width and looking cut off. */}
+        <span className="flex-1 text-center text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("graph.colGraph")}
         </span>
       </div>

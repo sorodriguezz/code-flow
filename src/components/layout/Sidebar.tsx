@@ -45,6 +45,7 @@ import type { BranchInfo, GithubConnection, Project, PullRequestSummary, StashIn
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
+import { Select } from "../common/Select";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
@@ -492,31 +493,17 @@ function CreateBranchForm({ branches, onDone }: { branches: BranchInfo[]; onDone
         placeholder={t("sidebar.newBranchName")}
         className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-1.5 py-0.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
       />
-      <select
+      <Select
         value={startPoint}
-        onChange={(e) => setStartPoint(e.target.value)}
-        className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-0.5 text-[12px]"
-      >
-        <option value="">{t("sidebar.fromCurrentHead")}</option>
-        <optgroup label={t("sidebar.local")}>
-          {branches
-            .filter((b) => !b.is_remote)
-            .map((b) => (
-              <option key={b.name} value={b.name}>
-                {b.name}
-              </option>
-            ))}
-        </optgroup>
-        <optgroup label={t("sidebar.remote")}>
-          {branches
-            .filter((b) => b.is_remote)
-            .map((b) => (
-              <option key={b.name} value={b.name}>
-                {b.name}
-              </option>
-            ))}
-        </optgroup>
-      </select>
+        onChange={setStartPoint}
+        size="sm"
+        ariaLabel={t("sidebar.fromCurrentHead")}
+        options={[
+          { value: "", label: t("sidebar.fromCurrentHead") },
+          { label: t("sidebar.local"), options: branches.filter((b) => !b.is_remote).map((b) => ({ value: b.name, label: b.name })) },
+          { label: t("sidebar.remote"), options: branches.filter((b) => b.is_remote).map((b) => ({ value: b.name, label: b.name })) },
+        ]}
+      />
       <div className="flex justify-end gap-2 pt-0.5">
         <button onClick={onDone} className="text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
           {t("common.cancel")}
