@@ -2,10 +2,14 @@ import { create } from "zustand";
 import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
 import { listJobHistory, renameJobHistoryEntry, deleteJobHistoryEntry } from "../lib/tauri/commands";
 import { useLanguageStore } from "./languageStore";
+import { isCancellation, useAiRunStore } from "./aiRunStore";
 import { translations } from "../lib/i18n/translations";
 
 export type JobKind = "pr-review" | "analyze-changes";
-export type JobStatus = "running" | "done" | "error";
+/** `cancelled` is a stopped run, kept apart from `error` so the UI can offer "run it again"
+ * instead of showing a failure the user caused on purpose. It only ever lives in memory — the
+ * backend doesn't persist a cancelled run to `job_history`. */
+export type JobStatus = "running" | "done" | "error" | "cancelled";
 
 export interface Job {
   id: string;
@@ -102,9 +106,20 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       }));
     };
 
+    // The job id is also the run id the backend streams under — that's what lets this row show
+    // the CLI's live output and stop it.
+    useAiRunStore.getState().start(id);
+
     void task(id)
       .then((result) => settle({ status: "done", result, finishedAt: Date.now() }))
-      .catch((e) => settle({ status: "error", error: parseClaudeError(String(e)), finishedAt: Date.now() }));
+      .catch((e) =>
+        settle(
+          isCancellation(e)
+            ? { status: "cancelled", finishedAt: Date.now() }
+            : { status: "error", error: parseClaudeError(String(e)), finishedAt: Date.now() },
+        ),
+      )
+      .finally(() => useAiRunStore.getState().finish(id));
 
     return id;
   },

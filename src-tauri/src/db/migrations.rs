@@ -135,6 +135,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_session_id_to_activity_log(conn)?;
     add_response_time_to_activity_log(conn)?;
     add_is_error_to_activity_log(conn)?;
+    add_engine_session_id_to_activity_log(conn)?;
+    add_trace_to_activity_log(conn)?;
     add_custom_label_to_job_history(conn)?;
     add_github_columns_to_projects(conn)?;
     add_github_host_to_projects(conn)?;
@@ -186,6 +188,31 @@ fn add_session_id_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE activity_log ADD COLUMN session_id TEXT;")
+}
+
+/// Splits the two meanings `session_id` used to carry.
+///
+/// `session_id` is now the **conversation** id — minted by the app when a chat starts, stable for
+/// its whole life, and the key everything groups by. The engine's own resume token moves here,
+/// because it is not a conversation identity: Codex reports one fixed sentinel for every run
+/// (so every chat ever collapsed into a single activity), while the Claude CLI can mint a *new*
+/// id on each resumed turn (so one conversation could scatter across several activities). Old
+/// rows keep grouping by whatever they stored, which is the best that data supports.
+fn add_engine_session_id_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "activity_log", "engine_session_id")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE activity_log ADD COLUMN engine_session_id TEXT;")
+}
+
+/// What the engine printed while producing this turn (tool calls, progress), as JSON. Lets a
+/// finished answer still show *how* it was reached, days later — rows written before this simply
+/// have no trace to show.
+fn add_trace_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "activity_log", "trace")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE activity_log ADD COLUMN trace TEXT;")
 }
 
 /// `activity_log` originally didn't record how long a reply took — for a database created before

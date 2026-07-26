@@ -18,7 +18,7 @@ export function ConflictResolveModal({ filePath, onClose }: { filePath: string; 
   const t = useT();
   const repoPath = useRepoStore((s) => s.repoPath);
   const markConflictResolved = useRepoStore((s) => s.markConflictResolved);
-  const resolved = useThemeStore((s) => s.resolved);
+
 
   const [original, setOriginal] = useState("");
   const [proposal, setProposal] = useState("");
@@ -52,7 +52,7 @@ export function ConflictResolveModal({ filePath, onClose }: { filePath: string; 
 
   const busy = loading || accepting;
   const language = languageForPath(filePath);
-  const theme = resolved === "dark" ? "vs-dark" : "vs";
+  const theme = useThemeStore((s) => s.monacoTheme);
 
   const accept = async () => {
     if (!repoPath || !proposal.trim()) return;

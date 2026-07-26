@@ -1,22 +1,18 @@
-import { useState } from "react";
 import { ArrowDown, ArrowUp, ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import { useFetchTimerStore } from "../../state/fetchTimerStore";
-import { usePreferencesStore } from "../../state/preferencesStore";
 import { useT } from "../../state/languageStore";
-import { BranchSwitcherModal } from "./BranchSwitcherModal";
+import { canPublish, canPull, canPush, fetchNow, pullNow, pushNow } from "../../lib/gitActions";
+import { useShortcutHint } from "../../lib/useShortcutHint";
 
 export function StatusBar() {
   const project = useWorkspaceStore((s) => s.activeProject());
   const status = useRepoStore((s) => s.status);
   const branches = useRepoStore((s) => s.branches);
   const remoteOp = useRepoStore((s) => s.remoteOp);
-  const fetch = useRepoStore((s) => s.fetch);
-  const pull = useRepoStore((s) => s.pull);
-  const push = useRepoStore((s) => s.push);
   const settingsOpen = useUiStore((s) => s.settingsOpen);
   const toggleSettings = useUiStore((s) => s.toggleSettings);
   const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
@@ -24,14 +20,14 @@ export function StatusBar() {
   const aiPanelOpen = useUiStore((s) => s.aiPanelOpen);
   const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
   const remainingSeconds = useFetchTimerStore((s) => s.remainingSeconds);
-  const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
-  const [showBranchModal, setShowBranchModal] = useState(false);
+  const toggleBranchSwitcher = useUiStore((s) => s.toggleBranchSwitcher);
   const t = useT();
+  const hint = useShortcutHint();
 
   const settingsButton = (
     <button
       onClick={toggleSettings}
-      title={t("statusbar.settings")}
+      title={hint("app.settings", t("statusbar.settings"))}
       className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
         settingsOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
       }`}
@@ -43,7 +39,7 @@ export function StatusBar() {
   const terminalButton = (
     <button
       onClick={toggleTerminalPanel}
-      title={t("terminal.toggle")}
+      title={hint("panel.terminal", t("terminal.toggle"))}
       className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
         terminalPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
       }`}
@@ -55,7 +51,7 @@ export function StatusBar() {
   const aiPanelButton = (
     <button
       onClick={toggleAiPanel}
-      title={t("statusbar.aiPanel")}
+      title={hint("panel.ai", t("statusbar.aiPanel"))}
       className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
         aiPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
       }`}
@@ -78,12 +74,13 @@ export function StatusBar() {
   const current = branches.find((b) => b.is_head);
   const changedCount =
     (status?.staged.length ?? 0) + (status?.unstaged.length ?? 0) + (status?.untracked.length ?? 0);
-  const hasUpstream = !!current?.upstream;
-
-  const handleManualFetch = () => {
-    void fetch();
-    if (autoFetchSeconds) useFetchTimerStore.getState().setRemaining(autoFetchSeconds);
-  };
+  const behind = current?.behind ?? 0;
+  const ahead = current?.ahead ?? 0;
+  // Availability comes from `lib/gitActions` so these buttons and the keyboard shortcuts that do
+  // the same thing can't disagree about when there's nothing to do.
+  const pullEnabled = canPull(current);
+  const pushEnabled = canPush(current);
+  const publishable = canPublish(current);
 
   return (
     <footer className="flex h-8 shrink-0 items-center gap-3 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[12px] text-[var(--cf-text-muted)]">
@@ -101,7 +98,8 @@ export function StatusBar() {
       <span className="h-3 w-px shrink-0 bg-[var(--cf-border)]" />
 
       <button
-        onClick={() => setShowBranchModal(true)}
+        onClick={toggleBranchSwitcher}
+        title={hint("branch.switcher", t("shortcuts.cmdBranchSwitcher"))}
         className="flex items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
       >
         <GitBranch size={12} />
@@ -135,8 +133,12 @@ export function StatusBar() {
       <div className="ml-auto flex items-center gap-1">
         <button
           disabled={remoteOp !== null}
-          onClick={handleManualFetch}
-          title={remainingSeconds !== null ? t("statusbar.nextFetch", { n: remainingSeconds }) : t("statusbar.fetch")}
+          onClick={fetchNow}
+          title={
+            remainingSeconds !== null
+              ? t("statusbar.nextFetch", { n: remainingSeconds })
+              : hint("git.fetch", t("statusbar.fetch"))
+          }
           className="flex h-6 items-center gap-1 rounded-md px-2 hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
         >
           {remoteOp === "fetch" ? (
@@ -148,11 +150,11 @@ export function StatusBar() {
           {remainingSeconds !== null && <span className="tabular-nums text-[10px]">{remainingSeconds}s</span>}
         </button>
 
-        {!hasUpstream ? (
+        {publishable ? (
           <button
             disabled={remoteOp !== null}
-            onClick={() => push(true)}
-            title={t("statusbar.publishTo")}
+            onClick={pushNow}
+            title={hint("git.push", t("statusbar.publishTo"))}
             className="flex h-6 items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 text-white hover:brightness-110 disabled:opacity-40"
           >
             {remoteOp === "push" ? <Loader2 size={12} className="animate-spin" /> : <CloudUpload size={12} />}
@@ -161,30 +163,28 @@ export function StatusBar() {
         ) : (
           <>
             <button
-              disabled={remoteOp !== null}
-              onClick={() => pull()}
-              title={t("statusbar.pullFrom")}
-              className="flex h-6 items-center gap-1 rounded-md px-2 hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
+              disabled={remoteOp !== null || !pullEnabled}
+              onClick={pullNow}
+              title={pullEnabled ? hint("git.pull", t("statusbar.pullFrom")) : t("statusbar.nothingToPull")}
+              className="flex h-6 items-center gap-1 rounded-md px-2 hover:bg-black/[0.05] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.08] dark:disabled:hover:bg-transparent"
             >
               {remoteOp === "pull" ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
               {t("statusbar.pull")}
-              {(current?.behind ?? 0) > 0 && <span className="font-semibold">↓{current?.behind}</span>}
+              {behind > 0 && <span className="font-semibold">↓{behind}</span>}
             </button>
             <button
-              disabled={remoteOp !== null}
-              onClick={() => push(false)}
-              title={t("statusbar.pushTo")}
-              className="flex h-6 items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 text-white hover:brightness-110 disabled:opacity-40"
+              disabled={remoteOp !== null || !pushEnabled}
+              onClick={pushNow}
+              title={pushEnabled ? hint("git.push", t("statusbar.pushTo")) : t("statusbar.nothingToPush")}
+              className="flex h-6 items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:brightness-100"
             >
               {remoteOp === "push" ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
               {t("statusbar.push")}
-              {(current?.ahead ?? 0) > 0 && <span className="font-semibold">↑{current?.ahead}</span>}
+              {ahead > 0 && <span className="font-semibold">↑{ahead}</span>}
             </button>
           </>
         )}
       </div>
-
-      {showBranchModal && <BranchSwitcherModal onClose={() => setShowBranchModal(false)} />}
     </footer>
   );
 }

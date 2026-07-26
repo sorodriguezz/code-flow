@@ -1,11 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
-import type { editor as MonacoEditorNS } from "monaco-editor";
-import { ChevronRight, Code2, Columns2, Eye, FileCode, Folder, GitBranch, Loader2, Save } from "lucide-react";
+import type { editor as MonacoEditorNS, IRange } from "monaco-editor";
+import {
+  ChevronRight,
+  Code2,
+  Columns2,
+  Eye,
+  Bug,
+  FileCode,
+  FileSearch,
+  Files,
+  Keyboard,
+  Loader2,
+  Save,
+  Search,
+} from "lucide-react";
 import { FileTree } from "./FileTree";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { DbmlDiagram } from "./DbmlDiagram";
 import { EditorTabs, type EditorTabItem } from "./EditorTabs";
+import { FilePalette } from "./FilePalette";
+import { SearchPanel } from "./SearchPanel";
+import { InlineEditWidget } from "./InlineEditWidget";
+import { DebugPanel } from "./DebugPanel";
 import { readFileText, writeFileText } from "../../lib/tauri/commands";
 import { onRepoFsChanged } from "../../lib/tauri/events";
 import { languageForPath } from "../../lib/monacoLanguage";
@@ -16,6 +33,7 @@ import { useThemeStore } from "../../state/themeStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
+import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { confirmAction } from "../../state/confirmStore";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
@@ -109,7 +127,6 @@ function Breadcrumb({ path, dirty, loading }: { path: string; dirty: boolean; lo
 export function EditorView() {
   const t = useT();
   const project = useWorkspaceStore((s) => s.activeProject());
-  const currentBranch = useRepoStore((s) => s.status?.current_branch ?? null);
   const status = useRepoStore((s) => s.status);
   const changedPaths = useMemo(() => {
     const map = new Map<string, string>();
@@ -123,10 +140,12 @@ export function EditorView() {
     return map;
   }, [status]);
   const resolved = useThemeStore((s) => s.resolved);
+  const monacoTheme = useThemeStore((s) => s.monacoTheme);
   const workingDiff = useRepoStore((s) => s.workingDiff);
   const stagedDiff = useRepoStore((s) => s.stagedDiff);
   const activeView = useUiStore((s) => s.activeView);
   const pendingEditorPath = useUiStore((s) => s.pendingEditorPath);
+  const pendingEditorLine = useUiStore((s) => s.pendingEditorLine);
   const clearPendingEditorPath = useUiStore((s) => s.clearPendingEditorPath);
   const treeWidth = useLayoutStore((s) => s.sizes.editorTreeWidth);
   const setSize = useLayoutStore((s) => s.setSize);
@@ -135,6 +154,16 @@ export function EditorView() {
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [sidePanel, setSidePanel] = useState<"files" | "search" | "debug">("files");
+  /** The selection Ctrl+I was pressed on, captured at that moment: the widget's own input steals
+   * focus, and Monaco's selection is gone by the time the instruction is submitted. */
+  const [inlineEdit, setInlineEdit] = useState<{
+    selection: string;
+    range: IRange;
+  } | null>(null);
+  /** A line to reveal once the file is open and Monaco has mounted — set by a search hit. */
+  const pendingRevealRef = useRef<{ path: string; line: number } | null>(null);
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   // Decoration ids are per *model*, so they have to be tracked per open file — reusing one
@@ -165,6 +194,18 @@ export function EditorView() {
   useEffect(() => {
     tabsRef.current = tabs;
   }, [tabs]);
+
+  const activeAbsolutePath = useMemo(
+    () => (project && activePath ? normalizePath(`${project.local_path}/${activePath}`) : null),
+    [project, activePath],
+  );
+  const breakpoints = useDebugStore((s) => s.breakpoints);
+  // Monaco's mouse handler is registered once, at mount; a ref is how it sees the *current*
+  // file rather than whichever one was open when it was wired up.
+  const activeAbsolutePathRef = useRef<string | null>(null);
+  activeAbsolutePathRef.current = activeAbsolutePath;
+  const debugStatus = useDebugStore((s) => s.status);
+  const pausedFrame = useDebugStore((s) => (s.status === "paused" ? s.frames[s.selectedFrame] : undefined));
 
   const previewKind = previewKindFor(activePath);
   const dbmlSchema = useMemo(() => (previewKind === "dbml" ? parseDbml(content) : null), [previewKind, content]);
@@ -209,12 +250,84 @@ export function EditorView() {
     decorationIdsRef.current.set(activePath, ed.deltaDecorations(previous, decorations));
   }, [ranges, activePath]);
 
+  // Breakpoints and the stopped line are their own decoration set: they change on a completely
+  // different rhythm from the git markers, and mixing them would make each update clobber the
+  // other's ids.
+  const debugDecorationsRef = useRef<string[]>([]);
+  useEffect(() => {
+    const ed = editorRef.current;
+    const mon = monacoRef.current;
+    if (!ed || !mon || !ed.getModel()) return;
+    const lines = activeAbsolutePath ? (breakpoints[activeAbsolutePath] ?? []) : [];
+    const decorations: MonacoEditorNS.IModelDeltaDecoration[] = lines.map((line) => ({
+      range: new mon.Range(line, 1, line, 1),
+      options: { isWholeLine: false, glyphMarginClassName: "cf-breakpoint-glyph" },
+    }));
+    // Only when the *selected* frame is this file: stepping through a call shows where you are,
+    // not a stale highlight in a file you happen to have open.
+    const pausedHere =
+      pausedFrame && activeAbsolutePath && normalizePath(pausedFrame.file) === activeAbsolutePath;
+    if (pausedHere && pausedFrame) {
+      decorations.push({
+        range: new mon.Range(pausedFrame.line, 1, pausedFrame.line, 1),
+        options: {
+          isWholeLine: true,
+          className: "cf-debug-current-line",
+          glyphMarginClassName: "cf-debug-current-glyph",
+        },
+      });
+    }
+    debugDecorationsRef.current = ed.deltaDecorations(debugDecorationsRef.current, decorations);
+  }, [breakpoints, activeAbsolutePath, pausedFrame, editorReady, activeTab?.loading]);
+
   const handleMount: OnMount = (editorInstance, monacoInstance) => {
     editorRef.current = editorInstance;
     monacoRef.current = monacoInstance;
+    // Ctrl+I is registered on the editor rather than on `window` so it only ever fires with the
+    // caret in the code — and so Monaco's own keybinding service swallows it before the browser
+    // or another panel sees it.
+    editorInstance.addCommand(monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyI, () => {
+      const model = editorInstance.getModel();
+      const selection = editorInstance.getSelection();
+      if (!model || !selection) return;
+      // With nothing selected, the current line is the implied target — asking someone to select
+      // a line before rewriting it is a step the editor can take for them.
+      const range = selection.isEmpty()
+        ? new monacoInstance.Range(
+            selection.startLineNumber,
+            1,
+            selection.startLineNumber,
+            model.getLineMaxColumn(selection.startLineNumber),
+          )
+        : selection;
+      const text = model.getValueInRange(range);
+      if (!text.trim()) return;
+      setInlineEdit({ selection: text, range });
+    });
+    // Clicking the gutter toggles a breakpoint — the only way anyone expects to set one.
+    editorInstance.onMouseDown((event) => {
+      if (event.target.type !== monacoInstance.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) return;
+      const line = event.target.position?.lineNumber;
+      const path = activeAbsolutePathRef.current;
+      if (line && path) useDebugStore.getState().toggleBreakpoint(path, line);
+    });
     applyDecorations();
     setEditorReady((n) => n + 1);
   };
+
+  /** Applies an AI rewrite through Monaco's edit stack, so it joins the undo history and shows
+   * up as an ordinary unsaved change instead of appearing from nowhere. */
+  const applyInlineEdit = useCallback(
+    (replacement: string) => {
+      const ed = editorRef.current;
+      const target = inlineEdit;
+      if (!ed || !target || !ed.getModel()) return;
+      ed.executeEdits("cf-inline-edit", [{ range: target.range, text: replacement, forceMoveMarkers: true }]);
+      ed.pushUndoStop();
+      ed.focus();
+    },
+    [inlineEdit],
+  );
 
   // Re-applies decorations when the diff/theme changes, and when the active tab changes
   // (each tab has its own model, so the new one starts undecorated).
@@ -463,10 +576,51 @@ export function EditorView() {
     if (pendingEditorPath) {
       // An explicit "open this file" from elsewhere in the app is a deliberate navigation,
       // not a peek, so it gets a permanent tab rather than the preview slot.
+      if (pendingEditorLine) pendingRevealRef.current = { path: pendingEditorPath, line: pendingEditorLine };
       void openFile(pendingEditorPath, { pin: true });
       clearPendingEditorPath();
     }
-  }, [pendingEditorPath, openFile, clearPendingEditorPath]);
+  }, [pendingEditorPath, pendingEditorLine, openFile, clearPendingEditorPath]);
+
+  // Jumping to a search hit can't reveal the line until the file has finished loading *and*
+  // Monaco has (re)mounted on it, which is several renders after the click — so the request is
+  // parked in a ref and consumed by whichever pass first has an editor able to honour it.
+  useEffect(() => {
+    const target = pendingRevealRef.current;
+    const ed = editorRef.current;
+    if (!target || !ed || target.path !== activePath || activeTab?.loading || !ed.getModel()) return;
+    pendingRevealRef.current = null;
+    ed.revealLineInCenter(target.line);
+    ed.setPosition({ lineNumber: target.line, column: 1 });
+    ed.focus();
+  }, [activePath, activeTab?.loading, editorReady]);
+
+  const openHit = useCallback(
+    (path: string, line: number) => {
+      pendingRevealRef.current = { path, line };
+      void openFile(path, { pin: true });
+    },
+    [openFile],
+  );
+
+  // Editor-wide shortcuts, gated on the Editor being the visible view (this panel stays mounted
+  // in the background once opened).
+  useEffect(() => {
+    if (activeView !== "editor") return;
+    const handler = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === "p" && !e.shiftKey) {
+        e.preventDefault();
+        setPaletteOpen(true);
+      } else if (key === "f" && e.shiftKey) {
+        e.preventDefault();
+        setSidePanel("search");
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [activeView]);
 
   if (!project) {
     return <EmptyState icon={FileCode} title={t("editor.noProject")} />;
@@ -481,7 +635,7 @@ export function EditorView() {
       path={modelPathFor(project, activeTab.path)}
       language={languageForPath(activeTab.path)}
       value={content}
-      theme={resolved === "dark" ? "vs-dark" : "vs"}
+      theme={monacoTheme}
       // Each tab keeps its own model, so Monaco must not throw it away when this component
       // unmounts (preview-only mode) — tab closing is what disposes models here.
       keepCurrentModel
@@ -491,36 +645,107 @@ export function EditorView() {
         patchTab(activeTab.path, { content: value ?? "", preview: false });
       }}
       onMount={handleMount}
-      options={{ minimap: { enabled: true }, fontSize: 13, automaticLayout: true }}
+      options={{
+        minimap: { enabled: true },
+        fontSize: 13,
+        automaticLayout: true,
+        // Without a glyph margin there is nowhere to click for a breakpoint, and nowhere to
+        // draw one.
+        glyphMargin: true,
+      }}
     />
   ) : null;
 
   return (
+    // No header strip: the project and branch it used to repeat are already in the status bar,
+    // and the row it occupied is worth more as editor.
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex shrink-0 items-center gap-3 border-b border-[var(--cf-border)] px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)]">
-        <span className="flex items-center gap-1.5 font-medium text-[var(--cf-text)]">
-          <Folder size={12} />
-          {project.name}
-        </span>
-        {currentBranch && (
-          <span className="flex items-center gap-1">
-            <GitBranch size={12} />
-            {currentBranch}
-          </span>
-        )}
-      </div>
       <div className="flex min-h-0 flex-1 gap-1.5 p-2">
+        {/* Activity rail: the panel toggles up top, one-shot actions pinned to the bottom the
+            way an editor keeps its settings gear there. */}
+        <div className="flex w-9 shrink-0 flex-col items-center gap-1 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] py-1.5 shadow-[var(--cf-shadow)]">
+          {(
+            [
+              { id: "files", icon: Files, label: t("editor.explorer"), hint: "" },
+              { id: "search", icon: Search, label: t("editor.searchInProject"), hint: " (Ctrl+Shift+F)" },
+              { id: "debug", icon: Bug, label: t("debug.title"), hint: "" },
+            ] as const
+          ).map(({ id, icon: Icon, label, hint }) => (
+            <button
+              key={id}
+              onClick={() => setSidePanel(id)}
+              title={`${label}${hint}`}
+              aria-label={label}
+              className={`relative flex h-7 w-7 items-center justify-center rounded-md ${
+                sidePanel === id
+                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+              }`}
+            >
+              <Icon size={15} />
+              {/* A live session is worth seeing from any panel — it's a running process. */}
+              {id === "debug" && debugStatus !== "idle" && (
+                <span
+                  className={`absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ${
+                    debugStatus === "paused" ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-success)]"
+                  }`}
+                />
+              )}
+            </button>
+          ))}
+          {/* Go to file lives here rather than in a strip of its own: it's an action, not a
+              panel, and it has to be reachable with no file open — which the tab bar isn't. */}
+          <button
+            onClick={() => setPaletteOpen(true)}
+            title={`${t("editor.goToFile")} (Ctrl+P)`}
+            aria-label={t("editor.goToFile")}
+            className="mt-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+          >
+            <FileSearch size={15} />
+          </button>
+          <button
+            onClick={() => useUiStore.getState().toggleShortcutsModal()}
+            title={t("shortcuts.title")}
+            aria-label={t("shortcuts.title")}
+            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+          >
+            <Keyboard size={15} />
+          </button>
+        </div>
         <div
           style={{ width: treeWidth }}
-          className="shrink-0 overflow-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+          // The tree owns its own scroll area now (below its toolbar), so this wrapper only
+          // clips — scrolling it too would carry the toolbar out of view.
+          className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
         >
-          <FileTree
-            repoPath={project.local_path}
-            selectedPath={activePath}
-            onSelectFile={(path) => void openFile(path)}
-            onOpenFile={(path) => void openFile(path, { pin: true })}
-            changedPaths={changedPaths}
-          />
+          {/* Explorer, find-in-project or the debugger — same column VS Code uses for all three,
+              since each of them wants the width more than a file tree does. */}
+          {sidePanel === "search" ? (
+            <SearchPanel
+              repoPath={project.local_path}
+              onOpenHit={openHit}
+              onClose={() => setSidePanel("files")}
+            />
+          ) : sidePanel === "debug" ? (
+            <DebugPanel
+              repoPath={project.local_path}
+              suggestedProgram={activeAbsolutePath}
+              onOpenFrame={(file, line) => {
+                // Frames carry absolute paths; the editor opens repo-relative ones.
+                const root = normalizePath(`${project.local_path}/`);
+                const normalized = normalizePath(file);
+                if (normalized.startsWith(root)) openHit(normalized.slice(root.length), line);
+              }}
+            />
+          ) : (
+            <FileTree
+              repoPath={project.local_path}
+              selectedPath={activePath}
+              onSelectFile={(path) => void openFile(path)}
+              onOpenFile={(path) => void openFile(path, { pin: true })}
+              changedPaths={changedPaths}
+            />
+          )}
         </div>
         <ResizeHandle
           axis="x"
@@ -591,7 +816,9 @@ export function EditorView() {
                 }
               />
               <Breadcrumb path={activeTab.path} dirty={dirty} loading={activeTab.loading} />
-              <div className="min-h-0 flex-1">
+              {/* `relative` anchors the inline-edit widget over the code, the way an editor
+                  floats its own peek widgets. */}
+              <div className="relative min-h-0 flex-1">
                 {activeTab.loading ? (
                   <div className="flex h-full items-center justify-center">
                     <BouncingDots />
@@ -616,6 +843,15 @@ export function EditorView() {
                 ) : (
                   editorPane
                 )}
+                {inlineEdit && activeTab && (
+                  <InlineEditWidget
+                    filePath={activeTab.path}
+                    fileContent={content}
+                    selection={inlineEdit.selection}
+                    onApply={applyInlineEdit}
+                    onClose={() => setInlineEdit(null)}
+                  />
+                )}
               </div>
             </>
           ) : (
@@ -623,6 +859,13 @@ export function EditorView() {
           )}
         </div>
       </div>
+      {paletteOpen && (
+        <FilePalette
+          repoPath={project.local_path}
+          onPick={(path) => void openFile(path, { pin: true })}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
     </div>
   );
 }

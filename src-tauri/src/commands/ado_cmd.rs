@@ -341,10 +341,12 @@ fn parse_pr_draft(raw: &str) -> PrDescriptionDraft {
 /// the source branch is pushed.
 #[tauri::command]
 pub async fn generate_pr_description(
+    app: AppHandle,
     db: State<'_, Db>,
     project_id: String,
     source_branch: String,
     target_branch: String,
+    run_id: Option<String>,
 ) -> Result<PrDescriptionDraft, String> {
     let project = load_project(&db, &project_id)?;
     let (config, template) = {
@@ -355,15 +357,18 @@ pub async fn generate_pr_description(
     };
     let diff_files = git::diff::get_branch_diff(&project.local_path, &target_branch, &source_branch)?;
     let diff_text = git::diff::render_diff_for_prompt(&diff_files);
-    let raw = ai::generate_pr_description(
-        &*config.engine,
-        &config.binary,
-        &config.model,
-        &source_branch,
-        &target_branch,
-        &diff_text,
-        &template,
-    )
+    let raw = crate::ai_runs::scoped(app, run_id, async {
+        ai::generate_pr_description(
+            &*config.engine,
+            &config.binary,
+            &config.model,
+            &source_branch,
+            &target_branch,
+            &diff_text,
+            &template,
+        )
+        .await
+    })
     .await?;
     Ok(parse_pr_draft(&raw))
 }
@@ -497,22 +502,27 @@ pub async fn review_pull_request(
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
-    let result = ai::review_pull_request(
-        &*config.engine,
-        &config.binary,
-        &config.model,
-        &pr.title,
-        &pr.description,
-        &enabled_contexts,
-        &diff_text,
-        &config.tools,
-        &project.local_path,
-        &review_template,
-        mcp_config_path.as_deref(),
-    )
+    // Same identity for the job row and the run, so the row can stream its own output and stop it.
+    let result = crate::ai_runs::scoped(app.clone(), Some(job_id.clone()), async {
+        ai::review_pull_request(
+            &*config.engine,
+            &config.binary,
+            &config.model,
+            &pr.title,
+            &pr.description,
+            &enabled_contexts,
+            &diff_text,
+            &config.tools,
+            &project.local_path,
+            &review_template,
+            mcp_config_path.as_deref(),
+        )
+        .await
+    })
     .await;
 
-    {
+    // Same rule as the change analysis: a stopped run leaves no history row behind.
+    if !matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
         let label = format!("#{} {}", pr.id, pr.title);
         let meta = serde_json::json!({ "prId": pr.id, "prTitle": pr.title }).to_string();
         let conn = db.0.lock().map_err(|e| e.to_string())?;

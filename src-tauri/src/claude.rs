@@ -42,7 +42,12 @@ impl AiEngine for ClaudeEngine {
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
         }
-        cmd.arg("--output-format").arg("json");
+        // `stream-json` (which the CLI only accepts alongside `--verbose` in `-p` mode) emits one
+        // JSON event per line *as the run happens*, instead of a single blob at the very end.
+        // That's what the app streams into the run log — under plain `json` there is literally
+        // nothing to show until the process exits. The final `result` event carries exactly the
+        // payload the old format produced, so `interpret_output` reads the same fields.
+        cmd.arg("--output-format").arg("stream-json").arg("--verbose");
         if !inv.allowed_tools.is_empty() {
             cmd.arg("--allowedTools").arg(inv.allowed_tools.join(","));
         }
@@ -86,8 +91,29 @@ fn model_used(parsed: &ClaudeCliResult) -> Option<String> {
     }
 }
 
-/// Turns one finished `claude --output-format json` run into either its reply text (plus the
-/// session id) or an error message for the frontend.
+/// Picks the payload to interpret out of the CLI's stdout.
+///
+/// Under `stream-json` stdout is one JSON event per line and the last `{"type":"result",…}` is
+/// the run's verdict — the same object the old single-blob `json` format printed on its own.
+/// Falling back to parsing the whole buffer keeps a CLI that ignored (or doesn't know) the flag
+/// working exactly as before, so this is safe against both older and newer versions.
+fn result_payload(stdout: &str) -> Option<ClaudeCliResult> {
+    for line in stdout.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            if value.get("type").and_then(serde_json::Value::as_str) == Some("result") {
+                return serde_json::from_value(value).ok();
+            }
+        }
+    }
+    serde_json::from_str::<ClaudeCliResult>(stdout).ok()
+}
+
+/// Turns one finished `claude` run into either its reply text (plus the session id) or an error
+/// message for the frontend.
 ///
 /// Under `--output-format json` the CLI reports its *own* failures on stdout — as
 /// `{"is_error":true,"result":"<reason>"}` — and exits non-zero leaving stderr **empty**. So
@@ -100,7 +126,7 @@ fn interpret_output(
     stdout: &str,
     stderr: &str,
 ) -> Result<AiRun, String> {
-    let parsed = serde_json::from_str::<ClaudeCliResult>(stdout).ok();
+    let parsed = result_payload(stdout);
     let result_text = parsed
         .as_ref()
         .and_then(|p| p.result.as_deref())
@@ -167,6 +193,38 @@ mod tests {
             err,
             "Failed to authenticate: OAuth session expired and could not be refreshed"
         );
+    }
+
+    /// What `--output-format stream-json --verbose` actually prints: an init event, the
+    /// assistant's turn (tool calls included), then the verdict. Only the last one is the run's
+    /// result — parsing must skip everything before it rather than choke on the first line.
+    const STREAM_JSON_STDOUT: &str = concat!(
+        r#"{"type":"system","subtype":"init","session_id":"s-1","model":"claude-opus-4-8"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"src/App.tsx"}}]},"session_id":"s-1"}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"s-1","result":"fix: guard the null case","modelUsage":{"claude-opus-4-8":{"outputTokens":9}}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn reads_the_verdict_out_of_a_streamed_run() {
+        let run = interpret_output(true, "exit status: 0", STREAM_JSON_STDOUT, "").unwrap();
+        assert_eq!(run.text, "fix: guard the null case");
+        assert_eq!(run.session_id.as_deref(), Some("s-1"));
+        assert_eq!(run.model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn a_streamed_failure_reports_its_reason_not_the_exit_status() {
+        let stdout = concat!(
+            r#"{"type":"system","subtype":"init","session_id":"s-2"}"#,
+            "\n",
+            r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Unknown model 'nope'"}"#,
+            "\n",
+        );
+        let err = interpret_output(false, "exit status: 1", stdout, "").unwrap_err();
+        assert_eq!(err, "Unknown model 'nope'");
     }
 
     #[test]

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
-import { RefreshCw, ShieldCheck, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { RefreshCw, ShieldCheck, Square, X } from "lucide-react";
 import { analyzeWorkingChanges } from "../../lib/tauri/commands";
 import { parseAnalysis } from "../../lib/parseAnalysis";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
@@ -9,6 +9,7 @@ import { ThinkingOrb } from "../common/ThinkingOrb";
 import { renderMarkdown } from "../../lib/markdown";
 import { FindingCard, QualityGateBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
 import { AiErrorBanner } from "./AiErrorBanner";
+import { AiRunLog } from "./AiRunLog";
 
 /** Pre-commit change analysis, shown inline in the AI panel (alongside chat and PR review)
  * instead of a separate modal — so it shares the same "Activity" job tracking and the same
@@ -57,7 +58,9 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, selectedJobId]);
 
+  const [logExpanded, setLogExpanded] = useState(false);
   const loading = job?.status === "running" || !job;
+  const cancelled = job?.status === "cancelled";
   const error = job?.status === "error" ? job.error : null;
   const parsed = useMemo(() => (job?.status === "done" && job.result ? parseAnalysis(job.result) : null), [job]);
   const findings = parsed?.findings ?? [];
@@ -116,15 +119,35 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
         </div>
 
         {loading && (
-          <div className="flex flex-col items-center justify-center gap-3 py-10 text-center">
-            <ThinkingOrb size="lg" />
-            <p className="text-[13px] text-[var(--cf-text-muted)]">{t("ai.working")}</p>
+          <div className="space-y-3">
+            <div className="flex flex-col items-center justify-center gap-3 py-6 text-center">
+              <ThinkingOrb size="lg" />
+              <p className="text-[13px] text-[var(--cf-text-muted)]">{t("ai.working")}</p>
+            </div>
+            {job && (
+              <AiRunLog
+                runId={job.id}
+                running
+                expanded={logExpanded}
+                onToggle={() => setLogExpanded((v) => !v)}
+              />
+            )}
+          </div>
+        )}
+
+        {cancelled && (
+          <div className="flex flex-col items-center justify-center gap-2 py-10 text-center">
+            <Square size={20} className="fill-current text-[var(--cf-text-muted)]" />
+            <p className="text-[13px] text-[var(--cf-text-muted)]">{t("ai.runStopped")}</p>
+            <button onClick={runAnalysis} className="text-[12px] text-[var(--cf-accent)] underline">
+              {t("analyze.reanalyze")}
+            </button>
           </div>
         )}
 
         {!loading && error && <AiErrorBanner error={error} />}
 
-        {!loading && !error && findings.length === 0 && (
+        {!loading && !cancelled && !error && findings.length === 0 && (
           summary.length > 0 && summary.length > SHORT_SUMMARY_MAX ? (
             // Nothing matched the expected "### finding" format at all — rather than lose
             // the model's actual answer, render the raw response as markdown instead of a
@@ -143,7 +166,7 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
           )
         )}
 
-        {!loading && !error && findings.length > 0 && (
+        {!loading && !cancelled && !error && findings.length > 0 && (
           <div className="space-y-3">
             {summary && (
               <div

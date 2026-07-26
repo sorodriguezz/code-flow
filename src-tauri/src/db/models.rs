@@ -85,9 +85,17 @@ pub struct WorkspaceSkill {
 pub struct ActivityLogEntry {
     pub id: String,
     pub project_id: String,
+    /// The **conversation** this turn belongs to — app-minted and stable for the conversation's
+    /// whole life. Not the engine's session token; see `engine_session_id`.
     pub session_id: Option<String>,
+    /// The engine's own resume token for this turn, when it reported one. Only used to carry a
+    /// reopened conversation forward on the CLI's side.
+    pub engine_session_id: Option<String>,
     pub question: String,
     pub answer: String,
+    /// What the engine printed while working on this turn, as a JSON array of
+    /// `{stream, line}` — `None` for turns recorded before traces were kept.
+    pub trace: Option<String>,
     pub created_at: String,
     /// How long the engine took to answer this turn, in milliseconds. `None` for turns recorded
     /// before this was tracked.

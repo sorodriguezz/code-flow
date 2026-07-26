@@ -188,8 +188,8 @@ export const markConflictResolved = (repoPath: string, relPath: string) =>
   invoke<void>("mark_conflict_resolved", { repoPath, relPath });
 
 /** Proposes an AI-merged version of a conflicted file. Returns the resolved content (no markers). */
-export const resolveConflictWithAi = (repoPath: string, relPath: string) =>
-  invoke<string>("resolve_conflict_with_ai", { repoPath, relPath });
+export const resolveConflictWithAi = (repoPath: string, relPath: string, runId?: string) =>
+  invoke<string>("resolve_conflict_with_ai", { repoPath, relPath, runId });
 
 export const completeMerge = (repoPath: string, message: string) =>
   invoke<string>("complete_merge", { repoPath, message });
@@ -353,8 +353,31 @@ export const githubAuthenticatedUser = (host: string) =>
 
 // ---------- claude ----------
 
-export const generateCommitMessage = (diff: string) =>
-  invoke<string>("generate_commit_message", { diff });
+export const generateCommitMessage = (diff: string, runId?: string) =>
+  invoke<string>("generate_commit_message", { diff, runId });
+
+/** Stops a run by the id it was started with. Resolves `false` when it had already finished. */
+export const cancelAiRun = (runId: string) => invoke<boolean>("cancel_ai_run", { runId });
+
+export interface AiCheckpoint {
+  id: string;
+  /** Stable action key (`chat`, `fix-finding`, …) — translated in the UI, not here. */
+  kind: string;
+  /** Unix seconds. */
+  created_at: number;
+  /** Files that differ from the snapshot right now — exactly what restoring would put back. */
+  changed_paths: string[];
+}
+
+export const listAiCheckpoints = (repoPath: string) =>
+  invoke<AiCheckpoint[]>("list_ai_checkpoints", { repoPath });
+
+/** Restores the checkpoint's files. Returns the paths that were put back. */
+export const restoreAiCheckpoint = (repoPath: string, checkpointId: string) =>
+  invoke<string[]>("restore_ai_checkpoint", { repoPath, checkpointId });
+
+export const deleteAiCheckpoint = (repoPath: string, checkpointId: string) =>
+  invoke<void>("delete_ai_checkpoint", { repoPath, checkpointId });
 
 export const defaultCommitTemplate = () => invoke<string>("default_commit_template");
 
@@ -369,8 +392,8 @@ export const defaultResolveConflictTemplate = () => invoke<string>("default_reso
 export const analyzeWorkingChanges = (projectId: string, jobId: string) =>
   invoke<string>("analyze_working_changes", { projectId, jobId });
 
-export const resolveFindingWithAi = (projectId: string, findingPrompt: string) =>
-  invoke<string>("resolve_finding_with_ai", { projectId, findingPrompt });
+export const resolveFindingWithAi = (projectId: string, findingPrompt: string, runId?: string) =>
+  invoke<string>("resolve_finding_with_ai", { projectId, findingPrompt, runId });
 
 export interface ChatReply {
   text: string;
@@ -381,8 +404,15 @@ export interface ChatReply {
   response_time_ms: number;
 }
 
-export const sendChatMessage = (projectId: string, message: string, sessionId: string | null) =>
-  invoke<ChatReply>("send_chat_message", { projectId, message, sessionId });
+/** `sessionId` is the engine's resume token; `conversationId` is *our* identity for the chat and
+ * is what groups turns into one activity. See the Rust command's docs for why they're separate. */
+export const sendChatMessage = (
+  projectId: string,
+  message: string,
+  sessionId: string | null,
+  conversationId: string,
+  runId?: string,
+) => invoke<ChatReply>("send_chat_message", { projectId, message, sessionId, conversationId, runId });
 
 // ---------- pull requests (Azure DevOps / GitHub) ----------
 
@@ -426,8 +456,12 @@ export const actOnPullRequest = (projectId: string, prId: number, action: PrActi
   invoke<void>("act_on_pull_request", { projectId, prId, action, body });
 
 /** AI-drafts a PR title + body from the diff between two branches (no host call — local git). */
-export const generatePrDescription = (projectId: string, sourceBranch: string, targetBranch: string) =>
-  invoke<PrDescriptionDraft>("generate_pr_description", { projectId, sourceBranch, targetBranch });
+export const generatePrDescription = (
+  projectId: string,
+  sourceBranch: string,
+  targetBranch: string,
+  runId?: string,
+) => invoke<PrDescriptionDraft>("generate_pr_description", { projectId, sourceBranch, targetBranch, runId });
 
 /** Opens a PR on the project's linked host. Returns the created PR. */
 export const createPullRequest = (
@@ -450,12 +484,74 @@ export const readFileText = (repoPath: string, relPath: string) =>
 export const writeFileText = (repoPath: string, relPath: string, content: string) =>
   invoke<void>("write_file_text", { repoPath, relPath, content });
 
+export const createDir = (repoPath: string, relPath: string) =>
+  invoke<void>("create_dir", { repoPath, relPath });
+
+export const createFile = (repoPath: string, relPath: string) =>
+  invoke<void>("create_file", { repoPath, relPath });
+
 export const openInDefaultApp = (repoPath: string, relPath: string) =>
   invoke<void>("open_in_default_app", { repoPath, relPath });
 
 export const revealInFileManager = (path: string) => invoke<void>("reveal_in_file_manager", { path });
 
 export const openInVsCode = (path: string) => invoke<void>("open_in_vscode", { path });
+
+/** Every non-ignored file in the repo, repo-relative — the corpus "go to file" filters over. */
+export const listRepoFiles = (repoPath: string) => invoke<string[]>("list_repo_files", { repoPath });
+
+export interface SearchHit {
+  path: string;
+  /** 1-based. */
+  line_no: number;
+  line: string;
+}
+
+export interface SearchOutcome {
+  hits: SearchHit[];
+  /** True when `maxResults` cut the list short. */
+  truncated: boolean;
+}
+
+/** The find box's toggles. `include`/`exclude` are comma-separated globs; a pattern without a
+ * slash matches by file name at any depth (`*.ts`). */
+export interface SearchOptions {
+  caseSensitive: boolean;
+  wholeWord: boolean;
+  regex: boolean;
+  include: string;
+  exclude: string;
+}
+
+export interface ReplaceOutcome {
+  replacements: number;
+  files: number;
+  /** Snapshot taken before anything was written — restorable from the restore-points list. */
+  checkpoint_id: string | null;
+}
+
+export const searchRepo = (repoPath: string, query: string, options: SearchOptions, maxResults = 500) =>
+  invoke<SearchOutcome>("search_repo", { repoPath, query, options, maxResults });
+
+/** Rewrites every match, across the repo or within `onlyPath`. Writes to disk — the backend
+ * checkpoints first so the whole thing can be undone as a unit. */
+export const replaceInRepo = (
+  repoPath: string,
+  query: string,
+  replacement: string,
+  options: SearchOptions,
+  onlyPath?: string | null,
+) => invoke<ReplaceOutcome>("replace_in_repo", { repoPath, query, replacement, options, onlyPath: onlyPath ?? null });
+
+/** Rewrites `selection` per `instruction` and returns the replacement text. Nothing is written
+ * to disk — the editor applies it to its buffer, so it stays undoable. */
+export const inlineEditWithAi = (
+  relPath: string,
+  fileContent: string,
+  selection: string,
+  instruction: string,
+  runId?: string,
+) => invoke<string>("inline_edit_with_ai", { relPath, fileContent, selection, instruction, runId });
 
 // ---------- activity log (AI chat history / conversations) ----------
 
@@ -476,6 +572,56 @@ export const listJobHistory = (projectId: string) => invoke<JobHistoryEntry[]>("
 export const renameJobHistoryEntry = (id: string, label: string) => invoke<void>("rename_job_history_entry", { id, label });
 
 export const deleteJobHistoryEntry = (id: string) => invoke<void>("delete_job_history_entry", { id });
+
+// ---------- debugger (Node / JavaScript) ----------
+
+export interface StackFrame {
+  id: string;
+  name: string;
+  /** Absolute path, or the raw script url for runtime internals. */
+  file: string;
+  /** 1-based. */
+  line: number;
+  scope_id: string | null;
+}
+
+export interface DebugVariable {
+  name: string;
+  value: string;
+  /** Present when the value can be expanded. */
+  object_id: string | null;
+}
+
+/** Launches `program` under Node with the inspector attached. `breakpoints` maps absolute file
+ * paths to 1-based lines and is applied before the first statement runs. */
+export const debugStart = (
+  cwd: string,
+  program: string,
+  args: string[],
+  breakpoints: Record<string, number[]>,
+  nodeBinary?: string,
+) => invoke<void>("debug_start", { cwd, program, args, breakpoints, nodeBinary: nodeBinary ?? null });
+
+/** Starts a session through a DAP adapter — every language other than Node. `launchConfig` is
+ * that adapter's own launch object. */
+export const debugStartAdapter = (
+  cwd: string,
+  command: string,
+  args: string[],
+  launchConfig: Record<string, unknown>,
+  breakpoints: Record<string, number[]>,
+) => invoke<void>("debug_start_adapter", { cwd, command, args, launchConfig, breakpoints });
+
+export const debugStop = () => invoke<void>("debug_stop");
+export const debugContinue = () => invoke<void>("debug_continue");
+export const debugPause = () => invoke<void>("debug_pause");
+export const debugStep = (kind: "over" | "into" | "out") => invoke<void>("debug_step", { kind });
+export const debugSetBreakpoints = (breakpoints: Record<string, number[]>) =>
+  invoke<void>("debug_set_breakpoints", { breakpoints });
+export const debugProperties = (objectId: string) =>
+  invoke<DebugVariable[]>("debug_properties", { objectId });
+export const debugEvaluate = (frameId: string, expression: string) =>
+  invoke<DebugVariable>("debug_evaluate", { frameId, expression });
 
 // ---------- filesystem watcher ----------
 

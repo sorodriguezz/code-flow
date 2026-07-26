@@ -14,8 +14,10 @@
 //!   the default binary, how a command is built, and how that CLI's output is parsed.
 
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
+
+use crate::ai_runs::{self, RunCtx};
 
 pub const MAX_DIFF_CHARS: usize = 20_000;
 pub const MAX_REVIEW_DIFF_CHARS: usize = 120_000;
@@ -521,15 +523,75 @@ pub async fn probe(engine: &dyn AiEngine, binary: &str) -> (bool, String) {
     }
 }
 
+/// Drains one of the child's pipes: accumulates the raw bytes for the engine's own interpreter
+/// while streaming complete lines to the frontend as they arrive.
+///
+/// Bytes rather than a `String` accumulator on purpose — a multi-byte character split across two
+/// `read` calls would decode into replacement characters if each chunk were decoded on its own,
+/// silently corrupting the very output an engine is about to parse. Line splitting happens on the
+/// byte buffer for the same reason: each emitted line is a complete byte sequence.
+async fn pump<R: tokio::io::AsyncRead + Unpin>(
+    pipe: Option<R>,
+    stream: &'static str,
+    ctx: Option<RunCtx>,
+) -> Vec<u8> {
+    let mut collected: Vec<u8> = Vec::new();
+    let Some(mut pipe) = pipe else { return collected };
+
+    let mut buf = [0u8; 8192];
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let read = match pipe.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        collected.extend_from_slice(&buf[..read]);
+        let Some(ctx) = &ctx else { continue };
+
+        pending.extend_from_slice(&buf[..read]);
+        while let Some(idx) = pending.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = pending.drain(..=idx).collect();
+            ai_runs::emit_line(ctx, stream, &strip_ansi(&String::from_utf8_lossy(&line)));
+        }
+        // A CLI drawing a progress bar rewrites one line forever with `\r` and never sends a
+        // newline; without this the buffer would grow unbounded and the user would see nothing.
+        if pending.len() > 8192 {
+            ai_runs::emit_line(ctx, stream, &strip_ansi(&String::from_utf8_lossy(&pending)));
+            pending.clear();
+        }
+    }
+    if let Some(ctx) = &ctx {
+        if !pending.is_empty() {
+            ai_runs::emit_line(ctx, stream, &strip_ansi(&String::from_utf8_lossy(&pending)));
+        }
+    }
+    collected
+}
+
 /// Shared subprocess plumbing for every headless AI invocation: builds the engine's command,
-/// pipes `stdin_content` in, waits for it, and hands the output back to the engine to interpret.
+/// pipes `stdin_content` in, streams its output while it runs, and hands the result back to the
+/// engine to interpret. Cancellable at any point when the caller wrapped this in
+/// [`ai_runs::scoped`].
 async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Result<AiRun, String> {
+    let ctx = ai_runs::current();
+    let mut cancel = ctx.as_ref().and_then(|c| ai_runs::subscribe(&c.run_id));
+
     // HTTP engines don't spawn a process — `binary` is the base URL. Everything below (binary
-    // resolution, PATH, stdin piping) is subprocess-only, so hand off before any of it.
+    // resolution, PATH, stdin piping) is subprocess-only, so hand off before any of it. They get
+    // no live output (a single request answers all at once) but they do get cancellation, by
+    // dropping the in-flight request.
     match engine.transport() {
-        Transport::Ollama => return mark_quota(crate::ollama::complete(binary, &inv).await),
+        Transport::Ollama => {
+            return tokio::select! {
+                result = crate::ollama::complete(binary, &inv) => mark_quota(result),
+                _ = ai_runs::cancelled(&mut cancel) => Err(ai_runs::CANCELLED_MARKER.to_string()),
+            }
+        }
         Transport::OpenAiCompatible { api_key } => {
-            return mark_quota(crate::openai::complete(binary, &api_key, &inv).await)
+            return tokio::select! {
+                result = crate::openai::complete(binary, &api_key, &inv) => mark_quota(result),
+                _ = ai_runs::cancelled(&mut cancel) => Err(ai_runs::CANCELLED_MARKER.to_string()),
+            }
         }
         Transport::Subprocess => {}
     }
@@ -560,15 +622,33 @@ async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Resu
         }
     });
 
-    let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
+    // Both pipes are drained concurrently with the wait: reading them only after the process
+    // exits would deadlock any CLI whose output outgrows the OS pipe buffer, and there'd be
+    // nothing to stream in the meantime.
+    let stdout_task = tokio::spawn(pump(child.stdout.take(), "stdout", ctx.clone()));
+    let stderr_task = tokio::spawn(pump(child.stderr.take(), "stderr", ctx.clone()));
+
+    let status = tokio::select! {
+        status = child.wait() => status.map_err(|e| e.to_string())?,
+        _ = ai_runs::cancelled(&mut cancel) => {
+            ai_runs::kill_tree(&mut child).await;
+            // The pumps end on their own once the pipes close with the process; awaiting them
+            // keeps the tasks from outliving the run and emitting into a finished one.
+            let _ = tokio::join!(stdout_task, stderr_task, writer);
+            return Err(ai_runs::CANCELLED_MARKER.to_string());
+        }
+    };
+
+    let stdout = stdout_task.await.unwrap_or_default();
+    let stderr = stderr_task.await.unwrap_or_default();
     let _ = writer.await;
     // Stripped here rather than per-engine: every CLI colourizes, and no interpreter wants to see
     // escape bytes — least of all the UI, which would render them as literal `[91m` noise.
     engine.interpret(
-        output.status.success(),
-        &output.status.to_string(),
-        &strip_ansi(&String::from_utf8_lossy(&output.stdout)),
-        &strip_ansi(&String::from_utf8_lossy(&output.stderr)),
+        status.success(),
+        &status.to_string(),
+        &strip_ansi(&String::from_utf8_lossy(&stdout)),
+        &strip_ansi(&String::from_utf8_lossy(&stderr)),
     )
 }
 
@@ -663,6 +743,48 @@ pub const DEFAULT_RESOLVE_CONFLICT_TEMPLATE: &str =
      - Conserva el estilo, la indentación y el formato del archivo.\n\
      - Si ambos lados hacen cambios compatibles, inclúyelos ambos; si son incompatibles, elige la \
      integración más razonable sin perder funcionalidad.";
+
+pub const DEFAULT_INLINE_EDIT_PROMPT: &str =
+    "Eres un programador editando un fragmento de código dentro de un archivo. Por stdin recibes \
+     el archivo completo como contexto, el fragmento seleccionado y la instrucción del usuario.\n\n\
+     Tu tarea: devolver el fragmento seleccionado reescrito según la instrucción.\n\n\
+     Reglas ESTRICTAS de salida:\n\
+     - Responde ÚNICAMENTE con el código que reemplaza al fragmento seleccionado.\n\
+     - NO devuelvas el archivo completo, solo el fragmento reescrito.\n\
+     - NO uses bloques de código markdown (```) ni añadas explicaciones antes o después.\n\
+     - Conserva la indentación, el estilo y el lenguaje del archivo.\n\
+     - Si la instrucción no se puede aplicar, devuelve el fragmento original sin cambios.";
+
+/// Rewrites the selected fragment of a file according to a natural-language instruction — the
+/// editor's inline edit. Text-in/text-out on purpose: no tools, no file writes, so it works with
+/// every provider (a local Ollama model included) and the result lands in the editor's buffer as
+/// a normal, undoable edit rather than as a change made behind the user's back.
+pub async fn inline_edit(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    file_path: &str,
+    file_content: &str,
+    selection: &str,
+    instruction: &str,
+) -> Result<String, String> {
+    if selection.trim().is_empty() {
+        return Err("No hay código seleccionado para editar".to_string());
+    }
+    let context: String = file_content.chars().take(MAX_DIFF_CHARS).collect();
+    let stdin_payload = format!(
+        "ARCHIVO: {file_path}\n\n\
+         === CONTENIDO DEL ARCHIVO (contexto) ===\n{context}\n\n\
+         === FRAGMENTO SELECCIONADO ===\n{selection}\n\n\
+         === INSTRUCCIÓN ===\n{instruction}"
+    );
+
+    let mut inv = AiInvocation::new("Reescribe el fragmento seleccionado según la instrucción.", &stdin_payload);
+    inv.system_prompt = Some(DEFAULT_INLINE_EDIT_PROMPT);
+    inv.model = model;
+    let run = run(engine, binary, inv).await?;
+    Ok(strip_code_fence(&run.text))
+}
 
 /// Some models wrap their answer in a ```lang fence despite being told not to — strip a single
 /// outer fence so what gets written to disk is the raw file content.

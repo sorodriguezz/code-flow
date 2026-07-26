@@ -9,6 +9,8 @@ import {
 } from "../../lib/parseAnalysis";
 import { renderInlineMarkdown } from "../../lib/markdown";
 import { resolveFindingWithAi } from "../../lib/tauri/commands";
+import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
+import { AiRunLog } from "./AiRunLog";
 import { useRepoStore } from "../../state/repoStore";
 import { useResolutionsStore } from "../../state/resolutionsStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -55,6 +57,7 @@ export function useResolveWithAi(
 ) {
   const t = useT();
   const [resolving, setResolving] = useState(false);
+  const [runId, setRunId] = useState<string | null>(null);
   const [localResolution, setLocalResolution] = useState<string | null>(null);
   const persisted = useResolutionsStore((s) =>
     projectId && resolutionKey ? s.byProject[projectId]?.[resolutionKey]?.text ?? null : null,
@@ -94,18 +97,25 @@ export function useResolveWithAi(
     }
 
     if (!projectId) return;
+    // A fix writes to the working tree, so it's the run that most needs to be watchable and
+    // stoppable — the id ties both to this particular fix.
+    const id = newRunId("fix");
+    setRunId(id);
+    useAiRunStore.getState().start(id);
     setResolving(true);
     try {
-      const result = await resolveFindingWithAi(projectId, promptText);
+      const result = await resolveFindingWithAi(projectId, promptText, id);
       record(result);
     } catch (e) {
-      pushErrorToast(String(e));
+      // Stopping is a decision, not a failure — no error toast for it.
+      if (!isCancellation(e)) pushErrorToast(String(e));
     } finally {
+      useAiRunStore.getState().finish(id);
       setResolving(false);
     }
   };
 
-  return { resolving, resolution, resolve, clearResolution };
+  return { resolving, resolution, resolve, clearResolution, runId };
 }
 
 /** The button + result text for `useResolveWithAi` — identical markup in `FindingCard` and
@@ -114,15 +124,19 @@ export function useResolveWithAi(
 export function ResolveWithAiButton({
   resolving,
   resolution,
+  runId,
   onClick,
   onClear,
 }: {
   resolving: boolean;
   resolution: string | null;
+  /** The in-flight (or last) run, so the live log and its stop button can be shown here. */
+  runId?: string | null;
   onClick: () => void;
   onClear?: () => void;
 }) {
   const t = useT();
+  const [logExpanded, setLogExpanded] = useState(false);
   // "Fix with AI" needs a write-capable agentic engine — hidden entirely for local models (Ollama)
   // so there's no dead button, unless there's already a resolution to show from an earlier run.
   // Keyed on the *fix* task's provider, which routing may point somewhere other than the default.
@@ -140,6 +154,9 @@ export function ResolveWithAiButton({
           {resolving ? t("finding.resolving") : resolution ? t("finding.resolveAgain") : t("finding.resolve")}
         </button>
       </div>
+      {resolving && runId && (
+        <AiRunLog runId={runId} running expanded={logExpanded} onToggle={() => setLogExpanded((v) => !v)} />
+      )}
       {resolution && (
         <div className="relative rounded-md border border-[color-mix(in_oklab,var(--cf-success)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_9%,transparent)] px-2.5 py-1.5 pr-6">
           <span className="mb-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-success)]">
@@ -253,7 +270,11 @@ export function FindingCard({
   const t = useT();
   const [open, setOpen] = useState(defaultOpen);
   const { icon: Icon, color } = SEVERITY_STYLE[finding.severity];
-  const { resolving, resolution, resolve, clearResolution } = useResolveWithAi(projectId, prSourceBranch, resolutionKey);
+  const { resolving, resolution, resolve, clearResolution, runId } = useResolveWithAi(
+    projectId,
+    prSourceBranch,
+    resolutionKey,
+  );
 
   return (
     <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
@@ -323,6 +344,7 @@ export function FindingCard({
             <ResolveWithAiButton
               resolving={resolving}
               resolution={resolution}
+              runId={runId}
               onClick={() => void resolve(formatFindingAsFixPrompt(finding))}
               onClear={clearResolution}
             />

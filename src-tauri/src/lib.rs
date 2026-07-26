@@ -1,8 +1,11 @@
 mod ado;
 mod ai;
+mod ai_runs;
 mod claude;
 mod commands;
+mod dap;
 mod db;
+mod debugger;
 mod fsops;
 mod codex;
 mod gemini;
@@ -13,6 +16,7 @@ mod openai;
 mod opencode;
 mod paths;
 mod remote;
+mod search;
 mod secret_scan;
 mod secrets;
 mod terminal;
@@ -187,6 +191,11 @@ pub fn run() {
             commands::claude_cmd::resolve_conflict_with_ai,
             commands::claude_cmd::resolve_finding_with_ai,
             commands::claude_cmd::send_chat_message,
+            commands::claude_cmd::cancel_ai_run,
+            commands::claude_cmd::inline_edit_with_ai,
+            commands::checkpoint_cmd::list_ai_checkpoints,
+            commands::checkpoint_cmd::restore_ai_checkpoint,
+            commands::checkpoint_cmd::delete_ai_checkpoint,
             commands::ado_cmd::ado_list_projects,
             commands::ado_cmd::ado_list_repos,
             commands::ado_cmd::auto_link_project,
@@ -203,8 +212,13 @@ pub fn run() {
             commands::github_cmd::link_project_github,
             commands::github_cmd::github_authenticated_user,
             commands::fs_cmd::list_dir,
+            commands::fs_cmd::list_repo_files,
+            commands::fs_cmd::search_repo,
+            commands::fs_cmd::replace_in_repo,
             commands::fs_cmd::read_file_text,
             commands::fs_cmd::write_file_text,
+            commands::fs_cmd::create_dir,
+            commands::fs_cmd::create_file,
             commands::fs_cmd::open_in_default_app,
             commands::fs_cmd::reveal_in_file_manager,
             commands::fs_cmd::open_in_vscode,
@@ -219,6 +233,16 @@ pub fn run() {
             commands::terminal_cmd::write_terminal,
             commands::terminal_cmd::resize_terminal,
             commands::terminal_cmd::close_terminal,
+            commands::debug_cmd::debug_start,
+            commands::debug_cmd::debug_start_adapter,
+            commands::debug_cmd::debug_stop,
+            commands::debug_cmd::debug_continue,
+            commands::debug_cmd::debug_pause,
+            commands::debug_cmd::debug_step,
+            commands::debug_cmd::debug_set_breakpoints,
+            commands::debug_cmd::debug_properties,
+            commands::debug_cmd::debug_evaluate,
+            commands::debug_cmd::debug_is_running,
             commands::watcher_cmd::start_watching,
             commands::watcher_cmd::stop_watching,
         ])

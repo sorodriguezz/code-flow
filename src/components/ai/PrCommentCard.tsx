@@ -63,7 +63,11 @@ export function PrCommentCard({
   resolutionKey?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const { resolving, resolution, resolve, clearResolution } = useResolveWithAi(projectId, prSourceBranch, resolutionKey);
+  const { resolving, resolution, resolve, clearResolution, runId } = useResolveWithAi(
+    projectId,
+    prSourceBranch,
+    resolutionKey,
+  );
   const [first, ...rest] = thread.comments;
   const loc = locationLabel(thread);
 
@@ -106,6 +110,7 @@ export function PrCommentCard({
           <ResolveWithAiButton
             resolving={resolving}
             resolution={resolution}
+            runId={runId}
             onClick={() => void resolve(buildFixPrompt(thread))}
             onClear={clearResolution}
           />

@@ -41,7 +41,7 @@ const MAX_SPLIT_HEIGHT = 640;
 const SPLIT_LINE_HEIGHT = 19;
 
 function SplitFileDiff({ file }: { file: FileDiffInfo }) {
-  const resolved = useThemeStore((s) => s.resolved);
+  const monacoTheme = useThemeStore((s) => s.monacoTheme);
   const { original, modified } = useMemo(() => reconstructSides(file), [file]);
   const path = file.new_path ?? file.old_path ?? "";
   const lineCount = Math.max(original.split("\n").length, modified.split("\n").length);
@@ -53,7 +53,7 @@ function SplitFileDiff({ file }: { file: FileDiffInfo }) {
       language={languageForPath(path)}
       original={original}
       modified={modified}
-      theme={resolved === "dark" ? "vs-dark" : "vs"}
+      theme={monacoTheme}
       options={{
         readOnly: true,
         fontSize: 13,

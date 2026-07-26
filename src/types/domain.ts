@@ -189,9 +189,16 @@ export interface WorkspaceMcp {
 export interface ActivityLogEntry {
   id: string;
   project_id: string;
+  /** The conversation this turn belongs to (app-minted, stable), not the engine's session token. */
   session_id: string | null;
+  /** The engine's resume token for this turn, when it reported one — used to carry a reopened
+   * conversation forward on the CLI's side. */
+  engine_session_id: string | null;
   question: string;
   answer: string;
+  /** JSON array of `{stream, line}` with what the engine printed while working on this turn, so a
+   * finished answer can still show how it got there. `null` for turns recorded before traces. */
+  trace: string | null;
   created_at: string;
   /** How long the engine took to answer, in ms. `null` for turns recorded before this was tracked. */
   response_time_ms: number | null;

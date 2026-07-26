@@ -1,4 +1,5 @@
 use crate::fsops;
+use crate::search;
 
 #[tauri::command]
 pub fn list_dir(repo_path: String, sub_path: Option<String>) -> Result<Vec<fsops::FileEntry>, String> {
@@ -16,6 +17,16 @@ pub fn write_file_text(repo_path: String, rel_path: String, content: String) -> 
 }
 
 #[tauri::command]
+pub fn create_dir(repo_path: String, rel_path: String) -> Result<(), String> {
+    fsops::create_dir(&repo_path, &rel_path)
+}
+
+#[tauri::command]
+pub fn create_file(repo_path: String, rel_path: String) -> Result<(), String> {
+    fsops::create_file(&repo_path, &rel_path)
+}
+
+#[tauri::command]
 pub fn open_in_default_app(repo_path: String, rel_path: String) -> Result<(), String> {
     fsops::open_in_default_app(&repo_path, &rel_path)
 }
@@ -28,4 +39,36 @@ pub fn reveal_in_file_manager(path: String) -> Result<(), String> {
 #[tauri::command]
 pub fn open_in_vscode(path: String) -> Result<(), String> {
     fsops::open_in_vscode(&path)
+}
+
+/// Every non-ignored file in the repo — what "go to file" filters over. Listed once per open
+/// rather than streamed: even a large repo is a few thousand short strings, and filtering in the
+/// frontend keeps typing instant.
+#[tauri::command]
+pub fn list_repo_files(repo_path: String) -> Result<Vec<String>, String> {
+    search::list_files(&repo_path)
+}
+
+/// Content search across the repo's text files, with the toggles the find box exposes.
+#[tauri::command]
+pub fn search_repo(
+    repo_path: String,
+    query: String,
+    options: search::SearchOptions,
+    max_results: usize,
+) -> Result<search::SearchOutcome, String> {
+    search::search(&repo_path, &query, &options, max_results)
+}
+
+/// Rewrites every match across the repo — or within one file when `only_path` is given. Returns
+/// what it touched, plus the checkpoint taken beforehand so the whole thing can be undone.
+#[tauri::command]
+pub fn replace_in_repo(
+    repo_path: String,
+    query: String,
+    replacement: String,
+    options: search::SearchOptions,
+    only_path: Option<String>,
+) -> Result<search::ReplaceOutcome, String> {
+    search::replace_all(&repo_path, &query, &replacement, &options, only_path.as_deref())
 }

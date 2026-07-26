@@ -1,19 +1,29 @@
 import { useMemo, useState } from "react";
-import { Cloud, Cog, FolderGit2, GitBranch, History, MessageCircle, TerminalSquare } from "lucide-react";
+import { Briefcase, Cloud, Cog, FolderGit2, GitBranch, History, MessageCircle, TerminalSquare } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useRepoStore } from "../../state/repoStore";
-import { useUiStore, type MainView, type SettingsSectionId } from "../../state/uiStore";
+import { useUiStore, type MainView, type PaletteScope, type SettingsSectionId } from "../../state/uiStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
+
+type PaletteGroup = "workspaces" | "projects" | "branches" | "views" | "settings";
 
 interface PaletteItem {
   key: string;
   icon: typeof GitBranch;
   label: string;
-  group: "projects" | "branches" | "views" | "settings";
+  group: PaletteGroup;
   onSelect: () => void;
 }
+
+/** A scoped opening (from the "switch repository" / "switch workspace" / "switch branch"
+ * shortcuts) narrows the palette to one group, so it acts as a dedicated picker. */
+const SCOPE_GROUPS: Record<PaletteScope, PaletteGroup[]> = {
+  all: ["workspaces", "projects", "branches", "views", "settings"],
+  workspaces: ["workspaces"],
+  projects: ["projects"],
+};
 
 const VIEW_ITEMS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBranch }[] = [
   { id: "graph", labelKey: "tabbar.graph", icon: History },
@@ -24,6 +34,7 @@ const VIEW_ITEMS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBran
 const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [
   { id: "appearance", labelKey: "settings.appearance" },
   { id: "general", labelKey: "settings.general" },
+  { id: "keybindings", labelKey: "shortcuts.title" },
   { id: "projects", labelKey: "settings.projects" },
   { id: "git", labelKey: "settings.git" },
   { id: "azure", labelKey: "settings.gitHostingSection" },
@@ -34,17 +45,20 @@ const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [
   { id: "mcps", labelKey: "settings.mcps" },
 ];
 
-const GROUP_LABEL_KEY: Record<PaletteItem["group"], TranslationKey> = {
+const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {
+  workspaces: "sidebar.workspaces",
   projects: "sidebar.projects",
   branches: "sidebar.localBranches",
   views: "titlebar.goTo",
   settings: "statusbar.settings",
 };
 
-export function CommandPalette({ onClose }: { onClose: () => void }) {
+export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScope; onClose: () => void }) {
   const t = useT();
   const [query, setQuery] = useState("");
 
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const setActiveWorkspace = useWorkspaceStore((s) => s.setActiveWorkspace);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   // Selecting the raw (stably-referenced) map and only applying the `?? []` fallback in the
   // render body — not inside the selector — avoids handing useSyncExternalStore a brand-new
@@ -62,6 +76,14 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
   const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
 
   const items = useMemo<PaletteItem[]>(() => {
+    const workspaceItems: PaletteItem[] = workspaces.map((w) => ({
+      key: `workspace:${w.id}`,
+      icon: Briefcase,
+      label: w.name,
+      group: "workspaces",
+      onSelect: () => setActiveWorkspace(w.id),
+    }));
+
     const projectItems: PaletteItem[] = projects.map((p) => ({
       key: `project:${p.id}`,
       icon: FolderGit2,
@@ -110,11 +132,13 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       onSelect: () => openSettings(id),
     }));
 
-    return [...projectItems, ...branchItems, ...viewItems, ...settingsItems];
+    return [...workspaceItems, ...projectItems, ...branchItems, ...viewItems, ...settingsItems];
   }, [
+    workspaces,
     projects,
     branches,
     t,
+    setActiveWorkspace,
     setActiveProject,
     checkoutBranch,
     checkoutRemoteBranch,
@@ -124,13 +148,14 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     toggleTerminalPanel,
   ]);
 
+  const groups = SCOPE_GROUPS[scope];
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter((item) => item.label.toLowerCase().includes(q));
-  }, [items, query]);
-
-  const groups: PaletteItem["group"][] = ["projects", "branches", "views", "settings"];
+    const inScope = items.filter((item) => groups.includes(item.group));
+    if (!q) return inScope;
+    return inScope.filter((item) => item.label.toLowerCase().includes(q));
+  }, [items, groups, query]);
 
   const choose = (item: PaletteItem) => {
     item.onSelect();
@@ -152,7 +177,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
               if (e.key === "Escape") onClose();
               if (e.key === "Enter" && filtered[0]) choose(filtered[0]);
             }}
-            placeholder={t("titlebar.searchPlaceholder")}
+            placeholder={scope === "all" ? t("titlebar.searchPlaceholder") : t(GROUP_LABEL_KEY[groups[0]])}
             className="flex-1 bg-transparent text-[13px] outline-none"
           />
         </div>

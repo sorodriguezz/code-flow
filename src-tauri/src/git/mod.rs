@@ -1,4 +1,5 @@
 pub mod branch;
+pub mod checkpoint;
 pub mod diff;
 pub mod graph;
 pub mod identity;

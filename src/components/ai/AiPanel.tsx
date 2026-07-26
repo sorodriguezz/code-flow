@@ -12,7 +12,9 @@ import {
   Loader2,
   Plus,
   RefreshCw,
+  RotateCcw,
   Sparkles,
+  Square,
   ThumbsDown,
   ThumbsUp,
   X,
@@ -49,6 +51,8 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { ActivityModal } from "./ActivityModal";
+import { AiRunLog } from "./AiRunLog";
+import { CheckpointsModal } from "./CheckpointsModal";
 import { AnalyzeSection } from "./AnalyzeSection";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { AiErrorBanner } from "./AiErrorBanner";
@@ -83,7 +87,7 @@ function ActivitySection({ projectId }: { projectId: string }) {
   const chatLoaded = useChatHistoryStore((s) => s.loaded[projectId]);
   const loadChatHistory = useChatHistoryStore((s) => s.load);
   const loadResolutions = useResolutionsStore((s) => s.load);
-  const activeSessionId = useChatStore((s) => s.byProject[projectId]?.sessionId ?? null);
+  const activeSessionId = useChatStore((s) => s.byProject[projectId]?.conversationId ?? null);
   const switchTo = useChatStore((s) => s.switchTo);
   const [collapsed, setCollapsed] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -206,6 +210,7 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
     [jobs, pr.id],
   );
 
+  const [logExpanded, setLogExpanded] = useState(false);
   const loading = job?.status === "running";
   const error = job?.status === "error" ? job.error : null;
   const reviewText = job?.status === "done" ? job.result : null;
@@ -336,10 +341,28 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
           </div>
         )}
 
-        {loading && (
-          <div className="flex items-center gap-3 rounded-lg border border-[var(--cf-border)] p-4 text-[12px] text-[var(--cf-text-muted)]">
-            <ThinkingOrb size="sm" />
-            {t("ai.working")}
+        {loading && job && (
+          <div className="space-y-2">
+            <div className="flex items-center gap-3 rounded-lg border border-[var(--cf-border)] p-4 text-[12px] text-[var(--cf-text-muted)]">
+              <ThinkingOrb size="sm" />
+              {t("ai.working")}
+            </div>
+            <AiRunLog
+              runId={job.id}
+              running
+              expanded={logExpanded}
+              onToggle={() => setLogExpanded((v) => !v)}
+            />
+          </div>
+        )}
+
+        {job?.status === "cancelled" && (
+          <div className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--cf-border)] p-3 text-[12px] text-[var(--cf-text-muted)]">
+            <Square size={11} className="fill-current" />
+            {t("ai.runStopped")}
+            <button onClick={runReview} className="ml-auto text-[var(--cf-accent)] underline">
+              {t("pr.reviewAgain")}
+            </button>
           </div>
         )}
 
@@ -473,6 +496,22 @@ function useCopy(): [boolean, (text: string) => void] {
 function ChatBubble({ message }: { message: ChatMessage }) {
   const t = useT();
   const [copied, copy] = useCopy();
+  const [traceOpen, setTraceOpen] = useState(false);
+  // The recorded process behind this answer. Rendered under every kind of assistant turn —
+  // including the failed and the stopped ones, where "what was it doing when it died?" is the
+  // whole question.
+  const trace = message.trace;
+  const traceLog = trace && trace.length > 0 && (
+    <div className="mr-auto max-w-[95%] pt-1">
+      <AiRunLog
+        lines={trace}
+        running={false}
+        label={t("ai.traceSteps", { n: trace.length })}
+        expanded={traceOpen}
+        onToggle={() => setTraceOpen((v) => !v)}
+      />
+    </div>
+  );
   const html = useMemo(
     () => (message.role === "assistant" && !message.isError ? renderMarkdown(message.content) : null),
     [message.role, message.content, message.isError],
@@ -488,6 +527,19 @@ function ChatBubble({ message }: { message: ChatMessage }) {
     return (
       <div className="mr-auto max-w-[95%]">
         <AiErrorBanner error={parsedError} compact />
+        {traceLog}
+      </div>
+    );
+  }
+
+  if (message.isCancelled) {
+    return (
+      <div className="mr-auto max-w-[85%]">
+        <div className="flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-1 text-[11px] text-[var(--cf-text-muted)]">
+          <Square size={9} className="fill-current" />
+          {t("ai.runStopped")}
+        </div>
+        {traceLog}
       </div>
     );
   }
@@ -521,6 +573,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
           {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} className="text-[var(--cf-text-muted)]" />}
         </button>
       </div>
+      {traceLog}
       {message.role === "assistant" && message.responseTimeMs !== undefined && (
         <div className="pl-0.5 text-[10px] text-[var(--cf-text-muted)]">⏱ {formatResponseTime(message.responseTimeMs)}</div>
       )}
@@ -536,6 +589,9 @@ function ChatSection({ projectId }: { projectId: string }) {
   const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
   const chatLoaded = useChatHistoryStore((s) => s.loaded[projectId] ?? false);
   const [input, setInput] = useState("");
+  // Collapsed by default: the newest line is enough to know it's alive, and the full log is one
+  // click away for when it isn't going well.
+  const [logExpanded, setLogExpanded] = useState(false);
   const openSettings = useUiStore((s) => s.openSettings);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -544,17 +600,16 @@ function ChatSection({ projectId }: { projectId: string }) {
   }, [chat.messages.length, chat.sending]);
 
   // Self-heal a chat whose conversation was deleted from history: once the persisted list is
-  // loaded and none of this chat's sessions remain in it, the conversation is gone — reset the
-  // panel so a deleted chat can't keep showing (or get re-created on the next message). Keyed on
+  // loaded and this chat's conversation is no longer in it, it's gone — reset the panel so a
+  // deleted chat can't keep showing (or get re-created on the next message). Keyed on
   // `conversations` (not on `chat`) so it evaluates against the freshest list and never races a
-  // just-arrived reply whose session hasn't been reloaded into the list yet.
+  // just-arrived reply whose conversation hasn't been reloaded into the list yet.
   useEffect(() => {
     if (!chatLoaded) return;
     const current = useChatStore.getState().byProject[projectId];
     if (!current || current.sending || current.messages.length === 0) return;
-    const ids = current.sessionIds.length > 0 ? current.sessionIds : current.sessionId ? [current.sessionId] : [];
-    if (ids.length === 0) return;
-    const stillExists = ids.some((id) => conversations.some((c) => c.session_id === id));
+    if (!current.conversationId) return;
+    const stillExists = conversations.some((c) => c.session_id === current.conversationId);
     if (!stillExists) clearChat(projectId);
   }, [conversations, chatLoaded, clearChat, projectId]);
 
@@ -585,11 +640,15 @@ function ChatSection({ projectId }: { projectId: string }) {
             {chat.messages.map((m, i) => (
               <ChatBubble key={i} message={m} />
             ))}
-            {chat.sending && (
-              <div className="mr-auto flex max-w-[85%] items-center gap-2 rounded-lg bg-[var(--cf-surface-raised)] px-2.5 py-1.5">
-                <ThinkingOrb size="sm" />
-                <span className="text-[11px] text-[var(--cf-text-muted)]">{t("ai.working")}</span>
-              </div>
+            {chat.sending && chat.runId && (
+              // Replaces the old "thinking…" bubble: same reassurance, except now it says what
+              // the engine is actually doing and can be stopped.
+              <AiRunLog
+                runId={chat.runId}
+                running
+                expanded={logExpanded}
+                onToggle={() => setLogExpanded((v) => !v)}
+              />
             )}
           </div>
         )}
@@ -653,6 +712,8 @@ export function AiPanel() {
     useChatStore.getState().clear(project.id);
   };
 
+  const [checkpointsOpen, setCheckpointsOpen] = useState(false);
+
   return (
     <motion.div
       initial={{ width: 0, opacity: 0 }}
@@ -678,6 +739,15 @@ export function AiPanel() {
           <Sparkles size={13} className="text-[var(--cf-accent)]" />
           <span className="text-[12px] font-semibold">{t("chat.title")}</span>
           <div className="ml-auto flex items-center gap-1">
+            {project && (
+              <button
+                onClick={() => setCheckpointsOpen(true)}
+                title={t("checkpoints.title")}
+                className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+              >
+                <RotateCcw size={12} />
+              </button>
+            )}
             {project && (
               <button
                 onClick={startNewChat}
@@ -714,6 +784,9 @@ export function AiPanel() {
           </>
         )}
       </aside>
+      {checkpointsOpen && project && (
+        <CheckpointsModal repoPath={project.local_path} onClose={() => setCheckpointsOpen(false)} />
+      )}
     </motion.div>
   );
 }

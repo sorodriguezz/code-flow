@@ -261,6 +261,34 @@ body {
   background: color-mix(in oklab, var(--cf-success) 6%, transparent);
 }
 
+/* A breakpoint: the red dot editors have drawn in the gutter for thirty years. */
+.cf-breakpoint-glyph::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: var(--cf-danger);
+}
+
+/* Where execution is stopped right now. */
+.cf-debug-current-line {
+  background: color-mix(in oklab, var(--cf-warning) 18%, transparent);
+}
+
+.cf-debug-current-glyph::before {
+  content: "▶";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 10px;
+  color: var(--cf-warning);
+}
+
 /* The editor's tab strip scrolls sideways when tabs overflow, but a 10px bar (the app-wide
    default) would eat a third of a 36px tab row — keep it hairline and out of the way. */
 .cf-tab-strip::-webkit-scrollbar {

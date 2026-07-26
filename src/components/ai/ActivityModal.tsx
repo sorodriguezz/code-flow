@@ -30,7 +30,7 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
   const selectPr = usePrStore((s) => s.selectPr);
   const analyzeOpen = useAnalyzeUiStore((s) => s.open);
   const analyzeJobId = useAnalyzeUiStore((s) => s.selectedJobId);
-  const activeSessionId = useChatStore((s) => s.byProject[projectId]?.sessionId ?? null);
+  const activeSessionId = useChatStore((s) => s.byProject[projectId]?.conversationId ?? null);
   const switchTo = useChatStore((s) => s.switchTo);
   const [query, setQuery] = useState("");
   const [renamingKey, setRenamingKey] = useState<string | null>(null);

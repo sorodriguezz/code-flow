@@ -18,7 +18,8 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useNavigationStore } from "../../state/navigationStore";
 import { usePrStore } from "../../state/prStore";
 import { useT } from "../../state/languageStore";
-import { CommandPalette } from "./CommandPalette";
+import { goHistory } from "../../lib/shortcuts";
+import { useShortcutHint } from "../../lib/useShortcutHint";
 
 const win = getCurrentWindow();
 
@@ -107,28 +108,13 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
 export function TitleBar() {
   const platform = usePlatform();
   const toggleSidebar = useUiStore((s) => s.toggleSidebar);
-  const setActiveView = useUiStore((s) => s.setActiveView);
-  const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
+  const openCommandPalette = useUiStore((s) => s.openCommandPalette);
   const canGoBack = useNavigationStore((s) => s.canGoBack);
   const canGoForward = useNavigationStore((s) => s.canGoForward);
   const isMac = platform === "macos";
   const t = useT();
-  const [showSearch, setShowSearch] = useState(false);
+  const hint = useShortcutHint();
   const [showAiMenu, setShowAiMenu] = useState(false);
-
-  const goBack = () => {
-    const entry = useNavigationStore.getState().back();
-    if (!entry) return;
-    setActiveView(entry.view);
-    if (entry.projectId) setActiveProject(entry.projectId);
-  };
-
-  const goForward = () => {
-    const entry = useNavigationStore.getState().forward();
-    if (!entry) return;
-    setActiveView(entry.view);
-    if (entry.projectId) setActiveProject(entry.projectId);
-  };
 
   return (
     <header
@@ -140,30 +126,31 @@ export function TitleBar() {
         {isMac ? <MacControlsSpacer /> : <div className="w-2" />}
         <button
           onClick={toggleSidebar}
+          title={hint("panel.sidebar", t("titlebar.toggleSidebar"))}
           className="flex h-7 w-7 items-center justify-center rounded-md text-black/60 hover:bg-black/10 dark:text-white/70"
         >
           <SidebarIcon size={16} />
         </button>
         <button
-          onClick={() => setShowSearch(true)}
-          title={t("titlebar.search")}
+          onClick={() => openCommandPalette("all")}
+          title={hint("app.commandPalette", t("titlebar.search"))}
           className="flex h-7 w-7 items-center justify-center rounded-md text-black/60 hover:bg-black/10 dark:text-white/70"
         >
           <Search size={16} />
         </button>
         <div className="flex items-center gap-0.5">
           <button
-            onClick={goBack}
+            onClick={() => goHistory("back")}
             disabled={!canGoBack}
-            title={t("titlebar.goBack")}
+            title={hint("nav.back", t("titlebar.goBack"))}
             className="flex h-7 w-7 items-center justify-center rounded-md text-black/40 hover:bg-black/10 disabled:opacity-30 disabled:hover:bg-transparent dark:text-white/50"
           >
             <ChevronLeft size={16} />
           </button>
           <button
-            onClick={goForward}
+            onClick={() => goHistory("forward")}
             disabled={!canGoForward}
-            title={t("titlebar.goForward")}
+            title={hint("nav.forward", t("titlebar.goForward"))}
             className="flex h-7 w-7 items-center justify-center rounded-md text-black/40 hover:bg-black/10 disabled:opacity-30 disabled:hover:bg-transparent dark:text-white/50"
           >
             <ChevronRight size={16} />
@@ -184,8 +171,6 @@ export function TitleBar() {
         </div>
         {!isMac && <WindowsControls />}
       </div>
-
-      {showSearch && <CommandPalette onClose={() => setShowSearch(false)} />}
     </header>
   );
 }

@@ -12,6 +12,9 @@ import { AiPanel } from "./components/ai/AiPanel";
 import { EditorView } from "./components/editor/EditorView";
 import { TerminalDock } from "./components/terminal/TerminalDock";
 import { SettingsView } from "./components/settings/SettingsView";
+import { CommandPalette } from "./components/layout/CommandPalette";
+import { ShortcutsModal } from "./components/layout/ShortcutsModal";
+import { BranchSwitcherModal } from "./components/layout/BranchSwitcherModal";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
 import { ConfirmModal } from "./components/common/ConfirmModal";
@@ -27,6 +30,8 @@ import { useAccentStore } from "./state/accentStore";
 import { useFetchTimerStore } from "./state/fetchTimerStore";
 import { useNavigationStore } from "./state/navigationStore";
 import { useTerminalStore } from "./state/terminalStore";
+import { useShortcutsStore } from "./state/shortcutsStore";
+import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
 import { onRepoFsChanged } from "./lib/tauri/events";
 
@@ -76,6 +81,7 @@ export default function App() {
   const initAccent = useAccentStore((s) => s.init);
   const initTerminal = useTerminalStore((s) => s.init);
   const initAiProvider = useAiProviderStore((s) => s.init);
+  const initShortcuts = useShortcutsStore((s) => s.init);
   const project = useWorkspaceStore((s) => s.activeProject());
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
@@ -84,6 +90,15 @@ export default function App() {
   const activeView = useUiStore((s) => s.activeView);
   const aiPanelOpen = useUiStore((s) => s.aiPanelOpen);
   const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
+  const commandPaletteOpen = useUiStore((s) => s.commandPaletteOpen);
+  const commandPaletteScope = useUiStore((s) => s.commandPaletteScope);
+  const closeCommandPalette = useUiStore((s) => s.closeCommandPalette);
+  const shortcutsModalOpen = useUiStore((s) => s.shortcutsModalOpen);
+  const closeShortcutsModal = useUiStore((s) => s.closeShortcutsModal);
+  const branchSwitcherOpen = useUiStore((s) => s.branchSwitcherOpen);
+  const closeBranchSwitcher = useUiStore((s) => s.closeBranchSwitcher);
+
+  useGlobalShortcuts();
 
   useEffect(() => {
     (async () => {
@@ -95,10 +110,20 @@ export default function App() {
         initAccent(),
         initTerminal(),
         initAiProvider(),
+        initShortcuts(),
       ]);
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
     })();
-  }, [initTheme, initLayout, initPreferences, initLanguage, initAccent, initTerminal, initAiProvider]);
+  }, [
+    initTheme,
+    initLayout,
+    initPreferences,
+    initLanguage,
+    initAccent,
+    initTerminal,
+    initAiProvider,
+    initShortcuts,
+  ]);
 
   // Re-apply the chosen accent whenever the resolved theme or the accent selection changes,
   // since the actual hex differs per theme (a lighter shade is used on dark backgrounds).
@@ -184,6 +209,11 @@ export default function App() {
       </div>
       <StatusBar />
       <SettingsView />
+      {/* All three are reachable from the keyboard anywhere in the app, so they're mounted at the
+          root rather than inside whichever panel happens to have a button for them. */}
+      {commandPaletteOpen && <CommandPalette scope={commandPaletteScope} onClose={closeCommandPalette} />}
+      {shortcutsModalOpen && <ShortcutsModal onClose={closeShortcutsModal} />}
+      {branchSwitcherOpen && <BranchSwitcherModal onClose={closeBranchSwitcher} />}
       <ToastContainer />
       <ConfirmModal />
     </div>

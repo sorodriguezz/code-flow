@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +71,56 @@ pub fn write_file_text(repo_path: &str, rel_path: &str, content: &str) -> Result
     std::fs::write(&full, content).map_err(|e| e.to_string())
 }
 
+/// Resolves the target of a *creation*, which by definition doesn't exist yet — so
+/// `resolve_within_repo`'s canonicalize-based containment check can't see through a `..`
+/// segment. Requiring every component to be a plain name is the equivalent guard here, and
+/// it also rejects the empty/whitespace names the explorer's inline input can produce.
+fn resolve_new_path(repo_path: &str, rel_path: &str) -> Result<PathBuf, String> {
+    let rel = rel_path.trim();
+    if rel.is_empty() {
+        return Err("name cannot be empty".to_string());
+    }
+    let candidate = Path::new(rel);
+    let plain = candidate
+        .components()
+        .all(|c| matches!(c, Component::Normal(_)));
+    if candidate.is_absolute() || !plain {
+        return Err(format!("invalid path: {rel_path}"));
+    }
+    let base = Path::new(repo_path)
+        .canonicalize()
+        .map_err(|e| format!("invalid repo path: {e}"))?;
+    Ok(base.join(candidate))
+}
+
+/// Creates a directory (and any missing parents, so `a/b/c` works in one go, like typing a
+/// nested name into VS Code's explorer).
+pub fn create_dir(repo_path: &str, rel_path: &str) -> Result<(), String> {
+    let full = resolve_new_path(repo_path, rel_path)?;
+    if full.exists() {
+        return Err(format!("{} already exists", rel_path.trim()));
+    }
+    std::fs::create_dir_all(&full).map_err(|e| e.to_string())
+}
+
+/// Creates an empty file, plus any missing parent directories. `create_new` so an existing
+/// file is reported back instead of being silently truncated.
+pub fn create_file(repo_path: &str, rel_path: &str) -> Result<(), String> {
+    let full = resolve_new_path(repo_path, rel_path)?;
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&full)
+        .map(|_| ())
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::AlreadyExists => format!("{} already exists", rel_path.trim()),
+            _ => e.to_string(),
+        })
+}
+
 /// Opens a repo-relative file with the OS's default application. Implemented directly
 /// with the `open` crate (rather than the opener plugin's JS API) so path joining goes
 /// through `Path::join` instead of naive string concatenation on the frontend, which was
@@ -102,4 +152,46 @@ pub fn open_in_vscode(path: &str) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("failed to launch VS Code (is `code` on PATH?): {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_repo() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-fsops-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn creates_nested_file_and_dir() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+
+        create_dir(&root, "src/nested").unwrap();
+        assert!(repo.join("src/nested").is_dir());
+
+        create_file(&root, "src/nested/new.ts").unwrap();
+        assert_eq!(read_file_text(&root, "src/nested/new.ts").unwrap(), "");
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    #[test]
+    fn rejects_duplicates_empty_names_and_traversal() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+
+        create_file(&root, "dup.txt").unwrap();
+        assert!(create_file(&root, "dup.txt").is_err());
+        create_dir(&root, "dir").unwrap();
+        assert!(create_dir(&root, "dir").is_err());
+        assert!(create_file(&root, "   ").is_err());
+        assert!(create_file(&root, "../escaped.txt").is_err());
+        assert!(create_dir(&root, "../escaped").is_err());
+        assert!(!repo.parent().unwrap().join("escaped.txt").exists());
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
 }

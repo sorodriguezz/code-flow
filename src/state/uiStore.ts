@@ -6,6 +6,7 @@ export type MainView = "graph" | "changes" | "editor";
 export type SettingsSectionId =
   | "appearance"
   | "general"
+  | "keybindings"
   | "projects"
   | "git"
   | "azure"
@@ -14,6 +15,10 @@ export type SettingsSectionId =
   | "mdFiles"
   | "skills"
   | "mcps";
+
+/** Which group the command palette lists. Scoped openings come from the keyboard shortcuts —
+ * "switch repository" wants a list of repositories, not everything the app can do. */
+export type PaletteScope = "all" | "workspaces" | "projects";
 
 interface UiState {
   sidebarCollapsed: boolean;
@@ -27,19 +32,39 @@ interface UiState {
   settingsHostingProvider: VcsProvider;
   /** Repo-relative path the Editor tab should jump to open next; consumed once then cleared. */
   pendingEditorPath: string | null;
+  /** 1-based line to reveal in that file — set when the jump came from a search hit, so the
+   * editor lands on the match instead of at the top of the file. */
+  pendingEditorLine: number | null;
   /** The AI panel (PRs / open questions / change analysis) is a persistent left-docked panel,
    * not a tab — it stays mounted and scoped to whatever project is active regardless of which
    * main view or project the user switches to. */
   aiPanelOpen: boolean;
+  /** The command palette and the shortcuts cheat sheet live here rather than as local state in
+   * the title bar / editor, because keyboard shortcuts have to reach them from anywhere. */
+  commandPaletteOpen: boolean;
+  commandPaletteScope: PaletteScope;
+  shortcutsModalOpen: boolean;
+  /** Branch picking has its own modal (it checks out, rather than just navigating), so it gets
+   * its own flag instead of a palette scope. */
+  branchSwitcherOpen: boolean;
   toggleSidebar: () => void;
   setActiveView: (view: MainView) => void;
   openSettings: (section: SettingsSectionId, hostingProvider?: VcsProvider) => void;
   toggleSettings: () => void;
   closeSettings: () => void;
-  openInEditor: (relPath: string) => void;
+  openInEditor: (relPath: string, line?: number) => void;
   clearPendingEditorPath: () => void;
   toggleAiPanel: () => void;
   openAiPanel: () => void;
+  openCommandPalette: (scope?: PaletteScope) => void;
+  /** Re-pressing the same shortcut closes the palette; a *different* scope re-scopes the open
+   * one instead, so ⌘O → ⌘⇧O doesn't require closing it in between. */
+  toggleCommandPalette: (scope?: PaletteScope) => void;
+  closeCommandPalette: () => void;
+  toggleShortcutsModal: () => void;
+  closeShortcutsModal: () => void;
+  toggleBranchSwitcher: () => void;
+  closeBranchSwitcher: () => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -49,7 +74,12 @@ export const useUiStore = create<UiState>((set) => ({
   settingsSection: "appearance",
   settingsHostingProvider: "azure",
   pendingEditorPath: null,
+  pendingEditorLine: null,
   aiPanelOpen: false,
+  commandPaletteOpen: false,
+  commandPaletteScope: "all",
+  shortcutsModalOpen: false,
+  branchSwitcherOpen: false,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setActiveView: (view) => set({ activeView: view, settingsOpen: false }),
   openSettings: (section, hostingProvider) =>
@@ -60,8 +90,25 @@ export const useUiStore = create<UiState>((set) => ({
     })),
   toggleSettings: () => set((s) => ({ settingsOpen: !s.settingsOpen })),
   closeSettings: () => set({ settingsOpen: false }),
-  openInEditor: (relPath) => set({ activeView: "editor", pendingEditorPath: relPath, settingsOpen: false }),
-  clearPendingEditorPath: () => set({ pendingEditorPath: null }),
+  openInEditor: (relPath, line) =>
+    set({
+      activeView: "editor",
+      pendingEditorPath: relPath,
+      pendingEditorLine: line ?? null,
+      settingsOpen: false,
+    }),
+  clearPendingEditorPath: () => set({ pendingEditorPath: null, pendingEditorLine: null }),
   toggleAiPanel: () => set((s) => ({ aiPanelOpen: !s.aiPanelOpen })),
   openAiPanel: () => set({ aiPanelOpen: true }),
+  openCommandPalette: (scope = "all") => set({ commandPaletteOpen: true, commandPaletteScope: scope }),
+  toggleCommandPalette: (scope = "all") =>
+    set((s) => ({
+      commandPaletteOpen: !(s.commandPaletteOpen && s.commandPaletteScope === scope),
+      commandPaletteScope: scope,
+    })),
+  closeCommandPalette: () => set({ commandPaletteOpen: false }),
+  toggleShortcutsModal: () => set((s) => ({ shortcutsModalOpen: !s.shortcutsModalOpen })),
+  closeShortcutsModal: () => set({ shortcutsModalOpen: false }),
+  toggleBranchSwitcher: () => set((s) => ({ branchSwitcherOpen: !s.branchSwitcherOpen })),
+  closeBranchSwitcher: () => set({ branchSwitcherOpen: false }),
 }));

@@ -437,31 +437,37 @@ pub fn delete_workspace_mcp(conn: &Connection, id: &str) -> rusqlite::Result<()>
 pub fn add_activity_log(
     conn: &Connection,
     project_id: &str,
-    session_id: &str,
+    conversation_id: &str,
+    engine_session_id: Option<&str>,
     question: &str,
     answer: &str,
+    trace: Option<&str>,
     response_time_ms: Option<i64>,
     is_error: bool,
 ) -> rusqlite::Result<ActivityLogEntry> {
     let entry = ActivityLogEntry {
         id: Uuid::new_v4().to_string(),
         project_id: project_id.to_string(),
-        session_id: Some(session_id.to_string()),
+        session_id: Some(conversation_id.to_string()),
+        engine_session_id: engine_session_id.map(str::to_string),
         question: question.to_string(),
         answer: answer.to_string(),
+        trace: trace.map(str::to_string),
         created_at: now(),
         response_time_ms,
         is_error,
     };
     conn.execute(
-        "INSERT INTO activity_log (id, project_id, session_id, question, answer, created_at, response_time_ms, is_error)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             entry.id,
             entry.project_id,
             entry.session_id,
+            entry.engine_session_id,
             entry.question,
             entry.answer,
+            entry.trace,
             entry.created_at,
             entry.response_time_ms,
             entry.is_error
@@ -470,23 +476,31 @@ pub fn add_activity_log(
     Ok(entry)
 }
 
+/// The column list every `activity_log` read shares, so the row indices below can't drift apart.
+const ACTIVITY_COLUMNS: &str =
+    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error";
+
+fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> {
+    Ok(ActivityLogEntry {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        session_id: row.get(2)?,
+        engine_session_id: row.get(3)?,
+        question: row.get(4)?,
+        answer: row.get(5)?,
+        trace: row.get(6)?,
+        created_at: row.get(7)?,
+        response_time_ms: row.get(8)?,
+        is_error: row.get(9)?,
+    })
+}
+
 fn all_activity_log_entries(conn: &Connection, project_id: &str) -> rusqlite::Result<Vec<ActivityLogEntry>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, project_id, session_id, question, answer, created_at, response_time_ms, is_error
-         FROM activity_log WHERE project_id = ?1 AND session_id IS NOT NULL ORDER BY created_at ASC",
-    )?;
-    let rows = stmt.query_map(params![project_id], |row| {
-        Ok(ActivityLogEntry {
-            id: row.get(0)?,
-            project_id: row.get(1)?,
-            session_id: row.get(2)?,
-            question: row.get(3)?,
-            answer: row.get(4)?,
-            created_at: row.get(5)?,
-            response_time_ms: row.get(6)?,
-            is_error: row.get(7)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ACTIVITY_COLUMNS}
+         FROM activity_log WHERE project_id = ?1 AND session_id IS NOT NULL ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt.query_map(params![project_id], read_activity_row)?;
     rows.collect()
 }
 
@@ -575,22 +589,11 @@ pub fn get_conversation_messages(
     project_id: &str,
     session_id: &str,
 ) -> rusqlite::Result<Vec<ActivityLogEntry>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, project_id, session_id, question, answer, created_at, response_time_ms, is_error
-         FROM activity_log WHERE project_id = ?1 AND session_id = ?2 ORDER BY created_at ASC",
-    )?;
-    let rows = stmt.query_map(params![project_id, session_id], |row| {
-        Ok(ActivityLogEntry {
-            id: row.get(0)?,
-            project_id: row.get(1)?,
-            session_id: row.get(2)?,
-            question: row.get(3)?,
-            answer: row.get(4)?,
-            created_at: row.get(5)?,
-            response_time_ms: row.get(6)?,
-            is_error: row.get(7)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ACTIVITY_COLUMNS}
+         FROM activity_log WHERE project_id = ?1 AND session_id = ?2 ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt.query_map(params![project_id, session_id], read_activity_row)?;
     rows.collect()
 }
 
@@ -707,4 +710,81 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
         params![key, value],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::migrations;
+
+    /// A migrated, empty database with one project to hang activity on.
+    fn fixture() -> (Connection, String) {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let ws = create_workspace(&conn, "ws", "folder", "#fff").unwrap();
+        let project = create_project(
+            &conn,
+            crate::db::models::NewProject {
+                workspace_id: ws.id,
+                name: "proj".into(),
+                local_path: "/tmp/proj".into(),
+                remote_url: None,
+                color: "#fff".into(),
+                icon: "folder".into(),
+                ado_org: None,
+                ado_project: None,
+                ado_repo_id: None,
+                github_owner: None,
+                github_repo: None,
+                github_host: None,
+            },
+        )
+        .unwrap();
+        (conn, project.id)
+    }
+
+    fn log(conn: &Connection, project: &str, conversation: &str, engine_session: &str, question: &str) {
+        add_activity_log(conn, project, conversation, Some(engine_session), question, "answer", None, None, false)
+            .unwrap();
+    }
+
+    /// The bug this split fixes: Codex reports one fixed session sentinel for every run, so when
+    /// the engine's id was the grouping key, three separate chats collapsed into one activity.
+    #[test]
+    fn separate_conversations_stay_separate_even_when_the_engine_reuses_one_session_id() {
+        let (conn, project) = fixture();
+        log(&conn, &project, "conv-1", "codex-last", "primera pregunta");
+        log(&conn, &project, "conv-2", "codex-last", "segunda pregunta");
+        log(&conn, &project, "conv-3", "codex-last", "tercera pregunta");
+
+        let conversations = list_chat_conversations(&conn, &project, None).unwrap();
+        assert_eq!(conversations.len(), 3);
+        assert_eq!(conversations.iter().map(|c| c.turn_count).collect::<Vec<_>>(), vec![1, 1, 1]);
+    }
+
+    /// The mirror case: the Claude CLI can mint a *new* session id on each resumed turn, which
+    /// used to scatter one conversation across several activities.
+    #[test]
+    fn one_conversation_stays_one_activity_even_when_the_engine_changes_session_id() {
+        let (conn, project) = fixture();
+        log(&conn, &project, "conv-1", "session-a", "pregunta");
+        log(&conn, &project, "conv-1", "session-b", "seguimiento");
+
+        let conversations = list_chat_conversations(&conn, &project, None).unwrap();
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].turn_count, 2);
+        assert_eq!(conversations[0].title, "pregunta");
+    }
+
+    /// Reopening a conversation has to resume the engine session its *latest* turn ran under.
+    #[test]
+    fn a_conversation_keeps_the_engine_session_of_each_turn() {
+        let (conn, project) = fixture();
+        log(&conn, &project, "conv-1", "session-a", "pregunta");
+        log(&conn, &project, "conv-1", "session-b", "seguimiento");
+
+        let turns = get_conversation_messages(&conn, &project, "conv-1").unwrap();
+        let latest = turns.iter().filter_map(|t| t.engine_session_id.clone()).next_back();
+        assert_eq!(latest.as_deref(), Some("session-b"));
+    }
 }
