@@ -39,6 +39,13 @@ pub fn github_token_key(host: &str) -> String {
     format!("github-token:{host}")
 }
 
+/// API key for an HTTP AI provider (OpenAI and any OpenAI-compatible endpoint). Keyed per
+/// provider id so several can be configured side by side, and kept in the OS credential store
+/// rather than `app_settings` — unlike a binary path or a model id, this is a real credential.
+pub fn ai_api_key(provider: &str) -> String {
+    format!("ai-api-key:{provider}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -51,6 +51,19 @@ pub(crate) fn quota_signal(text: &str) -> bool {
     QUOTA_SIGNALS.iter().any(|s| lower.contains(s))
 }
 
+/// Tags a limit/billing refusal with [`QUOTA_MARKER`] so the frontend renders its dedicated notice
+/// instead of a bare red error. The subprocess engines do this inside their own `interpret`; the
+/// HTTP ones never reach that, so [`run`] applies it to their results here.
+fn mark_quota(result: Result<AiRun, String>) -> Result<AiRun, String> {
+    result.map_err(|e| {
+        if e.starts_with(QUOTA_MARKER) || !quota_signal(&e) {
+            e
+        } else {
+            format!("{QUOTA_MARKER}{e}")
+        }
+    })
+}
+
 /// Removes terminal escape sequences from a CLI's output. The engines run headless but still
 /// colourize (opencode paints its errors red), and those raw `ESC[91m` bytes would otherwise be
 /// rendered literally in the UI. Handles CSI (colour/cursor) and OSC (hyperlink/title) sequences.
@@ -265,13 +278,21 @@ impl<'a> AiInvocation<'a> {
     }
 }
 
-/// How an engine actually talks to its model. Almost every engine is a headless CLI subprocess;
-/// Ollama is the exception — a local HTTP server — so [`run`] branches on this instead of forcing
-/// an HTTP engine to masquerade as a process. For `Http`, the `binary` argument threaded through
-/// [`run`]/[`list_models`] carries the base URL (e.g. `http://localhost:11434`) rather than a path.
+/// How an engine actually talks to its model. Most engines are headless CLI subprocesses; the
+/// HTTP ones are the exception, so [`run`] branches on this instead of forcing them to masquerade
+/// as a process. For every `Http` variant the `binary` argument threaded through
+/// [`run`]/[`list_models`] carries the base URL rather than a path.
+///
+/// The variant is what routes the call, and it carries the credential when there is one — that
+/// way engines stay stateless from the caller's point of view and no operation signature has to
+/// grow an `api_key` parameter.
 pub enum Transport {
     Subprocess,
-    Http,
+    /// A local Ollama server — no credential.
+    Ollama,
+    /// Any endpoint speaking OpenAI's `/v1/chat/completions`: OpenAI itself, Azure OpenAI,
+    /// OpenRouter, Groq, a local vLLM… Only the base URL and key differ.
+    OpenAiCompatible { api_key: String },
 }
 
 /// A headless AI CLI. Implementors describe how to launch their binary and how to read its
@@ -302,6 +323,13 @@ pub trait AiEngine: Send + Sync {
         None
     }
 
+    /// Models this engine can enumerate *without running anything* — typically from a catalog its
+    /// CLI already keeps on disk. Checked before [`AiEngine::list_models_args`], so an engine with
+    /// no listing subcommand can still offer a current list.
+    fn cached_models(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// How this engine reaches its model. Defaults to a CLI subprocess; only the local Ollama
     /// engine overrides this to [`Transport::Http`].
     fn transport(&self) -> Transport {
@@ -313,6 +341,14 @@ pub trait AiEngine: Send + Sync {
     /// features are hidden for it in the UI and refused defensively in the backend.
     fn agentic(&self) -> bool {
         true
+    }
+
+    /// What gets piped to the process's stdin. Defaults to the invocation's data payload, which is
+    /// what every engine that takes its instructions as arguments wants. An engine whose CLI can't
+    /// safely receive a multi-line argument (npm `.cmd` shims reject them) overrides this to send
+    /// the whole brief — system prompt, ask and data — down the pipe instead.
+    fn stdin_payload(&self, inv: &AiInvocation) -> String {
+        inv.stdin_content.to_string()
     }
 
     /// Whether the engine carries a conversation forward on its own side between turns (the CLIs'
@@ -330,7 +366,16 @@ pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
     match provider {
         "gemini" => Box::new(crate::gemini::GeminiEngine),
         "opencode" => Box::new(crate::opencode::OpenCodeEngine),
+        "codex" => Box::new(crate::codex::CodexEngine),
         "ollama" | "local" => Box::new(crate::ollama::OllamaEngine),
+        // The key is read here, from the OS keyring, so it rides along in the engine's transport
+        // and no operation signature needs an extra parameter for it.
+        "openai" => Box::new(crate::openai::OpenAiEngine {
+            api_key: crate::secrets::get_secret(&crate::secrets::ai_api_key("openai"))
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        }),
         _ => Box::new(crate::claude::ClaudeEngine),
     }
 }
@@ -369,9 +414,12 @@ fn install_dirs() -> Vec<std::path::PathBuf> {
     if let Some(appdata) = dirs::data_dir() {
         dirs.push(appdata.join("npm"));
     }
-    // Antigravity CLI (`agy`) installs to `%LOCALAPPDATA%\agy\bin`.
     if let Some(local) = dirs::data_local_dir() {
+        // Antigravity CLI (`agy`) installs to `%LOCALAPPDATA%\agy\bin`.
         dirs.push(local.join("agy").join("bin"));
+        // The Codex desktop app ships the CLI here and does *not* put it on `PATH`, so without
+        // this entry a perfectly working install still probes as "not found".
+        dirs.push(local.join("Programs").join("OpenAI").join("Codex").join("bin"));
     }
     dirs
 }
@@ -453,10 +501,19 @@ fn find_on_path(binary: &str) -> Option<std::path::PathBuf> {
 /// when not — the frontend wraps it in a translated label rather than showing it bare.
 pub async fn probe(engine: &dyn AiEngine, binary: &str) -> (bool, String) {
     match engine.transport() {
-        Transport::Http => match crate::ollama::fetch_tags(binary).await {
+        Transport::Ollama => match crate::ollama::fetch_tags(binary).await {
             Ok(models) => (true, format!("{} · {} modelos", binary, models.len())),
             Err(e) => (false, e),
         },
+        Transport::OpenAiCompatible { api_key } => {
+            if api_key.trim().is_empty() {
+                return (false, "missing-api-key".to_string());
+            }
+            match crate::openai::fetch_models(binary, &api_key).await {
+                Ok(models) => (true, format!("{} · {} modelos", binary, models.len())),
+                Err(e) => (false, e),
+            }
+        }
         Transport::Subprocess => match find_on_path(binary) {
             Some(path) => (true, path.to_string_lossy().into_owned()),
             None => (false, binary.to_string()),
@@ -467,10 +524,14 @@ pub async fn probe(engine: &dyn AiEngine, binary: &str) -> (bool, String) {
 /// Shared subprocess plumbing for every headless AI invocation: builds the engine's command,
 /// pipes `stdin_content` in, waits for it, and hands the output back to the engine to interpret.
 async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Result<AiRun, String> {
-    // HTTP engines (Ollama) don't spawn a process — `binary` is the base URL. Everything below
-    // (binary resolution, PATH, stdin piping) is subprocess-only, so hand off before any of it.
-    if let Transport::Http = engine.transport() {
-        return crate::ollama::complete(binary, &inv).await;
+    // HTTP engines don't spawn a process — `binary` is the base URL. Everything below (binary
+    // resolution, PATH, stdin piping) is subprocess-only, so hand off before any of it.
+    match engine.transport() {
+        Transport::Ollama => return mark_quota(crate::ollama::complete(binary, &inv).await),
+        Transport::OpenAiCompatible { api_key } => {
+            return mark_quota(crate::openai::complete(binary, &api_key, &inv).await)
+        }
+        Transport::Subprocess => {}
     }
 
     let dirs = search_dirs();
@@ -490,7 +551,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Resu
     //     the write just fails with `BrokenPipe` when the child exits, which we ignore.
     // (2) an engine that *does* read stdin still needs EOF to start producing output — dropping the
     //     handle at the end of the task sends it. Doing both concurrently is correct either way.
-    let stdin_content = inv.stdin_content.to_string();
+    let stdin_content = engine.stdin_payload(&inv);
     let mut stdin_handle = child.stdin.take();
     let writer = tokio::spawn(async move {
         if let Some(mut stdin) = stdin_handle.take() {
@@ -528,9 +589,16 @@ async fn capture(binary: &str, args: &[String]) -> Result<std::process::Output, 
 /// for engines with no listing command ([`AiEngine::list_models_args`] is `None`) — no process is
 /// spawned in that case — so the frontend can fall back to its curated per-provider list.
 pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<String>, String> {
-    // Ollama lists its installed models over HTTP (`/api/tags`), not via a CLI subcommand.
-    if let Transport::Http = engine.transport() {
-        return crate::ollama::list_models(binary).await;
+    // The HTTP engines list over their own API, not via a CLI subcommand.
+    match engine.transport() {
+        Transport::Ollama => return crate::ollama::list_models(binary).await,
+        Transport::OpenAiCompatible { api_key } => return crate::openai::list_models(binary, &api_key).await,
+        Transport::Subprocess => {}
+    }
+    // A catalog the CLI already wrote to disk beats spawning it (and is the only option for CLIs
+    // with no listing subcommand).
+    if let Some(models) = engine.cached_models() {
+        return Ok(models);
     }
     let Some(args) = engine.list_models_args() else {
         return Ok(Vec::new());

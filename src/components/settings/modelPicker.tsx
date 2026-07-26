@@ -20,11 +20,12 @@ export function parseModel(
   return { choice: CUSTOM_MODEL, custom: trimmed };
 }
 
-/** The option set to show for a provider: the CLI's live models when we got them, else the curated
- * fallback list. Live ids (e.g. `opencode/claude-sonnet-5`) are shown verbatim — they're already
- * the exact string the CLI expects. */
-export function modelOptionsFor(providerId: string, dynamicModels: string[]): AiModelOption[] {
-  if (dynamicModels.length > 0) return dynamicModels.map((id) => ({ id, label: id }));
+/** The option set to show for a provider: the fetched models when we have them, else the curated
+ * fallback list. Fetched ids (e.g. `opencode/claude-sonnet-5`) are shown verbatim — they're already
+ * the exact string the CLI expects. `undefined` means the list hasn't arrived yet, which is not an
+ * error: the caller renders the fallback until it does. */
+export function modelOptionsFor(providerId: string, dynamicModels?: string[]): AiModelOption[] {
+  if (dynamicModels && dynamicModels.length > 0) return dynamicModels.map((id) => ({ id, label: id }));
   return PROVIDER_MODELS[providerId] ?? [];
 }
 
@@ -46,11 +47,25 @@ export function customModelPlaceholder(providerId: string, fallback: string): st
 }
 
 /** A labelled setting row: label on top, control, then an optional hint below — the app's
- * standard field layout, factored out so every field lines up identically. */
-export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+ * standard field layout, factored out so every field lines up identically. `action` puts a
+ * control (e.g. "refresh") on the right of the label line. */
+export function Field({
+  label,
+  hint,
+  action,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
   return (
     <div>
-      <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">{label}</label>
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <label className="block text-[12px] font-medium text-[var(--cf-text-muted)]">{label}</label>
+        {action}
+      </div>
       {children}
       {hint && <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">{hint}</p>}
     </div>

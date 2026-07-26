@@ -4,10 +4,12 @@ mod claude;
 mod commands;
 mod db;
 mod fsops;
+mod codex;
 mod gemini;
 mod git;
 mod github;
 mod ollama;
+mod openai;
 mod opencode;
 mod paths;
 mod remote;
@@ -169,6 +171,9 @@ pub fn run() {
             commands::secrets_cmd::set_github_token,
             commands::secrets_cmd::get_github_token,
             commands::secrets_cmd::delete_github_token,
+            commands::secrets_cmd::set_ai_api_key,
+            commands::secrets_cmd::has_ai_api_key,
+            commands::secrets_cmd::delete_ai_api_key,
             commands::claude_cmd::generate_commit_message,
             commands::claude_cmd::list_ai_models,
             commands::claude_cmd::check_ai_provider,

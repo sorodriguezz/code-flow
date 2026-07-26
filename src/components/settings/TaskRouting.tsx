@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertTriangle } from "lucide-react";
-import { getSetting, listAiModels, setSetting } from "../../lib/tauri/commands";
+import { getSetting, setSetting } from "../../lib/tauri/commands";
+import { useAiModelsStore } from "../../state/aiModelsStore";
 import { AI_PROVIDERS, isAgenticProvider } from "../../lib/aiProviders";
 import { AI_TASKS } from "../../lib/aiTasks";
 import { useAiProviderStore } from "../../state/aiProviderStore";
@@ -34,9 +35,9 @@ export function TaskRouting() {
     if (Object.keys(useProviderStatusStore.getState().byProvider).length === 0) void checkProviders();
   }, [checkProviders]);
 
-  // Model lists are per provider and never change within a session — cached in a ref so fetching
-  // them can't retrigger the effect that fetches them.
-  const modelCache = useRef<Record<string, string[]>>({});
+  const modelsByProvider = useAiModelsStore((s) => s.byProvider);
+  const ensureModels = useAiModelsStore((s) => s.ensure);
+  const rememberModel = useAiModelsStore((s) => s.remember);
   const [choice, setChoice] = useState<Record<string, string>>({});
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
@@ -57,14 +58,11 @@ export function TaskRouting() {
     let cancelled = false;
     void (async () => {
       setLoading(true);
-      const providers = Array.from(new Set(AI_TASKS.map((task) => effectiveProvider(task.key))));
-      await Promise.all(
-        providers.map(async (p) => {
-          if (modelCache.current[p]) return;
-          modelCache.current[p] = await listAiModels(p).catch(() => []);
-        }),
-      );
+      // Shared cache, so the lists here match the provider rows and the chat picker — including
+      // any model id typed by hand into a "Custom" field.
+      await ensureModels(Array.from(new Set(AI_TASKS.map((task) => effectiveProvider(task.key)))));
       if (cancelled) return;
+      const cache = useAiModelsStore.getState().byProvider;
 
       const nextChoice: Record<string, string> = {};
       const nextCustom: Record<string, string> = {};
@@ -72,7 +70,7 @@ export function TaskRouting() {
         AI_TASKS.map(async ({ key }) => {
           const provider = effectiveProvider(key);
           const stored = await getSetting(`${provider}_${key}_model`).catch(() => null);
-          const ids = modelOptionsFor(provider, modelCache.current[provider] ?? []).map((o) => o.id);
+          const ids = modelOptionsFor(provider, cache[provider] ?? []).map((o) => o.id);
           const parsed = parseModel(stored, ids);
           nextChoice[key] = parsed.choice;
           nextCustom[key] = parsed.custom;
@@ -90,7 +88,10 @@ export function TaskRouting() {
   }, [routingSignature]);
 
   const persistModel = async (task: string, value: string) => {
-    await setSetting(`${effectiveProvider(task)}_${task}_model`, value);
+    const provider = effectiveProvider(task);
+    // Keep hand-typed ids as future options — see the store's `remember`.
+    if (value.trim()) void rememberModel(provider, value);
+    await setSetting(`${provider}_${task}_model`, value);
     await refresh();
   };
 
@@ -112,7 +113,7 @@ export function TaskRouting() {
         // A task that needs tool use can't run on a local model — including when it inherits a
         // default that happens to be one, which the row has to call out rather than silently fail.
         const broken = task.agenticOnly && !isAgenticProvider(provider);
-        const options = modelOptionsFor(provider, modelCache.current[provider] ?? []);
+        const options = modelOptionsFor(provider, modelsByProvider[provider] ?? []);
 
         return (
           <div key={task.key} className="rounded-lg border border-[var(--cf-border)] p-2.5">

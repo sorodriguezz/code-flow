@@ -229,6 +229,15 @@ export const setSetting = (key: string, value: string) => invoke<void>("set_sett
  * providers whose CLI has no listing command — the caller falls back to a curated list. */
 export const listAiModels = (provider: string) => invoke<string[]>("list_ai_models", { provider });
 
+// AI provider API keys live in the OS keyring. There's deliberately no "get" — the key is only
+// read backend-side when building a request, so the UI can only ask whether one is set.
+export const setAiApiKey = (provider: string, key: string) =>
+  invoke<void>("set_ai_api_key", { provider, key });
+
+export const hasAiApiKey = (provider: string) => invoke<boolean>("has_ai_api_key", { provider });
+
+export const deleteAiApiKey = (provider: string) => invoke<void>("delete_ai_api_key", { provider });
+
 /** Opens an http(s) link in the default browser — e.g. a provider's billing page from its own
  * error message. Non-http schemes are rejected backend-side. */
 export const openExternalUrl = (url: string) => invoke<void>("open_external_url", { url });

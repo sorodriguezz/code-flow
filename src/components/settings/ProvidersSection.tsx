@@ -1,10 +1,31 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Check, ChevronDown, CircleAlert, CircleCheck, FolderOpen, Loader2, Star, X } from "lucide-react";
-import { getSetting, listAiModels, setSetting } from "../../lib/tauri/commands";
+import {
+  Check,
+  ChevronDown,
+  CircleAlert,
+  CircleCheck,
+  Copy,
+  ExternalLink,
+  FolderOpen,
+  KeyRound,
+  Loader2,
+  RotateCw,
+  Star,
+  X,
+} from "lucide-react";
+import {
+  deleteAiApiKey,
+  getSetting,
+  hasAiApiKey,
+  setAiApiKey,
+  setSetting,
+} from "../../lib/tauri/commands";
 import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, type AiProviderOption } from "../../lib/aiProviders";
+import { openExternalUrl } from "../../lib/tauri/commands";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
+import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -64,8 +85,141 @@ function customModelHint(providerId: string, t: (key: TranslationKey) => string)
     );
   }
   if (providerId === "claude") return t("settings.modelIdHintClaude");
+  if (providerId === "codex") return t("settings.modelIdHintCodex");
+  if (providerId === "opencode") return t("settings.modelIdHintOpencode");
   if (providerId === "ollama") return t("settings.modelIdHintOllama");
+  if (providerId === "openai") return t("settings.modelIdHintOpenai");
   return t("settings.modelIdHintGeneric");
+}
+
+/** API key field for the providers that authenticate with one. The stored value is never sent to
+ * the frontend — this only knows *whether* a key exists, and writes a new one. */
+function ApiKeyField({ providerId, onSaved }: { providerId: string; onSaved: () => void }) {
+  const t = useT();
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void hasAiApiKey(providerId)
+      .then((v) => !cancelled && setHasKey(v))
+      .catch(() => !cancelled && setHasKey(false));
+    return () => {
+      cancelled = true;
+    };
+  }, [providerId]);
+
+  const save = async () => {
+    const key = draft.trim();
+    if (!key) return;
+    setBusy(true);
+    try {
+      await setAiApiKey(providerId, key);
+      setDraft("");
+      setHasKey(true);
+      onSaved();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async () => {
+    setBusy(true);
+    try {
+      await deleteAiApiKey(providerId);
+      setHasKey(false);
+      onSaved();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Field label={t("settings.apiKeyLabel")} hint={t("settings.apiKeyHint")}>
+      {hasKey ? (
+        <div className="flex items-center gap-2">
+          <span className="flex flex-1 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text-muted)]">
+            <KeyRound size={12} className="text-[var(--cf-success)]" />
+            {t("settings.apiKeyStored")}
+          </span>
+          <button
+            onClick={() => void remove()}
+            disabled={busy}
+            className="rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-50"
+          >
+            {t("settings.apiKeyRemove")}
+          </button>
+        </div>
+      ) : (
+        <div className="flex gap-1.5">
+          <input
+            type="password"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void save()}
+            placeholder="sk-…"
+            autoComplete="off"
+            spellCheck={false}
+            className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[13px] outline-none focus:border-[var(--cf-accent)]"
+          />
+          <button
+            onClick={() => void save()}
+            disabled={busy || !draft.trim()}
+            className="rounded-md bg-[var(--cf-accent)] px-2.5 text-[12px] font-medium text-white disabled:opacity-40"
+          >
+            {t("common.save")}
+          </button>
+        </div>
+      )}
+    </Field>
+  );
+}
+
+/** A copyable one-line command. Installing is the user's call, so this hands them the exact string
+ * rather than running anything. */
+function CommandLine({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      onClick={() => {
+        void navigator.clipboard.writeText(command);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1400);
+      }}
+      className="group flex w-full items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-black/[0.03] px-2 py-1 text-left font-mono text-[11px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] dark:bg-white/[0.05]"
+    >
+      <span className="min-w-0 flex-1 truncate">{command}</span>
+      {copied ? (
+        <Check size={11} className="shrink-0 text-[var(--cf-success)]" />
+      ) : (
+        <Copy size={11} className="shrink-0 text-[var(--cf-text-muted)] opacity-0 group-hover:opacity-100" />
+      )}
+    </button>
+  );
+}
+
+/** How to get this provider working: the install command (when there's a canonical one), whatever
+ * has to run afterwards (sign-in, pulling a model), and a link to its official docs. */
+function SetupHelp({ provider }: { provider: AiProviderOption }) {
+  const t = useT();
+  if (!provider.setup) return null;
+  const { url, command, postCommand } = provider.setup;
+  return (
+    <div className="space-y-1.5 rounded-lg border border-[var(--cf-border)] p-2.5">
+      <p className="text-[11.5px] font-medium text-[var(--cf-text)]">{t("settings.setupTitle")}</p>
+      {command && <CommandLine command={command} />}
+      {postCommand && <CommandLine command={postCommand} />}
+      <button
+        onClick={() => void openExternalUrl(url)}
+        className="flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
+      >
+        <ExternalLink size={11} />
+        {t("settings.setupDocs")}
+      </button>
+      {command && <p className="text-[10.5px] text-[var(--cf-text-muted)]">{t("settings.setupRestartHint")}</p>}
+    </div>
+  );
 }
 
 /** Availability badge: green when the CLI/endpoint answered, amber when it didn't. Blank while the
@@ -104,6 +258,9 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
   const setDefaultProvider = useAiProviderStore((s) => s.setProvider);
   const refreshRouting = useAiProviderStore((s) => s.refresh);
   const recheck = useProviderStatusStore((s) => s.check);
+  const invalidateModels = useAiModelsStore((s) => s.invalidate);
+  const rememberModel = useAiModelsStore((s) => s.remember);
+  const ensureModels = useAiModelsStore((s) => s.ensure);
   const status = useProviderStatusStore((s) => s.byProvider[provider.id]);
   const pushToast = useToastStore((s) => s.pushToast);
 
@@ -113,11 +270,13 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
   const [custom, setCustom] = useState("");
   const [tools, setTools] = useState<string[]>([]);
   const [customTool, setCustomTool] = useState("");
-  const [dynamicModels, setDynamicModels] = useState<string[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
+  // `undefined` until the shared store has this provider's list — i.e. still loading.
+  const dynamicModels = useAiModelsStore((s) => s.byProvider[provider.id]);
+  const modelsLoaded = dynamicModels !== undefined;
 
-  const isOllama = provider.id === "ollama";
+  // HTTP providers configure an endpoint instead of a binary; only some of them need a key.
+  const isEndpoint = provider.isEndpoint === true;
   const agentic = isAgenticProvider(provider.id);
   const label = provider.label ?? (provider.labelKey ? t(provider.labelKey) : provider.id);
   const isDefault = provider.id === defaultProviderId;
@@ -148,27 +307,30 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
     };
   }, [provider.id]);
 
-  // Asking a CLI for its models spawns a process, so only do it for a row the user opened.
+  // Asking a CLI for its models spawns a process, so only do it for a row the user opened. The
+  // shared store is what fetches — so the list (live ∪ hand-typed ids) is the same one the routing
+  // table and the chat picker see.
   useEffect(() => {
-    if (!expanded || modelsLoaded) return;
+    if (!expanded) return;
+    void ensureModels([provider.id]);
+  }, [expanded, provider.id, ensureModels, dynamicModels]);
+
+  // Re-classify the stored model once the real option set is known, so a listed model isn't left
+  // sitting in the "custom" box.
+  useEffect(() => {
+    if (!dynamicModels) return;
     let cancelled = false;
     void (async () => {
-      const live = await listAiModels(provider.id).catch(() => [] as string[]);
-      if (cancelled) return;
-      setDynamicModels(live);
-      // Re-classify the stored model now that the real option set is known, so a listed model
-      // isn't left sitting in the "custom" box.
       const stored = await getSetting(providerKey(provider.id, "model")).catch(() => null);
       if (cancelled) return;
-      const parsed = parseModel(stored, modelOptionsFor(provider.id, live).map((o) => o.id));
+      const parsed = parseModel(stored, modelOptionsFor(provider.id, dynamicModels).map((o) => o.id));
       setChoice(parsed.choice);
       setCustom(parsed.custom);
-      setModelsLoaded(true);
     })();
     return () => {
       cancelled = true;
     };
-  }, [expanded, modelsLoaded, provider.id]);
+  }, [dynamicModels, provider.id]);
 
   const saveBinary = async (value: string) => {
     setBinaryPath(value);
@@ -177,6 +339,9 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
   };
 
   const saveModel = async (value: string) => {
+    // A hand-typed id becomes a normal option next time — the only way Claude Code and Codex,
+    // which can't enumerate their models, ever learn about new ones.
+    if (value.trim()) void rememberModel(provider.id, value);
     await setSetting(providerKey(provider.id, "model"), value);
     if (isDefault) useAiProviderStore.getState().setModel(value);
     // Tasks inheriting this provider now resolve to a different model.
@@ -251,9 +416,11 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
             <>
               {status && !status.available && (
                 <p className="rounded-md border border-[color-mix(in_oklab,var(--cf-warning)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-2 text-[11.5px] leading-snug text-[var(--cf-text)]">
-                  {isOllama
-                    ? t("settings.providerMissingOllama", { detail: status.detail })
-                    : t("settings.providerMissingBinary", { binary: status.binary })}
+                  {status.detail === "missing-api-key"
+                    ? t("settings.providerMissingKey")
+                    : isEndpoint
+                      ? t("settings.providerMissingEndpoint", { detail: status.detail })
+                      : t("settings.providerMissingBinary", { binary: status.binary })}
                 </p>
               )}
 
@@ -263,9 +430,31 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                 </p>
               )}
 
+              {/* Up top when it isn't working, so "Not found" is immediately actionable; tucked
+                  below the config once it is, where it's reference rather than a to-do. */}
+              {status && !status.available && <SetupHelp provider={provider} />}
+
+              {provider.needsApiKey && (
+                <ApiKeyField
+                  providerId={provider.id}
+                  onSaved={() => {
+                    void recheck(provider.id);
+                    // Which models the endpoint serves depends on the key, so the list fetched
+                    // before it existed (empty → curated fallback) is now wrong.
+                    invalidateModels(provider.id);
+                  }}
+                />
+              )}
+
               <Field
-                label={isOllama ? t("settings.ollamaEndpointLabel") : t("settings.binaryLabel")}
-                hint={isOllama ? t("settings.ollamaEndpointHint") : t("settings.binaryHint")}
+                label={isEndpoint ? t("settings.endpointLabel") : t("settings.binaryLabel")}
+                hint={
+                  provider.id === "ollama"
+                    ? t("settings.ollamaEndpointHint")
+                    : isEndpoint
+                      ? t("settings.endpointHint")
+                      : t("settings.binaryHint")
+                }
               >
                 <div className="flex gap-1.5">
                   <input
@@ -274,7 +463,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                     onBlur={(e) => void saveBinary(e.target.value)}
                     className={`${inputClass} flex-1 font-mono`}
                   />
-                  {!isOllama && (
+                  {!isEndpoint && (
                     <button
                       onClick={browseBinary}
                       title={t("settings.selectClaudeBinaryTitle")}
@@ -287,7 +476,23 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                 </div>
               </Field>
 
-              <Field label={t("settings.baseModel")} hint={t("settings.baseModelHint")}>
+              <Field
+                label={t("settings.baseModel")}
+                hint={t("settings.baseModelHint")}
+                action={
+                  // The list is fetched live, but cached — this forces a re-fetch without
+                  // restarting, for when the provider ships a model mid-session.
+                  <button
+                    onClick={() => invalidateModels(provider.id)}
+                    disabled={!modelsLoaded}
+                    title={t("settings.refreshModels")}
+                    className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-50"
+                  >
+                    <RotateCw size={11} className={modelsLoaded ? "" : "animate-spin"} />
+                    {t("settings.refreshModels")}
+                  </button>
+                }
+              >
                 <ModelField
                   options={options}
                   choice={choice}
@@ -307,13 +512,22 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                 />
               </Field>
 
-              {agentic && (
+              {/* Only Claude Code's CLI takes an allow-list. For the other agentic CLIs the
+                  setting would be inert, so they get an explanation of what actually governs
+                  their access instead of a control that does nothing. */}
+              {agentic && !provider.usesToolAllowlist && (
+                <p className="rounded-md border border-[var(--cf-border)] px-2.5 py-2 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+                  {t("settings.toolsSandboxNote")}
+                </p>
+              )}
+
+              {agentic && provider.usesToolAllowlist && (
                 <div>
                   <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
                     {t("settings.allowedTools")}
                   </label>
                   <p className="mb-2 text-[11px] text-[var(--cf-text-muted)]">{t("settings.allowedToolsHint")}</p>
-                  {provider.id === "claude" ? (
+                  {(
                     <div className="space-y-1.5 rounded-lg border border-[var(--cf-border)] p-2.5">
                       {TOOL_OPTIONS.map((tool) => (
                         <label
@@ -338,8 +552,6 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                         </label>
                       ))}
                     </div>
-                  ) : (
-                    <p className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.toolsProviderHint")}</p>
                   )}
 
                   {tools.filter((tool) => !KNOWN_TOOL_IDS.has(tool)).length > 0 && (
@@ -389,6 +601,8 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                   </div>
                 </div>
               )}
+
+              {status?.available && <SetupHelp provider={provider} />}
             </>
           )}
         </div>
@@ -423,15 +637,6 @@ export function ProvidersSection() {
       {AI_PROVIDERS.filter((p) => p.available).map((provider) => (
         <ProviderRow key={provider.id} provider={provider} />
       ))}
-      {AI_PROVIDERS.some((p) => !p.available) && (
-        <p className="pt-1 text-[11px] text-[var(--cf-text-muted)]">
-          {t("settings.providersComingSoon", {
-            providers: AI_PROVIDERS.filter((p) => !p.available)
-              .map((p) => p.label ?? p.id)
-              .join(", "),
-          })}
-        </p>
-      )}
     </div>
   );
 }

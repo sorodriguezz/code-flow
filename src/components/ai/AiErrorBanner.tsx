@@ -39,7 +39,9 @@ export function AiErrorBanner({ error, compact = false }: { error: ClaudeErrorIn
           className={`mt-2 flex items-center gap-1 ${subSize} font-medium text-[var(--cf-accent)] hover:underline`}
         >
           <ExternalLink size={11} />
-          {t("ai.openBilling")}
+          {/* Providers don't always link to billing — OpenAI's quota error points at its error-code
+              docs — so the label follows the URL rather than promising a payments page. */}
+          {/billing|payment|plans?\b/i.test(error.actionUrl) ? t("ai.openBilling") : t("ai.openLink")}
         </button>
       )}
     </div>

@@ -1,4 +1,4 @@
-import { Bot, Cpu, Gem, HardDrive, SquareTerminal, Waves, type LucideIcon } from "lucide-react";
+import { Bot, Cpu, Gem, HardDrive, Sparkles, SquareTerminal, type LucideIcon } from "lucide-react";
 import type { TranslationKey } from "./i18n/translations";
 
 export interface AiProviderOption {
@@ -16,20 +16,82 @@ export interface AiProviderOption {
    * completion model (Ollama) can't, so the "fix with AI" buttons, tool settings and MCP notes
    * key off this. Absent → treated as `true` (every CLI engine is agentic). */
   agentic?: boolean;
+  /** Authenticates with an API key (stored in the OS keyring) rather than a CLI login, so Settings
+   * shows a key field for it. */
+  needsApiKey?: boolean;
+  /** The CLI accepts a tool allow-list (Claude Code's `--allowedTools`), so configuring one
+   * actually changes what it may do. The other agentic CLIs have no such flag — their access is
+   * governed by a permission/sandbox mode the app sets per operation — so offering the field there
+   * would be a control that does nothing. */
+  usesToolAllowlist?: boolean;
+  /** True when `defaultBinary` is an HTTP endpoint rather than an executable — Settings then labels
+   * the field accordingly and drops the "browse for a file" button. */
+  isEndpoint?: boolean;
+  /** Where to go to get this provider working. Shown in its Settings row, and surfaced up front
+   * when the provider isn't detected — so "Not found" always comes with a way out. */
+  setup?: {
+    /** Official install / setup page. */
+    url: string;
+    /** Canonical one-line install command, when the provider has one. */
+    command?: string;
+    /** Command to run once installed, e.g. signing in. */
+    postCommand?: string;
+  };
 }
 
-// Ordered so the selectable engines come first and the not-yet-wired ones (shown disabled with a
-// "coming soon" badge) sit together at the end — the picker reads as "what you can use" then
-// "what's on the way", not an interleaved mix.
+// Every entry here is selectable. `available: false` is still honoured by the UI (it renders a
+// "coming soon" badge) for when a future engine is stubbed in, but nothing is stubbed today.
 export const AI_PROVIDERS: AiProviderOption[] = [
-  // ── Available now ──
-  { id: "claude", label: "Claude Code", icon: Bot, available: true, defaultBinary: "claude" },
+  {
+    id: "claude",
+    label: "Claude Code",
+    icon: Bot,
+    available: true,
+    defaultBinary: "claude",
+    usesToolAllowlist: true,
+    setup: {
+      url: "https://docs.claude.com/en/docs/claude-code/setup",
+      command: "npm install -g @anthropic-ai/claude-code",
+    },
+  },
   // Gemini now runs through Google's Antigravity CLI (`agy`), the successor to the retired
   // `gemini` CLI, against a Google-account login. Headless via `agy -p`. See `gemini.rs`.
-  { id: "gemini", label: "Gemini", icon: Gem, available: true, defaultBinary: "agy" },
+  {
+    id: "gemini",
+    label: "Gemini",
+    icon: Gem,
+    available: true,
+    defaultBinary: "agy",
+    setup: { url: "https://antigravity.google" },
+  },
+  // OpenAI's CLI, logged in with a **ChatGPT subscription** (`codex login`) rather than metered
+  // API credits — that's what separates it from the `openai` entry below. Headless via
+  // `codex exec`. See `codex.rs`.
+  {
+    id: "codex",
+    label: "Codex",
+    icon: Cpu,
+    available: true,
+    defaultBinary: "codex",
+    setup: {
+      url: "https://developers.openai.com/codex/",
+      command: "winget install OpenAI.Codex",
+      postCommand: "codex login",
+    },
+  },
   // opencode is provider-agnostic: it drives whatever model providers the user configured inside
-  // it, addressed as `provider/model`. Headless via `opencode run`. See `opencode.rs`.
-  { id: "opencode", label: "Open Code", icon: SquareTerminal, available: true, defaultBinary: "opencode" },
+  // it, addressed as `provider/model`. Its own first-party services are addressed explicitly —
+  // `opencode/…` for Zen (pay-as-you-go) and `opencode-go/…` for Go (subscription) — so both can
+  // be used side by side by pointing different tasks at different prefixes. Headless via
+  // `opencode run`. See `opencode.rs`.
+  {
+    id: "opencode",
+    label: "Open Code",
+    icon: SquareTerminal,
+    available: true,
+    defaultBinary: "opencode",
+    setup: { url: "https://opencode.ai/docs/" },
+  },
   // Local models via Ollama (HTTP, not a CLI). Non-agentic: no tool use / MCP, so those features
   // are hidden when it's active. `defaultBinary` is the endpoint. See `ollama.rs`.
   {
@@ -39,10 +101,23 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     available: true,
     defaultBinary: "http://localhost:11434",
     agentic: false,
+    isEndpoint: true,
+    setup: { url: "https://ollama.com/download", postCommand: "ollama pull qwen2.5-coder" },
   },
-  // ── Coming soon (disabled) ──
-  { id: "codex", label: "Codex", icon: Cpu, available: false },
-  { id: "deepseek", label: "DeepSeek", icon: Waves, available: false },
+  // Any endpoint speaking OpenAI's `/v1/chat/completions` — OpenAI itself by default, but the URL
+  // is editable, so Azure OpenAI / OpenRouter / Groq / DeepSeek / vLLM all work here. Authenticated
+  // with an API key from the OS keyring; non-agentic (no tool loop). See `openai.rs`.
+  {
+    id: "openai",
+    label: "OpenAI",
+    icon: Sparkles,
+    available: true,
+    defaultBinary: "https://api.openai.com/v1",
+    agentic: false,
+    needsApiKey: true,
+    isEndpoint: true,
+    setup: { url: "https://platform.openai.com/api-keys" },
+  },
 ];
 
 export const DEFAULT_AI_PROVIDER = "claude";
@@ -82,16 +157,32 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "gemini-3.1-pro-high", label: "Gemini 3.1 Pro (High)" },
     { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
   ],
+  // Fallback only — the real list is read from the catalog Codex caches at
+  // `~/.codex/models_cache.json`, which the CLI keeps current on its own. These are only shown
+  // before Codex has ever run (no cache file yet).
+  codex: [
+    { id: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
+    { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
+    { id: "gpt-5.5", label: "GPT-5.5" },
+  ],
   // opencode addresses models as `provider/model`, and which are available depends entirely on the
-  // providers the user configured inside opencode — so these are just format examples. The
-  // "custom" field in Settings (and leaving it on "default") is the real path.
+  // providers configured inside it — so these are just format examples, including one of each of
+  // its own services (Zen pay-as-you-go vs Go subscription). The live list from `opencode models`
+  // is what's normally shown; "Custom" covers the rest.
   opencode: [
     { id: "anthropic/claude-sonnet-4-5", label: "Claude Sonnet 4.5" },
     { id: "openai/gpt-5", label: "GPT-5" },
-    { id: "google/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { id: "opencode-go/kimi-k3", label: "Kimi K3 (opencode Go)" },
   ],
   // Fallback only — the real list is fetched live from the local server's `/api/tags`. These are
   // common coding models the user may have pulled; shown when Ollama isn't reachable.
+  // Fallback only — the real list comes live from `GET /v1/models` once a key is set, and depends
+  // entirely on which endpoint the provider points at.
+  openai: [
+    { id: "gpt-5", label: "GPT-5" },
+    { id: "gpt-5-mini", label: "GPT-5 mini" },
+    { id: "o3", label: "o3" },
+  ],
   ollama: [
     { id: "qwen2.5-coder", label: "Qwen2.5 Coder" },
     { id: "llama3.1", label: "Llama 3.1" },

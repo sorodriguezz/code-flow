@@ -43,7 +43,7 @@ impl AiEngine for OllamaEngine {
     }
 
     fn transport(&self) -> Transport {
-        Transport::Http
+        Transport::Ollama
     }
 
     fn agentic(&self) -> bool {
