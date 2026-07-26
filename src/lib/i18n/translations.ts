@@ -502,6 +502,8 @@ export const translations = {
     "editor.viewPreview": "Preview",
     "editor.viewSplit": "Split",
     "editor.dbmlEmpty": "No tables found in this DBML file",
+    "editor.closeTab": "Close (Ctrl+W)",
+    "editor.closeDirtyConfirm": "\"{name}\" has unsaved changes. Close it anyway?",
 
     "terminal.noProject": "No project open",
     "terminal.emptyHint": "No terminals open — click + to start one.",
@@ -1086,6 +1088,8 @@ export const translations = {
     "editor.viewPreview": "Vista previa",
     "editor.viewSplit": "Dividido",
     "editor.dbmlEmpty": "No se encontraron tablas en este archivo DBML",
+    "editor.closeTab": "Cerrar (Ctrl+W)",
+    "editor.closeDirtyConfirm": "\"{name}\" tiene cambios sin guardar. ¿Cerrar de todas formas?",
 
     "terminal.noProject": "No hay proyecto abierto",
     "terminal.emptyHint": "No hay terminales abiertas — haz clic en + para iniciar una.",

@@ -261,6 +261,20 @@ body {
   background: color-mix(in oklab, var(--cf-success) 6%, transparent);
 }
 
+/* The editor's tab strip scrolls sideways when tabs overflow, but a 10px bar (the app-wide
+   default) would eat a third of a 36px tab row — keep it hairline and out of the way. */
+.cf-tab-strip::-webkit-scrollbar {
+  height: 3px;
+}
+
+.cf-tab-strip::-webkit-scrollbar-thumb {
+  background: transparent;
+}
+
+.cf-tab-strip:hover::-webkit-scrollbar-thumb {
+  background: var(--cf-border);
+}
+
 .cf-markdown-preview {
   color: var(--cf-text);
   font-size: 13.5px;

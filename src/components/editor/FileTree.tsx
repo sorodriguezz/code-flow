@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { ChevronDown, ChevronRight, File, Folder } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder } from "lucide-react";
 import { listDir } from "../../lib/tauri/commands";
 import { SkeletonRows } from "../common/Skeleton";
 import type { FileEntry } from "../../types/domain";
 import { fileStatusColor, fileStatusLabelKey } from "../../lib/fileStatus";
+import { fileIconFor } from "../../lib/fileIcon";
 import { useT } from "../../state/languageStore";
 
 function TreeNode({
@@ -12,6 +13,7 @@ function TreeNode({
   depth,
   selectedPath,
   onSelectFile,
+  onOpenFile,
   changedPaths,
 }: {
   repoPath: string;
@@ -19,6 +21,7 @@ function TreeNode({
   depth: number;
   selectedPath: string | null;
   onSelectFile: (path: string) => void;
+  onOpenFile?: (path: string) => void;
   changedPaths: Map<string, string>;
 }) {
   const t = useT();
@@ -40,11 +43,13 @@ function TreeNode({
     entry.is_dir && !ownStatus && [...changedPaths.keys()].some((p) => p.startsWith(`${entry.path}/`));
   const status = ownStatus ?? (hasChangedDescendant ? "modified" : undefined);
   const color = status ? fileStatusColor(status) : undefined;
+  const { Icon: FileIcon, color: iconColor } = fileIconFor(entry.path);
 
   return (
     <div>
       <button
         onClick={() => (entry.is_dir ? setExpanded((v) => !v) : onSelectFile(entry.path))}
+        onDoubleClick={() => !entry.is_dir && onOpenFile?.(entry.path)}
         style={{ paddingLeft: depth * 14 + 6 }}
         className={`flex w-full items-center gap-1.5 truncate rounded-md py-0.5 pr-2 text-left text-[13px] ${
           isSelected
@@ -60,7 +65,9 @@ function TreeNode({
         ) : (
           <>
             <span className="w-3 shrink-0" />
-            <File size={13} className="shrink-0" style={!isSelected && color ? { color } : undefined} />
+            {/* Git status wins over the language color: a modified file has to read as
+                modified first, the same way it does in the Changes tab. */}
+            <FileIcon size={13} className="shrink-0" style={{ color: isSelected ? undefined : (color ?? iconColor) }} />
           </>
         )}
         <span className="truncate" style={!isSelected && color ? { color } : undefined}>
@@ -86,6 +93,7 @@ function TreeNode({
               depth={depth + 1}
               selectedPath={selectedPath}
               onSelectFile={onSelectFile}
+              onOpenFile={onOpenFile}
               changedPaths={changedPaths}
             />
           ))}
@@ -104,11 +112,15 @@ export function FileTree({
   repoPath,
   selectedPath,
   onSelectFile,
+  onOpenFile,
   changedPaths,
 }: {
   repoPath: string;
   selectedPath: string | null;
+  /** Single click — opens the file as a reusable preview tab. */
   onSelectFile: (path: string) => void;
+  /** Double click — opens the file for good, pinning its tab. */
+  onOpenFile?: (path: string) => void;
   changedPaths: Map<string, string>;
 }) {
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
@@ -130,6 +142,7 @@ export function FileTree({
           depth={0}
           selectedPath={selectedPath}
           onSelectFile={onSelectFile}
+          onOpenFile={onOpenFile}
           changedPaths={changedPaths}
         />
       ))}
