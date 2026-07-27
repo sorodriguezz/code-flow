@@ -204,6 +204,13 @@ export interface ActivityLogEntry {
   response_time_ms: number | null;
   /** True when the turn failed — `answer` then holds the engine's error text. */
   is_error: boolean;
+  /** Provider id that answered this turn (`claude`, `codex`, …), recorded at the time it ran so a
+   * reopened conversation isn't relabelled by today's routing. `null` for older turns. */
+  provider: string | null;
+  /** Model the CLI reported for this turn. `null` for older turns, or when it didn't report one. */
+  model: string | null;
+  /** Version of the engine CLI that answered this turn. `null` for older turns. */
+  engine_version: string | null;
 }
 
 export interface JobHistoryEntry {

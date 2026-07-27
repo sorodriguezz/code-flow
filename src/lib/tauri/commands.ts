@@ -400,6 +400,14 @@ export interface ChatReply {
   session_id: string | null;
   /** Model id the CLI reported for this turn, or `null` when it didn't report exactly one. */
   model: string | null;
+  /** Provider id that answered this turn — the engine that actually ran, not the one currently
+   * configured (they differ the moment the routing is changed mid-conversation). */
+  provider: string;
+  /** Version of the engine CLI, or `null` when it couldn't be read (HTTP engines have none). */
+  engine_version: string | null;
+  /** When the turn was recorded, RFC 3339 — taken from the persisted row, so the live timestamp
+   * and the one on a reopened conversation are the same instant. */
+  created_at: string;
   /** How long the engine took to answer, in milliseconds. */
   response_time_ms: number;
 }
@@ -483,6 +491,16 @@ export const readFileText = (repoPath: string, relPath: string) =>
 
 export const writeFileText = (repoPath: string, relPath: string, content: string) =>
   invoke<void>("write_file_text", { repoPath, relPath, content });
+
+/** Writes an exported binary to an absolute path — the one the user picked in a native save
+ * dialog, which is what authorises writing outside the repo. */
+export const writeFileBytes = (path: string, contents: Uint8Array) =>
+  invoke<void>("write_file_bytes", { path, contents: Array.from(contents) });
+
+/** Moves a file or folder into `destDir` (repo-relative; `""` is the repo root), keeping its
+ * name. Returns the new repo-relative path. */
+export const movePath = (repoPath: string, fromRel: string, destDir: string) =>
+  invoke<string>("move_path", { repoPath, fromRel, destDir });
 
 export const createDir = (repoPath: string, relPath: string) =>
   invoke<void>("create_dir", { repoPath, relPath });

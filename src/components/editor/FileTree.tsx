@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   ChevronDown,
   ChevronRight,
@@ -8,12 +9,15 @@ import {
   FolderPlus,
   RefreshCw,
 } from "lucide-react";
-import { createDir, createFile, listDir } from "../../lib/tauri/commands";
+import { createDir, createFile, listDir, movePath } from "../../lib/tauri/commands";
 import { SkeletonRows } from "../common/Skeleton";
 import type { FileEntry } from "../../types/domain";
 import { fileStatusColor, fileStatusLabelKey } from "../../lib/fileStatus";
 import { fileIconFor } from "../../lib/fileIcon";
 import { useRepoStore } from "../../state/repoStore";
+import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
+import { useRowHoverStore } from "../../state/rowHoverStore";
+import { canDropInto, useTreeDragStore, type TreeDrag } from "../../state/treeDragStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 
@@ -115,6 +119,8 @@ function TreeNode({
   onOpenFile,
   onSubmitDraft,
   onCancelDraft,
+  onBeginDrag,
+  suppressClick,
   changedPaths,
 }: {
   entry: FileEntry;
@@ -132,11 +138,24 @@ function TreeNode({
   onOpenFile?: (path: string) => void;
   onSubmitDraft: (name: string) => void;
   onCancelDraft: () => void;
+  /** Arms a possible move — the row only becomes a drag once the pointer travels far enough. */
+  onBeginDrag: (e: React.PointerEvent<HTMLElement>, entry: FileEntry) => void;
+  /** True once, right after a drag, so the trailing click doesn't also select the row. */
+  suppressClick: () => boolean;
   changedPaths: Map<string, string>;
 }) {
   const t = useT();
   const isExpanded = entry.is_dir && expanded.has(entry.path);
   const children = childrenByDir.get(entry.path) ?? null;
+
+  const drag = useTreeDragStore((s) => s.drag);
+  const overDir = useTreeDragStore((s) => s.overDir);
+  const isDragging = drag?.path === entry.path;
+  const isDropTarget = entry.is_dir && overDir === entry.path;
+  // Only this row and the one being left re-render when the pointer moves between them, which is
+  // what makes tracking hover in state affordable on a tree this size.
+  const hoverKey = `tree:${entry.path}`;
+  const isHovered = useRowHoverStore((s) => s.key === hoverKey);
 
   const isSelected = entry.is_dir ? focusedDir === entry.path : selectedPath === entry.path;
   const ownStatus = changedPaths.get(entry.path);
@@ -153,14 +172,33 @@ function TreeNode({
   return (
     <div>
       <button
-        onClick={() => (entry.is_dir ? onToggleDir(entry.path) : onSelectFile(entry.path))}
+        data-cf-treepath={entry.path}
+        data-cf-treedir={entry.is_dir ? "1" : "0"}
+        onPointerDown={(e) => onBeginDrag(e, entry)}
+        onPointerEnter={() => useRowHoverStore.getState().enter(hoverKey)}
+        onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
+        // See the same call in `EditorTabs`: stops the press from starting a text selection,
+        // while leaving click and double-click intact.
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => {
+          // A drag ends with a click on the row it started from; the tree must not also treat
+          // that as a selection.
+          if (suppressClick()) return;
+          if (entry.is_dir) onToggleDir(entry.path);
+          else onSelectFile(entry.path);
+        }}
         onDoubleClick={() => !entry.is_dir && onOpenFile?.(entry.path)}
         style={{ paddingLeft: depth * 14 + 6 }}
         className={`flex w-full items-center gap-1.5 truncate rounded-md py-0.5 pr-2 text-left text-[13px] ${
           isSelected
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-            : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-        } ${isSelected ? "" : color ? "" : "text-[var(--cf-text-muted)]"}`}
+            : // Nothing but the drop target is highlighted while a drag is in flight.
+              isHovered && !drag
+              ? "cf-row-hover"
+              : ""
+        } ${isSelected ? "" : color ? "" : "text-[var(--cf-text-muted)]"} ${
+          isDropTarget ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
+        } ${isDragging ? "opacity-40" : ""}`}
       >
         {entry.is_dir ? (
           <>
@@ -217,6 +255,8 @@ function TreeNode({
               onOpenFile={onOpenFile}
               onSubmitDraft={onSubmitDraft}
               onCancelDraft={onCancelDraft}
+              onBeginDrag={onBeginDrag}
+              suppressClick={suppressClick}
               changedPaths={changedPaths}
             />
           ))}
@@ -236,6 +276,7 @@ export function FileTree({
   selectedPath,
   onSelectFile,
   onOpenFile,
+  onPathMoved,
   changedPaths,
 }: {
   repoPath: string;
@@ -244,6 +285,9 @@ export function FileTree({
   onSelectFile: (path: string) => void;
   /** Double click — opens the file for good, pinning its tab. */
   onOpenFile?: (path: string) => void;
+  /** A file or folder was moved by dragging. The editor uses this to re-point any tab that was
+   * showing it, instead of leaving a tab aimed at a path that no longer exists. */
+  onPathMoved?: (from: string, to: string) => void;
   changedPaths: Map<string, string>;
 }) {
   const t = useT();
@@ -386,6 +430,99 @@ export function FileTree({
     [onSelectFile],
   );
 
+  /**
+   * Moving a file or folder by dragging it onto another folder.
+   *
+   * Pointer-driven rather than HTML5 drag-and-drop for the same reason the tab strip is: Tauri's
+   * native drag handler on the webview intercepts those events before the page sees them. The
+   * pointer is hit-tested against the rows' `data-cf-treepath` markers on every move, which is
+   * also what lets a *file* row stand in for its parent folder — dropping "next to" something is
+   * how people aim.
+   */
+  const suppressClickRef = useRef(false);
+  const ghostRef = useRef<HTMLDivElement | null>(null);
+  const treeDrag = useTreeDragStore((s) => s.drag);
+  const treeOverDir = useTreeDragStore((s) => s.overDir);
+  const treeOrigin = useTreeDragStore((s) => s.origin);
+
+  const applyMove = useCallback(
+    async (from: string, destDir: string) => {
+      const fromParent = parentDir(from);
+      try {
+        const to = await movePath(repoPath, from, destDir);
+        if (activeRepoRef.current !== repoPath) return;
+        // Both ends changed; the destination may not have been listed yet, in which case this
+        // primes it for when it's expanded.
+        await Promise.all([loadDir(fromParent), loadDir(destDir)]);
+        void useRepoStore.getState().refreshStatus();
+        onPathMoved?.(from, to);
+      } catch (e) {
+        pushErrorToast(String(e));
+      }
+    },
+    [repoPath, loadDir, onPathMoved],
+  );
+
+  const beginDrag = useCallback((e: React.PointerEvent<HTMLElement>, entry: FileEntry) => {
+    if (e.button !== 0) return;
+    const from = { x: e.clientX, y: e.clientY };
+    const dragged: TreeDrag = { path: entry.path, isDir: entry.is_dir };
+    let started = false;
+
+    /** The folder under the pointer: a folder row itself, a file row's parent, or the root when
+     * the pointer is over the tree's empty space. `null` where the move isn't allowed. */
+    const dirAt = (x: number, y: number): string | null => {
+      const el = document.elementFromPoint(x, y);
+      if (!el) return null;
+      const row = el.closest<HTMLElement>("[data-cf-treepath]");
+      let dir: string | null = null;
+      if (row?.dataset.cfTreepath !== undefined) {
+        dir = row.dataset.cfTreedir === "1" ? row.dataset.cfTreepath : parentDir(row.dataset.cfTreepath);
+      } else if (el.closest("[data-cf-treeroot]")) {
+        dir = "";
+      }
+      return dir !== null && canDropInto(dragged, dir) ? dir : null;
+    };
+
+    const onMove = (ev: PointerEvent) => {
+      if (!started) {
+        if (Math.hypot(ev.clientX - from.x, ev.clientY - from.y) < DRAG_THRESHOLD) return;
+        started = true;
+        suppressClickRef.current = true;
+        setDragCursor(true);
+        useTreeDragStore.getState().start(dragged, ev.clientX, ev.clientY);
+      }
+      if (ghostRef.current) {
+        ghostRef.current.style.transform = `translate(${ev.clientX + 12}px, ${ev.clientY + 12}px)`;
+      }
+      useTreeDragStore.getState().hover(dirAt(ev.clientX, ev.clientY));
+    };
+
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      if (!started) return;
+      const dest = dirAt(ev.clientX, ev.clientY);
+      setDragCursor(false);
+      useTreeDragStore.getState().end();
+      if (dest !== null) void applyMoveRef.current(dragged.path, dest);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }, []);
+
+  const applyMoveRef = useRef(applyMove);
+  applyMoveRef.current = applyMove;
+
+  const takeSuppressedClick = useCallback(() => {
+    if (!suppressClickRef.current) return false;
+    suppressClickRef.current = false;
+    return true;
+  }, []);
+
   const rootEntries = childrenByDir.get("") ?? null;
 
   return (
@@ -408,12 +545,16 @@ export function FileTree({
         </ToolbarButton>
       </div>
       <div
+        data-cf-treeroot=""
         // Clicking empty space below the tree targets the repo root, so a new file created
         // right after lands at the top level instead of inside a previously clicked folder.
         onClick={(e) => {
           if (e.target === e.currentTarget) setFocus({ path: "", isDir: true });
         }}
-        className="min-h-0 flex-1 overflow-auto py-1"
+        // Dropping on that same empty space moves to the repo root.
+        className={`min-h-0 flex-1 overflow-auto py-1 ${
+          treeOverDir === "" ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
+        }`}
       >
         {!rootEntries ? (
           <SkeletonRows count={10} className="cf-fade-in" />
@@ -437,12 +578,29 @@ export function FileTree({
                 onOpenFile={onOpenFile}
                 onSubmitDraft={submitDraft}
                 onCancelDraft={cancelDraft}
+                onBeginDrag={beginDrag}
+                suppressClick={takeSuppressedClick}
                 changedPaths={changedPaths}
               />
             ))}
           </>
         )}
       </div>
+
+      {/* Portalled so no ancestor's `overflow` clips it, and click-through so it never becomes
+          the element `elementFromPoint` finds under the cursor. */}
+      {treeDrag &&
+        treeOrigin &&
+        createPortal(
+          <div
+            ref={ghostRef}
+            style={{ transform: `translate(${treeOrigin.x + 12}px, ${treeOrigin.y + 12}px)` }}
+            className="pointer-events-none fixed left-0 top-0 z-[100] rounded-md border border-[var(--cf-accent)] bg-[var(--cf-surface)] px-2 py-1 text-[11px] text-[var(--cf-text)] shadow-lg"
+          >
+            {treeDrag.path.split("/").pop()}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

@@ -285,6 +285,9 @@ export const EDITOR_RESERVED: { chord: Chord; labelKey: TranslationKey }[] = [
   { chord: "Alt+ArrowUp", labelKey: "shortcuts.moveLine" },
   { chord: "Alt+ArrowDown", labelKey: "shortcuts.moveLine" },
   { chord: "Mod+Shift+K", labelKey: "shortcuts.deleteLine" },
+  { chord: "Mod+Shift+M", labelKey: "anchors.title" },
+  { chord: "Mod+Shift+C", labelKey: "codesnap.action" },
+  { chord: "Mod+\\", labelKey: "editor.splitRight" },
   { chord: "Mod+Z", labelKey: "shortcuts.undo" },
 ];
 

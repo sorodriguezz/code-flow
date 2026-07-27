@@ -434,6 +434,19 @@ pub fn delete_workspace_mcp(conn: &Connection, id: &str) -> rusqlite::Result<()>
 
 // ---------- activity log (AI chat history / conversations) ----------
 
+/// Who answered a chat turn, on what, and how long it took — the facts stamped under the reply.
+/// Grouped into one argument so [`add_activity_log`] keeps a readable signature as this grows.
+#[derive(Default)]
+pub struct TurnMeta<'a> {
+    /// Provider id the turn actually ran through (`claude`, `codex`, …).
+    pub provider: Option<&'a str>,
+    /// Model the CLI reported for the turn. `None` when it didn't report exactly one.
+    pub model: Option<&'a str>,
+    /// Version of the engine CLI. `None` for HTTP engines, or when the probe failed.
+    pub engine_version: Option<&'a str>,
+    pub response_time_ms: Option<i64>,
+}
+
 pub fn add_activity_log(
     conn: &Connection,
     project_id: &str,
@@ -442,7 +455,7 @@ pub fn add_activity_log(
     question: &str,
     answer: &str,
     trace: Option<&str>,
-    response_time_ms: Option<i64>,
+    meta: TurnMeta<'_>,
     is_error: bool,
 ) -> rusqlite::Result<ActivityLogEntry> {
     let entry = ActivityLogEntry {
@@ -454,12 +467,15 @@ pub fn add_activity_log(
         answer: answer.to_string(),
         trace: trace.map(str::to_string),
         created_at: now(),
-        response_time_ms,
+        response_time_ms: meta.response_time_ms,
         is_error,
+        provider: meta.provider.map(str::to_string),
+        model: meta.model.map(str::to_string),
+        engine_version: meta.engine_version.map(str::to_string),
     };
     conn.execute(
-        "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             entry.id,
             entry.project_id,
@@ -470,7 +486,10 @@ pub fn add_activity_log(
             entry.trace,
             entry.created_at,
             entry.response_time_ms,
-            entry.is_error
+            entry.is_error,
+            entry.provider,
+            entry.model,
+            entry.engine_version
         ],
     )?;
     Ok(entry)
@@ -478,7 +497,7 @@ pub fn add_activity_log(
 
 /// The column list every `activity_log` read shares, so the row indices below can't drift apart.
 const ACTIVITY_COLUMNS: &str =
-    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error";
+    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version";
 
 fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> {
     Ok(ActivityLogEntry {
@@ -492,6 +511,9 @@ fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> 
         created_at: row.get(7)?,
         response_time_ms: row.get(8)?,
         is_error: row.get(9)?,
+        provider: row.get(10)?,
+        model: row.get(11)?,
+        engine_version: row.get(12)?,
     })
 }
 
@@ -744,8 +766,18 @@ mod tests {
     }
 
     fn log(conn: &Connection, project: &str, conversation: &str, engine_session: &str, question: &str) {
-        add_activity_log(conn, project, conversation, Some(engine_session), question, "answer", None, None, false)
-            .unwrap();
+        add_activity_log(
+            conn,
+            project,
+            conversation,
+            Some(engine_session),
+            question,
+            "answer",
+            None,
+            TurnMeta::default(),
+            false,
+        )
+        .unwrap();
     }
 
     /// The bug this split fixes: Codex reports one fixed session sentinel for every run, so when

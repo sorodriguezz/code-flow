@@ -100,6 +100,15 @@ pub struct ActivityLogEntry {
     /// How long the engine took to answer this turn, in milliseconds. `None` for turns recorded
     /// before this was tracked.
     pub response_time_ms: Option<i64>,
+    /// Provider id this turn ran through (`claude`, `codex`, …). Recorded per turn rather than
+    /// read from the setting at display time, because the setting is a *current* choice — a
+    /// conversation reopened later would otherwise claim to have run on whatever is configured
+    /// now. `None` for turns recorded before this was tracked.
+    pub provider: Option<String>,
+    /// Model the CLI reported for this turn, for the same reason as `provider`.
+    pub model: Option<String>,
+    /// Version of the engine CLI that answered this turn.
+    pub engine_version: Option<String>,
     /// Whether this turn failed — `answer` then holds the engine's error rather than a reply, so
     /// a run that died (out of credit, CLI missing) is still there tomorrow.
     pub is_error: bool,

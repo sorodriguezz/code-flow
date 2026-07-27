@@ -619,6 +619,61 @@ export function monacoThemeName(id: string): string {
   return `cf-${id}`;
 }
 
+export interface TokenRule {
+  /** Monaco token scope, e.g. `keyword` or `attribute.value`. `""` is the catch-all. */
+  token: string;
+  /** Hex with the `#`. Monaco wants it bare, so `monacoSetup` strips it; the code-snapshot
+   * renderer paints with it directly. */
+  foreground: string;
+  fontStyle?: "italic";
+}
+
+/** How a scheme colours code, as scope→colour rules.
+ *
+ * Shared rather than inlined at the Monaco registration, because the code-snapshot renderer
+ * paints tokens onto a canvas itself and has to reach the *same* conclusion Monaco does — a
+ * snapshot whose colours don't match the editor it was taken from is a bug you can see. */
+export function tokenRulesFor(theme: CodeTheme): TokenRule[] {
+  return [
+    { token: "", foreground: theme.tokens.variable },
+    { token: "comment", foreground: theme.tokens.comment, fontStyle: "italic" },
+    { token: "keyword", foreground: theme.tokens.keyword },
+    { token: "keyword.json", foreground: theme.tokens.constant },
+    { token: "string", foreground: theme.tokens.string },
+    { token: "string.key", foreground: theme.tokens.variable },
+    { token: "string.value", foreground: theme.tokens.string },
+    { token: "number", foreground: theme.tokens.number },
+    { token: "regexp", foreground: theme.tokens.string },
+    { token: "type", foreground: theme.tokens.type },
+    { token: "type.identifier", foreground: theme.tokens.type },
+    { token: "constant", foreground: theme.tokens.constant },
+    { token: "function", foreground: theme.tokens.fn },
+    { token: "identifier", foreground: theme.tokens.variable },
+    { token: "variable", foreground: theme.tokens.variable },
+    { token: "variable.predefined", foreground: theme.tokens.constant },
+    { token: "operator", foreground: theme.tokens.operator },
+    { token: "delimiter", foreground: theme.ui.textMuted },
+    { token: "tag", foreground: theme.tokens.tag },
+    { token: "metatag", foreground: theme.tokens.tag },
+    { token: "attribute.name", foreground: theme.tokens.attribute },
+    { token: "attribute.value", foreground: theme.tokens.string },
+    { token: "annotation", foreground: theme.tokens.attribute },
+  ];
+}
+
+/** Resolves one of Monaco's token types (`keyword.ts`, `string.quoted.double.js`) to its colour,
+ * the way Monaco's own theme service does: the rule whose scope is the longest dot-delimited
+ * prefix of the type wins, and `""` catches everything else. */
+export function resolveTokenRule(tokenType: string, rules: TokenRule[]): TokenRule {
+  let best = rules.find((r) => r.token === "") ?? rules[0];
+  for (const rule of rules) {
+    if (rule.token === "") continue;
+    const matches = tokenType === rule.token || tokenType.startsWith(`${rule.token}.`);
+    if (matches && rule.token.length > best.token.length) best = rule;
+  }
+  return best;
+}
+
 /** Paints the app in this scheme by rewriting the CSS variables every component already reads.
  *
  * `--cf-accent` is deliberately not touched: the accent picker owns it, and a theme silently

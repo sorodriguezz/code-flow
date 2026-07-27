@@ -71,6 +71,74 @@ pub fn write_file_text(repo_path: &str, rel_path: &str, content: &str) -> Result
     std::fs::write(&full, content).map_err(|e| e.to_string())
 }
 
+/// Writes raw bytes to an **absolute** path chosen by the user in a native save dialog.
+///
+/// Deliberately not scoped to a repo like the rest of this module: the whole point of an export
+/// is that it lands wherever the user pointed the dialog — Desktop, Downloads, a scratch folder.
+/// The dialog *is* the authorisation here, which is why this takes a path rather than a
+/// directory-plus-name the caller could have assembled from something else.
+pub fn write_file_bytes(path: &str, contents: &[u8]) -> Result<(), String> {
+    let target = Path::new(path);
+    if !target.is_absolute() {
+        return Err(format!("expected an absolute path, got: {path}"));
+    }
+    if let Some(parent) = target.parent() {
+        if !parent.is_dir() {
+            return Err(format!("no such folder: {}", parent.display()));
+        }
+    }
+    std::fs::write(target, contents).map_err(|e| e.to_string())
+}
+
+/// Moves a file or directory into `dest_dir` (repo-relative; `""` is the repo root), keeping its
+/// name. Returns the new repo-relative path.
+///
+/// This is what the explorer's drag-and-drop calls, so the guards matter more than usual — a
+/// dragged row is a much easier thing to get wrong than a typed command:
+/// - both ends are resolved inside the repo, so a drag can never write outside it;
+/// - moving a directory into itself (or into its own descendant) is rejected, which the
+///   filesystem would otherwise turn into a lost subtree;
+/// - an existing name at the destination is refused rather than overwritten.
+pub fn move_path(repo_path: &str, from_rel: &str, dest_dir: &str) -> Result<String, String> {
+    let source = resolve_within_repo(repo_path, from_rel)?;
+    let name = source
+        .file_name()
+        .ok_or_else(|| format!("cannot move {from_rel}"))?
+        .to_owned();
+
+    let base = Path::new(repo_path)
+        .canonicalize()
+        .map_err(|e| format!("invalid repo path: {e}"))?;
+    let dest = if dest_dir.trim().is_empty() {
+        base.clone()
+    } else {
+        resolve_within_repo(repo_path, dest_dir)?
+    };
+    if !dest.is_dir() {
+        return Err(format!("{dest_dir} is not a folder"));
+    }
+
+    // Comparing canonical paths, so a symlinked route into the subtree is caught too.
+    if source.is_dir() && dest.starts_with(&source) {
+        return Err("cannot move a folder into itself".to_string());
+    }
+    let target = dest.join(&name);
+    if target == source {
+        // Dropped back where it already lives — not an error, just nothing to do.
+        return Ok(from_rel.to_string());
+    }
+    if target.exists() {
+        return Err(format!("{} already exists here", name.to_string_lossy()));
+    }
+
+    std::fs::rename(&source, &target).map_err(|e| e.to_string())?;
+    Ok(target
+        .strip_prefix(&base)
+        .map_err(|_| "moved outside the repository".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/"))
+}
+
 /// Resolves the target of a *creation*, which by definition doesn't exist yet — so
 /// `resolve_within_repo`'s canonicalize-based containment check can't see through a `..`
 /// segment. Requiring every component to be a plain name is the equivalent guard here, and
@@ -174,6 +242,41 @@ mod tests {
 
         create_file(&root, "src/nested/new.ts").unwrap();
         assert_eq!(read_file_text(&root, "src/nested/new.ts").unwrap(), "");
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The explorer's drag-and-drop calls this, so the guards are the test: a mis-aimed drop must
+    /// fail loudly rather than overwrite a file or swallow a directory into itself.
+    #[test]
+    fn moves_within_the_repo_and_refuses_the_destructive_cases() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+        create_dir(&root, "src/nested").unwrap();
+        create_dir(&root, "other").unwrap();
+        create_file(&root, "src/a.ts").unwrap();
+        create_file(&root, "other/a.ts").unwrap();
+
+        // Into a sibling folder, then back out to the repo root.
+        assert_eq!(move_path(&root, "src/a.ts", "src/nested").unwrap(), "src/nested/a.ts");
+        assert!(repo.join("src/nested/a.ts").is_file());
+        assert_eq!(move_path(&root, "src/nested/a.ts", "").unwrap(), "a.ts");
+        assert!(repo.join("a.ts").is_file());
+
+        // A name already taken at the destination is refused, not overwritten.
+        assert!(move_path(&root, "other/a.ts", "").is_err());
+        assert!(repo.join("other/a.ts").is_file());
+
+        // A folder cannot swallow itself, directly or through a descendant.
+        assert!(move_path(&root, "src", "src").is_err());
+        assert!(move_path(&root, "src", "src/nested").is_err());
+        assert!(repo.join("src/nested").is_dir());
+
+        // Dropped back where it already lives: a no-op, not a failure.
+        assert_eq!(move_path(&root, "other/a.ts", "other").unwrap(), "other/a.ts");
+
+        // And nothing may leave the repository.
+        assert!(move_path(&root, "a.ts", "..").is_err());
 
         std::fs::remove_dir_all(&repo).ok();
     }

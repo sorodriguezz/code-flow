@@ -1,128 +1,54 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
-import type { editor as MonacoEditorNS, IRange } from "monaco-editor";
-import {
-  ChevronRight,
-  Code2,
-  Columns2,
-  Eye,
-  Bug,
-  FileCode,
-  FileSearch,
-  Files,
-  Keyboard,
-  Loader2,
-  Save,
-  Search,
-} from "lucide-react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import * as monaco from "monaco-editor";
+import { Bug, FileCode, FileSearch, Files, Keyboard, Search, Tags } from "lucide-react";
 import { FileTree } from "./FileTree";
-import { MarkdownPreview } from "./MarkdownPreview";
-import { DbmlDiagram } from "./DbmlDiagram";
-import { EditorTabs, type EditorTabItem } from "./EditorTabs";
 import { FilePalette } from "./FilePalette";
 import { SearchPanel } from "./SearchPanel";
-import { InlineEditWidget } from "./InlineEditWidget";
+import { AnchorsPanel } from "./AnchorsPanel";
+import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
+import { EditorPane, modelPathFor, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
+import {
+  closeGroupInGroups,
+  closeTabInGroups,
+  moveTabInGroups,
+  newGroup,
+  openInGroups,
+  splitGroups,
+  type EditorGroup,
+} from "../../lib/editorGroups";
 import { readFileText, writeFileText } from "../../lib/tauri/commands";
 import { onRepoFsChanged } from "../../lib/tauri/events";
-import { languageForPath } from "../../lib/monacoLanguage";
-import { fileIconFor } from "../../lib/fileIcon";
-import { parseDbml } from "../../lib/dbml";
+import { findTheme } from "../../lib/codeThemes";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
+import type { TabDrag } from "../../state/tabDragStore";
 import { confirmAction } from "../../state/confirmStore";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
-import { BouncingDots } from "../common/BouncingDots";
 import { useT } from "../../state/languageStore";
-import type { FileDiffInfo, Project } from "../../types/domain";
 
 const TREE_MIN = 200;
 const TREE_MAX = 480;
 const MODEL_SCHEME = "cf-editor";
-
-type PreviewKind = "markdown" | "dbml" | null;
-type ViewMode = "code" | "preview" | "split";
-
-interface OpenTab {
-  path: string;
-  content: string;
-  originalContent: string;
-  loading: boolean;
-  viewMode: ViewMode;
-  /** Ephemeral tab: opened by a single click in the tree and reused by the next single
-   * click, so browsing a repo doesn't leave a trail of tabs behind. Editing it, or
-   * double-clicking either the file or the tab, makes it permanent. */
-  preview: boolean;
-}
-
-/** One Monaco model per open file (instead of one shared model whose text gets swapped)
- * so each tab keeps its own undo history, cursor and scroll position. Namespaced by
- * project so two repos with a `src/main.ts` never collide on the same model. */
-function modelPathFor(project: Project, relPath: string): string {
-  return `${MODEL_SCHEME}:/${encodeURIComponent(project.id)}/${encodeURIComponent(relPath)}`;
-}
-
-function previewKindFor(path: string | null): PreviewKind {
-  if (!path) return null;
-  const lower = path.toLowerCase();
-  if (lower.endsWith(".md") || lower.endsWith(".markdown")) return "markdown";
-  if (lower.endsWith(".dbml")) return "dbml";
-  return null;
-}
-
-function resolveCssColor(varName: string, fallback: string): string {
-  if (typeof window === "undefined") return fallback;
-  const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim();
-  return value || fallback;
-}
-
-/** Groups a file diff's added/current lines (origin "+", which for a modified line is its
- * *new* content — exactly what the editor is currently showing) into contiguous ranges, so
- * a 40-line block of changes becomes one decoration instead of 40. */
-function changedLineRanges(fileDiff: FileDiffInfo | undefined): { start: number; end: number }[] {
-  if (!fileDiff) return [];
-  const lines: number[] = [];
-  for (const hunk of fileDiff.hunks) {
-    for (const line of hunk.lines) {
-      if (line.origin === "+" && line.new_lineno) lines.push(line.new_lineno);
-    }
-  }
-  lines.sort((a, b) => a - b);
-  const ranges: { start: number; end: number }[] = [];
-  for (const n of lines) {
-    const last = ranges[ranges.length - 1];
-    if (last && n === last.end + 1) last.end = n;
-    else ranges.push({ start: n, end: n });
-  }
-  return ranges;
-}
-
-/** VS Code-style path bar under the tabs: the folders leading to the open file, then the
- * file itself in its language color. */
-function Breadcrumb({ path, dirty, loading }: { path: string; dirty: boolean; loading: boolean }) {
-  const segments = path.split("/");
-  const name = segments.pop()!;
-  const { Icon, color } = fileIconFor(path);
-  return (
-    <div className="flex h-6 shrink-0 items-center gap-0.5 overflow-hidden border-b border-[var(--cf-border)] px-3 text-[11px] text-[var(--cf-text-muted)]">
-      {segments.map((segment, i) => (
-        <span key={`${segment}-${i}`} className="flex shrink-0 items-center gap-0.5">
-          <span className="truncate">{segment}</span>
-          <ChevronRight size={11} className="opacity-60" />
-        </span>
-      ))}
-      <Icon size={11} className="mr-1 shrink-0" style={{ color }} />
-      <span className="truncate text-[var(--cf-text)]">{name}</span>
-      {dirty && <span className="ml-1 shrink-0 text-[var(--cf-warning)]">•</span>}
-      {loading && <Loader2 size={11} className="ml-1 shrink-0 animate-spin" />}
-    </div>
-  );
-}
+const GROUP_MAX = 2000;
+/** Matches the `w-1.5` on `ResizeHandle`, which the even-split maths has to account for. */
+const HANDLE_WIDTH = 6;
+/**
+ * Hard floor on a group's width — the bug this fixes was worth the constant.
+ *
+ * A pane's tab strip can shrink to nothing, but the toolbar beside it (split, close group, save)
+ * cannot: it's `shrink-0`, so once the pane is narrower than the toolbar the buttons overflow and
+ * get clipped by the pane's own `overflow-hidden`. Splitting a few times used to produce panes
+ * you could no longer split *or close* — the controls were still there, just painted outside the
+ * box. Below this width the row scrolls horizontally instead, which keeps every control reachable
+ * however many times you split.
+ */
+const GROUP_MIN = 320;
 
 export function EditorView() {
   const t = useT();
@@ -141,6 +67,14 @@ export function EditorView() {
   }, [status]);
   const resolved = useThemeStore((s) => s.resolved);
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
+  const darkThemeId = useThemeStore((s) => s.darkThemeId);
+  const lightThemeId = useThemeStore((s) => s.lightThemeId);
+  // The scheme Monaco is painting with, as data rather than as its registered name — the code
+  // snapshot renders tokens itself and needs the palette, not the id.
+  const activeCodeTheme = useMemo(
+    () => findTheme(resolved === "dark" ? darkThemeId : lightThemeId, resolved),
+    [resolved, darkThemeId, lightThemeId],
+  );
   const workingDiff = useRepoStore((s) => s.workingDiff);
   const stagedDiff = useRepoStore((s) => s.stagedDiff);
   const activeView = useUiStore((s) => s.activeView);
@@ -151,37 +85,43 @@ export function EditorView() {
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
 
+  /** Every open file, once, however many groups are showing it. */
   const [tabs, setTabs] = useState<OpenTab[]>([]);
-  const [activePath, setActivePath] = useState<string | null>(null);
+  const [groups, setGroups] = useState<EditorGroup[]>(() => [newGroup()]);
+  const [activeGroupId, setActiveGroupId] = useState<string>(() => groups[0].id);
   const [saving, setSaving] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [sidePanel, setSidePanel] = useState<"files" | "search" | "debug">("files");
-  /** The selection Ctrl+I was pressed on, captured at that moment: the widget's own input steals
-   * focus, and Monaco's selection is gone by the time the instruction is submitted. */
-  const [inlineEdit, setInlineEdit] = useState<{
-    selection: string;
-    range: IRange;
-  } | null>(null);
-  /** A line to reveal once the file is open and Monaco has mounted — set by a search hit. */
-  const pendingRevealRef = useRef<{ path: string; line: number } | null>(null);
-  const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
-  const monacoRef = useRef<Monaco | null>(null);
-  // Decoration ids are per *model*, so they have to be tracked per open file — reusing one
-  // list across tabs would try to replace ids that belong to another tab's model.
-  const decorationIdsRef = useRef<Map<string, string[]>>(new Map());
-  const tabsRef = useRef<OpenTab[]>([]);
-  const previewScrollRef = useRef<HTMLDivElement | null>(null);
-  const scrollSyncGuardRef = useRef<"editor" | "preview" | null>(null);
-  // Bumped every time a Monaco instance actually finishes mounting — the code panel remounts
-  // Monaco whenever it toggles away and back (preview-only mode), which would otherwise leave
-  // effects keyed on `[ranges]`/`[viewMode]` alone reading a stale/disposed `editorRef.current`
-  // if they happened to fire before the new instance was ready.
-  const [editorReady, setEditorReady] = useState(0);
+  const [sidePanel, setSidePanel] = useState<"files" | "search" | "anchors" | "debug">("files");
+  /** The snapshot being composed, or `null` when the dialog is closed. */
+  const [codeSnap, setCodeSnap] = useState<CodeSnapTarget | null>(null);
+  /** Which group should jump where. Scoped to a group because "go to this search hit" means the
+   * pane the user is working in, not every pane that happens to have the file open. */
+  const [reveal, setReveal] = useState<{ groupId: string; request: RevealRequest } | null>(null);
+  const revealNonce = useRef(0);
+  /** Width of every group but the last, which flexes. Session-only: a split is a transient
+   * arrangement, not a setting. */
+  const [groupWidths, setGroupWidths] = useState<number[]>([]);
+  const groupsRowRef = useRef<HTMLDivElement>(null);
+  /** The focused pane's "capture a snapshot" function, re-registered whenever focus moves, so
+   * the keyboard shortcut reaches the group the user is looking at even from outside the code. */
+  const captureRef = useRef<(() => void) | null>(null);
 
+  // Assigned during render, not in an effect: the callbacks below read them to decide what to do
+  // *now*, and a ref that lagged a render would act on the previous tab or group.
+  const tabsRef = useRef<OpenTab[]>(tabs);
+  tabsRef.current = tabs;
+  const groupsRef = useRef<EditorGroup[]>(groups);
+  groupsRef.current = groups;
+  const activeGroupIdRef = useRef(activeGroupId);
+  activeGroupIdRef.current = activeGroupId;
+
+  const activeGroup = useMemo(
+    () => groups.find((g) => g.id === activeGroupId) ?? groups[0],
+    [groups, activeGroupId],
+  );
+  const activePath = activeGroup?.activePath ?? null;
   const activeTab = useMemo(() => tabs.find((tab) => tab.path === activePath) ?? null, [tabs, activePath]);
-  const content = activeTab?.content ?? "";
-  const dirty = activeTab ? activeTab.content !== activeTab.originalContent : false;
-  const viewMode = activeTab?.viewMode ?? "code";
+  const activeContent = activeTab?.content ?? "";
 
   // `useT()` hands back a fresh function every render; callbacks that only need it to
   // build a message read it through this ref instead of taking it as a dependency and
@@ -191,179 +131,45 @@ export function EditorView() {
     tRef.current = t;
   });
 
-  useEffect(() => {
-    tabsRef.current = tabs;
-  }, [tabs]);
-
   const activeAbsolutePath = useMemo(
     () => (project && activePath ? normalizePath(`${project.local_path}/${activePath}`) : null),
     [project, activePath],
   );
-  const breakpoints = useDebugStore((s) => s.breakpoints);
-  // Monaco's mouse handler is registered once, at mount; a ref is how it sees the *current*
-  // file rather than whichever one was open when it was wired up.
-  const activeAbsolutePathRef = useRef<string | null>(null);
-  activeAbsolutePathRef.current = activeAbsolutePath;
   const debugStatus = useDebugStore((s) => s.status);
-  const pausedFrame = useDebugStore((s) => (s.status === "paused" ? s.frames[s.selectedFrame] : undefined));
 
-  const previewKind = previewKindFor(activePath);
-  const dbmlSchema = useMemo(() => (previewKind === "dbml" ? parseDbml(content) : null), [previewKind, content]);
+  // Same "unstaged wins, else staged" priority as the file tree's own indicator, so the
+  // gutter/minimap markers always match whatever status letter that file is showing there.
+  const fileDiffFor = useCallback(
+    (path: string) =>
+      workingDiff.find((f) => (f.new_path ?? f.old_path) === path) ??
+      stagedDiff.find((f) => (f.new_path ?? f.old_path) === path),
+    [workingDiff, stagedDiff],
+  );
 
   const patchTab = useCallback((path: string, patch: Partial<OpenTab>) => {
     setTabs((prev) => prev.map((tab) => (tab.path === path ? { ...tab, ...patch } : tab)));
   }, []);
 
-  // Same "unstaged wins, else staged" priority as the file tree's own indicator, so the
-  // gutter/minimap markers always match whatever status letter that file is showing there.
-  const fileDiff = useMemo(() => {
-    if (!activePath) return undefined;
-    return (
-      workingDiff.find((f) => (f.new_path ?? f.old_path) === activePath) ??
-      stagedDiff.find((f) => (f.new_path ?? f.old_path) === activePath)
-    );
-  }, [activePath, workingDiff, stagedDiff]);
-
-  const ranges = useMemo(() => changedLineRanges(fileDiff), [fileDiff]);
-
-  // Marks changed lines directly on Monaco's own minimap + overview ruler + gutter, rather
-  // than a bespoke strip — this *is* the "code map" the Changes tab has, just reused where
-  // Monaco already renders one.
-  const applyDecorations = useCallback(() => {
-    const ed = editorRef.current;
-    const mon = monacoRef.current;
-    // A disposed editor (Monaco unmounted for preview-only mode, or between tab closes)
-    // reports no model — bail instead of poking at its internals.
-    if (!ed || !mon || !activePath || !ed.getModel()) return;
-    const color = resolveCssColor("--cf-success", "#22c55e");
-    const decorations: MonacoEditorNS.IModelDeltaDecoration[] = ranges.map((r) => ({
-      range: new mon.Range(r.start, 1, r.end, 1),
-      options: {
-        isWholeLine: true,
-        className: "cf-editor-changed-line",
-        linesDecorationsClassName: "cf-editor-changed-gutter",
-        minimap: { color, position: mon.editor.MinimapPosition.Inline },
-        overviewRuler: { color, position: mon.editor.OverviewRulerLane.Left },
-      },
-    }));
-    const previous = decorationIdsRef.current.get(activePath) ?? [];
-    decorationIdsRef.current.set(activePath, ed.deltaDecorations(previous, decorations));
-  }, [ranges, activePath]);
-
-  // Breakpoints and the stopped line are their own decoration set: they change on a completely
-  // different rhythm from the git markers, and mixing them would make each update clobber the
-  // other's ids.
-  const debugDecorationsRef = useRef<string[]>([]);
-  useEffect(() => {
-    const ed = editorRef.current;
-    const mon = monacoRef.current;
-    if (!ed || !mon || !ed.getModel()) return;
-    const lines = activeAbsolutePath ? (breakpoints[activeAbsolutePath] ?? []) : [];
-    const decorations: MonacoEditorNS.IModelDeltaDecoration[] = lines.map((line) => ({
-      range: new mon.Range(line, 1, line, 1),
-      options: { isWholeLine: false, glyphMarginClassName: "cf-breakpoint-glyph" },
-    }));
-    // Only when the *selected* frame is this file: stepping through a call shows where you are,
-    // not a stale highlight in a file you happen to have open.
-    const pausedHere =
-      pausedFrame && activeAbsolutePath && normalizePath(pausedFrame.file) === activeAbsolutePath;
-    if (pausedHere && pausedFrame) {
-      decorations.push({
-        range: new mon.Range(pausedFrame.line, 1, pausedFrame.line, 1),
-        options: {
-          isWholeLine: true,
-          className: "cf-debug-current-line",
-          glyphMarginClassName: "cf-debug-current-glyph",
-        },
-      });
-    }
-    debugDecorationsRef.current = ed.deltaDecorations(debugDecorationsRef.current, decorations);
-  }, [breakpoints, activeAbsolutePath, pausedFrame, editorReady, activeTab?.loading]);
-
-  const handleMount: OnMount = (editorInstance, monacoInstance) => {
-    editorRef.current = editorInstance;
-    monacoRef.current = monacoInstance;
-    // Ctrl+I is registered on the editor rather than on `window` so it only ever fires with the
-    // caret in the code — and so Monaco's own keybinding service swallows it before the browser
-    // or another panel sees it.
-    editorInstance.addCommand(monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyI, () => {
-      const model = editorInstance.getModel();
-      const selection = editorInstance.getSelection();
-      if (!model || !selection) return;
-      // With nothing selected, the current line is the implied target — asking someone to select
-      // a line before rewriting it is a step the editor can take for them.
-      const range = selection.isEmpty()
-        ? new monacoInstance.Range(
-            selection.startLineNumber,
-            1,
-            selection.startLineNumber,
-            model.getLineMaxColumn(selection.startLineNumber),
-          )
-        : selection;
-      const text = model.getValueInRange(range);
-      if (!text.trim()) return;
-      setInlineEdit({ selection: text, range });
-    });
-    // Clicking the gutter toggles a breakpoint — the only way anyone expects to set one.
-    editorInstance.onMouseDown((event) => {
-      if (event.target.type !== monacoInstance.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) return;
-      const line = event.target.position?.lineNumber;
-      const path = activeAbsolutePathRef.current;
-      if (line && path) useDebugStore.getState().toggleBreakpoint(path, line);
-    });
-    applyDecorations();
-    setEditorReady((n) => n + 1);
-  };
-
-  /** Applies an AI rewrite through Monaco's edit stack, so it joins the undo history and shows
-   * up as an ordinary unsaved change instead of appearing from nowhere. */
-  const applyInlineEdit = useCallback(
-    (replacement: string) => {
-      const ed = editorRef.current;
-      const target = inlineEdit;
-      if (!ed || !target || !ed.getModel()) return;
-      ed.executeEdits("cf-inline-edit", [{ range: target.range, text: replacement, forceMoveMarkers: true }]);
-      ed.pushUndoStop();
-      ed.focus();
-    },
-    [inlineEdit],
-  );
-
-  // Re-applies decorations when the diff/theme changes, and when the active tab changes
-  // (each tab has its own model, so the new one starts undecorated).
-  useEffect(() => {
-    applyDecorations();
-  }, [applyDecorations, resolved, editorReady]);
-
   const openFile = useCallback(
-    async (path: string, opts?: { pin?: boolean }) => {
+    async (path: string, opts?: { pin?: boolean; groupId?: string }) => {
       if (!project) return;
       const pin = opts?.pin ?? false;
-      const existing = tabs.find((tab) => tab.path === path);
-      if (existing) {
-        if (pin && existing.preview) patchTab(path, { preview: false });
-        setActivePath(path);
-        return;
-      }
+      const targetId = opts?.groupId ?? activeGroupIdRef.current;
+      const alreadyOpen = tabsRef.current.some((tab) => tab.path === path);
 
-      const fresh: OpenTab = {
-        path,
-        content: "",
-        originalContent: "",
-        loading: true,
-        viewMode: "code",
-        preview: !pin,
-      };
+      const outcome = openInGroups(groupsRef.current, targetId, path, pin, (p) =>
+        Boolean(tabsRef.current.find((tab) => tab.path === p)?.preview),
+      );
+      setGroups(outcome.groups);
+      setActiveGroupId(targetId);
+
       setTabs((prev) => {
-        // A new preview open takes over the existing preview tab's slot instead of adding
-        // one, which is what keeps click-through-the-tree from flooding the strip.
-        const previewIndex = pin ? -1 : prev.findIndex((tab) => tab.preview);
-        if (previewIndex < 0) return [...prev, fresh];
-        const next = [...prev];
-        next[previewIndex] = fresh;
-        return next;
+        // An evicted preview only leaves the registry if no other group was showing it too.
+        const kept = outcome.evictedFully ? prev.filter((tab) => tab.path !== outcome.evicted) : prev;
+        if (alreadyOpen) return pin ? kept.map((tab) => (tab.path === path ? { ...tab, preview: false } : tab)) : kept;
+        return [...kept, { path, content: "", originalContent: "", loading: true, viewMode: "code", preview: !pin }];
       });
-      setActivePath(path);
+      if (alreadyOpen) return;
 
       try {
         const text = await readFileText(project.local_path, path);
@@ -373,73 +179,91 @@ export function EditorView() {
         patchTab(path, { content: message, originalContent: message, loading: false });
       }
     },
-    [project, tabs, patchTab],
+    [project, patchTab],
   );
 
-  const closeTab = useCallback(async (path: string) => {
+  const closeTab = useCallback(async (groupId: string, path: string) => {
     const tab = tabsRef.current.find((item) => item.path === path);
     if (!tab) return;
-    if (tab.content !== tab.originalContent) {
+    // Only the *last* view of a file is a real close — shutting one of two panes onto the same
+    // buffer loses nothing, so it has no business asking.
+    const viewCount = groupsRef.current.filter((g) => g.paths.includes(path)).length;
+    if (viewCount <= 1 && tab.content !== tab.originalContent) {
       const ok = await confirmAction(
         tRef.current("editor.closeDirtyConfirm", { name: path.split("/").pop() ?? path }),
         true,
       );
       if (!ok) return;
     }
-    // Re-read after the (awaited) confirm — the tab list can have moved on while the
-    // modal was up.
-    const current = tabsRef.current;
-    const index = current.findIndex((item) => item.path === path);
-    if (index < 0) return;
-    const next = current.filter((item) => item.path !== path);
-    decorationIdsRef.current.delete(path);
-    setTabs(next);
-    // Falls back to the tab that slid into the closed one's slot, then to its left
-    // neighbour — the same "keep looking at something adjacent" rule editors use.
-    setActivePath((prev) => (prev === path ? ((next[index] ?? next[index - 1])?.path ?? null) : prev));
+    // Re-read after the (awaited) confirm — groups can have moved on while the modal was up.
+    const next = closeTabInGroups(groupsRef.current, groupId, path);
+    setGroups(next);
+    if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
+    // Out of every group means out of the registry — which is also what disposes its model.
+    if (!next.some((g) => g.paths.includes(path))) setTabs((prev) => prev.filter((item) => item.path !== path));
   }, []);
 
-  const reorderTabs = useCallback((from: number, to: number) => {
-    setTabs((prev) => {
-      if (from < 0 || from >= prev.length || to < 0 || to >= prev.length) return prev;
-      const next = [...prev];
-      const [moved] = next.splice(from, 1);
-      next.splice(to, 0, moved);
-      return next;
-    });
+  /** One handler for both gestures: dragging a tab along its own strip and dragging it into
+   * another split are the same move, differing only in the target group. */
+  const dropTab = useCallback((payload: TabDrag, targetGroupId: string, targetIndex: number) => {
+    const outcome = moveTabInGroups(groupsRef.current, payload, targetGroupId, targetIndex);
+    if (!outcome) return;
+    setGroups(outcome.groups);
+    setActiveGroupId(outcome.focusId);
   }, []);
 
-  const tabItems = useMemo<EditorTabItem[]>(
-    () =>
-      tabs.map((tab) => ({
-        path: tab.path,
-        dirty: tab.content !== tab.originalContent,
-        preview: tab.preview,
-      })),
-    [tabs],
-  );
+  /** Splits a group's current file into a new group to its right and focuses it — see
+   * `splitGroups` for why only the active file crosses over. */
+  const splitGroup = useCallback((groupId?: string) => {
+    const outcome = splitGroups(groupsRef.current, groupId ?? activeGroupIdRef.current);
+    if (!outcome) return;
+    setGroups(outcome.groups);
+    setActiveGroupId(outcome.focusId);
+  }, []);
 
-  const save = useCallback(async () => {
-    if (!project || !activeTab || activeTab.content === activeTab.originalContent) return;
-    const { path, content: text } = activeTab;
-    setSaving(true);
-    try {
-      await writeFileText(project.local_path, path, text);
-      setTabs((prev) => prev.map((tab) => (tab.path === path ? { ...tab, originalContent: text } : tab)));
-      // The Changes tab (and any conflict-resolution flow) reads git status from
-      // repoStore, which has no way to know a file changed on disk outside of a git
-      // command — refresh it explicitly so a save here shows up immediately there.
-      void useRepoStore.getState().refreshStatus();
-    } finally {
-      setSaving(false);
+  const closeGroup = useCallback(async (groupId: string) => {
+    const outcome = closeGroupInGroups(groupsRef.current, groupId);
+    if (!outcome) return;
+    // Files this group was the last to show go with it. Unsaved ones get the same question a
+    // dirty tab gets — asked once for the group, rather than once per file.
+    const unsaved = outcome.orphaned.filter((p) =>
+      tabsRef.current.some((tab) => tab.path === p && tab.content !== tab.originalContent),
+    );
+    if (unsaved.length > 0) {
+      const ok = await confirmAction(tRef.current("editor.closeGroupDirtyConfirm", { n: unsaved.length }), true);
+      if (!ok) return;
     }
-  }, [project, activeTab]);
+    setGroups(outcome.groups);
+    setActiveGroupId(outcome.focusId);
+    setTabs((prev) => prev.filter((tab) => outcome.groups.some((g) => g.paths.includes(tab.path))));
+  }, []);
+
+  const save = useCallback(
+    async (path: string) => {
+      const tab = tabsRef.current.find((item) => item.path === path);
+      if (!project || !tab || tab.content === tab.originalContent) return;
+      const text = tab.content;
+      setSaving(true);
+      try {
+        await writeFileText(project.local_path, path, text);
+        setTabs((prev) => prev.map((item) => (item.path === path ? { ...item, originalContent: text } : item)));
+        // The Changes tab (and any conflict-resolution flow) reads git status from
+        // repoStore, which has no way to know a file changed on disk outside of a git
+        // command — refresh it explicitly so a save here shows up immediately there.
+        void useRepoStore.getState().refreshStatus();
+      } finally {
+        setSaving(false);
+      }
+    },
+    [project],
+  );
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "s") {
         e.preventDefault();
-        void save();
+        const current = groupsRef.current.find((g) => g.id === activeGroupIdRef.current)?.activePath;
+        if (current) void save(current);
       }
     };
     window.addEventListener("keydown", handler);
@@ -448,29 +272,30 @@ export function EditorView() {
 
   // Tab shortcuts are gated on the Editor tab actually being the visible view — this panel
   // stays mounted in the background once opened, and Ctrl+W closing an invisible file while
-  // the user is reading the graph would be baffling.
+  // the user is reading the graph would be baffling. They act on the focused group.
   useEffect(() => {
     if (activeView !== "editor") return;
     const handler = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return;
-      const current = tabsRef.current;
+      const group = groupsRef.current.find((g) => g.id === activeGroupIdRef.current);
+      if (!group) return;
       if (e.key === "w" || e.key === "W") {
         e.preventDefault();
-        if (activePath) void closeTab(activePath);
+        if (group.activePath) void closeTab(group.id, group.activePath);
         return;
       }
       if (e.key === "PageDown" || e.key === "PageUp") {
-        if (current.length < 2 || !activePath) return;
+        if (group.paths.length < 2 || !group.activePath) return;
         e.preventDefault();
-        const index = current.findIndex((tab) => tab.path === activePath);
+        const index = group.paths.indexOf(group.activePath);
         const delta = e.key === "PageDown" ? 1 : -1;
-        const target = current[(index + delta + current.length) % current.length];
-        setActivePath(target.path);
+        const target = group.paths[(index + delta + group.paths.length) % group.paths.length];
+        setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, activePath: target } : g)));
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeView, activePath, closeTab]);
+  }, [activeView, closeTab]);
 
   // Otherwise switching projects leaves the previous repo's files open — everything else
   // (branch, file tree, status) points at the new repo. Done during render rather than in
@@ -479,68 +304,25 @@ export function EditorView() {
   if ((project?.local_path ?? null) !== lastProjectPath) {
     setLastProjectPath(project?.local_path ?? null);
     setTabs([]);
-    setActivePath(null);
-    decorationIdsRef.current.clear();
+    const fresh = newGroup();
+    setGroups([fresh]);
+    setActiveGroupId(fresh.id);
   }
 
-  // Models outlive the editor (see `keepCurrentModel` below), so closing a tab has to
-  // dispose its model explicitly or every file ever opened stays in memory. Runs after the
-  // commit that already switched Monaco to the surviving tab, so the model being disposed
-  // is never the attached one.
-  // Keyed on *which* files are open rather than on `tabs` itself, so the model registry
-  // isn't swept on every keystroke. Newline is the one character a path can't contain.
+  // Models outlive the editor (see `keepCurrentModel`), so a file leaving the registry has to
+  // dispose its model explicitly or everything ever opened stays in memory. Keyed on *which*
+  // files are open rather than on `tabs` itself, so this isn't swept on every keystroke.
+  // Newline is the one character a path can't contain.
   const openPathsKey = tabs.map((tab) => tab.path).join("\n");
   useEffect(() => {
-    const mon = monacoRef.current;
-    if (!mon || !project) return;
+    if (!project) return;
     // Both sides go through `Uri.parse().toString()` so the comparison is against Monaco's
     // own normalization of the path rather than the raw string we handed it.
-    const open = new Set(
-      tabsRef.current.map((tab) => mon.Uri.parse(modelPathFor(project, tab.path)).toString()),
-    );
-    for (const model of mon.editor.getModels()) {
+    const open = new Set(tabsRef.current.map((tab) => monaco.Uri.parse(modelPathFor(project, tab.path)).toString()));
+    for (const model of monaco.editor.getModels()) {
       if (model.uri.scheme === MODEL_SCHEME && !open.has(model.uri.toString())) model.dispose();
     }
   }, [openPathsKey, project]);
-
-  // Split view: keep the Monaco pane and the rendered preview pane scrolling together,
-  // proportionally (their line heights don't correspond 1:1, so this syncs by scroll ratio
-  // rather than by line number). Re-attaches whenever Monaco (re)mounts.
-  useEffect(() => {
-    if (viewMode !== "split") return;
-    const ed = editorRef.current;
-    const previewEl = previewScrollRef.current;
-    if (!ed || !previewEl) return;
-
-    const fromEditor = () => {
-      if (scrollSyncGuardRef.current === "preview") {
-        scrollSyncGuardRef.current = null;
-        return;
-      }
-      const denom = ed.getScrollHeight() - ed.getLayoutInfo().height;
-      const ratio = denom > 0 ? ed.getScrollTop() / denom : 0;
-      scrollSyncGuardRef.current = "editor";
-      previewEl.scrollTop = ratio * (previewEl.scrollHeight - previewEl.clientHeight);
-    };
-    const fromPreview = () => {
-      if (scrollSyncGuardRef.current === "editor") {
-        scrollSyncGuardRef.current = null;
-        return;
-      }
-      const denom = previewEl.scrollHeight - previewEl.clientHeight;
-      const ratio = denom > 0 ? previewEl.scrollTop / denom : 0;
-      const editorDenom = ed.getScrollHeight() - ed.getLayoutInfo().height;
-      scrollSyncGuardRef.current = "preview";
-      ed.setScrollTop(ratio * editorDenom);
-    };
-
-    const disposable = ed.onDidScrollChange(fromEditor);
-    previewEl.addEventListener("scroll", fromPreview);
-    return () => {
-      disposable.dispose();
-      previewEl.removeEventListener("scroll", fromPreview);
-    };
-  }, [viewMode, activePath, editorReady]);
 
   // Reload open files from disk when they change externally — a terminal `git` command, an
   // edit in another editor, a branch checkout — instead of silently showing stale content
@@ -572,36 +354,27 @@ export function EditorView() {
     };
   }, [project]);
 
-  useEffect(() => {
-    if (pendingEditorPath) {
-      // An explicit "open this file" from elsewhere in the app is a deliberate navigation,
-      // not a peek, so it gets a permanent tab rather than the preview slot.
-      if (pendingEditorLine) pendingRevealRef.current = { path: pendingEditorPath, line: pendingEditorLine };
-      void openFile(pendingEditorPath, { pin: true });
-      clearPendingEditorPath();
-    }
-  }, [pendingEditorPath, pendingEditorLine, openFile, clearPendingEditorPath]);
-
-  // Jumping to a search hit can't reveal the line until the file has finished loading *and*
-  // Monaco has (re)mounted on it, which is several renders after the click — so the request is
-  // parked in a ref and consumed by whichever pass first has an editor able to honour it.
-  useEffect(() => {
-    const target = pendingRevealRef.current;
-    const ed = editorRef.current;
-    if (!target || !ed || target.path !== activePath || activeTab?.loading || !ed.getModel()) return;
-    pendingRevealRef.current = null;
-    ed.revealLineInCenter(target.line);
-    ed.setPosition({ lineNumber: target.line, column: 1 });
-    ed.focus();
-  }, [activePath, activeTab?.loading, editorReady]);
-
+  /** Opens a file in the focused group and jumps to a position in it. */
   const openHit = useCallback(
-    (path: string, line: number) => {
-      pendingRevealRef.current = { path, line };
+    (path: string, line: number, column?: number) => {
+      revealNonce.current += 1;
+      setReveal({
+        groupId: activeGroupIdRef.current,
+        request: { path, line, column, nonce: revealNonce.current },
+      });
       void openFile(path, { pin: true });
     },
     [openFile],
   );
+
+  useEffect(() => {
+    if (!pendingEditorPath) return;
+    // An explicit "open this file" from elsewhere in the app is a deliberate navigation,
+    // not a peek, so it gets a permanent tab rather than the preview slot.
+    if (pendingEditorLine) openHit(pendingEditorPath, pendingEditorLine);
+    else void openFile(pendingEditorPath, { pin: true });
+    clearPendingEditorPath();
+  }, [pendingEditorPath, pendingEditorLine, openFile, openHit, clearPendingEditorPath]);
 
   // Editor-wide shortcuts, gated on the Editor being the visible view (this panel stays mounted
   // in the background once opened).
@@ -616,45 +389,112 @@ export function EditorView() {
       } else if (key === "f" && e.shiftKey) {
         e.preventDefault();
         setSidePanel("search");
+      } else if (key === "m" && e.shiftKey) {
+        e.preventDefault();
+        setSidePanel("anchors");
+      } else if (key === "\\") {
+        // VS Code's own split binding, so muscle memory carries over.
+        e.preventDefault();
+        splitGroup();
+      } else if (key === "c" && e.shiftKey) {
+        // Monaco's own binding covers the case where the caret is in the code; this one makes
+        // the shortcut work from anywhere in the Editor tab, including preview-only mode where
+        // there is no editor instance to have registered it.
+        e.preventDefault();
+        captureRef.current?.();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeView]);
+  }, [activeView, splitGroup]);
+
+  const registerCapture = useCallback((capture: () => void) => {
+    captureRef.current = capture;
+  }, []);
+
+  const setGroupActive = useCallback((groupId: string, path: string) => {
+    setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, activePath: path } : g)));
+    setActiveGroupId(groupId);
+  }, []);
+
+  const clearReveal = useCallback(() => setReveal(null), []);
+
+  /** Re-points open tabs after the explorer moves a file or folder, so a moved file keeps its
+   * tab (and its unsaved edits) instead of leaving one aimed at a path that no longer exists.
+   * Moving a *folder* re-points everything under it. The old Monaco model is left behind and
+   * swept by the disposal effect, since the path — and therefore the model URI — changed. */
+  const handlePathMoved = useCallback((from: string, to: string) => {
+    const remap = (p: string) => (p === from ? to : p.startsWith(`${from}/`) ? `${to}${p.slice(from.length)}` : p);
+    setTabs((prev) => prev.map((tab) => ({ ...tab, path: remap(tab.path) })));
+    setGroups((prev) =>
+      prev.map((g) => ({
+        ...g,
+        paths: g.paths.map(remap),
+        activePath: g.activePath ? remap(g.activePath) : null,
+      })),
+    );
+  }, []);
+
+  // Splitting (or closing) a group re-divides the row evenly, which is what VS Code does and the
+  // only sane answer for an arbitrary number of panes: any other rule has to invent where the new
+  // group's width came from. Widths are only reset when the *count* changes, so dragging a
+  // boundary sticks until the next split.
+  const groupCount = groups.length;
+  useLayoutEffect(() => {
+    const row = groupsRowRef.current;
+    if (!row || groupCount < 2) {
+      setGroupWidths([]);
+      return;
+    }
+    // The drag handles sit between the panes and take real space out of the row.
+    const share = (row.clientWidth - HANDLE_WIDTH * (groupCount - 1)) / groupCount;
+    setGroupWidths(Array.from({ length: groupCount - 1 }, () => Math.max(GROUP_MIN, Math.floor(share))));
+  }, [groupCount]);
+
+  /** The tab width Monaco resolved for the file being snapped, so an indented snapshot lines up
+   * the way the editor showed it. */
+  const snapTabSize = useMemo(() => {
+    if (!codeSnap || !project) return 2;
+    const model = monaco.editor.getModel(monaco.Uri.parse(modelPathFor(project, codeSnap.path)));
+    return model?.getOptions().tabSize ?? 2;
+  }, [codeSnap, project]);
 
   if (!project) {
     return <EmptyState icon={FileCode} title={t("editor.noProject")} />;
   }
 
-  // Deliberately not rendered until the file's text has arrived: Monaco would otherwise
-  // create the model empty and the subsequent fill would land in the undo stack, one
-  // Ctrl+Z away from blanking the file.
-  const editorPane = activeTab && !activeTab.loading ? (
-    <Editor
-      height="100%"
-      path={modelPathFor(project, activeTab.path)}
-      language={languageForPath(activeTab.path)}
-      value={content}
-      theme={monacoTheme}
-      // Each tab keeps its own model, so Monaco must not throw it away when this component
-      // unmounts (preview-only mode) — tab closing is what disposes models here.
-      keepCurrentModel
-      onChange={(value) => {
-        if (!activeTab) return;
-        // Typing in a preview tab promotes it to a permanent one, exactly like VS Code.
-        patchTab(activeTab.path, { content: value ?? "", preview: false });
-      }}
-      onMount={handleMount}
-      options={{
-        minimap: { enabled: true },
-        fontSize: 13,
-        automaticLayout: true,
-        // Without a glyph margin there is nowhere to click for a breakpoint, and nowhere to
-        // draw one.
-        glyphMargin: true,
-      }}
+  const renderGroup = (group: EditorGroup) => (
+    <EditorPane
+      key={group.id}
+      groupId={group.id}
+      project={project}
+      // Registry lookup per path: tab order belongs to the group, file state is shared.
+      tabs={group.paths.flatMap((p) => tabs.find((tab) => tab.path === p) ?? [])}
+      activePath={group.activePath}
+      focused={group.id === activeGroupId}
+      monacoTheme={monacoTheme}
+      themeMode={resolved}
+      fileDiffFor={fileDiffFor}
+      saving={saving}
+      reveal={reveal?.groupId === group.id ? reveal.request : null}
+      onRevealDone={clearReveal}
+      onFocus={() => setActiveGroupId(group.id)}
+      onSelect={(path) => setGroupActive(group.id, path)}
+      onClose={(path) => void closeTab(group.id, path)}
+      onPin={(path) => patchTab(path, { preview: false })}
+      onDropTab={dropTab}
+      // Typing in a preview tab promotes it to a permanent one, exactly like VS Code.
+      onChange={(path, value) => patchTab(path, { content: value, preview: false })}
+      onViewMode={(path, mode: ViewMode) => patchTab(path, { viewMode: mode })}
+      onSave={() => group.activePath && void save(group.activePath)}
+      onCodeSnap={setCodeSnap}
+      registerCapture={registerCapture}
+      // Always available — VS Code lets you keep splitting, and each press splits *this* group
+      // rather than whichever one happens to hold focus.
+      onSplit={group.activePath ? () => splitGroup(group.id) : null}
+      onCloseGroup={groups.length > 1 ? () => closeGroup(group.id) : null}
     />
-  ) : null;
+  );
 
   return (
     // No header strip: the project and branch it used to repeat are already in the status bar,
@@ -668,6 +508,7 @@ export function EditorView() {
             [
               { id: "files", icon: Files, label: t("editor.explorer"), hint: "" },
               { id: "search", icon: Search, label: t("editor.searchInProject"), hint: " (Ctrl+Shift+F)" },
+              { id: "anchors", icon: Tags, label: t("anchors.title"), hint: " (Ctrl+Shift+M)" },
               { id: "debug", icon: Bug, label: t("debug.title"), hint: "" },
             ] as const
           ).map(({ id, icon: Icon, label, hint }) => (
@@ -718,13 +559,16 @@ export function EditorView() {
           // clips — scrolling it too would carry the toolbar out of view.
           className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
         >
-          {/* Explorer, find-in-project or the debugger — same column VS Code uses for all three,
-              since each of them wants the width more than a file tree does. */}
+          {/* Explorer, find-in-project, anchors or the debugger — same column VS Code uses for
+              all of them, since each wants the width more than a file tree does. */}
           {sidePanel === "search" ? (
-            <SearchPanel
+            <SearchPanel repoPath={project.local_path} onOpenHit={openHit} onClose={() => setSidePanel("files")} />
+          ) : sidePanel === "anchors" ? (
+            <AnchorsPanel
               repoPath={project.local_path}
-              onOpenHit={openHit}
-              onClose={() => setSidePanel("files")}
+              activePath={activePath}
+              activeContent={activeContent}
+              onOpenAnchor={openHit}
             />
           ) : sidePanel === "debug" ? (
             <DebugPanel
@@ -743,6 +587,7 @@ export function EditorView() {
               selectedPath={activePath}
               onSelectFile={(path) => void openFile(path)}
               onOpenFile={(path) => void openFile(path, { pin: true })}
+              onPathMoved={handlePathMoved}
               changedPaths={changedPaths}
             />
           )}
@@ -755,108 +600,38 @@ export function EditorView() {
           onChange={(w) => setSize("editorTreeWidth", w)}
           onCommit={(w) => commitSize("editorTreeWidth", w)}
         />
-        <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
-          {activeTab ? (
-            <>
-              <EditorTabs
-                tabs={tabItems}
-                activePath={activePath}
-                onSelect={setActivePath}
-                onClose={(path) => void closeTab(path)}
-                onPin={(path) => patchTab(path, { preview: false })}
-                onReorder={reorderTabs}
-                actions={
-                  <>
-                    {previewKind && (
-                      <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
-                        <button
-                          onClick={() => patchTab(activeTab.path, { viewMode: "code" })}
-                          title={t("editor.viewCode")}
-                          className={`flex h-5 w-5 items-center justify-center rounded ${
-                            viewMode === "code"
-                              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                              : "text-[var(--cf-text-muted)]"
-                          }`}
-                        >
-                          <Code2 size={12} />
-                        </button>
-                        <button
-                          onClick={() => patchTab(activeTab.path, { viewMode: "split" })}
-                          title={t("editor.viewSplit")}
-                          className={`flex h-5 w-5 items-center justify-center rounded ${
-                            viewMode === "split"
-                              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                              : "text-[var(--cf-text-muted)]"
-                          }`}
-                        >
-                          <Columns2 size={12} />
-                        </button>
-                        <button
-                          onClick={() => patchTab(activeTab.path, { viewMode: "preview" })}
-                          title={t("editor.viewPreview")}
-                          className={`flex h-5 w-5 items-center justify-center rounded ${
-                            viewMode === "preview"
-                              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                              : "text-[var(--cf-text-muted)]"
-                          }`}
-                        >
-                          <Eye size={12} />
-                        </button>
-                      </div>
-                    )}
-                    <button
-                      onClick={save}
-                      disabled={!dirty || saving}
-                      className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-0.5 text-[12px] text-white disabled:opacity-40"
-                    >
-                      {saving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
-                      {t("editor.save")}
-                    </button>
-                  </>
-                }
-              />
-              <Breadcrumb path={activeTab.path} dirty={dirty} loading={activeTab.loading} />
-              {/* `relative` anchors the inline-edit widget over the code, the way an editor
-                  floats its own peek widgets. */}
-              <div className="relative min-h-0 flex-1">
-                {activeTab.loading ? (
-                  <div className="flex h-full items-center justify-center">
-                    <BouncingDots />
-                  </div>
-                ) : viewMode === "preview" ? (
-                  previewKind === "markdown" ? (
-                    <MarkdownPreview content={content} />
-                  ) : (
-                    <DbmlDiagram schema={dbmlSchema!} />
-                  )
-                ) : viewMode === "split" ? (
-                  <div className="flex h-full">
-                    <div className="min-w-0 flex-1 border-r border-[var(--cf-border)]">{editorPane}</div>
-                    <div className="min-w-0 flex-1">
-                      {previewKind === "markdown" ? (
-                        <MarkdownPreview content={content} ref={previewScrollRef} />
-                      ) : (
-                        <DbmlDiagram schema={dbmlSchema!} ref={previewScrollRef} />
-                      )}
-                    </div>
-                  </div>
-                ) : (
-                  editorPane
-                )}
-                {inlineEdit && activeTab && (
-                  <InlineEditWidget
-                    filePath={activeTab.path}
-                    fileContent={content}
-                    selection={inlineEdit.selection}
-                    onApply={applyInlineEdit}
-                    onClose={() => setInlineEdit(null)}
+        {/* Every group but the last carries an explicit width; the last takes the remainder, so
+            the row fills exactly and a drag only ever moves one boundary. `GROUP_MIN` is a real
+            floor — past the point where the panes stop fitting, the row scrolls rather than
+            squeezing controls out of reach. */}
+        <div ref={groupsRowRef} className="flex min-w-0 flex-1 overflow-x-auto">
+          {groups.map((group, i) => {
+            const last = i === groups.length - 1;
+            return (
+              <Fragment key={group.id}>
+                {i > 0 && (
+                  <ResizeHandle
+                    axis="x"
+                    value={groupWidths[i - 1] ?? GROUP_MIN}
+                    min={GROUP_MIN}
+                    max={GROUP_MAX}
+                    onChange={(w) => setGroupWidths((prev) => prev.map((v, k) => (k === i - 1 ? w : v)))}
+                    onCommit={() => {}}
                   />
                 )}
-              </div>
-            </>
-          ) : (
-            <EmptyState icon={FileCode} title={t("editor.selectFile")} subtitle={t("editor.selectFileHint")} />
-          )}
+                <div
+                  style={
+                    last
+                      ? { minWidth: GROUP_MIN }
+                      : { width: groupWidths[i] ?? GROUP_MIN, minWidth: GROUP_MIN }
+                  }
+                  className={last ? "flex flex-1" : "flex shrink-0"}
+                >
+                  {renderGroup(group)}
+                </div>
+              </Fragment>
+            );
+          })}
         </div>
       </div>
       {paletteOpen && (
@@ -864,6 +639,14 @@ export function EditorView() {
           repoPath={project.local_path}
           onPick={(path) => void openFile(path, { pin: true })}
           onClose={() => setPaletteOpen(false)}
+        />
+      )}
+      {codeSnap && (
+        <CodeSnapModal
+          target={codeSnap}
+          theme={activeCodeTheme}
+          tabSize={snapTabSize}
+          onClose={() => setCodeSnap(null)}
         />
       )}
     </div>

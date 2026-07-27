@@ -13,7 +13,9 @@
 //! - **Each engine** (`claude::ClaudeEngine`, `gemini::GeminiEngine`) owns only what differs:
 //!   the default binary, how a command is built, and how that CLI's output is parsed.
 
+use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
@@ -701,6 +703,53 @@ pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<Stri
         .collect())
 }
 
+/// The engine CLI's own version — what a chat turn records next to its model, so "which build
+/// answered this?" is still answerable in a conversation reopened weeks later.
+///
+/// Cached per binary for the life of the process: otherwise every chat turn would pay for an
+/// extra process spawn, and a CLI doesn't change version underneath a running app. A failed probe
+/// is cached too (as `None`), so a missing/older binary isn't re-spawned on every message. HTTP
+/// engines have no CLI to ask, so they report `None` and the stamp simply omits the version.
+pub async fn engine_version(engine: &dyn AiEngine, binary: &str) -> Option<String> {
+    if !matches!(engine.transport(), Transport::Subprocess) {
+        return None;
+    }
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(binary).cloned()) {
+        return hit;
+    }
+
+    let version = match capture(binary, &["--version".to_string()]).await {
+        // Not every CLI prints its banner on stdout, so stderr is the second place to look.
+        Ok(out) if out.status.success() => parse_version(&strip_ansi(&String::from_utf8_lossy(&out.stdout)))
+            .or_else(|| parse_version(&strip_ansi(&String::from_utf8_lossy(&out.stderr)))),
+        _ => None,
+    };
+    if let Ok(mut c) = cache.lock() {
+        c.insert(binary.to_string(), version.clone());
+    }
+    version
+}
+
+/// Pulls the version out of a `--version` banner. The CLIs disagree on shape — a bare `2.0.14`,
+/// `2.0.14 (Claude Code)`, `codex-cli 0.20.0` — so the first dotted-numeric token wins and the
+/// whole first line is the fallback for anything that doesn't look like one.
+fn parse_version(output: &str) -> Option<String> {
+    let line = output.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let token = line
+        .split_whitespace()
+        .find(|t| {
+            let core = t.trim_start_matches('v');
+            core.contains('.') && core.starts_with(|c: char| c.is_ascii_digit())
+        })
+        .unwrap_or(line);
+    // Capped: the fallback is an arbitrary banner line, and this ends up in a one-line stamp
+    // under a chat bubble.
+    let value: String = token.trim_start_matches('v').trim().chars().take(40).collect();
+    (!value.is_empty()).then_some(value)
+}
+
 /// The engine can't reliably know the real wall-clock time or which model string it was actually
 /// launched with, so the app stamps this footer on itself rather than asking the prompt to
 /// fabricate it. `label` is the engine's display name (e.g. "Claude Code" / "Gemini").
@@ -1092,6 +1141,25 @@ mod tests {
     #[test]
     fn leaves_ordinary_text_untouched() {
         assert_eq!(strip_ansi("feat: add thing [skip ci]"), "feat: add thing [skip ci]");
+    }
+
+    /// The four `--version` shapes the supported CLIs actually print. The `v` prefix and the
+    /// surrounding words are noise; the number is the only part worth stamping on a chat turn.
+    #[test]
+    fn reads_the_version_out_of_each_cli_banner() {
+        assert_eq!(parse_version("2.0.14 (Claude Code)").as_deref(), Some("2.0.14"));
+        assert_eq!(parse_version("codex-cli 0.20.0\n").as_deref(), Some("0.20.0"));
+        assert_eq!(parse_version("v1.4.2").as_deref(), Some("1.4.2"));
+        assert_eq!(parse_version("\n  0.9.1  \nsecond line").as_deref(), Some("0.9.1"));
+    }
+
+    /// A banner with no version-shaped token still says *something* useful, but an empty probe
+    /// (a binary that printed nothing) must report nothing rather than a blank stamp.
+    #[test]
+    fn falls_back_to_the_banner_line_and_rejects_empty_output() {
+        assert_eq!(parse_version("nightly build").as_deref(), Some("nightly build"));
+        assert_eq!(parse_version("   \n  "), None);
+        assert_eq!(parse_version(""), None);
     }
 
     #[test]

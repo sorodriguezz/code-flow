@@ -1,6 +1,6 @@
 import * as monaco from "monaco-editor";
 import { loader } from "@monaco-editor/react";
-import { ALL_THEMES, monacoThemeName } from "./codeThemes";
+import { ALL_THEMES, monacoThemeName, tokenRulesFor } from "./codeThemes";
 // Subpaths go through the package's own `exports` map (`./*` → `./esm/vs/*.js`), so these are
 // the mapped specifiers, not the on-disk paths.
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -77,31 +77,14 @@ for (const theme of ALL_THEMES) {
     // Inherit so anything the palette doesn't name (regex literals, embedded languages) still
     // gets a sensible color from Monaco's own base theme instead of falling back to plain text.
     inherit: true,
-    rules: [
-      { token: "", foreground: bare(theme.tokens.variable), background: bare(theme.ui.bg) },
-      { token: "comment", foreground: bare(theme.tokens.comment), fontStyle: "italic" },
-      { token: "keyword", foreground: bare(theme.tokens.keyword) },
-      { token: "keyword.json", foreground: bare(theme.tokens.constant) },
-      { token: "string", foreground: bare(theme.tokens.string) },
-      { token: "string.key", foreground: bare(theme.tokens.variable) },
-      { token: "string.value", foreground: bare(theme.tokens.string) },
-      { token: "number", foreground: bare(theme.tokens.number) },
-      { token: "regexp", foreground: bare(theme.tokens.string) },
-      { token: "type", foreground: bare(theme.tokens.type) },
-      { token: "type.identifier", foreground: bare(theme.tokens.type) },
-      { token: "constant", foreground: bare(theme.tokens.constant) },
-      { token: "function", foreground: bare(theme.tokens.fn) },
-      { token: "identifier", foreground: bare(theme.tokens.variable) },
-      { token: "variable", foreground: bare(theme.tokens.variable) },
-      { token: "variable.predefined", foreground: bare(theme.tokens.constant) },
-      { token: "operator", foreground: bare(theme.tokens.operator) },
-      { token: "delimiter", foreground: bare(theme.ui.textMuted) },
-      { token: "tag", foreground: bare(theme.tokens.tag) },
-      { token: "metatag", foreground: bare(theme.tokens.tag) },
-      { token: "attribute.name", foreground: bare(theme.tokens.attribute) },
-      { token: "attribute.value", foreground: bare(theme.tokens.string) },
-      { token: "annotation", foreground: bare(theme.tokens.attribute) },
-    ],
+    // Same rule list the code-snapshot renderer paints from — see `tokenRulesFor`. Only the
+    // catch-all needs the extra `background`, which is a Monaco-only concern.
+    rules: tokenRulesFor(theme).map((rule) => ({
+      token: rule.token,
+      foreground: bare(rule.foreground),
+      ...(rule.fontStyle ? { fontStyle: rule.fontStyle } : {}),
+      ...(rule.token === "" ? { background: bare(theme.ui.bg) } : {}),
+    })),
     colors: {
       "editor.background": theme.ui.bg,
       "editor.foreground": theme.tokens.variable,

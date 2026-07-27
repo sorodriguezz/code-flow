@@ -190,6 +190,14 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
   ],
 };
 
+/** Display name for a provider id — its own label, its translated one, or the raw id for a
+ * provider this build doesn't know (which is what a stored id from a newer version looks like). */
+export function providerDisplayLabel(providerId: string, t: (key: TranslationKey) => string): string {
+  const provider = AI_PROVIDERS.find((p) => p.id === providerId);
+  if (!provider) return providerId;
+  return provider.label ?? (provider.labelKey ? t(provider.labelKey) : providerId);
+}
+
 /** Short, human-readable name for the model a provider is currently pointed at.
  *
  * `modelId` is the raw stored setting, which has three shapes: empty means no `--model` flag

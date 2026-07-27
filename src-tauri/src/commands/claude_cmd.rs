@@ -23,6 +23,15 @@ pub struct ChatReply {
     /// Model that actually answered this turn, when the CLI reported one — shown as-is in the
     /// chat's "who am I talking to" chip. `None` falls back to the configured setting there.
     model: Option<String>,
+    /// Provider id that answered this turn (`claude`, `codex`, …). Reported back rather than read
+    /// from the setting on the frontend, so the stamp under a reply keeps naming the engine that
+    /// actually ran even after the routing is changed.
+    provider: String,
+    /// Version of the engine CLI, when it could be read.
+    engine_version: Option<String>,
+    /// When this turn was recorded, RFC 3339. Comes from the persisted row so the timestamp shown
+    /// live and the one shown on a reopened conversation are the same instant.
+    created_at: String,
     /// How long the engine took to answer, in milliseconds — shown under the reply.
     response_time_ms: i64,
 }
@@ -101,6 +110,9 @@ fn provider_for(conn: &Connection, task: AiTask) -> Result<String, String> {
 /// by contrast, are shared across providers (see [`shared_template`]).
 pub(crate) struct AiConfig {
     pub engine: Box<dyn AiEngine>,
+    /// The provider id this config resolved to — kept so a caller can record *which* engine ran
+    /// (the setting it came from is a moving target).
+    pub provider: String,
     pub binary: String,
     pub model: String,
     pub tools: Vec<String>,
@@ -139,7 +151,7 @@ pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig
         },
     };
 
-    Ok(AiConfig { engine, binary, model, tools })
+    Ok(AiConfig { engine, provider, binary, model, tools })
 }
 
 /// Reads a shared (provider-independent) prompt template. New installs store these under an
@@ -498,6 +510,10 @@ pub async fn send_chat_message(
     .await;
     let response_time_ms = started.elapsed().as_millis() as i64;
     checkpoint_after(&project.local_path, checkpoint);
+    // Read after the run, not before: it's cached per binary, so only the very first turn of an
+    // app session pays for the probe, and it never sits between the user pressing send and the
+    // engine starting.
+    let engine_version = ai::engine_version(&*config.engine, &config.binary).await;
     // Kept with the turn so the answer can still show *how* it was reached — which files were
     // read, which commands ran — long after the live log is gone.
     let trace_json = (!trace.is_empty()).then(|| serde_json::to_string(&trace).unwrap_or_default());
@@ -526,7 +542,14 @@ pub async fn send_chat_message(
                         &message,
                         &e,
                         trace_json.as_deref(),
-                        Some(response_time_ms),
+                        // A failed turn has no model to report (the CLI never got that far), but
+                        // *which* engine and version failed is exactly what makes it diagnosable.
+                        queries::TurnMeta {
+                            provider: Some(&config.provider),
+                            model: None,
+                            engine_version: engine_version.as_deref(),
+                            response_time_ms: Some(response_time_ms),
+                        },
                         true,
                     );
                 }
@@ -535,9 +558,9 @@ pub async fn send_chat_message(
         }
     };
 
-    {
+    let created_at = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let _ = queries::add_activity_log(
+        queries::add_activity_log(
             &conn,
             &project_id,
             &conversation_id,
@@ -545,12 +568,30 @@ pub async fn send_chat_message(
             &message,
             &run.text,
             trace_json.as_deref(),
-            Some(response_time_ms),
+            queries::TurnMeta {
+                provider: Some(&config.provider),
+                model: run.model.as_deref(),
+                engine_version: engine_version.as_deref(),
+                response_time_ms: Some(response_time_ms),
+            },
             false,
-        );
-    }
+        )
+        .map(|entry| entry.created_at)
+        // The reply is already in hand; a failed *write* shouldn't cost the user their answer, so
+        // the turn is still returned — just stamped with the time it arrived rather than the time
+        // it was filed.
+        .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339())
+    };
 
-    Ok(ChatReply { text: run.text, session_id: run.session_id, model: run.model, response_time_ms })
+    Ok(ChatReply {
+        text: run.text,
+        session_id: run.session_id,
+        model: run.model,
+        provider: config.provider,
+        engine_version,
+        created_at,
+        response_time_ms,
+    })
 }
 
 /// Rewrites the selected code according to a natural-language instruction, for the editor's

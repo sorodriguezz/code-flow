@@ -9,6 +9,15 @@ export interface ChatMessage {
   content: string;
   /** Response time in milliseconds — only set for assistant messages */
   responseTimeMs?: number;
+  /** When this turn happened, RFC 3339. Comes from the persisted row for anything the backend
+   * recorded, so reopening a conversation shows the original instant rather than "now". */
+  createdAt?: string;
+  /** Which engine produced this answer — pinned per message rather than read from the current
+   * setting, so a conversation that switched models mid-way still says what each turn ran on.
+   * Assistant messages only; `undefined` for turns recorded before this was tracked. */
+  provider?: string;
+  model?: string;
+  engineVersion?: string;
   /** What the engine printed while producing this answer — kept with the message so the trace
    * outlives the run, and reloaded from disk when a past conversation is reopened. */
   trace?: AiRunLine[];
@@ -102,7 +111,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ...s.byProject,
         [projectId]: {
           ...existing,
-          messages: [...existing.messages, { role: "user", content: trimmed }],
+          // Stamped client-side: the turn isn't persisted until the reply lands, and the question
+          // was asked now, not whenever the engine finishes answering it.
+          messages: [...existing.messages, { role: "user", content: trimmed, createdAt: new Date().toISOString() }],
           sending: true,
           runId,
           conversationId,
@@ -128,6 +139,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     role: "assistant",
                     content: reply.text,
                     responseTimeMs: reply.response_time_ms,
+                    createdAt: reply.created_at,
+                    provider: reply.provider,
+                    model: reply.model ?? undefined,
+                    engineVersion: reply.engine_version ?? undefined,
                     trace: trace.length > 0 ? trace : undefined,
                   },
                 ],
@@ -155,14 +170,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 // the next message would wipe. The backend persists it too, so it's still here
                 // tomorrow. Raw text is kept so the bubble can re-parse the quota marker. A turn
                 // the user stopped isn't a failure, so it's flagged separately.
+                // A rejected turn carries no reply to read the persisted timestamp from, so it's
+                // stamped locally — off from the recorded row by the milliseconds of the IPC hop.
                 messages: [
                   ...proj.messages,
                   cancelled
-                    ? { role: "assistant", content: "", isCancelled: true, trace: trace.length > 0 ? trace : undefined }
+                    ? {
+                        role: "assistant",
+                        content: "",
+                        isCancelled: true,
+                        createdAt: new Date().toISOString(),
+                        trace: trace.length > 0 ? trace : undefined,
+                      }
                     : {
                         role: "assistant",
                         content: String(e),
                         isError: true,
+                        createdAt: new Date().toISOString(),
                         trace: trace.length > 0 ? trace : undefined,
                       },
                 ],
@@ -184,12 +208,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   switchTo: async (projectId, conversationId) => {
     const entries = await getChatConversation(projectId, conversationId);
+    // One stored row is one exchange, so both halves carry its timestamp — the question wasn't
+    // recorded separately, and splitting hairs there would mean inventing a time.
     const messages: ChatMessage[] = entries.flatMap((e) => [
-      { role: "user" as const, content: e.question },
+      { role: "user" as const, content: e.question, createdAt: e.created_at },
       {
         role: "assistant" as const,
         content: e.answer,
         responseTimeMs: e.response_time_ms ?? undefined,
+        createdAt: e.created_at,
+        provider: e.provider ?? undefined,
+        model: e.model ?? undefined,
+        engineVersion: e.engine_version ?? undefined,
         isError: e.is_error,
         trace: parseTrace(e.trace),
       },

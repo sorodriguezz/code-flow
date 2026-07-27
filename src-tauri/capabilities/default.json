@@ -13,6 +13,7 @@
     "core:window:allow-set-theme",
     "opener:default",
     "dialog:allow-open",
+    "dialog:allow-save",
     "os:allow-platform",
     "updater:default",
     "process:allow-restart"

@@ -137,6 +137,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_is_error_to_activity_log(conn)?;
     add_engine_session_id_to_activity_log(conn)?;
     add_trace_to_activity_log(conn)?;
+    add_engine_meta_to_activity_log(conn)?;
     add_custom_label_to_job_history(conn)?;
     add_github_columns_to_projects(conn)?;
     add_github_host_to_projects(conn)?;
@@ -232,6 +233,19 @@ fn add_is_error_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE activity_log ADD COLUMN is_error INTEGER NOT NULL DEFAULT 0;")
+}
+
+/// Which engine answered a turn — provider, model and CLI version. Recorded per turn because the
+/// alternative (reading today's settings when a conversation is reopened) would credit an old
+/// answer to whatever engine happens to be configured now. Rows written before this stay NULL and
+/// simply show no engine stamp. Added together since they're always written as a set.
+fn add_engine_meta_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    for column in ["provider", "model", "engine_version"] {
+        if !has_column(conn, "activity_log", column)? {
+            conn.execute_batch(&format!("ALTER TABLE activity_log ADD COLUMN {column} TEXT;"))?;
+        }
+    }
+    Ok(())
 }
 
 /// `job_history` originally had no `custom_label` column — for a database created before

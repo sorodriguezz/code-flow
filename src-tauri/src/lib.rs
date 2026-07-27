@@ -217,6 +217,8 @@ pub fn run() {
             commands::fs_cmd::replace_in_repo,
             commands::fs_cmd::read_file_text,
             commands::fs_cmd::write_file_text,
+            commands::fs_cmd::write_file_bytes,
+            commands::fs_cmd::move_path,
             commands::fs_cmd::create_dir,
             commands::fs_cmd::create_file,
             commands::fs_cmd::open_in_default_app,

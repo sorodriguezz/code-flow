@@ -16,6 +16,20 @@ pub fn write_file_text(repo_path: String, rel_path: String, content: String) -> 
     fsops::write_file_text(&repo_path, &rel_path, &content)
 }
 
+/// Saves an exported binary (today: a code snapshot PNG) to the absolute path the user picked in
+/// the native save dialog.
+#[tauri::command]
+pub fn write_file_bytes(path: String, contents: Vec<u8>) -> Result<(), String> {
+    fsops::write_file_bytes(&path, &contents)
+}
+
+/// Moves a file or folder into `dest_dir` (repo-relative, `""` for the root) — the explorer's
+/// drag-and-drop. Returns the new repo-relative path.
+#[tauri::command]
+pub fn move_path(repo_path: String, from_rel: String, dest_dir: String) -> Result<String, String> {
+    fsops::move_path(&repo_path, &from_rel, &dest_dir)
+}
+
 #[tauri::command]
 pub fn create_dir(repo_path: String, rel_path: String) -> Result<(), String> {
     fsops::create_dir(&repo_path, &rel_path)

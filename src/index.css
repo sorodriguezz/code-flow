@@ -261,6 +261,49 @@ body {
   background: color-mix(in oklab, var(--cf-success) 6%, transparent);
 }
 
+/* While a tab or an explorer row is being dragged. `!important` and the `*` reach are on purpose:
+ * this has to beat Monaco's own `user-select` rules on the editor lines, which is where the
+ * runaway selection showed up. */
+body.cf-dragging,
+body.cf-dragging * {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: grabbing !important;
+}
+
+/* Row hover for the explorer and the tab strip.
+ *
+ * Note there is no `:hover` here: the class is applied from `state/rowHoverStore.ts`, because the
+ * engine's own hover state is unreliable across a hand-rolled drag — see that file. Uses
+ * `--cf-text` so one rule covers both themes: it's dark on light backgrounds and light on dark. */
+.cf-row-hover {
+  background-color: color-mix(in oklab, var(--cf-text) 5%, transparent);
+}
+
+/* Anchor tags (`// TODO:`, `# FIXME:`) coloured inside the comment they live in.
+ *
+ * `!important` because Monaco has already coloured that span with the theme's comment colour via
+ * an `.mtk*` class, and its stylesheet is injected into the head at runtime — after this file —
+ * so specificity alone loses. Colours mirror `ANCHOR_TAGS` in `lib/anchors.ts`: a tag added
+ * there needs a rule here. */
+.cf-anchor {
+  font-weight: 700 !important;
+  font-style: normal !important;
+}
+.cf-anchor-anchor { color: #10b981 !important; }
+.cf-anchor-todo { color: #3b82f6 !important; }
+.cf-anchor-fixme { color: #ef4444 !important; }
+.cf-anchor-bug { color: #e11d48 !important; }
+.cf-anchor-hack { color: #f97316 !important; }
+.cf-anchor-note { color: #f59e0b !important; }
+.cf-anchor-review { color: #84cc16 !important; }
+.cf-anchor-optimize { color: #14b8a6 !important; }
+.cf-anchor-section { color: #8b5cf6 !important; }
+.cf-anchor-link { color: #06b6d4 !important; }
+.cf-anchor-stub { color: #a855f7 !important; }
+.cf-anchor-idea { color: #ec4899 !important; }
+.cf-anchor-xxx { color: #94a3b8 !important; }
+
 /* A breakpoint: the red dot editors have drawn in the gutter for thirty years. */
 .cf-breakpoint-glyph::before {
   content: "";

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ArrowUp,
@@ -45,7 +45,8 @@ import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activitySt
 import { useResolutionsStore } from "../../state/resolutionsStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { confirmAction } from "../../state/confirmStore";
-import { useT } from "../../state/languageStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
+import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
@@ -493,6 +494,66 @@ function useCopy(): [boolean, (text: string) => void] {
   return [copied, copy];
 }
 
+const formatResponseTime = (ms: number) => (ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`);
+
+/** The app's own language decides how timestamps read, not the OS locale — otherwise a chat in a
+ * Spanish UI would print English dates. */
+const useLocale = () => (useLanguageStore((s) => s.language) === "es" ? "es-ES" : "en-US");
+
+/** Parses a stored RFC 3339 stamp, tolerating the `undefined` of turns recorded before timestamps
+ * were kept and the (theoretical) unparseable value rather than rendering "Invalid Date". */
+function parseStamp(iso: string | undefined): Date | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+/** One muted 10px line under a turn: when it happened and, for an answer, what produced it —
+ * engine, model, CLI version, and how long it took.
+ *
+ * Deliberately a single row rather than a chip or a header. The process log sitting right above
+ * it is already a box, and this is reference information you go looking for ("which model wrote
+ * this?"), not something the transcript should be announcing. Only the time is shown; the day is
+ * carried by the divider between days, and the full date is on hover. */
+function ChatStamp({ message }: { message: ChatMessage }) {
+  const t = useT();
+  const locale = useLocale();
+  const when = parseStamp(message.createdAt);
+
+  const parts: string[] = [];
+  if (message.role === "assistant") {
+    if (message.responseTimeMs !== undefined) parts.push(`⏱ ${formatResponseTime(message.responseTimeMs)}`);
+    if (message.provider) parts.push(providerDisplayLabel(message.provider, t));
+    // An empty provider still yields the raw model id, which is the honest answer for a turn
+    // recorded before the provider was tracked.
+    if (message.model) parts.push(modelDisplayLabel(message.provider ?? "", message.model, t));
+    if (message.engineVersion) parts.push(`v${message.engineVersion}`);
+  }
+  if (when) parts.push(when.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }));
+  if (parts.length === 0) return null;
+
+  return (
+    <div
+      title={when?.toLocaleString(locale)}
+      className={`px-0.5 text-[10px] leading-tight text-[var(--cf-text-muted)] ${
+        message.role === "user" ? "text-right" : ""
+      }`}
+    >
+      {parts.join(" · ")}
+    </div>
+  );
+}
+
+/** The date to announce before `message`, or `null` when it falls on the same day as the one
+ * before it. Carrying the day here keeps every per-message stamp down to a bare time. */
+function dayDivider(message: ChatMessage, previous: ChatMessage | undefined, locale: string): string | null {
+  const when = parseStamp(message.createdAt);
+  if (!when) return null;
+  const before = parseStamp(previous?.createdAt);
+  if (before && before.toDateString() === when.toDateString()) return null;
+  return when.toLocaleDateString(locale, { day: "numeric", month: "long", year: "numeric" });
+}
+
 function ChatBubble({ message }: { message: ChatMessage }) {
   const t = useT();
   const [copied, copy] = useCopy();
@@ -525,29 +586,26 @@ function ChatBubble({ message }: { message: ChatMessage }) {
 
   if (parsedError) {
     return (
-      <div className="mr-auto max-w-[95%]">
+      <div className="mr-auto max-w-[95%] space-y-1">
         <AiErrorBanner error={parsedError} compact />
         {traceLog}
+        <ChatStamp message={message} />
       </div>
     );
   }
 
   if (message.isCancelled) {
     return (
-      <div className="mr-auto max-w-[85%]">
+      <div className="mr-auto max-w-[85%] space-y-1">
         <div className="flex items-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] px-2.5 py-1 text-[11px] text-[var(--cf-text-muted)]">
           <Square size={9} className="fill-current" />
           {t("ai.runStopped")}
         </div>
         {traceLog}
+        <ChatStamp message={message} />
       </div>
     );
   }
-
-  const formatResponseTime = (ms: number) => {
-    if (ms < 1000) return `${Math.round(ms)}ms`;
-    return `${(ms / 1000).toFixed(1)}s`;
-  };
 
   return (
     <div className="space-y-1">
@@ -574,15 +632,14 @@ function ChatBubble({ message }: { message: ChatMessage }) {
         </button>
       </div>
       {traceLog}
-      {message.role === "assistant" && message.responseTimeMs !== undefined && (
-        <div className="pl-0.5 text-[10px] text-[var(--cf-text-muted)]">⏱ {formatResponseTime(message.responseTimeMs)}</div>
-      )}
+      <ChatStamp message={message} />
     </div>
   );
 }
 
 function ChatSection({ projectId }: { projectId: string }) {
   const t = useT();
+  const locale = useLocale();
   const chat = useChatStore((s) => s.byProject[projectId] ?? EMPTY_CHAT);
   const send = useChatStore((s) => s.send);
   const clearChat = useChatStore((s) => s.clear);
@@ -637,9 +694,24 @@ function ChatSection({ projectId }: { projectId: string }) {
           </div>
         ) : (
           <div className="space-y-2.5">
-            {chat.messages.map((m, i) => (
-              <ChatBubble key={i} message={m} />
-            ))}
+            {chat.messages.map((m, i) => {
+              // The day is announced once, between turns that fall on different dates, so each
+              // message's own stamp stays a bare time instead of repeating the date all the way
+              // down the transcript.
+              const day = dayDivider(m, chat.messages[i - 1], locale);
+              return (
+                <Fragment key={i}>
+                  {day && (
+                    <div className="flex items-center gap-2 pt-1.5">
+                      <div className="h-px flex-1 bg-[var(--cf-border)]" />
+                      <span className="text-[10px] text-[var(--cf-text-muted)]">{day}</span>
+                      <div className="h-px flex-1 bg-[var(--cf-border)]" />
+                    </div>
+                  )}
+                  <ChatBubble message={m} />
+                </Fragment>
+              );
+            })}
             {chat.sending && chat.runId && (
               // Replaces the old "thinking…" bubble: same reassurance, except now it says what
               // the engine is actually doing and can be stopped.
