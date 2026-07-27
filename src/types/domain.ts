@@ -157,14 +157,65 @@ export interface ReviewContext {
   created_at: string;
 }
 
-export interface WorkspaceMdFile {
+/** A saved PR-review run as listed in the memory manager (slim projection, no heavy text). */
+export interface ReviewRunSummary {
+  id: string;
+  project_id: string;
+  project_name: string;
+  pr_id: number;
+  pr_title: string;
+  iter: number;
+  level: string;
+  findings_count: number;
+  created_at: string;
+}
+
+/** One finding inside a saved run's `findings` JSON (mirrors the Rust `MemoryFinding`). */
+export interface SavedFinding {
+  id: string;
+  severity: string;
+  tipo: string;
+  categoria: string;
+  subtitulo: string;
+  archivo: string | null;
+  lineas: string | null;
+  confianza: number | null;
+  estado: string;
+  thread_id?: number | null;
+  introducido_en_iter: number;
+  resuelto_en_iter?: number | null;
+  motivo_descarte?: string | null;
+  delta?: string | null;
+}
+
+/** Full content of one saved review run, for the in-app viewer / export. */
+export interface ReviewRunDetail {
+  id: string;
+  project_id: string;
+  pr_id: number;
+  iter: number;
+  level: string;
+  /** Run metadata as a JSON string (ReviewMeta). */
+  meta: string;
+  review_md: string;
+  diff: string;
+  /** Parsed findings as a JSON string. */
+  findings: string;
+  created_at: string;
+}
+
+/** A user-defined SDD/Harness agent (role): name, role, model, prompt, on/off. */
+export interface WorkspaceAgent {
   id: string;
   workspace_id: string;
-  filename: string;
-  content: string;
+  name: string;
+  role: string;
+  provider: string;
+  model: string;
+  prompt: string;
   enabled: boolean;
+  sort_order: number;
   created_at: string;
-  updated_at: string;
 }
 
 export interface WorkspaceSkill {
@@ -172,6 +223,7 @@ export interface WorkspaceSkill {
   workspace_id: string;
   skill_name: string;
   source_repo: string;
+  enabled: boolean;
   installed_at: string;
 }
 

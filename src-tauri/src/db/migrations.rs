@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -43,18 +43,39 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             created_at   TEXT NOT NULL
         );
 
-        -- Free-form markdown instruction files per workspace (a CLAUDE.md-style doc, plus
-        -- room for more later) — folded into the review prompt alongside review_contexts,
-        -- never written into a project's own working tree.
-        CREATE TABLE IF NOT EXISTS workspace_md_files (
-            id           TEXT PRIMARY KEY,
+        -- Per-workspace, provider-independent prompt overrides keyed by `kind`
+        -- (`review_standard` = the PR review methodology, `pr_description` = the PR-description
+        -- generator). One row per (workspace, kind), seeded with the built-in default on creation
+        -- and backfilled for pre-existing workspaces (see backfill_workspace_prompts). Empty
+        -- content means "use the built-in default", so resetting is just a blank save. These are
+        -- deliberately NOT per-provider — the same text applies to whatever engine a task routes to.
+        CREATE TABLE IF NOT EXISTS workspace_prompts (
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-            filename     TEXT NOT NULL,
+            kind         TEXT NOT NULL,
             content      TEXT NOT NULL DEFAULT '',
-            enabled      INTEGER NOT NULL DEFAULT 1,
-            created_at   TEXT NOT NULL,
-            updated_at   TEXT NOT NULL
+            updated_at   TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, kind)
         );
+
+        -- Durable memory of every completed PR review — one row per run, kept in the DB (not on
+        -- disk) so it moves/backs up with codeflow.db. Holds the rendered review, the exact diff
+        -- reviewed, run metadata and the parsed findings (JSON), which is what a re-review reads
+        -- back to reconcile new/still-present/resolved. Timestamped rows, never overwritten, so the
+        -- code a finding referred to stays recoverable even after the branch is gone.
+        CREATE TABLE IF NOT EXISTS review_runs (
+            id           TEXT PRIMARY KEY,
+            project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            workspace_id TEXT NOT NULL,
+            pr_id        INTEGER NOT NULL,
+            iter         INTEGER NOT NULL,
+            level        TEXT NOT NULL,
+            meta         TEXT NOT NULL DEFAULT '{}',
+            review_md    TEXT NOT NULL,
+            diff         TEXT NOT NULL DEFAULT '',
+            findings     TEXT NOT NULL DEFAULT '[]',
+            created_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_review_runs_pr ON review_runs (project_id, pr_id, created_at);
 
         -- Skills installed via `npx skills add`, scoped per workspace; synced into whichever
         -- project is actually being reviewed at review time (Claude Code only discovers
@@ -64,7 +85,23 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
             skill_name   TEXT NOT NULL,
             source_repo  TEXT NOT NULL,
+            enabled      INTEGER NOT NULL DEFAULT 1,
             installed_at TEXT NOT NULL
+        );
+
+        -- User-defined SDD/Harness agents (roles) per workspace — name + role + model + prompt.
+        -- Deliberately empty by default (no preset roster); the user creates their own.
+        CREATE TABLE IF NOT EXISTS workspace_agents (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            role         TEXT NOT NULL DEFAULT '',
+            provider     TEXT NOT NULL DEFAULT '',
+            model        TEXT NOT NULL DEFAULT '',
+            prompt       TEXT NOT NULL DEFAULT '',
+            enabled      INTEGER NOT NULL DEFAULT 1,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL
         );
 
         -- MCP servers configured per workspace; written out as a --mcp-config JSON file for
@@ -131,6 +168,9 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     migrate_review_contexts_to_workspace(conn)?;
+    migrate_md_files_into_contexts(conn)?;
+    migrate_review_standards_into_prompts(conn)?;
+    backfill_workspace_prompts(conn)?;
     drop_legacy_installed_skills(conn)?;
     add_session_id_to_activity_log(conn)?;
     add_response_time_to_activity_log(conn)?;
@@ -141,7 +181,27 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_custom_label_to_job_history(conn)?;
     add_github_columns_to_projects(conn)?;
     add_github_host_to_projects(conn)?;
+    add_enabled_to_workspace_skills(conn)?;
+    add_provider_to_workspace_agents(conn)?;
     Ok(())
+}
+
+/// `workspace_agents` gained a `provider` column so an agent runs on its own provider + model
+/// (not just a bare model id). Existing rows default to empty, falling back to the active provider.
+fn add_provider_to_workspace_agents(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "workspace_agents", "provider")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE workspace_agents ADD COLUMN provider TEXT NOT NULL DEFAULT '';")
+}
+
+/// `workspace_skills` gained an `enabled` flag so skills can be toggled off (e.g. when not using
+/// Claude Code) without deleting them. Existing rows default to enabled — the pre-toggle behavior.
+fn add_enabled_to_workspace_skills(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "workspace_skills", "enabled")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE workspace_skills ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;")
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
@@ -173,6 +233,78 @@ fn migrate_review_contexts_to_workspace(conn: &Connection) -> rusqlite::Result<(
         ALTER TABLE review_contexts DROP COLUMN project_id;
         "#,
     )
+}
+
+/// The old `workspace_md_files` ("Instructions / .md") was functionally identical to
+/// `review_contexts` — both were just named text blocks folded into the review prompt. They're now
+/// one concept ("Contexto"), so move any md-file rows into `review_contexts` (name = filename) and
+/// drop the old table. No-op on fresh installs where the table never existed.
+fn migrate_md_files_into_contexts(conn: &Connection) -> rusqlite::Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_md_files'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !exists {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        INSERT OR IGNORE INTO review_contexts (id, workspace_id, name, content, enabled, created_at)
+            SELECT id, workspace_id, filename, content, enabled, created_at FROM workspace_md_files;
+        DROP TABLE workspace_md_files;
+        "#,
+    )
+}
+
+/// Moves any rows from the original per-workspace `workspace_review_standards` table (added
+/// earlier in this feature's life) into the generalized `workspace_prompts` table under
+/// `kind = 'review_standard'`, then drops the old table. No-op on fresh installs where the old
+/// table never existed.
+fn migrate_review_standards_into_prompts(conn: &Connection) -> rusqlite::Result<()> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_review_standards'",
+            [],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false);
+    if !exists {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        INSERT OR IGNORE INTO workspace_prompts (workspace_id, kind, content, updated_at)
+            SELECT workspace_id, 'review_standard', content, updated_at FROM workspace_review_standards;
+        DROP TABLE workspace_review_standards;
+        "#,
+    )
+}
+
+/// Seeds the built-in default of every prompt `kind` into every workspace that doesn't have that
+/// row yet — both workspaces created before this feature existed and any created outside
+/// `create_workspace` (e.g. an imported DB). Seeding the actual default text (not a blank) means
+/// users see and can edit the real methodology/template rather than an empty box.
+fn backfill_workspace_prompts(conn: &Connection) -> rusqlite::Result<()> {
+    let now = crate::db::queries::now();
+    for (kind, default) in [
+        ("review_standard", crate::ai::DEFAULT_PR_REVIEW_STANDARD),
+        ("pr_description", crate::ai::DEFAULT_PR_DESCRIPTION_TEMPLATE),
+    ] {
+        conn.execute(
+            "INSERT INTO workspace_prompts (workspace_id, kind, content, updated_at)
+             SELECT w.id, ?1, ?2, ?3 FROM workspaces w
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM workspace_prompts p WHERE p.workspace_id = w.id AND p.kind = ?1
+             )",
+            rusqlite::params![kind, default, now],
+        )?;
+    }
+    Ok(())
 }
 
 /// Superseded by `workspace_skills` — the old table was never actually used for anything

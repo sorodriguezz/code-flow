@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Lock, Settings2 } from "lucide-react";
-import { AI_PROVIDERS, PROVIDER_MODELS, modelDisplayLabel } from "../../lib/aiProviders";
+import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
+import { modelOptionsFor } from "../settings/modelPicker";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
@@ -119,11 +120,13 @@ export function ChatModelPicker({ liveModel, chatActive }: { liveModel: string |
     await setTaskRouting("chat", nextProvider, model);
   };
 
-  /** Live list when the CLI gave us one, else the curated fallback. `undefined` = still loading. */
+  /** Live list when the CLI gave us one, else the curated fallback — via `modelOptionsFor`, which
+   * for hand-maintained providers (Claude Code) always keeps the full catalog. `undefined` = still
+   * loading. */
   const versionsFor = (id: string): string[] | undefined => {
     const live = modelsByProvider[id];
     if (live === undefined) return undefined;
-    return live.length > 0 ? live : (PROVIDER_MODELS[id] ?? []).map((m) => m.id);
+    return modelOptionsFor(id, live).map((o) => o.id);
   };
 
   const versions = browsing ? versionsFor(browsing) : undefined;

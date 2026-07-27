@@ -23,6 +23,16 @@ fn api_root(host: &str) -> String {
     }
 }
 
+/// The GraphQL endpoint — `api.github.com/graphql` on github.com, `<host>/api/graphql` on
+/// Enterprise. Used to resolve review threads (there's no REST endpoint for that).
+fn graphql_root(host: &str) -> String {
+    if host.eq_ignore_ascii_case(GITHUB_COM) {
+        "https://api.github.com/graphql".to_string()
+    } else {
+        format!("https://{host}/api/graphql")
+    }
+}
+
 fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
@@ -290,6 +300,13 @@ pub async fn head_sha_for(host: &str, owner: &str, repo: &str, pr_number: i64, t
 /// Posts an inline review comment anchored to a file/line on the PR's head commit — the GitHub
 /// equivalent of Azure DevOps' file-anchored thread. A multi-line range includes `start_line`;
 /// a single line omits it (GitHub 422s if `start_line == line`).
+#[derive(Deserialize)]
+struct CommentCreated {
+    id: i64,
+}
+
+/// Posts an inline review comment and returns its **comment id** — kept so a re-review can reply to
+/// the same conversation (`/comments/{id}/replies`) and resolve its thread, rather than duplicate.
 #[allow(clippy::too_many_arguments)]
 pub async fn post_pr_comment_anchored(
     host: &str,
@@ -302,7 +319,7 @@ pub async fn post_pr_comment_anchored(
     end_line: i64,
     commit_id: &str,
     token: &str,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let url = format!("{}/repos/{owner}/{repo}/pulls/{pr_number}/comments", api_root(host));
     // GitHub anchors to the last line of the range as `line`; `start_line` (when the range
     // spans more than one line) marks where the highlight begins.
@@ -319,16 +336,92 @@ pub async fn post_pr_comment_anchored(
         body["start_line"] = serde_json::json!(start_line);
         body["start_side"] = serde_json::json!("RIGHT");
     }
-    post_json(&url, token, &body).await
+    let created: CommentCreated = post_json_returning(&url, token, &body).await?;
+    Ok(created.id)
 }
 
 /// Posts a general (non-file-anchored) comment on the PR's conversation — used for the summary
 /// comment and as a fallback for any finding whose location couldn't be parsed. GitHub models
 /// these as issue comments (a PR is an issue), a different endpoint from inline review comments.
-pub async fn post_pr_comment(host: &str, owner: &str, repo: &str, pr_number: i64, content: &str, token: &str) -> Result<(), String> {
+/// Returns the created issue-comment id (issue comments aren't threaded, so it isn't reused).
+pub async fn post_pr_comment(host: &str, owner: &str, repo: &str, pr_number: i64, content: &str, token: &str) -> Result<i64, String> {
     let url = format!("{}/repos/{owner}/{repo}/issues/{pr_number}/comments", api_root(host));
     let body = serde_json::json!({ "body": content });
+    let created: CommentCreated = post_json_returning(&url, token, &body).await?;
+    Ok(created.id)
+}
+
+/// Replies to an existing inline review comment (keeps the conversation on one thread instead of
+/// opening a new one). GitHub threads replies off the root comment's id.
+pub async fn reply_pr_review_comment(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: i64,
+    comment_id: i64,
+    content: &str,
+    token: &str,
+) -> Result<(), String> {
+    let url = format!("{}/repos/{owner}/{repo}/pulls/{pr_number}/comments/{comment_id}/replies", api_root(host));
+    let body = serde_json::json!({ "body": content });
     post_json(&url, token, &body).await
+}
+
+/// Marks the review thread that owns `comment_id` as resolved — GitHub's equivalent of Azure's
+/// `fixed`. There's no REST endpoint for it, so it goes through GraphQL: find the review thread
+/// whose comments include our comment (by `databaseId`), then `resolveReviewThread`. Best-effort by
+/// design at the call site — a failure just leaves the thread open, it never fails the post.
+pub async fn resolve_review_thread_for_comment(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: i64,
+    comment_id: i64,
+    token: &str,
+) -> Result<(), String> {
+    let graphql = graphql_root(host);
+    // 1) Find the thread node id whose comments contain this databaseId.
+    let query = format!(
+        r#"query {{ repository(owner: "{owner}", name: "{repo}") {{ pullRequest(number: {pr_number}) {{ reviewThreads(first: 100) {{ nodes {{ id isResolved comments(first: 100) {{ nodes {{ databaseId }} }} }} }} }} }} }}"#
+    );
+    let res = client()
+        .post(&graphql)
+        .header("Authorization", bearer(token))
+        .header("User-Agent", USER_AGENT)
+        .json(&serde_json::json!({ "query": query }))
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach GitHub: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("GitHub GraphQL returned {}", res.status()));
+    }
+    let data: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let threads = data["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        .as_array()
+        .ok_or("no review threads in GraphQL response")?;
+    let thread_id = threads.iter().find_map(|t| {
+        let has = t["comments"]["nodes"]
+            .as_array()
+            .map(|cs| cs.iter().any(|c| c["databaseId"].as_i64() == Some(comment_id)))
+            .unwrap_or(false);
+        if has { t["id"].as_str().map(str::to_string) } else { None }
+    });
+    let thread_id = thread_id.ok_or("couldn't find the review thread for this comment")?;
+
+    // 2) Resolve it.
+    let mutation = format!(r#"mutation {{ resolveReviewThread(input: {{ threadId: "{thread_id}" }}) {{ thread {{ isResolved }} }} }}"#);
+    let res = client()
+        .post(&graphql)
+        .header("Authorization", bearer(token))
+        .header("User-Agent", USER_AGENT)
+        .json(&serde_json::json!({ "query": mutation }))
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach GitHub: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!("GitHub GraphQL resolve returned {}", res.status()));
+    }
+    Ok(())
 }
 
 /// Submits a review on the PR — `event` is GitHub's review verb (`"APPROVE"` or

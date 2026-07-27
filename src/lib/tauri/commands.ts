@@ -23,12 +23,14 @@ import type {
   ReviewContext,
   SecretHit,
   StashInfo,
+  ReviewRunDetail,
+  ReviewRunSummary,
   Workspace,
+  WorkspaceAgent,
   WorkspaceMcp,
-  WorkspaceMdFile,
   WorkspaceSkill,
 } from "../../types/domain";
-import type { ReviewCommentInput } from "../parseAnalysis";
+import type { FindingLocation } from "../parseAnalysis";
 
 // ---------- app lifecycle ----------
 
@@ -254,6 +256,70 @@ export interface ProviderStatus {
 export const checkAiProvider = (provider: string) =>
   invoke<ProviderStatus>("check_ai_provider", { provider });
 
+// ---------- workspace prompts (review standard, PR description) ----------
+
+/** `kind` is "review_standard" | "pr_description" — provider-independent, per-workspace. */
+export const getWorkspacePrompt = (workspaceId: string, kind: string) =>
+  invoke<string>("get_workspace_prompt", { workspaceId, kind });
+
+export const setWorkspacePrompt = (workspaceId: string, kind: string, content: string) =>
+  invoke<void>("set_workspace_prompt", { workspaceId, kind, content });
+
+export const defaultWorkspacePrompt = (kind: string) =>
+  invoke<string>("default_workspace_prompt", { kind });
+
+// ---------- SDD/Harness agents ----------
+
+export const listWorkspaceAgents = (workspaceId: string) =>
+  invoke<WorkspaceAgent[]>("list_workspace_agents", { workspaceId });
+
+export const upsertWorkspaceAgent = (
+  id: string | undefined,
+  workspaceId: string,
+  name: string,
+  role: string,
+  provider: string,
+  model: string,
+  prompt: string,
+  enabled: boolean,
+) =>
+  invoke<WorkspaceAgent>("upsert_workspace_agent", {
+    id: id ?? null,
+    workspaceId,
+    name,
+    role,
+    provider,
+    model,
+    prompt,
+    enabled,
+  });
+
+export const deleteWorkspaceAgent = (id: string) => invoke<void>("delete_workspace_agent", { id });
+
+// ---------- review memory (review_runs) ----------
+
+export const listReviewRuns = (workspaceId: string) =>
+  invoke<ReviewRunSummary[]>("list_review_runs", { workspaceId });
+
+export const getReviewRun = (id: string) => invoke<ReviewRunDetail | null>("get_review_run", { id });
+
+/** `estado` is "falso_positivo" | "ignorado" to mark, or "abierto" to clear the mark. */
+export const markReviewFinding = (runId: string, findingId: string, estado: string, motivo?: string) =>
+  invoke<void>("mark_review_finding", { runId, findingId, estado, motivo: motivo ?? null });
+
+export const deleteReviewRun = (id: string) => invoke<void>("delete_review_run", { id });
+
+export const deleteReviewRunsForPr = (projectId: string, prId: number) =>
+  invoke<void>("delete_review_runs_for_pr", { projectId, prId });
+
+export const purgeWorkspaceReviewRuns = (workspaceId: string) =>
+  invoke<void>("purge_workspace_review_runs", { workspaceId });
+
+/** Exports one run (by `id`) or all of the workspace's runs (`id` undefined) to `destDir`.
+ * Returns how many runs were written. */
+export const exportReviewRuns = (workspaceId: string, id: string | undefined, destDir: string) =>
+  invoke<number>("export_review_runs", { workspaceId, id: id ?? null, destDir });
+
 export const listReviewContexts = (workspaceId: string) =>
   invoke<ReviewContext[]>("list_review_contexts", { workspaceId });
 
@@ -274,28 +340,6 @@ export const upsertReviewContext = (
 
 export const deleteReviewContext = (id: string) => invoke<void>("delete_review_context", { id });
 
-// ---------- workspace MD files (CLAUDE.md-style instructions) ----------
-
-export const listWorkspaceMdFiles = (workspaceId: string) =>
-  invoke<WorkspaceMdFile[]>("list_workspace_md_files", { workspaceId });
-
-export const upsertWorkspaceMdFile = (
-  id: string | undefined,
-  workspaceId: string,
-  filename: string,
-  content: string,
-  enabled: boolean,
-) =>
-  invoke<WorkspaceMdFile>("upsert_workspace_md_file", {
-    id: id ?? null,
-    workspaceId,
-    filename,
-    content,
-    enabled,
-  });
-
-export const deleteWorkspaceMdFile = (id: string) => invoke<void>("delete_workspace_md_file", { id });
-
 // ---------- workspace skills ----------
 
 export const listWorkspaceSkills = (workspaceId: string) =>
@@ -305,6 +349,27 @@ export const installWorkspaceSkill = (workspaceId: string, sourceRepo: string, s
   invoke<WorkspaceSkill>("install_workspace_skill", { workspaceId, sourceRepo, skillName });
 
 export const removeWorkspaceSkill = (id: string) => invoke<void>("remove_workspace_skill", { id });
+
+export const setWorkspaceSkillEnabled = (id: string, enabled: boolean) =>
+  invoke<void>("set_workspace_skill_enabled", { id, enabled });
+
+export const createCustomSkill = (workspaceId: string, name: string, skillMd: string) =>
+  invoke<WorkspaceSkill>("create_custom_skill", { workspaceId, name, skillMd });
+
+export const importSkillFromFolder = (workspaceId: string, srcDir: string) =>
+  invoke<WorkspaceSkill>("import_skill_from_folder", { workspaceId, srcDir });
+
+export const listSkillFiles = (workspaceId: string, skillName: string) =>
+  invoke<string[]>("list_skill_files", { workspaceId, skillName });
+
+export const readSkillFile = (workspaceId: string, skillName: string, relPath: string) =>
+  invoke<string>("read_skill_file", { workspaceId, skillName, relPath });
+
+export const writeSkillFile = (workspaceId: string, skillName: string, relPath: string, content: string) =>
+  invoke<void>("write_skill_file", { workspaceId, skillName, relPath, content });
+
+export const deleteSkillFile = (workspaceId: string, skillName: string, relPath: string) =>
+  invoke<void>("delete_skill_file", { workspaceId, skillName, relPath });
 
 // ---------- workspace MCP servers ----------
 
@@ -389,8 +454,14 @@ export const defaultPrDescriptionTemplate = () => invoke<string>("default_pr_des
 
 export const defaultResolveConflictTemplate = () => invoke<string>("default_resolve_conflict_template");
 
-export const analyzeWorkingChanges = (projectId: string, jobId: string) =>
-  invoke<string>("analyze_working_changes", { projectId, jobId });
+export const analyzeWorkingChanges = (projectId: string, jobId: string, agent?: ChatAgentOverride | null) =>
+  invoke<string>("analyze_working_changes", {
+    projectId,
+    jobId,
+    agentProvider: agent?.provider ?? null,
+    agentModel: agent?.model ?? null,
+    agentPrompt: agent?.prompt ?? null,
+  });
 
 export const resolveFindingWithAi = (projectId: string, findingPrompt: string, runId?: string) =>
   invoke<string>("resolve_finding_with_ai", { projectId, findingPrompt, runId });
@@ -414,13 +485,33 @@ export interface ChatReply {
 
 /** `sessionId` is the engine's resume token; `conversationId` is *our* identity for the chat and
  * is what groups turns into one activity. See the Rust command's docs for why they're separate. */
+/** When an SDD/Harness agent is active, its provider + model + prompt run this turn as that role.
+ * `id` is carried for the UI to show which agent is selected; the backend only uses the rest. */
+export interface ChatAgentOverride {
+  id?: string;
+  provider: string;
+  model: string;
+  prompt: string;
+}
+
 export const sendChatMessage = (
   projectId: string,
   message: string,
   sessionId: string | null,
   conversationId: string,
   runId?: string,
-) => invoke<ChatReply>("send_chat_message", { projectId, message, sessionId, conversationId, runId });
+  agent?: ChatAgentOverride | null,
+) =>
+  invoke<ChatReply>("send_chat_message", {
+    projectId,
+    message,
+    sessionId,
+    conversationId,
+    runId,
+    agentProvider: agent?.provider ?? null,
+    agentModel: agent?.model ?? null,
+    agentPrompt: agent?.prompt ?? null,
+  });
 
 // ---------- pull requests (Azure DevOps / GitHub) ----------
 
@@ -452,11 +543,41 @@ export const listPullRequests = (projectId: string) =>
 export const listPrCommentThreads = (projectId: string, prId: number) =>
   invoke<PrCommentThread[]>("list_pr_comment_threads", { projectId, prId });
 
-export const reviewPullRequest = (projectId: string, prId: number, jobId: string) =>
-  invoke<string>("review_pull_request", { projectId, prId, jobId });
+export const reviewPullRequest = (
+  projectId: string,
+  prId: number,
+  jobId: string,
+  level: string,
+  agent?: ChatAgentOverride | null,
+) =>
+  invoke<string>("review_pull_request", {
+    projectId,
+    prId,
+    jobId,
+    level,
+    agentProvider: agent?.provider ?? null,
+    agentModel: agent?.model ?? null,
+    agentPrompt: agent?.prompt ?? null,
+  });
 
-export const postPrReviewComment = (projectId: string, prId: number, comments: ReviewCommentInput[]) =>
-  invoke<void>("post_pr_review_comment", { projectId, prId, comments });
+/** One human-selected finding to post — identity (`file` + `category`) reuses its stored thread. */
+export interface PostFindingItem {
+  file: string | null;
+  category: string;
+  content: string;
+  location: FindingLocation | null;
+}
+
+/** Posts the selected findings to the PR, reconciling threads (new / reply / resolve) against the
+ * saved run (`runId`), plus an optional summary comment. */
+export const postPrReviewComment = (
+  projectId: string,
+  prId: number,
+  runId: string,
+  items: PostFindingItem[],
+  postSummary: boolean,
+  summary: string | null,
+) => invoke<void>("post_pr_review_comment", { projectId, prId, runId, items, postSummary, summary });
 
 export type PrAction = "approve" | "request_changes" | "close";
 

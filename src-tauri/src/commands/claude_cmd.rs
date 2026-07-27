@@ -154,6 +154,25 @@ pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig
     Ok(AiConfig { engine, provider, binary, model, tools })
 }
 
+/// Builds an [`AiConfig`] for an explicit provider + model (an SDD/Harness agent's own routing),
+/// bypassing per-task resolution — the binary path and tool allow-list still come from that
+/// provider's saved settings.
+pub(crate) fn load_ai_config_for(conn: &Connection, provider: &str, model: &str) -> Result<AiConfig, String> {
+    let engine = ai::engine_for(provider);
+    let get = |suffix: &str| -> Result<Option<String>, String> {
+        queries::get_setting(conn, &format!("{provider}_{suffix}")).map_err(|e| e.to_string())
+    };
+    let nonblank = |v: Option<String>| v.filter(|s| !s.trim().is_empty());
+    let binary = nonblank(get("binary_path")?).unwrap_or_else(|| engine.default_binary().to_string());
+    let tools = get("allowed_tools")?
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Ok(AiConfig { engine, provider: provider.to_string(), binary, model: model.to_string(), tools })
+}
+
 /// Reads a shared (provider-independent) prompt template. New installs store these under an
 /// unprefixed key (`commit_template`); older ones stored them under the legacy `claude_*` key —
 /// so we read the new key and fall back to the legacy one, preserving a user's existing
@@ -337,6 +356,10 @@ pub async fn analyze_working_changes(
     db: State<'_, Db>,
     project_id: String,
     job_id: String,
+    // When an SDD/Harness agent runs this analysis, its provider + model + prompt for this run.
+    agent_provider: Option<String>,
+    agent_model: Option<String>,
+    agent_prompt: Option<String>,
 ) -> Result<String, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -346,19 +369,23 @@ pub async fn analyze_working_changes(
     };
     let workspace_id = project.workspace_id.clone();
 
-    let (contexts, md_files, mcps, config, analyze_template) = {
+    let (contexts, mcps, skills, config, analyze_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let md_files = queries::list_workspace_md_files(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let config = load_ai_config(&conn, AiTask::Analyze)?;
+        let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        // An active agent analyzes on its own provider + model; otherwise the Analyze routing.
+        let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
+            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => load_ai_config_for(&conn, p, m)?,
+            _ => load_ai_config(&conn, AiTask::Analyze)?,
+        };
         let analyze_template = shared_template(&conn, "analyze_template", "claude_analyze_template")?;
-        (contexts, md_files, mcps, config, analyze_template)
+        (contexts, mcps, skills, config, analyze_template)
     };
 
     // Best-effort, same as the PR review path — a missing/unwritable skills dir shouldn't
     // block the analysis itself.
-    let _ = sync_skills_into_project(&workspace_id, &project.local_path);
+    let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
 
     let diff_files = git::diff::get_working_diff(&project.local_path)?;
     let diff_text = git::diff::render_diff_for_prompt(&diff_files);
@@ -368,7 +395,9 @@ pub async fn analyze_working_changes(
         .filter(|c| c.enabled)
         .map(|c| (c.name, c.content))
         .collect();
-    enabled_contexts.extend(md_files.into_iter().filter(|f| f.enabled).map(|f| (f.filename, f.content)));
+    if let Some(prompt) = agent_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+        enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
+    }
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
@@ -481,6 +510,9 @@ fn session_for_provider(
 ///   list. Leaving that to the engines never worked: Gemini/agy reports one fixed sentinel for
 ///   every run (so every chat ever collapsed into a single activity), while the Claude CLI can mint
 ///   a fresh id on each resumed turn (so one conversation could scatter into several).
+/// - `agent_provider` / `agent_model` / `agent_prompt`: when an SDD/Harness agent is active, its
+///   own provider + model + prompt for this turn — the role runs on its own routing and its
+///   instructions frame the message. All absent → the normal per-task chat routing.
 #[tauri::command]
 pub async fn send_chat_message(
     app: AppHandle,
@@ -490,6 +522,9 @@ pub async fn send_chat_message(
     session_id: Option<String>,
     conversation_id: Option<String>,
     run_id: Option<String>,
+    agent_provider: Option<String>,
+    agent_model: Option<String>,
+    agent_prompt: Option<String>,
 ) -> Result<ChatReply, String> {
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -499,27 +534,34 @@ pub async fn send_chat_message(
     };
     let workspace_id = project.workspace_id.clone();
 
-    let (contexts, md_files, mcps, config, session_id) = {
+    let (contexts, mcps, skills, config, session_id) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let md_files = queries::list_workspace_md_files(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let config = load_ai_config(&conn, AiTask::Chat)?;
+        let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        // An active agent runs on its own provider + model; otherwise the normal chat routing.
+        let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
+            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => load_ai_config_for(&conn, p, m)?,
+            _ => load_ai_config(&conn, AiTask::Chat)?,
+        };
         // Shadows the argument on purpose: nothing below should see the unvalidated token, and the
         // turn is recorded against the session it actually ran under.
         let session_id =
             session_for_provider(&conn, &project_id, conversation_id.as_deref(), session_id, &config.provider);
-        (contexts, md_files, mcps, config, session_id)
+        (contexts, mcps, skills, config, session_id)
     };
 
-    let _ = sync_skills_into_project(&workspace_id, &project.local_path);
+    let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
 
     let mut enabled_contexts: Vec<(String, String)> = contexts
         .into_iter()
         .filter(|c| c.enabled)
         .map(|c| (c.name, c.content))
         .collect();
-    enabled_contexts.extend(md_files.into_iter().filter(|f| f.enabled).map(|f| (f.filename, f.content)));
+    // The active agent's own instructions go first, so the role frames the whole turn.
+    if let Some(prompt) = agent_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+        enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
+    }
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 

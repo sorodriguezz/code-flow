@@ -61,15 +61,50 @@ pub struct ReviewContext {
     pub created_at: String,
 }
 
+/// A saved PR-review run as listed in the memory manager — the slim projection (no heavy
+/// review/diff text), joined with the project name for display.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceMdFile {
+pub struct ReviewRunSummary {
+    pub id: String,
+    pub project_id: String,
+    pub project_name: String,
+    pub pr_id: i64,
+    pub pr_title: String,
+    pub iter: i64,
+    pub level: String,
+    pub findings_count: i64,
+    pub created_at: String,
+}
+
+/// The full content of one saved review run, for the in-app viewer / export.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewRunDetail {
+    pub id: String,
+    pub project_id: String,
+    pub pr_id: i64,
+    pub iter: i64,
+    pub level: String,
+    pub meta: String,
+    pub review_md: String,
+    pub diff: String,
+    pub findings: String,
+    pub created_at: String,
+}
+
+/// A user-defined SDD/Harness agent (role) — name, role description, its model, an optional
+/// prompt, and an on/off toggle. Empty by default; the user builds their own roster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceAgent {
     pub id: String,
     pub workspace_id: String,
-    pub filename: String,
-    pub content: String,
+    pub name: String,
+    pub role: String,
+    pub provider: String,
+    pub model: String,
+    pub prompt: String,
     pub enabled: bool,
+    pub sort_order: i64,
     pub created_at: String,
-    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +113,7 @@ pub struct WorkspaceSkill {
     pub workspace_id: String,
     pub skill_name: String,
     pub source_repo: String,
+    pub enabled: bool,
     pub installed_at: String,
 }
 

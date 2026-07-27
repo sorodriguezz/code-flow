@@ -3,11 +3,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::models::{
-    ActivityLogEntry, ChatConversationSummary, JobHistoryEntry, NewProject, Project, ReviewContext, Workspace,
-    WorkspaceMcp, WorkspaceMdFile, WorkspaceSkill,
+    ActivityLogEntry, ChatConversationSummary, JobHistoryEntry, NewProject, Project, ReviewContext, ReviewRunDetail,
+    ReviewRunSummary, Workspace, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill,
 };
 
-fn now() -> String {
+pub(crate) fn now() -> String {
     Utc::now().to_rfc3339()
 }
 
@@ -26,7 +26,204 @@ pub fn create_workspace(conn: &Connection, name: &str, icon: &str, color: &str) 
         "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![ws.id, ws.name, ws.icon, ws.color, ws.sort_order, ws.created_at],
     )?;
+    // Seed the workspace's editable prompt overrides (review standard + PR-description template)
+    // with their built-in defaults so a new workspace works out of the box and the user can edit.
+    for (kind, default) in [
+        ("review_standard", crate::ai::DEFAULT_PR_REVIEW_STANDARD),
+        ("pr_description", crate::ai::DEFAULT_PR_DESCRIPTION_TEMPLATE),
+    ] {
+        conn.execute(
+            "INSERT INTO workspace_prompts (workspace_id, kind, content, updated_at) VALUES (?1, ?2, ?3, ?4)",
+            params![ws.id, kind, default, ws.created_at],
+        )?;
+    }
     Ok(ws)
+}
+
+// ---------- review runs (durable review memory) ----------
+
+/// How many runs this PR already has — used to number the next iteration.
+pub fn count_review_runs(conn: &Connection, project_id: &str, pr_id: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM review_runs WHERE project_id = ?1 AND pr_id = ?2",
+        params![project_id, pr_id],
+        |row| row.get(0),
+    )
+}
+
+/// The newest run's `findings` JSON for this PR, if any — read back on a re-review to reconcile
+/// against the previous run.
+pub fn latest_review_findings(conn: &Connection, project_id: &str, pr_id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT findings FROM review_runs WHERE project_id = ?1 AND pr_id = ?2 ORDER BY created_at DESC LIMIT 1",
+        params![project_id, pr_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+}
+
+/// The head commit SHA of this PR's most recent run (from its `meta` JSON), if any — used to
+/// detect "nothing changed since last review" and to diff which files changed since.
+pub fn latest_review_head(conn: &Connection, project_id: &str, pr_id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT json_extract(meta, '$.head_sha') FROM review_runs
+         WHERE project_id = ?1 AND pr_id = ?2 ORDER BY created_at DESC LIMIT 1",
+        params![project_id, pr_id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(|opt| opt.flatten().filter(|s| !s.is_empty()))
+}
+
+/// Records one completed review run. `id` reuses the job id so the run and its `job_history` row
+/// share identity. `meta`/`findings` are JSON blobs authored by the caller.
+#[allow(clippy::too_many_arguments)]
+pub fn add_review_run(
+    conn: &Connection,
+    id: &str,
+    project_id: &str,
+    workspace_id: &str,
+    pr_id: i64,
+    iter: i64,
+    level: &str,
+    meta: &str,
+    review_md: &str,
+    diff: &str,
+    findings: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO review_runs
+            (id, project_id, workspace_id, pr_id, iter, level, meta, review_md, diff, findings, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(id) DO NOTHING",
+        params![id, project_id, workspace_id, pr_id, iter, level, meta, review_md, diff, findings, now()],
+    )?;
+    Ok(())
+}
+
+/// Every saved run in a workspace (across its projects), newest first — the memory manager's list.
+/// `pr_title` comes from the run's own `meta` JSON (json_extract); `findings_count` from the
+/// length of the `findings` JSON array.
+pub fn list_review_runs(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<ReviewRunSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.id, r.project_id, COALESCE(p.name, '—'), r.pr_id,
+                COALESCE(json_extract(r.meta, '$.pr_title'), ''),
+                r.iter, r.level,
+                COALESCE(json_array_length(r.findings), 0),
+                r.created_at
+         FROM review_runs r
+         LEFT JOIN projects p ON p.id = r.project_id
+         WHERE r.workspace_id = ?1
+         ORDER BY r.created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |row| {
+        Ok(ReviewRunSummary {
+            id: row.get(0)?,
+            project_id: row.get(1)?,
+            project_name: row.get(2)?,
+            pr_id: row.get(3)?,
+            pr_title: row.get(4)?,
+            iter: row.get(5)?,
+            level: row.get(6)?,
+            findings_count: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// The full content of one run, for the viewer / export.
+pub fn get_review_run(conn: &Connection, id: &str) -> rusqlite::Result<Option<ReviewRunDetail>> {
+    conn.query_row(
+        "SELECT id, project_id, pr_id, iter, level, meta, review_md, diff, findings, created_at
+         FROM review_runs WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(ReviewRunDetail {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                pr_id: row.get(2)?,
+                iter: row.get(3)?,
+                level: row.get(4)?,
+                meta: row.get(5)?,
+                review_md: row.get(6)?,
+                diff: row.get(7)?,
+                findings: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Overwrites a run's `findings` JSON — used when a finding is marked (false-positive / ignored)
+/// so the change persists and future re-reviews carry it forward.
+pub fn set_review_run_findings(conn: &Connection, id: &str, findings: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE review_runs SET findings = ?2 WHERE id = ?1", params![id, findings])?;
+    Ok(())
+}
+
+pub fn delete_review_run(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM review_runs WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Deletes every saved run of one PR (the "clear this PR's history" action).
+pub fn delete_review_runs_for_pr(conn: &Connection, project_id: &str, pr_id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM review_runs WHERE project_id = ?1 AND pr_id = ?2",
+        params![project_id, pr_id],
+    )?;
+    Ok(())
+}
+
+/// Wipes all saved review memory for a workspace (the strong "purge" action).
+pub fn purge_workspace_review_runs(conn: &Connection, workspace_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM review_runs WHERE workspace_id = ?1", params![workspace_id])?;
+    Ok(())
+}
+
+// ---------- workspace prompts (review standard, PR description) ----------
+
+/// The built-in default text for a prompt `kind` — the fallback when a workspace has no override
+/// (or blanked it), and the source for the editor's "restore default".
+pub fn workspace_prompt_default(kind: &str) -> &'static str {
+    match kind {
+        "pr_description" => crate::ai::DEFAULT_PR_DESCRIPTION_TEMPLATE,
+        // The SDD/Harness pipeline stages reuse this per-workspace text store; they start empty
+        // (no preconfig — the user defines them). The guide is static frontend content, not stored.
+        "sdd_stages" => "",
+        // review_standard and anything unexpected fall back to the review methodology.
+        _ => crate::ai::DEFAULT_PR_REVIEW_STANDARD,
+    }
+}
+
+/// The workspace's saved override for `kind`, or the built-in default when the row is missing or
+/// was blanked (a blank save is how the UI "resets to default"). Never returns an empty string,
+/// so callers can use it directly as the prompt.
+pub fn get_workspace_prompt(conn: &Connection, workspace_id: &str, kind: &str) -> rusqlite::Result<String> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT content FROM workspace_prompts WHERE workspace_id = ?1 AND kind = ?2",
+            params![workspace_id, kind],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(match stored {
+        Some(c) if !c.trim().is_empty() => c,
+        _ => workspace_prompt_default(kind).to_string(),
+    })
+}
+
+/// Saves the workspace's override for `kind`. Passing the empty string clears the override so the
+/// workspace falls back to the built-in default (that's what the "restore default" button does).
+pub fn set_workspace_prompt(conn: &Connection, workspace_id: &str, kind: &str, content: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO workspace_prompts (workspace_id, kind, content, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(workspace_id, kind) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at",
+        params![workspace_id, kind, content, now()],
+    )?;
+    Ok(())
 }
 
 pub fn list_workspaces(conn: &Connection) -> rusqlite::Result<Vec<Workspace>> {
@@ -243,75 +440,6 @@ pub fn delete_review_context(conn: &Connection, id: &str) -> rusqlite::Result<()
     Ok(())
 }
 
-// ---------- workspace MD files ----------
-
-pub fn upsert_workspace_md_file(
-    conn: &Connection,
-    id: Option<String>,
-    workspace_id: &str,
-    filename: &str,
-    content: &str,
-    enabled: bool,
-) -> rusqlite::Result<WorkspaceMdFile> {
-    let existing_created_at = id.as_ref().and_then(|existing_id| {
-        conn.query_row(
-            "SELECT created_at FROM workspace_md_files WHERE id = ?1",
-            params![existing_id],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
-    });
-    let now_str = now();
-    let file = WorkspaceMdFile {
-        id: id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-        workspace_id: workspace_id.to_string(),
-        filename: filename.to_string(),
-        content: content.to_string(),
-        enabled,
-        created_at: existing_created_at.unwrap_or_else(|| now_str.clone()),
-        updated_at: now_str,
-    };
-    conn.execute(
-        "INSERT INTO workspace_md_files (id, workspace_id, filename, content, enabled, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(id) DO UPDATE SET filename = excluded.filename, content = excluded.content,
-            enabled = excluded.enabled, updated_at = excluded.updated_at",
-        params![
-            file.id,
-            file.workspace_id,
-            file.filename,
-            file.content,
-            file.enabled,
-            file.created_at,
-            file.updated_at,
-        ],
-    )?;
-    Ok(file)
-}
-
-pub fn list_workspace_md_files(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceMdFile>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, filename, content, enabled, created_at, updated_at
-         FROM workspace_md_files WHERE workspace_id = ?1 ORDER BY created_at",
-    )?;
-    let rows = stmt.query_map(params![workspace_id], |row| {
-        Ok(WorkspaceMdFile {
-            id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            filename: row.get(2)?,
-            content: row.get(3)?,
-            enabled: row.get(4)?,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
-        })
-    })?;
-    rows.collect()
-}
-
-pub fn delete_workspace_md_file(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM workspace_md_files WHERE id = ?1", params![id])?;
-    Ok(())
-}
 
 // ---------- workspace skills ----------
 
@@ -326,52 +454,128 @@ pub fn add_workspace_skill(
         workspace_id: workspace_id.to_string(),
         skill_name: skill_name.to_string(),
         source_repo: source_repo.to_string(),
+        enabled: true,
         installed_at: now(),
     };
     conn.execute(
-        "INSERT INTO workspace_skills (id, workspace_id, skill_name, source_repo, installed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO workspace_skills (id, workspace_id, skill_name, source_repo, enabled, installed_at)
+         VALUES (?1, ?2, ?3, ?4, 1, ?5)",
         params![skill.id, skill.workspace_id, skill.skill_name, skill.source_repo, skill.installed_at],
     )?;
     Ok(skill)
 }
 
+fn map_skill(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceSkill> {
+    Ok(WorkspaceSkill {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        skill_name: row.get(2)?,
+        source_repo: row.get(3)?,
+        enabled: row.get(4)?,
+        installed_at: row.get(5)?,
+    })
+}
+
 pub fn list_workspace_skills(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceSkill>> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, skill_name, source_repo, installed_at
+        "SELECT id, workspace_id, skill_name, source_repo, enabled, installed_at
          FROM workspace_skills WHERE workspace_id = ?1 ORDER BY installed_at",
     )?;
-    let rows = stmt.query_map(params![workspace_id], |row| {
-        Ok(WorkspaceSkill {
-            id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            skill_name: row.get(2)?,
-            source_repo: row.get(3)?,
-            installed_at: row.get(4)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![workspace_id], map_skill)?;
     rows.collect()
 }
 
 pub fn get_workspace_skill(conn: &Connection, id: &str) -> rusqlite::Result<Option<WorkspaceSkill>> {
     conn.query_row(
-        "SELECT id, workspace_id, skill_name, source_repo, installed_at FROM workspace_skills WHERE id = ?1",
+        "SELECT id, workspace_id, skill_name, source_repo, enabled, installed_at FROM workspace_skills WHERE id = ?1",
         params![id],
-        |row| {
-            Ok(WorkspaceSkill {
-                id: row.get(0)?,
-                workspace_id: row.get(1)?,
-                skill_name: row.get(2)?,
-                source_repo: row.get(3)?,
-                installed_at: row.get(4)?,
-            })
-        },
+        map_skill,
     )
     .optional()
 }
 
+pub fn set_workspace_skill_enabled(conn: &Connection, id: &str, enabled: bool) -> rusqlite::Result<()> {
+    conn.execute("UPDATE workspace_skills SET enabled = ?2 WHERE id = ?1", params![id, enabled])?;
+    Ok(())
+}
+
 pub fn delete_workspace_skill(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM workspace_skills WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+// ---------- workspace SDD/Harness agents ----------
+
+pub fn list_workspace_agents(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceAgent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at
+         FROM workspace_agents WHERE workspace_id = ?1 ORDER BY sort_order, created_at",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |row| {
+        Ok(WorkspaceAgent {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            name: row.get(2)?,
+            role: row.get(3)?,
+            provider: row.get(4)?,
+            model: row.get(5)?,
+            prompt: row.get(6)?,
+            enabled: row.get(7)?,
+            sort_order: row.get(8)?,
+            created_at: row.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_workspace_agent(
+    conn: &Connection,
+    id: Option<String>,
+    workspace_id: &str,
+    name: &str,
+    role: &str,
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    enabled: bool,
+) -> rusqlite::Result<WorkspaceAgent> {
+    let existing = id.as_ref().and_then(|existing_id| {
+        conn.query_row(
+            "SELECT sort_order, created_at FROM workspace_agents WHERE id = ?1",
+            params![existing_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok()
+    });
+    let (sort_order, created_at) = existing.unwrap_or((0, now()));
+    let agent = WorkspaceAgent {
+        id: id.unwrap_or_else(|| Uuid::new_v4().to_string()),
+        workspace_id: workspace_id.to_string(),
+        name: name.to_string(),
+        role: role.to_string(),
+        provider: provider.to_string(),
+        model: model.to_string(),
+        prompt: prompt.to_string(),
+        enabled,
+        sort_order,
+        created_at,
+    };
+    conn.execute(
+        "INSERT INTO workspace_agents (id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, role = excluded.role, provider = excluded.provider,
+            model = excluded.model, prompt = excluded.prompt, enabled = excluded.enabled",
+        params![
+            agent.id, agent.workspace_id, agent.name, agent.role, agent.provider, agent.model, agent.prompt,
+            agent.enabled, agent.sort_order, agent.created_at,
+        ],
+    )?;
+    Ok(agent)
+}
+
+pub fn delete_workspace_agent(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM workspace_agents WHERE id = ?1", params![id])?;
     Ok(())
 }
 

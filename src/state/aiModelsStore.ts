@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { getSetting, listAiModels, setSetting } from "../lib/tauri/commands";
+import { PROVIDER_MODELS } from "../lib/aiProviders";
 
 /** Model ids the user has typed into a "Custom" field for this provider. Kept as CSV in settings.
  * This is what keeps Claude Code and Codex current: neither CLI can enumerate its models, so
@@ -69,6 +70,10 @@ export const useAiModelsStore = create<AiModelsState>((set, get) => ({
   remember: async (providerId, modelId) => {
     const id = modelId.trim();
     if (!id) return;
+    // A catalog id is already offered — remembering it would (for providers with no live list,
+    // like Claude Code) make the remembered subset replace the whole catalog. Only remember
+    // genuinely hand-typed ids.
+    if ((PROVIDER_MODELS[providerId] ?? []).some((m) => m.id === id)) return;
     const remembered = await loadRemembered(providerId);
     if (remembered.includes(id)) return;
     const next = [...remembered, id];

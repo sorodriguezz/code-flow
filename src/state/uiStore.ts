@@ -11,8 +11,8 @@ export type SettingsSectionId =
   | "git"
   | "azure"
   | "claude"
-  | "context"
-  | "mdFiles"
+  | "review"
+  | "sdd"
   | "skills"
   | "mcps";
 

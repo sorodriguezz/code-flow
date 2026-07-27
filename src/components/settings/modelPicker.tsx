@@ -20,13 +20,26 @@ export function parseModel(
   return { choice: CUSTOM_MODEL, custom: trimmed };
 }
 
+/** Providers whose model list is maintained by hand — their CLI can't enumerate models, so the
+ * curated catalog is the source of truth and must always be shown (with any hand-typed ids merged
+ * in), never replaced by a "live" list that is really just the ids the user happened to pick
+ * before. Without this, selecting one Claude model collapsed the dropdown to only that one. */
+const CURATED_MODEL_PROVIDERS = new Set(["claude"]);
+
 /** The option set to show for a provider: the fetched models when we have them, else the curated
  * fallback list. Fetched ids (e.g. `opencode/claude-sonnet-5`) are shown verbatim — they're already
  * the exact string the CLI expects. `undefined` means the list hasn't arrived yet, which is not an
- * error: the caller renders the fallback until it does. */
+ * error: the caller renders the fallback until it does. For curated providers the catalog is always
+ * kept, with any extra (hand-typed) ids appended. */
 export function modelOptionsFor(providerId: string, dynamicModels?: string[]): AiModelOption[] {
+  const curated = PROVIDER_MODELS[providerId] ?? [];
+  if (CURATED_MODEL_PROVIDERS.has(providerId)) {
+    const known = new Set(curated.map((o) => o.id));
+    const extra = (dynamicModels ?? []).filter((id) => !known.has(id)).map((id) => ({ id, label: id }));
+    return [...curated, ...extra];
+  }
   if (dynamicModels && dynamicModels.length > 0) return dynamicModels.map((id) => ({ id, label: id }));
-  return PROVIDER_MODELS[providerId] ?? [];
+  return curated;
 }
 
 /** Where to find a valid model ID for the "Custom" field, per provider — a listing command for the

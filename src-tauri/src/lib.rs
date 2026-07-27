@@ -16,6 +16,7 @@ mod openai;
 mod opencode;
 mod paths;
 mod remote;
+mod review_memory;
 mod search;
 mod secret_scan;
 mod secrets;
@@ -157,18 +158,35 @@ pub fn run() {
             commands::git_ops::git_push,
             commands::settings::get_setting,
             commands::settings::set_setting,
+            commands::settings::get_workspace_prompt,
+            commands::settings::set_workspace_prompt,
+            commands::settings::default_workspace_prompt,
+            commands::settings::list_workspace_agents,
+            commands::settings::upsert_workspace_agent,
+            commands::settings::delete_workspace_agent,
+            commands::settings::list_review_runs,
+            commands::settings::get_review_run,
+            commands::settings::mark_review_finding,
+            commands::settings::delete_review_run,
+            commands::settings::delete_review_runs_for_pr,
+            commands::settings::purge_workspace_review_runs,
+            commands::settings::export_review_runs,
             commands::settings::list_review_contexts,
             commands::settings::upsert_review_context,
             commands::settings::delete_review_context,
-            commands::settings::list_workspace_md_files,
-            commands::settings::upsert_workspace_md_file,
-            commands::settings::delete_workspace_md_file,
             commands::settings::list_workspace_mcps,
             commands::settings::upsert_workspace_mcp,
             commands::settings::delete_workspace_mcp,
             commands::skills_cmd::install_workspace_skill,
             commands::skills_cmd::list_workspace_skills,
             commands::skills_cmd::remove_workspace_skill,
+            commands::skills_cmd::set_workspace_skill_enabled,
+            commands::skills_cmd::create_custom_skill,
+            commands::skills_cmd::import_skill_from_folder,
+            commands::skills_cmd::list_skill_files,
+            commands::skills_cmd::read_skill_file,
+            commands::skills_cmd::write_skill_file,
+            commands::skills_cmd::delete_skill_file,
             commands::secrets_cmd::set_ado_pat,
             commands::secrets_cmd::get_ado_pat,
             commands::secrets_cmd::delete_ado_pat,

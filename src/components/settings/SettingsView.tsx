@@ -2,25 +2,25 @@ import { useEffect } from "react";
 import {
   Bot,
   Cloud,
-  FileText,
   FolderGit2,
   GitBranch,
   Globe,
   Keyboard,
-  MessageSquareText,
   PackagePlus,
   Palette,
   Plug,
+  ShieldCheck,
+  Workflow,
   X,
 } from "lucide-react";
 import { ThemeSettings } from "./ThemeSettings";
 import { ProjectsSettings } from "./ProjectsSettings";
 import { GitHostingSettings } from "./GitHostingSettings";
 import { ClaudeSettings } from "./ClaudeSettings";
-import { ReviewContextEditor } from "./ReviewContextEditor";
+import { ReviewSettings } from "./ReviewSettings";
+import { SddSettings } from "./SddSettings";
 import { SkillsSettings } from "./SkillsSettings";
 import { McpSettings } from "./McpSettings";
-import { MdFilesSettings } from "./MdFilesSettings";
 import { GitSettings } from "./GitSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { ShortcutsSettings } from "./ShortcutsSettings";
@@ -48,8 +48,8 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
 ];
 
 const WORKSPACE_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
-  { id: "context", labelKey: "settings.context", icon: MessageSquareText },
-  { id: "mdFiles", labelKey: "settings.mdFiles", icon: FileText },
+  { id: "review", labelKey: "settings.review", icon: ShieldCheck },
+  { id: "sdd", labelKey: "settings.sdd", icon: Workflow },
   { id: "skills", labelKey: "settings.skills", icon: PackagePlus },
   { id: "mcps", labelKey: "settings.mcps", icon: Plug },
 ];
@@ -155,8 +155,8 @@ export function SettingsView() {
               {section === "git" && <GitSettings />}
               {section === "azure" && <GitHostingSettings />}
               {section === "claude" && <ClaudeSettings />}
-              {section === "context" && <ReviewContextEditor />}
-              {section === "mdFiles" && <MdFilesSettings />}
+              {section === "review" && <ReviewSettings />}
+              {section === "sdd" && <SddSettings />}
               {section === "skills" && <SkillsSettings />}
               {section === "mcps" && <McpSettings />}
             </div>

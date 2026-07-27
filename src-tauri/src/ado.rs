@@ -2,6 +2,9 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 const API_VERSION: &str = "7.1";
+/// A handful of Azure DevOps endpoints (notably `connectionData`) never went GA, and the server
+/// rejects a plain `7.1` on them with a 400 demanding the `-preview` suffix.
+const PREVIEW_API_VERSION: &str = "7.1-preview";
 
 fn auth_header(pat: &str) -> String {
     let token = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
@@ -350,6 +353,14 @@ async fn get_latest_iteration_id(org: &str, project: &str, repo_id: &str, pr_id:
 /// iteration — this is what makes the comment show up attached to the actual diff hunk
 /// (like `debe-ser.png`) instead of as a general PR-level remark.
 #[allow(clippy::too_many_arguments)]
+#[derive(Deserialize)]
+struct ThreadCreated {
+    id: i64,
+}
+
+/// Posts a file-anchored comment thread and returns its **thread id** — kept so a later re-review
+/// can reply to (or resolve) the same thread instead of opening a duplicate.
+#[allow(clippy::too_many_arguments)]
 pub async fn post_pr_comment_anchored(
     org: &str,
     project: &str,
@@ -360,7 +371,7 @@ pub async fn post_pr_comment_anchored(
     start_line: i64,
     end_line: i64,
     pat: &str,
-) -> Result<(), String> {
+) -> Result<i64, String> {
     let iteration_id = get_latest_iteration_id(org, project, repo_id, pr_id, pat).await?;
     let org_enc = encode_segment(&normalize_org(org));
     let project_enc = encode_segment(project);
@@ -381,6 +392,68 @@ pub async fn post_pr_comment_anchored(
             "iterationContext": { "firstComparingIteration": 1, "secondComparingIteration": iteration_id },
         },
     });
+    post_thread(&url, &body, pat).await
+}
+
+/// Posts a general (non-file-anchored) comment thread on the PR — used for the summary
+/// comment and as a fallback for any finding whose location couldn't be parsed. Returns the id.
+pub async fn post_pr_comment(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    content: &str,
+    pat: &str,
+) -> Result<i64, String> {
+    let org = encode_segment(&normalize_org(org));
+    let project = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/threads\
+         ?api-version={API_VERSION}"
+    );
+    let body = serde_json::json!({
+        "comments": [{ "parentCommentId": 0, "content": content, "commentType": 1 }],
+        "status": 1,
+    });
+    post_thread(&url, &body, pat).await
+}
+
+/// Shared POST for both thread flavors — returns the created thread's id.
+async fn post_thread(url: &str, body: &serde_json::Value, pat: &str) -> Result<i64, String> {
+    let res = client()
+        .post(url)
+        .header("Authorization", auth_header(pat))
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {body}"));
+    }
+    let created: ThreadCreated = res.json().await.map_err(|e| format!("couldn't read Azure DevOps response: {e}"))?;
+    Ok(created.id)
+}
+
+/// Adds a follow-up comment (reply) to an existing thread — used on re-review so a persisting or
+/// resolved finding gets a note on its own thread rather than a duplicate.
+pub async fn reply_pr_thread(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    thread_id: i64,
+    content: &str,
+    pat: &str,
+) -> Result<(), String> {
+    let org = encode_segment(&normalize_org(org));
+    let project = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/threads/{thread_id}/comments\
+         ?api-version={API_VERSION}"
+    );
+    let body = serde_json::json!({ "parentCommentId": 1, "content": content, "commentType": 1 });
     let res = client()
         .post(&url)
         .header("Authorization", auth_header(pat))
@@ -396,28 +469,26 @@ pub async fn post_pr_comment_anchored(
     Ok(())
 }
 
-/// Posts a general (non-file-anchored) comment thread on the PR — used for the summary
-/// comment and as a fallback for any finding whose location couldn't be parsed.
-pub async fn post_pr_comment(
+/// Sets a thread's status. Azure's thread status ints: 1=active, 2=fixed, 3=wontFix, 4=closed,
+/// 5=byDesign, 6=pending. A resolved finding's thread is marked `2` (fixed).
+pub async fn set_pr_thread_status(
     org: &str,
     project: &str,
     repo_id: &str,
     pr_id: i64,
-    content: &str,
+    thread_id: i64,
+    status: i32,
     pat: &str,
 ) -> Result<(), String> {
     let org = encode_segment(&normalize_org(org));
     let project = encode_segment(project);
     let url = format!(
-        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/threads\
+        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/threads/{thread_id}\
          ?api-version={API_VERSION}"
     );
-    let body = serde_json::json!({
-        "comments": [{ "parentCommentId": 0, "content": content, "commentType": 1 }],
-        "status": 1,
-    });
+    let body = serde_json::json!({ "status": status });
     let res = client()
-        .post(&url)
+        .patch(&url)
         .header("Authorization", auth_header(pat))
         .json(&body)
         .send()
@@ -447,7 +518,7 @@ struct RawConnectionUser {
 /// org-scoped `connectionData` endpoint.
 async fn authenticated_user_id(org: &str, pat: &str) -> Result<String, String> {
     let org = encode_segment(&normalize_org(org));
-    let url = format!("https://dev.azure.com/{org}/_apis/connectionData?api-version={API_VERSION}");
+    let url = format!("https://dev.azure.com/{org}/_apis/connectionData?api-version={PREVIEW_API_VERSION}");
     let data: ConnectionData = get_json(&url, pat).await?;
     Ok(data.authenticated_user.id)
 }

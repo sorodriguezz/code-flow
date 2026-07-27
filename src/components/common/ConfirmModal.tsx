@@ -52,7 +52,7 @@ export function ConfirmModal() {
               request.danger ? "bg-[var(--cf-danger)]" : "bg-[var(--cf-accent)]"
             }`}
           >
-            {t("common.confirm")}
+            {request.confirmLabel ?? t("common.confirm")}
           </button>
         </div>
       </div>

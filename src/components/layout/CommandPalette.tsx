@@ -39,8 +39,8 @@ const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [
   { id: "git", labelKey: "settings.git" },
   { id: "azure", labelKey: "settings.gitHostingSection" },
   { id: "claude", labelKey: "settings.aiSection" },
-  { id: "context", labelKey: "settings.context" },
-  { id: "mdFiles", labelKey: "settings.mdFiles" },
+  { id: "review", labelKey: "settings.review" },
+  { id: "sdd", labelKey: "settings.sdd" },
   { id: "skills", labelKey: "settings.skills" },
   { id: "mcps", labelKey: "settings.mcps" },
 ];

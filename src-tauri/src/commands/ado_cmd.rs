@@ -3,7 +3,7 @@ use tauri::{AppHandle, State};
 
 use crate::ado;
 use crate::ai;
-use crate::commands::claude_cmd::{load_ai_config, shared_template, AiTask};
+use crate::commands::claude_cmd::{load_ai_config, AiTask};
 use crate::commands::skills_cmd;
 use crate::db::{
     models::{Project, WorkspaceMcp},
@@ -352,7 +352,10 @@ pub async fn generate_pr_description(
     let (config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let config = load_ai_config(&conn, AiTask::PrDescription)?;
-        let template = shared_template(&conn, "pr_description_template", "claude_pr_description_template")?;
+        // The PR-description template is now the workspace's own (editable) copy — provider-neutral,
+        // seeded with the built-in default. Falls back to that default when blanked.
+        let template = queries::get_workspace_prompt(&conn, &project.workspace_id, "pr_description")
+            .map_err(|e| e.to_string())?;
         (config, template)
     };
     let diff_files = git::diff::get_branch_diff(&project.local_path, &target_branch, &source_branch)?;
@@ -431,19 +434,34 @@ pub async fn review_pull_request(
     project_id: String,
     pr_id: i64,
     job_id: String,
+    level: String,
+    // When an SDD/Harness agent runs this review, its provider + model + prompt for this run.
+    agent_provider: Option<String>,
+    agent_model: Option<String>,
+    agent_prompt: Option<String>,
 ) -> Result<String, String> {
     let project = load_project(&db, &project_id)?;
     let link = linked_repo(&project)?;
     let workspace_id = project.workspace_id.clone();
 
-    let (contexts, md_files, mcps, config, review_template) = {
+    let (contexts, mcps, skills, config, review_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let md_files = queries::list_workspace_md_files(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let config = load_ai_config(&conn, AiTask::Review)?;
-        let review_template = shared_template(&conn, "review_template", "claude_review_template")?;
-        (contexts, md_files, mcps, config, review_template)
+        let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        // An active agent reviews on its own provider + model; otherwise the Review task routing.
+        let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
+            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
+                crate::commands::claude_cmd::load_ai_config_for(&conn, p, m)?
+            }
+            _ => load_ai_config(&conn, AiTask::Review)?,
+        };
+        // The review methodology is the workspace's own (editable) PR review standard — the
+        // transversal base every review runs under. Always non-empty (falls back to the built-in
+        // default), so it's the prompt directly; project-specific rules ride along in `contexts`.
+        let review_template = queries::get_workspace_prompt(&conn, &workspace_id, "review_standard")
+            .map_err(|e| e.to_string())?;
+        (contexts, mcps, skills, config, review_template)
     };
 
     let prs = match &link {
@@ -481,9 +499,30 @@ pub async fn review_pull_request(
         LinkedRepo::Azure { .. } => pr.source_branch.clone(),
     };
 
+    // The head commit this review will run against. On a re-review, if it matches the last run's
+    // head, nothing changed — skip the whole (costly) analysis. Otherwise remember which files
+    // changed since, so untouched-file findings auto-persist during reconciliation.
+    let head_sha = git::diff::resolve_sha(&project.local_path, &head_ref).unwrap_or_default();
+    let prev_head = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::latest_review_head(&conn, &project_id, pr_id).ok().flatten()
+    };
+    if let Some(prev) = &prev_head {
+        if !head_sha.is_empty() && prev == &head_sha {
+            let short = &head_sha[..head_sha.len().min(8)];
+            return Ok(format!(
+                "🔁 Sin cambios desde la última revisión (mismo commit `{short}`). No se volvió a analizar."
+            ));
+        }
+    }
+    let changed_files = match &prev_head {
+        Some(prev) if !prev.is_empty() => git::diff::changed_files_between(&project.local_path, prev, &head_ref).ok(),
+        _ => None,
+    };
+
     // Also best-effort: skills are a nice-to-have for the review, not a precondition —
     // don't block the review if e.g. the project directory is read-only.
-    let _ = skills_cmd::sync_skills_into_project(&workspace_id, &project.local_path);
+    let _ = skills_cmd::sync_skills_into_project(&skills, &workspace_id, &project.local_path);
 
     let diff_files = git::diff::get_branch_diff(&project.local_path, &pr.target_branch, &head_ref)?;
     let diff_text = git::diff::render_diff_for_prompt(&diff_files);
@@ -493,12 +532,10 @@ pub async fn review_pull_request(
         .filter(|c| c.enabled)
         .map(|c| (c.name, c.content))
         .collect();
-    enabled_contexts.extend(
-        md_files
-            .into_iter()
-            .filter(|f| f.enabled)
-            .map(|f| (f.filename, f.content)),
-    );
+    // The active agent's own instructions go first, so the role frames the review.
+    if let Some(prompt) = agent_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+        enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
+    }
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
@@ -515,24 +552,130 @@ pub async fn review_pull_request(
             &config.tools,
             &project.local_path,
             &review_template,
+            &level,
             mcp_config_path.as_deref(),
         )
         .await
     })
     .await;
 
-    // Same rule as the change analysis: a stopped run leaves no history row behind.
-    if !matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
-        let label = format!("#{} {}", pr.id, pr.title);
-        let meta = serde_json::json!({ "prId": pr.id, "prTitle": pr.title }).to_string();
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let _ = match &result {
-            Ok(text) => queries::add_job_history(&conn, &job_id, &project_id, "pr-review", &label, "done", Some(text), None, &meta),
-            Err(e) => queries::add_job_history(&conn, &job_id, &project_id, "pr-review", &label, "error", None, Some(e), &meta),
-        };
+    // A stopped run leaves nothing behind (no history row, no saved memory) — return as-is.
+    if matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
+        return result;
     }
 
+    let label = format!("#{} {}", pr.id, pr.title);
+    let history_meta = serde_json::json!({ "prId": pr.id, "prTitle": pr.title, "level": level }).to_string();
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+
+    // On success, save durable memory of the run into the DB and, when this PR was reviewed
+    // before, reconcile against the previous run so the delta (new / still-present / resolved)
+    // rides on top of the returned review. Best-effort: a memory write must never turn a good
+    // review into a failure.
+    let result = match result {
+        Ok(text) => {
+            let text = persist_review_run(
+                &conn, &job_id, &project, &workspace_id, &pr, &level, config.engine.label(), &config.model,
+                &diff_text, &head_sha, changed_files.as_deref(), text,
+            );
+            let _ = queries::add_job_history(
+                &conn, &job_id, &project_id, "pr-review", &label, "done", Some(&text), None, &history_meta,
+            );
+            Ok(text)
+        }
+        Err(e) => {
+            let _ = queries::add_job_history(
+                &conn, &job_id, &project_id, "pr-review", &label, "error", None, Some(&e), &history_meta,
+            );
+            Err(e)
+        }
+    };
+
     result
+}
+
+/// Saves one completed review into `review_runs` (durable memory, in the DB) and, when the PR has
+/// a previous run, reconciles the new findings against it — returning the review text with a
+/// one-line re-review delta banner prepended. Best-effort: any failure just returns the review
+/// unchanged, since losing memory must never fail the review the user is waiting on.
+#[allow(clippy::too_many_arguments)]
+fn persist_review_run(
+    conn: &rusqlite::Connection,
+    job_id: &str,
+    project: &Project,
+    workspace_id: &str,
+    pr: &ado::PullRequestSummary,
+    level: &str,
+    engine_label: &str,
+    model: &str,
+    diff_text: &str,
+    head_sha: &str,
+    changed_files: Option<&[String]>,
+    text: String,
+) -> String {
+    use crate::review_memory as mem;
+
+    let prior = queries::count_review_runs(conn, &project.id, pr.id).unwrap_or(0) as usize;
+    let parsed = mem::parse_findings(&text);
+
+    // Reconcile against the previous run's findings when there is one; otherwise it's the first
+    // run and the parsed findings are the whole set (introduced this iteration).
+    let (findings, delta) = if prior > 0 {
+        let prev: Vec<mem::MemoryFinding> = queries::latest_review_findings(conn, &project.id, pr.id)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        let (merged, d) = mem::reconcile(&prev, &parsed, prior, changed_files);
+        (merged, Some(d))
+    } else {
+        let mut first = parsed;
+        for f in first.iter_mut() {
+            f.introducido_en_iter = 1;
+        }
+        (first, None)
+    };
+    let iter = prior + 1;
+
+    // On a re-review, append the cumulative "resolved findings" traceability to the review body
+    // and prepend the delta banner — the stored memory and the returned text are identical.
+    let mut text = match mem::resolved_history_section(&findings) {
+        Some(section) => format!("{text}{section}"),
+        None => text,
+    };
+    if let Some(d) = &delta {
+        text = format!("{}{}", mem::delta_banner(d), text);
+    }
+
+    let meta = mem::ReviewMeta {
+        pr_id: pr.id,
+        pr_title: pr.title.clone(),
+        pr_description: pr.description.clone(),
+        author: pr.author.clone(),
+        source_branch: pr.source_branch.clone(),
+        target_branch: pr.target_branch.clone(),
+        url: pr.url.clone(),
+        provider: pr.provider.clone(),
+        level: level.to_string(),
+        engine: engine_label.to_string(),
+        model: model.to_string(),
+        project_id: project.id.clone(),
+        project_name: project.name.clone(),
+        workspace_id: workspace_id.to_string(),
+        timestamp: chrono::Local::now().to_rfc3339(),
+        iter,
+        head_sha: head_sha.to_string(),
+    };
+
+    let meta_json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
+    let findings_json = serde_json::to_string(&findings).unwrap_or_else(|_| "[]".to_string());
+    if let Err(e) = queries::add_review_run(
+        conn, job_id, &project.id, workspace_id, pr.id, iter as i64, level, &meta_json, &text, diff_text, &findings_json,
+    ) {
+        eprintln!("failed to save review memory: {e}");
+    }
+
+    text
 }
 
 #[derive(Deserialize)]
@@ -543,97 +686,172 @@ pub struct CommentLocation {
     pub end_line: i64,
 }
 
+/// One human-selected finding to post. Identity (`file` + `category`) matches it back to the stored
+/// run finding so its thread is reused across re-reviews.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReviewComment {
+pub struct PostFindingItem {
+    pub file: Option<String>,
+    pub category: String,
+    /// Full comment markdown, used when opening a new thread.
     pub content: String,
-    /// Present for a per-finding comment (anchors it to that file/line via the PR's latest
-    /// iteration); absent for the summary comment or a finding whose location the model
-    /// didn't provide in a parseable form, which just posts as a general PR comment.
     pub location: Option<CommentLocation>,
 }
 
-/// Posts each finding as its own comment thread — anchored to its file/line when the model
-/// reported one (`debe-ser.png`-style inline review), a general PR comment otherwise —
-/// rather than a single comment dumping the whole review. Posted sequentially (not
-/// concurrently) to avoid bursting Azure DevOps' API, and every thread is attempted even if
-/// an earlier one fails so one bad comment doesn't silently swallow the rest of the review.
+/// Posts the human-selected findings to the PR, reconciling against what was already posted so a
+/// finding keeps ONE thread for the PR's whole life ("un hallazgo = un thread"): no thread yet →
+/// open a new (anchored) one; already posted and still present → a follow-up reply; now resolved →
+/// a reply plus its thread marked resolved/fixed. New thread ids are written back onto the run so a
+/// later re-post continues the same threads instead of duplicating. Works on both Azure DevOps
+/// (threads) and GitHub (review-comment replies + GraphQL thread resolve). Optionally posts a
+/// summary comment. Every item is attempted even if one fails.
 #[tauri::command]
 pub async fn post_pr_review_comment(
     db: State<'_, Db>,
     project_id: String,
     pr_id: i64,
-    comments: Vec<ReviewComment>,
+    run_id: String,
+    items: Vec<PostFindingItem>,
+    post_summary: bool,
+    summary: Option<String>,
 ) -> Result<(), String> {
+    use crate::review_memory::finding_identity;
     let project = load_project(&db, &project_id)?;
     let link = linked_repo(&project)?;
 
+    // Stored findings are the source of truth for existing thread ids / state.
+    let (mut findings, iter): (Vec<crate::review_memory::MemoryFinding>, i64) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        match queries::get_review_run(&conn, &run_id).map_err(|e| e.to_string())? {
+            Some(r) => (serde_json::from_str(&r.findings).unwrap_or_default(), r.iter),
+            None => (Vec::new(), 1),
+        }
+    };
+    let index_of = |findings: &[crate::review_memory::MemoryFinding], item: &PostFindingItem| {
+        let key = finding_identity(item.file.as_deref(), &item.category);
+        findings
+            .iter()
+            .position(|f| finding_identity(f.archivo.as_deref(), &f.categoria) == key)
+    };
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let mut failures = Vec::new();
-    match link {
+
+    match &link {
         LinkedRepo::Azure { org, project: ado_project, repo_id } => {
-            let pat = pat_for_org(&org)?;
-            for (i, comment) in comments.iter().enumerate() {
-                let result = match &comment.location {
-                    Some(loc) => {
-                        ado::post_pr_comment_anchored(
-                            &org,
-                            &ado_project,
-                            &repo_id,
-                            pr_id,
-                            &comment.content,
-                            &loc.file,
-                            loc.start_line,
-                            loc.end_line,
-                            &pat,
-                        )
-                        .await
+            let pat = pat_for_org(org)?;
+            for (i, item) in items.iter().enumerate() {
+                let idx = index_of(&findings, item);
+                let thread = idx.and_then(|k| findings[k].thread_id);
+                let resolved = idx.map(|k| findings[k].estado == "resuelto").unwrap_or(false);
+                let outcome = match thread {
+                    None => match &item.location {
+                        Some(loc) => ado::post_pr_comment_anchored(org, ado_project, repo_id, pr_id, &item.content, &loc.file, loc.start_line, loc.end_line, &pat)
+                            .await
+                            .map(Some),
+                        None => ado::post_pr_comment(org, ado_project, repo_id, pr_id, &item.content, &pat).await.map(Some),
+                    },
+                    Some(tid) => {
+                        let text = if resolved {
+                            format!("✔️ _Resuelto en la iteración {iter} — {today}. Marcado como fixed._")
+                        } else {
+                            format!("➡️ _Sigue presente en la iteración {iter} — {today}._")
+                        };
+                        let r = ado::reply_pr_thread(org, ado_project, repo_id, pr_id, tid, &text, &pat).await;
+                        if r.is_ok() && resolved {
+                            let _ = ado::set_pr_thread_status(org, ado_project, repo_id, pr_id, tid, 2, &pat).await;
+                        }
+                        r.map(|_| None)
                     }
-                    None => ado::post_pr_comment(&org, &ado_project, &repo_id, pr_id, &comment.content, &pat).await,
                 };
-                if let Err(e) = result {
-                    failures.push(format!("#{} of {}: {e}", i + 1, comments.len()));
+                apply_post_outcome(&mut findings, idx, outcome, i, &mut failures);
+            }
+            if post_summary {
+                if let Some(s) = &summary {
+                    if let Err(e) = ado::post_pr_comment(org, ado_project, repo_id, pr_id, s, &pat).await {
+                        failures.push(format!("summary: {e}"));
+                    }
                 }
             }
         }
         LinkedRepo::GitHub { host, owner, repo } => {
-            let token = github_token(&host)?;
-            // One head-SHA fetch for the whole batch (anchored comments all pin to the same
-            // commit). Best-effort: if it fails, anchored comments fall back to general PR
-            // comments rather than aborting the whole post.
-            let head_sha = if comments.iter().any(|c| c.location.is_some()) {
-                github::head_sha_for(&host, &owner, &repo, pr_id, &token).await.ok()
+            let token = github_token(host)?;
+            let head_sha = if items.iter().any(|it| it.location.is_some()) {
+                github::head_sha_for(host, owner, repo, pr_id, &token).await.ok()
             } else {
                 None
             };
-            for (i, comment) in comments.iter().enumerate() {
-                let result = match (&comment.location, &head_sha) {
-                    (Some(loc), Some(sha)) => {
-                        github::post_pr_comment_anchored(
-                            &host,
-                            &owner,
-                            &repo,
-                            pr_id,
-                            &comment.content,
-                            &loc.file,
-                            loc.start_line,
-                            loc.end_line,
-                            sha,
-                            &token,
-                        )
-                        .await
+            for (i, item) in items.iter().enumerate() {
+                let idx = index_of(&findings, item);
+                let comment = idx.and_then(|k| findings[k].thread_id);
+                let resolved = idx.map(|k| findings[k].estado == "resuelto").unwrap_or(false);
+                let outcome = match comment {
+                    None => match (&item.location, &head_sha) {
+                        (Some(loc), Some(sha)) => github::post_pr_comment_anchored(host, owner, repo, pr_id, &item.content, &loc.file, loc.start_line, loc.end_line, sha, &token)
+                            .await
+                            .map(Some),
+                        _ => github::post_pr_comment(host, owner, repo, pr_id, &item.content, &token).await.map(Some),
+                    },
+                    Some(cid) => {
+                        let text = if resolved {
+                            format!("✔️ Resuelto en la iteración {iter} — {today}.")
+                        } else {
+                            format!("➡️ Sigue presente en la iteración {iter} — {today}.")
+                        };
+                        let r = github::reply_pr_review_comment(host, owner, repo, pr_id, cid, &text, &token).await;
+                        if r.is_ok() && resolved {
+                            let _ = github::resolve_review_thread_for_comment(host, owner, repo, pr_id, cid, &token).await;
+                        }
+                        r.map(|_| None)
                     }
-                    _ => github::post_pr_comment(&host, &owner, &repo, pr_id, &comment.content, &token).await,
                 };
-                if let Err(e) = result {
-                    failures.push(format!("#{} of {}: {e}", i + 1, comments.len()));
+                apply_post_outcome(&mut findings, idx, outcome, i, &mut failures);
+            }
+            if post_summary {
+                if let Some(s) = &summary {
+                    if let Err(e) = github::post_pr_comment(host, owner, repo, pr_id, s, &token).await {
+                        failures.push(format!("summary: {e}"));
+                    }
                 }
             }
         }
     }
+
+    // Write back the thread ids / states we just changed.
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let json = serde_json::to_string(&findings).unwrap_or_else(|_| "[]".to_string());
+        let _ = queries::set_review_run_findings(&conn, &run_id, &json);
+    }
+
     if !failures.is_empty() {
         return Err(format!("{} comment(s) failed to post — {}", failures.len(), failures.join("; ")));
     }
     Ok(())
+}
+
+/// Applies the result of posting one item to the stored finding: `Ok(Some(id))` means a new thread
+/// was opened (record its id + mark posted); `Ok(None)` means a reply on an existing thread (no id
+/// change); `Err` is collected. Keeps the per-provider loops small.
+fn apply_post_outcome(
+    findings: &mut [crate::review_memory::MemoryFinding],
+    idx: Option<usize>,
+    outcome: Result<Option<i64>, String>,
+    i: usize,
+    failures: &mut Vec<String>,
+) {
+    match outcome {
+        Ok(Some(new_thread)) => {
+            if let Some(k) = idx {
+                findings[k].thread_id = Some(new_thread);
+                if findings[k].estado == "abierto" {
+                    findings[k].estado = "posteado".to_string();
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(e) => failures.push(format!("#{}: {e}", i + 1)),
+    }
 }
 
 /// Approve / request-changes / close a pull request on whichever host it's linked to. `action`

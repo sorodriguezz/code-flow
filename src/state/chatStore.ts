@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { sendChatMessage, getChatConversation } from "../lib/tauri/commands";
+import { sendChatMessage, getChatConversation, type ChatAgentOverride } from "../lib/tauri/commands";
 import { useChatHistoryStore } from "./activityStore";
 import { isCancellation, newRunId, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { formatAgentLogLine } from "../lib/agentLog";
@@ -80,6 +80,10 @@ const EMPTY_CHAT: ProjectChat = emptyChat();
 
 interface ChatState {
   byProject: Record<string, ProjectChat>;
+  /** The SDD/Harness agent selected for a project's chat, if any — its provider+model+prompt run
+   * each turn as that role. `null`/absent means the normal chat routing. */
+  agentByProject: Record<string, ChatAgentOverride | null>;
+  setAgent: (projectId: string, agent: ChatAgentOverride | null) => void;
   /** Fire-and-forget — the reply lands in `byProject` whenever it arrives, so it isn't lost
    * if the user switches projects or closes the AI panel while Claude is still answering. */
   send: (projectId: string, message: string) => void;
@@ -92,6 +96,10 @@ interface ChatState {
 
 export const useChatStore = create<ChatState>((set, get) => ({
   byProject: {},
+  agentByProject: {},
+
+  setAgent: (projectId, agent) =>
+    set((s) => ({ agentByProject: { ...s.agentByProject, [projectId]: agent } })),
 
   send: (projectId, message) => {
     const trimmed = message.trim();
@@ -121,7 +129,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       },
     }));
 
-    void sendChatMessage(projectId, trimmed, existing.sessionId, conversationId, runId)
+    const agent = get().agentByProject[projectId] ?? null;
+    void sendChatMessage(projectId, trimmed, existing.sessionId, conversationId, runId, agent)
       .then((reply) => {
         // The live log is already in memory and formatted; attaching it to the message is what
         // keeps "what did it do?" answerable after the run ends, without a second round trip.

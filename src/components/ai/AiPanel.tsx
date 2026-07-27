@@ -18,10 +18,12 @@ import {
   ThumbsDown,
   ThumbsUp,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
 import { parseClaudeError } from "../../lib/claudeError";
-import { parseAnalysis, buildReviewComments } from "../../lib/parseAnalysis";
+import { parseAnalysis, buildFixpack, formatFindingAsComment, formatSummaryComment } from "../../lib/parseAnalysis";
+import { Checkbox } from "../common/Checkbox";
 import { listPrCommentThreads } from "../../lib/tauri/commands";
 import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
 import { PrCommentCard, PrCommentsSkeleton } from "./PrCommentCard";
@@ -38,7 +40,7 @@ import {
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
-import { usePrStore } from "../../state/prStore";
+import { usePrStore, type ReviewLevel } from "../../state/prStore";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
@@ -56,6 +58,7 @@ import { AiRunLog } from "./AiRunLog";
 import { CheckpointsModal } from "./CheckpointsModal";
 import { AnalyzeSection } from "./AnalyzeSection";
 import { ChatModelPicker } from "./ChatModelPicker";
+import { ChatAgentPicker } from "./ChatAgentPicker";
 import { AiErrorBanner } from "./AiErrorBanner";
 import type { PullRequestSummary, PrCommentThread } from "../../types/domain";
 
@@ -199,6 +202,8 @@ function ActivitySection({ projectId }: { projectId: string }) {
 function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequestSummary }) {
   const t = useT();
   const reviewPr = usePrStore((s) => s.reviewPr);
+  const reviewLevel = usePrStore((s) => s.reviewLevel);
+  const setReviewLevel = usePrStore((s) => s.setReviewLevel);
   const postReview = usePrStore((s) => s.postReview);
   const selectPr = usePrStore((s) => s.selectPr);
   const posting = usePrStore((s) => s.posting);
@@ -219,20 +224,37 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
   const findings = parsed?.findings ?? [];
   const summary = parsed?.summary ?? "";
 
-  // One Azure DevOps comment thread per finding (anchored to its file/line) plus a summary
-  // thread with the Quality Gate and a findings table — instead of one comment dumping the
-  // whole review.
-  const comments = useMemo(() => {
-    if (!reviewText || !parsed) return [];
-    return buildReviewComments(parsed, new Date().toISOString().slice(0, 10));
-  }, [reviewText, parsed]);
+  // Human selection of which findings to post (default: all), plus whether to post the summary
+  // thread. Reset whenever a new review result arrives.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [postSummary, setPostSummary] = useState(true);
+  useEffect(() => {
+    setSelectedIds(new Set(findings.map((f) => f.id)));
+  }, [reviewText]); // eslint-disable-line react-hooks/exhaustive-deps
+  const toggleSelected = (id: string) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
 
+  const [fixpackCopied, copyFixpack] = useCopy();
   const runReview = () => reviewPr(projectId, pr.id);
   const publish = async () => {
-    if (comments.length === 0) return;
+    if (!parsed || !job) return;
+    const chosen = findings.filter((f) => selectedIds.has(f.id));
+    if (chosen.length === 0 && !postSummary) return;
     const confirmKey = pr.provider === "github" ? "chat.confirmPostGithub" : "chat.confirmPost";
-    if (!(await confirmAction(t(confirmKey, { id: pr.id, n: comments.length }), false))) return;
-    void postReview(projectId, pr.id, comments);
+    if (!(await confirmAction(t(confirmKey, { id: pr.id, n: chosen.length }), false))) return;
+    const items = chosen.map((f) => ({
+      file: f.location?.file ?? null,
+      category: f.category,
+      content: formatFindingAsComment(f),
+      location: f.location,
+    }));
+    const summary = postSummary ? formatSummaryComment(parsed, new Date().toISOString().slice(0, 10)) : null;
+    void postReview(projectId, pr.id, job.id, items, postSummary, summary);
   };
 
   // Approve / request changes / close aren't available once the PR is already merged or closed.
@@ -275,6 +297,16 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
   useEffect(() => {
     void loadThreads();
   }, [loadThreads]);
+
+  // Footer buttons truncate when the panel is narrow, so their label doubles as the tooltip.
+  const publishLabel = posted
+    ? pr.provider === "github"
+      ? t("chat.postedGithub")
+      : t("chat.posted")
+    : posting
+      ? t("chat.posting")
+      : t("chat.postToPr");
+  const reviewLabel = loading ? t("chat.reviewing") : reviewText ? t("chat.reviewAgain") : t("chat.reviewWithClaude");
 
   return (
     <div className="flex h-full flex-col">
@@ -403,14 +435,20 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
               </div>
               <div className="space-y-2">
                 {findings.map((finding) => (
-                  <FindingCard
-                    key={finding.id}
-                    finding={finding}
-                    defaultOpen={false}
-                    projectId={projectId}
-                    prSourceBranch={pr.source_branch}
-                    resolutionKey={job ? `job:${job.id}:${finding.id}` : undefined}
-                  />
+                  <div key={finding.id} className="flex items-start gap-2">
+                    <span className="mt-2 shrink-0" title={t("pr.selectToPost")}>
+                      <Checkbox checked={selectedIds.has(finding.id)} onChange={() => toggleSelected(finding.id)} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <FindingCard
+                        finding={finding}
+                        defaultOpen={false}
+                        projectId={projectId}
+                        prSourceBranch={pr.source_branch}
+                        resolutionKey={job ? `job:${job.id}:${finding.id}` : undefined}
+                      />
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
@@ -422,62 +460,170 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
         )}
       </div>
 
-      <div className="border-t border-[var(--cf-border)] p-3 space-y-2">
+      {/* Footer laid out as stacked rows (PR decision → review options → primary actions) instead of
+          one packed strip: the panel can be as narrow as PANEL_MIN, and cramming the level selector,
+          the toggles and both call-to-actions into a single line wrapped their labels onto two lines,
+          which rendered as oversized buttons. Every label here stays one line and truncates. */}
+      <div className="@container shrink-0 space-y-2 border-t border-[var(--cf-border)] p-2.5">
         {!prClosed && (
           <div className="flex items-center gap-1.5">
-            <button
+            <PrActionButton
+              tone="success"
+              icon={ThumbsUp}
+              label={t("pr.approve")}
+              busy={prActionBusy === "approve"}
+              disabled={prActionBusy !== null}
               onClick={() => doPrAction("approve")}
+            />
+            <PrActionButton
+              tone="warning"
+              icon={ThumbsDown}
+              label={t("pr.requestChanges")}
+              busy={prActionBusy === "request_changes"}
               disabled={prActionBusy !== null}
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-success)] hover:bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] disabled:opacity-40"
-            >
-              {prActionBusy === "approve" ? <Loader2 size={12} className="animate-spin" /> : <ThumbsUp size={12} />}
-              {t("pr.approve")}
-            </button>
-            <button
               onClick={() => doPrAction("request_changes")}
+            />
+            <PrActionButton
+              tone="danger"
+              icon={Ban}
+              label={t("pr.close")}
+              busy={prActionBusy === "close"}
               disabled={prActionBusy !== null}
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-warning)] hover:bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] disabled:opacity-40"
-            >
-              {prActionBusy === "request_changes" ? <Loader2 size={12} className="animate-spin" /> : <ThumbsDown size={12} />}
-              {t("pr.requestChanges")}
-            </button>
-            <button
               onClick={() => doPrAction("close")}
-              disabled={prActionBusy !== null}
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-danger)] hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] disabled:opacity-40"
-            >
-              {prActionBusy === "close" ? <Loader2 size={12} className="animate-spin" /> : <Ban size={12} />}
-              {t("pr.close")}
-            </button>
+            />
           </div>
         )}
-        <div className="flex items-center justify-end gap-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={loading} />
+          <ChatAgentPicker projectId={projectId} />
+          {reviewText && !loading && findings.length > 0 && (
+            <>
+              <button
+                onClick={() => parsed && copyFixpack(buildFixpack(parsed, pr.id))}
+                title={t("pr.fixpackHint")}
+                className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+              >
+                {fixpackCopied ? <Check size={11} /> : <Copy size={11} />}
+                {t("pr.fixpack")}
+              </button>
+              <label
+                className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
+                title={t("pr.postSummaryHint")}
+              >
+                <Checkbox checked={postSummary} onChange={setPostSummary} />
+                {t("pr.postSummary")}
+              </label>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5">
           {reviewText && !loading && (
             <button
               onClick={publish}
               disabled={posting || posted}
-              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+              title={publishLabel}
+              className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
             >
-              {posting ? <Loader2 size={12} className="animate-spin" /> : null}
-              {posted
-                ? pr.provider === "github"
-                  ? t("chat.postedGithub")
-                  : t("chat.posted")
-                : posting
-                  ? t("chat.posting")
-                  : t("chat.postToPr")}
+              {posting ? (
+                <Loader2 size={12} className="shrink-0 animate-spin" />
+              ) : posted ? (
+                <Check size={12} className="shrink-0 text-[var(--cf-success)]" />
+              ) : null}
+              <span className="truncate">{publishLabel}</span>
             </button>
           )}
           <button
             onClick={runReview}
             disabled={loading}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
+            title={reviewLabel}
+            className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
           >
-            {loading ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-            {loading ? t("chat.reviewing") : reviewText ? t("chat.reviewAgain") : t("chat.reviewWithClaude")}
+            {loading ? (
+              <Loader2 size={12} className="shrink-0 animate-spin" />
+            ) : (
+              <Sparkles size={12} className="shrink-0" />
+            )}
+            <span className="truncate">{reviewLabel}</span>
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Tone classes spelled out statically so Tailwind picks them up (an interpolated `--cf-${tone}`
+ * arbitrary value would never be generated). */
+const PR_ACTION_TONES = {
+  success: "text-[var(--cf-success)] hover:bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)]",
+  warning: "text-[var(--cf-warning)] hover:bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)]",
+  danger: "text-[var(--cf-danger)] hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)]",
+} as const;
+
+/** One of the three PR decision buttons (approve / request changes / close). They share the footer
+ * row evenly and truncate their label rather than wrapping, so the row keeps a single-line height
+ * even at the panel's minimum width. */
+function PrActionButton({
+  tone,
+  icon: Icon,
+  label,
+  busy,
+  disabled,
+  onClick,
+}: {
+  tone: keyof typeof PR_ACTION_TONES;
+  icon: LucideIcon;
+  label: string;
+  busy: boolean;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      className={`flex min-w-0 flex-1 items-center justify-center gap-1 rounded-md border border-[var(--cf-border)] px-1.5 py-1.5 text-[11px] font-medium disabled:opacity-40 ${PR_ACTION_TONES[tone]}`}
+    >
+      {busy ? <Loader2 size={12} className="shrink-0 animate-spin" /> : <Icon size={12} className="shrink-0" />}
+      {/* Below ~300px of footer the three labels can only render as stubs ("Solicitar cam…"), so the
+          row falls back to icons — the tooltip still names the action. */}
+      <span className="truncate @max-[300px]:hidden">{label}</span>
+    </button>
+  );
+}
+
+/** Compact segmented control for the review depth (básico / completo / ultra). Shares the choice
+ * through `prStore` so the title-bar review shortcut launches at the same level. */
+function ReviewLevelSelector({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: ReviewLevel;
+  onChange: (level: ReviewLevel) => void;
+  disabled: boolean;
+}) {
+  const t = useT();
+  const levels: ReviewLevel[] = ["basico", "completo", "ultra"];
+  return (
+    <div
+      className="flex items-center rounded-md border border-[var(--cf-border)] p-0.5"
+      title={t("pr.levelHint")}
+    >
+      {levels.map((level) => (
+        <button
+          key={level}
+          onClick={() => onChange(level)}
+          disabled={disabled}
+          className={`rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors disabled:opacity-50 ${
+            value === level
+              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+              : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          }`}
+        >
+          {t(`pr.level.${level}` as never)}
+        </button>
+      ))}
     </div>
   );
 }
@@ -687,7 +833,7 @@ function ChatSection({ projectId }: { projectId: string }) {
             <p className="text-[14px] font-semibold">{t("chat.title")}</p>
             <p className="max-w-[220px] text-[12px] text-[var(--cf-text-muted)]">
               {t("chat.hint")}{" "}
-              <button onClick={() => openSettings("context")} className="text-[var(--cf-accent)] underline">
+              <button onClick={() => openSettings("review")} className="text-[var(--cf-accent)] underline">
                 {t("chat.configure")}
               </button>
             </p>
@@ -747,6 +893,7 @@ function ChatSection({ projectId }: { projectId: string }) {
                 per-conversation override. Once there are turns on screen the picker locks to the
                 current provider's versions: sessions don't transfer between CLIs. */}
             <ChatModelPicker liveModel={chat.model} chatActive={chat.messages.length > 0} />
+            <ChatAgentPicker projectId={projectId} />
             <button
               onClick={submit}
               disabled={!input.trim() || chat.sending}

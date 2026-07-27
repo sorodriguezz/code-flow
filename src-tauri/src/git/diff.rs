@@ -174,6 +174,24 @@ pub fn get_branch_diff(path: &str, base: &str, head: &str) -> Result<Vec<FileDif
     collect_diff(&diff)
 }
 
+/// Resolves a ref (branch, remote branch, tag, or raw SHA) to its full commit SHA. Used to record
+/// which head commit a review ran against, so a re-review can tell whether anything changed.
+pub fn resolve_sha(path: &str, refname: &str) -> Result<String, String> {
+    let repo = open(path)?;
+    let commit = resolve_branch_commit(&repo, refname)?;
+    Ok(commit.id().to_string())
+}
+
+/// The files that changed between two refs (`from`..`to`), by path — the set a re-review needs so
+/// findings on untouched files auto-persist instead of looking resolved.
+pub fn changed_files_between(path: &str, from: &str, to: &str) -> Result<Vec<String>, String> {
+    let files = get_branch_diff(path, from, to)?;
+    Ok(files
+        .iter()
+        .filter_map(|f| f.new_path.clone().or_else(|| f.old_path.clone()))
+        .collect())
+}
+
 /// Flattens file diffs into plain unified-diff-ish text suitable for a Claude prompt.
 pub fn render_diff_for_prompt(files: &[FileDiffInfo]) -> String {
     let mut out = String::new();

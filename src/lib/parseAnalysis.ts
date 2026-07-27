@@ -201,6 +201,31 @@ export function formatFindingAsFixPrompt(finding: AnalysisFinding): string {
   return lines.join("\n");
 }
 
+/** The **fix-pack**: the review's findings as an actionable JSON artifact (schema
+ * `pr-review-fixpack/v1`) another agent can consume to apply the fixes — fields renamed to action
+ * terms (`problema`/`causa`/`correccion`) rather than the review's own. Provider-neutral: it's a
+ * string you can copy, export, or post. */
+export function buildFixpack(parsed: ParsedAnalysis, prId: number): string {
+  const hallazgos = parsed.findings.map((f) => ({
+    id: f.id,
+    severidad: f.severity,
+    tipo: f.type,
+    categoria: f.category,
+    archivo: f.location?.file ?? null,
+    lineas: f.location ? locationLabel(f.location).split(":")[1] ?? null : null,
+    problema: f.subtitle,
+    causa: f.why,
+    correccion: f.suggestion,
+    codigo_sugerido: f.exampleCode || null,
+    confianza: f.confidence,
+  }));
+  return JSON.stringify(
+    { schema: "pr-review-fixpack/v1", pr: prId, generado: new Date().toISOString(), hallazgos },
+    null,
+    2,
+  );
+}
+
 /** The overview comment posted once per review — Quality Gate + A–E grades + a table linking
  * every posted finding to its file/line, mirroring a standard "PR review summary" format. */
 export function formatSummaryComment(parsed: ParsedAnalysis, date: string): string {

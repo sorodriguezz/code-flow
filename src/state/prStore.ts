@@ -2,11 +2,14 @@ import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { useJobsStore } from "./jobsStore";
+import { useChatStore } from "./chatStore";
 import { useLanguageStore } from "./languageStore";
 import { translations } from "../lib/i18n/translations";
 import type { PullRequestSummary } from "../types/domain";
-import type { PrAction } from "../lib/tauri/commands";
-import type { ReviewCommentInput } from "../lib/parseAnalysis";
+import type { PrAction, PostFindingItem } from "../lib/tauri/commands";
+
+/** Review depth, mirroring the WF-PR-REVIEWER levels. `completo` is the default. */
+export type ReviewLevel = "basico" | "completo" | "ultra";
 
 /** Translates outside of React (this store isn't a component) using whatever language is
  * currently selected — same lookup `useT()` does, just without the hook. */
@@ -21,6 +24,9 @@ interface PrState {
   loadErrorByProject: Record<string, string>;
 
   selectedPr: PullRequestSummary | null;
+  /** Depth the next review runs at — shared so both the AI panel selector and the title-bar
+   * shortcut launch at the same level. */
+  reviewLevel: ReviewLevel;
   posting: boolean;
   posted: boolean;
   /** Which PR action (approve / request_changes / close) is in flight, so its button can show a
@@ -29,12 +35,22 @@ interface PrState {
 
   loadPullRequests: (projectId: string) => Promise<void>;
   selectPr: (pr: PullRequestSummary | null) => void;
+  setReviewLevel: (level: ReviewLevel) => void;
   /** Fire-and-forget — the run is tracked in `jobsStore`, not here, precisely so it survives
-   * switching away from this PR (or this project) before it finishes. */
-  reviewPr: (projectId: string, prId: number) => void;
-  /** One Azure DevOps comment thread per finding (anchored to its file/line when known) plus
-   * a summary thread — not one comment with the whole review. */
-  postReview: (projectId: string, prId: number, comments: ReviewCommentInput[]) => Promise<void>;
+   * switching away from this PR (or this project) before it finishes. Uses `reviewLevel` unless
+   * an explicit `level` is passed. */
+  reviewPr: (projectId: string, prId: number, level?: ReviewLevel) => void;
+  /** One comment thread per finding (anchored to its file/line when known) plus an optional
+   * summary thread — reconciled against the saved run (`runId`) so a finding keeps one thread
+   * across re-reviews. `items` are the human-selected findings. */
+  postReview: (
+    projectId: string,
+    prId: number,
+    runId: string,
+    items: PostFindingItem[],
+    postSummary: boolean,
+    summary: string | null,
+  ) => Promise<void>;
   /** Approve / request changes / close the PR on its host (GitHub or Azure DevOps). Refreshes
    * the PR list afterward so the new status shows, and drops the selection when it was closed. */
   actOnPr: (projectId: string, prId: number, action: PrAction) => Promise<void>;
@@ -52,6 +68,7 @@ export const usePrStore = create<PrState>((set, get) => ({
   loadErrorByProject: {},
 
   selectedPr: null,
+  reviewLevel: "completo",
   posting: false,
   posted: false,
   prActionBusy: null,
@@ -70,21 +87,26 @@ export const usePrStore = create<PrState>((set, get) => ({
 
   selectPr: (pr) => set({ selectedPr: pr, posted: false }),
 
-  reviewPr: (projectId, prId) => {
+  setReviewLevel: (level) => set({ reviewLevel: level }),
+
+  reviewPr: (projectId, prId, level) => {
     const pr = get().prsByProject[projectId]?.find((p) => p.id === prId);
+    const activeLevel = level ?? get().reviewLevel;
+    // The workspace's active SDD/Harness agent (if any) reviews as that role.
+    const agent = useChatStore.getState().agentByProject[projectId] ?? null;
     useJobsStore.getState().run({
       projectId,
       kind: "pr-review",
       label: pr ? `#${pr.id} ${pr.title}` : `PR #${prId}`,
-      meta: { prId },
-      task: (jobId) => api.reviewPullRequest(projectId, prId, jobId),
+      meta: { prId, level: activeLevel },
+      task: (jobId) => api.reviewPullRequest(projectId, prId, jobId, activeLevel, agent),
     });
   },
 
-  postReview: async (projectId, prId, comments) => {
+  postReview: async (projectId, prId, runId, items, postSummary, summary) => {
     set({ posting: true });
     try {
-      await api.postPrReviewComment(projectId, prId, comments);
+      await api.postPrReviewComment(projectId, prId, runId, items, postSummary, summary);
       set({ posted: true });
     } catch (e) {
       pushErrorToast(String(e));

@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, useToastStore } from "./toastStore";
+import { confirmAction } from "./confirmStore";
+import { useLanguageStore } from "./languageStore";
+import { translations, type TranslationKey } from "../lib/i18n/translations";
 import type {
   BranchInfo,
   CommitInfo,
@@ -91,6 +94,56 @@ async function guarded(set: (partial: Partial<RepoState>) => void, fn: () => Pro
     pushErrorToast(message);
   } finally {
     set({ busy: false });
+  }
+}
+
+/** Translates outside of React (this store isn't a component) using whatever language is
+ * currently selected — same lookup `useT()` does, just without the hook. */
+function translate(key: TranslationKey, params?: Record<string, string>): string {
+  const language = useLanguageStore.getState().language;
+  const raw: string = translations[language][key] ?? translations.en[key] ?? key;
+  if (!params) return raw;
+  return Object.entries(params).reduce((acc, [name, value]) => acc.split(`{${name}}`).join(value), raw);
+}
+
+/** Set by the Rust side on the one checkout failure that has a way out — see
+ * `CHECKOUT_CONFLICT_PREFIX` in `src-tauri/src/git/branch.rs`. */
+const CHECKOUT_CONFLICT_PREFIX = "CHECKOUT_CONFLICT: ";
+
+/** Runs a checkout and, when uncommitted work is what blocks it, offers to stash that work
+ * and retry rather than just reporting the failure — the same escape hatch you'd reach for
+ * by hand. Declining still surfaces the original error. */
+async function checkoutGuarded(
+  set: (partial: Partial<RepoState>) => void,
+  get: () => RepoState,
+  target: string,
+  run: () => Promise<void>,
+) {
+  const { repoPath } = get();
+  if (!repoPath) return;
+  set({ checkingOutBranch: target, busy: true, error: null });
+  try {
+    try {
+      await run();
+    } catch (e) {
+      if (!String(e).includes(CHECKOUT_CONFLICT_PREFIX)) throw e;
+      const stash = await confirmAction(
+        translate("checkout.blockedByChanges", { name: target }),
+        false,
+        translate("checkout.stashAndSwitch"),
+      );
+      if (!stash) throw e;
+      await api.stashSave(repoPath, translate("checkout.autoStashMessage", { name: target }), true);
+      await run();
+      useToastStore.getState().pushToast(translate("checkout.changesStashed"), "info");
+    }
+    await get().refreshAll();
+  } catch (e) {
+    const message = String(e).replace(CHECKOUT_CONFLICT_PREFIX, "");
+    set({ error: message });
+    pushErrorToast(message);
+  } finally {
+    set({ busy: false, checkingOutBranch: null });
   }
 }
 
@@ -326,43 +379,21 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   checkoutBranch: async (name) => {
     const { repoPath } = get();
     if (!repoPath) return;
-    set({ checkingOutBranch: name });
-    try {
-      await guarded(set, async () => {
-        await api.checkoutLocalBranch(repoPath, name);
-        await get().refreshAll();
-      });
-    } finally {
-      set({ checkingOutBranch: null });
-    }
+    await checkoutGuarded(set, get, name, () => api.checkoutLocalBranch(repoPath, name));
   },
 
   checkoutDetached: async (refname) => {
     const { repoPath } = get();
     if (!repoPath) return;
-    set({ checkingOutBranch: refname });
-    try {
-      await guarded(set, async () => {
-        await api.checkoutDetached(repoPath, refname);
-        await get().refreshAll();
-      });
-    } finally {
-      set({ checkingOutBranch: null });
-    }
+    await checkoutGuarded(set, get, refname, () => api.checkoutDetached(repoPath, refname));
   },
 
   checkoutRemoteBranch: async (remoteBranch) => {
     const { repoPath } = get();
     if (!repoPath) return;
-    set({ checkingOutBranch: remoteBranch });
-    try {
-      await guarded(set, async () => {
-        await api.checkoutRemoteTracking(repoPath, remoteBranch);
-        await get().refreshAll();
-      });
-    } finally {
-      set({ checkingOutBranch: null });
-    }
+    await checkoutGuarded(set, get, remoteBranch, async () => {
+      await api.checkoutRemoteTracking(repoPath, remoteBranch);
+    });
   },
 
   createBranch: async (name, startPoint) => {

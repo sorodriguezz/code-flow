@@ -1,7 +1,21 @@
-use git2::{BranchType, ObjectType};
+use git2::{BranchType, ErrorCode, ObjectType};
 use serde::{Deserialize, Serialize};
 
 use super::repo::open;
+
+/// Marks the one checkout failure the UI can offer a way out of: uncommitted work that the
+/// switch would clobber. The frontend keys off this prefix to propose stashing instead of
+/// dead-ending on the error — sniffing libgit2's English text ("N conflicts prevent
+/// checkout") would break on its singular form and on any upstream rewording.
+pub const CHECKOUT_CONFLICT_PREFIX: &str = "CHECKOUT_CONFLICT: ";
+
+fn checkout_error(e: git2::Error) -> String {
+    if e.code() == ErrorCode::Conflict {
+        format!("{}{}", CHECKOUT_CONFLICT_PREFIX, e.message())
+    } else {
+        e.message().to_string()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchInfo {
@@ -99,7 +113,7 @@ pub fn checkout_local_branch(path: &str, name: &str) -> Result<(), String> {
     let object = repo
         .revparse_single(&refname)
         .map_err(|e| e.message().to_string())?;
-    repo.checkout_tree(&object, None).map_err(|e| e.message().to_string())?;
+    repo.checkout_tree(&object, None).map_err(checkout_error)?;
     repo.set_head(&refname).map_err(|e| e.message().to_string())?;
     Ok(())
 }
@@ -112,7 +126,7 @@ pub fn checkout_detached(path: &str, refname: &str) -> Result<(), String> {
         .revparse_single(refname)
         .map_err(|e| e.message().to_string())?;
     let commit = object.peel(ObjectType::Commit).map_err(|e| e.message().to_string())?;
-    repo.checkout_tree(&commit, None).map_err(|e| e.message().to_string())?;
+    repo.checkout_tree(&commit, None).map_err(checkout_error)?;
     repo.set_head_detached(commit.id()).map_err(|e| e.message().to_string())?;
     Ok(())
 }
@@ -149,4 +163,81 @@ pub fn checkout_remote_tracking(path: &str, remote_branch: &str) -> Result<Strin
 
     checkout_local_branch(path, short_name)?;
     Ok(short_name.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+
+    /// A repo on `base` with one committed file, plus a `feature` branch that changed it —
+    /// so switching between them touches the same path and can conflict with local edits.
+    fn fixture() -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!("cf-branch-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let repo = git2::Repository::init(&dir).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "Test").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+        // Keep checked-out content byte-identical to what was committed, whatever
+        // core.autocrlf the machine running the tests happens to have set globally.
+        config.set_bool("core.autocrlf", false).unwrap();
+
+        let commit = |content: &str, message: &str| {
+            fs::write(dir.join("a.txt"), content).unwrap();
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("a.txt")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = repo.signature().unwrap();
+            let parents = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+            let parents: Vec<_> = parents.iter().collect();
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &parents).unwrap();
+        };
+
+        commit("one\n", "initial");
+        let base = repo.head().unwrap().shorthand().unwrap().to_string();
+        let path = dir.to_str().unwrap();
+
+        create_branch(path, "feature", None).unwrap();
+        checkout_local_branch(path, "feature").unwrap();
+        commit("feature\n", "feature edit");
+        checkout_local_branch(path, &base).unwrap();
+
+        (dir, base)
+    }
+
+    #[test]
+    fn checkout_blocked_by_local_changes_is_tagged_for_the_ui() {
+        let (dir, _base) = fixture();
+        let path = dir.to_str().unwrap();
+
+        fs::write(dir.join("a.txt"), "uncommitted work\n").unwrap();
+        let err = checkout_local_branch(path, "feature").unwrap_err();
+
+        // The frontend keys off this prefix to offer stashing instead of just reporting
+        // the failure — if libgit2 ever stops reporting a conflict code here, that
+        // recovery path silently disappears, so pin it.
+        assert!(err.starts_with(CHECKOUT_CONFLICT_PREFIX), "unexpected error: {err}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn stashing_the_local_changes_unblocks_the_same_checkout() {
+        let (dir, _base) = fixture();
+        let path = dir.to_str().unwrap();
+
+        fs::write(dir.join("a.txt"), "uncommitted work\n").unwrap();
+        assert!(checkout_local_branch(path, "feature").is_err());
+
+        super::super::stash::stash_save(path, Some("auto stash".into()), true).unwrap();
+        checkout_local_branch(path, "feature").unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "feature\n");
+        assert_eq!(super::super::stash::list_stashes(path).unwrap().len(), 1);
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

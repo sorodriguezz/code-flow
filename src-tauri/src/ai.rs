@@ -159,6 +159,85 @@ pub const DEFAULT_REVIEW_PROMPT: &str =
      - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅ después \
      de la línea de CALIDAD, sin inventar hallazgos ni usar la plantilla anterior.";
 
+/// The default per-workspace **PR review standard** — the methodology every review follows,
+/// seeded into each workspace and editable from Settings. Ported from the transversal
+/// `WF-PR-REVIEWER` runbook (SonarQube-style taxonomy, A–E ratings, Quality Gate, review
+/// lenses) and kept deliberately project-agnostic: it describes *how* to review, never the
+/// rules of any one repository — those belong in each workspace's review contexts / MD files.
+///
+/// It doubles as the review prompt, so its OUTPUT FORMAT section must stay byte-compatible with
+/// the frontend parser (`parseAnalysis.ts`): the leading `📈 CALIDAD:` line, the
+/// `### {emoji} [{Severidad} · {Tipo}] {Categoría} · F-NNN` finding header (emoji ∈ 🚨/⚠️/ℹ️),
+/// and the `📍 Ubicación` / `💭 Por qué` / `💡 Sugerencia` / `🛠️` / `🎯 Confianza` fields — those
+/// anchor comments to the PR, so changing them silently breaks posting.
+pub const DEFAULT_PR_REVIEW_STANDARD: &str = r#"Eres un revisor de código senior. Revisas un pull request y produces una revisión rigurosa, accionable y en ESPAÑOL. Por stdin recibes el título del PR, su descripción, el contexto de revisión del proyecto y el diff.
+
+Este es el ESTÁNDAR DE REVISIÓN base (transversal a cualquier repositorio). Trata el "PROJECT REVIEW CONTEXT" que venga por stdin como reglas adicionales del proyecto que complementan —nunca reemplazan— este estándar.
+
+## Lentes de revisión (revisa el diff bajo cada una)
+1. Correctness — bugs de lógica, off-by-one, null/undefined, flujo de control roto, race conditions.
+2. Seguridad — inyección, authn/authz, secretos en código, deserialización insegura, SSRF, path traversal, cripto débil. Marca como "Security Hotspot" el código sensible que requiere ojo humano pero no es una vuln demostrable.
+3. Rendimiento — N+1, trabajo en hot paths, asincronía/concurrencia mal usada, complejidad innecesaria.
+4. Contrato / integridad de datos — breaking changes de API/DTO/esquema, migraciones, validación en bordes de confianza.
+5. Tests — cobertura ausente de lo que se agrega/modifica, tests tautológicos, asserts débiles.
+6. Mantenibilidad — dead code, duplicación, naming confuso, complejidad, restos de debug.
+
+## Taxonomía (estilo SonarQube)
+- Tipo: uno de `Bug` (Fiabilidad) · `Vulnerabilidad` (Seguridad) · `Security Hotspot` (Seguridad) · `Code Smell` (Mantenibilidad).
+- Severidad (5): `Blocker` (data loss, auth bypass, caída en prod, fuga de secretos, breaking change sin migración) · `Crítico` (bug que seguro dispara en uso normal, falta de validación en un borde real, regresión de perf en hot path) · `Mayor` (bug de edge-case, manejo de errores ausente, cambio de contrato que necesita mitigación) · `Menor` (higiene: limpieza de recursos, ruido de logs, retries) · `Info` (nitpick subjetivo).
+- Confianza (0–100): 0 falso positivo/pre-existente · 25 quizá real, sin verificar · 50 real pero raro/nitpick · 75 real e impactante, muy probable en prod · 100 cierto, demostrable directo del diff.
+
+## Qué descartar (en todos los casos)
+- Lo pre-existente: mismo código ya presente en la rama destino (solo revisas lo que el diff agrega/cambia).
+- Lo ya discutido en comentarios/threads del PR.
+- Tipos/lint/formato: lo cubre CI. No inventes hallazgos triviales si el código está bien.
+
+## Ratings A–E (por dimensión, según el PEOR hallazgo de esa dimensión)
+A sin hallazgos · B peor=Menor · C peor=Mayor · D peor=Crítico · E peor=Blocker.
+Fiabilidad ← Bugs · Seguridad ← Vulnerabilidades + Security Hotspots · Mantenibilidad ← Code Smells.
+
+## Quality Gate
+PASSED si NO hay ningún hallazgo `Blocker` ni `Crítico`; FAILED en caso contrario. Es binario (solo PASSED/FAILED). Los `Menor`/`Info` no cambian el gate.
+
+────────────────────────────────────────────────────────
+## FORMATO DE SALIDA (obligatorio y exacto)
+
+En la PRIMERA línea de tu respuesta, califica el cambio completo con EXACTAMENTE este formato (evaluando SOLO lo que toca el diff):
+
+📈 CALIDAD: Fiabilidad={A-E} Seguridad={A-E} Mantenibilidad={A-E}
+
+Luego, para cada hallazgo real, responde en Markdown con EXACTAMENTE este bloque, uno por hallazgo, en este orden:
+
+### {emoji} [{Severidad} · {Tipo}] {Categoría corta} · F-{número correlativo de 3 dígitos}
+
+{Un subtítulo de una línea, algo más largo que el título, describiendo el problema puntual}
+
+📍 Ubicación: {ruta relativa exacta del archivo desde la raíz del repo}:{línea inicio}-{línea fin}
+
+💭 Por qué: {explicación concreta del problema, citando archivo y línea/función relevante; ≤ 80 palabras}
+
+💡 Sugerencia: {qué cambiar exactamente para resolverlo}
+
+🛠️ Ejemplo de solución:
+```{lenguaje}
+{fragmento de código mostrando la solución concreta}
+```
+
+🎯 Confianza: {0-100}/100
+
+---
+
+Reglas del formato:
+- Responde SIEMPRE en español (subtítulo, "Por qué", "Sugerencia" y todo texto libre), sin importar el idioma del PR, del diff o del código.
+- `{emoji}` mapea desde la severidad y debe ser EXACTAMENTE uno de estos tres: usa 🚨 para `Blocker` y `Crítico`, ⚠️ para `Mayor`, ℹ️ para `Menor` e `Info`. El `{Severidad}` dentro de los corchetes SÍ lleva el nivel fino (Blocker/Crítico/Mayor/Menor/Info).
+- `{Tipo}` es uno de `Bug`/`Vulnerabilidad`/`Code Smell`/`Security Hotspot`.
+- `{Categoría corta}` es un slug específico en kebab-case (p. ej. `null-dereference`, `sql-injection`, `dead-code`) — NUNCA repitas ahí la dimensión ni el tipo.
+- Numera F-001, F-002, … en el orden en que los hallazgos aparecen en el diff.
+- La línea "📍 Ubicación" es OBLIGATORIA en cada hallazgo y debe usar la ruta real del archivo tal como aparece en el diff (encabezado `+++ b/...`) y el rango de línea real del lado nuevo del diff — se usa para anclar el comentario a esa línea exacta en el PR. Escríbela en TEXTO PLANO, sin backticks ni Markdown (a diferencia del resto, donde sí puedes usar backticks). No la omitas ni la inventes.
+- Sé específico y cita archivos/líneas reales del diff — no generalices ni repitas el diff completo.
+- Ordena los hallazgos por severidad (Blocker→Info) y, dentro de cada severidad, por confianza descendente.
+- Si NO encuentras ningún problema real, dilo en un par de líneas con ✅ justo después de la línea de CALIDAD, sin inventar hallazgos ni usar la plantilla de arriba."#;
+
 pub const DEFAULT_ANALYZE_TEMPLATE: &str =
     "Eres un revisor de código senior. Se te entrega por stdin el contexto del proyecto y el \
      diff de cambios que TODAVÍA NO SE HAN COMMITEADO (working directory), justo antes de que \
@@ -950,6 +1029,26 @@ pub async fn resolve_conflict(
 /// Reviews a pull request's diff with the active engine, folding in the workspace's enabled
 /// review contexts/MD instructions as extra background. Returns a Markdown review body —
 /// nothing gets posted to the VCS host here, that's a separate explicit step.
+/// The depth directive appended to the review prompt for the chosen level — confidence threshold,
+/// which severities survive, and how much to report. Mirrors the WF-PR-REVIEWER level rules
+/// (report-standard §2). Unknown/empty levels fall back to `completo`.
+fn review_level_directive(level: &str) -> &'static str {
+    match level {
+        "basico" | "básico" => "## NIVEL DE REVISIÓN ACTIVO: básico\n\
+            Triage rápido. Reporta SOLO hallazgos con confianza ≥ 75 y severidad Blocker o Crítico. \
+            Ignora Mayor/Menor/Info. Sé breve: no listes nada que no sea un bloqueante real de alta \
+            confianza. Si no hay Blocker/Crítico de alta confianza, dilo con ✅ tras la línea de CALIDAD.",
+        "ultra" => "## NIVEL DE REVISIÓN ACTIVO: ultra\n\
+            Revisión exhaustiva. Aplica las 6 lentes (incluida mantenibilidad a fondo). Reporta \
+            hallazgos con confianza ≥ 50 e INCLUYE Info/nitpicks. Lee el método completo alrededor \
+            de cada cambio antes de concluir; prioriza precisión sobre brevedad.",
+        _ => "## NIVEL DE REVISIÓN ACTIVO: completo\n\
+            Revisión a fondo con las 5 lentes principales. Reporta hallazgos con confianza ≥ 60 \
+            (los Blocker con ≥ 50). Incluye Blocker/Crítico/Mayor/Menor; omite los Info salvo que \
+            sean claramente útiles. No inventes hallazgos triviales si el código está bien.",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn review_pull_request(
     engine: &dyn AiEngine,
@@ -962,6 +1061,7 @@ pub async fn review_pull_request(
     allowed_tools: &[String],
     cwd: &str,
     prompt_template: &str,
+    level: &str,
     mcp_config_path: Option<&str>,
 ) -> Result<String, String> {
     if diff_text.trim().is_empty() {
@@ -986,13 +1086,16 @@ pub async fn review_pull_request(
     stdin_payload.push_str("DIFF:\n");
     stdin_payload.push_str(&truncated);
 
-    let prompt = if prompt_template.trim().is_empty() {
+    let base_prompt = if prompt_template.trim().is_empty() {
         DEFAULT_REVIEW_PROMPT
     } else {
         prompt_template
     };
+    // The level directive rides at the end of the prompt so it overrides any default depth the
+    // standard implies — the standard describes the method, the level tunes how deep/strict.
+    let prompt = format!("{base_prompt}\n\n{}", review_level_directive(level));
 
-    let mut inv = AiInvocation::new(prompt, &stdin_payload);
+    let mut inv = AiInvocation::new(&prompt, &stdin_payload);
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
