@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Settings2 } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Lock, Settings2 } from "lucide-react";
 import { AI_PROVIDERS, PROVIDER_MODELS, modelDisplayLabel } from "../../lib/aiProviders";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
@@ -20,8 +20,13 @@ const EDGE = 8;
  * The pick is written to the **chat task's** routing (`ai_provider_chat` + `{provider}_chat_model`),
  * the same settings the routing table owns, so it's a real configuration change rather than a
  * per-conversation override. No other task is touched.
+ *
+ * While a conversation is open (`chatActive`) only the *current* provider's versions can be picked.
+ * Switching provider mid-chat can't work: each CLI keeps its own session store, so the turns so far
+ * live somewhere the next engine can't read, and its resume token means nothing there. Rather than
+ * silently dropping the thread, the other providers are locked behind "new chat".
  */
-export function ChatModelPicker({ liveModel }: { liveModel: string | null }) {
+export function ChatModelPicker({ liveModel, chatActive }: { liveModel: string | null; chatActive: boolean }) {
   const t = useT();
   const providerId = useTaskProvider("chat");
   const configuredModel = useAiProviderStore((s) => s.taskModels.chat ?? s.model);
@@ -155,11 +160,13 @@ export function ChatModelPicker({ liveModel }: { liveModel: string | null }) {
                 <div className="min-h-0 flex-1 overflow-auto p-1 pt-0">
                   {selectable.map((p) => {
                     const unavailable = statuses[p.id]?.available === false;
+                    const locked = chatActive && p.id !== providerId;
                     return (
                       <button
                         key={p.id}
                         onClick={() => browse(p.id)}
-                        disabled={unavailable}
+                        disabled={unavailable || locked}
+                        title={locked ? t("chat.providerLocked") : undefined}
                         className={`flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12px] disabled:opacity-40 ${
                           p.id === providerId
                             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
@@ -172,6 +179,8 @@ export function ChatModelPicker({ liveModel }: { liveModel: string | null }) {
                           <span className="shrink-0 text-[10px] text-[var(--cf-warning)]">
                             {t("settings.providerMissing")}
                           </span>
+                        ) : locked ? (
+                          <Lock size={11} className="shrink-0 opacity-60" />
                         ) : (
                           <ChevronRight size={12} className="shrink-0 opacity-60" />
                         )}
@@ -179,7 +188,13 @@ export function ChatModelPicker({ liveModel }: { liveModel: string | null }) {
                     );
                   })}
                 </div>
+                {chatActive && (
+                  <p className="shrink-0 border-t border-[var(--cf-border)] px-2.5 py-1.5 text-[10px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("chat.providerLocked")}
+                  </p>
+                )}
               </>
+
             ) : (
               <>
                 <button

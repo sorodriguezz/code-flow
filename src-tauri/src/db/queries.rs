@@ -619,6 +619,26 @@ pub fn get_conversation_messages(
     rows.collect()
 }
 
+/// Provider id that answered the most recent turn of a conversation, when one was recorded.
+/// `None` for a conversation with no turns yet, or whose turns predate provider tracking.
+///
+/// This is how the chat command tells whether a stored resume token still belongs to the engine
+/// about to run — see `claude_cmd::session_for_provider`.
+pub fn last_turn_provider(
+    conn: &Connection,
+    project_id: &str,
+    conversation_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT provider FROM activity_log
+         WHERE project_id = ?1 AND session_id = ?2 AND provider IS NOT NULL
+         ORDER BY created_at DESC LIMIT 1",
+        params![project_id, conversation_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 pub fn delete_chat_conversation(conn: &Connection, project_id: &str, session_id: &str) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM activity_log WHERE project_id = ?1 AND session_id = ?2",
@@ -806,6 +826,43 @@ mod tests {
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].turn_count, 2);
         assert_eq!(conversations[0].title, "pregunta");
+    }
+
+    fn log_provider(conn: &Connection, project: &str, conversation: &str, provider: &str) {
+        add_activity_log(
+            conn,
+            project,
+            conversation,
+            Some("engine-session"),
+            "pregunta",
+            "answer",
+            None,
+            TurnMeta { provider: Some(provider), ..TurnMeta::default() },
+            false,
+        )
+        .unwrap();
+    }
+
+    /// A conversation reports the engine of its *latest* turn: that's what reveals a resume token
+    /// left behind by a different CLI after the chat's routing changed.
+    #[test]
+    fn a_conversation_reports_the_provider_of_its_latest_turn() {
+        let (conn, project) = fixture();
+        log_provider(&conn, &project, "conv-1", "opencode");
+        log_provider(&conn, &project, "conv-1", "claude");
+
+        assert_eq!(last_turn_provider(&conn, &project, "conv-1").unwrap().as_deref(), Some("claude"));
+    }
+
+    /// Turns recorded before provider tracking existed have nothing to compare against — the
+    /// caller must read that as "can't tell" and keep the session rather than discard a working one.
+    #[test]
+    fn a_conversation_without_recorded_providers_reports_none() {
+        let (conn, project) = fixture();
+        log(&conn, &project, "conv-1", "session-a", "pregunta");
+
+        assert_eq!(last_turn_provider(&conn, &project, "conv-1").unwrap(), None);
+        assert_eq!(last_turn_provider(&conn, &project, "conv-inexistente").unwrap(), None);
     }
 
     /// Reopening a conversation has to resume the engine session its *latest* turn ran under.

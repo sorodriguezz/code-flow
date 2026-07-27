@@ -744,8 +744,9 @@ function ChatSection({ projectId }: { projectId: string }) {
           <div className="flex items-center gap-1.5 px-0.5">
             {/* Which engine this chat talks to — and the control that changes it. Picking here
                 rewrites the *chat* task's routing, so it's a real settings change, not a
-                per-conversation override. */}
-            <ChatModelPicker liveModel={chat.model} />
+                per-conversation override. Once there are turns on screen the picker locks to the
+                current provider's versions: sessions don't transfer between CLIs. */}
+            <ChatModelPicker liveModel={chat.model} chatActive={chat.messages.length > 0} />
             <button
               onClick={submit}
               disabled={!input.trim() || chat.sending}

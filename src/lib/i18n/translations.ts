@@ -245,6 +245,8 @@ export const translations = {
     "chat.loadingModels": "Loading versions…",
     "chat.noModels": "This provider didn't report any models. Set one in Settings.",
     "chat.configureModels": "Configure providers and tasks",
+    "chat.providerLocked":
+      "Each provider keeps its own sessions, so an open chat can't move between them. Start a new chat to switch provider — here you can only change the current provider's version.",
     "settings.templateCustom": "Customized",
     "settings.templateDefault": "Default",
     "settings.templateReset": "Restore default",
@@ -1002,6 +1004,8 @@ export const translations = {
     "chat.loadingModels": "Cargando versiones…",
     "chat.noModels": "Este proveedor no informó modelos. Configura uno en Ajustes.",
     "chat.configureModels": "Configurar proveedores y tareas",
+    "chat.providerLocked":
+      "Cada proveedor guarda sus propias sesiones, así que un chat abierto no puede pasar de uno a otro. Inicia un chat nuevo para cambiar de proveedor — aquí solo puedes cambiar la versión del proveedor actual.",
     "settings.templateCustom": "Personalizada",
     "settings.templateDefault": "Por defecto",
     "settings.templateReset": "Restaurar la original",

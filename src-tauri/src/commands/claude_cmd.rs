@@ -438,6 +438,33 @@ pub async fn resolve_finding_with_ai(
     result
 }
 
+/// Drops a resume token that was minted by a *different* engine than the one about to run.
+///
+/// Session tokens aren't portable across providers: Claude hands back a real UUID, while
+/// opencode/codex/gemini hand back a fixed "continue your last run" sentinel. Replaying one into
+/// another engine either fails outright (`claude --resume opencode-last`) or — worse — silently
+/// continues that engine's own unrelated last run, answering with the wrong context. Returning
+/// `None` makes the turn open a fresh engine session, which also re-sends the project context.
+///
+/// The model picker refuses to switch provider while a chat is open, so this is the backstop for
+/// the paths it doesn't cover: routing edited in Settings, and a past conversation reopened after
+/// its provider changed. Anything it can't determine (no recorded provider, a read that failed)
+/// keeps the token — discarding a working session is the worse failure.
+fn session_for_provider(
+    conn: &Connection,
+    project_id: &str,
+    conversation_id: Option<&str>,
+    session_id: Option<String>,
+    provider: &str,
+) -> Option<String> {
+    let session_id = session_id?;
+    let Some(conversation_id) = conversation_id else { return Some(session_id) };
+    match queries::last_turn_provider(conn, project_id, conversation_id) {
+        Ok(Some(previous)) if previous != provider => None,
+        _ => Some(session_id),
+    }
+}
+
 /// Open-ended chat about the project — "preguntas abiertas del repositorio", the free-text
 /// half of the AI panel alongside PR review and change analysis.
 ///
@@ -467,13 +494,17 @@ pub async fn send_chat_message(
     };
     let workspace_id = project.workspace_id.clone();
 
-    let (contexts, md_files, mcps, config) = {
+    let (contexts, md_files, mcps, config, session_id) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let md_files = queries::list_workspace_md_files(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let config = load_ai_config(&conn, AiTask::Chat)?;
-        (contexts, md_files, mcps, config)
+        // Shadows the argument on purpose: nothing below should see the unvalidated token, and the
+        // turn is recorded against the session it actually ran under.
+        let session_id =
+            session_for_provider(&conn, &project_id, conversation_id.as_deref(), session_id, &config.provider);
+        (contexts, md_files, mcps, config, session_id)
     };
 
     let _ = sync_skills_into_project(&workspace_id, &project.local_path);
