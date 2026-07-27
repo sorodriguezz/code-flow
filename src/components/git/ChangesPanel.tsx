@@ -3,7 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
-  ExternalLink,
+  Code2,
   FileText,
   Folder,
   FolderTree,
@@ -25,7 +25,7 @@ import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
-import { generateCommitMessage, openInDefaultApp, scanStagedSecrets } from "../../lib/tauri/commands";
+import { generateCommitMessage, scanStagedSecrets } from "../../lib/tauri/commands";
 import { diffToText } from "../../lib/diffText";
 import { parseClaudeError, type ClaudeErrorInfo } from "../../lib/claudeError";
 import { confirmAction } from "../../state/confirmStore";
@@ -38,10 +38,25 @@ import { useUiStore } from "../../state/uiStore";
 import { usePrStore } from "../../state/prStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
-import type { FileStatusEntry, SecretHit } from "../../types/domain";
+import type { FileDiffInfo, FileStatusEntry, SecretHit } from "../../types/domain";
 
 const LIST_MIN = 220;
 const LIST_MAX = 520;
+
+/** 1-based line of the first change in a file's diff, so opening it in the editor lands on the
+ * change instead of at the top of the file. A deleted line has no counterpart on the new side —
+ * fall back to the first line the hunk does map, and to the file top when it maps none. */
+function firstChangedLine(files: FileDiffInfo[]): number | undefined {
+  for (const file of files) {
+    for (const hunk of file.hunks) {
+      const changed = hunk.lines.find((l) => l.origin !== " " && l.new_lineno !== null);
+      if (changed?.new_lineno) return changed.new_lineno;
+      const anchor = hunk.lines.find((l) => l.new_lineno !== null);
+      if (anchor?.new_lineno) return anchor.new_lineno;
+    }
+  }
+  return undefined;
+}
 
 function UnpushedCommitsSection() {
   const unpushedCommits = useRepoStore((s) => s.unpushedCommits);
@@ -234,6 +249,7 @@ export function ChangesPanel() {
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null);
   const [viewMode, setViewMode] = useState<"list" | "tree">("list");
   const openAiPanel = useUiStore((s) => s.openAiPanel);
+  const openInEditor = useUiStore((s) => s.openInEditor);
   const [message, setMessage] = useState("");
   const [aiBusy, setAiBusy] = useState(false);
   const [aiError, setAiError] = useState<ClaudeErrorInfo | null>(null);
@@ -269,9 +285,12 @@ export function ChangesPanel() {
     return pool.filter((f) => (f.new_path ?? f.old_path) === selected.path);
   }, [selected, stagedDiff, workingDiff]);
 
-  const openFile = (relPath: string) => {
-    if (!repoPath) return;
-    void openInDefaultApp(repoPath, relPath);
+  // Open the file in the app's own Editor tab (at the first changed line) instead of handing it
+  // to the OS default app — the point is to inspect the change in place, not to leave the app.
+  const openFile = (relPath: string, staged: boolean) => {
+    const pool = staged ? stagedDiff : workingDiff;
+    const files = pool.filter((f) => (f.new_path ?? f.old_path) === relPath);
+    openInEditor(relPath, firstChangedLine(files));
   };
 
   if (!status) {
@@ -282,7 +301,7 @@ export function ChangesPanel() {
     const isPending = pending?.path === entry.path;
     const blocked = pending !== null && !isPending;
     return [
-      { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
+      { icon: Code2, title: t("changes.openInEditor"), onClick: () => openFile(entry.path, true) },
       {
         icon: Minus,
         title: t("changes.unstage"),
@@ -297,7 +316,7 @@ export function ChangesPanel() {
     const isPending = pending?.path === entry.path;
     const blocked = pending !== null && !isPending;
     return [
-      { icon: ExternalLink, title: t("changes.openFile"), onClick: () => openFile(entry.path) },
+      { icon: Code2, title: t("changes.openInEditor"), onClick: () => openFile(entry.path, false) },
       {
         icon: Plus,
         title: t("changes.stage"),

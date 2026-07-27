@@ -1,5 +1,7 @@
+import { useMemo } from "react";
 import { Code2, GitBranch, History } from "lucide-react";
 import { useUiStore, type MainView } from "../../state/uiStore";
+import { useRepoStore } from "../../state/repoStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -9,9 +11,24 @@ const TABS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBranch }[]
   { id: "editor", labelKey: "tabbar.editor", icon: Code2 },
 ];
 
+/** Uncommitted files, counted once per path: a partially staged file appears in both `staged`
+ * and `unstaged` but is still a single pending change. */
+function useUncommittedCount(): number {
+  const status = useRepoStore((s) => s.status);
+  return useMemo(() => {
+    if (!status) return 0;
+    const paths = new Set<string>();
+    for (const list of [status.staged, status.unstaged, status.untracked, status.conflicted]) {
+      for (const entry of list) paths.add(entry.path);
+    }
+    return paths.size;
+  }, [status]);
+}
+
 export function TabBar() {
   const activeView = useUiStore((s) => s.activeView);
   const setActiveView = useUiStore((s) => s.setActiveView);
+  const uncommitted = useUncommittedCount();
   const t = useT();
 
   return (
@@ -31,6 +48,14 @@ export function TabBar() {
           >
             <Icon size={14} />
             {t(tab.labelKey)}
+            {tab.id === "changes" && uncommitted > 0 && (
+              <span
+                title={t("tabbar.uncommittedCount", { n: uncommitted })}
+                className={`text-[12px] tabular-nums ${active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`}
+              >
+                ({uncommitted})
+              </span>
+            )}
           </button>
         );
       })}

@@ -108,6 +108,7 @@ export const translations = {
 
     "tabbar.graph": "Graph",
     "tabbar.changes": "Changes",
+    "tabbar.uncommittedCount": "{n} uncommitted change(s)",
     "tabbar.editor": "Editor",
     "tabbar.terminal": "Terminal",
 
@@ -425,7 +426,7 @@ export const translations = {
     "changes.commit": "Commit",
     "changes.discardChanges": "Discard changes",
     "changes.discardConfirm": 'Discard changes to "{path}"? This can\'t be undone.',
-    "changes.openFile": "Open file",
+    "changes.openInEditor": "Open in editor",
     "changes.selectFile": "Select a file",
     "changes.selectFileHint": "Pick a file on the left to see its diff.",
     "changes.generateWithAi": "Generate with AI",
@@ -867,6 +868,7 @@ export const translations = {
 
     "tabbar.graph": "Grafo",
     "tabbar.changes": "Cambios",
+    "tabbar.uncommittedCount": "{n} cambio(s) sin commitear",
     "tabbar.editor": "Editor",
     "tabbar.terminal": "Terminal",
 
@@ -1184,7 +1186,7 @@ export const translations = {
     "changes.commit": "Commit",
     "changes.discardChanges": "Descartar cambios",
     "changes.discardConfirm": '¿Descartar los cambios en "{path}"? Esto no se puede deshacer.',
-    "changes.openFile": "Abrir archivo",
+    "changes.openInEditor": "Abrir en el editor",
     "changes.selectFile": "Selecciona un archivo",
     "changes.selectFileHint": "Elige un archivo a la izquierda para ver su diff.",
     "changes.generateWithAi": "Generar con IA",
