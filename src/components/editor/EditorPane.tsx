@@ -18,6 +18,7 @@ import { DbmlDiagram } from "./DbmlDiagram";
 import { EditorTabs, type EditorTabItem } from "./EditorTabs";
 import { InlineEditWidget } from "./InlineEditWidget";
 import type { CodeSnapTarget } from "./CodeSnapModal";
+import { modelPathFor } from "../../lib/editorModel";
 import { languageForPath } from "../../lib/monacoLanguage";
 import { fileIconFor } from "../../lib/fileIcon";
 import { parseDbml } from "../../lib/dbml";
@@ -28,8 +29,6 @@ import { useT } from "../../state/languageStore";
 import { BouncingDots } from "../common/BouncingDots";
 import { EmptyState } from "../common/EmptyState";
 import type { FileDiffInfo, Project } from "../../types/domain";
-
-const MODEL_SCHEME = "cf-editor";
 
 export type PreviewKind = "markdown" | "dbml" | null;
 export type ViewMode = "code" | "preview" | "split";
@@ -57,16 +56,6 @@ export interface RevealRequest {
   line: number;
   column?: number;
   nonce: number;
-}
-
-/** One Monaco model per open file (instead of one shared model whose text gets swapped)
- * so each tab keeps its own undo history, cursor and scroll position. Namespaced by
- * project so two repos with a `src/main.ts` never collide on the same model.
- *
- * Two groups showing the same file resolve to the same URI on purpose — that is what makes an
- * edit on the left appear on the right, exactly like VS Code. */
-export function modelPathFor(project: Project, relPath: string): string {
-  return `${MODEL_SCHEME}:/${encodeURIComponent(project.id)}/${encodeURIComponent(relPath)}`;
 }
 
 export function previewKindFor(path: string | null): PreviewKind {

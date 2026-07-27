@@ -63,6 +63,11 @@ pub fn list_dir(repo_path: &str, sub_path: Option<String>) -> Result<Vec<FileEnt
 
 pub fn read_file_text(repo_path: &str, rel_path: &str) -> Result<String, String> {
     let full = resolve_within_repo(repo_path, rel_path)?;
+    // Checked explicitly so a folder reaching this by mistake says so, instead of surfacing the
+    // OS's "Is a directory (os error 21)" as the file's contents.
+    if full.is_dir() {
+        return Err(format!("{rel_path} is a folder, not a file"));
+    }
     std::fs::read_to_string(&full).map_err(|e| e.to_string())
 }
 

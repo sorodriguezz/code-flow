@@ -7,7 +7,9 @@ import { SearchPanel } from "./SearchPanel";
 import { AnchorsPanel } from "./AnchorsPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
-import { EditorPane, modelPathFor, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
+import { EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
+import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
+import { setDefinitionContext } from "../../lib/goToDefinition";
 import {
   closeGroupInGroups,
   closeTabInGroups,
@@ -34,7 +36,6 @@ import { useT } from "../../state/languageStore";
 
 const TREE_MIN = 200;
 const TREE_MAX = 480;
-const MODEL_SCHEME = "cf-editor";
 const GROUP_MAX = 2000;
 /** Matches the `w-1.5` on `ResizeHandle`, which the even-split maths has to account for. */
 const HANDLE_WIDTH = 6;
@@ -366,6 +367,14 @@ export function EditorView() {
     },
     [openFile],
   );
+
+  // Ctrl/Cmd+click "go to definition" is registered globally on Monaco, so it needs telling which
+  // repo it's looking at and how to open a file — both of which only the editor knows.
+  useEffect(() => {
+    if (!project) return;
+    setDefinitionContext({ project, open: openHit });
+    return () => setDefinitionContext(null);
+  }, [project, openHit]);
 
   useEffect(() => {
     if (!pendingEditorPath) return;
