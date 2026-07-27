@@ -11,6 +11,18 @@
 //! taken as additional context alongside the prompt argument, which maps exactly onto this app's
 //! "ask as argument, data on stdin" split.
 //!
+//! **Sessions.** `codex exec` opens its run with a preamble on stderr — version, workdir, model,
+//! sandbox, and a `session id: <uuid>` line — and `codex exec resume <id>` continues that rollout.
+//! So the id is scraped from stderr rather than from `--json`: stdout keeps carrying nothing but
+//! the final agent message, so the reply extraction below is unaffected by Codex's event schema.
+//! Before this, the engine reported a fixed sentinel and never passed a resume argument at all,
+//! which was the worst of both — no continuity *and* the app believing a session existed, so
+//! [`crate::ai::chat_with_repo`] stopped re-sending the project context from turn two onward.
+//!
+//! If the preamble ever stops carrying the id, [`session_id_from_preamble`] returns `None` and the
+//! next turn simply opens a fresh session with the context re-sent. That is the deliberate failure
+//! mode: losing continuity is recoverable, resuming the wrong conversation silently is not.
+//!
 //! Why the brief goes through stdin anyway: the prompt templates are multi-line, and a CLI
 //! installed as an npm `.cmd` shim on Windows can't receive a multi-line argument. Sending a short
 //! single-line pointer as the argument and everything else down the pipe is safe on every platform
@@ -25,10 +37,6 @@ const DEFAULT_BINARY: &str = "codex";
 /// Let the CLI pick its own model for commit messages — which ids a ChatGPT plan exposes depends on
 /// the subscription tier, so hardcoding one risks naming something the account can't use.
 const COMMIT_MESSAGE_MODEL: &str = "";
-
-/// Non-empty sentinel so the app's chat state stays at "there is a session" and the next turn
-/// passes a resume id. TODO(verify): capture the real rollout id and use `codex exec resume <id>`.
-const SESSION_SENTINEL: &str = "codex-last";
 
 /// Single-line, ASCII, shim-safe. The real instructions arrive on stdin.
 const POINTER: &str =
@@ -73,7 +81,13 @@ impl AiEngine for CodexEngine {
 
     fn build_command(&self, binary: &str, inv: &AiInvocation) -> Command {
         let mut cmd = Command::new(binary);
-        cmd.arg("exec").arg(POINTER);
+        cmd.arg("exec");
+        // Multi-turn chat: continue *this conversation's* rollout. `resume <id>` is a subcommand of
+        // `exec`, so it goes between `exec` and the prompt, before the flags.
+        if let Some(id) = inv.resume_session_id {
+            cmd.arg("resume").arg(id);
+        }
+        cmd.arg(POINTER);
 
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
@@ -144,6 +158,22 @@ fn read_models_cache(codex_home: &std::path::Path) -> Option<Vec<String>> {
     (!slugs.is_empty()).then_some(slugs)
 }
 
+/// Pulls the rollout id out of `codex exec`'s stderr preamble, which prints one `key: value` per
+/// line — the id being `session id: 019ce7d6-5962-7f21-9f20-95ebe6504c32`. Matched leniently
+/// (either spelling, any case) because this is a human-readable banner, not a committed format;
+/// `None` when it isn't there, which costs continuity but never resumes the wrong rollout.
+fn session_id_from_preamble(stderr: &str) -> Option<String> {
+    stderr.lines().find_map(|line| {
+        let line = line.trim();
+        let lower = line.to_ascii_lowercase();
+        let rest = ["session id:", "session_id:"]
+            .iter()
+            .find_map(|key| lower.starts_with(key).then(|| &line[key.len()..]))?;
+        let id = rest.trim();
+        (!id.is_empty()).then(|| id.to_string())
+    })
+}
+
 /// `codex exec` puts the agent's final message on stdout and its progress log on stderr, so the
 /// reply is just stdout. Mirrors the other engines' error/quota contract.
 fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
@@ -173,18 +203,57 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
     if quota_signal(text) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
-    Ok(AiRun { text: text.to_string(), session_id: Some(SESSION_SENTINEL.to_string()), model: None })
+    Ok(AiRun { text: text.to_string(), session_id: session_id_from_preamble(stderr), model: None })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The real `codex exec` stderr preamble — the only place the rollout id is reported when
+    /// stdout is left as plain text.
+    const PREAMBLE: &str = concat!(
+        "OpenAI Codex v0.114.0 (research preview)\n",
+        "--------\n",
+        "workdir: /home/u/project\n",
+        "model: gpt-5.3-codex\n",
+        "provider: openai\n",
+        "approval: never\n",
+        "sandbox: read-only\n",
+        "session id: 019ce7d6-5962-7f21-9f20-95ebe6504c32\n",
+        "--------\n",
+    );
+
     #[test]
     fn a_successful_run_returns_stdout_as_the_reply() {
         let run = interpret_output(true, "exit status: 0", "  feat: add thing  ", "thinking…").unwrap();
         assert_eq!(run.text, "feat: add thing");
-        assert_eq!(run.session_id.as_deref(), Some(SESSION_SENTINEL));
+    }
+
+    /// What makes per-conversation resume possible: the id comes off the preamble, so the next turn
+    /// can `codex exec resume <id>` instead of opening an unrelated rollout.
+    #[test]
+    fn captures_the_rollout_id_from_the_stderr_preamble() {
+        let run = interpret_output(true, "exit status: 0", "done", PREAMBLE).unwrap();
+        assert_eq!(run.session_id.as_deref(), Some("019ce7d6-5962-7f21-9f20-95ebe6504c32"));
+    }
+
+    /// A preamble without the id must report no session rather than a placeholder: `None` makes the
+    /// next turn start fresh *with* the project context, which a sentinel silently suppressed.
+    #[test]
+    fn reports_no_session_when_the_preamble_omits_the_id() {
+        let run = interpret_output(true, "exit status: 0", "done", "OpenAI Codex v0.1\nmodel: gpt\n").unwrap();
+        assert_eq!(run.session_id, None);
+    }
+
+    /// Tolerated because the banner is human-readable prose, not a committed format.
+    #[test]
+    fn accepts_the_underscored_and_differently_cased_spellings() {
+        assert_eq!(
+            session_id_from_preamble("Session_ID:  abc-123  ").as_deref(),
+            Some("abc-123")
+        );
+        assert_eq!(session_id_from_preamble("session id:").as_deref(), None);
     }
 
     #[test]

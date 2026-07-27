@@ -800,14 +800,14 @@ mod tests {
         .unwrap();
     }
 
-    /// The bug this split fixes: Codex reports one fixed session sentinel for every run, so when
-    /// the engine's id was the grouping key, three separate chats collapsed into one activity.
+    /// The bug this split fixes: Gemini/agy reports one fixed session sentinel for every run, so
+    /// when the engine's id was the grouping key, three separate chats collapsed into one activity.
     #[test]
     fn separate_conversations_stay_separate_even_when_the_engine_reuses_one_session_id() {
         let (conn, project) = fixture();
-        log(&conn, &project, "conv-1", "codex-last", "primera pregunta");
-        log(&conn, &project, "conv-2", "codex-last", "segunda pregunta");
-        log(&conn, &project, "conv-3", "codex-last", "tercera pregunta");
+        log(&conn, &project, "conv-1", "agy-last", "primera pregunta");
+        log(&conn, &project, "conv-2", "agy-last", "segunda pregunta");
+        log(&conn, &project, "conv-3", "agy-last", "tercera pregunta");
 
         let conversations = list_chat_conversations(&conn, &project, None).unwrap();
         assert_eq!(conversations.len(), 3);

@@ -440,11 +440,16 @@ pub async fn resolve_finding_with_ai(
 
 /// Drops a resume token that was minted by a *different* engine than the one about to run.
 ///
-/// Session tokens aren't portable across providers: Claude hands back a real UUID, while
-/// opencode/codex/gemini hand back a fixed "continue your last run" sentinel. Replaying one into
-/// another engine either fails outright (`claude --resume opencode-last`) or — worse — silently
-/// continues that engine's own unrelated last run, answering with the wrong context. Returning
-/// `None` makes the turn open a fresh engine session, which also re-sends the project context.
+/// Session tokens aren't portable across providers. Most engines now hand back a real id, and each
+/// namespaces it differently (a Claude UUID, an opencode `ses_…`, a Codex rollout UUID); Gemini/agy
+/// is the exception and still hands back a fixed "continue your last run" sentinel, because its CLI
+/// won't tell a headless caller the conversation id. Replaying any of them into a *different* engine
+/// either fails outright (`claude --resume ses_abc`) or — worse — silently continues something
+/// unrelated, answering with the wrong context. Returning `None` makes the turn open a fresh engine
+/// session, which also re-sends the project context.
+///
+/// This is only about crossing *between* providers. Two conversations on the *same* provider are
+/// kept apart by the engines themselves, by resuming a specific id rather than "the last run".
 ///
 /// The model picker refuses to switch provider while a chat is open, so this is the backstop for
 /// the paths it doesn't cover: routing edited in Settings, and a past conversation reopened after
@@ -473,9 +478,9 @@ fn session_for_provider(
 ///   whatever the previous call returned afterwards, so the CLI carries the context forward.
 /// - `conversation_id` is the *app's* identity for the conversation, minted by the frontend when
 ///   a chat starts and stable for its whole life. It's what turns group under in the activity
-///   list. Leaving that to the engines never worked: Codex reports one fixed sentinel for every
-///   run (so every chat ever collapsed into a single activity), while the Claude CLI can mint a
-///   fresh id on each resumed turn (so one conversation could scatter into several).
+///   list. Leaving that to the engines never worked: Gemini/agy reports one fixed sentinel for
+///   every run (so every chat ever collapsed into a single activity), while the Claude CLI can mint
+///   a fresh id on each resumed turn (so one conversation could scatter into several).
 #[tauri::command]
 pub async fn send_chat_message(
     app: AppHandle,

@@ -195,7 +195,7 @@ fn add_session_id_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
 ///
 /// `session_id` is now the **conversation** id — minted by the app when a chat starts, stable for
 /// its whole life, and the key everything groups by. The engine's own resume token moves here,
-/// because it is not a conversation identity: Codex reports one fixed sentinel for every run
+/// because it is not a conversation identity: Gemini/agy reports one fixed sentinel for every run
 /// (so every chat ever collapsed into a single activity), while the Claude CLI can mint a *new*
 /// id on each resumed turn (so one conversation could scatter across several activities). Old
 /// rows keep grouping by whatever they stored, which is the best that data supports.

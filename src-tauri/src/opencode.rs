@@ -19,10 +19,23 @@
 //! to a temp file, attach it with `--file`, and pass only a short, single-line, ASCII pointer
 //! message. That sidesteps all three constraints at once. Verified: opencode feeds `--file` content
 //! to the model, and the message must precede `--file` (a variadic flag that would otherwise eat
-//! it). What's still worth a real end-to-end check per flow: the `--continue` session semantics and
-//! that structured-output tasks (review/commit) follow the attached instructions as faithfully as
-//! they did on the native `-p` path. Temp files aren't cleaned up yet.
+//! it). Temp files aren't cleaned up yet.
+//!
+//! **Sessions.** Runs use `--format json`, which is what makes per-conversation resume possible:
+//! the real session id (`ses_…`) rides on every emitted event as `sessionID`, so
+//! [`OpenCodeEngine::interpret`] can hand it back and the next turn resumes *that* session with
+//! `--session <id>`. This replaces an
+//! earlier `--continue`, which resolves to "the first root session opencode lists" — global to the
+//! CLI, not scoped to the conversation — so two chats open on the same project would silently
+//! answer each other's context. Note `--session <id>` hard-fails ("Session not found", exit 1) on
+//! an id opencode no longer has, which is deliberate: a loud error beats the wrong context.
+//!
+//! Verified against opencode 1.18.7 (`opencode run --help` for the flags, a live run for the event
+//! shape) and pinned against the CLI's own `run.ts`, which emits every event as
+//! `{type, timestamp, sessionID, ...data}` — one JSON object per line on stdout. The events this
+//! module reads are `text` (a completed assistant text part, in `part.text`) and `error`.
 
+use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::ai::{quota_signal, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
@@ -32,14 +45,6 @@ use crate::ai::{quota_signal, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
 const COMMIT_MESSAGE_MODEL: &str = "";
 
 const DEFAULT_BINARY: &str = "opencode";
-
-/// Sentinel handed back as the "session id" on every successful run. opencode resumes its most
-/// recent session with `--continue` (no id needed), so rather than parse the JSON event stream for
-/// the real id (TODO(verify)) we return a non-empty marker — that keeps the app's multi-turn chat
-/// state at "there is a session", so the next turn passes a resume id, which [`build_command`] maps
-/// to `--continue`. TODO(verify): capture the real session id via `--format json` and switch to
-/// `--session <id>` so interleaved reviews/chats can't resume each other's session.
-const SESSION_SENTINEL: &str = "opencode-last";
 
 pub struct OpenCodeEngine;
 
@@ -91,6 +96,11 @@ impl AiEngine for OpenCodeEngine {
              Follow them exactly and reply with only the requested output.",
         );
 
+        // Structured events on stdout instead of formatted text. Needed for the session id — it is
+        // reported nowhere else — and the reply is reassembled from the `text` events, which carry
+        // exactly what the default formatter would have printed.
+        cmd.arg("--format").arg("json");
+
         // Model as `provider/model`; empty means "use opencode's configured default".
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
@@ -103,10 +113,10 @@ impl AiEngine for OpenCodeEngine {
         if let Some(dir) = inv.cwd {
             cmd.arg("--dir").arg(dir);
         }
-        // Multi-turn chat: resume opencode's last session. TODO(verify) `--session <id>` once the
-        // real id is captured (see SESSION_SENTINEL).
-        if inv.resume_session_id.is_some() {
-            cmd.arg("--continue");
+        // Multi-turn chat: resume *this conversation's* session by id, not whichever session the
+        // CLI happens to consider most recent (see the module docs on `--continue`).
+        if let Some(id) = inv.resume_session_id {
+            cmd.arg("--session").arg(id);
         }
         // `--file` last so the message positional above can't be mistaken for another attachment.
         if let Some(path) = write_payload_file(&brief) {
@@ -134,16 +144,135 @@ fn write_payload_file(content: &str) -> Option<std::path::PathBuf> {
     std::fs::write(&path, content).ok().map(|_| path)
 }
 
-/// opencode's default output is formatted assistant text on stdout, so — unlike Claude's JSON
-/// envelope — the reply is just stdout. Mirrors the other engines' error/quota contract.
-/// TODO(verify): `--format json` emits a raw JSON event stream that would let us extract the real
-/// session id and model; until that schema is pinned we consume the plain text.
+/// One line of `opencode run --format json`. Every event is `{type, timestamp, sessionID, ...data}`,
+/// so `sessionID` is available whichever event arrives first — including the `error` ones, which is
+/// what lets a failed run still report the session it failed in.
+#[derive(Deserialize)]
+struct Event {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(rename = "sessionID")]
+    session_id: Option<String>,
+    part: Option<Part>,
+    error: Option<EventError>,
+}
+
+#[derive(Deserialize)]
+struct Part {
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// The `error` event's payload: a named error whose human-readable text sits in `data.message`.
+#[derive(Deserialize)]
+struct EventError {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    data: Option<EventErrorData>,
+}
+
+#[derive(Deserialize)]
+struct EventErrorData {
+    #[serde(default)]
+    message: Option<String>,
+}
+
+/// What one JSON-formatted run reported.
+struct Parsed {
+    text: String,
+    session_id: Option<String>,
+    /// First error event, if any — the root cause, which later events tend to restate.
+    error: Option<String>,
+}
+
+/// Reads the event stream. `None` means stdout held no parseable event at all, so the caller falls
+/// back to treating it as plain text — which keeps a build that ignored `--format json` working
+/// exactly as before instead of reporting an empty reply.
+fn parse_events(stdout: &str) -> Option<Parsed> {
+    let mut texts: Vec<String> = Vec::new();
+    let mut session_id: Option<String> = None;
+    let mut error: Option<String> = None;
+    let mut saw_event = false;
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<Event>(line) else { continue };
+        saw_event = true;
+        if session_id.is_none() {
+            session_id = event.session_id.filter(|id| !id.trim().is_empty());
+        }
+        match event.kind.as_str() {
+            // Concatenating the completed text parts reproduces what the default formatter writes
+            // to a non-TTY stdout (each part trimmed, one per line) — so the reply text is
+            // unchanged by moving to JSON.
+            "text" => {
+                if let Some(text) = event.part.and_then(|p| p.text) {
+                    let text = text.trim();
+                    if !text.is_empty() {
+                        texts.push(text.to_string());
+                    }
+                }
+            }
+            "error" => {
+                if error.is_none() {
+                    error = event.error.and_then(error_message);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    saw_event.then(|| Parsed { text: texts.join("\n"), session_id, error })
+}
+
+/// Best available description of an `error` event: its message, qualified by the error name when
+/// there is one (`APIError: Unauthorized …` reads better than a bare message in the UI).
+fn error_message(error: EventError) -> Option<String> {
+    let message = error.data.and_then(|d| d.message).map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    match (error.name.as_deref().map(str::trim).filter(|n| !n.is_empty()), message) {
+        (Some(name), Some(message)) => Some(format!("{name}: {message}")),
+        (None, Some(message)) => Some(message),
+        (Some(name), None) => Some(name.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// Turns one finished `opencode run --format json` into its reply (plus the session id to resume
+/// next turn) or a user-facing error. Mirrors the other engines' error/quota contract.
 fn interpret_output(
     success: bool,
     status_label: &str,
     stdout: &str,
     stderr: &str,
 ) -> Result<AiRun, String> {
+    if let Some(parsed) = parse_events(stdout) {
+        // An `error` event is the CLI explaining itself, and it can arrive on an otherwise
+        // zero-exit run — so it's judged before the status, as in the Claude engine.
+        if let Some(error) = parsed.error {
+            return Err(if quota_signal(&error) { format!("{QUOTA_MARKER}{error}") } else { error });
+        }
+        let text = parsed.text.trim();
+        if !success {
+            let detail = [text, stderr.trim()].into_iter().find(|s| !s.is_empty()).unwrap_or("sin salida");
+            if quota_signal(detail) {
+                return Err(format!("{QUOTA_MARKER}{detail}"));
+            }
+            return Err(stale_session_hint(detail)
+                .unwrap_or_else(|| format!("opencode exited with an error ({status_label}): {detail}")));
+        }
+        if text.is_empty() {
+            return Err("opencode produced no output".to_string());
+        }
+        if quota_signal(text) {
+            return Err(format!("{QUOTA_MARKER}{text}"));
+        }
+        return Ok(AiRun { text: text.to_string(), session_id: parsed.session_id, model: None });
+    }
+
     if !success {
         if quota_signal(stderr) {
             return Err(format!("{QUOTA_MARKER}{}", stderr.trim()));
@@ -155,7 +284,8 @@ fn interpret_output(
             .into_iter()
             .find(|s| !s.is_empty())
             .unwrap_or("sin salida en stdout ni stderr");
-        return Err(format!("opencode exited with an error ({status_label}): {detail}"));
+        return Err(stale_session_hint(detail)
+            .unwrap_or_else(|| format!("opencode exited with an error ({status_label}): {detail}")));
     }
 
     let text = stdout.trim();
@@ -171,19 +301,101 @@ fn interpret_output(
     if quota_signal(text) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
-    Ok(AiRun { text: text.to_string(), session_id: Some(SESSION_SENTINEL.to_string()), model: None })
+    // No events means no session id to report. `None` costs this conversation its continuity (the
+    // next turn starts fresh and re-sends the project context) but never resumes the wrong one.
+    Ok(AiRun { text: text.to_string(), session_id: None, model: None })
+}
+
+/// Rewrites opencode's bare "Session not found" into something actionable. It means the id we asked
+/// to resume is gone from opencode's store (deleted or pruned), which the raw message doesn't
+/// convey — and since the app keeps re-sending that id, the conversation would otherwise look
+/// permanently broken for no visible reason.
+fn stale_session_hint(detail: &str) -> Option<String> {
+    detail.to_lowercase().contains("session not found").then(|| {
+        "La sesión de opencode que continuaba esta conversación ya no existe (fue eliminada o \
+         purgada). Inicia una conversación nueva para volver a empezar."
+            .to_string()
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A real `--format json` run, trimmed to the events this module reads. Shape taken from the
+    /// CLI's own emitter (`{type, timestamp, sessionID, ...data}`) and a live opencode 1.18.7 run.
+    const JSON_STDOUT: &str = concat!(
+        r#"{"type":"step_start","timestamp":1785160196000,"sessionID":"ses_05c2930e3ffeAwuzpCYQ7CgtfG","part":{"type":"step-start"}}"#,
+        "\n",
+        r#"{"type":"text","timestamp":1785160196045,"sessionID":"ses_05c2930e3ffeAwuzpCYQ7CgtfG","part":{"id":"prt_1","messageID":"msg_1","type":"text","text":"  feat: add thing  ","time":{"start":1,"end":2}}}"#,
+        "\n",
+        r#"{"type":"step_finish","timestamp":1785160196050,"sessionID":"ses_05c2930e3ffeAwuzpCYQ7CgtfG","part":{"type":"step-finish"}}"#,
+        "\n",
+    );
+
+    /// The whole point of the JSON format: the reply *and* the real `ses_…` id, so the next turn
+    /// resumes this conversation by id rather than whatever session opencode ran last.
     #[test]
-    fn a_successful_run_returns_stdout_as_the_reply() {
+    fn reads_the_reply_and_the_real_session_id_out_of_the_event_stream() {
+        let run = interpret_output(true, "exit status: 0", JSON_STDOUT, "").unwrap();
+        assert_eq!(run.text, "feat: add thing");
+        assert_eq!(run.session_id.as_deref(), Some("ses_05c2930e3ffeAwuzpCYQ7CgtfG"));
+    }
+
+    /// Several completed text parts arrive as separate events; joining them reproduces what the
+    /// default (non-JSON) formatter would have written to stdout.
+    #[test]
+    fn joins_multiple_text_parts_in_order() {
+        let stdout = concat!(
+            r#"{"type":"text","sessionID":"ses_a","part":{"type":"text","text":"first"}}"#,
+            "\n",
+            r#"{"type":"text","sessionID":"ses_a","part":{"type":"text","text":"second"}}"#,
+            "\n",
+        );
+        let run = interpret_output(true, "exit status: 0", stdout, "").unwrap();
+        assert_eq!(run.text, "first\nsecond");
+    }
+
+    /// Verbatim `error` event from a live run whose Copilot token had expired: a zero exit code, so
+    /// the event is the only thing that says the run failed.
+    #[test]
+    fn an_error_event_beats_a_clean_exit_status() {
+        let stdout = r#"{"type":"error","timestamp":1785160196045,"sessionID":"ses_05c2930e3ffeAwuzpCYQ7CgtfG","error":{"name":"APIError","data":{"message":"Unauthorized: unauthorized: AuthenticateToken authentication failed","statusCode":401}}}"#;
+        let err = interpret_output(true, "exit status: 0", stdout, "").unwrap_err();
+        assert_eq!(err, "APIError: Unauthorized: unauthorized: AuthenticateToken authentication failed");
+    }
+
+    /// A billing refusal that exits non-zero without emitting an `error` event still has to reach
+    /// the frontend as a quota notice, not a generic red banner.
+    #[test]
+    fn a_quota_failure_alongside_events_still_gets_the_marker() {
+        let stdout = r#"{"type":"step_start","sessionID":"ses_a","part":{"type":"step-start"}}"#;
+        let err = interpret_output(false, "exit status: 1", stdout, "Error: Insufficient balance").unwrap_err();
+        assert!(err.starts_with(QUOTA_MARKER), "got {err}");
+    }
+
+    #[test]
+    fn a_quota_error_event_gets_the_marker() {
+        let stdout = r#"{"type":"error","sessionID":"ses_a","error":{"name":"APIError","data":{"message":"Insufficient balance"}}}"#;
+        let err = interpret_output(true, "exit status: 0", stdout, "").unwrap_err();
+        assert!(err.starts_with(QUOTA_MARKER), "got {err}");
+    }
+
+    /// Resuming an id opencode has since dropped exits 1 with a bare "Session not found"; the app
+    /// keeps re-sending that id, so the message has to say what to do about it.
+    #[test]
+    fn a_dropped_session_explains_itself_instead_of_repeating_the_cli_error() {
+        let err = interpret_output(false, "exit status: 1", "", "Error: Session not found").unwrap_err();
+        assert!(err.contains("Inicia una conversación nueva"), "got {err}");
+    }
+
+    /// A build that ignored `--format json` still emits plain text; it must keep working, just
+    /// without a session id (no id is better than resuming a stranger's session).
+    #[test]
+    fn falls_back_to_plain_stdout_and_reports_no_session() {
         let run = interpret_output(true, "exit status: 0", "  feat: add thing  ", "").unwrap();
         assert_eq!(run.text, "feat: add thing");
-        // Non-empty session marker so multi-turn chat resumes with `--continue`.
-        assert_eq!(run.session_id.as_deref(), Some(SESSION_SENTINEL));
+        assert_eq!(run.session_id, None);
     }
 
     #[test]

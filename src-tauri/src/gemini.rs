@@ -18,6 +18,21 @@
 //!         a temp file, the temp dir added with `--add-dir`, and a short `-p` message tells agy to
 //!         read it. Reading it headlessly needs `--dangerously-skip-permissions` (no prompt to
 //!         answer). agy has no granular tool-allowlist flag, so permissions are all-or-nothing.
+//!
+//! **Sessions: agy cannot resume by id from `--print`, so this engine deliberately doesn't try.**
+//! The sibling engines were moved off "resume the CLI's last run" onto real per-conversation ids
+//! (`opencode --session <id>`, `codex exec resume <id>`); agy is the one that can't follow, and it
+//! is a gap in the CLI, not here. `agy --conversation <id>` *does* resume a specific conversation,
+//! but nothing gives a headless caller that id: it is printed on neither stdout nor stderr in
+//! `--print` mode, and there is no `--json`/`--output-format` to ask for it. That is tracked
+//! upstream as google-antigravity/antigravity-cli#7, still open — which also rules out the
+//! workarounds: `~/.gemini/antigravity-cli/cache/last_conversations.json` maps a workspace path to
+//! its most recent conversation, but the schema is undocumented and the mapping is per *workspace*,
+//! so two chats on one project overwrite each other exactly like `--continue` does.
+//!
+//! So `--continue` stays, with its known limitation: two conversations open on the same project can
+//! resume each other's context, silently. Guessing a flag or a cache format would trade a *known*
+//! collision for an unverifiable one. When #7 lands, capture the id and swap in `--conversation`.
 
 use tokio::process::Command;
 
@@ -30,9 +45,11 @@ const DEFAULT_BINARY: &str = "agy";
 /// user's plan doesn't expose.
 const COMMIT_MESSAGE_MODEL: &str = "";
 
-/// A non-empty sentinel so the app's chat state stays at "there is a session" and the next turn
-/// passes a resume id, which [`build_command`] maps to `--continue` (resume the most recent
-/// conversation). TODO(verify): capture the real conversation id and use `--conversation <id>`.
+/// Stand-in for a session id, because agy never tells a `--print` caller its real conversation id
+/// (see the module docs). It identifies nothing — its only job is to keep the app's chat state at
+/// "there is a session" so the next turn passes *something*, which
+/// [`GeminiEngine::build_command`] turns into `--continue`. Being a fixed string is why chat turns
+/// group under the app's own conversation id and not this one (see `db::migrations`).
 const SESSION_SENTINEL: &str = "agy-last";
 
 /// Above this many chars the prompt is delivered via a temp file + `--add-dir` instead of inline,
@@ -101,7 +118,9 @@ impl AiEngine for GeminiEngine {
         if inv.auto_approve_edits || needs_read_permission {
             cmd.arg("--dangerously-skip-permissions");
         }
-        // Multi-turn chat: resume the most recent conversation.
+        // Multi-turn chat: resume the most recent conversation. Not this conversation — agy gives a
+        // headless caller no id to be specific with, so two chats on one project can cross. See the
+        // module docs; `--conversation <id>` is the fix once the id is obtainable.
         if inv.resume_session_id.is_some() {
             cmd.arg("--continue");
         }
