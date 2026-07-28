@@ -12,6 +12,7 @@ jobs:
     outputs:
       should-release: ${{ steps.check.outputs.should-release }}
       version: ${{ steps.check.outputs.version }}
+      notes: ${{ steps.notes.outputs.notes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,6 +29,26 @@ jobs:
             echo "should-release=true" >> "$GITHUB_OUTPUT"
             echo "New version v$VERSION — will build and release."
           fi
+
+      # The release body isn't only read on the Releases page: the updater publishes it as the
+      # `notes` field of `latest.json`, and the app shows it in its "What's new" window when it
+      # finds this version. So it's built from the commits since the previous tag.
+      - id: notes
+        if: steps.check.outputs.should-release == 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          # The tag for this version doesn't exist yet (the step above just checked), so the
+          # newest tag is the previous release. Empty on the very first one, which the
+          # generator handles by walking the whole history.
+          PREV=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          echo "Previous tag: ${PREV:-<none>}"
+          {
+            echo "notes<<CF_RELEASE_NOTES_EOF"
+            PREV="$PREV" node .github/scripts/release-notes.cjs
+            echo "CF_RELEASE_NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
 
   release:
     needs: check-version
@@ -82,7 +103,7 @@ jobs:
         with:
           tagName: v${{ needs.check-version.outputs.version }}
           releaseName: CodeFlow v${{ needs.check-version.outputs.version }}
-          releaseBody: See the commit history for what changed in this release.
+          releaseBody: ${{ needs.check-version.outputs.notes }}
           # Published (not draft) so the updater's `releases/latest/download/latest.json`
           # endpoint can resolve — draft releases aren't served there.
           releaseDraft: false

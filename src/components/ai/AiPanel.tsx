@@ -77,6 +77,68 @@ function relativeTime(ts: number, t: (key: TranslationKey, vars?: Record<string,
   return t("ai.daysAgo", { n: Math.round(hours / 24) });
 }
 
+/**
+ * The link reviews opened this session, so one can be brought back.
+ *
+ * A PR reviewed from a link belongs to no project, so it's in no sidebar and no PR list: without
+ * this list, the panel showing it was the only way to reach it, and closing that — or pressing
+ * "New chat" — left its review, its comments and its approval stranded in memory with no route
+ * back. Everything is still there; this is the door.
+ *
+ * Rendered only when no link session is on screen, since the one on screen doesn't need a way
+ * back to itself.
+ */
+function LinkSessionsSection() {
+  const t = useT();
+  const sessions = usePrStore((s) => s.linkPrHistory);
+  const openLinkPr = usePrStore((s) => s.openLinkPr);
+  const forgetLinkPr = usePrStore((s) => s.forgetLinkPr);
+  const jobsByBucket = useJobsStore((s) => s.byProject);
+
+  if (sessions.length === 0) return null;
+
+  return (
+    <div className="shrink-0 border-b border-[var(--cf-border)]">
+      <p className="flex items-center gap-1.5 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <Link2 size={11} />
+        {t("prLink.sessionsTitle")}
+      </p>
+      <div className="px-1.5 pb-1.5">
+        {sessions.map((session) => {
+          const runs = (jobsByBucket[`pr-link:${session.url}`] ?? EMPTY_JOBS).length;
+          return (
+            <div key={session.url} className="group flex items-center gap-1">
+              <button
+                onClick={() => {
+                  useAnalyzeUiStore.getState().hide();
+                  openLinkPr(session);
+                }}
+                className="min-w-0 flex-1 rounded-md px-1.5 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              >
+                <span className="block truncate text-[12px] text-[var(--cf-text)]">
+                  #{session.pr.id} {session.pr.title}
+                </span>
+                <span className="block truncate text-[10px] text-[var(--cf-text-muted)]">
+                  {session.repoLabel}
+                  {runs > 0 && ` · ${t("prLink.sessionEntries", { n: runs })}`}
+                </span>
+              </button>
+              <button
+                onClick={() => forgetLinkPr(session.url)}
+                title={t("prLink.forgetSession")}
+                aria-label={t("prLink.forgetSession")}
+                className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] opacity-0 hover:bg-black/[0.05] hover:text-[var(--cf-text)] group-hover:opacity-100 dark:hover:bg-white/[0.08]"
+              >
+                <X size={11} />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** Unified "Activity" list — background jobs (PR review / pre-commit analysis) and past
  * chat conversations combined and sorted by recency, so there's one place to reopen anything
  * Claude has done for this project instead of two separate sections. */
@@ -1013,6 +1075,9 @@ export function AiPanel() {
   // analysis, one click drops those and lands on a fresh, empty free-form conversation — so the
   // user isn't stuck hunting for the little × on the PR card (which only closed the PR, it didn't
   // start a new chat) to get back to open-ended chat.
+  //
+  // None of it is destructive: a selected PR is still in the sidebar, and a link session is
+  // parked in `linkPrHistory` for the list above Activity to bring back.
   const startNewChat = () => {
     if (!project) return;
     usePrStore.getState().selectPr(null);
@@ -1086,9 +1151,15 @@ export function AiPanel() {
             </div>
           </>
         ) : !project ? (
-          <EmptyState icon={Sparkles} title={t("ai.noProject")} />
+          // Still offer the way back into a parked link review — with no project open this used
+          // to be a dead end, which is exactly where "New chat" landed the user.
+          <>
+            <LinkSessionsSection />
+            <EmptyState icon={Sparkles} title={t("ai.noProject")} />
+          </>
         ) : (
           <>
+            <LinkSessionsSection />
             <ActivitySection projectId={project.id} />
             <div className="min-h-0 flex-1">
               {selectedPr ? (

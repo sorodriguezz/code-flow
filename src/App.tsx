@@ -17,6 +17,8 @@ import { CommandPalette } from "./components/layout/CommandPalette";
 import { ShortcutsModal } from "./components/layout/ShortcutsModal";
 import { BranchSwitcherModal } from "./components/layout/BranchSwitcherModal";
 import { OpenPrLinkModal } from "./components/layout/OpenPrLinkModal";
+import { UpdateNotesModal } from "./components/layout/UpdateNotesModal";
+import { UpdateAlert } from "./components/layout/UpdateAlert";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
 import { ConfirmModal } from "./components/common/ConfirmModal";
@@ -31,6 +33,7 @@ import { useAiProviderStore } from "./state/aiProviderStore";
 import { useLanguageStore } from "./state/languageStore";
 import { useAccentStore } from "./state/accentStore";
 import { useFetchTimerStore } from "./state/fetchTimerStore";
+import { useUpdateStore, CHECK_INTERVAL_MS } from "./state/updateStore";
 import { useNavigationStore } from "./state/navigationStore";
 import { useTerminalStore } from "./state/terminalStore";
 import { useShortcutsStore } from "./state/shortcutsStore";
@@ -170,6 +173,27 @@ export default function App() {
     void useApiStore.getState().setWorkspace(workspaceId);
   }, [workspaceId]);
 
+  // Looks for a newer release: once on launch, then every hour for as long as the app is open.
+  // The focus listener is the catch-up for a machine that slept through several ticks — a
+  // laptop reopened on Monday would otherwise keep Friday's answer until the next hour was up.
+  // Every one of these is silent unless it finds something; see `checkNow`.
+  useEffect(() => {
+    void useUpdateStore.getState().loadCurrentVersion();
+    void useUpdateStore.getState().checkNow();
+    const id = setInterval(() => void useUpdateStore.getState().checkNow(), CHECK_INTERVAL_MS);
+    const onFocus = () => {
+      const { lastCheckedAt } = useUpdateStore.getState();
+      if (lastCheckedAt === null || Date.now() - lastCheckedAt >= CHECK_INTERVAL_MS) {
+        void useUpdateStore.getState().checkNow();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, []);
+
   // Records every view/project change onto the back/forward history — TitleBar's
   // chevrons just replay entries from this stack.
   useEffect(() => {
@@ -239,7 +263,12 @@ export default function App() {
         </div>
         <AnimatePresence initial={false}>{aiPanelOpen && <AiPanel key="ai-panel" />}</AnimatePresence>
       </div>
-      <StatusBar />
+      {/* The update notice hangs off the top edge of the status bar, so it's anchored to the bar
+          itself instead of to a viewport offset that would have to be kept in sync by hand. */}
+      <div className="relative">
+        <UpdateAlert />
+        <StatusBar />
+      </div>
       <SettingsView />
       {/* All four are reachable from the keyboard anywhere in the app, so they're mounted at the
           root rather than inside whichever panel happens to have a button for them. */}
@@ -247,6 +276,9 @@ export default function App() {
       {shortcutsModalOpen && <ShortcutsModal onClose={closeShortcutsModal} />}
       {branchSwitcherOpen && <BranchSwitcherModal onClose={closeBranchSwitcher} />}
       {prLinkModalOpen && <OpenPrLinkModal onClose={closePrLinkModal} />}
+      {/* Owns its own open flag rather than one in uiStore: nothing but the update badge and the
+          Settings panel ever opens it, and both go through the update store already. */}
+      <UpdateNotesModal />
       <ToastContainer />
       <ConfirmModal />
     </div>

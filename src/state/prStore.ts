@@ -13,6 +13,10 @@ import type { PrAction, PostFindingItem } from "../lib/tauri/commands";
 /** Cache key for a PR's decision — a PR id is only unique within the repo it belongs to. */
 const decisionKey = (target: PrTarget, prId: number) => `${targetKey(target)}:${prId}`;
 
+/** Enough parked link reviews to cover an afternoon of "someone sent me this PR" without the
+ * list becoming its own navigation problem. */
+const MAX_LINK_HISTORY = 8;
+
 /**
  * A pull request opened from a link with nothing checked out for it.
  *
@@ -58,8 +62,20 @@ interface PrState {
   /** A PR being reviewed straight from its link, with no clone behind it. Mutually exclusive with
    * `selectedPr` — the panel renders whichever is set. */
   linkPr: LinkPrSession | null;
+  /**
+   * Every link session opened this run, newest first — including the one currently on screen.
+   *
+   * A link PR has no project, so it appears in no sidebar and no list: the panel showing it was
+   * the only handle on it, and closing that (or pressing "New chat") stranded its whole review —
+   * findings, comments, the approval — in memory with nothing left to reach it by. Its Activity
+   * was never actually deleted; it just became unreachable, which to the user is the same thing.
+   */
+  linkPrHistory: LinkPrSession[];
   openLinkPr: (session: LinkPrSession) => void;
   closeLinkPr: () => void;
+  /** Drops a parked session from the list. Its jobs stay in `jobsStore` — this is about the list
+   * not growing forever, not about erasing what happened. */
+  forgetLinkPr: (url: string) => void;
 
   loadPullRequests: (projectId: string) => Promise<void>;
   selectPr: (pr: PullRequestSummary | null) => void;
@@ -124,10 +140,27 @@ export const usePrStore = create<PrState>((set, get) => ({
   },
 
   linkPr: null,
+  linkPrHistory: [],
 
   // Opening one clears the other: they're two ways of reaching a PR, not two panes.
-  openLinkPr: (session) => set({ linkPr: session, selectedPr: null, posted: false }),
+  openLinkPr: (session) =>
+    set((s) => ({
+      linkPr: session,
+      selectedPr: null,
+      posted: false,
+      // Re-opening the same URL moves it back to the top rather than listing it twice; the fresh
+      // session object wins, since it carries the PR as the host last described it.
+      linkPrHistory: [session, ...s.linkPrHistory.filter((e) => e.url !== session.url)].slice(0, MAX_LINK_HISTORY),
+    })),
+  // Closing only takes it off screen. It stays in `linkPrHistory` so one click brings the whole
+  // review back — that's what makes the session's in-memory Activity worth keeping.
   closeLinkPr: () => set({ linkPr: null, posted: false }),
+
+  forgetLinkPr: (url) =>
+    set((s) => ({
+      linkPrHistory: s.linkPrHistory.filter((e) => e.url !== url),
+      linkPr: s.linkPr?.url === url ? null : s.linkPr,
+    })),
 
   selectPr: (pr) => set({ selectedPr: pr, linkPr: pr ? null : get().linkPr, posted: false }),
 
@@ -194,6 +227,13 @@ export const usePrStore = create<PrState>((set, get) => ({
         // it, where dropping it used to look like the PR had disappeared.
         selectedPr: s.selectedPr?.id === prId ? pr : s.selectedPr,
         linkPr: s.linkPr && s.linkPr.pr.id === prId ? { ...s.linkPr, pr } : s.linkPr,
+        // The parked copy too, or reopening this session from the list would show the PR as it
+        // was before the decision — "open" for one it just closed. Matched on the URL rather
+        // than the number, which repeats across repositories.
+        linkPrHistory:
+          target.kind === "link"
+            ? s.linkPrHistory.map((e) => (e.url === target.url ? { ...e, pr } : e))
+            : s.linkPrHistory,
         prsByProject:
           target.kind === "project"
             ? {
