@@ -37,12 +37,54 @@ dirs = "5"
 portable-pty = "0.8"
 notify = "6"
 open = "5"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+    # The API client needs the transport features the PR/VCS clients never did: file uploads
+    # (`multipart`), streaming request bodies (`stream`), manual redirect control and the
+    # content encodings a real server will negotiate if we advertise them.
+    "multipart",
+    "stream",
+    "gzip",
+    "brotli",
+    "deflate",
+] }
 base64 = "0.22"
 regex = "1"
 tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3.33"
+# Only for the `verify_ssl = false` path: `Connector::Rustls` wants an `Arc<rustls::ClientConfig>`
+# and tokio-tungstenite doesn't re-export the crate to build one. Pinned to the same feature set
+# reqwest already resolves (ring, no aws-lc-rs) — enabling a second crypto provider would make
+# `ClientConfig::builder()` panic at runtime for want of a process default.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 globset = "0.4.19"
+
+# ---------------- API client ----------------
+# The built-in Postman-style client needs a transport per protocol plus the primitives to sign
+# requests itself (Digest and AWS SigV4 are challenge/canonical-form schemes that can't be
+# expressed as a static header, so they can't be done in the webview).
+url = "2"
+percent-encoding = "2"
+bytes = "1"
+tokio-stream = "0.1"
+hmac = "0.12"
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+hex = "0.4"
+rand = "0.9"
+rumqttc = "0.24"
+# gRPC without a `protoc` binary on the user's machine: `protox` is a pure-Rust .proto compiler
+# producing a FileDescriptorSet, `prost-reflect` turns that into dynamic messages at runtime, and
+# `tonic` carries them over the wire through a hand-written codec (there is no generated stub —
+# the service isn't known until the user picks a .proto or the server answers reflection).
+tonic = { version = "0.14", features = ["transport", "tls-ring", "tls-native-roots"] }
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+prost-reflect = { version = "0.16", features = ["serde"] }
+protox = "0.9"
 
 # `keyring` ships with no OS credential-store backend enabled by default — without one
 # of these, Entry::set_password()/get_password() silently round-trip through a

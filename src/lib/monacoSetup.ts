@@ -116,3 +116,17 @@ export { monaco };
 // definition provider and the editor opener) are global to Monaco rather than per-instance —
 // see `installGoToDefinition`.
 installGoToDefinition();
+
+/**
+ * Options every embedded editor needs so its overlay widgets aren't clipped.
+ *
+ * Monaco renders the find widget, hovers and suggestions *inside* the editor's own DOM. Every
+ * editor in this app sits in a pane that clips (`overflow-hidden` on the panel, plus the flex
+ * columns above it), so those widgets get cut at the pane edge — and the part that gets cut is
+ * the right-hand end, which is where the find widget keeps its close button.
+ *
+ * `fixedOverflowWidgets` moves them into a fixed-position container on `document.body`, outside
+ * every clipping ancestor. Spread this into an editor's `options` rather than repeating the flag,
+ * so a new editor can't quietly reintroduce the same bug.
+ */
+export const OVERFLOW_SAFE_OPTIONS = { fixedOverflowWidgets: true } as const;

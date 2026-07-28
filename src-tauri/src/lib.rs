@@ -1,5 +1,7 @@
 mod ado;
 mod ai;
+mod api;
+mod appmenu;
 mod ai_runs;
 mod claude;
 mod commands;
@@ -25,6 +27,7 @@ mod tray;
 mod watcher;
 
 use tauri::Manager;
+use api::ApiRegistry;
 use terminal::TerminalRegistry;
 use watcher::WatcherRegistry;
 
@@ -81,10 +84,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(db::init().expect("failed to initialize CodeFlow database"))
         .manage(TerminalRegistry::default())
+        .manage(ApiRegistry::default())
         .manage(WatcherRegistry::default())
         .manage(tray::QuittingFlag::default())
         .setup(|app| {
             tray::setup(&app.handle())?;
+            appmenu::setup(&app.handle())?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -265,6 +270,52 @@ pub fn run() {
             commands::debug_cmd::debug_is_running,
             commands::watcher_cmd::start_watching,
             commands::watcher_cmd::stop_watching,
+            // ---- API client (global: no repo, workspace or project involved) ----
+            commands::api_cmd::api_load_tree,
+            commands::api_cmd::api_create_collection,
+            commands::api_cmd::api_update_collection,
+            commands::api_cmd::api_delete_collection,
+            commands::api_cmd::api_duplicate_collection,
+            commands::api_cmd::api_create_folder,
+            commands::api_cmd::api_update_folder,
+            commands::api_cmd::api_delete_folder,
+            commands::api_cmd::api_create_request,
+            commands::api_cmd::api_update_request,
+            commands::api_cmd::api_delete_request,
+            commands::api_cmd::api_duplicate_request,
+            commands::api_cmd::api_move_node,
+            commands::api_cmd::api_reorder_collections,
+            commands::api_cmd::api_list_environments,
+            commands::api_cmd::api_create_environment,
+            commands::api_cmd::api_update_environment,
+            commands::api_cmd::api_delete_environment,
+            commands::api_cmd::api_duplicate_environment,
+            commands::api_cmd::api_list_history,
+            commands::api_cmd::api_add_history,
+            commands::api_cmd::api_delete_history,
+            commands::api_cmd::api_clear_history,
+            commands::api_cmd::api_list_cookies,
+            commands::api_cmd::api_upsert_cookie,
+            commands::api_cmd::api_delete_cookie,
+            commands::api_cmd::api_clear_cookies,
+            commands::api_cmd::api_send_http,
+            commands::api_cmd::api_send_http_tracked,
+            commands::api_cmd::api_cancel_http,
+            commands::api_cmd::api_read_file_base64,
+            commands::api_cmd::api_ws_connect,
+            commands::api_cmd::api_ws_send,
+            commands::api_cmd::api_socketio_connect,
+            commands::api_cmd::api_socketio_emit,
+            commands::api_cmd::api_mqtt_connect,
+            commands::api_cmd::api_mqtt_publish,
+            commands::api_cmd::api_mqtt_subscribe,
+            commands::api_cmd::api_mqtt_unsubscribe,
+            commands::api_cmd::api_stream_disconnect,
+            commands::api_cmd::api_grpc_describe,
+            commands::api_cmd::api_grpc_call,
+            commands::api_cmd::api_pick_file,
+            commands::api_cmd::api_save_file,
+            commands::api_cmd::api_read_text_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

@@ -1,7 +1,9 @@
 import { create } from "zustand";
 import type { VcsProvider } from "../types/domain";
 
-export type MainView = "graph" | "changes" | "editor";
+/** `api` is the odd one out: it's the built-in API client, which is app-global rather than
+ * scoped to a repo, so it renders whether or not a project is open (see `App.tsx`). */
+export type MainView = "graph" | "changes" | "editor" | "api";
 
 export type SettingsSectionId =
   | "appearance"
@@ -14,7 +16,8 @@ export type SettingsSectionId =
   | "review"
   | "sdd"
   | "skills"
-  | "mcps";
+  | "mcps"
+  | "api";
 
 /** Which group the command palette lists. Scoped openings come from the keyboard shortcuts —
  * "switch repository" wants a list of repositories, not everything the app can do. */

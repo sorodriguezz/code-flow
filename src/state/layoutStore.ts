@@ -13,7 +13,10 @@ export type LayoutKey =
   | "graphColDate"
   | "graphColMessage"
   | "aiPanelWidth"
-  | "terminalPanelHeight";
+  | "terminalPanelHeight"
+  | "apiSidebarWidth"
+  | "apiSnippetWidth"
+  | "apiResponseHeight";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -28,6 +31,9 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   graphColMessage: "layout_graph_col_message",
   aiPanelWidth: "layout_ai_panel_width",
   terminalPanelHeight: "layout_terminal_panel_height",
+  apiSidebarWidth: "layout_api_sidebar_width",
+  apiSnippetWidth: "layout_api_snippet_width",
+  apiResponseHeight: "layout_api_response_height",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -43,6 +49,9 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   graphColMessage: 360,
   aiPanelWidth: 340,
   terminalPanelHeight: 260,
+  apiSidebarWidth: 288,
+  apiSnippetWidth: 420,
+  apiResponseHeight: 320,
 };
 
 interface LayoutState {

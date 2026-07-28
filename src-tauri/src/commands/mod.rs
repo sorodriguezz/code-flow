@@ -1,5 +1,6 @@
 pub mod activity_cmd;
 pub mod ado_cmd;
+pub mod api_cmd;
 pub mod app_cmd;
 pub mod checkpoint_cmd;
 pub mod claude_cmd;

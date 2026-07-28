@@ -1,13 +1,28 @@
 import { useMemo, useState } from "react";
-import { Briefcase, Cloud, Cog, FolderGit2, GitBranch, History, MessageCircle, TerminalSquare } from "lucide-react";
+import {
+  Briefcase,
+  Cloud,
+  Cog,
+  Download,
+  FolderGit2,
+  FolderPlus,
+  GitBranch,
+  History,
+  MessageCircle,
+  Plus,
+  TerminalSquare,
+  Zap,
+} from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore, type MainView, type PaletteScope, type SettingsSectionId } from "../../state/uiStore";
 import { useTerminalStore } from "../../state/terminalStore";
+import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
+import { useApiModalStore } from "../../state/apiModalStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
-type PaletteGroup = "workspaces" | "projects" | "branches" | "views" | "settings";
+type PaletteGroup = "workspaces" | "projects" | "branches" | "views" | "api" | "settings";
 
 interface PaletteItem {
   key: string;
@@ -20,7 +35,7 @@ interface PaletteItem {
 /** A scoped opening (from the "switch repository" / "switch workspace" / "switch branch"
  * shortcuts) narrows the palette to one group, so it acts as a dedicated picker. */
 const SCOPE_GROUPS: Record<PaletteScope, PaletteGroup[]> = {
-  all: ["workspaces", "projects", "branches", "views", "settings"],
+  all: ["workspaces", "projects", "branches", "views", "api", "settings"],
   workspaces: ["workspaces"],
   projects: ["projects"],
 };
@@ -29,6 +44,7 @@ const VIEW_ITEMS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBran
   { id: "graph", labelKey: "tabbar.graph", icon: History },
   { id: "changes", labelKey: "tabbar.changes", icon: GitBranch },
   { id: "editor", labelKey: "tabbar.editor", icon: FolderGit2 },
+  { id: "api", labelKey: "api.title", icon: Zap },
 ];
 
 const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [
@@ -43,6 +59,7 @@ const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [
   { id: "sdd", labelKey: "settings.sdd" },
   { id: "skills", labelKey: "settings.skills" },
   { id: "mcps", labelKey: "settings.mcps" },
+  { id: "api", labelKey: "api.settings.title" },
 ];
 
 const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {
@@ -50,6 +67,7 @@ const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {
   projects: "sidebar.projects",
   branches: "sidebar.localBranches",
   views: "titlebar.goTo",
+  api: "api.title",
   settings: "statusbar.settings",
 };
 
@@ -72,6 +90,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const checkoutRemoteBranch = useRepoStore((s) => s.checkoutRemoteBranch);
   const setActiveView = useUiStore((s) => s.setActiveView);
   const openSettings = useUiStore((s) => s.openSettings);
+  const openApiModal = useApiModalStore((s) => s.openApiModal);
   const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
   const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
 
@@ -124,6 +143,38 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       },
     ];
 
+    // The API client is app-global, so these work with no project open — but each one has to
+    // switch to the view as well, because `ApiView` is what mounts the tab strip and the modals.
+    const openApi = (then?: () => void) => {
+      setActiveView("api");
+      void ensureApiStoreLoaded().then(() => then?.());
+    };
+
+    const apiItems: PaletteItem[] = [
+      {
+        key: "api:new-request",
+        icon: Plus,
+        label: t("api.newRequest"),
+        group: "api",
+        onSelect: () => openApi(() => useApiStore.getState().openScratchTab()),
+      },
+      {
+        key: "api:new-collection",
+        icon: FolderPlus,
+        label: t("api.newCollection"),
+        group: "api",
+        onSelect: () =>
+          openApi(() => void useApiStore.getState().createCollection(t("api.untitledCollection"))),
+      },
+      {
+        key: "api:import",
+        icon: Download,
+        label: t("api.import.title"),
+        group: "api",
+        onSelect: () => openApi(() => openApiModal({ kind: "import" })),
+      },
+    ];
+
     const settingsItems: PaletteItem[] = SETTINGS_ITEMS.map(({ id, labelKey }) => ({
       key: `settings:${id}`,
       icon: Cog,
@@ -132,7 +183,14 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       onSelect: () => openSettings(id),
     }));
 
-    return [...workspaceItems, ...projectItems, ...branchItems, ...viewItems, ...settingsItems];
+    return [
+      ...workspaceItems,
+      ...projectItems,
+      ...branchItems,
+      ...viewItems,
+      ...apiItems,
+      ...settingsItems,
+    ];
   }, [
     workspaces,
     projects,
@@ -144,6 +202,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     checkoutRemoteBranch,
     setActiveView,
     openSettings,
+    openApiModal,
     toggleAiPanel,
     toggleTerminalPanel,
   ]);

@@ -484,3 +484,19 @@ body.cf-dragging * {
   color: var(--cf-accent);
   text-decoration: underline;
 }
+
+/* Monaco's own button tooltips ("Close (Escape)" on the find widget) are removed outright.
+ *
+ * They render as a floating box next to — and often over — the button that owns them, and in this
+ * app that box oscillates: it covers the button, the button reports a mouse-leave, the box hides,
+ * the pointer is over the button again, and it reappears. The result flickers and eats the click.
+ * `pointer-events: none` was tried first and did not stop it, so the element goes instead.
+ *
+ * The cost is small: these tooltips only restate an icon whose meaning is already obvious, and the
+ * keybinding they mention (Escape) works regardless. `.workbench-hover` is the hover-service
+ * widget used for those labels — the editor's own code hovers are a different widget
+ * (`.monaco-resizable-hover`) and are untouched. Verified in
+ * `monaco-editor/esm/vs/platform/hover/browser/hoverWidget.js`, where the class is added. */
+.workbench-hover {
+  display: none !important;
+}

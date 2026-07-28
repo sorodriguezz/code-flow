@@ -10,6 +10,7 @@ import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
 import { AiPanel } from "./components/ai/AiPanel";
 import { EditorView } from "./components/editor/EditorView";
+import { ApiView } from "./components/api/ApiView";
 import { TerminalDock } from "./components/terminal/TerminalDock";
 import { SettingsView } from "./components/settings/SettingsView";
 import { CommandPalette } from "./components/layout/CommandPalette";
@@ -23,6 +24,7 @@ import { useUiStore, type MainView } from "./state/uiStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
+import { useApiStore } from "./state/apiStore";
 import { usePreferencesStore } from "./state/preferencesStore";
 import { useAiProviderStore } from "./state/aiProviderStore";
 import { useLanguageStore } from "./state/languageStore";
@@ -41,9 +43,17 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "editor", render: () => <EditorView /> },
 ];
 
+/** Views that aren't about a repository, so the "no project open" empty state must not swallow
+ * them — but that do belong to a workspace. The API client owns the workspace's
+ * collections/environments and is expected to be usable before any repo has been added to it. */
+const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
+  { id: "api", render: () => <ApiView /> },
+];
+
 function MainContent() {
   const activeView = useUiStore((s) => s.activeView);
   const project = useWorkspaceStore((s) => s.activeProject());
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const [visited, setVisited] = useState<Set<MainView>>(new Set());
   const t = useT();
 
@@ -51,24 +61,33 @@ function MainContent() {
     setVisited((prev) => (prev.has(activeView) ? prev : new Set(prev).add(activeView)));
   }, [activeView]);
 
-  if (!project) {
+  const workspaceViewOpen =
+    workspaceId !== null && WORKSPACE_VIEWS.some((v) => v.id === activeView);
+
+  if (!project && !workspaceViewOpen) {
     return (
       <EmptyState icon={FolderGit2} title={t("common.noProjectOpen")} subtitle={t("common.openProjectHint")} />
     );
   }
 
-  // Once a project view has been opened it stays mounted (just hidden) so switching
-  // tabs doesn't kill in-progress state — most importantly the Terminal's shell
-  // session, which would otherwise restart every time you tabbed away from it. Views
-  // never opened yet aren't mounted at all, so e.g. no shell process spawns for a
-  // project until the user actually opens the Terminal tab.
+  // Once a view has been opened it stays mounted (just hidden) so switching tabs doesn't kill
+  // in-progress state — the Terminal's shell session, and now also the API client's live
+  // WebSocket/MQTT connections and unsaved request drafts, all of which would otherwise be
+  // torn down every time you tabbed away. Views never opened yet aren't mounted at all.
   return (
     <>
-      {PROJECT_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
-        <div key={id} className={activeView === id ? "h-full" : "hidden"}>
-          {render()}
-        </div>
-      ))}
+      {project &&
+        PROJECT_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
+          <div key={id} className={activeView === id ? "h-full" : "hidden"}>
+            {render()}
+          </div>
+        ))}
+      {workspaceId !== null &&
+        WORKSPACE_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
+          <div key={id} className={activeView === id ? "h-full" : "hidden"}>
+            {render()}
+          </div>
+        ))}
     </>
   );
 }
@@ -83,6 +102,7 @@ export default function App() {
   const initAiProvider = useAiProviderStore((s) => s.init);
   const initShortcuts = useShortcutsStore((s) => s.init);
   const project = useWorkspaceStore((s) => s.activeProject());
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
   const resolvedTheme = useThemeStore((s) => s.resolved);
@@ -137,6 +157,15 @@ export default function App() {
   useEffect(() => {
     void setRepoPath(project?.local_path ?? null);
   }, [project?.local_path, setRepoPath]);
+
+  // The API client's collections, environments, history and cookies belong to the workspace, so
+  // a switch has to swap them the way the repo above swaps. Only the id is passed: the store
+  // owns the teardown of what the previous workspace left running (live WebSocket/MQTT
+  // connections, open request tabs), so there is nothing here to keep in step with it.
+  useEffect(() => {
+    if (!workspaceId) return;
+    void useApiStore.getState().setWorkspace(workspaceId);
+  }, [workspaceId]);
 
   // Records every view/project change onto the back/forward history — TitleBar's
   // chevrons just replay entries from this stack.

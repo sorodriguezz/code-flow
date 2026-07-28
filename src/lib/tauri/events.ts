@@ -1,5 +1,9 @@
 import { listen } from "@tauri-apps/api/event";
 import type { GitDoneEvent, GitProgressEvent } from "../../types/domain";
+import type {
+  StreamMessage as ApiStreamMessage,
+  StreamStatusEvent as ApiStreamStatusEvent,
+} from "../../types/api";
 import type { StackFrame } from "./commands";
 
 export const onGitProgress = (handler: (event: GitProgressEvent) => void) =>
@@ -52,3 +56,11 @@ export const onDebugOutput = (handler: (event: { kind: string; text: string }) =
   listen<{ kind: string; text: string }>("debug:output", (e) => handler(e.payload));
 
 export const onDebugTerminated = (handler: () => void) => listen("debug:terminated", () => handler());
+
+/** One frame of a live WebSocket/Socket.IO/MQTT connection. Routed by `connection_id`, not by
+ * tab: the transport has no idea which tab opened the socket. */
+export const onApiStreamMessage = (handler: (event: ApiStreamMessage) => void) =>
+  listen<ApiStreamMessage>("api:stream-message", (e) => handler(e.payload));
+
+export const onApiStreamStatus = (handler: (event: ApiStreamStatusEvent) => void) =>
+  listen<ApiStreamStatusEvent>("api:stream-status", (e) => handler(e.payload));

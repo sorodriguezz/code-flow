@@ -1,3 +1,4 @@
+pub mod api_queries;
 pub mod migrations;
 pub mod models;
 pub mod queries;

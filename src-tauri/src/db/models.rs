@@ -196,3 +196,111 @@ pub struct WorkspaceMcp {
     pub enabled: bool,
     pub created_at: String,
 }
+
+// ===================== API client (per workspace) =====================
+//
+// These mirror `src/types/api.ts` one-for-one. Everything editable about a request travels in
+// the `spec` JSON string rather than in typed fields — the backend never interprets it, it only
+// stores and returns it, so a new protocol or auth scheme is a frontend-only change.
+//
+// Only the roots carry `workspace_id`; folders and requests reach it through their collection.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiCollection {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub description: String,
+    /// JSON `AuthConfig`, or `""` when nothing is configured.
+    pub auth: String,
+    pub pre_script: String,
+    pub post_script: String,
+    /// JSON `ApiVariable[]`.
+    pub variables: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiFolder {
+    pub id: String,
+    pub collection_id: String,
+    /// `None` = directly under the collection.
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub auth: String,
+    pub pre_script: String,
+    pub post_script: String,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiRequestRow {
+    pub id: String,
+    pub collection_id: String,
+    pub folder_id: Option<String>,
+    pub name: String,
+    pub protocol: String,
+    pub method: String,
+    pub url: String,
+    /// JSON `ApiRequestSpec`.
+    pub spec: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// The whole tree in one round trip — the UI rebuilds nesting client-side from the parent ids,
+/// which is cheaper than three chatty queries per expand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiTree {
+    pub collections: Vec<ApiCollection>,
+    pub folders: Vec<ApiFolder>,
+    pub requests: Vec<ApiRequestRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiEnvironment {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    /// JSON `ApiVariable[]`.
+    pub variables: String,
+    pub is_global: bool,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiHistoryEntry {
+    pub id: String,
+    pub workspace_id: String,
+    pub request_id: Option<String>,
+    pub name: String,
+    pub protocol: String,
+    pub method: String,
+    pub url: String,
+    pub status: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub size_bytes: Option<i64>,
+    /// JSON `{ request, response }`.
+    pub snapshot: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiCookie {
+    pub id: String,
+    pub workspace_id: String,
+    pub domain: String,
+    pub path: String,
+    pub name: String,
+    pub value: String,
+    pub secure: bool,
+    pub http_only: bool,
+    pub expires: Option<String>,
+    pub updated_at: String,
+}

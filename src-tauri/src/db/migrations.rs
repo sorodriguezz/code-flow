@@ -1,6 +1,11 @@
 use rusqlite::{Connection, OptionalExtension};
 
 pub fn run(conn: &Connection) -> rusqlite::Result<()> {
+    // Must run *before* the schema batch: it moves the pre-workspace `api_*` tables aside so the
+    // batch below recreates them in their current shape, and `migrate_api_tables_finish` then
+    // copies the old rows across. See that pair's doc comments.
+    migrate_api_tables_begin(conn)?;
+
     conn.execute_batch(
         r#"
         PRAGMA foreign_keys = ON;
@@ -164,8 +169,129 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             title       TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
+
+        -- ===================== API client (per workspace) =====================
+        -- Scoped to a WORKSPACE, not to a project: a collection describes a *service*, and the
+        -- several repos of one workspace (frontend, backend, infra) normally talk to the same
+        -- one — scoping per repo would mean re-creating the same collection in each. Scoping per
+        -- workspace also keeps environments and the cookie jar from leaking a staging session
+        -- from one client's workspace into another's.
+        --
+        -- Only the roots carry `workspace_id`: folders and requests reach it through their
+        -- collection, so there is exactly one place a row's workspace can be wrong.
+        --
+        -- The editable content of a request lives in one `spec` JSON blob rather than in
+        -- columns, so adding a protocol, an auth scheme or a body mode never needs a migration.
+
+        CREATE TABLE IF NOT EXISTS api_collections (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            name        TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '',
+            -- JSON AuthConfig; '' = nothing configured (children fall through to "none").
+            auth        TEXT NOT NULL DEFAULT '',
+            pre_script  TEXT NOT NULL DEFAULT '',
+            post_script TEXT NOT NULL DEFAULT '',
+            -- JSON ApiVariable[] — collection-scoped variables.
+            variables   TEXT NOT NULL DEFAULT '[]',
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+
+        -- Folders nest arbitrarily (`parent_id` self-references); NULL means "directly under the
+        -- collection". Kept as a separate table from requests so a folder can carry its own
+        -- auth/scripts, which requests inherit.
+        CREATE TABLE IF NOT EXISTS api_folders (
+            id            TEXT PRIMARY KEY,
+            collection_id TEXT NOT NULL REFERENCES api_collections(id) ON DELETE CASCADE,
+            parent_id     TEXT REFERENCES api_folders(id) ON DELETE CASCADE,
+            name          TEXT NOT NULL,
+            description   TEXT NOT NULL DEFAULT '',
+            auth          TEXT NOT NULL DEFAULT '',
+            pre_script    TEXT NOT NULL DEFAULT '',
+            post_script   TEXT NOT NULL DEFAULT '',
+            sort_order    INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_folders_parent
+            ON api_folders (collection_id, parent_id, sort_order);
+
+        CREATE TABLE IF NOT EXISTS api_requests (
+            id            TEXT PRIMARY KEY,
+            collection_id TEXT NOT NULL REFERENCES api_collections(id) ON DELETE CASCADE,
+            folder_id     TEXT REFERENCES api_folders(id) ON DELETE CASCADE,
+            name          TEXT NOT NULL,
+            -- http | graphql | websocket | socketio | grpc | mqtt
+            protocol      TEXT NOT NULL DEFAULT 'http',
+            -- Denormalized out of `spec` purely so the tree can render method+URL without
+            -- parsing every blob.
+            method        TEXT NOT NULL DEFAULT 'GET',
+            url           TEXT NOT NULL DEFAULT '',
+            -- JSON ApiRequestSpec: params, headers, body, auth, scripts, protocol settings.
+            spec          TEXT NOT NULL DEFAULT '{}',
+            sort_order    INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_requests_parent
+            ON api_requests (collection_id, folder_id, sort_order);
+
+        -- Environments are global too. Exactly one row has `is_global = 1`: the "Globals"
+        -- pseudo-environment, which is always in scope and can't be deleted or switched away
+        -- from (see `ensure_globals_environment`).
+        CREATE TABLE IF NOT EXISTS api_environments (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            name        TEXT NOT NULL,
+            -- JSON ApiVariable[] — initial vs current value, secret flag, enabled flag.
+            variables   TEXT NOT NULL DEFAULT '[]',
+            is_global   INTEGER NOT NULL DEFAULT 0,
+            sort_order  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT NOT NULL
+        );
+
+        -- Every send, whether or not it came from a saved request (`request_id` is NULL for
+        -- ad-hoc sends). `snapshot` holds the full request spec + response so an old entry can
+        -- be replayed or restored into the builder exactly as it was.
+        CREATE TABLE IF NOT EXISTS api_history (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            request_id  TEXT,
+            name        TEXT NOT NULL DEFAULT '',
+            protocol    TEXT NOT NULL DEFAULT 'http',
+            method      TEXT NOT NULL DEFAULT '',
+            url         TEXT NOT NULL DEFAULT '',
+            status      INTEGER,
+            duration_ms INTEGER,
+            size_bytes  INTEGER,
+            snapshot    TEXT NOT NULL DEFAULT '{}',
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_history_time ON api_history (workspace_id, created_at DESC);
+
+        -- The cookie jar. Persisted rather than kept in the reqwest client because the client is
+        -- rebuilt per request (per-request SSL/proxy/redirect overrides make a shared client
+        -- impossible), so nothing in the transport layer can hold jar state across sends.
+        CREATE TABLE IF NOT EXISTS api_cookies (
+            id         TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            domain     TEXT NOT NULL,
+            path       TEXT NOT NULL DEFAULT '/',
+            name       TEXT NOT NULL,
+            value      TEXT NOT NULL DEFAULT '',
+            secure     INTEGER NOT NULL DEFAULT 0,
+            http_only  INTEGER NOT NULL DEFAULT 0,
+            expires    TEXT,
+            updated_at TEXT NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_api_cookies_key
+            ON api_cookies (workspace_id, domain, path, name);
         "#,
     )?;
+
+    migrate_api_tables_finish(conn)?;
+    ensure_globals_environment(conn)?;
 
     migrate_review_contexts_to_workspace(conn)?;
     migrate_md_files_into_contexts(conn)?;
@@ -184,6 +310,141 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_enabled_to_workspace_skills(conn)?;
     add_provider_to_workspace_agents(conn)?;
     Ok(())
+}
+
+/// Every workspace resolves variables against its own "Globals" scope, so each one needs that row
+/// before anything reads it. Idempotent and keyed on `is_global` rather than a fixed id, so a
+/// user renaming it doesn't cause a duplicate to be seeded on the next launch.
+fn ensure_globals_environment(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO api_environments (id, workspace_id, name, variables, is_global, sort_order, created_at)
+         SELECT lower(hex(randomblob(16))), w.id, 'Globals', '[]', 1, -1, ?1
+         FROM workspaces w
+         WHERE NOT EXISTS (
+             SELECT 1 FROM api_environments e WHERE e.workspace_id = w.id AND e.is_global = 1
+         )",
+        rusqlite::params![chrono::Utc::now().to_rfc3339()],
+    )?;
+    Ok(())
+}
+
+/// The `api_*` tables shipped scoped to nothing — one global set of collections, environments,
+/// history and cookies. They are now per-workspace, which means a new `workspace_id` column on
+/// each of the four roots (folders and requests reach it through their collection).
+///
+/// SQLite can't add that column in place: `ALTER TABLE ... ADD COLUMN` rejects a `REFERENCES`
+/// clause while foreign keys are on, so an in-place add would leave a migrated database without
+/// the cascade a fresh one has — a workspace deletion would silently orphan its API rows. So the
+/// old tables are moved aside here, the schema batch recreates them in their current shape, and
+/// [`migrate_api_tables_finish`] copies the rows across. Splitting it in two is what lets the
+/// batch stay the single definition of the schema instead of being duplicated inside a migration.
+///
+/// `legacy_alter_table` is essential: without it SQLite helpfully rewrites the foreign keys in
+/// `api_folders`/`api_requests` to point at `api_collections_legacy`, and the rename silently
+/// takes the children with it.
+fn migrate_api_tables_begin(conn: &Connection) -> rusqlite::Result<()> {
+    let needs_migration = table_exists(conn, "api_collections")?
+        && !has_column(conn, "api_collections", "workspace_id")?;
+    if !needs_migration {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        PRAGMA foreign_keys = OFF;
+        PRAGMA legacy_alter_table = ON;
+        -- Dropped rather than carried along: a renamed table keeps its indexes under their old
+        -- names, which would collide when the schema batch recreates them.
+        DROP INDEX IF EXISTS idx_api_history_time;
+        DROP INDEX IF EXISTS idx_api_cookies_key;
+        ALTER TABLE api_collections  RENAME TO api_collections_legacy;
+        ALTER TABLE api_environments RENAME TO api_environments_legacy;
+        ALTER TABLE api_history      RENAME TO api_history_legacy;
+        ALTER TABLE api_cookies      RENAME TO api_cookies_legacy;
+        PRAGMA legacy_alter_table = OFF;
+        "#,
+    )
+}
+
+/// Second half of [`migrate_api_tables_begin`]: copies the pre-workspace rows into the recreated
+/// tables, assigning them all to the oldest workspace — the one a single-workspace user has been
+/// working in, which is where they will expect to find their collections.
+///
+/// If there is no workspace at all the legacy tables are left untouched rather than dropped:
+/// there is nowhere to put the rows, and destroying a user's collections to tidy up a migration
+/// is not a trade worth making. The next launch after a workspace exists finishes the job.
+fn migrate_api_tables_finish(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "api_collections_legacy")? {
+        return Ok(());
+    }
+    let target: Option<String> = conn
+        .query_row(
+            "SELECT id FROM workspaces ORDER BY sort_order, created_at LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(workspace_id) = target else {
+        return Ok(());
+    };
+
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let copied = conn.execute(
+        "INSERT INTO api_collections
+            (id, workspace_id, name, description, auth, pre_script, post_script, variables,
+             sort_order, created_at, updated_at)
+         SELECT id, ?1, name, description, auth, pre_script, post_script, variables,
+                sort_order, created_at, updated_at
+         FROM api_collections_legacy",
+        rusqlite::params![workspace_id],
+    )?;
+    // The Globals row is per-workspace now, and `ensure_globals_environment` seeds one for every
+    // workspace right after this — carrying the old one over as well would leave two in the
+    // workspace that inherits it.
+    conn.execute(
+        "INSERT INTO api_environments
+            (id, workspace_id, name, variables, is_global, sort_order, created_at)
+         SELECT id, ?1, name, variables, is_global, sort_order, created_at
+         FROM api_environments_legacy WHERE is_global = 0",
+        rusqlite::params![workspace_id],
+    )?;
+    conn.execute(
+        "INSERT INTO api_history
+            (id, workspace_id, request_id, name, protocol, method, url, status, duration_ms,
+             size_bytes, snapshot, created_at)
+         SELECT id, ?1, request_id, name, protocol, method, url, status, duration_ms,
+                size_bytes, snapshot, created_at
+         FROM api_history_legacy",
+        rusqlite::params![workspace_id],
+    )?;
+    conn.execute(
+        "INSERT INTO api_cookies
+            (id, workspace_id, domain, path, name, value, secure, http_only, expires, updated_at)
+         SELECT id, ?1, domain, path, name, value, secure, http_only, expires, updated_at
+         FROM api_cookies_legacy",
+        rusqlite::params![workspace_id],
+    )?;
+    conn.execute_batch(
+        r#"
+        DROP TABLE api_collections_legacy;
+        DROP TABLE api_environments_legacy;
+        DROP TABLE api_history_legacy;
+        DROP TABLE api_cookies_legacy;
+        PRAGMA foreign_keys = ON;
+        "#,
+    )?;
+    let _ = copied;
+    Ok(())
+}
+
+fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            rusqlite::params![name],
+            |_| Ok(true),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 /// `workspace_agents` gained a `provider` column so an agent runs on its own provider + model
@@ -412,4 +673,142 @@ fn add_github_host_to_projects(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE projects ADD COLUMN github_host TEXT;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The schema batch as it stood before the `api_*` tables were scoped to a workspace, derived
+    /// from the current one so the two can't drift apart: strip the `workspace_id` columns and
+    /// un-scope the two indexes that now lead with it.
+    fn legacy_schema() -> String {
+        let current = include_str!("migrations.rs");
+        let start = current.find("PRAGMA foreign_keys = ON;").expect("schema batch");
+        let end = current[start..].find("\"#,").expect("end of batch") + start;
+        current[start..end]
+            .replace(
+                "            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,\n",
+                "",
+            )
+            .replace(
+                "ON api_cookies (workspace_id, domain, path, name)",
+                "ON api_cookies (domain, path, name)",
+            )
+            .replace(
+                "ON api_history (workspace_id, created_at DESC)",
+                "ON api_history (created_at DESC)",
+            )
+    }
+
+    fn legacy_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&legacy_schema()).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT INTO workspaces (id, name, created_at, sort_order) VALUES ('w-old', 'Flow', '2020-01-01', 0);
+            INSERT INTO workspaces (id, name, created_at, sort_order) VALUES ('w-new', 'Other', '2021-01-01', 1);
+            INSERT INTO api_collections (id, name, created_at, updated_at) VALUES ('c1', 'My API', 't', 't');
+            INSERT INTO api_folders (id, collection_id, name, created_at) VALUES ('f1', 'c1', 'Auth', 't');
+            INSERT INTO api_requests (id, collection_id, folder_id, name, created_at, updated_at)
+                VALUES ('r1', 'c1', 'f1', 'Login', 't', 't');
+            INSERT INTO api_environments (id, name, is_global, created_at) VALUES ('e-glob', 'Globals', 1, 't');
+            INSERT INTO api_environments (id, name, is_global, created_at) VALUES ('e1', 'Dev', 0, 't');
+            INSERT INTO api_history (id, url, created_at) VALUES ('h1', 'https://x', 't');
+            INSERT INTO api_cookies (id, domain, path, name, updated_at) VALUES ('k1', 'a.com', '/', 'sid', 't');
+            "#,
+        )
+        .unwrap();
+        conn
+    }
+
+    fn scalar(conn: &Connection, sql: &str) -> i64 {
+        conn.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
+    #[test]
+    fn migrating_a_pre_workspace_database_keeps_every_row_and_reparents_it() {
+        let conn = legacy_db();
+        run(&conn).unwrap();
+
+        // Content survives, assigned to the oldest workspace.
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) FROM api_collections WHERE workspace_id = 'w-old'"),
+            1
+        );
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_folders"), 1);
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_requests"), 1);
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) FROM api_history WHERE workspace_id = 'w-old'"),
+            1
+        );
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) FROM api_cookies WHERE workspace_id = 'w-old'"),
+            1
+        );
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) FROM api_environments WHERE id = 'e1' AND workspace_id = 'w-old'"),
+            1
+        );
+
+        // Exactly one Globals per workspace: the legacy one is dropped, not carried over.
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_environments WHERE is_global = 1"), 2);
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(DISTINCT workspace_id) FROM api_environments WHERE is_global = 1"),
+            2
+        );
+
+        // The children's foreign keys still point at `api_collections`, not at the renamed table —
+        // this is what `legacy_alter_table` protects, and it fails loudly if that pragma is lost.
+        let folders_sql: String = conn
+            .query_row("SELECT sql FROM sqlite_master WHERE name = 'api_folders'", [], |r| r.get(0))
+            .unwrap();
+        assert!(folders_sql.contains("REFERENCES api_collections(id)"), "{folders_sql}");
+        assert!(!folders_sql.contains("legacy"), "{folders_sql}");
+
+        // No leftovers, and deleting the workspace now cascades the whole API tree away.
+        assert!(!table_exists(&conn, "api_collections_legacy").unwrap());
+        conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM workspaces WHERE id = 'w-old';")
+            .unwrap();
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_collections"), 0);
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_requests"), 0);
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_cookies"), 0);
+    }
+
+    #[test]
+    fn migration_is_idempotent_and_a_fresh_database_needs_no_migration() {
+        let conn = legacy_db();
+        run(&conn).unwrap();
+        run(&conn).unwrap();
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_collections"), 1);
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_environments WHERE is_global = 1"), 2);
+
+        let fresh = Connection::open_in_memory().unwrap();
+        run(&fresh).unwrap();
+        assert!(has_column(&fresh, "api_collections", "workspace_id").unwrap());
+    }
+
+    /// A database with API rows but no workspace has nowhere to put them; the rows must be kept
+    /// for a later launch rather than dropped on the floor.
+    #[test]
+    fn a_database_with_no_workspace_keeps_the_legacy_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&legacy_schema()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO api_collections (id, name, created_at, updated_at) VALUES ('c1', 'Kept', 't', 't');",
+        )
+        .unwrap();
+        run(&conn).unwrap();
+        assert!(table_exists(&conn, "api_collections_legacy").unwrap());
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_collections_legacy"), 1);
+
+        // Once a workspace exists, the next launch finishes the job.
+        conn.execute_batch(
+            "INSERT INTO workspaces (id, name, created_at, sort_order) VALUES ('w1', 'W', 't', 0);",
+        )
+        .unwrap();
+        run(&conn).unwrap();
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_collections WHERE workspace_id = 'w1'"), 1);
+        assert!(!table_exists(&conn, "api_collections_legacy").unwrap());
+    }
 }

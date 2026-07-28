@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   Workflow,
   X,
+  Zap,
 } from "lucide-react";
 import { ThemeSettings } from "./ThemeSettings";
 import { ProjectsSettings } from "./ProjectsSettings";
@@ -24,6 +25,7 @@ import { McpSettings } from "./McpSettings";
 import { GitSettings } from "./GitSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { ShortcutsSettings } from "./ShortcutsSettings";
+import { ApiSettingsBody } from "../api/ApiSettingsModal";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -45,6 +47,7 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
   { id: "git", labelKey: "settings.git", icon: GitBranch },
   { id: "azure", labelKey: "settings.gitHostingSection", icon: Cloud },
   { id: "claude", labelKey: "settings.aiSection", icon: Bot },
+  { id: "api", labelKey: "api.settings.title", icon: Zap },
 ];
 
 const WORKSPACE_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
@@ -155,6 +158,7 @@ export function SettingsView() {
               {section === "git" && <GitSettings />}
               {section === "azure" && <GitHostingSettings />}
               {section === "claude" && <ClaudeSettings />}
+              {section === "api" && <ApiSettingsBody />}
               {section === "review" && <ReviewSettings />}
               {section === "sdd" && <SddSettings />}
               {section === "skills" && <SkillsSettings />}
