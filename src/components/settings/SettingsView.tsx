@@ -10,6 +10,7 @@ import {
   Palette,
   Plug,
   ShieldCheck,
+  TerminalSquare,
   Workflow,
   X,
   Zap,
@@ -23,6 +24,7 @@ import { SddSettings } from "./SddSettings";
 import { SkillsSettings } from "./SkillsSettings";
 import { McpSettings } from "./McpSettings";
 import { GitSettings } from "./GitSettings";
+import { TerminalSettings } from "./TerminalSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { ShortcutsSettings } from "./ShortcutsSettings";
 import { ApiSettingsBody } from "../api/ApiSettingsModal";
@@ -46,6 +48,7 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
   { id: "keybindings", labelKey: "shortcuts.title", icon: Keyboard },
   { id: "projects", labelKey: "settings.projects", icon: FolderGit2 },
   { id: "git", labelKey: "settings.git", icon: GitBranch },
+  { id: "terminal", labelKey: "settings.terminal", icon: TerminalSquare },
   { id: "azure", labelKey: "settings.gitHostingSection", icon: Cloud },
   { id: "claude", labelKey: "settings.aiSection", icon: Bot },
   { id: "api", labelKey: "api.settings.title", icon: Zap },
@@ -187,6 +190,7 @@ export function SettingsView() {
               {section === "keybindings" && <ShortcutsSettings />}
               {section === "projects" && <ProjectsSettings />}
               {section === "git" && <GitSettings />}
+              {section === "terminal" && <TerminalSettings />}
               {section === "azure" && <GitHostingSettings />}
               {section === "claude" && <ClaudeSettings />}
               {section === "api" && <ApiSettingsBody />}

@@ -11,6 +11,7 @@ export type SettingsSectionId =
   | "keybindings"
   | "projects"
   | "git"
+  | "terminal"
   | "azure"
   | "claude"
   | "review"

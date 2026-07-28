@@ -3,9 +3,11 @@ import { closeTerminal, getSetting, openTerminal, setSetting } from "../lib/taur
 
 export interface TerminalTab {
   id: string;
-  /** `Terminal N` until the user renames it. Deliberately *not* persisted anywhere: a title
-   * describes a live shell, so it's meaningless once that shell is gone. It therefore lives
-   * exactly as long as this store does — until the tab is closed or the app exits. */
+  /** The profile's name (`zsh`, `Git Bash`, …) until the user renames it — so a dock holding
+   * several shells says which is which, the way VS Code's terminal tabs do. Deliberately *not*
+   * persisted anywhere: a title describes a live shell, so it's meaningless once that shell is
+   * gone. It therefore lives exactly as long as this store does — until the tab is closed or the
+   * app exits. */
   title: string;
 }
 
@@ -41,8 +43,9 @@ interface TerminalState {
   init: () => Promise<void>;
   togglePanel: () => void;
   /** With `split: true`, adds the new terminal to whichever group is currently active instead
-   * of starting a new one — otherwise every new terminal gets its own group. */
-  openNew: (projectId: string, cwd: string, opts?: { split?: boolean }) => Promise<void>;
+   * of starting a new one — otherwise every new terminal gets its own group. `profileId` picks
+   * the shell; omitted, the backend resolves the configured default. */
+  openNew: (projectId: string, cwd: string, opts?: { split?: boolean; profileId?: string }) => Promise<void>;
   close: (projectId: string, id: string) => Promise<void>;
   /** Shows the group `id` belongs to — never changes group membership by itself. */
   focus: (projectId: string, id: string) => void;
@@ -67,10 +70,12 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   openNew: async (projectId, cwd, opts) => {
-    const id = await openTerminal(cwd);
+    const { id, profile_name } = await openTerminal(cwd, opts?.profileId);
     set((s) => {
       const proj = s.byProject[projectId] ?? emptyProject();
-      const title = `Terminal ${proj.nextNumber}`;
+      // The shell's own name is the useful label; `Terminal N` remains the fallback for a
+      // profile that somehow reports none, so a tab is never nameless.
+      const title = profile_name.trim() || `Terminal ${proj.nextNumber}`;
       const tabs = [...proj.tabs, { id, title }];
       const current = activeGroup(proj);
       const groups =

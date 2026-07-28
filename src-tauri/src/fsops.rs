@@ -215,11 +215,11 @@ pub fn reveal_in_file_manager(path: &str) -> Result<(), String> {
 /// `npx` in `skills_cmd.rs`.
 pub fn open_in_vscode(path: &str) -> Result<(), String> {
     let mut cmd = if cfg!(target_os = "windows") {
-        let mut cmd = std::process::Command::new("cmd");
+        let mut cmd = crate::proc::std_command("cmd");
         cmd.args(["/C", "code"]);
         cmd
     } else {
-        std::process::Command::new("code")
+        crate::proc::std_command("code")
     };
     cmd.arg(path)
         .spawn()

@@ -385,3 +385,21 @@ export type PrLinkResolution =
       pr: PullRequestSummary;
     }
   | { status: "Unrecognized" };
+
+/** A shell the terminal can be opened with. `builtin` profiles are detected on this machine at
+ * every launch and aren't editable; the rest are the user's own, persisted in app settings. */
+export interface ShellProfile {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  builtin: boolean;
+}
+
+/** What `open_terminal` hands back: the pty session id plus the profile that actually started —
+ * which is resolved in the backend, so it isn't always the one the caller asked for. */
+export interface TerminalOpened {
+  id: string;
+  profile_id: string;
+  profile_name: string;
+}

@@ -282,9 +282,20 @@ async fn build_channel(
         };
     }
 
-    ep.connect()
-        .await
-        .map_err(|e| format!("Could not connect to {uri}: {e}"))
+    // tonic's own `Display` is just "transport error"; the reason lives at the bottom of the
+    // chain, and an unreachable host deserves the same sentence here as it gets over HTTP.
+    ep.connect().await.map_err(|e| {
+        crate::api::describe_transport_error(
+            &format!("Could not connect to {uri}"),
+            uri.host().unwrap_or(""),
+            uri.port_u16().or_else(|| match uri.scheme_str() {
+                Some("https") => Some(443),
+                Some("http") => Some(80),
+                _ => None,
+            }),
+            &e,
+        )
+    })
 }
 
 fn apply_metadata(map: &mut MetadataMap, entries: &[(String, String)]) -> Result<(), String> {

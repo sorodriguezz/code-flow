@@ -69,7 +69,7 @@ impl AiEngine for OpenCodeEngine {
     }
 
     fn build_command(&self, binary: &str, inv: &AiInvocation) -> Command {
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::proc::command(binary);
         cmd.arg("run");
 
         // Everything textual — system instructions, the ask, and the data payload — goes into one

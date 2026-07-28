@@ -388,6 +388,19 @@ fn manual_redirect_target(
 }
 
 fn transport_error(method: &Method, url: &Url, err: &reqwest::Error) -> String {
+    let cause = crate::api::root_cause(err);
+
+    // A cause we recognize is worth more than the generic verb in front of it: the OS's way of
+    // reporting an unresolvable hostname ("nodename nor servname provided, or not known") reads
+    // like a bug in the app rather than what it is — a typo in the URL, or a host this machine
+    // can't see. Anything unrecognized keeps its raw text, which beats paraphrasing it badly.
+    if let Some(explained) = cause
+        .as_deref()
+        .and_then(|c| crate::api::explain_cause(url.host_str().unwrap_or(""), url.port_or_known_default(), c))
+    {
+        return format!("{method} {url} — {explained}");
+    }
+
     let what = if err.is_timeout() {
         "timed out"
     } else if err.is_connect() {
@@ -399,23 +412,12 @@ fn transport_error(method: &Method, url: &Url, err: &reqwest::Error) -> String {
     } else {
         "failed"
     };
-    match root_cause(err) {
+    match cause {
         Some(cause) => format!("{method} {url} {what}: {cause}"),
         None => format!("{method} {url} {what}: {err}"),
     }
 }
 
-/// reqwest's own `Display` is usually a generic wrapper ("error sending request"); the useful
-/// sentence — certificate expired, connection refused, DNS failure — is at the bottom of the chain.
-fn root_cause(err: &dyn std::error::Error) -> Option<String> {
-    let mut deepest = None;
-    let mut source = err.source();
-    while let Some(current) = source {
-        deepest = Some(current.to_string());
-        source = current.source();
-    }
-    deepest
-}
 
 // ---------------------------------------------------------------------------
 // Request construction
@@ -809,7 +811,7 @@ async fn read_body(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| match root_cause(&e) {
+        .map_err(|e| match crate::api::root_cause(&e) {
             Some(cause) => format!("Reading the response body from {url} failed: {cause}"),
             None => format!("Reading the response body from {url} failed: {e}"),
         })?

@@ -279,7 +279,7 @@ pub async fn start(
     // Port 0 would be ideal, but the inspector prints its port to stderr rather than reporting
     // it anywhere queryable, so a free one is picked here instead.
     let port = pick_free_port()?;
-    let mut command = tokio::process::Command::new(node_binary);
+    let mut command = crate::proc::command(node_binary);
     command
         .arg(format!("--inspect-brk=127.0.0.1:{port}"))
         .arg(program)

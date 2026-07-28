@@ -7,6 +7,7 @@ use tokio::process::Command;
 
 use crate::db::{models::WorkspaceSkill, queries, Db};
 use crate::paths;
+use crate::proc;
 
 #[derive(Clone, serde::Serialize)]
 struct SkillProgressEvent {
@@ -17,11 +18,11 @@ struct SkillProgressEvent {
 /// fails to launch at all, the same class of issue as calling any other npm-installed shim.
 fn npx_command() -> Command {
     if cfg!(target_os = "windows") {
-        let mut cmd = Command::new("cmd");
+        let mut cmd = proc::command("cmd");
         cmd.args(["/C", "npx"]);
         cmd
     } else {
-        Command::new("npx")
+        proc::command("npx")
     }
 }
 

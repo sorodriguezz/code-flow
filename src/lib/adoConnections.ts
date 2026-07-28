@@ -8,6 +8,13 @@ const KEY = "ado_connections";
 // Where a single org lived before multi-org support — read once for back-compat migration.
 const LEGACY_ORG_KEY = "ado_default_org";
 
+// The legacy probe below reads the OS keychain, and this loader runs on every mount of the pull
+// requests panel — i.e. on every repo you open or switch to. On macOS each keychain read can pop
+// a password prompt, so the probe is memoized: the legacy state can't change during a session
+// without the user saving connections, and saving writes `ado_connections`, which makes the
+// legacy path unreachable from then on anyway.
+let legacyProbe: Promise<AdoConnection[]> | null = null;
+
 export async function loadAdoConnections(): Promise<AdoConnection[]> {
   const raw = await getSetting(KEY);
   if (raw) {
@@ -21,12 +28,15 @@ export async function loadAdoConnections(): Promise<AdoConnection[]> {
   // Back-compat: before multi-org support, a single org lived in `ado_default_org`. Surface it
   // as a one-item list (only if its PAT is still saved) so an existing connection isn't lost
   // after upgrading. Once the user adds/removes anything, `ado_connections` becomes authoritative.
-  const legacyOrg = await getSetting(LEGACY_ORG_KEY);
-  if (legacyOrg) {
-    const pat = await getAdoPat(legacyOrg).catch(() => null);
-    if (pat) return [{ org: legacyOrg }];
-  }
-  return [];
+  legacyProbe ??= (async () => {
+    const legacyOrg = await getSetting(LEGACY_ORG_KEY);
+    if (legacyOrg) {
+      const pat = await getAdoPat(legacyOrg).catch(() => null);
+      if (pat) return [{ org: legacyOrg }];
+    }
+    return [];
+  })();
+  return legacyProbe;
 }
 
 export async function saveAdoConnections(connections: AdoConnection[]): Promise<void> {

@@ -25,7 +25,9 @@ import type {
   RepoStatusInfo,
   ReviewContext,
   SecretHit,
+  ShellProfile,
   StashInfo,
+  TerminalOpened,
   ReviewRunDetail,
   ReviewRunSummary,
   Workspace,
@@ -206,7 +208,12 @@ export const abortMerge = (repoPath: string) => invoke<void>("abort_merge", { re
 
 // ---------- terminal ----------
 
-export const openTerminal = (cwd: string) => invoke<string>("open_terminal", { cwd });
+export const listShellProfiles = () => invoke<ShellProfile[]>("list_shell_profiles");
+
+/** Omit `profileId` to open the configured default profile. The reply names the profile that
+ * actually started, which is what the tab is titled after. */
+export const openTerminal = (cwd: string, profileId?: string) =>
+  invoke<TerminalOpened>("open_terminal", { cwd, profileId });
 
 export const writeTerminal = (id: string, data: string) => invoke<void>("write_terminal", { id, data });
 

@@ -48,26 +48,71 @@ struct GithubConnectionHost {
     host: String,
 }
 
-/// The GitHub hosts we're allowed to auto-detect: `github.com` always, plus every Enterprise
-/// host the user has connected (persisted by Settings as the `github_connections` JSON list).
-/// Without this allowlist an Enterprise remote is indistinguishable from any other self-hosted
-/// git server, so only configured hosts are recognized.
-fn github_known_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
-    let mut hosts = vec![github::GITHUB_COM.to_string()];
+#[derive(Deserialize)]
+struct AdoConnectionOrg {
+    org: String,
+}
+
+/// Which hosts/orgs the user has actually connected in Settings.
+///
+/// These two functions are how auto-linking answers "do we already have a credential for this
+/// remote?" *without* touching the OS credential store. Settings writes the connection list and
+/// the credential in the same operation (and removes them together), so the list is a faithful
+/// stand-in for the credential's existence.
+///
+/// The distinction matters on macOS: an app signed ad-hoc rather than with a stable Developer ID
+/// isn't recognized by the ACL on its own Keychain items, so every read pops a "enter your
+/// password" dialog. [`auto_link_project`] runs on every repo opened or switched to, so reading
+/// the Keychain from here meant one such prompt per repo switch. The credential itself is still
+/// read — later, only when a request to the host is actually made.
+fn github_connected_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
     let raw = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::get_setting(&conn, "github_connections").map_err(|e| e.to_string())?
     };
+    let Some(raw) = raw else { return Ok(Vec::new()) };
+    Ok(serde_json::from_str::<Vec<GithubConnectionHost>>(&raw)
+        .map(|conns| conns.into_iter().map(|c| c.host).collect())
+        .unwrap_or_default())
+}
+
+fn ado_connected_orgs(db: &State<'_, Db>) -> Result<Vec<String>, String> {
+    let (raw, legacy) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        (
+            queries::get_setting(&conn, "ado_connections").map_err(|e| e.to_string())?,
+            queries::get_setting(&conn, "ado_default_org").map_err(|e| e.to_string())?,
+        )
+    };
     if let Some(raw) = raw {
-        if let Ok(conns) = serde_json::from_str::<Vec<GithubConnectionHost>>(&raw) {
-            for c in conns {
-                if !hosts.iter().any(|h| h.eq_ignore_ascii_case(&c.host)) {
-                    hosts.push(c.host);
-                }
-            }
+        if let Ok(conns) = serde_json::from_str::<Vec<AdoConnectionOrg>>(&raw) {
+            return Ok(conns.into_iter().map(|c| c.org).collect());
         }
     }
-    Ok(hosts)
+    // Back-compat with the pre-multi-org setting, mirroring `loadAdoConnections` on the frontend:
+    // before `ado_connections` existed a single org lived in `ado_default_org`.
+    Ok(legacy.into_iter().collect())
+}
+
+/// The GitHub hosts we're allowed to auto-detect: `github.com` always, plus every Enterprise
+/// host the user has connected. Without this allowlist an Enterprise remote is indistinguishable
+/// from any other self-hosted git server, so only configured hosts are recognized. Detection is
+/// deliberately wider than [`github_connected_hosts`]: `github.com` is recognizable whether or not
+/// a token is saved, which is what lets a detected-but-unconnected remote report `NeedsToken`.
+fn github_known_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
+    Ok(detectable_github_hosts(&github_connected_hosts(db)?))
+}
+
+/// The allowlist itself, split out so a caller that already loaded the connected hosts (see
+/// [`auto_link_project`]) doesn't read the same setting twice.
+fn detectable_github_hosts(connected: &[String]) -> Vec<String> {
+    let mut hosts = vec![github::GITHUB_COM.to_string()];
+    for host in connected {
+        if !hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
+            hosts.push(host.clone());
+        }
+    }
+    hosts
 }
 
 /// Builds a `--mcp-config` JSON file for whichever of a workspace's MCP servers are
@@ -144,7 +189,9 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
     }
     ordered.extend(remotes.iter().filter(|r| r.name != "origin"));
 
-    let known_github_hosts = github_known_hosts(&db)?;
+    let connected_github_hosts = github_connected_hosts(&db)?;
+    let connected_ado_orgs = ado_connected_orgs(&db)?;
+    let known_github_hosts = detectable_github_hosts(&connected_github_hosts);
 
     // The repo binds to the first remote we recognize *and* already have a token for — so with
     // both GitHub and Azure DevOps connected, each repo auto-links to the host that's actually
@@ -156,7 +203,7 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
     for remote in &ordered {
         let url = remote.url.as_str();
         if let Some(detected) = github::detect_from_remote_url(url, &known_github_hosts) {
-            if secrets::get_secret(&secrets::github_token_key(&detected.host))?.is_some() {
+            if connected_github_hosts.iter().any(|h| h.eq_ignore_ascii_case(&detected.host)) {
                 let conn = db.0.lock().map_err(|e| e.to_string())?;
                 queries::link_project_github(&conn, &project_id, &detected.owner, &detected.repo, &detected.host)
                     .map_err(|e| e.to_string())?;
@@ -168,7 +215,7 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
                 needs_token = Some(AutoLinkResult::NeedsToken { provider: "github".to_string(), identifier: detected.owner });
             }
         } else if let Some(detected) = ado::detect_from_remote_url(url) {
-            if secrets::get_secret(&secrets::ado_pat_key(&detected.org))?.is_some() {
+            if connected_ado_orgs.iter().any(|o| o.eq_ignore_ascii_case(&detected.org)) {
                 let conn = db.0.lock().map_err(|e| e.to_string())?;
                 queries::link_project_ado(&conn, &project_id, &detected.org, &detected.project, &detected.repo)
                     .map_err(|e| e.to_string())?;

@@ -170,7 +170,7 @@ pub fn emit_line(ctx: &RunCtx, stream: &'static str, line: &str) {
 pub async fn kill_tree(child: &mut tokio::process::Child) {
     #[cfg(target_os = "windows")]
     if let Some(pid) = child.id() {
-        let killed = tokio::process::Command::new("taskkill")
+        let killed = crate::proc::command("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

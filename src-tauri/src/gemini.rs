@@ -78,7 +78,7 @@ impl AiEngine for GeminiEngine {
     }
 
     fn build_command(&self, binary: &str, inv: &AiInvocation) -> Command {
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::proc::command(binary);
 
         // Compose the full prompt: system instructions → the ask → the data payload.
         let mut brief = String::new();

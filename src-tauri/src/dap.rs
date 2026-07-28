@@ -201,7 +201,7 @@ pub async fn start(
 ) -> Result<(), String> {
     stop().await;
 
-    let mut child = tokio::process::Command::new(command)
+    let mut child = crate::proc::command(command)
         .args(args)
         .current_dir(cwd)
         .stdin(std::process::Stdio::piped())

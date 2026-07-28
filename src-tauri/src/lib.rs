@@ -18,11 +18,13 @@ mod openai;
 mod opencode;
 mod paths;
 mod pr_link;
+mod proc;
 mod remote;
 mod review_memory;
 mod search;
 mod secret_scan;
 mod secrets;
+mod shell_profiles;
 mod terminal;
 mod tray;
 mod watcher;
@@ -264,6 +266,7 @@ pub fn run() {
             commands::activity_cmd::list_job_history,
             commands::activity_cmd::rename_job_history_entry,
             commands::activity_cmd::delete_job_history_entry,
+            commands::terminal_cmd::list_shell_profiles,
             commands::terminal_cmd::open_terminal,
             commands::terminal_cmd::write_terminal,
             commands::terminal_cmd::resize_terminal,

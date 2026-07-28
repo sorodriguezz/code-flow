@@ -189,16 +189,29 @@ pub(super) async fn dial(
     options: &NetworkOptions,
 ) -> Result<WsStream, String> {
     let request = upgrade_request(url, headers, subprotocols)?;
+    // Read off the normalized request before the handshake consumes it — `url` is still the raw
+    // string the caller passed, which may not carry an explicit port.
+    let (host, port) = {
+        let uri = request.uri();
+        let default = if uri.scheme_str() == Some("wss") { 443 } else { 80 };
+        (uri.host().unwrap_or("").to_string(), Some(uri.port_u16().unwrap_or(default)))
+    };
     let connector = tls_connector(options.verify_ssl)?;
     let handshake = connect_async_tls_with_config(request, None, false, connector);
 
+    // tungstenite reports a failed connect as a bare "IO error"; the OS's sentence is one level
+    // down, and an unreachable host should read the same way here as it does over HTTP.
+    let describe = |e: &dyn std::error::Error| {
+        crate::api::describe_transport_error(&format!("WebSocket to {url}"), &host, port, e)
+    };
+
     let (stream, _response) = if options.timeout_ms == 0 {
-        handshake.await.map_err(|e| e.to_string())?
+        handshake.await.map_err(|e| describe(&e))?
     } else {
         tokio::time::timeout(Duration::from_millis(options.timeout_ms), handshake)
             .await
             .map_err(|_| format!("Handshake timed out after {}ms", options.timeout_ms))?
-            .map_err(|e| e.to_string())?
+            .map_err(|e| describe(&e))?
     };
     Ok(stream)
 }

@@ -886,7 +886,10 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
         </div>
       ) : (
         <>
-          <div className="flex min-h-0 flex-1 flex-col">
+          {/* `overflow-hidden` so a squeezed request area clips instead of spilling over the
+              response below it — the panels inside are sized by their own content and would
+              otherwise keep painting at full height once this box shrinks past them. */}
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
             <div className="cf-tab-strip flex shrink-0 items-stretch gap-1 overflow-x-auto border-y border-[var(--cf-border)] px-3">
               {PANEL_ORDER.map((id) => {
                 const count = badgeCount(id);
@@ -1011,7 +1014,17 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
             onChange={(height) => setSize("apiResponseHeight", height)}
             onCommit={(height) => commitSize("apiResponseHeight", height)}
           />
-          <div style={{ height: responseHeight }} className="min-h-0 shrink-0">
+          {/* `height` is the size the user dragged the handle to, but it can't be honoured
+              unconditionally: the builder's own height changes underneath it whenever something
+              else claims vertical space (opening the terminal dock is the easy way to see it).
+              Without the cap the response keeps its pixel height, the request area above is
+              squeezed to nothing, and the two end up painted over each other. Reserving room for
+              the request area instead means the response gives way first — and the stored height
+              comes back untouched as soon as there's room for it again. */}
+          <div
+            style={{ height: responseHeight, maxHeight: "calc(100% - 120px)" }}
+            className="min-h-0 shrink-0"
+          >
             <ResponsePanel tabId={tabId} />
           </div>
         </>

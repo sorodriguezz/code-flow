@@ -1,7 +1,8 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
+
+use crate::proc;
 
 /// All clone/fetch/pull/push runs go through the system `git` binary so the user's
 /// existing SSH keys, HTTPS credential manager, and global git config are reused as-is —
@@ -21,7 +22,7 @@ pub struct GitDoneEvent {
 }
 
 async fn run_streamed(app: &AppHandle, op: &str, cwd: Option<&str>, args: &[&str]) -> Result<(), String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = proc::command("git");
     cmd.args(args);
     if let Some(dir) = cwd {
         cmd.current_dir(dir);

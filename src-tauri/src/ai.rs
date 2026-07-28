@@ -682,6 +682,9 @@ async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Resu
     let mut cmd = engine.build_command(&program, &inv);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     apply_path(&mut cmd, &dirs);
+    // The engines build their own `Command`, so the no-console-window flag is applied here —
+    // the one place every engine's command passes through on its way to being spawned.
+    crate::proc::hide_console(&mut cmd);
 
     let mut child = cmd
         .spawn()
@@ -739,7 +742,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Resu
 async fn capture(binary: &str, args: &[String]) -> Result<std::process::Output, String> {
     let dirs = search_dirs();
     let program = resolve_binary(binary, &dirs);
-    let mut cmd = Command::new(&program);
+    let mut cmd = crate::proc::command(&program);
     cmd.args(args);
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     apply_path(&mut cmd, &dirs);

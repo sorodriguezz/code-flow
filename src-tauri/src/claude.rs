@@ -34,7 +34,7 @@ impl AiEngine for ClaudeEngine {
     }
 
     fn build_command(&self, binary: &str, inv: &AiInvocation) -> Command {
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::proc::command(binary);
         cmd.arg("-p").arg(inv.prompt);
         if let Some(sp) = inv.system_prompt {
             cmd.arg("--append-system-prompt").arg(sp);

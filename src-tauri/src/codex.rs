@@ -80,7 +80,7 @@ impl AiEngine for CodexEngine {
     }
 
     fn build_command(&self, binary: &str, inv: &AiInvocation) -> Command {
-        let mut cmd = Command::new(binary);
+        let mut cmd = crate::proc::command(binary);
         cmd.arg("exec");
         // Multi-turn chat: continue *this conversation's* rollout. `resume <id>` is a subcommand of
         // `exec`, so it goes between `exec` and the prompt, before the flags.
