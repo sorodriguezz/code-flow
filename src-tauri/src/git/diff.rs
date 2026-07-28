@@ -264,6 +264,74 @@ pub fn discard_file_changes(path: &str, file_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Discards everything the "Changes" section lists: tracked files go back to what the index holds,
+/// untracked files are deleted from disk. Staged content is deliberately left alone — this clears
+/// exactly what that section shows, so a file staged *and* edited afterwards keeps its staged part.
+/// Conflicted paths are skipped too: resolving a merge is the conflict banner's job, not this one.
+pub fn discard_all_changes(path: &str) -> Result<(), String> {
+    let repo = open(path)?;
+    let workdir = repo
+        .workdir()
+        .ok_or_else(|| "bare repository".to_string())?
+        .to_path_buf();
+
+    let mut opts = git2::StatusOptions::new();
+    opts.include_untracked(true).recurse_untracked_dirs(true);
+    let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.message().to_string())?;
+
+    let mut tracked: Vec<String> = vec![];
+    let mut untracked: Vec<String> = vec![];
+    for entry in statuses.iter() {
+        let Some(file_path) = entry.path() else { continue };
+        let status = entry.status();
+        if status.is_conflicted() {
+            continue;
+        }
+        if status.is_wt_new() {
+            untracked.push(file_path.to_string());
+        } else if status.is_wt_modified()
+            || status.is_wt_deleted()
+            || status.is_wt_renamed()
+            || status.is_wt_typechange()
+        {
+            tracked.push(file_path.to_string());
+        }
+    }
+
+    if !tracked.is_empty() {
+        let mut index = repo.index().map_err(|e| e.message().to_string())?;
+        let mut cb = git2::build::CheckoutBuilder::new();
+        cb.force();
+        for file_path in &tracked {
+            cb.path(file_path);
+        }
+        repo.checkout_index(Some(&mut index), Some(&mut cb))
+            .map_err(|e| e.message().to_string())?;
+    }
+
+    for file_path in &untracked {
+        let full = workdir.join(file_path);
+        match std::fs::remove_file(&full) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{file_path}: {e}")),
+        }
+        // The directory a deleted untracked file lived in is often untracked itself (git records no
+        // empty directories), so leaving it behind would show up as a stray empty folder in the
+        // file tree. `remove_dir` only ever succeeds on an already-empty directory, so walking up
+        // until it fails can't take anything with it.
+        let mut parent = full.parent().map(|p| p.to_path_buf());
+        while let Some(dir) = parent {
+            if dir == workdir || std::fs::remove_dir(&dir).is_err() {
+                break;
+            }
+            parent = dir.parent().map(|p| p.to_path_buf());
+        }
+    }
+
+    Ok(())
+}
+
 pub fn commit(
     path: &str,
     message: &str,
@@ -290,4 +358,71 @@ pub fn commit(
         .map_err(|e| e.message().to_string())?;
 
     Ok(oid.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use git2::Repository;
+    use std::fs;
+
+    /// A repo with one committed file, in a throwaway directory.
+    fn fixture() -> (std::path::PathBuf, Repository) {
+        let dir = std::env::temp_dir().join(format!("cf-diff-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let repo = Repository::init(&dir).unwrap();
+        fs::write(dir.join("tracked.txt"), "original\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("tracked.txt")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = Signature::now("Test", "test@example.com").unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
+        }
+        (dir, repo)
+    }
+
+    #[test]
+    fn discard_all_reverts_tracked_edits_and_removes_untracked_files() {
+        let (dir, _repo) = fixture();
+        let path = dir.to_str().unwrap();
+
+        fs::write(dir.join("tracked.txt"), "edited\n").unwrap();
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("nested/new.txt"), "brand new\n").unwrap();
+
+        discard_all_changes(path).unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap(), "original\n");
+        assert!(!dir.join("nested/new.txt").exists());
+        assert!(!dir.join("nested").exists(), "the emptied untracked directory should go too");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn discard_all_keeps_staged_content() {
+        let (dir, repo) = fixture();
+        let path = dir.to_str().unwrap();
+
+        // Staged edit, then a further unstaged edit on top of it: discarding must roll back only
+        // the second one, leaving the index exactly as the user staged it.
+        fs::write(dir.join("tracked.txt"), "staged version\n").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("tracked.txt")).unwrap();
+            index.write().unwrap();
+        }
+        fs::write(dir.join("tracked.txt"), "unstaged version\n").unwrap();
+
+        discard_all_changes(path).unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap(), "staged version\n");
+        let status = repo.status_file(Path::new("tracked.txt")).unwrap();
+        assert!(status.is_index_modified(), "the staged change must survive");
+        assert!(!status.is_wt_modified(), "nothing unstaged should be left");
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

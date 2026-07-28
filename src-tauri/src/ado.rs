@@ -180,8 +180,17 @@ struct RawIdentity {
 }
 
 #[derive(Deserialize)]
+struct RawProjectRef {
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct RawRepoRef {
     name: String,
+    /// Azure includes the owning team project on the repository it returns with a pull request.
+    /// That's the only way to recover the project's *name* from a link that carries its GUID.
+    #[serde(default)]
+    project: Option<RawProjectRef>,
 }
 
 #[derive(Deserialize)]
@@ -233,39 +242,87 @@ pub async fn list_repos(org: &str, project: &str, pat: &str) -> Result<Vec<AdoRe
     Ok(parsed.value)
 }
 
+/// Maps one raw Azure DevOps pull request onto the shared, provider-neutral summary the
+/// frontend consumes. `org_enc` / `project_enc` are the already-percent-encoded path segments,
+/// since they go straight into the PR's browser URL.
+fn map_pull_request(org_enc: &str, project_enc: &str, pr: RawPullRequest) -> PullRequestSummary {
+    PullRequestSummary {
+        id: pr.pull_request_id,
+        title: pr.title,
+        description: pr.description,
+        status: bucket_status(&pr.status, pr.is_draft),
+        source_branch: strip_ref(&pr.source_ref_name),
+        target_branch: strip_ref(&pr.target_ref_name),
+        author: pr.created_by.display_name,
+        created_at: pr.creation_date,
+        url: format!(
+            "https://dev.azure.com/{org_enc}/{project_enc}/_git/{}/pullrequest/{}",
+            encode_segment(&pr.repository.name),
+            pr.pull_request_id
+        ),
+        provider: "azure".to_string(),
+    }
+}
+
 pub async fn list_pull_requests(
     org: &str,
     project: &str,
     repo_id: &str,
     pat: &str,
 ) -> Result<Vec<PullRequestSummary>, String> {
-    let org = encode_segment(&normalize_org(org));
+    let org_enc = encode_segment(&normalize_org(org));
     let project_enc = encode_segment(project);
     let url = format!(
-        "https://dev.azure.com/{org}/{project_enc}/_apis/git/repositories/{repo_id}/pullrequests\
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{repo_id}/pullrequests\
          ?searchCriteria.status=all&api-version={API_VERSION}"
     );
     let parsed: ListResponse<RawPullRequest> = get_json(&url, pat).await?;
     Ok(parsed
         .value
         .into_iter()
-        .map(|pr| PullRequestSummary {
-            id: pr.pull_request_id,
-            title: pr.title,
-            description: pr.description,
-            status: bucket_status(&pr.status, pr.is_draft),
-            source_branch: strip_ref(&pr.source_ref_name),
-            target_branch: strip_ref(&pr.target_ref_name),
-            author: pr.created_by.display_name,
-            created_at: pr.creation_date,
-            url: format!(
-                "https://dev.azure.com/{org}/{project_enc}/_git/{}/pullrequest/{}",
-                encode_segment(&pr.repository.name),
-                pr.pull_request_id
-            ),
-            provider: "azure".to_string(),
-        })
+        .map(|pr| map_pull_request(&org_enc, &project_enc, pr))
         .collect())
+}
+
+/// A single pull request plus the **names** Azure reports for the project and repository that own
+/// it. A pasted link doesn't necessarily carry those: Azure's own notification e-mails link with
+/// GUIDs (`/{org}/{projectGuid}/_git/{repoGuid}/pullrequest/{id}`), and matching a link against a
+/// local clone's git remote — which only ever spells out names — needs the names.
+pub struct AdoPullRequest {
+    pub summary: PullRequestSummary,
+    pub project_name: String,
+    pub repo_name: String,
+}
+
+/// Fetches a single pull request by id. Unlike [`list_pull_requests`] this reaches a PR no
+/// matter how far down the list it is, which is what a pasted link needs. `project` and `repo_id`
+/// may each be a name or a GUID — Azure's Git REST API accepts either.
+pub async fn get_pull_request(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    pat: &str,
+) -> Result<AdoPullRequest, String> {
+    let org_enc = encode_segment(&normalize_org(org));
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{}/_apis/git/repositories/{}/pullRequests/{pr_id}\
+         ?api-version={API_VERSION}",
+        encode_segment(project),
+        encode_segment(repo_id)
+    );
+    let raw: RawPullRequest = get_json(&url, pat).await?;
+    let repo_name = raw.repository.name.clone();
+    let project_name = raw
+        .repository
+        .project
+        .as_ref()
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| project.to_string());
+    // The browser URL is built from the canonical name, so a PR reached through a GUID link
+    // still gets a readable "view on Azure DevOps" address.
+    let summary = map_pull_request(&org_enc, &encode_segment(&project_name), raw);
+    Ok(AdoPullRequest { summary, project_name, repo_name })
 }
 
 /// Opens a pull request via `POST .../pullrequests`. Azure DevOps requires the branch names with
@@ -310,22 +367,7 @@ pub async fn create_pull_request(
     }
     let pr: RawPullRequest =
         res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
-    Ok(PullRequestSummary {
-        id: pr.pull_request_id,
-        title: pr.title,
-        description: pr.description,
-        status: bucket_status(&pr.status, pr.is_draft),
-        source_branch: strip_ref(&pr.source_ref_name),
-        target_branch: strip_ref(&pr.target_ref_name),
-        author: pr.created_by.display_name,
-        created_at: pr.creation_date,
-        url: format!(
-            "https://dev.azure.com/{org_enc}/{project_enc}/_git/{}/pullrequest/{}",
-            encode_segment(&pr.repository.name),
-            pr.pull_request_id
-        ),
-        provider: "azure".to_string(),
-    })
+    Ok(map_pull_request(&org_enc, &project_enc, pr))
 }
 
 #[derive(Deserialize)]

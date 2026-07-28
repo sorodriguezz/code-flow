@@ -40,7 +40,7 @@ import {
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
-import { usePrStore, type ReviewLevel } from "../../state/prStore";
+import { usePrStore } from "../../state/prStore";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
@@ -59,6 +59,7 @@ import { CheckpointsModal } from "./CheckpointsModal";
 import { AnalyzeSection } from "./AnalyzeSection";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { ChatAgentPicker } from "./ChatAgentPicker";
+import { ReviewLevelSelector } from "./ReviewLevelSelector";
 import { AiErrorBanner } from "./AiErrorBanner";
 import type { PullRequestSummary, PrCommentThread } from "../../types/domain";
 
@@ -589,42 +590,6 @@ function PrActionButton({
           row falls back to icons — the tooltip still names the action. */}
       <span className="truncate @max-[300px]:hidden">{label}</span>
     </button>
-  );
-}
-
-/** Compact segmented control for the review depth (básico / completo / ultra). Shares the choice
- * through `prStore` so the title-bar review shortcut launches at the same level. */
-function ReviewLevelSelector({
-  value,
-  onChange,
-  disabled,
-}: {
-  value: ReviewLevel;
-  onChange: (level: ReviewLevel) => void;
-  disabled: boolean;
-}) {
-  const t = useT();
-  const levels: ReviewLevel[] = ["basico", "completo", "ultra"];
-  return (
-    <div
-      className="flex items-center rounded-md border border-[var(--cf-border)] p-0.5"
-      title={t("pr.levelHint")}
-    >
-      {levels.map((level) => (
-        <button
-          key={level}
-          onClick={() => onChange(level)}
-          disabled={disabled}
-          className={`rounded px-2 py-1 text-[11px] font-medium capitalize transition-colors disabled:opacity-50 ${
-            value === level
-              ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-              : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          }`}
-        >
-          {t(`pr.level.${level}` as never)}
-        </button>
-      ))}
-    </div>
   );
 }
 

@@ -350,3 +350,26 @@ export type AutoLinkResult =
   | { status: "Linked"; project: Project }
   | { status: "NeedsToken"; provider: VcsProvider; identifier: string }
   | { status: "NotDetected" };
+
+/** What a pasted pull-request link turned out to be. `Ready` is the happy path: the PR was read
+ * from its host *and* matched to a local repository (linked on the spot if it wasn't already), so
+ * everything downstream — diff, findings, comments, review memory — works exactly as it does for
+ * a PR picked from the sidebar. */
+export type PrLinkResolution =
+  | {
+      status: "Ready";
+      project_id: string;
+      workspace_id: string;
+      project_name: string;
+      pr: PullRequestSummary;
+    }
+  | { status: "NeedsToken"; provider: VcsProvider; identifier: string }
+  | {
+      status: "NoLocalRepo";
+      provider: VcsProvider;
+      repo_label: string;
+      /** Clone URL for the "clone it and review" offer. */
+      clone_url: string;
+      pr: PullRequestSummary;
+    }
+  | { status: "Unrecognized" };

@@ -90,7 +90,12 @@ export const usePrStore = create<PrState>((set, get) => ({
   setReviewLevel: (level) => set({ reviewLevel: level }),
 
   reviewPr: (projectId, prId, level) => {
-    const pr = get().prsByProject[projectId]?.find((p) => p.id === prId);
+    // The current selection is a valid source for the label too: a review launched straight from
+    // a pasted link starts before that project's PR list has finished loading.
+    const selected = get().selectedPr;
+    const pr =
+      get().prsByProject[projectId]?.find((p) => p.id === prId) ??
+      (selected?.id === prId ? selected : undefined);
     const activeLevel = level ?? get().reviewLevel;
     // The workspace's active SDD/Harness agent (if any) reviews as that role.
     const agent = useChatStore.getState().agentByProject[projectId] ?? null;

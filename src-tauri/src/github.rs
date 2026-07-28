@@ -258,6 +258,20 @@ pub async fn list_pull_requests(host: &str, owner: &str, repo: &str, token: &str
     Ok(raw.into_iter().map(map_pull).collect())
 }
 
+/// Fetches a single pull request by number. Unlike [`list_pull_requests`] this reaches a PR
+/// regardless of how old it is (the list is paginated), which is what a pasted link needs.
+pub async fn get_pull_request(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<PullRequestSummary, String> {
+    let url = format!("{}/repos/{owner}/{repo}/pulls/{number}", api_root(host));
+    let raw: RawPull = get_json(&url, token).await?;
+    Ok(map_pull(raw))
+}
+
 /// Opens a pull request via `POST /repos/{owner}/{repo}/pulls`. `head`/`base` are branch names
 /// (`head` is the source/compare branch, `base` the target) — the branch must already exist on
 /// the remote. Returns the created PR mapped to the shared summary shape.

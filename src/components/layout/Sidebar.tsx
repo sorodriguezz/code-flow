@@ -17,6 +17,7 @@ import {
   GitMerge,
   GitPullRequest,
   Globe,
+  Link2,
   RefreshCw,
   Loader2,
   Lock,
@@ -1073,6 +1074,7 @@ export function Sidebar() {
   const sidebarWidth = useLayoutStore((s) => s.sizes.sidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
+  const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
   const t = useT();
   const [showCloneModal, setShowCloneModal] = useState(false);
 
@@ -1121,6 +1123,16 @@ export function Sidebar() {
               {t("sidebar.projects")}
             </span>
             <div className="flex items-center gap-0.5">
+              {/* Deliberately here, above the project list, rather than inside one project's
+                  Pull Requests section: the whole point is that the link decides which repo
+                  it belongs to. */}
+              <button
+                onClick={openPrLinkModal}
+                className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                title={t("prLink.menuItem")}
+              >
+                <Link2 size={13} />
+              </button>
               <button
                 onClick={() => setShowCloneModal(true)}
                 className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"

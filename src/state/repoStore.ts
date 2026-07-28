@@ -63,6 +63,7 @@ interface RepoState {
   stageAll: () => Promise<void>;
   unstageAll: () => Promise<void>;
   discardFile: (filePath: string) => Promise<void>;
+  discardAll: () => Promise<void>;
   commitChanges: (message: string) => Promise<void>;
 
   checkoutBranch: (name: string) => Promise<void>;
@@ -363,6 +364,15 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     if (!repoPath) return;
     await guarded(set, async () => {
       await api.discardFileChanges(repoPath, filePath);
+      await get().refreshStatus();
+    });
+  },
+
+  discardAll: async () => {
+    const { repoPath } = get();
+    if (!repoPath) return;
+    await guarded(set, async () => {
+      await api.discardAllChanges(repoPath);
       await get().refreshStatus();
     });
   },

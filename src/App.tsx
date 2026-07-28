@@ -16,6 +16,7 @@ import { SettingsView } from "./components/settings/SettingsView";
 import { CommandPalette } from "./components/layout/CommandPalette";
 import { ShortcutsModal } from "./components/layout/ShortcutsModal";
 import { BranchSwitcherModal } from "./components/layout/BranchSwitcherModal";
+import { OpenPrLinkModal } from "./components/layout/OpenPrLinkModal";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
 import { ConfirmModal } from "./components/common/ConfirmModal";
@@ -117,6 +118,8 @@ export default function App() {
   const closeShortcutsModal = useUiStore((s) => s.closeShortcutsModal);
   const branchSwitcherOpen = useUiStore((s) => s.branchSwitcherOpen);
   const closeBranchSwitcher = useUiStore((s) => s.closeBranchSwitcher);
+  const prLinkModalOpen = useUiStore((s) => s.prLinkModalOpen);
+  const closePrLinkModal = useUiStore((s) => s.closePrLinkModal);
 
   useGlobalShortcuts();
 
@@ -238,11 +241,12 @@ export default function App() {
       </div>
       <StatusBar />
       <SettingsView />
-      {/* All three are reachable from the keyboard anywhere in the app, so they're mounted at the
+      {/* All four are reachable from the keyboard anywhere in the app, so they're mounted at the
           root rather than inside whichever panel happens to have a button for them. */}
       {commandPaletteOpen && <CommandPalette scope={commandPaletteScope} onClose={closeCommandPalette} />}
       {shortcutsModalOpen && <ShortcutsModal onClose={closeShortcutsModal} />}
       {branchSwitcherOpen && <BranchSwitcherModal onClose={closeBranchSwitcher} />}
+      {prLinkModalOpen && <OpenPrLinkModal onClose={closePrLinkModal} />}
       <ToastContainer />
       <ConfirmModal />
     </div>

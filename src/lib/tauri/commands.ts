@@ -16,6 +16,7 @@ import type {
   NewProject,
   PrCommentThread,
   PrDescriptionDraft,
+  PrLinkResolution,
   Project,
   PullRequestSummary,
   RemoteInfo,
@@ -142,6 +143,9 @@ export const unstageAll = (repoPath: string) => invoke<void>("unstage_all", { re
 
 export const discardFileChanges = (repoPath: string, filePath: string) =>
   invoke<void>("discard_file_changes", { repoPath, filePath });
+
+/** Reverts every unstaged change and deletes every untracked file. Staged content survives. */
+export const discardAllChanges = (repoPath: string) => invoke<void>("discard_all_changes", { repoPath });
 
 export const commitChanges = (
   repoPath: string,
@@ -539,6 +543,11 @@ export const openRepoInBrowser = (projectId: string) =>
 
 export const listPullRequests = (projectId: string) =>
   invoke<PullRequestSummary[]>("list_pull_requests", { projectId });
+
+/** Resolves a pasted pull-request URL (GitHub, GitHub Enterprise or Azure DevOps) into the PR
+ * plus the local repository it belongs to — linking that repository to its host when it wasn't
+ * already, so the review runs with the project's full context. */
+export const resolvePrLink = (url: string) => invoke<PrLinkResolution>("resolve_pr_link", { url });
 
 export const listPrCommentThreads = (projectId: string, prId: number) =>
   invoke<PrCommentThread[]>("list_pr_comment_threads", { projectId, prId });

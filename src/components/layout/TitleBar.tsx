@@ -3,6 +3,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ChevronLeft,
   ChevronRight,
+  Link2,
   MessageCircle,
   Minus,
   Search,
@@ -63,12 +64,18 @@ function WindowsControls() {
 function AiActionsMenu({ onClose }: { onClose: () => void }) {
   const t = useT();
   const openAiPanel = useUiStore((s) => s.openAiPanel);
+  const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
   const project = useWorkspaceStore((s) => s.activeProject());
   const selectedPr = usePrStore((s) => s.selectedPr);
   const reviewPr = usePrStore((s) => s.reviewPr);
 
   const openChat = () => {
     openAiPanel();
+    onClose();
+  };
+
+  const reviewFromLink = () => {
+    openPrLinkModal();
     onClose();
   };
 
@@ -99,6 +106,15 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
           <span className="min-w-0 flex-1 truncate">
             {selectedPr ? t("titlebar.reviewCurrentPr", { title: selectedPr.title }) : t("titlebar.noPrSelected")}
           </span>
+        </button>
+        {/* Works with no project open and no PR selected — that's the point: the link is the
+            only input needed. */}
+        <button
+          onClick={reviewFromLink}
+          className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        >
+          <Link2 size={13} />
+          {t("prLink.menuItem")}
         </button>
       </div>
     </>

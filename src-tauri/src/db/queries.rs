@@ -328,6 +328,16 @@ pub fn list_projects(conn: &Connection, workspace_id: &str) -> rusqlite::Result<
     rows.collect()
 }
 
+/// Every project in the app, across all workspaces — used to answer "which repo does this
+/// pull-request link belong to?", a question that isn't scoped to whatever workspace happens
+/// to be open.
+pub fn list_all_projects(conn: &Connection) -> rusqlite::Result<Vec<Project>> {
+    let sql = format!("SELECT {PROJECT_COLUMNS} FROM projects ORDER BY sort_order, created_at");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], map_project)?;
+    rows.collect()
+}
+
 pub fn get_project(conn: &Connection, id: &str) -> rusqlite::Result<Option<Project>> {
     let sql = format!("SELECT {PROJECT_COLUMNS} FROM projects WHERE id = ?1");
     conn.query_row(&sql, params![id], map_project).optional()

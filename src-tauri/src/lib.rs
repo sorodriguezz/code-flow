@@ -17,6 +17,7 @@ mod ollama;
 mod openai;
 mod opencode;
 mod paths;
+mod pr_link;
 mod remote;
 mod review_memory;
 mod search;
@@ -144,6 +145,7 @@ pub fn run() {
             commands::git_ops::unstage_file,
             commands::git_ops::unstage_all,
             commands::git_ops::discard_file_changes,
+            commands::git_ops::discard_all_changes,
             commands::git_ops::commit,
             commands::secret_scan_cmd::scan_staged_secrets,
             commands::git_ops::list_remotes,
@@ -226,6 +228,7 @@ pub fn run() {
             commands::ado_cmd::unlink_project,
             commands::ado_cmd::open_repo_in_browser,
             commands::ado_cmd::list_pull_requests,
+            commands::ado_cmd::resolve_pr_link,
             commands::ado_cmd::generate_pr_description,
             commands::ado_cmd::create_pull_request,
             commands::ado_cmd::list_pr_comment_threads,

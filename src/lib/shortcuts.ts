@@ -31,7 +31,8 @@ export type ShortcutId =
   | "branch.switcher"
   | "git.fetch"
   | "git.pull"
-  | "git.push";
+  | "git.push"
+  | "pr.fromLink";
 
 export interface ShortcutCommand {
   id: ShortcutId;
@@ -260,6 +261,13 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "statusbar.push",
     defaultChord: "Mod+Shift+U",
     run: pushNow,
+  },
+  {
+    id: "pr.fromLink",
+    group: "git",
+    labelKey: "prLink.menuItem",
+    defaultChord: "Mod+Shift+L",
+    run: () => useUiStore.getState().togglePrLinkModal(),
   },
 ];
 

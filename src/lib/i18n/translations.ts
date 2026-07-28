@@ -101,6 +101,25 @@ export const translations = {
     "clone.cloning": "Cloning…",
     "clone.clone": "Clone",
 
+    "prLink.title": "Review a pull request from its link",
+    "prLink.menuItem": "Review a PR from its link",
+    "prLink.subtitle":
+      "Paste the link a teammate sent you — CodeFlow works out which of your repositories it belongs to.",
+    "prLink.placeholder": "https://github.com/owner/repo/pull/42",
+    "prLink.find": "Find",
+    "prLink.searching": "Searching…",
+    "prLink.foundIn": "Matched to {project}",
+    "prLink.open": "Just open it",
+    "prLink.review": "Review now",
+    "prLink.unrecognized":
+      "That isn't a pull-request link CodeFlow can read. GitHub, GitHub Enterprise and Azure DevOps links work — an Enterprise host has to be connected in Settings first.",
+    "prLink.needsToken":
+      "No token saved for \"{identifier}\", so this pull request can't be read yet. Connect it in",
+    "prLink.noLocalRepo":
+      "{repo} isn't in CodeFlow yet. A review reads the diff from the local clone, so clone it to review this pull request.",
+    "prLink.cloneAndReview": "Clone and review",
+    "prLink.noWorkspace": "Open a workspace first — the clone is added to it as a project.",
+
     "branchModal.search": "Search branches…",
     "branchModal.local": "Local",
     "branchModal.remote": "Remote",
@@ -1009,6 +1028,9 @@ export const translations = {
     "changes.commit": "Commit",
     "changes.discardChanges": "Discard changes",
     "changes.discardConfirm": 'Discard changes to "{path}"? This can\'t be undone.',
+    "changes.discardAll": "Discard all",
+    "changes.discardAllConfirm":
+      "Discard all {n} unstaged change(s)? Modified files go back to their last staged state and new files are deleted. Staged changes are kept. This can't be undone.",
     "changes.openInEditor": "Open in editor",
     "changes.selectFile": "Select a file",
     "changes.selectFileHint": "Pick a file on the left to see its diff.",
@@ -1461,6 +1483,25 @@ export const translations = {
     "clone.folderName": "Nombre de la carpeta",
     "clone.cloning": "Clonando…",
     "clone.clone": "Clonar",
+
+    "prLink.title": "Revisar un pull request desde su enlace",
+    "prLink.menuItem": "Revisar un PR desde su enlace",
+    "prLink.subtitle":
+      "Pega el enlace que te pasaron — CodeFlow deduce a cuál de tus repositorios pertenece.",
+    "prLink.placeholder": "https://github.com/owner/repo/pull/42",
+    "prLink.find": "Buscar",
+    "prLink.searching": "Buscando…",
+    "prLink.foundIn": "Corresponde a {project}",
+    "prLink.open": "Solo abrirlo",
+    "prLink.review": "Revisar ahora",
+    "prLink.unrecognized":
+      "Ese no es un enlace de pull request que CodeFlow pueda leer. Sirven los de GitHub, GitHub Enterprise y Azure DevOps — un host Enterprise hay que conectarlo antes en Ajustes.",
+    "prLink.needsToken":
+      "No hay token guardado para \"{identifier}\", así que todavía no se puede leer este pull request. Conéctalo en",
+    "prLink.noLocalRepo":
+      "{repo} todavía no está en CodeFlow. La revisión lee el diff del clon local, así que clónalo para poder revisar este pull request.",
+    "prLink.cloneAndReview": "Clonar y revisar",
+    "prLink.noWorkspace": "Abre primero un workspace — el clon se agrega ahí como proyecto.",
 
     "branchModal.search": "Buscar ramas…",
     "branchModal.local": "Local",
@@ -2371,6 +2412,9 @@ export const translations = {
     "changes.commit": "Commit",
     "changes.discardChanges": "Descartar cambios",
     "changes.discardConfirm": '¿Descartar los cambios en "{path}"? Esto no se puede deshacer.',
+    "changes.discardAll": "Descartar todo",
+    "changes.discardAllConfirm":
+      "¿Descartar los {n} cambio(s) sin stage? Los archivos modificados vuelven a su último estado en stage y los archivos nuevos se eliminan. Lo que está en stage se conserva. Esto no se puede deshacer.",
     "changes.openInEditor": "Abrir en el editor",
     "changes.selectFile": "Selecciona un archivo",
     "changes.selectFileHint": "Elige un archivo a la izquierda para ver su diff.",

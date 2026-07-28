@@ -119,6 +119,11 @@ pub fn discard_file_changes(repo_path: String, file_path: String) -> Result<(), 
 }
 
 #[tauri::command]
+pub fn discard_all_changes(repo_path: String) -> Result<(), String> {
+    diff::discard_all_changes(&repo_path)
+}
+
+#[tauri::command]
 pub fn commit(
     repo_path: String,
     message: String,

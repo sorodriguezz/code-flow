@@ -5,6 +5,7 @@ import { onGitProgress } from "../../lib/tauri/events";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import type { Project } from "../../types/domain";
 
 function deriveName(url: string): string {
   const trimmed = url.trim().replace(/\/+$/, "");
@@ -12,11 +13,25 @@ function deriveName(url: string): string {
   return last.replace(/\.git$/i, "") || "repo";
 }
 
-export function CloneRepoModal({ workspaceId, onClose }: { workspaceId: string; onClose: () => void }) {
+export function CloneRepoModal({
+  workspaceId,
+  initialUrl,
+  onClose,
+  onCloned,
+}: {
+  workspaceId: string;
+  /** Prefills the URL field — used when the clone was offered for a specific repository (the
+   * "this pull request's repo isn't in CodeFlow yet" path). */
+  initialUrl?: string;
+  onClose: () => void;
+  /** Fires with the freshly-added project, before `onClose`, so the caller can continue whatever
+   * it needed the repository for. */
+  onCloned?: (project: Project) => void;
+}) {
   const addProject = useWorkspaceStore((s) => s.addProject);
   const t = useT();
   const [baseDir, setBaseDir] = useState("");
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(initialUrl ?? "");
   const [name, setName] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
   const [cloning, setCloning] = useState(false);
@@ -44,7 +59,7 @@ export function CloneRepoModal({ workspaceId, onClose }: { workspaceId: string; 
     });
     try {
       await gitClone(url.trim(), dest);
-      await addProject({
+      const project = await addProject({
         workspace_id: workspaceId,
         name: effectiveName,
         local_path: dest,
@@ -58,6 +73,7 @@ export function CloneRepoModal({ workspaceId, onClose }: { workspaceId: string; 
         github_repo: null,
         github_host: null,
       });
+      onCloned?.(project);
       onClose();
     } catch (e) {
       pushErrorToast(String(e));

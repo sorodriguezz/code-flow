@@ -50,6 +50,10 @@ interface UiState {
   /** Branch picking has its own modal (it checks out, rather than just navigating), so it gets
    * its own flag instead of a palette scope. */
   branchSwitcherOpen: boolean;
+  /** "Review a PR from its link" — reachable from the title bar, the command palette, the
+   * sidebar and a shortcut, none of which own the modal, so it lives here and is rendered once
+   * at the app root. */
+  prLinkModalOpen: boolean;
   toggleSidebar: () => void;
   setActiveView: (view: MainView) => void;
   openSettings: (section: SettingsSectionId, hostingProvider?: VcsProvider) => void;
@@ -68,6 +72,9 @@ interface UiState {
   closeShortcutsModal: () => void;
   toggleBranchSwitcher: () => void;
   closeBranchSwitcher: () => void;
+  openPrLinkModal: () => void;
+  togglePrLinkModal: () => void;
+  closePrLinkModal: () => void;
 }
 
 export const useUiStore = create<UiState>((set) => ({
@@ -83,6 +90,7 @@ export const useUiStore = create<UiState>((set) => ({
   commandPaletteScope: "all",
   shortcutsModalOpen: false,
   branchSwitcherOpen: false,
+  prLinkModalOpen: false,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setActiveView: (view) => set({ activeView: view, settingsOpen: false }),
   openSettings: (section, hostingProvider) =>
@@ -114,4 +122,7 @@ export const useUiStore = create<UiState>((set) => ({
   closeShortcutsModal: () => set({ shortcutsModalOpen: false }),
   toggleBranchSwitcher: () => set((s) => ({ branchSwitcherOpen: !s.branchSwitcherOpen })),
   closeBranchSwitcher: () => set({ branchSwitcherOpen: false }),
+  openPrLinkModal: () => set({ prLinkModalOpen: true }),
+  togglePrLinkModal: () => set((s) => ({ prLinkModalOpen: !s.prLinkModalOpen })),
+  closePrLinkModal: () => set({ prLinkModalOpen: false }),
 }));

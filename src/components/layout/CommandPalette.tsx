@@ -8,6 +8,7 @@ import {
   FolderPlus,
   GitBranch,
   History,
+  Link2,
   MessageCircle,
   Plus,
   TerminalSquare,
@@ -22,7 +23,7 @@ import { useApiModalStore } from "../../state/apiModalStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
-type PaletteGroup = "workspaces" | "projects" | "branches" | "views" | "api" | "settings";
+type PaletteGroup = "workspaces" | "projects" | "branches" | "views" | "actions" | "api" | "settings";
 
 interface PaletteItem {
   key: string;
@@ -35,7 +36,7 @@ interface PaletteItem {
 /** A scoped opening (from the "switch repository" / "switch workspace" / "switch branch"
  * shortcuts) narrows the palette to one group, so it acts as a dedicated picker. */
 const SCOPE_GROUPS: Record<PaletteScope, PaletteGroup[]> = {
-  all: ["workspaces", "projects", "branches", "views", "api", "settings"],
+  all: ["workspaces", "projects", "branches", "views", "actions", "api", "settings"],
   workspaces: ["workspaces"],
   projects: ["projects"],
 };
@@ -67,6 +68,7 @@ const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {
   projects: "sidebar.projects",
   branches: "sidebar.localBranches",
   views: "titlebar.goTo",
+  actions: "titlebar.aiActions",
   api: "api.title",
   settings: "statusbar.settings",
 };
@@ -91,6 +93,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   const setActiveView = useUiStore((s) => s.setActiveView);
   const openSettings = useUiStore((s) => s.openSettings);
   const openApiModal = useApiModalStore((s) => s.openApiModal);
+  const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
   const toggleAiPanel = useUiStore((s) => s.toggleAiPanel);
   const toggleTerminalPanel = useTerminalStore((s) => s.togglePanel);
 
@@ -143,6 +146,17 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       },
     ];
 
+    // Reviewing a PR from its link needs nothing but the link — no project open, no repo picked.
+    const actionItems: PaletteItem[] = [
+      {
+        key: "action:pr-from-link",
+        icon: Link2,
+        label: t("prLink.menuItem"),
+        group: "actions",
+        onSelect: () => openPrLinkModal(),
+      },
+    ];
+
     // The API client is app-global, so these work with no project open — but each one has to
     // switch to the view as well, because `ApiView` is what mounts the tab strip and the modals.
     const openApi = (then?: () => void) => {
@@ -188,6 +202,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
       ...projectItems,
       ...branchItems,
       ...viewItems,
+      ...actionItems,
       ...apiItems,
       ...settingsItems,
     ];
@@ -203,6 +218,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     setActiveView,
     openSettings,
     openApiModal,
+    openPrLinkModal,
     toggleAiPanel,
     toggleTerminalPanel,
   ]);

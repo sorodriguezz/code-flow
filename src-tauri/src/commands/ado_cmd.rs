@@ -305,6 +305,201 @@ pub async fn list_pull_requests(
     }
 }
 
+/// What a pasted pull-request link turned out to be. The point of the whole flow is that a link
+/// from a chat message is enough: the user never has to know which of their repos it belongs to,
+/// nor find it in the sidebar first.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status")]
+pub enum PrLinkResolution {
+    /// The link resolved to a PR *and* to a local repository, which is now linked to that host —
+    /// so selecting this PR gives the full review pipeline (local diff, findings, comments,
+    /// review memory), identical to picking it in the sidebar.
+    Ready {
+        project_id: String,
+        workspace_id: String,
+        project_name: String,
+        pr: ado::PullRequestSummary,
+    },
+    /// The host is recognized but nothing is saved to authenticate with it — `identifier` is the
+    /// GitHub host or the Azure DevOps organization the token is missing for.
+    NeedsToken { provider: String, identifier: String },
+    /// The PR was read fine, but no repository in CodeFlow points at it. `clone_url` is what the
+    /// "clone it and review" offer uses; the PR itself is carried so it can still be previewed.
+    NoLocalRepo {
+        provider: String,
+        repo_label: String,
+        clone_url: String,
+        pr: ado::PullRequestSummary,
+    },
+    /// Not a pull-request URL on a host we can talk to.
+    Unrecognized,
+}
+
+/// Case-insensitive compare for the host/owner/repo/org names both providers treat as
+/// case-insensitive — a link copied as `Acme/Widget` must still match a remote of `acme/widget`.
+fn same(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+fn same_opt(a: &Option<String>, b: &str) -> bool {
+    a.as_deref().map(|v| same(v, b)).unwrap_or(false)
+}
+
+/// Finds the local repository a pull-request link belongs to.
+///
+/// Two passes, in order: a project already linked to exactly this repo (no writes at all), then
+/// any project whose *own git remote* points at it — which gets linked on the spot, since the
+/// remote is the ground truth for where a repo lives and the PR commands dispatch off the link
+/// columns. `matches_remote` answers "does this remote URL point at the link's repo?".
+fn find_project_for_link(
+    db: &State<'_, Db>,
+    projects: &[Project],
+    already_linked: impl Fn(&Project) -> bool,
+    matches_remote: impl Fn(&str) -> bool,
+    link: impl Fn(&rusqlite::Connection, &str) -> Result<(), String>,
+) -> Result<Option<Project>, String> {
+    if let Some(project) = projects.iter().find(|p| already_linked(p)) {
+        return Ok(Some(project.clone()));
+    }
+
+    for project in projects {
+        // A project whose folder moved or was deleted simply can't answer — skip it rather than
+        // failing the whole lookup on one bad row.
+        let remotes = git::remotes::list_remotes(&project.local_path).unwrap_or_default();
+        if !remotes.iter().any(|r| matches_remote(&r.url)) {
+            continue;
+        }
+        {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            // Clear whatever it was linked to first: a project holds at most one host's columns,
+            // and `linked_repo` prefers GitHub, so leaving a stale Azure/GitHub pair behind would
+            // dispatch the review at the wrong provider.
+            queries::unlink_project(&conn, &project.id).map_err(|e| e.to_string())?;
+            link(&conn, &project.id)?;
+        }
+        // Re-read the row so the caller gets the project as it now is, not the pre-link copy.
+        return load_project(db, &project.id).map(Some);
+    }
+
+    Ok(None)
+}
+
+/// Resolves a pasted pull-request URL — GitHub (including Enterprise) or Azure DevOps — into a
+/// PR plus the local repository it belongs to, linking that repository to its host if it wasn't
+/// already. This is what makes "review this PR" reachable from a link someone sent you, instead
+/// of only from the sidebar list of a project you already had open.
+#[tauri::command]
+pub async fn resolve_pr_link(db: State<'_, Db>, url: String) -> Result<PrLinkResolution, String> {
+    let known_hosts = github_known_hosts(&db)?;
+    let Some(target) = crate::pr_link::parse(&url, &known_hosts) else {
+        return Ok(PrLinkResolution::Unrecognized);
+    };
+
+    let projects = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::list_all_projects(&conn).map_err(|e| e.to_string())?
+    };
+
+    match target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            let Some(token) = secrets::get_secret(&secrets::github_token_key(&host))? else {
+                return Ok(PrLinkResolution::NeedsToken {
+                    provider: "github".to_string(),
+                    identifier: host,
+                });
+            };
+            let pr = github::get_pull_request(&host, &owner, &repo, number, &token).await?;
+            let found = find_project_for_link(
+                &db,
+                &projects,
+                |p| {
+                    same_opt(&p.github_owner, &owner)
+                        && same_opt(&p.github_repo, &repo)
+                        && same(p.github_host.as_deref().unwrap_or(github::GITHUB_COM), &host)
+                },
+                |remote_url| {
+                    github::detect_from_remote_url(remote_url, &known_hosts)
+                        .map(|d| same(&d.host, &host) && same(&d.owner, &owner) && same(&d.repo, &repo))
+                        .unwrap_or(false)
+                },
+                |conn, project_id| {
+                    queries::link_project_github(conn, project_id, &owner, &repo, &host)
+                        .map_err(|e| e.to_string())
+                },
+            )?;
+            Ok(match found {
+                Some(project) => PrLinkResolution::Ready {
+                    project_id: project.id,
+                    workspace_id: project.workspace_id,
+                    project_name: project.name,
+                    pr,
+                },
+                None => PrLinkResolution::NoLocalRepo {
+                    provider: "github".to_string(),
+                    repo_label: format!("{owner}/{repo}"),
+                    clone_url: format!("https://{host}/{owner}/{repo}.git"),
+                    pr,
+                },
+            })
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project: ado_project, repo, number } => {
+            let Some(pat) = secrets::get_secret(&secrets::ado_pat_key(&org))? else {
+                return Ok(PrLinkResolution::NeedsToken {
+                    provider: "azure".to_string(),
+                    identifier: org,
+                });
+            };
+            // The link may name the project/repo by GUID (Azure's notification e-mails do), so
+            // everything from here on uses the names Azure itself reported — that's what a git
+            // remote can be matched against, and what belongs in the project's link columns.
+            let detail = ado::get_pull_request(&org, &ado_project, &repo, number, &pat).await?;
+            let (pr, ado_project, repo) = (detail.summary, detail.project_name, detail.repo_name);
+            let found = find_project_for_link(
+                &db,
+                &projects,
+                |p| {
+                    same_opt(&p.ado_org, &org)
+                        && same_opt(&p.ado_project, &ado_project)
+                        && same_opt(&p.ado_repo_id, &repo)
+                        // `linked_repo` prefers GitHub, so a project carrying both would dispatch
+                        // there instead. Leave it to the remote pass, which repairs the columns.
+                        && !(p.github_owner.is_some() && p.github_repo.is_some())
+                },
+                |remote_url| {
+                    ado::detect_from_remote_url(remote_url)
+                        .map(|d| same(&d.org, &org) && same(&d.project, &ado_project) && same(&d.repo, &repo))
+                        .unwrap_or(false)
+                },
+                |conn, project_id| {
+                    // Azure's Git REST API takes the repository *name* wherever it takes a GUID,
+                    // so the name straight out of the link is a valid `ado_repo_id`.
+                    queries::link_project_ado(conn, project_id, &org, &ado_project, &repo)
+                        .map_err(|e| e.to_string())
+                },
+            )?;
+            Ok(match found {
+                Some(project) => PrLinkResolution::Ready {
+                    project_id: project.id,
+                    workspace_id: project.workspace_id,
+                    project_name: project.name,
+                    pr,
+                },
+                None => PrLinkResolution::NoLocalRepo {
+                    provider: "azure".to_string(),
+                    repo_label: format!("{ado_project}/{repo}"),
+                    clone_url: format!(
+                        "https://dev.azure.com/{}/{}/_git/{}",
+                        web_encode(&org),
+                        web_encode(&ado_project),
+                        web_encode(&repo)
+                    ),
+                    pr,
+                },
+            })
+        }
+    }
+}
+
 /// A drafted PR title + body, produced by the AI from the branch diff. The frontend fills the
 /// "Create PR" form with these.
 #[derive(Serialize)]

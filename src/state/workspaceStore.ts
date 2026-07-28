@@ -27,6 +27,10 @@ interface WorkspaceState {
   moveProject: (id: string, fromWorkspaceId: string, toWorkspaceId: string) => Promise<void>;
   setActiveWorkspace: (id: string) => void;
   setActiveProject: (id: string) => void;
+  /** Brings a project into focus from anywhere, crossing workspaces if it lives in another one —
+   * awaitable, so a caller that needs `activeProject()` to already resolve (opening a PR from a
+   * pasted link) can wait for the workspace's projects to load instead of racing them. */
+  focusProject: (workspaceId: string, projectId: string) => Promise<void>;
 
   activeProject: () => Project | null;
 }
@@ -163,6 +167,19 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setActiveProject: (id) => {
     set({ activeProjectId: id });
     void api.setSetting(LAST_PROJECT_KEY, id);
+  },
+
+  focusProject: async (workspaceId, projectId) => {
+    if (get().activeWorkspaceId !== workspaceId) {
+      // Same effect as setActiveWorkspace, except the projects load is awaited rather than
+      // fired and forgotten — the caller's next step depends on this workspace's list.
+      set({ activeWorkspaceId: workspaceId, activeProjectId: null });
+      void api.setSetting(LAST_WORKSPACE_KEY, workspaceId);
+      await get().loadProjects(workspaceId);
+    } else if (!get().projectsByWorkspace[workspaceId]) {
+      await get().loadProjects(workspaceId);
+    }
+    get().setActiveProject(projectId);
   },
 
   activeProject: () => {

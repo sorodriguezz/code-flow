@@ -17,6 +17,7 @@ import {
   RotateCcw,
   ShieldCheck,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
@@ -239,6 +240,7 @@ export function ChangesPanel() {
   const stageAll = useRepoStore((s) => s.stageAll);
   const unstageAll = useRepoStore((s) => s.unstageAll);
   const discardFile = useRepoStore((s) => s.discardFile);
+  const discardAll = useRepoStore((s) => s.discardAll);
   const commitChanges = useRepoStore((s) => s.commitChanges);
   const busy = useRepoStore((s) => s.busy);
   const merging = useRepoStore((s) => s.merging);
@@ -325,7 +327,9 @@ export function ChangesPanel() {
         disabled: blocked,
       },
       {
-        icon: RotateCcw,
+        // A trash can, not a circular arrow: discarding throws the change away (and deletes the
+        // file outright when it's untracked) — the arrow reads as "reload/restart" and undersells it.
+        icon: Trash2,
         title: t("changes.discardChanges"),
         danger: true,
         onClick: async () => {
@@ -470,6 +474,31 @@ export function ChangesPanel() {
                     className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                   >
                     <ShieldCheck size={13} />
+                  </button>
+                )}
+                {unstagedAndUntracked.length > 0 && (
+                  <button
+                    onClick={async () => {
+                      const ok = await confirmAction(
+                        t("changes.discardAllConfirm", { n: unstagedAndUntracked.length }),
+                        true,
+                        t("changes.discardAll"),
+                      );
+                      if (!ok) return;
+                      // The selected file may be one of the ones about to vanish — drop the
+                      // selection rather than leaving the diff pane on a file that no longer differs.
+                      if (selected && !selected.staged) setSelected(null);
+                      void runAction("__discard_all__", "all", () => discardAll());
+                    }}
+                    disabled={pending !== null && pending.path !== "__discard_all__"}
+                    title={t("changes.discardAll")}
+                    className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-30"
+                  >
+                    {pending?.path === "__discard_all__" ? (
+                      <Loader2 size={13} className="animate-spin" />
+                    ) : (
+                      <Trash2 size={13} />
+                    )}
                   </button>
                 )}
                 {unstagedAndUntracked.length > 0 && (
