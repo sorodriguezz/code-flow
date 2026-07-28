@@ -19,7 +19,6 @@ import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ReviewLevelSelector } from "../ai/ReviewLevelSelector";
-import { LinkPrReview } from "../ai/LinkPrReview";
 import { CloneRepoModal } from "./CloneRepoModal";
 import type { PrLinkResolution, PullRequestSummary } from "../../types/domain";
 
@@ -80,8 +79,6 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
   const [resolution, setResolution] = useState<PrLinkResolution | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showClone, setShowClone] = useState(false);
-  /** Set once the user chooses the repo-less review — the modal turns into the review itself. */
-  const [quickPr, setQuickPr] = useState<PullRequestSummary | null>(null);
   // Only the newest lookup may write state — the field stays editable while one is in flight.
   const requestRef = useRef(0);
 
@@ -138,7 +135,7 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
     // The sidebar's own list is refreshed in the background so this PR shows as selected there
     // too — the review itself doesn't wait on it.
     void usePrStore.getState().loadPullRequests(ready.project_id);
-    if (review) usePrStore.getState().reviewPr(ready.project_id, ready.pr.id);
+    if (review) usePrStore.getState().reviewPr({ kind: "project", projectId: ready.project_id }, ready.pr.id);
     onClose();
   };
 
@@ -147,6 +144,24 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
   const onCloned = async () => {
     const result = await resolve(url);
     if (result?.status === "Ready") void openPr(result, true);
+  };
+
+  /** Hands the PR to the panel with no clone behind it. From here on it is an ordinary review —
+   * same findings, same comment threads, same approve / request changes / close, same Activity —
+   * just reading its diff from the host instead of from a working copy. */
+  const openWithoutCloning = (found: Extract<PrLinkResolution, { status: "NoLocalRepo" }>) => {
+    if (!activeWorkspaceId) return;
+    useAnalyzeUiStore.getState().hide();
+    usePrStore.getState().openLinkPr({
+      url: url.trim(),
+      pr: found.pr,
+      repoLabel: found.repo_label,
+      cloneUrl: found.clone_url,
+      workspaceId: activeWorkspaceId,
+    });
+    useUiStore.getState().openAiPanel();
+    usePrStore.getState().reviewPr({ kind: "link", url: url.trim(), workspaceId: activeWorkspaceId }, found.pr.id);
+    onClose();
   };
 
   const lookupBody = (
@@ -256,7 +271,7 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
               {t("prLink.cloneAndReview")}
             </button>
             <button
-              onClick={() => setQuickPr(resolution.pr)}
+              onClick={() => openWithoutCloning(resolution)}
               disabled={!activeWorkspaceId}
               className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
             >
@@ -278,24 +293,15 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
     </>
   );
 
-  // A review on screen (or still running) must not be thrown away by a stray click on the
-  // backdrop — the × is the way out of it.
-  const dismissOnBackdrop = quickPr ? undefined : onClose;
-
   return (
     <>
-      <div
-        className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24"
-        onClick={dismissOnBackdrop}
-      >
+      <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={onClose}>
         <div
           onClick={(e) => e.stopPropagation()}
           onKeyDown={(e) => {
             if (e.key === "Escape") onClose();
           }}
-          className={`flex flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)] ${
-            quickPr ? "max-h-[78vh] w-[720px]" : "w-[480px]"
-          }`}
+          className="flex w-[480px] flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
         >
           <div className="mb-3 flex shrink-0 items-center justify-between">
             <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
@@ -307,16 +313,7 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
             </button>
           </div>
 
-          {quickPr && activeWorkspaceId ? (
-            <>
-              <div className="mb-3 shrink-0">
-                <PrPreview pr={quickPr} />
-              </div>
-              <LinkPrReview url={url.trim()} pr={quickPr} workspaceId={activeWorkspaceId} />
-            </>
-          ) : (
-            lookupBody
-          )}
+          {lookupBody}
         </div>
       </div>
 

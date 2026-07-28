@@ -120,7 +120,8 @@ export const translations = {
     "prLink.cloneAndReview": "Clone and review",
     "prLink.quickReview": "Review without cloning",
     "prLink.quickNote":
-      "Reviewing from the diff the host's API returns — there's no local checkout, so the model can't read the rest of the codebase, findings can't be auto-fixed, and this run isn't kept in history. Clone the repo for the full review.",
+      "No local checkout: the diff comes from the host's API, so the model can't read the rest of the codebase and findings can't be auto-fixed. Everything else works — comments, approve, request changes, close. This session's Activity is kept in memory only.",
+    "prLink.cloneInstead": "Clone it for the full review",
     "prLink.noWorkspace": "Open a workspace first — the clone is added to it as a project.",
 
     "branchModal.search": "Search branches…",
@@ -1520,7 +1521,8 @@ export const translations = {
     "prLink.cloneAndReview": "Clonar y revisar",
     "prLink.quickReview": "Revisar sin clonar",
     "prLink.quickNote":
-      "Revisión hecha con el diff que devuelve la API del host — no hay clon local, así que el modelo no puede leer el resto del código, los hallazgos no se pueden autocorregir y esta ejecución no queda en el historial. Clona el repo para la revisión completa.",
+      "Sin clon local: el diff viene de la API del host, así que el modelo no puede leer el resto del código y los hallazgos no se pueden autocorregir. Todo lo demás funciona — comentarios, aprobar, pedir cambios, cerrar. La actividad de esta sesión solo vive en memoria.",
+    "prLink.cloneInstead": "Clonarlo para la revisión completa",
     "prLink.noWorkspace": "Abre primero un workspace — el clon se agrega ahí como proyecto.",
 
     "branchModal.search": "Buscar ramas…",

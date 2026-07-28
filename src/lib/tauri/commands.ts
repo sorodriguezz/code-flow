@@ -809,3 +809,20 @@ export const debugEvaluate = (frameId: string, expression: string) =>
 export const startWatching = (repoPath: string) => invoke<void>("start_watching", { repoPath });
 
 export const stopWatching = (repoPath: string) => invoke<void>("stop_watching", { repoPath });
+
+// ---------- pull requests addressed by link (no local clone) ----------
+
+/** The PR behind a link, re-read from its host. */
+export const prLinkPullRequest = (url: string) =>
+  invoke<PullRequestSummary>("pr_link_pull_request", { url });
+
+/** The PR's existing comment threads, addressed by link. */
+export const prLinkCommentThreads = (url: string) =>
+  invoke<PrCommentThread[]>("pr_link_comment_threads", { url });
+
+/** What the signed-in user has already decided on the PR behind a link. */
+export const prLinkDecision = (url: string) => invoke<PrDecision>("pr_link_decision", { url });
+
+/** Approve / request changes / close the PR behind a link. Returns it as the host now reports it. */
+export const actOnPrLink = (url: string, action: PrAction, body?: string) =>
+  invoke<PullRequestSummary>("act_on_pr_link", { url, action, body });

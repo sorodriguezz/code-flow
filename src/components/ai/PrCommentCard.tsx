@@ -57,7 +57,9 @@ export function PrCommentCard({
   resolutionKey,
 }: {
   thread: PrCommentThread;
-  projectId: string;
+  /** Omitted for a PR reviewed from a link with no clone: there's no working copy for "resolve
+   * with AI" to edit, so that action isn't offered. */
+  projectId?: string;
   prSourceBranch: string;
   /** Stable id under which this comment thread's "resolve with AI" outcome is persisted. */
   resolutionKey?: string;
@@ -107,13 +109,16 @@ export function PrCommentCard({
               <InlineMarkdown text={c.content} className="cf-markdown-inline text-[var(--cf-text-muted)]" />
             </p>
           ))}
-          <ResolveWithAiButton
-            resolving={resolving}
-            resolution={resolution}
-            runId={runId}
-            onClick={() => void resolve(buildFixPrompt(thread))}
-            onClear={clearResolution}
-          />
+          {/* Nothing to apply a fix to without a working copy. */}
+          {projectId && (
+            <ResolveWithAiButton
+              resolving={resolving}
+              resolution={resolution}
+              runId={runId}
+              onClick={() => void resolve(buildFixPrompt(thread))}
+              onClear={clearResolution}
+            />
+          )}
         </div>
       )}
     </div>

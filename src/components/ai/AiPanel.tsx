@@ -10,6 +10,7 @@ import {
   ExternalLink,
   GitMerge,
   History,
+  Link2,
   Loader2,
   Plus,
   RefreshCw,
@@ -23,9 +24,9 @@ import {
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
 import { parseClaudeError } from "../../lib/claudeError";
+import { listCommentThreads, targetKey, targetProjectId, type PrTarget } from "../../lib/prTarget";
 import { parseAnalysis, buildFixpack, formatFindingAsComment, formatSummaryComment } from "../../lib/parseAnalysis";
 import { Checkbox } from "../common/Checkbox";
-import { listPrCommentThreads } from "../../lib/tauri/commands";
 import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
 import { PrCommentCard, PrCommentsSkeleton } from "./PrCommentCard";
 import {
@@ -86,6 +87,7 @@ function ActivitySection({ projectId }: { projectId: string }) {
   const loadJobHistory = useJobsStore((s) => s.load);
   const prsByProject = usePrStore((s) => s.prsByProject);
   const selectedPr = usePrStore((s) => s.selectedPr);
+  const linkPr = usePrStore((s) => s.linkPr);
   const selectPr = usePrStore((s) => s.selectPr);
   const analyzeOpen = useAnalyzeUiStore((s) => s.open);
   const analyzeJobId = useAnalyzeUiStore((s) => s.selectedJobId);
@@ -110,7 +112,8 @@ function ActivitySection({ projectId }: { projectId: string }) {
   if (entries.length === 0) return null;
 
   const activeEntryKey = findActiveEntryKey(entries, {
-    selectedPrId: selectedPr?.id ?? null,
+    // A link session's PR is shown the same way a selected one is, so its row highlights too.
+    selectedPrId: selectedPr?.id ?? linkPr?.pr.id ?? null,
     analyzeOpen,
     analyzeJobId,
     activeSessionId,
@@ -202,18 +205,30 @@ function ActivitySection({ projectId }: { projectId: string }) {
   );
 }
 
-function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequestSummary }) {
+/**
+ * One PR review, whatever it's backed by.
+ *
+ * `target` is the whole difference between a PR from a project's own list and one opened from a
+ * pasted link with nothing cloned: the operations that act on the *host* — comment threads,
+ * decisions, publishing — are identical, and the two that need a working copy (a diff built from
+ * local git, applying a fix to a file) simply aren't offered when there isn't one.
+ */
+function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSummary }) {
   const t = useT();
+  const projectId = targetProjectId(target);
+  const bucket = targetKey(target);
+  const linkOnly = target.kind === "link";
   const reviewPr = usePrStore((s) => s.reviewPr);
   const reviewLevel = usePrStore((s) => s.reviewLevel);
   const setReviewLevel = usePrStore((s) => s.setReviewLevel);
   const postReview = usePrStore((s) => s.postReview);
   const selectPr = usePrStore((s) => s.selectPr);
+  const closeLinkPr = usePrStore((s) => s.closeLinkPr);
   const posting = usePrStore((s) => s.posting);
   const posted = usePrStore((s) => s.posted);
   const actOnPr = usePrStore((s) => s.actOnPr);
   const prActionBusy = usePrStore((s) => s.prActionBusy);
-  const jobs = useJobsStore((s) => s.byProject[projectId] ?? EMPTY_JOBS);
+  const jobs = useJobsStore((s) => s.byProject[bucket] ?? EMPTY_JOBS);
   const job = useMemo(
     () => jobs.find((j) => j.kind === "pr-review" && j.meta.prId === pr.id) ?? null,
     [jobs, pr.id],
@@ -243,7 +258,7 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
     });
 
   const [fixpackCopied, copyFixpack] = useCopy();
-  const runReview = () => reviewPr(projectId, pr.id);
+  const runReview = () => reviewPr(target, pr.id);
   const publish = async () => {
     if (!parsed || !job) return;
     const chosen = findings.filter((f) => selectedIds.has(f.id));
@@ -258,16 +273,19 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
     }));
     // `chosen`, not every finding: the summary describes what actually gets posted.
     const summary = postSummary ? formatSummaryComment(parsed, new Date().toISOString().slice(0, 10), chosen) : null;
-    void postReview(projectId, pr.id, job.id, items, postSummary, summary);
+    void postReview(target, pr.id, job.id, items, postSummary, summary);
   };
 
   // A decision already on the record (here or on the website) retires the button that would take
   // it again — and a merged/closed PR retires all three, since there's nothing left to decide.
-  const decision = usePrStore((s) => s.decisionByPr[`${projectId}:${pr.id}`] ?? "none");
+  const decision = usePrStore((s) => s.decisionByPr[`${bucket}:${pr.id}`] ?? "none");
   const loadPrDecision = usePrStore((s) => s.loadPrDecision);
   useEffect(() => {
-    void loadPrDecision(projectId, pr.id);
-  }, [loadPrDecision, projectId, pr.id]);
+    void loadPrDecision(target, pr.id);
+    // `target` is rebuilt on every render by the caller, so the identity that matters is what it
+    // addresses — the bucket key and the PR.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadPrDecision, bucket, pr.id]);
 
   const prClosed = pr.status === "merged" || pr.status === "closed";
   const doPrAction = async (action: "approve" | "request_changes" | "close") => {
@@ -280,7 +298,7 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
     // Request-changes and close are destructive-ish (they push a state the author sees), so they
     // get the emphasized confirm; approve gets the plain one.
     if (!(await confirmAction(t(confirmKey, { id: pr.id }), action !== "approve"))) return;
-    void actOnPr(projectId, pr.id, action);
+    void actOnPr(target, pr.id, action);
   };
 
   // Existing comment threads on the PR — e.g. from a human reviewer — refetched fresh every
@@ -294,7 +312,7 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
   const loadThreads = useCallback(() => {
     const token = ++threadsReqRef.current;
     setThreadsLoading(true);
-    return listPrCommentThreads(projectId, pr.id)
+    return listCommentThreads(target, pr.id)
       .then((threads) => {
         if (threadsReqRef.current === token) setOpenThreads(threads);
       })
@@ -304,7 +322,8 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
       .finally(() => {
         if (threadsReqRef.current === token) setThreadsLoading(false);
       });
-  }, [projectId, pr.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bucket, pr.id]);
   useEffect(() => {
     void loadThreads();
   }, [loadThreads]);
@@ -346,13 +365,17 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
             )}
           </div>
           <button
-            onClick={() => selectPr(null)}
+            onClick={() => (linkOnly ? closeLinkPr() : selectPr(null))}
             title={t("chat.backToChat")}
             className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
           >
             <X size={14} />
           </button>
         </div>
+
+        {/* Says which repository this PR belongs to — no project in the sidebar is naming it —
+            and what the missing clone costs, since the difference shows up in the findings. */}
+        {linkOnly && <LinkReviewNotice />}
 
         {threadsLoading ? (
           <PrCommentsSkeleton label={t("pr.loadingComments")} />
@@ -517,7 +540,8 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
           <>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
               <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={loading} />
-              <ChatAgentPicker projectId={projectId} />
+              {/* Agents are picked per project; a link session has none to pick for. */}
+              {projectId && <ChatAgentPicker projectId={projectId} />}
               {reviewText && !loading && findings.length > 0 && (
                 <>
                   <button
@@ -571,6 +595,33 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The banner a link-only review wears: which repository the PR is in (nothing else on screen says
+ * so), what this review can't see, and the way out of that — cloning it, which turns the same PR
+ * into a project-backed review with no loss of place.
+ */
+function LinkReviewNotice() {
+  const t = useT();
+  const linkPr = usePrStore((s) => s.linkPr);
+  const openCloneOffer = useUiStore((s) => s.openPrLinkModal);
+  if (!linkPr) return null;
+  return (
+    <div className="mb-4 rounded-lg border border-dashed border-[var(--cf-border)] px-3 py-2">
+      <p className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--cf-text)]">
+        <Link2 size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+        <span className="min-w-0 truncate">{linkPr.repoLabel}</span>
+      </p>
+      <p className="mt-1 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">{t("prLink.quickNote")}</p>
+      <button
+        onClick={openCloneOffer}
+        className="mt-1 text-[11px] font-medium text-[var(--cf-accent)] hover:underline"
+      >
+        {t("prLink.cloneInstead")}
+      </button>
     </div>
   );
 }
@@ -947,6 +998,11 @@ export function AiPanel() {
   const t = useT();
   const project = useWorkspaceStore((s) => s.activeProject());
   const selectedPr = usePrStore((s) => s.selectedPr);
+  const linkPr = usePrStore((s) => s.linkPr);
+  const linkTarget = useMemo<PrTarget | null>(
+    () => (linkPr ? { kind: "link", url: linkPr.url, workspaceId: linkPr.workspaceId } : null),
+    [linkPr],
+  );
   const analyzeOpen = useAnalyzeUiStore((s) => s.open);
   const toggle = useUiStore((s) => s.toggleAiPanel);
   const width = useLayoutStore((s) => s.sizes.aiPanelWidth);
@@ -960,6 +1016,7 @@ export function AiPanel() {
   const startNewChat = () => {
     if (!project) return;
     usePrStore.getState().selectPr(null);
+    usePrStore.getState().closeLinkPr();
     useAnalyzeUiStore.getState().hide();
     useChatStore.getState().clear(project.id);
   };
@@ -1019,14 +1076,23 @@ export function AiPanel() {
             </button>
           </div>
         </div>
-        {!project ? (
+        {/* A PR opened from a link outranks the project view and works without one — that's the
+            whole point: it belongs to a repository this machine may not have. */}
+        {linkPr ? (
+          <>
+            <ActivitySection projectId={targetKey(linkTarget!)} />
+            <div className="min-h-0 flex-1">
+              <PrReviewSection target={linkTarget!} pr={linkPr.pr} />
+            </div>
+          </>
+        ) : !project ? (
           <EmptyState icon={Sparkles} title={t("ai.noProject")} />
         ) : (
           <>
             <ActivitySection projectId={project.id} />
             <div className="min-h-0 flex-1">
               {selectedPr ? (
-                <PrReviewSection projectId={project.id} pr={selectedPr} />
+                <PrReviewSection target={{ kind: "project", projectId: project.id }} pr={selectedPr} />
               ) : analyzeOpen ? (
                 <AnalyzeSection projectId={project.id} />
               ) : (

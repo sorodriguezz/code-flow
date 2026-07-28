@@ -86,7 +86,7 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
   const reviewCurrentPr = () => {
     if (!project || !selectedPr || prSettled) return;
     openAiPanel();
-    reviewPr(project.id, selectedPr.id);
+    reviewPr({ kind: "project", projectId: project.id }, selectedPr.id);
     onClose();
   };
 

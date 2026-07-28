@@ -11,6 +11,7 @@ import {
   Settings2,
   X,
 } from "lucide-react";
+import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollectionTree, ContextMenu, MethodBadge, type MenuItem } from "./CollectionTree";
 import { HistoryList } from "./HistoryList";
@@ -268,13 +269,15 @@ export function ApiSidebar() {
             <button
               key={entry.id}
               onClick={() => setSection(entry.id)}
-              className={`min-w-0 flex-1 truncate rounded-md px-1.5 py-1 text-[11px] font-medium ${
+              title={entry.label}
+              className={`relative min-w-0 flex-1 rounded-md px-1.5 py-1 text-[11px] font-medium ${
                 section === entry.id
-                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  ? "text-[var(--cf-accent)]"
                   : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
               }`}
             >
-              {entry.label}
+              {section === entry.id && <ActivePill layoutId="cf-api-section-pill" />}
+              <span className="relative block truncate">{entry.label}</span>
             </button>
           ))}
         </div>

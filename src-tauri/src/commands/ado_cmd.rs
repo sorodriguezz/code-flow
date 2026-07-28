@@ -660,6 +660,91 @@ pub async fn review_pr_from_link(
     .await
 }
 
+/// The pull request behind a link, re-read from its host. Lets a review with no clone refresh
+/// its own header the way the project-backed one refreshes from the PR list.
+#[tauri::command]
+pub async fn pr_link_pull_request(db: State<'_, Db>, url: String) -> Result<ado::PullRequestSummary, String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    match &target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            github::get_pull_request(host, owner, repo, *number, &credential).await
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            Ok(ado::get_pull_request(org, project, repo, *number, &credential).await?.summary)
+        }
+    }
+}
+
+/// The PR's existing comment threads, addressed by link — the repo-less twin of
+/// [`list_pr_comment_threads`]. Reading a conversation never needed a working copy.
+#[tauri::command]
+pub async fn pr_link_comment_threads(db: State<'_, Db>, url: String) -> Result<Vec<ado::PrCommentThread>, String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    match &target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            github::list_pr_comment_threads(host, owner, repo, *number, &credential).await
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            ado::list_pr_comment_threads(org, project, repo, *number, &credential).await
+        }
+    }
+}
+
+/// What the signed-in user has already decided on the PR behind a link — the repo-less twin of
+/// [`pr_review_decision`].
+#[tauri::command]
+pub async fn pr_link_decision(db: State<'_, Db>, url: String) -> Result<String, String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    match &target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            github::viewer_decision(host, owner, repo, *number, &credential).await
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            ado::viewer_decision(org, project, repo, *number, &credential).await
+        }
+    }
+}
+
+/// Approve / request-changes / close the PR behind a link — the repo-less twin of
+/// [`act_on_pull_request`], and the reason a review with no clone is a real review rather than a
+/// read-only preview. Returns the pull request as the host reports it afterwards.
+///
+/// No Activity row is written here: that table belongs to a project, and this PR has none. The
+/// caller files the decision in the session's own in-memory Activity instead.
+#[tauri::command]
+pub async fn act_on_pr_link(
+    db: State<'_, Db>,
+    url: String,
+    action: String,
+    body: Option<String>,
+) -> Result<ado::PullRequestSummary, String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    let comment = body.unwrap_or_default();
+    match &target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            match action.as_str() {
+                "approve" => github::submit_pr_review(host, owner, repo, *number, "APPROVE", &comment, &credential).await,
+                "request_changes" => {
+                    let text = if comment.trim().is_empty() { "Cambios solicitados desde CodeFlow." } else { &comment };
+                    github::submit_pr_review(host, owner, repo, *number, "REQUEST_CHANGES", text, &credential).await
+                }
+                "close" => github::close_pull_request(host, owner, repo, *number, &credential).await,
+                other => Err(format!("unknown PR action: {other}")),
+            }?;
+            github::get_pull_request(host, owner, repo, *number, &credential).await
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            match action.as_str() {
+                "approve" => ado::set_reviewer_vote(org, project, repo, *number, 10, &credential).await,
+                "request_changes" => ado::set_reviewer_vote(org, project, repo, *number, -10, &credential).await,
+                "close" => ado::abandon_pull_request(org, project, repo, *number, &credential).await,
+                other => Err(format!("unknown PR action: {other}")),
+            }?;
+            Ok(ado::get_pull_request(org, project, repo, *number, &credential).await?.summary)
+        }
+    }
+}
+
 /// Posts the selected findings of a repo-less review onto the pull request, addressed by link.
 ///
 /// Unlike [`post_pr_review_comment`] there is no saved run to reconcile against — a review with
