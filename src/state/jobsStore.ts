@@ -1,11 +1,15 @@
 import { create } from "zustand";
 import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
 import { listJobHistory, renameJobHistoryEntry, deleteJobHistoryEntry } from "../lib/tauri/commands";
+import type { JobHistoryEntry } from "../types/domain";
 import { useLanguageStore } from "./languageStore";
 import { isCancellation, useAiRunStore } from "./aiRunStore";
 import { translations } from "../lib/i18n/translations";
 
-export type JobKind = "pr-review" | "analyze-changes";
+/** `pr-action` is the odd one out: it isn't something that *ran*, it's a decision that was taken
+ * (approve / request changes / close). It's filed here anyway because Activity is where the user
+ * looks for "what happened to this PR", and a decision belongs in that answer. */
+export type JobKind = "pr-review" | "analyze-changes" | "pr-action";
 /** `cancelled` is a stopped run, kept apart from `error` so the UI can offer "run it again"
  * instead of showing a failure the user caused on purpose. It only ever lives in memory — the
  * backend doesn't persist a cancelled run to `job_history`. */
@@ -43,6 +47,9 @@ interface JobsState {
     meta?: Record<string, unknown>;
     task: (jobId: string) => Promise<string>;
   }) => string;
+  /** Files an already-completed history row into Activity without a round-trip to disk — used by
+   * a PR decision, which the backend persists as it happens rather than running as a job. */
+  record: (projectId: string, entry: JobHistoryEntry) => void;
   /** Hydrates this project's finished PR reviews / pre-commit analyses from disk — `run()`
    * only ever lived in memory, so without this every past result vanished on restart. Runs
    * once per project per session; a job already in memory (freshly run before this resolves)
@@ -73,6 +80,45 @@ function safeParseMeta(raw: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+const PR_ACTION_LABEL_KEY: Record<string, keyof typeof translations.en> = {
+  approve: "activity.prApproved",
+  request_changes: "activity.prChangesRequested",
+  close: "activity.prClosed",
+};
+
+/** Turns a persisted history row into the in-memory job the Activity list renders. Shared by the
+ * initial load and by a decision recorded this session, so a row reads the same either way. */
+function toJob(projectId: string, row: JobHistoryEntry): Job {
+  const meta = safeParseMeta(row.meta);
+  const prLabel = typeof meta.prTitle === "string" ? `#${meta.prId} ${meta.prTitle}` : row.label;
+  const label =
+    row.custom_label ??
+    (row.kind === "analyze-changes"
+      ? // Same "title · time" shape as a freshly-run analysis (see AnalyzeSection.runAnalysis),
+        // so reloaded entries stay distinguishable instead of all reading the plain title.
+        `${translate("analyze.title")} · ${new Date(row.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+      : row.kind === "pr-action"
+        ? // The decision is the whole point of the row, so it's in the label rather than only in
+          // the icon — "#12 Fix login · Approved".
+          `${prLabel} · ${translate(PR_ACTION_LABEL_KEY[String(meta.action)] ?? "activity.prApproved")}`
+        : row.kind === "pr-review" && typeof meta.prTitle === "string"
+          ? prLabel
+          : row.label);
+  const createdAt = new Date(row.created_at).getTime();
+  return {
+    id: row.id,
+    projectId,
+    kind: row.kind as JobKind,
+    label,
+    status: row.status as JobStatus,
+    createdAt,
+    finishedAt: createdAt,
+    result: row.result,
+    error: row.error ? parseClaudeError(row.error) : null,
+    meta,
+  };
 }
 
 export const useJobsStore = create<JobsState>((set, get) => ({
@@ -124,6 +170,16 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     return id;
   },
 
+  record: (projectId, entry) => {
+    const job = toJob(projectId, entry);
+    set((s) => ({
+      byProject: {
+        ...s.byProject,
+        [projectId]: [job, ...(s.byProject[projectId] ?? []).filter((j) => j.id !== job.id)],
+      },
+    }));
+  },
+
   load: async (projectId) => {
     if (get().loaded[projectId]) return;
     // Marked synchronously, before the `await` below — React (in dev StrictMode especially)
@@ -134,31 +190,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     set((s) => ({ loaded: { ...s.loaded, [projectId]: true } }));
 
     const rows = await listJobHistory(projectId).catch(() => []);
-    const loadedJobs: Job[] = rows.map((row) => {
-      const meta = safeParseMeta(row.meta);
-      const label =
-        row.custom_label ??
-        (row.kind === "analyze-changes"
-          ? // Same "title · time" shape as a freshly-run analysis (see AnalyzeSection.runAnalysis),
-            // so reloaded entries stay distinguishable instead of all reading the plain title.
-            `${translate("analyze.title")} · ${new Date(row.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-          : row.kind === "pr-review" && typeof meta.prTitle === "string"
-            ? `#${meta.prId} ${meta.prTitle}`
-            : row.label);
-      const createdAt = new Date(row.created_at).getTime();
-      return {
-        id: row.id,
-        projectId,
-        kind: row.kind as JobKind,
-        label,
-        status: row.status as JobStatus,
-        createdAt,
-        finishedAt: createdAt,
-        result: row.result,
-        error: row.error ? parseClaudeError(row.error) : null,
-        meta,
-      };
-    });
+    const loadedJobs: Job[] = rows.map((row) => toJob(projectId, row));
     set((s) => {
       const existing = s.byProject[projectId] ?? [];
       const existingIds = new Set(existing.map((j) => j.id));

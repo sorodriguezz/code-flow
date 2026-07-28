@@ -8,6 +8,7 @@ import { useLanguageStore, useT } from "../../state/languageStore";
 import { renderMarkdown } from "../../lib/markdown";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { WorkspaceAgent } from "../../types/domain";
+import { ActiveUnderline } from "../common/ActivePill";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
@@ -56,12 +57,11 @@ export function SddSettings() {
           <button
             key={id}
             onClick={() => setTab(id)}
-            className={`-mb-px flex items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-[12.5px] ${
-              tab === id
-                ? "border-[var(--cf-accent)] font-medium text-[var(--cf-accent)]"
-                : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            className={`relative -mb-px flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] ${
+              tab === id ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
             }`}
           >
+            {tab === id && <ActiveUnderline layoutId="cf-sdd-tab-underline" />}
             <Icon size={13} />
             {t(labelKey)}
           </button>

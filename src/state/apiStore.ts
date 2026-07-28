@@ -732,6 +732,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
       environment: parseVariables(environment?.variables),
       collection: parseVariables(collection?.variables),
       global: parseVariables(globals?.variables),
+      collectionId,
     };
   },
 

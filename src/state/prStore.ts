@@ -5,8 +5,11 @@ import { useJobsStore } from "./jobsStore";
 import { useChatStore } from "./chatStore";
 import { useLanguageStore } from "./languageStore";
 import { translations } from "../lib/i18n/translations";
-import type { PullRequestSummary } from "../types/domain";
+import type { PrDecision, PullRequestSummary } from "../types/domain";
 import type { PrAction, PostFindingItem } from "../lib/tauri/commands";
+
+/** Cache key for a PR's decision — a PR id is only unique within its project. */
+const decisionKey = (projectId: string, prId: number) => `${projectId}:${prId}`;
 
 /** Review depth, mirroring the WF-PR-REVIEWER levels. `completo` is the default. */
 export type ReviewLevel = "basico" | "completo" | "ultra";
@@ -51,8 +54,17 @@ interface PrState {
     postSummary: boolean,
     summary: string | null,
   ) => Promise<void>;
-  /** Approve / request changes / close the PR on its host (GitHub or Azure DevOps). Refreshes
-   * the PR list afterward so the new status shows, and drops the selection when it was closed. */
+  /** What the signed-in user has already decided on a PR, keyed `${projectId}:${prId}`. Read from
+   * the host, so an approval given on the website locks the buttons here too. */
+  decisionByPr: Record<string, PrDecision>;
+  /** Fetches (and caches) that decision — called when a PR is opened. Silent on failure: not
+   * knowing the decision must never block reviewing the PR. */
+  loadPrDecision: (projectId: string, prId: number) => Promise<void>;
+  /** Approve / request changes / close the PR on its host (GitHub or Azure DevOps).
+   *
+   * The PR stays selected afterwards, in the state the host reports back — closing one used to
+   * drop it out of the panel, which read as "it vanished" rather than "it's closed". The decision
+   * is filed in Activity and remembered here, so the action can't be taken twice. */
   actOnPr: (projectId: string, prId: number, action: PrAction) => Promise<void>;
   /** Opens a PR on the project's linked host, then refreshes the list and selects the new PR.
    * Throws on failure so the caller (the modal) can keep itself open and surface the error. */
@@ -121,21 +133,42 @@ export const usePrStore = create<PrState>((set, get) => ({
     }
   },
 
+  decisionByPr: {},
+
+  loadPrDecision: async (projectId, prId) => {
+    try {
+      const decision = await api.prReviewDecision(projectId, prId);
+      set((s) => ({ decisionByPr: { ...s.decisionByPr, [decisionKey(projectId, prId)]: decision } }));
+    } catch {
+      // The host wouldn't say — leave it unknown, which just means the buttons stay offered.
+    }
+  },
+
   actOnPr: async (projectId, prId, action) => {
     set({ prActionBusy: action });
     try {
-      await api.actOnPullRequest(projectId, prId, action);
-      // Reflect the new state (e.g. a closed PR leaves the "open" bucket); when it was closed
-      // there's nothing left to act on, so return to chat.
-      await get().loadPullRequests(projectId);
-      if (action === "close") {
-        set((s) => (s.selectedPr?.id === prId ? { selectedPr: null } : {}));
-      } else {
-        // Keep the selection pointing at the refreshed PR object so its status/buttons update.
-        set((s) => ({ selectedPr: s.prsByProject[projectId]?.find((p) => p.id === prId) ?? s.selectedPr }));
-      }
+      const { pr, activity } = await api.actOnPullRequest(projectId, prId, action);
+      // The decision is now on the record: remember it so the button that produced it is retired,
+      // and file the action in Activity so "what happened to this PR" has an answer.
+      const decision: PrDecision =
+        action === "approve" ? "approved" : action === "request_changes" ? "changes_requested" : "none";
+      set((s) => ({
+        decisionByPr: { ...s.decisionByPr, [decisionKey(projectId, prId)]: decision },
+        // The host's own answer, so a closed PR reads as closed rather than staying "open" until
+        // the list refresh lands. The PR deliberately stays selected — including after closing it,
+        // where dropping the selection used to look like the PR had disappeared.
+        selectedPr: s.selectedPr?.id === prId ? pr : s.selectedPr,
+        prsByProject: {
+          ...s.prsByProject,
+          [projectId]: (s.prsByProject[projectId] ?? []).map((p) => (p.id === prId ? pr : p)),
+        },
+      }));
+      useJobsStore.getState().record(projectId, activity);
       const key = action === "approve" ? "pr.approved" : action === "request_changes" ? "pr.changesRequested" : "pr.closed";
       useToastStore.getState().pushToast(translate(key), "success");
+      // Re-read the list so the sidebar's open/draft/merged/closed buckets settle too.
+      await get().loadPullRequests(projectId);
+      set((s) => ({ selectedPr: s.prsByProject[projectId]?.find((p) => p.id === prId) ?? s.selectedPr }));
     } catch (e) {
       pushErrorToast(String(e));
     } finally {

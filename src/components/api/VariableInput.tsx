@@ -1,25 +1,30 @@
 import {
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ClipboardEvent,
   type KeyboardEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { Check, Pencil, X } from "lucide-react";
 import {
   DYNAMIC_VARIABLES,
   findUnresolved,
+  listVariables,
   lookupVariable,
   type VariableContext,
 } from "../../lib/api/variables";
+import { useApiStore } from "../../state/apiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { VariableScope } from "../../types/api";
 
 /**
  * A single-line field that marks the `{{variables}}` inside it — accent-tinted when the current
- * scopes define them, danger-tinted when nothing does.
+ * scopes define them, danger-tinted when nothing does — completes them as you type, and lets you
+ * change what one is worth without leaving the request.
  *
  * Built as a mirrored `<div>` under a real `<input>` rather than a contenteditable: an `<input>`
  * is the only element that gets caret placement, selection, undo, autofill and IME composition
@@ -36,6 +41,9 @@ import type { VariableScope } from "../../types/api";
 const TOKEN_SPLIT = /(\{\{[^{}]*\}\})/;
 const TOKEN_SCAN = /\{\{([^{}]*)\}\}/g;
 
+/** Enough rows to be worth scrolling, few enough to stay a menu rather than a catalogue. */
+const MAX_SUGGESTIONS = 40;
+
 const SCOPE_LABELS: Record<VariableScope, TranslationKey> = {
   local: "api.scope.local",
   data: "api.scope.data",
@@ -43,6 +51,10 @@ const SCOPE_LABELS: Record<VariableScope, TranslationKey> = {
   collection: "api.scope.collection",
   global: "api.scope.global",
 };
+
+/** Scopes owned by a running script or the runner's data file — there's no stored row behind them
+ * to edit, and whatever you typed would be overwritten on the next run. */
+const READ_ONLY_SCOPES: VariableScope[] = ["local", "data"];
 
 type SegmentKind = "text" | "resolved" | "unresolved";
 
@@ -90,10 +102,44 @@ function variableNames(value: string): string[] {
   return names;
 }
 
+/** A `{{` the caret is sitting inside that hasn't been closed yet — what the completion menu
+ * completes, and the span it replaces on accept. */
+interface OpenToken {
+  start: number;
+  end: number;
+  query: string;
+}
+
+/**
+ * Finds the token being typed at `caret`, or `null` when the caret isn't inside one.
+ *
+ * A token counts as "being typed" while no `}}` sits between its `{{` and the caret. The closing
+ * braces that editors auto-pair, or that a previous accept left behind, are swallowed into `end`
+ * so re-editing `{{ba|}}` replaces the whole token instead of nesting a second one inside it.
+ */
+function openTokenAt(value: string, caret: number | null): OpenToken | null {
+  if (caret === null) return null;
+  const before = value.slice(0, caret);
+  const start = before.lastIndexOf("{{");
+  if (start === -1) return null;
+  const inner = before.slice(start + 2);
+  if (inner.includes("}") || inner.includes("{")) return null;
+  const end = value.slice(caret).startsWith("}}") ? caret + 2 : caret;
+  return { start, end, query: inner.trim() };
+}
+
+interface Suggestion {
+  name: string;
+  /** Current value, or the example output for a dynamic variable. */
+  detail: string;
+  badge: string;
+}
+
 export interface VariableInputProps {
   value: string;
   onChange: (value: string) => void;
-  /** `null` turns the highlighting and the popover off; the field stays an ordinary input. */
+  /** `null` turns the highlighting, the completion menu and the popover off; the field stays an
+   * ordinary input. */
   variableContext?: VariableContext | null;
   placeholder?: string;
   disabled?: boolean;
@@ -127,10 +173,50 @@ export function VariableInput({
   const mirrorRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [hovering, setHovering] = useState(false);
+  const [popoverHover, setPopoverHover] = useState(false);
   const [anchor, setAnchor] = useState<{ left: number; top: number; width: number } | null>(null);
+
+  const [caret, setCaret] = useState<number | null>(null);
+  /** Escape closes the menu for the token being typed; typing anything reopens it. */
+  const [dismissed, setDismissed] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  /** Where to put the caret once React has committed an accepted completion. */
+  const pendingCaret = useRef<number | null>(null);
+
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const segments = segment(value, variableContext);
   const names = variableContext ? variableNames(value) : [];
+
+  const token = disabled ? null : openTokenAt(value, caret);
+  const suggestions = useMemo<Suggestion[]>(() => {
+    if (!variableContext || !token) return [];
+    const query = token.query.toLowerCase();
+    const defined: Suggestion[] = listVariables(variableContext).map((variable) => ({
+      name: variable.name,
+      detail: variable.value,
+      badge: t(SCOPE_LABELS[variable.scope]),
+    }));
+    const dynamic: Suggestion[] = DYNAMIC_VARIABLES.map((item) => ({
+      name: item.name,
+      detail: item.example,
+      badge: t("api.env.dynamicVariables"),
+    }));
+    // Anything containing the query is a match, but what *starts* with it comes first — typing
+    // "id" should offer `id` before `$randomUUID`.
+    return [...defined, ...dynamic]
+      .filter((item) => item.name.toLowerCase().includes(query))
+      .sort((a, b) => {
+        const rank = (name: string) => (name.toLowerCase().startsWith(query) ? 0 : 1);
+        return rank(a.name) - rank(b.name);
+      })
+      .slice(0, MAX_SUGGESTIONS);
+  }, [variableContext, token?.query, t]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const menuOpen = !dismissed && token !== null && suggestions.length > 0;
+  const quickLookOpen = !menuOpen && names.length > 0 && (hovering || popoverHover || editing !== null);
 
   /** The mirror doesn't scroll on its own — it is shifted by whatever the input scrolled. */
   const syncScroll = () => {
@@ -143,11 +229,81 @@ export function VariableInput({
   // offset is re-read after each committed value as well.
   useEffect(syncScroll, [value]);
 
+  // A fresh token means a fresh menu: the previous Escape shouldn't keep it shut, and the
+  // highlight belongs on the best match rather than wherever it was left.
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [token?.query]);
+
   useLayoutEffect(() => {
-    if (!hovering || names.length === 0) return;
+    if (pendingCaret.current === null) return;
+    const at = pendingCaret.current;
+    pendingCaret.current = null;
+    const input = inputRef.current;
+    if (!input) return;
+    input.setSelectionRange(at, at);
+    setCaret(at);
+  }, [value]);
+
+  useLayoutEffect(() => {
+    if (!menuOpen && !quickLookOpen) return;
     const rect = wrapRef.current?.getBoundingClientRect();
-    if (rect) setAnchor({ left: rect.left, top: rect.bottom + 6, width: rect.width });
-  }, [hovering, names.length, value]);
+    // Anchored flush to the field's bottom edge: a gap here is a strip the pointer crosses on its
+    // way into the popover, and crossing it would close the very thing being reached for.
+    if (rect) setAnchor({ left: rect.left, top: rect.bottom, width: rect.width });
+  }, [menuOpen, quickLookOpen, names.length, suggestions.length, value]);
+
+  const accept = (name: string) => {
+    if (!token) return;
+    const next = `${value.slice(0, token.start)}{{${name}}}${value.slice(token.end)}`;
+    pendingCaret.current = token.start + name.length + 4;
+    onChange(next);
+  };
+
+  const syncCaret = () => setCaret(inputRef.current?.selectionStart ?? null);
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (menuOpen) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const delta = e.key === "ArrowDown" ? 1 : -1;
+        setActiveIndex((i) => (i + delta + suggestions.length) % suggestions.length);
+        return;
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        accept(suggestions[activeIndex]?.name ?? suggestions[0].name);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setDismissed(true);
+        return;
+      }
+    }
+    // The caller's handler runs only on keys the menu didn't claim — Enter must send the request
+    // when no completion is on screen, and must not when one is.
+    onKeyDown?.(e);
+  };
+
+  /** Writes a variable's *current* value — the same field the environment editor and scripts
+   * write, and what Postman's inline editor changes. An unresolved name is created in the active
+   * environment, or in Globals when none is selected, since that's the only scope guaranteed to
+   * exist. */
+  const saveValue = async (name: string) => {
+    if (!variableContext) return;
+    const found = lookupVariable(name, variableContext);
+    if (found && READ_ONLY_SCOPES.includes(found.scope)) return;
+    const store = useApiStore.getState();
+    const scope: VariableScope = found?.scope ?? (store.activeEnvironmentId ? "environment" : "global");
+    setSaving(true);
+    try {
+      await store.setVariable(scope, name, draft, variableContext.collectionId ?? null);
+      setEditing(null);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div
@@ -186,27 +342,116 @@ export function VariableInput({
         aria-label={ariaLabel}
         spellCheck={false}
         autoComplete="off"
-        onChange={(e) => onChange(e.target.value)}
+        role={menuOpen ? "combobox" : undefined}
+        aria-expanded={menuOpen || undefined}
+        aria-autocomplete={menuOpen ? "list" : undefined}
+        onChange={(e) => {
+          setDismissed(false);
+          onChange(e.target.value);
+          setCaret(e.target.selectionStart);
+        }}
+        onSelect={syncCaret}
+        onClick={syncCaret}
+        onFocus={syncCaret}
+        onBlur={() => setCaret(null)}
         onScroll={syncScroll}
         onPaste={onPaste}
-        onKeyDown={onKeyDown}
+        onKeyDown={handleKeyDown}
         className={`relative w-full select-text bg-transparent leading-5 text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] disabled:cursor-not-allowed disabled:text-[var(--cf-text-muted)] ${fieldClassName}`}
       />
 
-      {hovering &&
-        names.length > 0 &&
+      {menuOpen &&
+        anchor &&
+        createPortal(
+          <div
+            style={{ position: "fixed", left: anchor.left, top: anchor.top + 4, minWidth: Math.min(anchor.width, 460) }}
+            // `mousedown` is what blurs the input, and a blur clears the caret and closes this
+            // menu before the click ever lands — so the press is swallowed and the click handled.
+            onMouseDown={(e) => e.preventDefault()}
+            className="z-[9999] max-h-[240px] max-w-[560px] overflow-auto rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
+          >
+            {suggestions.map((item, index) => (
+              <button
+                key={`${item.badge}:${item.name}`}
+                type="button"
+                onClick={() => accept(item.name)}
+                onPointerEnter={() => setActiveIndex(index)}
+                className={`flex w-full items-baseline gap-2 rounded px-1.5 py-1 text-left ${
+                  index === activeIndex ? "bg-[var(--cf-accent-soft)]" : ""
+                }`}
+              >
+                <span className="shrink-0 font-mono text-[11px] text-[var(--cf-accent)]">{item.name}</span>
+                <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
+                  {item.detail}
+                </span>
+                <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+                  {item.badge}
+                </span>
+              </button>
+            ))}
+            <p className="px-1.5 pb-0.5 pt-1 text-[10px] text-[var(--cf-text-muted)]">{t("api.env.suggestHint")}</p>
+          </div>,
+          document.body,
+        )}
+
+      {quickLookOpen &&
         variableContext &&
         anchor &&
         createPortal(
           <div
             style={{ position: "fixed", left: anchor.left, top: anchor.top, minWidth: Math.min(anchor.width, 420) }}
-            className="pointer-events-none z-[9998] max-w-[520px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 shadow-[var(--cf-shadow)]"
+            onPointerEnter={() => setPopoverHover(true)}
+            onPointerLeave={() => {
+              setPopoverHover(false);
+              if (editing === null) setEditing(null);
+            }}
+            className="z-[9998] mt-1.5 max-w-[520px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 shadow-[var(--cf-shadow)]"
           >
             {names.map((name) => {
               const found = lookupVariable(name, variableContext);
               const dynamic = found ? undefined : DYNAMIC_VARIABLES.find((item) => item.name === name);
+              // A generated value has no stored row, and a script/runner one is rewritten on every
+              // run — neither is something to hand-edit.
+              const editable = !dynamic && !(found && READ_ONLY_SCOPES.includes(found.scope));
+
+              if (editing === name) {
+                return (
+                  <div key={name} className="flex items-center gap-1.5 py-0.5">
+                    <span className="shrink-0 font-mono text-[11px] text-[var(--cf-accent)]">{name}</span>
+                    <input
+                      autoFocus
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void saveValue(name);
+                        else if (e.key === "Escape") setEditing(null);
+                      }}
+                      aria-label={t("api.env.currentValue")}
+                      className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-transparent px-1.5 py-0.5 font-mono text-[11px] outline-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={saving}
+                      onClick={() => void saveValue(name)}
+                      title={t("common.save")}
+                      className="shrink-0 text-[var(--cf-success)] disabled:opacity-40"
+                    >
+                      <Check size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditing(null)}
+                      title={t("common.cancel")}
+                      className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                );
+              }
+
               return (
-                <div key={name} className="flex items-baseline gap-2 py-0.5">
+                <div key={name} className="group flex items-baseline gap-2 py-0.5">
                   <span className="shrink-0 font-mono text-[11px] text-[var(--cf-accent)]">{name}</span>
                   <span
                     className="min-w-0 flex-1 truncate font-mono text-[11px]"
@@ -218,6 +463,19 @@ export function VariableInput({
                     <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
                       {found ? t(SCOPE_LABELS[found.scope]) : t("api.env.dynamicVariables")}
                     </span>
+                  )}
+                  {editable && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDraft(found?.value ?? "");
+                        setEditing(name);
+                      }}
+                      title={found ? t("api.env.editValue") : t("api.env.defineValue")}
+                      className="shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-accent)] group-hover:opacity-100"
+                    >
+                      <Pencil size={11} />
+                    </button>
                   )}
                 </div>
               );

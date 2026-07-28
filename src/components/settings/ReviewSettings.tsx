@@ -3,6 +3,7 @@ import { Database, MessageSquareText, ShieldCheck, SquarePen, type LucideIcon } 
 import { WorkspacePromptEditor } from "./WorkspacePromptEditor";
 import { ReviewContextEditor } from "./ReviewContextEditor";
 import { ReviewMemoriesSettings } from "./ReviewMemoriesSettings";
+import { ActiveUnderline } from "../common/ActivePill";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -43,12 +44,13 @@ export function ReviewSettings() {
           <button
             key={id}
             onClick={() => setTab(id)}
-            className={`-mb-px flex items-center gap-1.5 border-b-2 px-2.5 py-1.5 text-[12.5px] ${
-              tab === id
-                ? "border-[var(--cf-accent)] font-medium text-[var(--cf-accent)]"
-                : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            // No weight change on select, for the same reason as the settings nav: bolding
+            // re-measures the label and shoves every tab to its right along by a few pixels.
+            className={`relative -mb-px flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] ${
+              tab === id ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
             }`}
           >
+            {tab === id && <ActiveUnderline layoutId="cf-review-tab-underline" />}
             <Icon size={13} />
             {t(labelKey)}
           </button>

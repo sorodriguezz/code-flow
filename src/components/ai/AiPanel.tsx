@@ -8,6 +8,7 @@ import {
   ChevronRight,
   Copy,
   ExternalLink,
+  GitMerge,
   History,
   Loader2,
   Plus,
@@ -61,7 +62,7 @@ import { ChatModelPicker } from "./ChatModelPicker";
 import { ChatAgentPicker } from "./ChatAgentPicker";
 import { ReviewLevelSelector } from "./ReviewLevelSelector";
 import { AiErrorBanner } from "./AiErrorBanner";
-import type { PullRequestSummary, PrCommentThread } from "../../types/domain";
+import type { PrDecision, PullRequestSummary, PrCommentThread } from "../../types/domain";
 
 const PANEL_MIN = 280;
 const PANEL_MAX = 520;
@@ -127,7 +128,8 @@ function ActivitySection({ projectId }: { projectId: string }) {
       void switchTo(projectId, entry.conv.session_id);
       return;
     }
-    if (entry.job.kind === "pr-review") {
+    // A recorded decision opens the PR it was taken on, same as a review of it would.
+    if (entry.job.kind === "pr-review" || entry.job.kind === "pr-action") {
       const pr = prsByProject[projectId]?.find((p) => p.id === entry.job.meta.prId);
       if (pr) {
         useAnalyzeUiStore.getState().hide();
@@ -254,11 +256,19 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
       content: formatFindingAsComment(f),
       location: f.location,
     }));
-    const summary = postSummary ? formatSummaryComment(parsed, new Date().toISOString().slice(0, 10)) : null;
+    // `chosen`, not every finding: the summary describes what actually gets posted.
+    const summary = postSummary ? formatSummaryComment(parsed, new Date().toISOString().slice(0, 10), chosen) : null;
     void postReview(projectId, pr.id, job.id, items, postSummary, summary);
   };
 
-  // Approve / request changes / close aren't available once the PR is already merged or closed.
+  // A decision already on the record (here or on the website) retires the button that would take
+  // it again — and a merged/closed PR retires all three, since there's nothing left to decide.
+  const decision = usePrStore((s) => s.decisionByPr[`${projectId}:${pr.id}`] ?? "none");
+  const loadPrDecision = usePrStore((s) => s.loadPrDecision);
+  useEffect(() => {
+    void loadPrDecision(projectId, pr.id);
+  }, [loadPrDecision, projectId, pr.id]);
+
   const prClosed = pr.status === "merged" || pr.status === "closed";
   const doPrAction = async (action: "approve" | "request_changes" | "close") => {
     const confirmKey =
@@ -394,9 +404,12 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
           <div className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--cf-border)] p-3 text-[12px] text-[var(--cf-text-muted)]">
             <Square size={11} className="fill-current" />
             {t("ai.runStopped")}
-            <button onClick={runReview} className="ml-auto text-[var(--cf-accent)] underline">
-              {t("pr.reviewAgain")}
-            </button>
+            {/* No re-run offered on a settled PR — same rule as the footer. */}
+            {!prClosed && (
+              <button onClick={runReview} className="ml-auto text-[var(--cf-accent)] underline">
+                {t("pr.reviewAgain")}
+              </button>
+            )}
           </div>
         )}
 
@@ -466,7 +479,8 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
           the toggles and both call-to-actions into a single line wrapped their labels onto two lines,
           which rendered as oversized buttons. Every label here stays one line and truncates. */}
       <div className="@container shrink-0 space-y-2 border-t border-[var(--cf-border)] p-2.5">
-        {!prClosed && (
+        {(prClosed || decision !== "none") && <PrDecisionState status={pr.status} decision={decision} />}
+        {!prClosed && decision !== "approved" && (
           <div className="flex items-center gap-1.5">
             <PrActionButton
               tone="success"
@@ -479,9 +493,11 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
             <PrActionButton
               tone="warning"
               icon={ThumbsDown}
+              // Already asked for changes: asking again says nothing new. Approving stays open,
+              // because approving once the author has pushed the fixes is the point of the flow.
               label={t("pr.requestChanges")}
               busy={prActionBusy === "request_changes"}
-              disabled={prActionBusy !== null}
+              disabled={prActionBusy !== null || decision === "changes_requested"}
               onClick={() => doPrAction("request_changes")}
             />
             <PrActionButton
@@ -494,63 +510,114 @@ function PrReviewSection({ projectId, pr }: { projectId: string; pr: PullRequest
             />
           </div>
         )}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={loading} />
-          <ChatAgentPicker projectId={projectId} />
-          {reviewText && !loading && findings.length > 0 && (
-            <>
+        {/* Everything below acts *on* the pull request — running a review of it, publishing to it.
+            A merged or closed PR is settled, so none of it is offered: the state chip above is the
+            whole footer. Its findings stay readable above, they just have nowhere left to go. */}
+        {!prClosed && (
+          <>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+              <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={loading} />
+              <ChatAgentPicker projectId={projectId} />
+              {reviewText && !loading && findings.length > 0 && (
+                <>
+                  <button
+                    onClick={() => parsed && copyFixpack(buildFixpack(parsed, pr.id))}
+                    title={t("pr.fixpackHint")}
+                    className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                  >
+                    {fixpackCopied ? <Check size={11} /> : <Copy size={11} />}
+                    {t("pr.fixpack")}
+                  </button>
+                  <label
+                    className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
+                    title={t("pr.postSummaryHint")}
+                  >
+                    <Checkbox checked={postSummary} onChange={setPostSummary} />
+                    {t("pr.postSummary")}
+                  </label>
+                </>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5">
+              {reviewText && !loading && (
+                <button
+                  onClick={publish}
+                  disabled={posting || posted}
+                  title={publishLabel}
+                  className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+                >
+                  {posting ? (
+                    <Loader2 size={12} className="shrink-0 animate-spin" />
+                  ) : posted ? (
+                    <Check size={12} className="shrink-0 text-[var(--cf-success)]" />
+                  ) : null}
+                  <span className="truncate">{publishLabel}</span>
+                </button>
+              )}
               <button
-                onClick={() => parsed && copyFixpack(buildFixpack(parsed, pr.id))}
-                title={t("pr.fixpackHint")}
-                className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                onClick={runReview}
+                disabled={loading}
+                title={reviewLabel}
+                className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
               >
-                {fixpackCopied ? <Check size={11} /> : <Copy size={11} />}
-                {t("pr.fixpack")}
+                {loading ? (
+                  <Loader2 size={12} className="shrink-0 animate-spin" />
+                ) : (
+                  <Sparkles size={12} className="shrink-0" />
+                )}
+                <span className="truncate">{reviewLabel}</span>
               </button>
-              <label
-                className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
-                title={t("pr.postSummaryHint")}
-              >
-                <Checkbox checked={postSummary} onChange={setPostSummary} />
-                {t("pr.postSummary")}
-              </label>
-            </>
-          )}
-        </div>
-        <div className="flex items-center gap-1.5">
-          {reviewText && !loading && (
-            <button
-              onClick={publish}
-              disabled={posting || posted}
-              title={publishLabel}
-              className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
-            >
-              {posting ? (
-                <Loader2 size={12} className="shrink-0 animate-spin" />
-              ) : posted ? (
-                <Check size={12} className="shrink-0 text-[var(--cf-success)]" />
-              ) : null}
-              <span className="truncate">{publishLabel}</span>
-            </button>
-          )}
-          <button
-            onClick={runReview}
-            disabled={loading}
-            title={reviewLabel}
-            className="flex min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2 py-1.5 text-[12px] font-medium text-white disabled:opacity-50"
-          >
-            {loading ? (
-              <Loader2 size={12} className="shrink-0 animate-spin" />
-            ) : (
-              <Sparkles size={12} className="shrink-0" />
-            )}
-            <span className="truncate">{reviewLabel}</span>
-          </button>
-        </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
 }
+
+/**
+ * What this pull request has settled into, shown in place of the decision it no longer takes:
+ * merged or closed (nothing left to decide, for anyone), or approved by this user (they already
+ * decided). Rendered as a statement rather than a disabled button row, because a row of greyed-out
+ * buttons says "this is broken" where a state chip says "this is done".
+ *
+ * The PR's own end state outranks the personal vote — once it's merged, "you approved it" stopped
+ * being the useful thing to say.
+ */
+function PrDecisionState({ status, decision }: { status: PullRequestSummary["status"]; decision: PrDecision }) {
+  const t = useT();
+  const state =
+    status === "merged"
+      ? { icon: GitMerge, tone: PR_STATE_TONES.accent, label: t("pr.stateMerged"), hint: t("pr.stateLockedHint") }
+      : status === "closed"
+        ? { icon: Ban, tone: PR_STATE_TONES.danger, label: t("pr.stateClosed"), hint: t("pr.stateLockedHint") }
+        : decision === "approved"
+          ? { icon: ThumbsUp, tone: PR_STATE_TONES.success, label: t("pr.stateApproved"), hint: t("pr.stateApprovedHint") }
+          : {
+              icon: ThumbsDown,
+              tone: PR_STATE_TONES.warning,
+              label: t("pr.stateChangesRequested"),
+              hint: t("pr.stateChangesRequestedHint"),
+            };
+  const Icon = state.icon;
+  return (
+    <div
+      title={state.hint}
+      className={`flex items-center justify-center gap-1.5 rounded-md border border-dashed border-[var(--cf-border)] px-2 py-1.5 text-[11px] font-medium ${state.tone}`}
+    >
+      <Icon size={12} className="shrink-0" />
+      <span className="truncate">{state.label}</span>
+    </div>
+  );
+}
+
+/** Static tone classes, for the same reason as `PR_ACTION_TONES` below. */
+const PR_STATE_TONES = {
+  accent: "text-[var(--cf-accent)]",
+  success: "text-[var(--cf-success)]",
+  warning: "text-[var(--cf-warning)]",
+  danger: "text-[var(--cf-danger)]",
+} as const;
 
 /** Tone classes spelled out statically so Tailwind picks them up (an interpolated `--cf-${tone}`
  * arbitrary value would never be generated). */

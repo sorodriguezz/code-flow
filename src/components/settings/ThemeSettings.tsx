@@ -3,6 +3,7 @@ import { Check, ChevronDown, ChevronRight, Droplet, Laptop, Moon, Palette, Sun }
 import { useThemeStore } from "../../state/themeStore";
 import { findTheme, themesFor } from "../../lib/codeThemes";
 import { ACCENT_OPTIONS, useAccentStore } from "../../state/accentStore";
+import { ActivePill } from "../common/ActivePill";
 import type { ThemePreference } from "../../types/domain";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -185,14 +186,17 @@ export function ThemeSettings() {
           <button
             key={id}
             onClick={() => setPreference(id)}
-            className={`flex flex-1 flex-col items-center gap-1.5 rounded-lg border px-3 py-3 text-[13px] ${
+            className={`relative flex flex-1 flex-col items-center gap-1.5 rounded-lg border px-3 py-3 text-[13px] ${
               preference === id
-                ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                ? "border-transparent text-[var(--cf-accent)]"
                 : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
             }`}
           >
-            <Icon size={18} />
-            {t(labelKey)}
+            {preference === id && <ActivePill layoutId="cf-theme-mode-pill" inset="-inset-px" radius="rounded-lg" />}
+            <span className="relative flex flex-col items-center gap-1.5">
+              <Icon size={18} />
+              {t(labelKey)}
+            </span>
           </button>
         ))}
       </div>

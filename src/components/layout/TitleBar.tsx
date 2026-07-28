@@ -79,8 +79,12 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
     onClose();
   };
 
+  // Same rule as the PR panel: a merged or closed pull request is settled and takes no more
+  // actions. Without this the menu would be a way around the panel's own lock.
+  const prSettled = selectedPr?.status === "merged" || selectedPr?.status === "closed";
+
   const reviewCurrentPr = () => {
-    if (!project || !selectedPr) return;
+    if (!project || !selectedPr || prSettled) return;
     openAiPanel();
     reviewPr(project.id, selectedPr.id);
     onClose();
@@ -99,7 +103,8 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
         </button>
         <button
           onClick={reviewCurrentPr}
-          disabled={!selectedPr}
+          disabled={!selectedPr || prSettled}
+          title={prSettled ? t("pr.stateLockedHint") : undefined}
           className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.04]"
         >
           <Sparkles size={13} />

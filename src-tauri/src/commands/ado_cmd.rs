@@ -500,6 +500,247 @@ pub async fn resolve_pr_link(db: State<'_, Db>, url: String) -> Result<PrLinkRes
     }
 }
 
+/// The link's coordinates plus the credential for its host. Both of the repo-less commands below
+/// start here; the typed "unrecognized"/"no token" states the user is shown come from
+/// [`resolve_pr_link`], so by the time these run a plain error is the right shape.
+fn link_credentials(
+    db: &State<'_, Db>,
+    url: &str,
+) -> Result<(crate::pr_link::PrLinkTarget, String), String> {
+    let known_hosts = github_known_hosts(db)?;
+    let target = crate::pr_link::parse(url, &known_hosts)
+        .ok_or_else(|| "That isn't a pull-request link CodeFlow can read".to_string())?;
+    let credential = match &target {
+        crate::pr_link::PrLinkTarget::GitHub { host, .. } => github_token(host)?,
+        crate::pr_link::PrLinkTarget::Azure { org, .. } => pat_for_org(org)?,
+    };
+    Ok((target, credential))
+}
+
+/// Reads a pull request and its diff from the host's API alone — no clone, no `projects` row.
+async fn fetch_pr_and_diff(
+    target: &crate::pr_link::PrLinkTarget,
+    credential: &str,
+) -> Result<(ado::PullRequestSummary, String), String> {
+    match target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            let pr = github::get_pull_request(host, owner, repo, *number, credential).await?;
+            let diff = github::pull_request_diff(host, owner, repo, *number, credential).await?;
+            Ok((pr, diff))
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            // Canonical names, so a link carrying GUIDs still addresses the blobs endpoint.
+            let detail = ado::get_pull_request(org, project, repo, *number, credential).await?;
+            let diff =
+                ado::pull_request_diff(org, &detail.project_name, &detail.repo_name, *number, credential).await?;
+            Ok((detail.summary, diff))
+        }
+    }
+}
+
+/// Keeps a directory name to what every filesystem accepts.
+fn slugify(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect()
+}
+
+/// Lays out the working directory a repo-less review runs in.
+///
+/// The engine needs *some* working directory, and pointing it at an unrelated folder would be
+/// worse than useless — so it gets one holding this pull request's own diff and description.
+/// Its file tools then have something real to read, and nothing else to wander into. Reused
+/// (overwritten) across re-runs of the same PR rather than piling up temp directories.
+fn link_review_workspace(
+    target: &crate::pr_link::PrLinkTarget,
+    pr: &ado::PullRequestSummary,
+    diff: &str,
+) -> Result<String, String> {
+    let slug = match target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            slugify(&format!("github-{host}-{owner}-{repo}-{number}"))
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            slugify(&format!("azure-{org}-{project}-{repo}-{number}"))
+        }
+    };
+    let dir = paths::base_dir().join("pr-link-reviews").join(slug);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let description = if pr.description.trim().is_empty() { "(sin descripción)" } else { &pr.description };
+    let overview = format!(
+        "# #{} {}\n\n- Autor: {}\n- Rama origen: `{}`\n- Rama destino: `{}`\n- URL: {}\n\n## Descripción\n\n{}\n",
+        pr.id, pr.title, pr.author, pr.source_branch, pr.target_branch, pr.url, description
+    );
+    std::fs::write(dir.join("PULL_REQUEST.md"), overview).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("changes.diff"), diff).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+/// Tells the model, up front, that it is reviewing without the surrounding codebase — so it
+/// works from the diff instead of trying to open files that aren't there, and grades what it
+/// can't confirm accordingly rather than asserting it.
+const NO_CLONE_CONTEXT: &str = "Esta revisión corre SIN un clon local del repositorio. Por stdin recibes el diff completo del pull request, y el directorio de trabajo solo contiene `PULL_REQUEST.md` y `changes.diff`. No intentes explorar el árbol del repositorio ni abrir archivos que no estén ahí. Basa la revisión en el diff: cuando un hallazgo dependa de código que no ves (una función llamada pero no incluida, un contrato definido en otro archivo), decláralo explícitamente y baja la confianza en consecuencia, o clasifícalo como Security Hotspot en lugar de afirmar un bug que no puedes demostrar.";
+
+/// Reviews a pull request from nothing but its link — reading the diff from the host's API
+/// instead of from a working copy.
+///
+/// This trades depth for reach, on purpose: the model sees the diff and the PR's description but
+/// not the surrounding codebase, so it can't confirm a caller, check whether a test exists, or
+/// have a fix applied afterwards. That's a genuinely weaker review than the project-backed one
+/// ([`review_pull_request`]), and the prompt says so to the model. Nothing is written to
+/// `job_history` either — a run with no project has no project to file itself under.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn review_pr_from_link(
+    app: AppHandle,
+    db: State<'_, Db>,
+    url: String,
+    job_id: String,
+    level: String,
+    workspace_id: String,
+    agent_provider: Option<String>,
+    agent_model: Option<String>,
+    agent_prompt: Option<String>,
+) -> Result<String, String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+
+    let (contexts, mcps, skills, config, review_template) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
+            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
+                crate::commands::claude_cmd::load_ai_config_for(&conn, p, m)?
+            }
+            _ => load_ai_config(&conn, AiTask::Review)?,
+        };
+        let review_template = queries::get_workspace_prompt(&conn, &workspace_id, "review_standard")
+            .map_err(|e| e.to_string())?;
+        (contexts, mcps, skills, config, review_template)
+    };
+
+    let (pr, diff_text) = fetch_pr_and_diff(&target, &credential).await?;
+    let cwd = link_review_workspace(&target, &pr, &diff_text)?;
+    // Best-effort, same as the project-backed review: skills are a nice-to-have, not a
+    // precondition.
+    let _ = skills_cmd::sync_skills_into_project(&skills, &workspace_id, &cwd);
+
+    let mut enabled_contexts: Vec<(String, String)> = contexts
+        .into_iter()
+        .filter(|c| c.enabled)
+        .map(|c| (c.name, c.content))
+        .collect();
+    enabled_contexts.insert(0, ("Modo de revisión".to_string(), NO_CLONE_CONTEXT.to_string()));
+    if let Some(prompt) = agent_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
+        enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
+    }
+
+    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
+
+    crate::ai_runs::scoped(app, Some(job_id), async {
+        ai::review_pull_request(
+            &*config.engine,
+            &config.binary,
+            &config.model,
+            &pr.title,
+            &pr.description,
+            &enabled_contexts,
+            &diff_text,
+            &config.tools,
+            &cwd,
+            &review_template,
+            &level,
+            mcp_config_path.as_deref(),
+        )
+        .await
+    })
+    .await
+}
+
+/// Posts the selected findings of a repo-less review onto the pull request, addressed by link.
+///
+/// Unlike [`post_pr_review_comment`] there is no saved run to reconcile against — a review with
+/// no project has nowhere to keep its memory — so every finding opens a fresh thread instead of
+/// continuing the one it opened last time. Every item is attempted even if one fails.
+#[tauri::command]
+pub async fn post_pr_link_review_comment(
+    db: State<'_, Db>,
+    url: String,
+    items: Vec<PostFindingItem>,
+    post_summary: bool,
+    summary: Option<String>,
+) -> Result<(), String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    let mut failures: Vec<String> = Vec::new();
+
+    match &target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            let head_sha = if items.iter().any(|it| it.location.is_some()) {
+                github::head_sha_for(host, owner, repo, *number, &credential).await.ok()
+            } else {
+                None
+            };
+            for (i, item) in items.iter().enumerate() {
+                let posted = match (&item.location, &head_sha) {
+                    (Some(loc), Some(sha)) => github::post_pr_comment_anchored(
+                        host, owner, repo, *number, &item.content, &loc.file, loc.start_line, loc.end_line, sha,
+                        &credential,
+                    )
+                    .await
+                    .map(|_| ()),
+                    _ => github::post_pr_comment(host, owner, repo, *number, &item.content, &credential)
+                        .await
+                        .map(|_| ()),
+                };
+                if let Err(e) = posted {
+                    failures.push(format!("#{}: {e}", i + 1));
+                }
+            }
+            if post_summary {
+                if let Some(s) = &summary {
+                    if let Err(e) = github::post_pr_comment(host, owner, repo, *number, s, &credential).await {
+                        failures.push(format!("summary: {e}"));
+                    }
+                }
+            }
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            // The link may carry GUIDs; the thread endpoints take either, so they're used as-is.
+            for (i, item) in items.iter().enumerate() {
+                let posted = match &item.location {
+                    Some(loc) => ado::post_pr_comment_anchored(
+                        org, project, repo, *number, &item.content, &loc.file, loc.start_line, loc.end_line,
+                        &credential,
+                    )
+                    .await
+                    .map(|_| ()),
+                    None => ado::post_pr_comment(org, project, repo, *number, &item.content, &credential)
+                        .await
+                        .map(|_| ()),
+                };
+                if let Err(e) = posted {
+                    failures.push(format!("#{}: {e}", i + 1));
+                }
+            }
+            if post_summary {
+                if let Some(s) = &summary {
+                    if let Err(e) = ado::post_pr_comment(org, project, repo, *number, s, &credential).await {
+                        failures.push(format!("summary: {e}"));
+                    }
+                }
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        return Err(format!("{} comment(s) failed to post — {}", failures.len(), failures.join("; ")));
+    }
+    Ok(())
+}
+
 /// A drafted PR title + body, produced by the AI from the branch diff. The frontend fills the
 /// "Create PR" form with these.
 #[derive(Serialize)]
@@ -1049,11 +1290,41 @@ fn apply_post_outcome(
     }
 }
 
+/// The decision the signed-in user has already recorded on a pull request — `"approved"` |
+/// `"changes_requested"` | `"none"`. Read from the host, so a vote cast on the website counts
+/// exactly as much as one cast here.
+#[tauri::command]
+pub async fn pr_review_decision(db: State<'_, Db>, project_id: String, pr_id: i64) -> Result<String, String> {
+    let project = load_project(&db, &project_id)?;
+    match linked_repo(&project)? {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(&org)?;
+            ado::viewer_decision(&org, &ado_project, &repo_id, pr_id, &pat).await
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            github::viewer_decision(&host, &owner, &repo, pr_id, &token).await
+        }
+    }
+}
+
+/// What a PR decision left behind: the pull request as the host now reports it (so "closed" is the
+/// host's answer, not an optimistic guess), and the Activity row the action was filed under.
+#[derive(Serialize)]
+pub struct PrActionOutcome {
+    pub pr: ado::PullRequestSummary,
+    pub activity: crate::db::models::JobHistoryEntry,
+}
+
 /// Approve / request-changes / close a pull request on whichever host it's linked to. `action`
 /// is one of `"approve"` | `"request_changes"` | `"close"`; the provider-specific mapping lives
 /// here (GitHub review events / state vs Azure reviewer vote / abandon). `body` is an optional
 /// comment carried on a GitHub review (GitHub requires a non-empty body to request changes, so a
 /// default is substituted when blank); Azure votes carry no message.
+///
+/// Deciding on a pull request is a real event in the project's history, not a fire-and-forget
+/// button, so it's filed in Activity alongside the reviews — and the PR is re-read from the host
+/// afterwards so the UI settles into the state the action actually produced.
 #[tauri::command]
 pub async fn act_on_pull_request(
     db: State<'_, Db>,
@@ -1061,30 +1332,55 @@ pub async fn act_on_pull_request(
     pr_id: i64,
     action: String,
     body: Option<String>,
-) -> Result<(), String> {
+) -> Result<PrActionOutcome, String> {
     let project = load_project(&db, &project_id)?;
     let comment = body.unwrap_or_default();
-    match linked_repo(&project)? {
+    let link = linked_repo(&project)?;
+
+    let pr = match &link {
         LinkedRepo::Azure { org, project: ado_project, repo_id } => {
-            let pat = pat_for_org(&org)?;
+            let pat = pat_for_org(org)?;
             match action.as_str() {
-                "approve" => ado::set_reviewer_vote(&org, &ado_project, &repo_id, pr_id, 10, &pat).await,
-                "request_changes" => ado::set_reviewer_vote(&org, &ado_project, &repo_id, pr_id, -10, &pat).await,
-                "close" => ado::abandon_pull_request(&org, &ado_project, &repo_id, pr_id, &pat).await,
+                "approve" => ado::set_reviewer_vote(org, ado_project, repo_id, pr_id, 10, &pat).await,
+                "request_changes" => ado::set_reviewer_vote(org, ado_project, repo_id, pr_id, -10, &pat).await,
+                "close" => ado::abandon_pull_request(org, ado_project, repo_id, pr_id, &pat).await,
                 other => Err(format!("unknown PR action: {other}")),
-            }
+            }?;
+            ado::get_pull_request(org, ado_project, repo_id, pr_id, &pat).await?.summary
         }
         LinkedRepo::GitHub { host, owner, repo } => {
-            let token = github_token(&host)?;
+            let token = github_token(host)?;
             match action.as_str() {
-                "approve" => github::submit_pr_review(&host, &owner, &repo, pr_id, "APPROVE", &comment, &token).await,
+                "approve" => github::submit_pr_review(host, owner, repo, pr_id, "APPROVE", &comment, &token).await,
                 "request_changes" => {
                     let text = if comment.trim().is_empty() { "Cambios solicitados desde CodeFlow." } else { &comment };
-                    github::submit_pr_review(&host, &owner, &repo, pr_id, "REQUEST_CHANGES", text, &token).await
+                    github::submit_pr_review(host, owner, repo, pr_id, "REQUEST_CHANGES", text, &token).await
                 }
-                "close" => github::close_pull_request(&host, &owner, &repo, pr_id, &token).await,
+                "close" => github::close_pull_request(host, owner, repo, pr_id, &token).await,
                 other => Err(format!("unknown PR action: {other}")),
-            }
+            }?;
+            github::get_pull_request(host, owner, repo, pr_id, &token).await?
         }
-    }
+    };
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let label = format!("#{} {}", pr.id, pr.title);
+    let meta = serde_json::json!({ "prId": pr.id, "prTitle": pr.title, "action": action }).to_string();
+    let activity = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::add_job_history(
+            &conn,
+            &job_id,
+            &project_id,
+            "pr-action",
+            &label,
+            "done",
+            Some(&pr.url),
+            None,
+            &meta,
+        )
+        .map_err(|e| e.to_string())?
+    };
+
+    Ok(PrActionOutcome { pr, activity })
 }

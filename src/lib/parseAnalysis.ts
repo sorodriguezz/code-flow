@@ -183,7 +183,8 @@ export interface ReviewCommentInput {
  * file/line when the model reported one, a general comment otherwise. */
 export function buildReviewComments(parsed: ParsedAnalysis, date: string): ReviewCommentInput[] {
   return [
-    { content: formatSummaryComment(parsed, date), location: null },
+    // This helper posts every finding, so the summary describes every finding.
+    { content: formatSummaryComment(parsed, date, parsed.findings), location: null },
     ...parsed.findings.map((f) => ({ content: formatFindingAsComment(f), location: f.location })),
   ];
 }
@@ -226,9 +227,21 @@ export function buildFixpack(parsed: ParsedAnalysis, prId: number): string {
   );
 }
 
-/** The overview comment posted once per review — Quality Gate + A–E grades + a table linking
- * every posted finding to its file/line, mirroring a standard "PR review summary" format. */
-export function formatSummaryComment(parsed: ParsedAnalysis, date: string): string {
+/**
+ * The overview comment posted once per review — Quality Gate + A–E grades + a table linking every
+ * posted finding to its file/line, mirroring a standard "PR review summary" format.
+ *
+ * `posted` is what the reviewer actually chose to publish, and it's what the table and the count
+ * describe: the summary must not announce findings that were never posted (it says "Hallazgos
+ * posteados", and a table of comments nobody can find on the PR is worse than no table).
+ *
+ * The **Quality Gate and the grades stay computed from the whole review**, deliberately. They
+ * judge the change, not the reviewer's selection — a Blocker doesn't stop being a Blocker because
+ * it wasn't posted, and letting the gate flip to PASSED by unticking a box would make it a
+ * meaningless badge. When the two sets differ, the count says so, so nobody reads a FAILED gate
+ * over a one-row table as a contradiction.
+ */
+export function formatSummaryComment(parsed: ParsedAnalysis, date: string, posted: AnalysisFinding[]): string {
   const passed = computeQualityGatePassed(parsed.findings);
   const lines = [`### 📋 Revisión automatizada (pr-review) — ${date}`, "", `🛡️ **Quality Gate:** ${passed ? "✅ PASSED" : "❌ FAILED"}`];
   if (parsed.grades) {
@@ -242,15 +255,22 @@ export function formatSummaryComment(parsed: ParsedAnalysis, date: string): stri
     lines.push(parsed.summary || "✅ No se encontraron problemas en este cambio.");
     return lines.join("\n");
   }
+  if (posted.length === 0) {
+    lines.push(
+      `La revisión encontró ${parsed.findings.length} hallazgo(s), ninguno de los cuales se publicó como comentario.`,
+    );
+    return lines.join("\n");
+  }
 
-  const bySeverity = (sev: AnalysisFinding["severity"]) => parsed.findings.filter((f) => f.severity === sev).length;
+  const bySeverity = (sev: AnalysisFinding["severity"]) => posted.filter((f) => f.severity === sev).length;
   const counts = (["critical", "warning", "info"] as const)
     .map((sev) => ({ sev, n: bySeverity(sev) }))
     .filter(({ n }) => n > 0)
     .map(({ sev, n }) => `${n} ${SEVERITY_LABEL_ES[sev]}`);
-  lines.push(`**Hallazgos posteados:** ${parsed.findings.length} (${counts.join(" · ")})`, "");
+  const outOf = posted.length < parsed.findings.length ? ` de ${parsed.findings.length}` : "";
+  lines.push(`**Hallazgos posteados:** ${posted.length}${outOf} (${counts.join(" · ")})`, "");
   lines.push("| | ID | Hallazgo | Archivo | Confianza |", "|---|---|---|---|---|");
-  for (const f of parsed.findings) {
+  for (const f of posted) {
     const loc = f.location ? `\`${locationLabel(f.location)}\`` : "—";
     lines.push(`| ${SEVERITY_DOT[f.severity]} | ${f.id} | ${f.type} / ${f.category} | ${loc} | ${f.confidence ?? "—"} |`);
   }

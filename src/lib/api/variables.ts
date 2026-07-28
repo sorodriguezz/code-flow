@@ -22,6 +22,10 @@ export interface VariableContext {
   environment: ApiVariable[];
   collection: ApiVariable[];
   global: ApiVariable[];
+  /** Which collection the `collection` scope came from. Carried here rather than passed alongside
+   * so that any field already receiving a context can write a collection variable back (the
+   * editor in the quick-look popover) without every call site having to thread an extra prop. */
+  collectionId?: string | null;
 }
 
 export function emptyVariableContext(): VariableContext {
@@ -77,6 +81,38 @@ export function lookupVariable(
     if (value !== null) return { value, scope };
   }
   return null;
+}
+
+/**
+ * Every variable the context defines, in resolution order and de-duplicated — so the entry listed
+ * for a name is the one that would actually win, and a shadowed definition never shows up twice.
+ * Disabled variables are left out: they resolve to nothing, so offering them would suggest a token
+ * that paints red the moment it's inserted.
+ *
+ * This is the `{{` autocomplete's catalogue.
+ */
+export function listVariables(ctx: VariableContext): { name: string; value: string; scope: VariableScope }[] {
+  const seen = new Set<string>();
+  const out: { name: string; value: string; scope: VariableScope }[] = [];
+  const add = (name: string, value: string, scope: VariableScope) => {
+    if (name === "" || seen.has(name)) return;
+    seen.add(name);
+    out.push({ name, value, scope });
+  };
+
+  for (const scope of VARIABLE_SCOPE_ORDER) {
+    if (scope === "local" || scope === "data") {
+      for (const [name, value] of Object.entries(scope === "local" ? ctx.local : ctx.data)) {
+        add(name, value, scope);
+      }
+      continue;
+    }
+    const list = scope === "environment" ? ctx.environment : scope === "collection" ? ctx.collection : ctx.global;
+    for (const variable of list) {
+      if (variable.enabled) add(variable.key, valueOf(variable), scope);
+    }
+  }
+  return out;
 }
 
 /** Substitutes every `{{name}}` and `{{$dynamic}}` it can, leaving the rest untouched. */

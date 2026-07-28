@@ -19,6 +19,7 @@ import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ReviewLevelSelector } from "../ai/ReviewLevelSelector";
+import { LinkPrReview } from "../ai/LinkPrReview";
 import { CloneRepoModal } from "./CloneRepoModal";
 import type { PrLinkResolution, PullRequestSummary } from "../../types/domain";
 
@@ -63,9 +64,9 @@ function PrPreview({ pr }: { pr: PullRequestSummary }) {
  * and hands the pull request to the normal review pipeline. No hunting through the sidebar, and
  * no need to know which project (or even which workspace) the repo lives in.
  *
- * The one thing a link can't substitute for is the code itself: a review reads the diff from the
- * local clone, so a repository CodeFlow has never seen is offered as a clone rather than silently
- * producing a shallower review.
+ * When the repository isn't on this machine at all there are two honest answers, and both are
+ * offered rather than picked for the user: review straight from the API diff (instant, but the
+ * model never sees the surrounding codebase), or clone it once and get the full review.
  */
 export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
   const t = useT();
@@ -79,6 +80,8 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
   const [resolution, setResolution] = useState<PrLinkResolution | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showClone, setShowClone] = useState(false);
+  /** Set once the user chooses the repo-less review — the modal turns into the review itself. */
+  const [quickPr, setQuickPr] = useState<PullRequestSummary | null>(null);
   // Only the newest lookup may write state — the field stays editable while one is in flight.
   const requestRef = useRef(0);
 
@@ -146,17 +149,155 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
     if (result?.status === "Ready") void openPr(result, true);
   };
 
+  const lookupBody = (
+    <>
+      <p className="mb-2 text-[11px] text-[var(--cf-text-muted)]">{t("prLink.subtitle")}</p>
+
+      <div className="mb-3 flex items-center gap-2">
+        <input
+          autoFocus
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void resolve(url);
+          }}
+          placeholder={t("prLink.placeholder")}
+          className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
+        />
+        <button
+          onClick={() => void resolve(url)}
+          disabled={!url.trim() || resolving}
+          className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] font-medium hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
+        >
+          {resolving ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
+          {resolving ? t("prLink.searching") : t("prLink.find")}
+        </button>
+      </div>
+
+      {error && (
+        <p className="mb-3 flex items-start gap-1.5 rounded-lg border border-[var(--cf-danger)]/40 p-2.5 text-[11px] text-[var(--cf-danger)]">
+          <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 flex-1 break-words">{error}</span>
+        </p>
+      )}
+
+      {resolution?.status === "Unrecognized" && (
+        <p className="mb-3 rounded-lg border border-[var(--cf-border)] p-2.5 text-[11px] text-[var(--cf-text-muted)]">
+          {t("prLink.unrecognized")}
+        </p>
+      )}
+
+      {resolution?.status === "NeedsToken" && (
+        <p className="mb-3 rounded-lg border border-[var(--cf-border)] p-2.5 text-[11px] text-[var(--cf-text-muted)]">
+          {t("prLink.needsToken", { identifier: resolution.identifier })}{" "}
+          <button
+            onClick={() => {
+              openSettings("azure", resolution.provider);
+              onClose();
+            }}
+            className="text-[var(--cf-accent)] hover:underline"
+          >
+            {t("statusbar.settings")}
+          </button>
+        </p>
+      )}
+
+      {resolution?.status === "NoLocalRepo" && (
+        <div className="mb-3 space-y-2">
+          <PrPreview pr={resolution.pr} />
+          <p className="text-[11px] text-[var(--cf-text-muted)]">
+            {t("prLink.noLocalRepo", { repo: resolution.repo_label })}
+          </p>
+          {!activeWorkspaceId && <p className="text-[11px] text-[var(--cf-danger)]">{t("prLink.noWorkspace")}</p>}
+        </div>
+      )}
+
+      {resolution?.status === "Ready" && (
+        <div className="mb-3 space-y-2">
+          <PrPreview pr={resolution.pr} />
+          <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+            <FolderGit2 size={11} className="shrink-0" />
+            {t("prLink.foundIn", { project: resolution.project_name })}
+          </p>
+        </div>
+      )}
+
+      <div className="flex items-center justify-end gap-2">
+        {resolution?.status === "Ready" && (
+          <>
+            <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={false} />
+            <div className="flex-1" />
+            <button
+              onClick={() => void openPr(resolution, false)}
+              className="rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            >
+              {t("prLink.open")}
+            </button>
+            <button
+              onClick={() => void openPr(resolution, true)}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
+            >
+              <Sparkles size={13} />
+              {t("prLink.review")}
+            </button>
+          </>
+        )}
+
+        {resolution?.status === "NoLocalRepo" && (
+          <>
+            {/* The deeper option, kept secondary: it downloads the repository, and the point of
+                this screen is that a link alone is enough. */}
+            <button
+              onClick={() => setShowClone(true)}
+              disabled={!activeWorkspaceId}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
+            >
+              <GitBranchPlus size={13} />
+              {t("prLink.cloneAndReview")}
+            </button>
+            <button
+              onClick={() => setQuickPr(resolution.pr)}
+              disabled={!activeWorkspaceId}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
+            >
+              <Sparkles size={13} />
+              {t("prLink.quickReview")}
+            </button>
+          </>
+        )}
+
+        {resolution?.status !== "Ready" && resolution?.status !== "NoLocalRepo" && (
+          <button
+            onClick={onClose}
+            className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+          >
+            {t("common.cancel")}
+          </button>
+        )}
+      </div>
+    </>
+  );
+
+  // A review on screen (or still running) must not be thrown away by a stray click on the
+  // backdrop — the × is the way out of it.
+  const dismissOnBackdrop = quickPr ? undefined : onClose;
+
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24" onClick={onClose}>
+      <div
+        className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-24"
+        onClick={dismissOnBackdrop}
+      >
         <div
           onClick={(e) => e.stopPropagation()}
           onKeyDown={(e) => {
             if (e.key === "Escape") onClose();
           }}
-          className="w-[480px] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+          className={`flex flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)] ${
+            quickPr ? "max-h-[78vh] w-[720px]" : "w-[480px]"
+          }`}
         >
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-3 flex shrink-0 items-center justify-between">
             <h3 className="flex items-center gap-1.5 text-[13px] font-semibold">
               <Link2 size={14} />
               {t("prLink.title")}
@@ -166,118 +307,16 @@ export function OpenPrLinkModal({ onClose }: { onClose: () => void }) {
             </button>
           </div>
 
-          <p className="mb-2 text-[11px] text-[var(--cf-text-muted)]">{t("prLink.subtitle")}</p>
-
-          <div className="mb-3 flex items-center gap-2">
-            <input
-              autoFocus
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") void resolve(url);
-              }}
-              placeholder={t("prLink.placeholder")}
-              className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)]"
-            />
-            <button
-              onClick={() => void resolve(url)}
-              disabled={!url.trim() || resolving}
-              className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] font-medium hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
-            >
-              {resolving ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
-              {resolving ? t("prLink.searching") : t("prLink.find")}
-            </button>
-          </div>
-
-          {error && (
-            <p className="mb-3 flex items-start gap-1.5 rounded-lg border border-[var(--cf-danger)]/40 p-2.5 text-[11px] text-[var(--cf-danger)]">
-              <AlertTriangle size={12} className="mt-0.5 shrink-0" />
-              <span className="min-w-0 flex-1 break-words">{error}</span>
-            </p>
+          {quickPr && activeWorkspaceId ? (
+            <>
+              <div className="mb-3 shrink-0">
+                <PrPreview pr={quickPr} />
+              </div>
+              <LinkPrReview url={url.trim()} pr={quickPr} workspaceId={activeWorkspaceId} />
+            </>
+          ) : (
+            lookupBody
           )}
-
-          {resolution?.status === "Unrecognized" && (
-            <p className="mb-3 rounded-lg border border-[var(--cf-border)] p-2.5 text-[11px] text-[var(--cf-text-muted)]">
-              {t("prLink.unrecognized")}
-            </p>
-          )}
-
-          {resolution?.status === "NeedsToken" && (
-            <p className="mb-3 rounded-lg border border-[var(--cf-border)] p-2.5 text-[11px] text-[var(--cf-text-muted)]">
-              {t("prLink.needsToken", { identifier: resolution.identifier })}{" "}
-              <button
-                onClick={() => {
-                  openSettings("azure", resolution.provider);
-                  onClose();
-                }}
-                className="text-[var(--cf-accent)] hover:underline"
-              >
-                {t("statusbar.settings")}
-              </button>
-            </p>
-          )}
-
-          {resolution?.status === "NoLocalRepo" && (
-            <div className="mb-3 space-y-2">
-              <PrPreview pr={resolution.pr} />
-              <p className="text-[11px] text-[var(--cf-text-muted)]">
-                {t("prLink.noLocalRepo", { repo: resolution.repo_label })}
-              </p>
-              {!activeWorkspaceId && <p className="text-[11px] text-[var(--cf-danger)]">{t("prLink.noWorkspace")}</p>}
-            </div>
-          )}
-
-          {resolution?.status === "Ready" && (
-            <div className="mb-3 space-y-2">
-              <PrPreview pr={resolution.pr} />
-              <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
-                <FolderGit2 size={11} className="shrink-0" />
-                {t("prLink.foundIn", { project: resolution.project_name })}
-              </p>
-            </div>
-          )}
-
-          <div className="flex items-center justify-end gap-2">
-            {resolution?.status === "Ready" && (
-              <>
-                <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={false} />
-                <div className="flex-1" />
-                <button
-                  onClick={() => void openPr(resolution, false)}
-                  className="rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                >
-                  {t("prLink.open")}
-                </button>
-                <button
-                  onClick={() => void openPr(resolution, true)}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white"
-                >
-                  <Sparkles size={13} />
-                  {t("prLink.review")}
-                </button>
-              </>
-            )}
-
-            {resolution?.status === "NoLocalRepo" && (
-              <button
-                onClick={() => setShowClone(true)}
-                disabled={!activeWorkspaceId}
-                className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white disabled:opacity-40"
-              >
-                <GitBranchPlus size={13} />
-                {t("prLink.cloneAndReview")}
-              </button>
-            )}
-
-            {resolution?.status !== "Ready" && (
-              <button
-                onClick={onClose}
-                className="rounded-md px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-              >
-                {t("common.cancel")}
-              </button>
-            )}
-          </div>
         </div>
       </div>
 

@@ -1,4 +1,5 @@
 import { LogOut, Trash2 } from "lucide-react";
+import { ActivePill } from "../common/ActivePill";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import type { Language } from "../../lib/i18n/translations";
 import { quitApp, resetAppData } from "../../lib/tauri/commands";
@@ -29,13 +30,14 @@ export function GeneralSettings() {
           <button
             key={opt.id}
             onClick={() => setLanguage(opt.id)}
-            className={`flex-1 rounded-lg border px-3 py-2.5 text-[13px] font-medium ${
+            className={`relative flex-1 rounded-lg border px-3 py-2.5 text-[13px] font-medium ${
               language === opt.id
-                ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                ? "border-transparent text-[var(--cf-accent)]"
                 : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
             }`}
           >
-            {opt.label}
+            {language === opt.id && <ActivePill layoutId="cf-language-pill" inset="-inset-px" radius="rounded-lg" />}
+            <span className="relative">{opt.label}</span>
           </button>
         ))}
       </div>

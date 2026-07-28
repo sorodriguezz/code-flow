@@ -1,4 +1,14 @@
-import { GitPullRequest, Loader2, MessageSquare, ShieldCheck, XCircle, type LucideIcon } from "lucide-react";
+import {
+  Ban,
+  GitPullRequest,
+  Loader2,
+  MessageSquare,
+  ShieldCheck,
+  ThumbsDown,
+  ThumbsUp,
+  XCircle,
+  type LucideIcon,
+} from "lucide-react";
 import type { Job } from "../state/jobsStore";
 import type { ChatConversationSummary } from "../types/domain";
 
@@ -10,17 +20,19 @@ export type ActivityEntry =
   | { type: "job"; job: Job; runs: Job[] }
   | { type: "chat"; conv: ChatConversationSummary };
 
-/** Collapses repeated runs of the *same activity* into one row: every `pr-review` run of a given
- * PR (fix findings → re-review) becomes one "#3 Tests" row, and every `analyze-changes` run of the
- * project becomes one "pre-commit" row — instead of N identical rows that looked like a bug. The
- * row carries all its runs (newest first) so the trash can wipe the whole history at once; the
- * representative `job` is the newest run. Chats are one activity each already. */
+/** Collapses everything that happened to the *same thing* into one row: a PR's reviews **and** the
+ * decisions taken on it (approve / request changes / close) become one "#3 Tests" row, and every
+ * `analyze-changes` run of the project becomes one "pre-commit" row — instead of N rows that read
+ * as a bug. The row carries all of them (newest first) so the trash wipes the whole history at
+ * once; the representative `job` is the newest, which is why a closed PR's row reads "#3 Tests ·
+ * Closed". Chats are one activity each already. */
 export function mergeActivityEntries(jobs: Job[], conversations: ChatConversationSummary[]): ActivityEntry[] {
   const prRuns = new Map<number, Job[]>();
   const analyzeRuns: Job[] = [];
   const standalone: Job[] = [];
   for (const job of jobs) {
-    if (job.kind === "pr-review" && typeof job.meta.prId === "number") {
+    const belongsToPr = job.kind === "pr-review" || job.kind === "pr-action";
+    if (belongsToPr && typeof job.meta.prId === "number") {
       const runs = prRuns.get(job.meta.prId);
       if (runs) runs.push(job);
       else prRuns.set(job.meta.prId, [job]);
@@ -49,9 +61,13 @@ export function mergeActivityEntries(jobs: Job[], conversations: ChatConversatio
   return entries.sort((a, b) => entryTimestamp(b) - entryTimestamp(a));
 }
 
-/** How many runs a job row stands for (1 for a chat or a single-run job). */
+/** How many *runs* a job row stands for (1 for a chat or a single-run job).
+ *
+ * A recorded decision isn't a run, so it doesn't count towards the ×N badge — a PR with two
+ * reviews and an approval is "×2", not "×3", which would be claiming a review that never
+ * happened. Deletion still covers everything in the row; it counts `runs` itself. */
 export function entryRunCount(entry: ActivityEntry): number {
-  return entry.type === "job" ? entry.runs.length : 1;
+  return entry.type === "job" ? entry.runs.filter((job) => job.kind !== "pr-action").length : 1;
 }
 
 export function entryTimestamp(entry: ActivityEntry): number {
@@ -79,6 +95,14 @@ export function entryVisual(entry: ActivityEntry): { icon: LucideIcon; color: st
   if (job.status === "running") return { icon: Loader2, color: "var(--cf-accent)", spinning: true };
   const color = job.status === "error" ? "var(--cf-danger)" : "var(--cf-success)";
   if (job.status === "error") return { icon: XCircle, color, spinning: false };
+  // A recorded decision is drawn as the decision itself — the row already spells it out in words,
+  // and the icon is what makes it scannable next to the reviews of the same PR.
+  if (job.kind === "pr-action") {
+    const action = job.meta.action;
+    if (action === "approve") return { icon: ThumbsUp, color: "var(--cf-success)", spinning: false };
+    if (action === "request_changes") return { icon: ThumbsDown, color: "var(--cf-warning)", spinning: false };
+    return { icon: Ban, color: "var(--cf-danger)", spinning: false };
+  }
   return { icon: job.kind === "pr-review" ? GitPullRequest : ShieldCheck, color, spinning: false };
 }
 
@@ -91,7 +115,15 @@ export function findActiveEntryKey(
   state: { selectedPrId: number | null; analyzeOpen: boolean; analyzeJobId: string | null; activeSessionId: string | null },
 ): string | null {
   if (state.selectedPrId !== null) {
-    const match = entries.find((e) => e.type === "job" && e.job.kind === "pr-review" && e.job.meta.prId === state.selectedPrId);
+    // Matched against every entry in the row, not just its newest: a PR whose latest event is a
+    // decision rather than a review still has to highlight when that PR is open.
+    const match = entries.find(
+      (e) =>
+        e.type === "job" &&
+        e.runs.some(
+          (run) => (run.kind === "pr-review" || run.kind === "pr-action") && run.meta.prId === state.selectedPrId,
+        ),
+    );
     return match ? entryKey(match) : null;
   }
   if (state.analyzeOpen) {

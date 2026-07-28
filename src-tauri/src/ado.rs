@@ -194,6 +194,13 @@ struct RawRepoRef {
 }
 
 #[derive(Deserialize)]
+struct RawReviewer {
+    id: String,
+    #[serde(default)]
+    vote: i32,
+}
+
+#[derive(Deserialize)]
 struct RawPullRequest {
     #[serde(rename = "pullRequestId")]
     pull_request_id: i64,
@@ -212,6 +219,9 @@ struct RawPullRequest {
     #[serde(rename = "creationDate")]
     creation_date: String,
     repository: RawRepoRef,
+    /// Present on a single-PR read; the list endpoint omits it, hence the default.
+    #[serde(default)]
+    reviewers: Vec<RawReviewer>,
 }
 
 fn strip_ref(r: &str) -> String {
@@ -389,6 +399,174 @@ async fn get_latest_iteration_id(org: &str, project: &str, repo_id: &str, pr_id:
     );
     let parsed: ListResponse<RawIteration> = get_json(&url, pat).await?;
     Ok(parsed.value.last().map(|i| i.id).unwrap_or(1))
+}
+
+/// Azure caps how much of a pull request is worth pulling over the wire one blob at a time —
+/// past this the review's own diff truncation would drop the tail anyway.
+const MAX_DIFF_FILES: usize = 80;
+/// Blobs bigger than this are almost always generated or binary; their content would swamp the
+/// diff without telling a reviewer anything.
+const MAX_BLOB_BYTES: usize = 512 * 1024;
+/// The all-zero object id Azure uses for "this side doesn't exist" (an add's original, a
+/// delete's current).
+const NULL_OBJECT_ID: &str = "0000000000000000000000000000000000000000";
+
+#[derive(Deserialize)]
+struct RawChangeItem {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(rename = "objectId", default)]
+    object_id: Option<String>,
+    #[serde(rename = "originalObjectId", default)]
+    original_object_id: Option<String>,
+    #[serde(rename = "isFolder", default)]
+    is_folder: bool,
+}
+
+#[derive(Deserialize)]
+struct RawChangeEntry {
+    #[serde(rename = "changeType", default)]
+    change_type: String,
+    #[serde(default)]
+    item: Option<RawChangeItem>,
+}
+
+#[derive(Deserialize)]
+struct ChangesResponse {
+    #[serde(rename = "changeEntries", default)]
+    change_entries: Vec<RawChangeEntry>,
+}
+
+/// Reads one blob's raw bytes. Azure serves file content by object id, which is exactly what the
+/// change list hands us for each side of a change.
+async fn get_blob(org_enc: &str, project_enc: &str, repo_enc: &str, sha: &str, pat: &str) -> Result<Vec<u8>, String> {
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{repo_enc}/blobs/{sha}\
+         ?api-version={API_VERSION}"
+    );
+    let res = client()
+        .get(&url)
+        .header("Authorization", auth_header(pat))
+        .header("Accept", "application/octet-stream")
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        return Err(format!("Azure DevOps returned {status} reading a file"));
+    }
+    Ok(res.bytes().await.map_err(|e| e.to_string())?.to_vec())
+}
+
+/// Turns two versions of a file into a unified diff. Azure has no endpoint that returns a
+/// pull request's diff as text, so it's rendered here with the same library the rest of the app
+/// diffs with (libgit2), which produces byte-for-byte what `git diff` would.
+fn unified_patch(path: &str, old: &[u8], new: &[u8]) -> Option<String> {
+    let as_path = std::path::Path::new(path);
+    let mut patch = git2::Patch::from_buffers(old, Some(as_path), new, Some(as_path), None).ok()?;
+    let buf = patch.to_buf().ok()?;
+    buf.as_str().map(str::to_string)
+}
+
+/// The pull request's diff, assembled from Azure's per-file change list — the equivalent of
+/// GitHub's single `Accept: application/vnd.github.diff` request, which Azure has no counterpart
+/// for. This is what lets a PR be reviewed from nothing but its link, with no clone on disk.
+///
+/// Files are fetched a few at a time rather than all at once (each one is two requests, old side
+/// and new side) so a large pull request doesn't open a hundred concurrent connections.
+pub async fn pull_request_diff(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    pat: &str,
+) -> Result<String, String> {
+    use futures_util::StreamExt;
+
+    let iteration_id = get_latest_iteration_id(org, project, repo_id, pr_id, pat).await?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let repo_enc = encode_segment(repo_id);
+    // No `$compareTo`, so the changes are measured against the base — the whole pull request,
+    // not just what the last push added.
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{repo_enc}/pullRequests/{pr_id}\
+         /iterations/{iteration_id}/changes?$top=1000&api-version={API_VERSION}"
+    );
+    let changes: ChangesResponse = get_json(&url, pat).await?;
+
+    let files: Vec<(String, String, Option<String>, Option<String>)> = changes
+        .change_entries
+        .into_iter()
+        .filter_map(|entry| {
+            let item = entry.item?;
+            if item.is_folder {
+                return None;
+            }
+            // Azure paths are absolute within the repo ("/src/x.ts"); findings have to cite the
+            // repo-relative path, which is also what the diff headers should carry.
+            let path = item.path?.trim_start_matches('/').to_string();
+            if path.is_empty() {
+                return None;
+            }
+            let usable = |id: Option<String>| id.filter(|s| !s.is_empty() && s != NULL_OBJECT_ID);
+            let change = entry.change_type.to_ascii_lowercase();
+            let new_id = if change.contains("delete") { None } else { usable(item.object_id) };
+            let old_id = if change.contains("add") { None } else { usable(item.original_object_id) };
+            Some((path, change, old_id, new_id))
+        })
+        .collect();
+
+    let total = files.len();
+    let truncated = total > MAX_DIFF_FILES;
+    let mut out = String::new();
+
+    let sections: Vec<String> = futures_util::stream::iter(files.into_iter().take(MAX_DIFF_FILES).map(
+        |(path, change, old_id, new_id)| {
+            let (org_enc, project_enc, repo_enc) = (org_enc.clone(), project_enc.clone(), repo_enc.clone());
+            async move {
+                let side = |id: Option<String>| {
+                    let (org_enc, project_enc, repo_enc) = (org_enc.clone(), project_enc.clone(), repo_enc.clone());
+                    async move {
+                        match id {
+                            None => Ok(Vec::new()),
+                            Some(sha) => get_blob(&org_enc, &project_enc, &repo_enc, &sha, pat).await,
+                        }
+                    }
+                };
+                let old = side(old_id).await;
+                let new = side(new_id).await;
+                let (Ok(old), Ok(new)) = (old, new) else {
+                    return format!("diff --git a/{path} b/{path}\n(couldn't read this file from Azure DevOps)\n");
+                };
+                if old.len() > MAX_BLOB_BYTES || new.len() > MAX_BLOB_BYTES {
+                    return format!("diff --git a/{path} b/{path}\n({change}, too large to display)\n");
+                }
+                unified_patch(&path, &old, &new)
+                    .unwrap_or_else(|| format!("diff --git a/{path} b/{path}\n({change}, binary)\n"))
+            }
+        },
+    ))
+    .buffered(6)
+    .collect()
+    .await;
+
+    for section in sections {
+        out.push_str(&section);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+
+    if out.trim().is_empty() {
+        return Err("This pull request has no file changes to review".to_string());
+    }
+    if truncated {
+        out.push_str(&format!(
+            "\n(only the first {MAX_DIFF_FILES} of {total} changed files are included)\n"
+        ));
+    }
+    Ok(out)
 }
 
 /// Posts a comment thread anchored to a specific file and line range on the PR's latest
@@ -600,6 +778,41 @@ pub async fn set_reviewer_vote(
     Ok(())
 }
 
+/// Which decision the signed-in user has already recorded on this pull request, so the app can
+/// show it and stop offering a decision that's already been made. Azure keeps it as the user's own
+/// entry in the PR's reviewer list: `10` approved, `5` approved with suggestions, `-5` waiting for
+/// the author, `-10` rejected, `0` no vote yet. Read from the host rather than remembered locally,
+/// since the vote may well have been cast on the website.
+pub async fn viewer_decision(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    pat: &str,
+) -> Result<String, String> {
+    let user_id = authenticated_user_id(org, pat).await?;
+    let org_enc = encode_segment(&normalize_org(org));
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{}/_apis/git/repositories/{}/pullRequests/{pr_id}\
+         ?api-version={API_VERSION}",
+        encode_segment(project),
+        encode_segment(repo_id)
+    );
+    let pr: RawPullRequest = get_json(&url, pat).await?;
+    let vote = pr
+        .reviewers
+        .iter()
+        .find(|r| r.id.eq_ignore_ascii_case(&user_id))
+        .map(|r| r.vote)
+        .unwrap_or(0);
+    Ok(match vote {
+        v if v > 0 => "approved",
+        v if v < 0 => "changes_requested",
+        _ => "none",
+    }
+    .to_string())
+}
+
 /// Abandons the PR — Azure DevOps' equivalent of closing without merging.
 pub async fn abandon_pull_request(
     org: &str,
@@ -734,4 +947,31 @@ pub async fn list_pr_comment_threads(
             Some(PrCommentThread { id: t.id, file_path, start_line, end_line, comments })
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Azure has no "give me the diff" endpoint, so the whole repo-less review of an Azure PR
+    /// rests on this rendering two blobs into something a diff parser (and the model) reads the
+    /// same way `git diff` output reads.
+    #[test]
+    fn unified_patch_renders_a_git_style_diff() {
+        let patch = unified_patch("src/app.ts", b"linea uno\nlinea dos\n", b"linea uno\nlinea DOS\n")
+            .expect("a patch");
+        assert!(patch.contains("a/src/app.ts"), "{patch}");
+        assert!(patch.contains("b/src/app.ts"), "{patch}");
+        assert!(patch.contains("@@"), "{patch}");
+        assert!(patch.contains("-linea dos"), "{patch}");
+        assert!(patch.contains("+linea DOS"), "{patch}");
+    }
+
+    #[test]
+    fn unified_patch_handles_added_and_deleted_files() {
+        let added = unified_patch("nuevo.txt", b"", b"hola\n").expect("a patch");
+        assert!(added.contains("+hola"), "{added}");
+        let deleted = unified_patch("viejo.txt", b"adios\n", b"").expect("a patch");
+        assert!(deleted.contains("-adios"), "{deleted}");
+    }
 }

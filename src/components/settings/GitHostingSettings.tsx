@@ -19,7 +19,7 @@ export function GitHostingSettings() {
     <section>
       <h3 className="mb-1 text-sm font-semibold">{t("settings.gitHostingTitle")}</h3>
       <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.gitHostingHint")}</p>
-      <ProviderTabs options={VCS_PROVIDERS} activeId={provider} onSelect={setProvider} />
+      <ProviderTabs options={VCS_PROVIDERS} activeId={provider} onSelect={setProvider} layoutId="cf-vcs-provider-pill" />
 
       {provider === "github" ? <GitHubSettings /> : <AzureDevOpsSettings />}
     </section>

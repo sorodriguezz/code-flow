@@ -26,6 +26,7 @@ import { GitSettings } from "./GitSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { ShortcutsSettings } from "./ShortcutsSettings";
 import { ApiSettingsBody } from "../api/ApiSettingsModal";
+import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -56,6 +57,58 @@ const WORKSPACE_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; ico
   { id: "skills", labelKey: "settings.skills", icon: PackagePlus },
   { id: "mcps", labelKey: "settings.mcps", icon: Plug },
 ];
+
+/**
+ * One row of the settings nav, wearing the same selected treatment as the Graph/Changes/Editor
+ * tabs: the accent fill is the shared [`ActivePill`], so picking a section slides it there rather
+ * than repainting two backgrounds.
+ *
+ * Both groups share the one `layoutId`, deliberately — the pill travels between "Global" and the
+ * workspace group as one continuous movement, which is exactly what the eye expects from a single
+ * list of sections. It works because every row stays mounted for as long as the nav is open.
+ */
+function SectionButton({
+  id,
+  labelKey,
+  icon: Icon,
+  active,
+  onSelect,
+}: {
+  id: SettingsSectionId;
+  labelKey: TranslationKey;
+  icon: typeof Palette;
+  active: boolean;
+  onSelect: (id: SettingsSectionId) => void;
+}) {
+  const t = useT();
+  const label = t(labelKey);
+  return (
+    <button
+      onClick={() => onSelect(id)}
+      aria-current={active ? "page" : undefined}
+      title={label}
+      // Selection changes colour and nothing else — no weight change, exactly like the tabs.
+      // Bolding on select re-measures the text (here: 140px → 143px against 141px of room), which
+      // wrapped "Workspaces & projects" onto a second line and made the row jump every time it was
+      // picked. Colour plus the pill is already the whole signal.
+      className={`relative mb-0.5 flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors ${
+        active
+          ? "text-[var(--cf-accent)]"
+          : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+      }`}
+    >
+      {active && <ActivePill layoutId="cf-settings-pill" />}
+      {/* Above the pill, which is absolutely positioned over the whole button. Truncating rather
+          than wrapping keeps every row exactly one line tall at any nav width — the nav is
+          resizable down to 160px, and a longer translation shouldn't be able to reflow it
+          either. The full label is on the tooltip. */}
+      <span className="relative flex min-w-0 items-center gap-1.5">
+        <Icon size={14} className="shrink-0" />
+        <span className="truncate">{label}</span>
+      </span>
+    </button>
+  );
+}
 
 export function SettingsView() {
   const open = useUiStore((s) => s.settingsOpen);
@@ -106,19 +159,8 @@ export function SettingsView() {
             <p className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("settings.globalGroup")}
             </p>
-            {GLOBAL_SECTIONS.map(({ id, labelKey, icon: Icon }) => (
-              <button
-                key={id}
-                onClick={() => setSection(id)}
-                className={`mb-0.5 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] ${
-                  section === id
-                    ? "bg-[var(--cf-accent-soft)] font-medium text-[var(--cf-accent)]"
-                    : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                }`}
-              >
-                <Icon size={14} />
-                {t(labelKey)}
-              </button>
+            {GLOBAL_SECTIONS.map((item) => (
+              <SectionButton key={item.id} {...item} active={section === item.id} onSelect={setSection} />
             ))}
 
             <p className="mb-1 mt-4 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
@@ -126,19 +168,8 @@ export function SettingsView() {
                 ? t("settings.workspaceGroup", { name: activeWorkspaceName })
                 : t("settings.workspaceGroupGeneric")}
             </p>
-            {WORKSPACE_SECTIONS.map(({ id, labelKey, icon: Icon }) => (
-              <button
-                key={id}
-                onClick={() => setSection(id)}
-                className={`mb-0.5 flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] ${
-                  section === id
-                    ? "bg-[var(--cf-accent-soft)] font-medium text-[var(--cf-accent)]"
-                    : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                }`}
-              >
-                <Icon size={14} />
-                {t(labelKey)}
-              </button>
+            {WORKSPACE_SECTIONS.map((item) => (
+              <SectionButton key={item.id} {...item} active={section === item.id} onSelect={setSection} />
             ))}
           </nav>
           <ResizeHandle

@@ -272,6 +272,104 @@ pub async fn get_pull_request(
     Ok(map_pull(raw))
 }
 
+#[derive(Deserialize)]
+struct RawPullFile {
+    filename: String,
+    #[serde(default)]
+    previous_filename: Option<String>,
+    status: String,
+    /// Absent for a binary file, and for one whose diff GitHub decided was too large to inline.
+    #[serde(default)]
+    patch: Option<String>,
+}
+
+/// Reassembles a unified diff from `GET /pulls/{n}/files`, the fallback for when GitHub refuses
+/// to render the whole diff in one response (it answers 406 past its size limit). Each entry
+/// carries only its hunks, so the `diff --git` / `---` / `+++` headers — the part every diff
+/// parser keys on — have to be put back. Binary and over-size files have no hunks at all and are
+/// listed as a bare header, which is honest: the review is told the file changed but not how.
+async fn pull_request_diff_from_files(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<String, String> {
+    let mut out = String::new();
+    // 300 files is GitHub's own hard ceiling for this endpoint; past it the diff is truncated no
+    // matter what, which the truncation the review applies would have done anyway.
+    for page in 1..=3 {
+        let url = format!(
+            "{}/repos/{owner}/{repo}/pulls/{number}/files?per_page=100&page={page}",
+            api_root(host)
+        );
+        let files: Vec<RawPullFile> = get_json(&url, token).await?;
+        let count = files.len();
+        for file in files {
+            let old_path = match file.status.as_str() {
+                "added" => "/dev/null".to_string(),
+                _ => format!("a/{}", file.previous_filename.as_deref().unwrap_or(&file.filename)),
+            };
+            let new_path = if file.status == "removed" {
+                "/dev/null".to_string()
+            } else {
+                format!("b/{}", file.filename)
+            };
+            out.push_str(&format!(
+                "diff --git a/{} b/{}\n--- {old_path}\n+++ {new_path}\n",
+                file.previous_filename.as_deref().unwrap_or(&file.filename),
+                file.filename
+            ));
+            match &file.patch {
+                Some(patch) => {
+                    out.push_str(patch);
+                    if !patch.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
+                None => out.push_str("(binary or too large to display)\n"),
+            }
+        }
+        if count < 100 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        return Err("GitHub reported no changed files for this pull request".to_string());
+    }
+    Ok(out)
+}
+
+/// The pull request's unified diff, read straight from GitHub instead of from a local clone —
+/// this is what makes reviewing a PR from nothing but its link possible. Asks for the `diff`
+/// media type first (one request, the real thing git would produce) and falls back to
+/// reassembling it from the per-file hunks when GitHub declines to render it whole.
+pub async fn pull_request_diff(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<String, String> {
+    let url = format!("{}/repos/{owner}/{repo}/pulls/{number}", api_root(host));
+    let res = client()
+        .get(&url)
+        .header("Authorization", bearer(token))
+        .header("Accept", "application/vnd.github.diff")
+        .header("User-Agent", USER_AGENT)
+        .header("X-GitHub-Api-Version", API_VERSION)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach GitHub: {e}"))?;
+    if res.status().is_success() {
+        let diff = res.text().await.map_err(|e| format!("unexpected response from GitHub: {e}"))?;
+        if !diff.trim().is_empty() {
+            return Ok(diff);
+        }
+    }
+    pull_request_diff_from_files(host, owner, repo, number, token).await
+}
+
 /// Opens a pull request via `POST /repos/{owner}/{repo}/pulls`. `head`/`base` are branch names
 /// (`head` is the source/compare branch, `base` the target) — the branch must already exist on
 /// the remote. Returns the created PR mapped to the shared summary shape.
@@ -436,6 +534,42 @@ pub async fn resolve_review_thread_for_comment(
         return Err(format!("GitHub GraphQL resolve returned {}", res.status()));
     }
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct RawReview {
+    user: RawUser,
+    state: String,
+}
+
+/// Which decision the signed-in user has already recorded on this pull request, so the app can
+/// show it and stop offering a decision that's already been made.
+///
+/// Read from the host rather than remembered locally: the user may well have approved it from the
+/// website, from another machine, or before CodeFlow ever saw this PR. GitHub keeps every review
+/// ever submitted, in order, so the last one that carries a verdict wins — a `DISMISSED` review is
+/// a verdict being taken back, which puts them back to having decided nothing.
+pub async fn viewer_decision(
+    host: &str,
+    owner: &str,
+    repo: &str,
+    number: i64,
+    token: &str,
+) -> Result<String, String> {
+    let login = get_authenticated_user(host, token).await?;
+    let url = format!("{}/repos/{owner}/{repo}/pulls/{number}/reviews?per_page=100", api_root(host));
+    let reviews: Vec<RawReview> = get_json(&url, token).await?;
+    let mut decision = "none";
+    for review in reviews.iter().filter(|r| r.user.login.eq_ignore_ascii_case(&login)) {
+        match review.state.to_ascii_uppercase().as_str() {
+            "APPROVED" => decision = "approved",
+            "CHANGES_REQUESTED" => decision = "changes_requested",
+            "DISMISSED" => decision = "none",
+            // `COMMENTED` and `PENDING` aren't verdicts — they leave the previous one standing.
+            _ => {}
+        }
+    }
+    Ok(decision.to_string())
 }
 
 /// Submits a review on the PR — `event` is GitHub's review verb (`"APPROVE"` or

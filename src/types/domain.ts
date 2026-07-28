@@ -351,6 +351,18 @@ export type AutoLinkResult =
   | { status: "NeedsToken"; provider: VcsProvider; identifier: string }
   | { status: "NotDetected" };
 
+/** The decision the signed-in user has already recorded on a pull request, as its host reports it
+ * — so a vote cast on the website counts the same as one cast here. Drives whether the approve /
+ * request-changes buttons are still offered. */
+export type PrDecision = "approved" | "changes_requested" | "none";
+
+/** What a PR decision left behind: the pull request as the host now reports it, and the Activity
+ * row the action was filed under. */
+export interface PrActionOutcome {
+  pr: PullRequestSummary;
+  activity: JobHistoryEntry;
+}
+
 /** What a pasted pull-request link turned out to be. `Ready` is the happy path: the PR was read
  * from its host *and* matched to a local repository (linked on the spot if it wasn't already), so
  * everything downstream — diff, findings, comments, review memory — works exactly as it does for

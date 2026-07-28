@@ -57,7 +57,8 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
       selectPr(null);
       useAnalyzeUiStore.getState().hide();
       void switchTo(projectId, entry.conv.session_id);
-    } else if (entry.job.kind === "pr-review") {
+      // A row whose newest entry is a decision still opens the PR it was taken on.
+    } else if (entry.job.kind === "pr-review" || entry.job.kind === "pr-action") {
       const pr = prsByProject[projectId]?.find((p) => p.id === entry.job.meta.prId);
       if (!pr) return;
       useAnalyzeUiStore.getState().hide();

@@ -108,7 +108,10 @@ clics**, sin pasar por Ajustes.
 
 - Conecta **GitHub** y **Azure DevOps** — ambos a la vez, si hace falta.
 - **Revisa un PR pegando solo su enlace** (⇧⌘L): CodeFlow averigua a cuál de tus repos pertenece
-  — aunque esté en otro workspace — y lanza la revisión. Si no lo tienes clonado, te ofrece clonarlo.
+  — aunque esté en otro workspace — y lanza la revisión.
+- ¿El repo no está en tu máquina? **Revísalo igual, sin clonar**: el diff se lee de la API del host.
+  Es una revisión más superficial (el modelo no ve el resto del código), así que también puedes
+  clonarlo de un clic para la revisión completa.
 - **Lista, revisa y comenta** PRs; **aprueba, pide cambios o ciérralos**.
 - **Crea un PR** con título y descripción por IA, también como borrador.
 - Publica los comentarios de la **revisión de IA** directamente en el pull request.

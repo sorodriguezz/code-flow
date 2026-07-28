@@ -30,6 +30,7 @@ import { useUiStore } from "../../state/uiStore";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
 import type { TabDrag } from "../../state/tabDragStore";
 import { confirmAction } from "../../state/confirmStore";
+import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
@@ -528,11 +529,12 @@ export function EditorView() {
               aria-label={label}
               className={`relative flex h-7 w-7 items-center justify-center rounded-md ${
                 sidePanel === id
-                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  ? "text-[var(--cf-accent)]"
                   : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
               }`}
             >
-              <Icon size={15} />
+              {sidePanel === id && <ActivePill layoutId="cf-editor-rail-pill" />}
+              <Icon size={15} className="relative" />
               {/* A live session is worth seeing from any panel — it's a running process. */}
               {id === "debug" && debugStatus !== "idle" && (
                 <span

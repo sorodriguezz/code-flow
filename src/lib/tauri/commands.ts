@@ -14,7 +14,9 @@ import type {
   JobHistoryEntry,
   MergeOutcome,
   NewProject,
+  PrActionOutcome,
   PrCommentThread,
+  PrDecision,
   PrDescriptionDraft,
   PrLinkResolution,
   Project,
@@ -569,6 +571,22 @@ export const reviewPullRequest = (
     agentPrompt: agent?.prompt ?? null,
   });
 
+/** Reviews a pull request from its link alone: the diff comes from the host's API, not from a
+ * working copy. Weaker than {@link reviewPullRequest} by construction — the model sees the diff
+ * but not the surrounding codebase — and nothing is written to job history, since a run with no
+ * project has no project to file itself under. `jobId` doubles as the run id the CLI streams on,
+ * which is what makes the live log and the stop button work. */
+export const reviewPrFromLink = (url: string, jobId: string, level: string, workspaceId: string) =>
+  invoke<string>("review_pr_from_link", {
+    url,
+    jobId,
+    level,
+    workspaceId,
+    agentProvider: null,
+    agentModel: null,
+    agentPrompt: null,
+  });
+
 /** One human-selected finding to post — identity (`file` + `category`) reuses its stored thread. */
 export interface PostFindingItem {
   file: string | null;
@@ -588,10 +606,25 @@ export const postPrReviewComment = (
   summary: string | null,
 ) => invoke<void>("post_pr_review_comment", { projectId, prId, runId, items, postSummary, summary });
 
+/** Posts the findings of a link-only review, addressed by URL. There's no saved run to reconcile
+ * against, so each finding opens a fresh thread rather than continuing an earlier one. */
+export const postPrLinkReviewComment = (
+  url: string,
+  items: PostFindingItem[],
+  postSummary: boolean,
+  summary: string | null,
+) => invoke<void>("post_pr_link_review_comment", { url, items, postSummary, summary });
+
 export type PrAction = "approve" | "request_changes" | "close";
 
+/** Approves / requests changes on / closes the PR on its host, returning the pull request as the
+ * host reports it afterwards plus the Activity row the action was filed under. */
 export const actOnPullRequest = (projectId: string, prId: number, action: PrAction, body?: string) =>
-  invoke<void>("act_on_pull_request", { projectId, prId, action, body });
+  invoke<PrActionOutcome>("act_on_pull_request", { projectId, prId, action, body });
+
+/** What the signed-in user has already decided on this PR, read from the host. */
+export const prReviewDecision = (projectId: string, prId: number) =>
+  invoke<PrDecision>("pr_review_decision", { projectId, prId });
 
 /** AI-drafts a PR title + body from the diff between two branches (no host call — local git). */
 export const generatePrDescription = (

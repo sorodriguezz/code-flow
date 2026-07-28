@@ -1,9 +1,9 @@
 import { useMemo } from "react";
-import { motion, useReducedMotion } from "framer-motion";
 import { Code2, FolderGit2, GitBranch, History, type LucideIcon } from "lucide-react";
 import { useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { ActivePill } from "../common/ActivePill";
 import { WorkspaceMenu } from "./WorkspaceMenu";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -62,32 +62,8 @@ function ScopeMarker({ icon: Icon, label, hint }: { icon: LucideIcon; label: str
   );
 }
 
-/**
- * The active tab's fill, shared across all three buttons by `layoutId` so switching tabs slides
- * it rather than blinking it to the new position.
- *
- * Safe to key globally here, unlike in `WorkspaceMenu`: these buttons are siblings that stay
- * mounted for the life of the bar, so Framer always has both the old and new rect to tween
- * between. Exactly one is rendered at a time, which is what makes it a move instead of a swap.
- */
-function ActivePill({ animate }: { animate: boolean }) {
-  return (
-    <motion.span
-      layoutId="cf-tab-pill"
-      aria-hidden
-      // Matching the workspace trigger's treatment: same radius, same accent-soft fill, same
-      // accent-tinted hairline — so the two ends of the bar read as one control family.
-      className="absolute inset-0 rounded-md border border-[color-mix(in_oklab,var(--cf-accent)_38%,transparent)] bg-[var(--cf-accent-soft)]"
-      transition={
-        animate ? { type: "spring", stiffness: 520, damping: 40, mass: 0.7 } : { duration: 0 }
-      }
-    />
-  );
-}
-
 function TabButton({ tab, active, badge }: { tab: Tab; active: boolean; badge?: number }) {
   const setActiveView = useUiStore((s) => s.setActiveView);
-  const reduceMotion = useReducedMotion();
   const t = useT();
   const Icon = tab.icon;
 
@@ -101,7 +77,9 @@ function TabButton({ tab, active, badge }: { tab: Tab; active: boolean; badge?: 
           : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
       }`}
     >
-      {active && <ActivePill animate={!reduceMotion} />}
+      {/* Same radius, fill and accent-tinted hairline as the workspace trigger at the other end
+          of the bar, so both read as one control family. */}
+      {active && <ActivePill layoutId="cf-tab-pill" />}
       {/* Above the pill, which is absolutely positioned over the whole button. */}
       <span className="relative flex items-center gap-1.5">
         <Icon size={14} />
