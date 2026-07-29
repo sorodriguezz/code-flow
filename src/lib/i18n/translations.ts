@@ -662,10 +662,22 @@ export const translations = {
     "api.backup.driveRestore": "Restore from Drive",
     "api.backup.driveNoFile": "There is no backup in this Drive account yet",
 
+    "common.beta": "beta",
     "api.collab.title": "Collaboration",
     "api.collab.about":
       "Share a collection through your own Supabase project. Nothing routes through anyone else's server: you create the project, run the install script in it once, and everyone you invite talks straight to it.",
     "api.collab.groupProject": "Your Supabase project",
+    "api.collab.oneProjectPerOwner":
+      "One project per person. This is where the collections you share are hosted; collections you were invited to live on the project of whoever invited you, and need nothing here.",
+    "api.collab.changingProjectWarning":
+      "You are already hosting collections on this project. Pointing it somewhere else does not move them — they will stop syncing for everyone.",
+    "api.collab.viaInvitation": "by invitation",
+    "api.collab.guestNoProject":
+      "You don't host anything yet, so there is nothing to set up here. The collections you were invited to work through the project of whoever invited you.",
+    "api.collab.setUpHosting": "Host my own collections",
+    "api.collab.disconnect": "Disconnect",
+    "api.collab.disconnectConfirm":
+      "Disconnect from \"{name}\"? Your copy stays here as an ordinary local collection; the shared one is untouched.",
     "api.collab.helpNewProject": "1. Create a project",
     "api.collab.helpApiKeys": "2. Copy the URL and anon key",
     "api.collab.helpSqlEditor": "3. Open the SQL editor",
@@ -730,6 +742,7 @@ export const translations = {
     "api.stale.message": "Someone else changed this request while you were editing it.",
     "api.stale.takeTheirs": "Discard my changes",
     "api.stale.keepMine": "Keep mine",
+    "api.collab.shareGone": "\"{name}\" is no longer shared — the project no longer has it. Your copy stays here.",
     "api.collab.rowShared": "Shared and in sync",
     "api.collab.rowPaused": "Shared — background sync is off",
     "api.collab.paused": "Shared, not syncing",
@@ -2287,10 +2300,22 @@ export const translations = {
     "api.backup.driveRestore": "Restaurar desde Drive",
     "api.backup.driveNoFile": "Todavía no hay ningún respaldo en esta cuenta de Drive",
 
+    "common.beta": "beta",
     "api.collab.title": "Colaboración",
     "api.collab.about":
       "Comparte una colección a través de tu propio proyecto de Supabase. Nada pasa por el servidor de nadie más: creas el proyecto, ejecutas el script de instalación una vez y todos los que invites hablan directamente con él.",
     "api.collab.groupProject": "Tu proyecto de Supabase",
+    "api.collab.oneProjectPerOwner":
+      "Un proyecto por persona. Aquí se alojan las colecciones que compartes tú; las colecciones a las que te invitaron viven en el proyecto de quien te invitó y no necesitan nada de esto.",
+    "api.collab.changingProjectWarning":
+      "Ya estás alojando colecciones en este proyecto. Apuntarlo a otro no las mueve — dejarán de sincronizar para todos.",
+    "api.collab.viaInvitation": "por invitación",
+    "api.collab.guestNoProject":
+      "Todavía no alojas nada, así que aquí no hay nada que configurar. Las colecciones a las que te invitaron funcionan con el proyecto de quien te invitó.",
+    "api.collab.setUpHosting": "Alojar mis propias colecciones",
+    "api.collab.disconnect": "Desconectar",
+    "api.collab.disconnectConfirm":
+      "¿Desconectarte de \"{name}\"? Tu copia se queda aquí como una colección local normal; la compartida no se toca.",
     "api.collab.helpNewProject": "1. Crear un proyecto",
     "api.collab.helpApiKeys": "2. Copiar la URL y la anon key",
     "api.collab.helpSqlEditor": "3. Abrir el editor SQL",
@@ -2355,6 +2380,7 @@ export const translations = {
     "api.stale.message": "Otra persona cambió este request mientras lo editabas.",
     "api.stale.takeTheirs": "Descartar mis cambios",
     "api.stale.keepMine": "Conservar el mío",
+    "api.collab.shareGone": "\"{name}\" ya no está compartida — el proyecto no la tiene. Tu copia se queda aquí.",
     "api.collab.rowShared": "Compartida y sincronizada",
     "api.collab.rowPaused": "Compartida — la sincronización automática está apagada",
     "api.collab.paused": "Compartida, sin sincronizar",

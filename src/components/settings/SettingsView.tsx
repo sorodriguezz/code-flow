@@ -27,7 +27,7 @@ import { GitSettings } from "./GitSettings";
 import { TerminalSettings } from "./TerminalSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { ShortcutsSettings } from "./ShortcutsSettings";
-import { ApiSettingsBody } from "../api/ApiSettingsModal";
+import { ApiSettingsBody } from "../api/ApiSettingsPanel";
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -144,7 +144,11 @@ export function SettingsView() {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex h-[640px] max-h-[85vh] w-[880px] max-w-[92vw] flex-col overflow-hidden rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+        // 1040 rather than the 880 it was: the nav takes 208 and the content its own padding, which
+        // used to leave the API client's section about 430px once its rail was in — narrow enough
+        // that a project URL showed a dozen characters and a truncation, which is the wrong end of
+        // a value anyone is trying to check. `max-w-[92vw]` still gives way on a small screen.
+        className="flex h-[640px] max-h-[85vh] w-[1040px] max-w-[92vw] flex-col overflow-hidden rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
       >
         <div className="flex shrink-0 items-center justify-between border-b border-[var(--cf-border)] px-4 py-2.5">
           <p className="text-[13px] font-semibold">{t("statusbar.settings")}</p>
@@ -184,7 +188,10 @@ export function SettingsView() {
             onCommit={(w) => commitSize("settingsNavWidth", w)}
           />
           <div className="flex-1 overflow-auto p-6">
-            <div className="mx-auto max-w-xl">
+            {/* Wider for the API client alone: it is the only section with a nav of its own, and
+                168px of that out of 576 would leave its forms in a column narrower than the labels
+                they carry. */}
+            <div className={`mx-auto ${section === "api" ? "max-w-3xl" : "max-w-xl"}`}>
               {section === "appearance" && <ThemeSettings />}
               {section === "general" && <GeneralSettings />}
               {section === "keybindings" && <ShortcutsSettings />}

@@ -334,6 +334,11 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS api_shared_collections (
             collection_id TEXT PRIMARY KEY,
             workspace_id  TEXT NOT NULL,
+            -- The Supabase project this particular share lives on. Per share, not per install:
+            -- hosting your own collections and accepting an invitation to a collection on someone
+            -- else's project are both normal, and often at the same time. A single global URL made
+            -- the second invitation silently break the first.
+            project_url   TEXT NOT NULL DEFAULT '',
             -- The name the remote knows it by; shown while joining, before the tree has it.
             remote_name   TEXT NOT NULL DEFAULT '',
             -- 'owner' for whoever created the share, 'member' for whoever accepted an invitation.
@@ -405,7 +410,22 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_pinned_to_api_collections(conn)?;
     add_updated_at_to_folders_and_environments(conn)?;
     add_collection_id_to_tombstones(conn)?;
+    add_project_url_to_shared_collections(conn)?;
     Ok(())
+}
+
+/// Shares created before a project could differ per share. They are all on whatever project was
+/// configured at the time, which the frontend still holds as its default — it backfills the column
+/// on the next launch rather than the migration guessing a URL it cannot see from here.
+fn add_project_url_to_shared_collections(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "api_shared_collections")?
+        || has_column(conn, "api_shared_collections", "project_url")?
+    {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "ALTER TABLE api_shared_collections ADD COLUMN project_url TEXT NOT NULL DEFAULT '';",
+    )
 }
 
 /// `github_host` records which GitHub server a linked project lives on (github.com or an

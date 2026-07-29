@@ -33,6 +33,7 @@ import { useApiStore } from "../../state/apiStore";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore, type ShareHealth } from "../../state/collabStore";
+import { useUiStore } from "../../state/uiStore";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useToastStore } from "../../state/toastStore";
@@ -926,15 +927,19 @@ export function CollectionTree() {
   const copyInvite = async (collectionId: string, name: string) => {
     const token = await useCollabStore.getState().tokenFor(collectionId);
     if (token === null) return;
-    const key = (await supabaseAnonKey().catch(() => null)) ?? "";
-    await navigator.clipboard.writeText(
-      encodeInvite({ url: useApiStore.getState().settings.supabaseUrl, key, token, name }),
-    );
+    // Addressed to the project this share actually lives on, which need not be the user's own.
+    const url = useCollabStore.getState().shareFor(collectionId)?.project_url ?? "";
+    if (url === "") return;
+    const key = (await supabaseAnonKey(url).catch(() => null)) ?? "";
+    await navigator.clipboard.writeText(encodeInvite({ url, key, token, name }));
     pushToast(t("api.collab.inviteCopied"), "success");
   };
 
-  const stopSharing = async (collectionId: string, name: string) => {
-    if (!(await confirmAction(t("api.collab.leaveConfirm", { name })))) return;
+  const stopSharing = async (collectionId: string, name: string, isOwner: boolean) => {
+    const question = isOwner
+      ? t("api.collab.leaveConfirm", { name })
+      : t("api.collab.disconnectConfirm", { name });
+    if (!(await confirmAction(question))) return;
     await useCollabStore.getState().leave(collectionId);
   };
 
@@ -973,21 +978,27 @@ export function CollectionTree() {
         onClick: () => openModal({ kind: "export", collectionId: node.id }),
       });
       if (sharedIds.has(node.id)) {
-        items.push({
-          label: t("api.collab.copyInvite"),
-          icon: Link2,
-          separated: true,
-          onClick: () => void copyInvite(node.id, node.name),
-        });
+        // The invitation carries the project's URL and key, so it is the host's to hand out and
+        // nobody else's — see the same gate in the collaboration pane.
+        const isOwner = useCollabStore.getState().shareFor(node.id)?.role === "owner";
+        if (isOwner) {
+          items.push({
+            label: t("api.collab.copyInvite"),
+            icon: Link2,
+            separated: true,
+            onClick: () => void copyInvite(node.id, node.name),
+          });
+        }
         items.push({
           label: t("api.collab.syncNow"),
           icon: RefreshCw,
+          separated: !isOwner,
           onClick: () => void syncCollection(node.id).catch(() => {}),
         });
         items.push({
-          label: t("api.collab.leave"),
+          label: isOwner ? t("api.collab.leave") : t("api.collab.disconnect"),
           icon: Unlink,
-          onClick: () => void stopSharing(node.id, node.name),
+          onClick: () => void stopSharing(node.id, node.name, isOwner),
         });
       } else {
         // Straight to the collaboration settings rather than a modal of its own: sharing a
@@ -997,7 +1008,7 @@ export function CollectionTree() {
           label: t("api.collab.shareCollection"),
           icon: Users,
           separated: true,
-          onClick: () => openModal({ kind: "settings", tab: "collab" }),
+          onClick: () => useUiStore.getState().openApiSettings("collab"),
         });
       }
     }

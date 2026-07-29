@@ -1065,6 +1065,8 @@ pub fn list_tombstones(
 pub struct SharedCollectionRow {
     pub collection_id: String,
     pub workspace_id: String,
+    /// The Supabase project this share lives on — every call about it is addressed here.
+    pub project_url: String,
     /// The local collection's name — empty when the row has outlived its collection.
     pub name: String,
     pub remote_name: String,
@@ -1081,19 +1083,20 @@ fn map_shared(row: &rusqlite::Row) -> rusqlite::Result<SharedCollectionRow> {
     Ok(SharedCollectionRow {
         collection_id: row.get(0)?,
         workspace_id: row.get(1)?,
-        name: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-        remote_name: row.get(3)?,
-        role: row.get(4)?,
-        cursor: row.get(5)?,
-        watermark: row.get(6)?,
-        last_sync_at: row.get(7)?,
-        last_error: row.get(8)?,
-        conflicts: row.get(9)?,
+        project_url: row.get(2)?,
+        name: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+        remote_name: row.get(4)?,
+        role: row.get(5)?,
+        cursor: row.get(6)?,
+        watermark: row.get(7)?,
+        last_sync_at: row.get(8)?,
+        last_error: row.get(9)?,
+        conflicts: row.get(10)?,
     })
 }
 
-const SHARED_COLUMNS: &str = "s.collection_id, s.workspace_id, c.name, s.remote_name, s.role, \
-     s.cursor, s.watermark, s.last_sync_at, s.last_error, \
+const SHARED_COLUMNS: &str = "s.collection_id, s.workspace_id, s.project_url, c.name, \
+     s.remote_name, s.role, s.cursor, s.watermark, s.last_sync_at, s.last_error, \
      (SELECT COUNT(*) FROM api_sync_conflicts k WHERE k.collection_id = s.collection_id)";
 
 /// Every shared collection on this machine, across every workspace — the collaboration panel is a
@@ -1131,20 +1134,31 @@ pub fn upsert_shared_collection(
     conn: &Connection,
     collection_id: &str,
     workspace_id: &str,
+    project_url: &str,
     remote_name: &str,
     role: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO api_shared_collections
-            (collection_id, workspace_id, remote_name, role, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+            (collection_id, workspace_id, project_url, remote_name, role, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(collection_id) DO UPDATE SET
             workspace_id = excluded.workspace_id,
+            project_url  = excluded.project_url,
             remote_name  = excluded.remote_name,
             role         = excluded.role",
-        params![collection_id, workspace_id, remote_name, role, now()],
+        params![collection_id, workspace_id, project_url, remote_name, role, now()],
     )?;
     Ok(())
+}
+
+/// Fills in the project for shares created before one could be recorded per share. The frontend is
+/// the only place that still knows which project those were made against — its default.
+pub fn backfill_share_projects(conn: &Connection, project_url: &str) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE api_shared_collections SET project_url = ?1 WHERE project_url = ''",
+        params![project_url],
+    )
 }
 
 /// Records the name the remote knows a share by, without touching its role or its cursor.

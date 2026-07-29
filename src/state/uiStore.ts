@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { VcsProvider } from "../types/domain";
+import type { ApiSettingsTab } from "./apiModalStore";
 
 /** `api` is the odd one out: it's the built-in API client, which is app-global rather than
  * scoped to a repo, so it renders whether or not a project is open (see `App.tsx`). */
@@ -55,9 +56,19 @@ interface UiState {
    * sidebar and a shortcut, none of which own the modal, so it lives here and is rendered once
    * at the app root. */
   prLinkModalOpen: boolean;
+  /** Which sub-tab the API client's settings section should open on, when asked for a specific one. */
+  apiSettingsTab: ApiSettingsTab | undefined;
   toggleSidebar: () => void;
   setActiveView: (view: MainView) => void;
   openSettings: (section: SettingsSectionId, hostingProvider?: VcsProvider) => void;
+  /**
+   * Opens the settings window on the API client's section, optionally on one of its sub-tabs.
+   *
+   * Its own action rather than a second argument to `openSettings`, because the sub-tab only means
+   * anything for one section and threading it through the general opener would put an `api`-shaped
+   * parameter on every call site that has nothing to do with the API client.
+   */
+  openApiSettings: (tab?: ApiSettingsTab) => void;
   toggleSettings: () => void;
   closeSettings: () => void;
   openInEditor: (relPath: string, line?: number) => void;
@@ -84,6 +95,7 @@ export const useUiStore = create<UiState>((set) => ({
   settingsOpen: false,
   settingsSection: "appearance",
   settingsHostingProvider: "azure",
+  apiSettingsTab: undefined,
   pendingEditorPath: null,
   pendingEditorLine: null,
   aiPanelOpen: false,
@@ -100,6 +112,8 @@ export const useUiStore = create<UiState>((set) => ({
       settingsSection: section,
       settingsHostingProvider: hostingProvider ?? s.settingsHostingProvider,
     })),
+  openApiSettings: (tab) =>
+    set({ settingsOpen: true, settingsSection: "api", apiSettingsTab: tab }),
   toggleSettings: () => set((s) => ({ settingsOpen: !s.settingsOpen })),
   closeSettings: () => set({ settingsOpen: false }),
   openInEditor: (relPath, line) =>

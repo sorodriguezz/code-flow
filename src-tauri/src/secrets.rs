@@ -108,10 +108,31 @@ pub fn gdrive_refresh_token_key() -> String {
     "gdrive-refresh-token".to_string()
 }
 
-/// The anon key of the user's own Supabase project. Public by design, but it is still the key to
-/// *their* project and belongs beside the share tokens rather than in a settings blob.
-pub fn supabase_anon_key() -> String {
+/// The anon key of one Supabase project, keyed by its host.
+///
+/// Per project, not per install. A person can host their own shared collections *and* accept
+/// invitations to collections living on somebody else's project — a client's, a second team's —
+/// and a single stored key would mean the most recent invitation silently revoked access to
+/// everything that came before it.
+pub fn supabase_anon_key(project_url: &str) -> String {
+    format!("supabase-anon:{}", project_host(project_url))
+}
+
+/// The single key of the days when one install meant one project. Still read as a fallback, so an
+/// existing setup keeps working without asking the user to paste their key again.
+pub fn supabase_legacy_anon_key() -> String {
     "supabase-anon-key".to_string()
+}
+
+/// The host, as the key to file a project's credential under: the same project reached as
+/// `https://x.supabase.co` and `https://x.supabase.co/` must not become two entries.
+fn project_host(project_url: &str) -> String {
+    project_url
+        .trim()
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .to_ascii_lowercase()
 }
 
 /// The share token for one shared collection — the whole credential for reaching it, so keyed per

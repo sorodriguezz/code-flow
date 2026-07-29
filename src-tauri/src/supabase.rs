@@ -121,36 +121,43 @@ async fn read_body(response: reqwest::Response) -> Result<String, String> {
 // Credentials
 // ---------------------------------------------------------------------------
 
-/// The anon key is public by design, but it is still the user's project identifier, and the share
+/// The anon key is public by design, but it is still the identifier of *a* project, and the share
 /// token very much is a credential — both live in the OS credential store rather than in settings.
-pub fn set_credentials(anon_key: &str) -> Result<(), String> {
+///
+/// Stored per project. Accepting an invitation to a collection on someone else's project must not
+/// disturb the key for the project the user hosts their own shares on.
+pub fn set_credentials(project_url: &str, anon_key: &str) -> Result<(), String> {
     if anon_key.trim().is_empty() {
-        return secrets::delete_secret(&secrets::supabase_anon_key());
+        return secrets::delete_secret(&secrets::supabase_anon_key(project_url));
     }
-    secrets::set_secret(&secrets::supabase_anon_key(), anon_key)
+    secrets::set_secret(&secrets::supabase_anon_key(project_url), anon_key)
 }
 
-pub fn has_credentials() -> Result<bool, String> {
-    Ok(secrets::get_secret(&secrets::supabase_anon_key())?
-        .filter(|k| !k.trim().is_empty())
-        .is_some())
+pub fn has_credentials(project_url: &str) -> Result<bool, String> {
+    Ok(public_anon_key(project_url)?.is_some())
 }
 
-/// The stored anon key, for building an invitation.
+/// The stored anon key for one project, for building an invitation.
 ///
 /// Handing it back to the UI is safe and deliberate: the anon key is public by design — it names
 /// the project, it authorises nothing, and the row-level-security policies ignore it entirely. It
-/// lives in the credential store because it is the user's project identifier and belongs beside the
-/// share tokens, not because it is a secret. Not reading it back is what used to make "copy
-/// invitation" fail until the key was typed in again from the dashboard.
-pub fn public_anon_key() -> Result<Option<String>, String> {
-    Ok(secrets::get_secret(&secrets::supabase_anon_key())?.filter(|k| !k.trim().is_empty()))
+/// lives in the credential store because it belongs beside the share tokens, not because it is a
+/// secret. Not reading it back is what used to make "copy invitation" fail until the key was typed
+/// in again from the dashboard.
+///
+/// Falls back to the single pre-multi-project entry, so an existing setup keeps working untouched.
+pub fn public_anon_key(project_url: &str) -> Result<Option<String>, String> {
+    if let Some(key) = secrets::get_secret(&secrets::supabase_anon_key(project_url))?
+        .filter(|k| !k.trim().is_empty())
+    {
+        return Ok(Some(key));
+    }
+    Ok(secrets::get_secret(&secrets::supabase_legacy_anon_key())?.filter(|k| !k.trim().is_empty()))
 }
 
-fn anon_key() -> Result<String, String> {
-    secrets::get_secret(&secrets::supabase_anon_key())?
-        .filter(|k| !k.trim().is_empty())
-        .ok_or_else(|| "no Supabase anon key is configured".to_string())
+fn anon_key(project_url: &str) -> Result<String, String> {
+    public_anon_key(project_url)?
+        .ok_or_else(|| format!("no Supabase anon key is stored for {}", trimmed_url(project_url)))
 }
 
 /// The share token for one local collection. Keyed per collection so a user can host one shared
@@ -192,7 +199,7 @@ fn mint_token() -> String {
 /// collection's token would make "connected" mean something different depending on which row of the
 /// sidebar happened to be selected.
 pub async fn check(url: String) -> Result<ConnectionCheck, String> {
-    let key = anon_key()?;
+    let key = anon_key(&url)?;
     match ping(&url, &key, "").await? {
         Some(_) => Ok(ConnectionCheck {
             reachable: true,
@@ -208,7 +215,7 @@ pub async fn check(url: String) -> Result<ConnectionCheck, String> {
 /// The name the remote has for this collection's share, or `None` when the token resolves to
 /// nothing — which is what a rotated or revoked token looks like from here.
 pub async fn probe(url: String, collection_id: String) -> Result<Option<String>, String> {
-    let key = anon_key()?;
+    let key = anon_key(&url)?;
     let Some(token) = share_token(&collection_id)? else {
         return Ok(None);
     };
@@ -273,7 +280,7 @@ pub async fn share(
     collection_id: String,
     name: String,
 ) -> Result<SharedCollection, String> {
-    let key = anon_key()?;
+    let key = anon_key(&url)?;
     let token = mint_token();
     let http = client()?;
 
@@ -314,7 +321,7 @@ pub async fn share(
 /// Keeps the remote share's display name in step with a local rename. Best-effort by design: a
 /// rename that can't reach the project is not worth failing the rename itself over.
 pub async fn rename(url: String, collection_id: String, name: String) -> Result<(), String> {
-    let key = anon_key()?;
+    let key = anon_key(&url)?;
     let token = require_token(&collection_id)?;
     let http = client()?;
 
@@ -343,7 +350,7 @@ pub async fn rename(url: String, collection_id: String, name: String) -> Result<
 /// Resolves an invitation token to the share it names, and remembers the token locally. Does not
 /// touch the local database — the caller decides which workspace the collection lands in.
 pub async fn join(url: String, token: String) -> Result<SharedCollection, String> {
-    let key = anon_key()?;
+    let key = anon_key(&url)?;
     let http = client()?;
 
     let response = request(
@@ -388,7 +395,7 @@ pub async fn join(url: String, token: String) -> Result<SharedCollection, String
 /// Replaces the token, which is how access is taken back: anyone still holding the old one stops
 /// matching every policy on their next request.
 pub async fn rotate(url: String, collection_id: String) -> Result<String, String> {
-    let key = anon_key()?;
+    let key = anon_key(&url)?;
     let current = require_token(&collection_id)?;
     let next = mint_token();
     let http = client()?;
@@ -431,7 +438,7 @@ pub async fn push(
     if items.is_empty() {
         return Ok(0);
     }
-    let key = anon_key()?;
+    let key = anon_key(&url)?;
     let token = require_token(&collection_id)?;
     let http = client()?;
 
@@ -464,7 +471,7 @@ pub async fn pull(
     collection_id: String,
     since: String,
 ) -> Result<Vec<SharedItem>, String> {
-    let key = anon_key()?;
+    let key = anon_key(&url)?;
     let token = require_token(&collection_id)?;
     let http = client()?;
 
@@ -493,7 +500,7 @@ pub async fn pull(
 /// asking a question this cheap is what makes a three-second poll reasonable on a free-tier project
 /// where a realtime socket would be the only alternative.
 pub async fn watermark(url: String, collection_id: String) -> Result<String, String> {
-    let key = anon_key()?;
+    let key = anon_key(&url)?;
     let token = require_token(&collection_id)?;
     let http = client()?;
 

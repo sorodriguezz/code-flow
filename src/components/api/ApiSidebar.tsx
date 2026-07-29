@@ -23,6 +23,7 @@ import { CARD } from "./panelChrome";
 import { useApiStore } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore } from "../../state/collabStore";
+import { useUiStore } from "../../state/uiStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
@@ -251,7 +252,11 @@ export function ApiSidebar() {
 
   const overflowItems: MenuItem[] = [
     { label: t("api.cookies"), icon: Cookie, onClick: () => openModal({ kind: "cookies" }) },
-    { label: t("api.settings.title"), icon: Settings, onClick: () => openModal({ kind: "settings" }) },
+    {
+      label: t("api.settings.title"),
+      icon: Settings,
+      onClick: () => useUiStore.getState().openApiSettings(),
+    },
   ];
 
   return (

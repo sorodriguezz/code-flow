@@ -12,7 +12,13 @@ import { create } from "zustand";
  * `ApiView` is the sole renderer. Opening one from outside the view is therefore only meaningful
  * together with `setActiveView("api")`, which is what mounts it.
  */
-/** The sub-tabs of the API client's settings — mirrors `TABS` in `ApiSettingsModal`. */
+/**
+ * The sub-tabs of the API client's settings — mirrors `TABS` in `ApiSettingsPanel`.
+ *
+ * The settings themselves are *not* one of these modals. They live in the app's own settings
+ * window, under "Ajustes del cliente API", and every entry point here routes there
+ * (`uiStore.openApiSettings`) rather than opening a second, smaller copy of the same panel.
+ */
 export type ApiSettingsTab =
   | "network"
   | "proxy"
@@ -25,9 +31,6 @@ export type ApiModal =
   | { kind: "environments" }
   | { kind: "import" }
   | { kind: "cookies" }
-  /** `tab` preselects one of the settings sub-tabs, for the menu entries that mean
-   *  "take me to that specific setting" rather than "open settings". */
-  | { kind: "settings"; tab?: ApiSettingsTab }
   | { kind: "export"; collectionId: string }
   | { kind: "runner"; collectionId: string; folderId: string | null }
   /** Accept an invitation to a shared collection. Sharing one lives in the settings pane. */

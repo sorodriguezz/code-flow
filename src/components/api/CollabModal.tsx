@@ -4,7 +4,7 @@ import { ApiModal, GhostButton, PrimaryButton } from "./ApiModal";
 import { Note } from "./settingsChrome";
 import { Select } from "../common/Select";
 import { useImportCollaborative } from "./CollaborationPanel";
-import { useApiModalStore } from "../../state/apiModalStore";
+import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 
@@ -19,7 +19,6 @@ import { useT } from "../../state/languageStore";
  */
 export function CollabModal({ onClose }: { onClose: () => void }) {
   const t = useT();
-  const openModal = useApiModalStore((s) => s.openApiModal);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const importCollaborative = useImportCollaborative();
@@ -47,7 +46,10 @@ export function CollabModal({ onClose }: { onClose: () => void }) {
       onClose={onClose}
       toolbar={
         <GhostButton
-          onClick={() => openModal({ kind: "settings", tab: "collab" })}
+          onClick={() => {
+            onClose();
+            useUiStore.getState().openApiSettings("collab");
+          }}
           title={t("api.collab.openSettings")}
         >
           <Settings size={12} />

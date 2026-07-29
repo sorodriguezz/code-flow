@@ -5,6 +5,7 @@ import {
   FolderInput,
   KeyRound,
   Link2,
+  Server,
   Plus,
   RefreshCw,
   ShieldAlert,
@@ -21,6 +22,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import {
+  apiBackfillShareProjects,
   apiLoadTree,
   supabaseAnonKey,
   supabaseCheck,
@@ -57,6 +59,11 @@ const HELP_URLS = {
 /** Re-verify on open if the last check is older than this. Cheap, and keeps the dot honest. */
 const RECHECK_AFTER_MS = 5 * 60_000;
 
+/** `https://abcd.supabase.co` → `abcd.supabase.co`. Enough to tell two projects apart in a tag. */
+function projectHost(url: string): string {
+  return url.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+}
+
 export function CollaborationPanel() {
   const t = useT();
   const settings = useApiStore((s) => s.settings);
@@ -72,16 +79,27 @@ export function CollaborationPanel() {
 
   const [anonKey, setAnonKey] = useState("");
   const [checking, setChecking] = useState(false);
+  const [hosting, setHosting] = useState(false);
   const [busy, setBusy] = useState(false);
   /** Every workspace's collections, so a share can be picked without switching workspace first. */
   const [trees, setTrees] = useState<Record<string, ApiCollection[]>>({});
 
   const configured = settings.supabaseUrl.trim() !== "" && hasKey;
+  const ownedShares = shares.filter((share) => share.role === "owner").length;
 
   useEffect(() => {
     void refresh();
-    void supabaseAnonKey().then((key) => setAnonKey(key ?? "")).catch(() => {});
-  }, [refresh]);
+    if (settings.supabaseUrl.trim() === "") return;
+    void supabaseAnonKey(settings.supabaseUrl).then((key) => setAnonKey(key ?? "")).catch(() => {});
+    // Shares created before a project could be recorded per share are all on this one, which is the
+    // only place that still knows it. Cheap and idempotent — it only ever touches empty columns.
+    void apiBackfillShareProjects(settings.supabaseUrl)
+      .then((filled) => {
+        if (filled > 0) void refresh();
+        void disownInheritedProject();
+      })
+      .catch(() => {});
+  }, [refresh, settings.supabaseUrl]);
 
   // Collections come from the database rather than from `apiStore`, which only ever holds the
   // active workspace's tree — and this panel is a list of *all* of them.
@@ -130,9 +148,30 @@ export function CollaborationPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [configured, settings.supabaseUrl]);
 
+  /**
+   * Clears a project URL that was never this person's to begin with.
+   *
+   * Accepting an invitation used to overwrite the single global project, because there was only
+   * one. On a machine that only ever joined, that leaves the *host's* server sitting in the field
+   * labelled "your project" — the one thing a member is not supposed to be looking at. The tell is
+   * exact: nothing is hosted here, and the URL is the one a share we are a member of points at.
+   * Only then, and it never touches a project the user actually set up.
+   */
+  const disownInheritedProject = async () => {
+    const current = useApiStore.getState().settings.supabaseUrl.trim();
+    if (current === "") return;
+    const rows = useCollabStore.getState().shares;
+    if (rows.some((share) => share.role === "owner")) return;
+    if (!rows.some((share) => share.project_url.trim() === current)) return;
+    await updateSettings({ supabaseUrl: "", supabaseReady: false, supabaseCheckedAt: "" });
+    await refresh();
+  };
+
   const saveKey = async (value: string) => {
     setAnonKey(value);
-    await supabaseSetAnonKey(value).catch((e: unknown) => pushErrorToast(String(e)));
+    await supabaseSetAnonKey(settings.supabaseUrl, value).catch((e: unknown) =>
+      pushErrorToast(String(e)),
+    );
     await refresh();
   };
 
@@ -155,11 +194,32 @@ export function CollaborationPanel() {
     days: t("api.collab.daysAgo"),
   });
 
+  // Someone who only ever accepted invitations hosts nothing, so a URL field, a key field, an
+  // install script and a connection test are four controls they will never touch — and the last
+  // thing a guest needs is a settings pane implying they are supposed to run a server. It folds
+  // away until they ask for it, or the moment they actually host something.
+  const hostsNothing = ownedShares === 0 && settings.supabaseUrl.trim() === "";
+
   return (
     <Panel>
       <Note>{t("api.collab.about")}</Note>
 
+      {hostsNothing && !hosting ? (
+        <Group title={t("api.collab.groupProject")}>
+          <Note>{t("api.collab.guestNoProject")}</Note>
+          <Actions>
+            <GhostButton onClick={() => setHosting(true)}>
+              <Server size={12} />
+              {t("api.collab.setUpHosting")}
+            </GhostButton>
+          </Actions>
+        </Group>
+      ) : (
       <Group title={t("api.collab.groupProject")}>
+        <Note>{t("api.collab.oneProjectPerOwner")}</Note>
+        {/* Changing it does not move anything: the shares already created live on the old project,
+            and every one of them would start failing against a URL that has never heard of them. */}
+        {ownedShares > 0 && <Note tone="warning">{t("api.collab.changingProjectWarning")}</Note>}
         {/* Create the project, copy its two values, then run the script — the three steps below,
             in that order, each landing on the page they happen on. */}
         <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -215,6 +275,7 @@ export function CollaborationPanel() {
           </Actions>
         </div>
       </Group>
+      )}
 
       <Group title={t("api.collab.groupShares")}>
         <Note>{t("api.collab.sharesAbout")}</Note>
@@ -377,6 +438,7 @@ function ShareRow({ collectionId, anonKey }: { collectionId: string; anonKey: st
 
   if (!share) return null;
   const name = share.name || share.remote_name;
+  const isOwner = share.role === "owner";
 
   const guard = async (action: () => Promise<void>) => {
     setBusy(true);
@@ -427,7 +489,10 @@ function ShareRow({ collectionId, anonKey }: { collectionId: string; anonKey: st
 
   const stop = () =>
     guard(async () => {
-      if (!(await confirmAction(t("api.collab.leaveConfirm", { name })))) return;
+      const question = isOwner
+        ? t("api.collab.leaveConfirm", { name })
+        : t("api.collab.disconnectConfirm", { name });
+      if (!(await confirmAction(question))) return;
       await leave(collectionId);
     });
 
@@ -449,6 +514,17 @@ function ShareRow({ collectionId, anonKey }: { collectionId: string; anonKey: st
     <div className="rounded-md bg-black/[0.02] px-2 py-1.5 dark:bg-white/[0.03]">
       <div className="flex items-center gap-2">
         <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{name}</span>
+        {/* The host sees which of their projects a share is on — theirs to know. A member is told
+            *how* they are connected, never *where*: the project, its URL and its key belong to
+            whoever invited them, and a guest has no business reading them off a settings pane. */}
+        {isOwner ? (
+          share.project_url !== "" &&
+          share.project_url !== settings.supabaseUrl && (
+            <Tag icon={Server}>{projectHost(share.project_url)}</Tag>
+          )
+        ) : (
+          <Tag icon={Link2}>{t("api.collab.viaInvitation")}</Tag>
+        )}
         {share.role === "owner" ? (
           <Tag icon={Crown}>{t("api.collab.roleOwner")}</Tag>
         ) : (
@@ -475,21 +551,29 @@ function ShareRow({ collectionId, anonKey }: { collectionId: string; anonKey: st
                     ? t("api.collab.syncedAgo", { ago: syncedAgo })
                     : t("api.collab.neverSynced")}
         </Status>
+        {/* A member is a guest on somebody else's project. They can move changes in and out, and
+            they can walk away — that is the whole of it. Handing out the invitation would be
+            re-sharing a project that is not theirs (the code carries its URL and key), and rotating
+            the token would lock out the person whose project it is, along with everyone else. */}
         <Actions>
-          <GhostButton onClick={copyInvite} disabled={busy} title={t("api.collab.copyInviteHint")}>
-            <ClipboardCopy size={12} />
-            {t("api.collab.copyInvite")}
-          </GhostButton>
+          {isOwner && (
+            <GhostButton onClick={copyInvite} disabled={busy} title={t("api.collab.copyInviteHint")}>
+              <ClipboardCopy size={12} />
+              {t("api.collab.copyInvite")}
+            </GhostButton>
+          )}
           <GhostButton onClick={syncOne} disabled={busy}>
             <RefreshCw size={12} />
             {t("api.collab.syncNow")}
           </GhostButton>
-          <GhostButton onClick={rotateCode} disabled={busy}>
-            <KeyRound size={12} />
-            {t("api.collab.rotate")}
-          </GhostButton>
+          {isOwner && (
+            <GhostButton onClick={rotateCode} disabled={busy}>
+              <KeyRound size={12} />
+              {t("api.collab.rotate")}
+            </GhostButton>
+          )}
           <GhostButton onClick={stop} disabled={busy}>
-            {t("api.collab.leave")}
+            {isOwner ? t("api.collab.leave") : t("api.collab.disconnect")}
           </GhostButton>
         </Actions>
       </div>
@@ -563,15 +647,22 @@ export function JoinBlock({ onDone }: { onDone?: () => void } = {}) {
 export function useImportCollaborative() {
   const t = useT();
   const join = useCollabStore((s) => s.join);
-  const updateSettings = useApiStore((s) => s.updateSettings);
   const pushToast = useToastStore((s) => s.pushToast);
 
   return async (code: string, workspaceId: string): Promise<boolean> => {
     try {
       const { decodeInvite } = await import("../../lib/api/sync");
       const invite = decodeInvite(code);
-      await supabaseSetAnonKey(invite.key);
-      await updateSettings({ supabaseUrl: invite.url, supabaseReady: true, supabaseCheckedAt: new Date().toISOString() });
+      // The key is stored *for the project the invitation names*, and the share records that
+      // project as its own. Nothing here touches the default above — that is the project this
+      // person shares their own collections from, and an invitation to someone else's is not a
+      // reason to redefine it. It used to be, which meant the second invitation silently cut off
+      // every collection accepted before it.
+      // The key is stored against the project the invitation names, and the share records that
+      // project as its own. Nothing is written to the settings above: that field is *this* person's
+      // project, the one they host their own collections on, and a guest never becomes the owner of
+      // somebody else's — putting the host's URL there would put their server on a settings pane
+      // belonging to someone who has no business reading it.
 
       const collectionId = await join(invite.url, invite.token, workspaceId);
       if (collectionId === null) return false;

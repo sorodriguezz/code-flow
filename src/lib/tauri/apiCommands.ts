@@ -319,6 +319,8 @@ export interface SharedCollection {
 export interface SharedCollectionRow {
   collection_id: string;
   workspace_id: string;
+  /** The Supabase project this share lives on. Every call about it is addressed here. */
+  project_url: string;
   /** The local collection's name; empty when the collection has been deleted here. */
   name: string;
   remote_name: string;
@@ -361,10 +363,11 @@ export interface SyncConflict {
 /** The SQL the host runs once in their project's editor. */
 export const supabaseInstallSql = () => invoke<string>("supabase_install_sql");
 
-export const supabaseSetAnonKey = (anonKey: string) =>
-  invoke<void>("supabase_set_anon_key", { anonKey });
+/** Stores the anon key **for one project** — a user can be on several at once. */
+export const supabaseSetAnonKey = (url: string, anonKey: string) =>
+  invoke<void>("supabase_set_anon_key", { url, anonKey });
 
-export const supabaseHasKey = () => invoke<boolean>("supabase_has_key");
+export const supabaseHasKey = (url: string) => invoke<boolean>("supabase_has_key", { url });
 
 export const supabaseShareToken = (collectionId: string) =>
   invoke<string | null>("supabase_share_token", { collectionId });
@@ -426,5 +429,10 @@ export const apiResolveConflict = (
   keep: "mine" | "theirs",
 ) => invoke<void>("api_resolve_conflict", { collectionId, kind, id, keep });
 
-/** The stored anon key, so an invitation can be built without re-typing it. Public by design. */
-export const supabaseAnonKey = () => invoke<string | null>("supabase_anon_key");
+/** The stored anon key for a project, so an invitation can be built without re-typing it. */
+export const supabaseAnonKey = (url: string) =>
+  invoke<string | null>("supabase_anon_key", { url });
+
+/** Adopts a project for every share that predates per-share projects. Returns how many it filled. */
+export const apiBackfillShareProjects = (url: string) =>
+  invoke<number>("api_backfill_share_projects", { url });

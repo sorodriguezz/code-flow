@@ -527,20 +527,28 @@ pub fn supabase_install_sql() -> &'static str {
     supabase::INSTALL_SQL
 }
 
+/// Stores the anon key **for one project**. A user can be on several.
 #[tauri::command]
-pub fn supabase_set_anon_key(anon_key: String) -> Result<(), String> {
-    supabase::set_credentials(&anon_key)
+pub fn supabase_set_anon_key(url: String, anon_key: String) -> Result<(), String> {
+    supabase::set_credentials(&url, &anon_key)
 }
 
 #[tauri::command]
-pub fn supabase_has_key() -> Result<bool, String> {
-    supabase::has_credentials()
+pub fn supabase_has_key(url: String) -> Result<bool, String> {
+    supabase::has_credentials(&url)
 }
 
-/// The stored anon key. Public by design — see `supabase::public_anon_key`.
+/// The stored anon key for one project. Public by design — see `supabase::public_anon_key`.
 #[tauri::command]
-pub fn supabase_anon_key() -> Result<Option<String>, String> {
-    supabase::public_anon_key()
+pub fn supabase_anon_key(url: String) -> Result<Option<String>, String> {
+    supabase::public_anon_key(&url)
+}
+
+/// Adopts a project for every share that predates per-share projects.
+#[tauri::command]
+pub fn api_backfill_share_projects(db: State<Db>, url: String) -> Result<usize, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::backfill_share_projects(&conn, &url).map_err(|e| e.to_string())
 }
 
 /// The invitation token for one shared collection — what the host hands out, so the UI has to be
@@ -580,14 +588,14 @@ pub async fn supabase_share(
     workspace_id: String,
     name: String,
 ) -> Result<supabase::SharedCollection, String> {
-    let shared = supabase::share(url, collection_id.clone(), name.clone()).await?;
+    let shared = supabase::share(url.clone(), collection_id.clone(), name.clone()).await?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    api_queries::upsert_shared_collection(&conn, &collection_id, &workspace_id, &name, "owner")
+    api_queries::upsert_shared_collection(&conn, &collection_id, &workspace_id, &url, &name, "owner")
         .map_err(|e| e.to_string())?;
     Ok(shared)
 }
 
-/// Keeps the remote's display name in step with a local rename.
+/// Keeps the remote's display name in step with a local rename. Host only.
 #[tauri::command]
 pub async fn supabase_rename_share(
     db: State<'_, Db>,
@@ -595,9 +603,28 @@ pub async fn supabase_rename_share(
     collection_id: String,
     name: String,
 ) -> Result<(), String> {
+    require_owner(&db, &collection_id)?;
     supabase::rename(url, collection_id.clone(), name.clone()).await?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     api_queries::rename_shared_collection(&conn, &collection_id, &name).map_err(|e| e.to_string())
+}
+
+/// Refuses anything that reaches into the *host's* half of a share.
+///
+/// A member holds a token that row-level security cannot tell apart from the host's — it is the
+/// same credential, and the project has no idea which of the two people holding it is which. So the
+/// distinction has to be kept here, against the role recorded when the share was created or
+/// accepted. Without it, rotating the code is something any member can do, and doing it locks the
+/// host and every other member out of their own collection.
+fn require_owner(db: &State<'_, Db>, collection_id: &str) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let share = api_queries::shared_collection(&conn, collection_id)
+        .map_err(|e| e.to_string())?
+        .ok_or("this collection is not shared")?;
+    if share.role != "owner" {
+        return Err("only the host of a shared collection can do that".to_string());
+    }
+    Ok(())
 }
 
 /// Accepts an invitation: resolves the token, files the share under the workspace the user picked,
@@ -609,15 +636,29 @@ pub async fn supabase_join(
     token: String,
     workspace_id: String,
 ) -> Result<supabase::SharedCollection, String> {
-    let shared = supabase::join(url, token).await?;
+    let shared = supabase::join(url.clone(), token).await?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    api_queries::upsert_shared_collection(&conn, &shared.id, &workspace_id, &shared.name, "member")
-        .map_err(|e| e.to_string())?;
+    api_queries::upsert_shared_collection(
+        &conn,
+        &shared.id,
+        &workspace_id,
+        &url,
+        &shared.name,
+        "member",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(shared)
 }
 
+/// Host only: rotating is how access is taken back, so a member doing it would be locking out the
+/// person whose project this is.
 #[tauri::command]
-pub async fn supabase_rotate(url: String, collection_id: String) -> Result<String, String> {
+pub async fn supabase_rotate(
+    db: State<'_, Db>,
+    url: String,
+    collection_id: String,
+) -> Result<String, String> {
+    require_owner(&db, &collection_id)?;
     supabase::rotate(url, collection_id).await
 }
 

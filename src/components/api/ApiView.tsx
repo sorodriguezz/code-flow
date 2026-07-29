@@ -8,7 +8,6 @@ import { EnvironmentModal } from "./EnvironmentModal";
 import { ImportModal } from "./ImportModal";
 import { ExportModal } from "./ExportModal";
 import { RunnerModal } from "./RunnerModal";
-import { ApiSettingsModal } from "./ApiSettingsModal";
 import { CookieModal } from "./CookieModal";
 import { CollabModal } from "./CollabModal";
 import { ConflictModal } from "./ConflictModal";
@@ -164,7 +163,6 @@ export function ApiView() {
       {modal?.kind === "environments" && <EnvironmentModal onClose={closeModal} />}
       {modal?.kind === "import" && <ImportModal onClose={closeModal} />}
       {modal?.kind === "cookies" && <CookieModal onClose={closeModal} />}
-      {modal?.kind === "settings" && <ApiSettingsModal tab={modal.tab} onClose={closeModal} />}
       {modal?.kind === "export" && (
         <ExportModal collectionId={modal.collectionId} onClose={closeModal} />
       )}

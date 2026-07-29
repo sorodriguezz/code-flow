@@ -17,12 +17,13 @@ import {
 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
-import { ActiveUnderline } from "../common/ActivePill";
-import { ApiModal, Field, GhostButton, Row } from "./ApiModal";
+import { ActivePill } from "../common/ActivePill";
+import { Field, GhostButton, Row } from "./ApiModal";
 import { Actions, Group, HelpLink, Note, Panel, Status } from "./settingsChrome";
 import { CollaborationPanel } from "./CollaborationPanel";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
 import { useCollabStore } from "../../state/collabStore";
+import { useUiStore } from "../../state/uiStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -116,24 +117,6 @@ function PathField({
       <Field mono value={value} placeholder={placeholder} onChange={onChange} />
       <GhostButton onClick={() => void browse()}>{t("api.settings.browse")}</GhostButton>
     </div>
-  );
-}
-
-export function ApiSettingsModal({
-  tab,
-  onClose,
-}: {
-  /** Opens straight onto one sub-tab, for callers that mean a specific setting. */
-  tab?: ApiSettingsTab;
-  onClose: () => void;
-}) {
-  const t = useT();
-  return (
-    <ApiModal icon={Settings2} title={t("api.settings.title")} width="max-w-2xl" onClose={onClose}>
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        <ApiSettingsBody initialTab={tab} />
-      </div>
-    </ApiModal>
   );
 }
 
@@ -767,12 +750,12 @@ function DriveConnection({ busy, onRestore }: { busy: boolean; onRestore: () => 
 
 // ---------------------------------------------------------------------------
 
-const TABS: { id: ApiSettingsTab; labelKey: TranslationKey; icon: LucideIcon }[] = [
+const TABS: { id: ApiSettingsTab; labelKey: TranslationKey; icon: LucideIcon; beta?: boolean }[] = [
   { id: "network", labelKey: "api.settings.network", icon: Network },
   { id: "proxy", labelKey: "api.settings.proxy", icon: Waypoints },
   { id: "certificates", labelKey: "api.settings.certificates", icon: ShieldCheck },
   { id: "general", labelKey: "settings.general", icon: Settings2 },
-  { id: "backup", labelKey: "api.backup.title", icon: DatabaseBackup },
+  { id: "backup", labelKey: "api.backup.title", icon: DatabaseBackup, beta: true },
   { id: "collab", labelKey: "api.collab.title", icon: Share2 },
 ];
 
@@ -783,8 +766,12 @@ const TABS: { id: ApiSettingsTab; labelKey: TranslationKey; icon: LucideIcon }[]
  * Behind sub-tabs rather than stacked: five groups down one scroll meant the backup controls — the
  * ones a new user has to find — sat below three screens of transport tuning nobody edits twice.
  */
-export function ApiSettingsBody({ initialTab }: { initialTab?: ApiSettingsTab } = {}) {
+export function ApiSettingsBody() {
   const t = useT();
+  // Which sub-tab to land on comes from whoever opened the window: "share this collection" asks for
+  // the collaboration one, and anything that just wants "settings" asks for nothing and gets the
+  // first tab.
+  const initialTab = useUiStore((s) => s.apiSettingsTab);
   // Reachable from the Settings window before the API view has ever been opened, in which case
   // the store still holds its defaults — and writing one back would overwrite what's on disk.
   useEffect(() => {
@@ -800,33 +787,54 @@ export function ApiSettingsBody({ initialTab }: { initialTab?: ApiSettingsTab } 
   }, [initialTab]);
 
   return (
-    <>
-      <div className="mb-3 flex flex-wrap gap-1 border-b border-[var(--cf-border)]">
-        {TABS.map(({ id, labelKey, icon: Icon }) => (
+    <div className="flex gap-4">
+      {/* A rail rather than a strip across the top.
+          Six sub-tabs with Spanish labels in a 576px column already wrapped, and the wrap put
+          "Colaboración" — the one most used right now — alone on a second line; a "beta" badge was
+          all it took to tip it over. Down the side there is nothing to wrap: a seventh tab, a
+          longer translation or another badge all just make the list one row taller. It is also the
+          shape the settings window around it already uses, which is why a nested nav reads as part
+          of the same furniture instead of as a second idea. */}
+      <nav className="sticky top-0 w-[168px] shrink-0 self-start">
+        {TABS.map(({ id, labelKey, icon: Icon, beta }) => (
           <button
             key={id}
             onClick={() => setTab(id)}
-            // No weight change on select: bolding re-measures the label and shoves every tab to
-            // its right along by a few pixels.
-            className={`relative -mb-px flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] ${
+            aria-current={tab === id ? "page" : undefined}
+            title={t(labelKey)}
+            // Colour and the pill carry the selection; no weight change, for the same reason the
+            // outer nav avoids one — bolding re-measures the label and reflows the row.
+            className={`relative mb-0.5 flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
               tab === id
                 ? "text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
             }`}
           >
-            {tab === id && <ActiveUnderline layoutId="cf-api-settings-tab-underline" />}
-            <Icon size={13} />
-            {t(labelKey)}
+            {tab === id && <ActivePill layoutId="cf-api-settings-pill" />}
+            {/* Above the pill, which covers the whole button. */}
+            <span className="relative flex min-w-0 flex-1 items-center gap-1.5">
+              <Icon size={13} className="shrink-0" />
+              <span className="truncate">{t(labelKey)}</span>
+              {/* Says "this one has not been through as many hands as the rest yet" — sized and
+                  coloured to be read once and then ignored, not to compete with the label. */}
+              {beta && (
+                <span className="ml-auto shrink-0 rounded bg-[color-mix(in_oklab,var(--cf-warning)_18%,transparent)] px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide text-[var(--cf-warning)]">
+                  {t("common.beta")}
+                </span>
+              )}
+            </span>
           </button>
         ))}
-      </div>
+      </nav>
 
-      {tab === "network" && <NetworkPanel />}
-      {tab === "proxy" && <ProxyPanel />}
-      {tab === "certificates" && <CertificatesPanel />}
-      {tab === "general" && <GeneralPanel />}
-      {tab === "backup" && <BackupPanel />}
-      {tab === "collab" && <CollaborationPanel />}
-    </>
+      <div className="min-w-0 flex-1">
+        {tab === "network" && <NetworkPanel />}
+        {tab === "proxy" && <ProxyPanel />}
+        {tab === "certificates" && <CertificatesPanel />}
+        {tab === "general" && <GeneralPanel />}
+        {tab === "backup" && <BackupPanel />}
+        {tab === "collab" && <CollaborationPanel />}
+      </div>
+    </div>
   );
 }

@@ -1,7 +1,15 @@
 import { useApiStore } from "../../state/apiStore";
 import { useCollabStore } from "../../state/collabStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { supabaseSync, supabaseWatermark, type SyncResult } from "../tauri/apiCommands";
+import {
+  supabaseProbe,
+  supabaseSync,
+  supabaseWatermark,
+  type SyncResult,
+} from "../tauri/apiCommands";
+import { useToastStore } from "../../state/toastStore";
+import { translations } from "../i18n/translations";
+import { useLanguageStore } from "../../state/languageStore";
 import type { ApiCollection, ApiFolder, ApiRequestRow } from "../../types/api";
 
 /**
@@ -41,6 +49,20 @@ const BACKOFF_MAX_MS = 120_000;
 
 /** How many probes have to fail in a row before the panel is told. One is a blip, three is a fact. */
 const PROBE_FAILURES_BEFORE_REPORTING = 3;
+
+/**
+ * How many shares one tick may ask about.
+ *
+ * The probe is cheap, but ten shared collections at one request every three seconds is three
+ * requests a second against a free-tier project for the rest of the session — and nine of those are
+ * about collections nobody is looking at. So the shares take turns, and the one that owns the
+ * request on screen always gets a turn. What that buys is "instant" for the thing being worked on
+ * and "within half a minute" for everything else, which is the right way round.
+ */
+const MAX_PROBES_PER_TICK = 2;
+
+/** Rotates through the shares that don't own the active tab. */
+let probeCursor = 0;
 
 let probeTimer: ReturnType<typeof setInterval> | null = null;
 let pushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -118,7 +140,9 @@ export function decodeInvite(code: string): Invite {
  * flight — which is what the manual button distinguishes from "synced, nothing had changed".
  */
 export async function syncCollection(collectionId: string): Promise<SyncResult | null> {
-  const url = useApiStore.getState().settings.supabaseUrl.trim();
+  // The project comes from the share, never from the settings: the default there is only where a
+  // *new* share would be created, and a collection someone invited us to lives wherever they host.
+  const url = useCollabStore.getState().shareFor(collectionId)?.project_url.trim() ?? "";
   if (url === "") return null;
   if (running.has(collectionId)) return null;
 
@@ -192,7 +216,8 @@ export async function syncNow(): Promise<SyncResult[]> {
 // ---------------------------------------------------------------------------
 
 async function probe(collectionId: string) {
-  const url = useApiStore.getState().settings.supabaseUrl.trim();
+  const share = useCollabStore.getState().shareFor(collectionId);
+  const url = share?.project_url.trim() ?? "";
   if (url === "" || running.has(collectionId)) return;
 
   const due = nextAttempt.get(collectionId) ?? 0;
@@ -210,12 +235,17 @@ async function probe(collectionId: string) {
     // that column, `syncCollection` re-reads the rows before it returns, and a local mirror that
     // never learned about a share created mid-session would compare against "" — which is less than
     // every timestamp, so the probe would fire a pointless full round every three seconds forever.
-    const cursor = useCollabStore.getState().shareFor(collectionId)?.cursor ?? "";
+    const cursor = share?.cursor ?? "";
     // String comparison is the right one: these are RFC 3339 timestamps with a fixed offset, which
     // sort lexicographically, and the backend compares them the same way.
     if (mark !== "" && mark > cursor) {
       await syncCollection(collectionId);
+      return;
     }
+    // The server holds nothing, but we have pulled from it before. Either everything was deleted or
+    // this machine can no longer see it — and a revoked token looks exactly like an empty share to
+    // row-level security, which answers with no rows rather than an error. Worth one question.
+    if (mark === "" && cursor !== "") await detachIfGone(collectionId, url);
   } catch {
     const count = before + 1;
     failures.set(collectionId, count);
@@ -223,8 +253,48 @@ async function probe(collectionId: string) {
     // Surfaced once, on the third consecutive failure rather than the first: a single dropped
     // request is noise, but a rotated invitation code looks exactly like this and would otherwise
     // leave the panel claiming "synced 5 minutes ago" for the rest of the session.
-    if (count === PROBE_FAILURES_BEFORE_REPORTING) void useCollabStore.getState().refresh();
+    if (count === PROBE_FAILURES_BEFORE_REPORTING) {
+      void useCollabStore.getState().refresh();
+      void detachIfGone(collectionId, url);
+    }
   }
+}
+
+/**
+ * Asks the project whether this share still exists, and stops syncing it here if it does not.
+ *
+ * The local copy is never touched. Everything the collection contains is in this machine's own
+ * database — the shared project is a channel, not the storage — so a host who deletes their project,
+ * or rotates the code, takes away the syncing and nothing else. The collection stays exactly where
+ * it is, as an ordinary local one.
+ *
+ * Deliberately asks rather than assuming. A project that cannot be reached at all raises here and
+ * is left alone: "the wifi is down" and "you no longer have access" must not have the same
+ * consequence, and only one of them is answerable from a single round trip.
+ */
+async function detachIfGone(collectionId: string, url: string) {
+  let name: string | null;
+  try {
+    name = await supabaseProbe(url, collectionId);
+  } catch {
+    return; // Unreachable, not gone.
+  }
+  if (name !== null) return;
+
+  const share = useCollabStore.getState().shareFor(collectionId);
+  await useCollabStore.getState().leave(collectionId);
+  useToastStore
+    .getState()
+    .pushToast(
+      translate("api.collab.shareGone").replace("{name}", share?.name || share?.remote_name || ""),
+      "info",
+    );
+}
+
+/** Same lookup `useT()` does, minus the hook — this module is not a component. */
+function translate(key: keyof (typeof translations)["en"]): string {
+  const language = useLanguageStore.getState().language;
+  return translations[language][key] ?? translations.en[key] ?? key;
 }
 
 let sinceLastProbe = 0;
@@ -240,7 +310,28 @@ function tick() {
   if (sinceLastProbe < wanted) return;
   sinceLastProbe = 0;
 
-  for (const id of activeShares()) void probe(id);
+  const shares = activeShares();
+  if (shares.length === 0) return;
+
+  // The collection behind the request on screen is the one whose latency anyone can feel.
+  const tabs = useApiStore.getState();
+  const focused = tabs.openTabs.find((tab) => tab.id === tabs.activeTabId)?.collectionId ?? null;
+
+  const queue = shares.filter((id) => id !== focused);
+  const turn: string[] = focused !== null && shares.includes(focused) ? [focused] : [];
+
+  // The cursor advances by what was taken *from the queue*, never by the size of the turn — the
+  // focused share is not part of the rotation, and counting it would step the cursor two at a time.
+  // Over an even-length queue that lands on the same half forever, and the other half is never
+  // asked about at all.
+  let taken = 0;
+  while (turn.length < MAX_PROBES_PER_TICK && taken < queue.length) {
+    turn.push(queue[(probeCursor + taken) % queue.length]);
+    taken++;
+  }
+  if (queue.length > 0) probeCursor = (probeCursor + taken) % queue.length;
+
+  for (const id of turn) void probe(id);
 }
 
 /** Which collections a store change touched, so a push doesn't wake every share in the workspace. */

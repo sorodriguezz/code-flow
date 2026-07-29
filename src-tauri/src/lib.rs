@@ -359,6 +359,7 @@ pub fn run() {
             commands::api_cmd::supabase_watermark,
             commands::api_cmd::supabase_sync,
             commands::api_cmd::api_shared_collections,
+            commands::api_cmd::api_backfill_share_projects,
             commands::api_cmd::api_sync_conflicts,
             commands::api_cmd::api_resolve_conflict,
         ])

@@ -67,7 +67,11 @@ export const useCollabStore = create<CollabState>((set, get) => ({
 
   refresh: async () => {
     try {
-      const [shares, hasKey] = await Promise.all([apiSharedCollections(), supabaseHasKey()]);
+      const url = useApiStore.getState().settings.supabaseUrl;
+      const [shares, hasKey] = await Promise.all([
+        apiSharedCollections(),
+        url.trim() === "" ? Promise.resolve(false) : supabaseHasKey(url),
+      ]);
       set({ shares, hasKey, loaded: true });
       await get().refreshConflicts();
     } catch (e) {
@@ -140,9 +144,10 @@ export const useCollabStore = create<CollabState>((set, get) => ({
   },
 
   rotate: async (collectionId) => {
-    const { settings } = useApiStore.getState();
+    const url = get().shareFor(collectionId)?.project_url;
+    if (!url) return null;
     try {
-      return await supabaseRotate(settings.supabaseUrl, collectionId);
+      return await supabaseRotate(url, collectionId);
     } catch (e) {
       pushErrorToast(String(e));
       return null;
