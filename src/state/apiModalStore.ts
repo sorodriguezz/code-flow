@@ -12,15 +12,26 @@ import { create } from "zustand";
  * `ApiView` is the sole renderer. Opening one from outside the view is therefore only meaningful
  * together with `setActiveView("api")`, which is what mounts it.
  */
+/** The sub-tabs of the API client's settings — mirrors `TABS` in `ApiSettingsModal`. */
+export type ApiSettingsTab =
+  | "network"
+  | "proxy"
+  | "certificates"
+  | "general"
+  | "backup"
+  | "collab";
+
 export type ApiModal =
   | { kind: "environments" }
   | { kind: "import" }
   | { kind: "cookies" }
-  | { kind: "settings" }
+  /** `tab` preselects one of the settings sub-tabs, for the menu entries that mean
+   *  "take me to that specific setting" rather than "open settings". */
+  | { kind: "settings"; tab?: ApiSettingsTab }
   | { kind: "export"; collectionId: string }
   | { kind: "runner"; collectionId: string; folderId: string | null }
-  /** Share a collection, or accept an invitation. `collectionId` preselects the one to share. */
-  | { kind: "collab"; collectionId?: string }
+  /** Accept an invitation to a shared collection. Sharing one lives in the settings pane. */
+  | { kind: "collab" }
   /** The records frozen by a three-way merge, and the choice for each. */
   | { kind: "conflicts" };
 

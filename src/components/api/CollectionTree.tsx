@@ -984,11 +984,14 @@ export function CollectionTree() {
           onClick: () => void stopSharing(node.id, node.name),
         });
       } else {
+        // Straight to the collaboration settings rather than a modal of its own: sharing a
+        // collection is a decision about the whole setup — which project, which workspaces are
+        // already sharing what — and a one-off dialog showed a single collection with none of it.
         items.push({
           label: t("api.collab.shareCollection"),
           icon: Users,
           separated: true,
-          onClick: () => openModal({ kind: "collab", collectionId: node.id }),
+          onClick: () => openModal({ kind: "settings", tab: "collab" }),
         });
       }
     }

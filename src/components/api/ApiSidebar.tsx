@@ -283,7 +283,10 @@ export function ApiSidebar() {
           {/* Collaboration gets its own button rather than a line in the overflow menu: pasting an
               invitation code is the first thing a new team member does in this app, and it should
               not be two clicks behind a "…". */}
-          <ToolbarButton onClick={() => openModal({ kind: "collab" })} title={t("api.collab.modalTitle")}>
+          <ToolbarButton
+            onClick={() => openModal({ kind: "collab" })}
+            title={t("api.collab.importCollaborative")}
+          >
             <Users size={13} />
           </ToolbarButton>
           {conflicts.length > 0 && (

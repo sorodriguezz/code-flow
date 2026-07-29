@@ -23,6 +23,7 @@ import { Actions, Group, HelpLink, Note, Panel, Status } from "./settingsChrome"
 import { CollaborationPanel } from "./CollaborationPanel";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
 import { useCollabStore } from "../../state/collabStore";
+import type { ApiSettingsTab } from "../../state/apiModalStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -118,12 +119,19 @@ function PathField({
   );
 }
 
-export function ApiSettingsModal({ onClose }: { onClose: () => void }) {
+export function ApiSettingsModal({
+  tab,
+  onClose,
+}: {
+  /** Opens straight onto one sub-tab, for callers that mean a specific setting. */
+  tab?: ApiSettingsTab;
+  onClose: () => void;
+}) {
   const t = useT();
   return (
     <ApiModal icon={Settings2} title={t("api.settings.title")} width="max-w-2xl" onClose={onClose}>
       <div className="min-h-0 flex-1 overflow-auto p-4">
-        <ApiSettingsBody />
+        <ApiSettingsBody initialTab={tab} />
       </div>
     </ApiModal>
   );
@@ -759,9 +767,7 @@ function DriveConnection({ busy, onRestore }: { busy: boolean; onRestore: () => 
 
 // ---------------------------------------------------------------------------
 
-type TabId = "network" | "proxy" | "certificates" | "general" | "backup" | "collab";
-
-const TABS: { id: TabId; labelKey: TranslationKey; icon: LucideIcon }[] = [
+const TABS: { id: ApiSettingsTab; labelKey: TranslationKey; icon: LucideIcon }[] = [
   { id: "network", labelKey: "api.settings.network", icon: Network },
   { id: "proxy", labelKey: "api.settings.proxy", icon: Waypoints },
   { id: "certificates", labelKey: "api.settings.certificates", icon: ShieldCheck },
@@ -777,7 +783,7 @@ const TABS: { id: TabId; labelKey: TranslationKey; icon: LucideIcon }[] = [
  * Behind sub-tabs rather than stacked: five groups down one scroll meant the backup controls — the
  * ones a new user has to find — sat below three screens of transport tuning nobody edits twice.
  */
-export function ApiSettingsBody() {
+export function ApiSettingsBody({ initialTab }: { initialTab?: ApiSettingsTab } = {}) {
   const t = useT();
   // Reachable from the Settings window before the API view has ever been opened, in which case
   // the store still holds its defaults — and writing one back would overwrite what's on disk.
@@ -785,7 +791,13 @@ export function ApiSettingsBody() {
     void ensureApiStoreLoaded();
   }, []);
 
-  const [tab, setTab] = useState<TabId>("network");
+  const [tab, setTab] = useState<ApiSettingsTab>(initialTab ?? "network");
+
+  // Initial state alone would only be read on mount, and a caller that asks for a tab while this
+  // is already on screen would be silently ignored.
+  useEffect(() => {
+    if (initialTab) setTab(initialTab);
+  }, [initialTab]);
 
   return (
     <>

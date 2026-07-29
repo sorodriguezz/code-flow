@@ -1,6 +1,6 @@
 import { memo, useMemo, useRef, useState } from "react";
 import { DiffEditor } from "@monaco-editor/react";
-import { Columns2, FileDiff, Rows3 } from "lucide-react";
+import { Columns2, FileDiff, Rows3, X } from "lucide-react";
 import type { FileDiffInfo } from "../../types/domain";
 import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
@@ -124,7 +124,22 @@ function ChangeMap({
   );
 }
 
-function DiffViewImpl({ files }: { files: FileDiffInfo[] }) {
+function DiffViewImpl({
+  files,
+  onClose,
+}: {
+  files: FileDiffInfo[];
+  /**
+   * Dismisses the diff. Supplied only where the diff is one pane of a view that reads perfectly
+   * well without it — the Changes screen — and left out where the diff *is* the view, as in the
+   * stash dialog, whose own chrome already closes it.
+   *
+   * Must be referentially stable. This component is memoised on its props precisely so that
+   * dragging the panel's resize handle doesn't rebuild a large diff on every pointer move, and an
+   * inline arrow would defeat that on every parent render.
+   */
+  onClose?: () => void;
+}) {
   const t = useT();
   const [mode, setMode] = useState<ViewMode>("unified");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -133,26 +148,39 @@ function DiffViewImpl({ files }: { files: FileDiffInfo[] }) {
     return <EmptyState icon={FileDiff} title={t("diff.noChanges")} subtitle={t("diff.noChangesHint")} />;
   }
 
-  const modeToggle = (
-    <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
-      <button
-        onClick={() => setMode("unified")}
-        title={t("diff.unifiedView")}
-        className={`flex h-5 w-5 items-center justify-center rounded ${
-          mode === "unified" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-        }`}
-      >
-        <Rows3 size={12} />
-      </button>
-      <button
-        onClick={() => setMode("split")}
-        title={t("diff.splitView")}
-        className={`flex h-5 w-5 items-center justify-center rounded ${
-          mode === "split" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-        }`}
-      >
-        <Columns2 size={12} />
-      </button>
+  /** Shared by both modes, so the close button can't exist in one view and not the other. */
+  const toolbar = (
+    <div className="flex items-center justify-end gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5">
+      <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
+        <button
+          onClick={() => setMode("unified")}
+          title={t("diff.unifiedView")}
+          className={`flex h-5 w-5 items-center justify-center rounded ${
+            mode === "unified" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+          }`}
+        >
+          <Rows3 size={12} />
+        </button>
+        <button
+          onClick={() => setMode("split")}
+          title={t("diff.splitView")}
+          className={`flex h-5 w-5 items-center justify-center rounded ${
+            mode === "split" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+          }`}
+        >
+          <Columns2 size={12} />
+        </button>
+      </div>
+      {onClose && (
+        <button
+          onClick={onClose}
+          title={t("diff.close")}
+          aria-label={t("diff.close")}
+          className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+        >
+          <X size={13} />
+        </button>
+      )}
     </div>
   );
 
@@ -160,7 +188,7 @@ function DiffViewImpl({ files }: { files: FileDiffInfo[] }) {
     return (
       <div className="flex h-full">
         <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
-          <div className="flex items-center justify-end border-b border-[var(--cf-border)] px-3 py-1.5">{modeToggle}</div>
+          {toolbar}
           <div className="divide-y divide-[var(--cf-border)]">
             {files.map((file, i) => {
               const color = statusColor(file.status);
@@ -192,7 +220,7 @@ function DiffViewImpl({ files }: { files: FileDiffInfo[] }) {
   return (
     <div className="flex h-full">
       <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
-        <div className="flex items-center justify-end border-b border-[var(--cf-border)] px-3 py-1.5">{modeToggle}</div>
+        {toolbar}
         <div className="divide-y divide-[var(--cf-border)]">
           {files.map((file, i) => {
             const color = statusColor(file.status);

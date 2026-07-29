@@ -164,16 +164,14 @@ export function ApiView() {
       {modal?.kind === "environments" && <EnvironmentModal onClose={closeModal} />}
       {modal?.kind === "import" && <ImportModal onClose={closeModal} />}
       {modal?.kind === "cookies" && <CookieModal onClose={closeModal} />}
-      {modal?.kind === "settings" && <ApiSettingsModal onClose={closeModal} />}
+      {modal?.kind === "settings" && <ApiSettingsModal tab={modal.tab} onClose={closeModal} />}
       {modal?.kind === "export" && (
         <ExportModal collectionId={modal.collectionId} onClose={closeModal} />
       )}
       {modal?.kind === "runner" && (
         <RunnerModal collectionId={modal.collectionId} folderId={modal.folderId} onClose={closeModal} />
       )}
-      {modal?.kind === "collab" && (
-        <CollabModal collectionId={modal.collectionId} onClose={closeModal} />
-      )}
+      {modal?.kind === "collab" && <CollabModal onClose={closeModal} />}
       {modal?.kind === "conflicts" && <ConflictModal onClose={closeModal} />}
     </>
   );

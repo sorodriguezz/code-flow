@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -249,6 +249,7 @@ export function ChangesPanel() {
   const commitSize = useLayoutStore((s) => s.commitSize);
 
   const [selected, setSelected] = useState<{ path: string; staged: boolean } | null>(null);
+  const clearSelection = useCallback(() => setSelected(null), []);
   const [viewMode, setViewMode] = useState<"list" | "tree">("list");
   const openAiPanel = useUiStore((s) => s.openAiPanel);
   const openInEditor = useUiStore((s) => s.openInEditor);
@@ -386,9 +387,14 @@ export function ChangesPanel() {
     <div className="flex h-full min-h-0 flex-col">
       {merging && <ConflictsBanner />}
       <div className="relative flex min-h-0 flex-1 gap-1.5 p-2">
+      {/* Fixed-width only while it has a neighbour. With no file selected there is no diff pane to
+          share the row with, so the list takes the whole width rather than leaving a placeholder
+          where the diff would have been. */}
       <div
-        style={{ width: listWidth }}
-        className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+        style={selected ? { width: listWidth } : undefined}
+        className={`flex flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${
+          selected ? "shrink-0" : "min-w-0 flex-1"
+        }`}
       >
         <div className="flex items-center justify-between border-b border-[var(--cf-border)] px-3 py-2">
           <span className="text-[12px] font-semibold text-[var(--cf-text-muted)]">{t("changes.changes")}</span>
@@ -581,22 +587,22 @@ export function ChangesPanel() {
         </div>
       </div>
 
-      <ResizeHandle
-        axis="x"
-        value={listWidth}
-        min={LIST_MIN}
-        max={LIST_MAX}
-        onChange={(w) => setSize("changesListWidth", w)}
-        onCommit={(w) => commitSize("changesListWidth", w)}
-      />
+      {selected && (
+        <>
+          <ResizeHandle
+            axis="x"
+            value={listWidth}
+            min={LIST_MIN}
+            max={LIST_MAX}
+            onChange={(w) => setSize("changesListWidth", w)}
+            onCommit={(w) => commitSize("changesListWidth", w)}
+          />
 
-      <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
-        {selected ? (
-          <DiffView files={selectedDiff} />
-        ) : (
-          <EmptyState icon={FileText} title={t("changes.selectFile")} subtitle={t("changes.selectFileHint")} />
-        )}
-      </div>
+          <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
+            <DiffView files={selectedDiff} onClose={clearSelection} />
+          </div>
+        </>
+      )}
       </div>
       {secretHits && (
         <SecretScanModal

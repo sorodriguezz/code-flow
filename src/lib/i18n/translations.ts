@@ -697,13 +697,11 @@ export const translations = {
     "api.collab.pickWorkspace": "Workspace",
     "api.collab.nothingLeftToShare": "Every collection here is already shared",
     "api.collab.noneShared": "No collections shared from this workspace yet.",
-    "api.collab.alreadyShared": "already shared",
     "api.collab.shareCollection": "Share this collection",
     "api.collab.share": "Share",
     "api.collab.shareHint":
       "Sharing creates an invitation code. Anyone you give it to gets this collection in their own workspace, kept in step with yours.",
     "api.collab.sharingStarted": "\"{name}\" is now shared",
-    "api.collab.codeReady": "Invitation code ready",
     "api.collab.tokenIsACredential":
       "The invitation code is the credential: anyone holding it can read and edit this collection. Share it like a password, and rotate it to take access back.",
     "api.collab.copyInvite": "Copy invitation",
@@ -746,13 +744,9 @@ export const translations = {
     "api.collab.joined": "\"{name}\" imported and syncing",
     "api.collab.invitationCode": "Invitation code",
     "api.collab.importCollaborative": "Collaborative collection",
-    "api.collab.modalTitle": "Collaborate on a collection",
-    "api.collab.modalSubtitle": "Share one of yours, or import one you were invited to",
-    "api.collab.tabShare": "Share",
-    "api.collab.tabImport": "Import",
+    "api.collab.modalSubtitle": "Paste the code someone sent you",
+    "api.collab.shareFromSettings": "To share one of yours, open the collaboration settings",
     "api.collab.openSettings": "Collaboration settings",
-    "api.collab.setUpFirst":
-      "Connect your Supabase project first — collaboration runs entirely on a project you own.",
 
     "api.conflict.title": "Changes to resolve",
     "api.conflict.subtitle": "{n} record(s) frozen until you decide",
@@ -1260,8 +1254,6 @@ export const translations = {
     "changes.discardAllConfirm":
       "Discard all {n} unstaged change(s)? Modified files go back to their last staged state and new files are deleted. Staged changes are kept. This can't be undone.",
     "changes.openInEditor": "Open in editor",
-    "changes.selectFile": "Select a file",
-    "changes.selectFileHint": "Pick a file on the left to see its diff.",
     "changes.generateWithAi": "Generate with AI",
     "changes.stageFirst": "Stage changes first",
     "changes.noRepo": "No repository loaded",
@@ -1288,6 +1280,7 @@ export const translations = {
 
     "diff.noChanges": "No changes",
     "diff.noChangesHint": "Nothing to show for this selection.",
+    "diff.close": "Close the diff",
     "diff.unifiedView": "Unified view",
     "diff.splitView": "Side-by-side view",
 
@@ -2322,13 +2315,11 @@ export const translations = {
     "api.collab.pickWorkspace": "Workspace",
     "api.collab.nothingLeftToShare": "Todas las colecciones de aquí ya están compartidas",
     "api.collab.noneShared": "Todavía no compartes ninguna colección de este workspace.",
-    "api.collab.alreadyShared": "ya compartida",
     "api.collab.shareCollection": "Compartir esta colección",
     "api.collab.share": "Compartir",
     "api.collab.shareHint":
       "Al compartir se genera un código de invitación. Quien lo reciba obtiene esta colección en su propio workspace, sincronizada con la tuya.",
     "api.collab.sharingStarted": "\"{name}\" ya está compartida",
-    "api.collab.codeReady": "Código de invitación listo",
     "api.collab.tokenIsACredential":
       "El código de invitación es la credencial: cualquiera que lo tenga puede leer y editar esta colección. Compártelo como una contraseña y rótalo para quitar el acceso.",
     "api.collab.copyInvite": "Copiar invitación",
@@ -2371,13 +2362,9 @@ export const translations = {
     "api.collab.joined": "\"{name}\" importada y sincronizando",
     "api.collab.invitationCode": "Código de invitación",
     "api.collab.importCollaborative": "Colección colaborativa",
-    "api.collab.modalTitle": "Colaborar en una colección",
-    "api.collab.modalSubtitle": "Comparte una tuya, o importa una a la que te invitaron",
-    "api.collab.tabShare": "Compartir",
-    "api.collab.tabImport": "Importar",
+    "api.collab.modalSubtitle": "Pega el código que te enviaron",
+    "api.collab.shareFromSettings": "Para compartir una tuya, abre los ajustes de colaboración",
     "api.collab.openSettings": "Ajustes de colaboración",
-    "api.collab.setUpFirst":
-      "Primero conecta tu proyecto de Supabase — la colaboración corre entera sobre un proyecto tuyo.",
 
     "api.conflict.title": "Cambios por resolver",
     "api.conflict.subtitle": "{n} registro(s) congelados hasta que decidas",
@@ -2886,8 +2873,6 @@ export const translations = {
     "changes.discardAllConfirm":
       "¿Descartar los {n} cambio(s) sin stage? Los archivos modificados vuelven a su último estado en stage y los archivos nuevos se eliminan. Lo que está en stage se conserva. Esto no se puede deshacer.",
     "changes.openInEditor": "Abrir en el editor",
-    "changes.selectFile": "Selecciona un archivo",
-    "changes.selectFileHint": "Elige un archivo a la izquierda para ver su diff.",
     "changes.generateWithAi": "Generar con IA",
     "changes.stageFirst": "Agrega cambios al stage primero",
     "changes.noRepo": "No hay repositorio cargado",
@@ -2914,6 +2899,7 @@ export const translations = {
 
     "diff.noChanges": "Sin cambios",
     "diff.noChangesHint": "No hay nada que mostrar para esta selección.",
+    "diff.close": "Cerrar el diff",
     "diff.unifiedView": "Vista unificada",
     "diff.splitView": "Vista en paralelo",
 

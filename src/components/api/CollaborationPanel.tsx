@@ -235,6 +235,7 @@ export function CollaborationPanel() {
             onChange={(syncAuto) => void updateSettings({ syncAuto })}
           />
         </Row>
+        <Note tone="warning">{t("api.collab.tokenIsACredential")}</Note>
         <Note>{t("api.collab.secretsNote")}</Note>
         <Note>{t("api.collab.conflictNote")}</Note>
       </Group>
@@ -318,6 +319,11 @@ function WorkspaceShares({
         </GhostButton>
       </div>
 
+      {picking && (
+        <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {t("api.collab.shareHint")}
+        </p>
+      )}
       {picking && (
         <div className="mt-1.5 flex items-center gap-1.5">
           <div className="min-w-0 flex-1">
