@@ -57,13 +57,13 @@ jobs:
       contents: write
     strategy:
       fail-fast: false
-      # Serializado a propósito: `tauri-action` crea el release en el primer job que termina y
-      # sube sus artefactos al existente en el resto. En paralelo los dos jobs consultan el tag
-      # a la vez, ambos ven que no existe y ambos intentan crearlo — el perdedor muere con
-      # "Validation Failed: tag_name already_exists". Lo mismo aplica a `latest.json`: el merge
-      # de plataformas es un read-modify-write no atómico, así que en paralelo una plataforma
-      # puede sobrescribir a la otra y dejar sin actualizaciones a la mitad de los usuarios.
-      # El costo es tiempo de reloj (~la suma de ambos builds); no vale la pena optimizarlo.
+      # Serialized on purpose: `tauri-action` creates the release in whichever job finishes
+      # first and uploads to the existing one afterwards. Run in parallel, both jobs look up
+      # the tag at the same time, both see it missing, and both try to create it — the loser
+      # dies with "Validation Failed: tag_name already_exists". The same applies to
+      # `latest.json`: merging the platform entries is a non-atomic read-modify-write, so in
+      # parallel one platform can clobber the other and leave half the users without updates.
+      # The cost is wall-clock (~the sum of both builds), which isn't worth optimizing here.
       max-parallel: 1
       matrix:
         include:

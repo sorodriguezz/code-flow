@@ -185,15 +185,20 @@ function StashesSection() {
     <CollapsibleSection
       icon={Archive}
       title={t("sidebar.stashes")}
-      action={
+      action={({ open, expand }) => (
         <button
-          onClick={() => setShowInput((v) => !v)}
+          // Same as the branch form: collapsed, the input isn't mounted, so "+" has to unfold
+          // the section before it can mean anything.
+          onClick={() => {
+            expand();
+            setShowInput(open ? !showInput : true);
+          }}
           className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
           title={t("sidebar.stashCurrentChanges")}
         >
           <Plus size={12} />
         </button>
-      }
+      )}
     >
       {showInput && (
         <div className="mb-1.5 flex items-center gap-1">
@@ -744,10 +749,13 @@ function PullRequestsSection({ project }: { project: Project }) {
     <CollapsibleSection
       icon={GitPullRequest}
       title={t("sidebar.pullRequests")}
-      action={
+      action={({ expand }) => (
         <div className="flex items-center gap-1.5">
           <button
-            onClick={() => setShowCreatePr(true)}
+            onClick={() => {
+              expand();
+              setShowCreatePr(true);
+            }}
             title={t("createPr.title")}
             className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
           >
@@ -769,7 +777,7 @@ function PullRequestsSection({ project }: { project: Project }) {
             <RefreshCw size={11} className={loading ? "animate-spin" : undefined} />
           </button>
         </div>
-      }
+      )}
     >
       {loadError ? (
         <div className="space-y-1 px-1.5">
@@ -967,15 +975,20 @@ function ProjectRow({ project }: { project: Project }) {
           <CollapsibleSection
             icon={GitBranch}
             title={t("sidebar.localBranches")}
-            action={
+            action={({ open, expand }) => (
               <button
-                onClick={() => setShowCreateBranch((v) => !v)}
+                // While collapsed the form isn't on screen, so "+" can only mean "show it";
+                // once the section is open it keeps working as a toggle.
+                onClick={() => {
+                  expand();
+                  setShowCreateBranch(open ? !showCreateBranch : true);
+                }}
                 className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
                 title={t("sidebar.newBranch")}
               >
                 <Plus size={12} />
               </button>
-            }
+            )}
           >
             {showCreateBranch && (
               <CreateBranchForm branches={branches} onDone={() => setShowCreateBranch(false)} />

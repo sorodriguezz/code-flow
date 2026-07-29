@@ -10,7 +10,11 @@ export function CollapsibleSection({
 }: {
   icon: LucideIcon;
   title: string;
-  action?: ReactNode;
+  // Header buttons — the "+" ones in particular — usually reveal a form or a modal that lives
+  // in `children`, and `children` isn't mounted while the section is collapsed, so their state
+  // flips with nothing on screen. Pass a function instead of a node to get `expand` (and the
+  // current `open`) and unfold the section as part of the same click.
+  action?: ReactNode | ((ctx: { open: boolean; expand: () => void }) => ReactNode);
   defaultOpen?: boolean;
   children: ReactNode;
 }) {
@@ -27,7 +31,7 @@ export function CollapsibleSection({
           <Icon size={12} />
           {title}
         </button>
-        {action}
+        {typeof action === "function" ? action({ open, expand: () => setOpen(true) }) : action}
       </div>
       {open && children}
     </div>
