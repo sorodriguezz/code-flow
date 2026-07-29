@@ -218,7 +218,13 @@ pub fn local_items(conn: &Connection, collection_id: &str) -> rusqlite::Result<V
 
     let consider = |kind: &str, id: &str, updated_at: &str| -> bool {
         let key = (kind.to_string(), id.to_string());
-        !frozen.contains(&key) && bases.get(&key).map(String::as_str) != Some(updated_at)
+        if frozen.contains(&key) {
+            return false;
+        }
+        match bases.get(&key) {
+            Some(base) => !same_instant(base, updated_at),
+            None => true,
+        }
     };
 
     if let Some((collection, folders, requests)) = api_queries::load_collection(conn, collection_id)? {
@@ -327,6 +333,33 @@ fn clear_base(conn: &Connection, collection_id: &str, kind: &str, id: &str) -> r
         params![collection_id, kind, id],
     )?;
     Ok(())
+}
+
+/// Whether two RFC 3339 timestamps name the same moment.
+///
+/// Never `==` on the strings. One side of every comparison here has usually been through the shared
+/// Postgres project, which prints a timestamp its own way: trailing zeros are stripped, so the
+/// `.582390` this machine wrote comes back as `.58239`. Those are the same instant and a string
+/// comparison says they are not — which marks the record as edited on both sides and freezes it as
+/// a conflict nobody caused.
+///
+/// (The other half of that round trip — Postgres *rounding* away precision it cannot store — is
+/// handled upstream, by `queries::now` stamping only microseconds. Parsing alone would not fix it,
+/// because a rounded value really is a different instant.)
+///
+/// Anything unparseable falls back to string equality: it did not come from a CodeFlow client, and
+/// guessing about it is worse than treating it as opaque.
+fn same_instant(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (
+        chrono::DateTime::parse_from_rfc3339(a),
+        chrono::DateTime::parse_from_rfc3339(b),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn base_map(conn: &Connection, collection_id: &str) -> rusqlite::Result<HashMap<(String, String), String>> {
@@ -492,12 +525,12 @@ pub fn apply_items(
 
         // Nothing moved on their side since we last agreed — whatever state we are in is ours to
         // push, not theirs to impose. The cursor still advanced, so this costs nothing next round.
-        if base.is_some_and(|b| *b == item.updated_at) {
+        if base.is_some_and(|b| same_instant(b, &item.updated_at)) {
             continue;
         }
 
         let local_moved = match (base, local) {
-            (Some(base), Some(local)) => local.updated_at != *base,
+            (Some(base), Some(local)) => !same_instant(&local.updated_at, base),
             // Here but never agreed: created locally under an id the remote also uses. Rare, and
             // exactly the case that must not be silently overwritten.
             (None, Some(_)) => true,
@@ -621,22 +654,38 @@ fn push_live(
     workspace_id: &str,
     existing: Option<&ApiCollection>,
 ) {
+    // **The column is the authority for the timestamp; the payload is the authority for the
+    // content.** They are two spellings of the same instant — the payload's is whatever the writing
+    // client formatted, the column's is what Postgres stored — and only the column's is what the
+    // base will hold. Landing the payload's would leave the applied row and the agreement one
+    // rendering apart, which reads as "edited here" on the very next round: an endless push/pull of
+    // records nobody has touched, and a false conflict the moment anyone touches one for real.
+    let stamp = |mut value: serde_json::Value| -> serde_json::Value {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "updated_at".into(),
+                serde_json::Value::String(item.updated_at.clone()),
+            );
+        }
+        value
+    };
+
     // A payload this build can't read is skipped rather than fatal: a newer client may be sharing a
     // record with a field this one doesn't know, and dropping one request is a much better outcome
     // than refusing the whole sync.
     match item.kind.as_str() {
         "collection" => {
-            if let Ok(row) = serde_json::from_value::<ApiCollection>(item.payload.clone()) {
+            if let Ok(row) = serde_json::from_value::<ApiCollection>(stamp(item.payload.clone())) {
                 live.collections.push(localise_collection(row, workspace_id, existing));
             }
         }
         "folder" => {
-            if let Ok(row) = serde_json::from_value(item.payload.clone()) {
+            if let Ok(row) = serde_json::from_value(stamp(item.payload.clone())) {
                 live.folders.push(row);
             }
         }
         "request" => {
-            if let Ok(row) = serde_json::from_value(item.payload.clone()) {
+            if let Ok(row) = serde_json::from_value(stamp(item.payload.clone())) {
                 live.requests.push(row);
             }
         }
@@ -1215,6 +1264,125 @@ mod tests {
         for id in ["c1", "f1", "r1"] {
             assert!(graves.contains(&id), "{id} must be tombstoned");
         }
+    }
+
+    /// How Postgres hands a timestamp back: `timestamptz` keeps microseconds and strips trailing
+    /// zeros, so the string is not the one that was sent even when the instant is.
+    fn as_postgres_returns_it(stamp: &str) -> String {
+        let parsed = chrono::DateTime::parse_from_rfc3339(stamp).unwrap();
+        let micros = parsed.to_utc().format("%Y-%m-%dT%H:%M:%S%.6f").to_string();
+        format!("{}+00:00", micros.trim_end_matches('0').trim_end_matches('.'))
+    }
+
+    /// The bug this pair of guards exists for. A record that came back from the shared project had
+    /// two spellings of one instant — the payload's and the column's — and comparing them as
+    /// strings marked every pulled record as locally edited, forever. Pushes carried the whole
+    /// collection every round, and every real incoming edit froze as a conflict nobody caused.
+    #[test]
+    fn a_timestamp_that_has_been_through_postgres_still_matches() {
+        assert!(same_instant(
+            "2026-07-28T13:47:12.582390+00:00",
+            "2026-07-28T13:47:12.58239+00:00"
+        ));
+        assert!(same_instant(
+            "2026-07-28T13:47:12.500000+00:00",
+            "2026-07-28T13:47:12.5+00:00"
+        ));
+        // A fraction that is all zeros loses the point as well.
+        assert!(same_instant(
+            "2026-07-28T13:47:12.000000+00:00",
+            "2026-07-28T13:47:12+00:00"
+        ));
+        // Same wall clock, different zone spelling.
+        assert!(same_instant(
+            "2026-07-28T13:47:12.582390+00:00",
+            "2026-07-28T10:47:12.582390-03:00"
+        ));
+        // And a real edit is still a real edit.
+        assert!(!same_instant(
+            "2026-07-28T13:47:12.582390+00:00",
+            "2026-07-28T13:47:12.582391+00:00"
+        ));
+    }
+
+    /// End to end: a peer's edit arrives with the server's spelling of every timestamp, and must
+    /// land instead of freezing.
+    #[test]
+    fn a_pull_whose_timestamps_came_back_from_postgres_is_not_a_conflict() {
+        let (mut peer, mut items) = synced_peer();
+        for item in &mut items {
+            // Everything the server returns is re-spelled, including the records nobody touched.
+            item.updated_at = as_postgres_returns_it(&item.updated_at);
+            if item.kind == "request" {
+                item.payload["name"] = serde_json::Value::String("Login (theirs)".into());
+                item.updated_at = as_postgres_returns_it("2027-01-01T00:00:00.120000+00:00");
+                item.payload["updated_at"] = serde_json::Value::String(item.updated_at.clone());
+            }
+        }
+
+        let result = apply_items(&mut peer, "c1", "w2", items).unwrap();
+
+        assert_eq!(result.conflicts, 0, "a re-spelled timestamp is not a second edit");
+        assert_eq!(result.applied.requests, 1);
+        assert_eq!(text(&peer, "SELECT name FROM api_requests WHERE id = 'r1'"), "Login (theirs)");
+    }
+
+    /// The invariant that stops the two spellings oscillating: an applied record is stamped with
+    /// the *column's* timestamp, which is the one the base will hold — not the payload's, which is
+    /// whatever the writing client formatted.
+    ///
+    /// Without it a pull leaves the row and the agreement one rendering apart, so the record reads
+    /// as edited here on the very next round; the push re-records the base in the local spelling,
+    /// the next pull disagrees again, and the collection ships back and forth forever.
+    #[test]
+    fn an_applied_record_is_stamped_with_the_timestamp_the_base_will_hold() {
+        let (mut peer, mut items) = synced_peer();
+        for item in &mut items {
+            if item.kind != "request" {
+                continue;
+            }
+            // The payload keeps the writer's nanosecond spelling; the column carries what the
+            // server stored. They are the same instant rendered two ways.
+            item.payload["name"] = serde_json::Value::String("Login (theirs)".into());
+            item.payload["updated_at"] =
+                serde_json::Value::String("2027-01-01T00:00:00.123456789+00:00".into());
+            item.updated_at = "2027-01-01T00:00:00.123457+00:00".into();
+        }
+
+        apply_items(&mut peer, "c1", "w2", items).unwrap();
+
+        let stored = text(&peer, "SELECT updated_at FROM api_requests WHERE id = 'r1'");
+        assert_eq!(stored, "2027-01-01T00:00:00.123457+00:00");
+        // And so the record is settled: not re-sent, and not a conflict next time round.
+        assert!(local_items(&peer, "c1").unwrap().iter().all(|i| i.id != "r1"));
+    }
+
+    /// And the outbound half: a record whose base only differs in spelling has not changed, so it
+    /// must not be re-sent — that re-send is what moved every peer's cursor every round.
+    #[test]
+    fn a_re_spelled_base_does_not_make_a_record_look_edited() {
+        let conn = seeded();
+        let mut pushed = local_items(&conn, "c1").unwrap();
+        for item in &mut pushed {
+            item.updated_at = as_postgres_returns_it(&item.updated_at);
+        }
+        record_base(&conn, "c1", &pushed).unwrap();
+
+        assert!(
+            local_items(&conn, "c1").unwrap().is_empty(),
+            "nothing changed; the differing spelling must not count as an edit"
+        );
+    }
+
+    /// The timestamps this app writes have to survive that round trip unchanged, or the guard above
+    /// is comparing a rounded instant against the original and correctly reporting a difference.
+    #[test]
+    fn our_own_timestamps_survive_postgres_precision() {
+        let stamp = now();
+        assert!(
+            same_instant(&stamp, &as_postgres_returns_it(&stamp)),
+            "now() must not carry precision the server cannot store: {stamp}"
+        );
     }
 
     /// A full push every round would move every row's `synced_at`, and every peer would then pull

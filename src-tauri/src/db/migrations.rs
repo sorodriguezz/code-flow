@@ -408,6 +408,65 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// `github_host` records which GitHub server a linked project lives on (github.com or an
+/// Enterprise host), so the API base URL and per-host token can be resolved. Added after
+/// `github_owner`/`github_repo` — a row with those set but a NULL host defaults to github.com.
+fn add_github_host_to_projects(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "projects", "github_host")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE projects ADD COLUMN github_host TEXT;")
+}
+
+/// `workspace_skills` gained an `enabled` flag so skills can be toggled off (e.g. when not using
+/// Claude Code) without deleting them. Existing rows default to enabled — the pre-toggle behavior.
+fn add_enabled_to_workspace_skills(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "workspace_skills", "enabled")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE workspace_skills ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;")
+}
+
+/// `workspace_agents` gained a `provider` column so an agent runs on its own provider + model
+/// (not just a bare model id). Existing rows default to empty, falling back to the active provider.
+fn add_provider_to_workspace_agents(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "workspace_agents", "provider")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE workspace_agents ADD COLUMN provider TEXT NOT NULL DEFAULT '';")
+}
+
+/// `api_collections` gained a `pinned` flag so the ones a workspace lives in sort to the top of
+/// the explorer. Existing rows default to unpinned — the pre-flag order, unchanged.
+fn add_pinned_to_api_collections(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "api_collections", "pinned")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE api_collections ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;")
+}
+
+/// Folders and environments had only a `created_at`, which made them the two records nothing could
+/// order: a backup restore and a pull from a shared workspace both had to guess, and both guessed
+/// "the incoming copy wins". That is a silent wrong answer — the local edit disappears — and it is
+/// also what made a shared workspace never settle, because a record with no timestamp of its own
+/// had to be re-stamped on every push and so looked changed forever.
+///
+/// Existing rows inherit their `created_at`: it is the only honest thing known about them, and it
+/// sorts them below anything edited since.
+fn add_updated_at_to_folders_and_environments(conn: &Connection) -> rusqlite::Result<()> {
+    for table in ["api_folders", "api_environments"] {
+        if has_column(conn, table, "updated_at")? {
+            continue;
+        }
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+             UPDATE {table} SET updated_at = created_at WHERE updated_at = '';"
+        ))?;
+    }
+    Ok(())
+}
+
+
 /// Sharing moved from the workspace to the collection, so a push has to be able to ask for the
 /// tombstones of one subtree. Rows written before this column existed get backfilled from whatever
 /// still resolves; a request whose collection is long gone keeps `''` and is simply never pushed,
@@ -432,27 +491,6 @@ fn add_collection_id_to_tombstones(conn: &Connection) -> rusqlite::Result<()> {
          WHERE kind = 'request';
         "#,
     )
-}
-
-/// Folders and environments had only a `created_at`, which made them the two records nothing could
-/// order: a backup restore and a pull from a shared workspace both had to guess, and both guessed
-/// "the incoming copy wins". That is a silent wrong answer — the local edit disappears — and it is
-/// also what made a shared workspace never settle, because a record with no timestamp of its own
-/// had to be re-stamped on every push and so looked changed forever.
-///
-/// Existing rows inherit their `created_at`: it is the only honest thing known about them, and it
-/// sorts them below anything edited since.
-fn add_updated_at_to_folders_and_environments(conn: &Connection) -> rusqlite::Result<()> {
-    for table in ["api_folders", "api_environments"] {
-        if has_column(conn, table, "updated_at")? {
-            continue;
-        }
-        conn.execute_batch(&format!(
-            "ALTER TABLE {table} ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
-             UPDATE {table} SET updated_at = created_at WHERE updated_at = '';"
-        ))?;
-    }
-    Ok(())
 }
 
 /// Every workspace resolves variables against its own "Globals" scope, so each one needs that row
@@ -588,33 +626,6 @@ fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
         )
         .optional()?
         .unwrap_or(false))
-}
-
-/// `workspace_agents` gained a `provider` column so an agent runs on its own provider + model
-/// (not just a bare model id). Existing rows default to empty, falling back to the active provider.
-fn add_provider_to_workspace_agents(conn: &Connection) -> rusqlite::Result<()> {
-    if has_column(conn, "workspace_agents", "provider")? {
-        return Ok(());
-    }
-    conn.execute_batch("ALTER TABLE workspace_agents ADD COLUMN provider TEXT NOT NULL DEFAULT '';")
-}
-
-/// `workspace_skills` gained an `enabled` flag so skills can be toggled off (e.g. when not using
-/// Claude Code) without deleting them. Existing rows default to enabled — the pre-toggle behavior.
-fn add_enabled_to_workspace_skills(conn: &Connection) -> rusqlite::Result<()> {
-    if has_column(conn, "workspace_skills", "enabled")? {
-        return Ok(());
-    }
-    conn.execute_batch("ALTER TABLE workspace_skills ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;")
-}
-
-/// `api_collections` gained a `pinned` flag so the ones a workspace lives in sort to the top of
-/// the explorer. Existing rows default to unpinned — the pre-flag order, unchanged.
-fn add_pinned_to_api_collections(conn: &Connection) -> rusqlite::Result<()> {
-    if has_column(conn, "api_collections", "pinned")? {
-        return Ok(());
-    }
-    conn.execute_batch("ALTER TABLE api_collections ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;")
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
@@ -815,16 +826,6 @@ fn add_github_columns_to_projects(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch("ALTER TABLE projects ADD COLUMN github_repo TEXT;")?;
     }
     Ok(())
-}
-
-/// `github_host` records which GitHub server a linked project lives on (github.com or an
-/// Enterprise host), so the API base URL and per-host token can be resolved. Added after
-/// `github_owner`/`github_repo` — a row with those set but a NULL host defaults to github.com.
-fn add_github_host_to_projects(conn: &Connection) -> rusqlite::Result<()> {
-    if has_column(conn, "projects", "github_host")? {
-        return Ok(());
-    }
-    conn.execute_batch("ALTER TABLE projects ADD COLUMN github_host TEXT;")
 }
 
 #[cfg(test)]

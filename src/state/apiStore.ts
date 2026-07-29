@@ -245,7 +245,12 @@ export const useApiStore = create<ApiState>((set, get) => ({
 
       // Merged over the defaults rather than used as-is, so a field added in a later version
       // arrives populated on an install whose stored blob predates it.
-      const settings = { ...defaultApiSettings(), ...parseJson<Partial<ApiSettings>>(rawSettings, {}) };
+      const stored = parseJson<StoredSettings>(rawSettings, {});
+      const migrated = migrateSettings(stored);
+      const settings = migrated ?? { ...defaultApiSettings(), ...stored };
+      // A migration that only lived in memory would run again on every launch — and would be undone
+      // the moment any other setting was written back over it.
+      if (migrated !== null) void setSetting(SETTINGS_KEY, JSON.stringify(migrated)).catch(() => {});
 
       const [tree, environments, history, cookies] = await Promise.all([
         apiLoadTree(workspaceId),
@@ -858,6 +863,28 @@ function releaseTab(tabId: string) {
   const connection = runtime.connections[tabId];
   if (connection) void apiStreamDisconnect(connection.id).catch(() => {});
   runtime.disposeTab(tabId);
+}
+
+/**
+ * The stored settings blob, which is whatever shape the version that wrote it used — including
+ * fields this one has since dropped.
+ */
+type StoredSettings = Partial<ApiSettings> & { syncCursors?: unknown };
+
+/**
+ * Brings a settings blob written before collaboration was reworked up to the current shape, or
+ * returns `null` when there is nothing to do.
+ *
+ * `syncCursors` is the marker: a per-workspace cursor map that the collection-shaped sync replaced
+ * with a column in `api_shared_collections`. Its presence means the blob predates the rework — and
+ * therefore that its `syncAuto: false` is the *old default*, not a choice anyone made. Merged over
+ * the new defaults it silently left background sync off, which for a collaboration feature means
+ * edits that never reach anyone, with nothing on screen to say why.
+ */
+function migrateSettings(stored: StoredSettings): ApiSettings | null {
+  if (!("syncCursors" in stored)) return null;
+  const { syncCursors: _retired, ...rest } = stored;
+  return { ...defaultApiSettings(), ...rest, syncAuto: defaultApiSettings().syncAuto };
 }
 
 /** A tab written by an older version can be missing spec fields the editor now reads. */

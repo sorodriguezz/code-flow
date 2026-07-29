@@ -15,6 +15,7 @@ import {
   Pencil,
   Play,
   Link2,
+  PauseCircle,
   RefreshCw,
   Share2,
   ShieldAlert,
@@ -464,19 +465,21 @@ function TreeRow({
               ? t("api.collab.rowConflict")
               : share === "error"
                 ? t("api.collab.rowError")
-                : share === "syncing"
-                  ? t("api.collab.syncing")
-                  : t("api.collab.rowShared")
+                : share === "paused"
+                  ? t("api.collab.rowPaused")
+                  : share === "syncing"
+                    ? t("api.collab.syncing")
+                    : t("api.collab.rowShared")
           }
           className={`flex h-4 w-4 shrink-0 items-center justify-center ${
-            share === "conflict" || share === "error"
+            share === "conflict" || share === "error" || share === "paused"
               ? "text-[var(--cf-warning)]"
               : share === "syncing"
                 ? "animate-pulse text-[var(--cf-accent)]"
                 : "text-[var(--cf-text-muted)]"
           }`}
         >
-          {share === "conflict" ? <ShieldAlert size={12} /> : <Users size={12} />}
+          {share === "conflict" ? <ShieldAlert size={12} /> : share === "paused" ? <PauseCircle size={12} /> : <Users size={12} />}
         </span>
       )}
       {conflicted && (
@@ -741,6 +744,9 @@ export function CollectionTree() {
   const shares = useCollabStore((s) => s.shares);
   const conflicts = useCollabStore((s) => s.conflicts);
   const shareHealth = useCollabStore((s) => s.health);
+  // `health` folds in `syncAuto`, which lives in another store — subscribed here so flipping the
+  // toggle repaints the glyphs instead of leaving them stale until something else re-renders.
+  useApiStore((s) => s.settings.syncAuto);
   const sharedIds = useMemo(() => new Set(shares.map((share) => share.collection_id)), [shares]);
   const conflictedIds = useMemo(
     () => new Set(conflicts.filter((c) => c.kind === "request").map((c) => c.id)),

@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{SubsecRound, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
@@ -7,8 +7,24 @@ use super::models::{
     ReviewRunSummary, Workspace, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill,
 };
 
+/// The timestamp every record is stamped with, truncated to **microseconds**.
+///
+/// `Utc::now()` has nanosecond resolution and `to_rfc3339()` prints all nine digits. That extra
+/// precision cannot survive a round trip through the shared Supabase project: `timestamptz` holds
+/// microseconds, so Postgres *rounds* on the way in (`.496982900` comes back `.496983`) and strips
+/// trailing zeros on the way out (`.582389800` comes back `.58239`).
+///
+/// The sync layer compares a record's timestamp against the one it last agreed with the server on.
+/// A value the server cannot store verbatim makes every pulled record look permanently edited here:
+/// every push re-sends the whole collection, and — much worse — every genuine incoming edit is read
+/// as a simultaneous local one and frozen as a conflict. Truncating here is what makes the value
+/// this machine holds and the value the server returns the same instant; `api_sync::same_instant`
+/// handles the trailing zeros.
+///
+/// Microseconds are far finer than anything that distinguishes two edits by a person, and the
+/// column is a string in SQLite either way, so nothing else notices.
 pub(crate) fn now() -> String {
-    Utc::now().to_rfc3339()
+    Utc::now().trunc_subsecs(6).to_rfc3339()
 }
 
 // ---------- workspaces ----------

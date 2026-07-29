@@ -30,7 +30,7 @@ import { pushErrorToast } from "./toastStore";
  */
 
 /** How a share is going, for the dot next to it. */
-export type ShareHealth = "syncing" | "conflict" | "error" | "ok";
+export type ShareHealth = "syncing" | "conflict" | "error" | "paused" | "ok";
 
 interface CollabState {
   /** Whether an anon key is stored — the panel can't tell from `settings` alone. */
@@ -106,6 +106,11 @@ export const useCollabStore = create<CollabState>((set, get) => ({
     if (!share) return "ok";
     if (share.conflicts > 0) return "conflict";
     if (share.last_error !== "") return "error";
+    // Reported after the real failures and before "fine", because it is not a failure — but a
+    // share that is shared and not syncing has to say so. Claiming "synced 4 minutes ago" while
+    // background sync is off is how an edit sits on one machine all afternoon with the UI
+    // insisting everything is in order.
+    if (!useApiStore.getState().settings.syncAuto) return "paused";
     return "ok";
   },
 

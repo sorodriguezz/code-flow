@@ -229,6 +229,9 @@ export function CollaborationPanel() {
             enabled={configured && settings.supabaseReady}
           />
         ))}
+        {!settings.syncAuto && shares.length > 0 && (
+          <Note tone="warning">{t("api.collab.pausedHint")}</Note>
+        )}
         <Row label={t("api.collab.auto")} hint={t("api.collab.autoHint")}>
           <Checkbox
             checked={settings.syncAuto}
@@ -435,7 +438,12 @@ function ShareRow({ collectionId, anonKey }: { collectionId: string; anonKey: st
     days: t("api.collab.daysAgo"),
   });
 
-  const tone = health === "conflict" ? "warning" : health === "error" ? "warning" : health === "syncing" ? "accent" : "success";
+  const tone =
+    health === "conflict" || health === "error" || health === "paused"
+      ? "warning"
+      : health === "syncing"
+        ? "accent"
+        : "success";
 
   return (
     <div className="rounded-md bg-black/[0.02] px-2 py-1.5 dark:bg-white/[0.03]">
@@ -461,9 +469,11 @@ function ShareRow({ collectionId, anonKey }: { collectionId: string; anonKey: st
               ? share.last_error
               : health === "conflict"
                 ? t("api.collab.waitingOnYou")
-                : syncedAgo
-                  ? t("api.collab.syncedAgo", { ago: syncedAgo })
-                  : t("api.collab.neverSynced")}
+                : health === "paused"
+                  ? t("api.collab.paused")
+                  : syncedAgo
+                    ? t("api.collab.syncedAgo", { ago: syncedAgo })
+                    : t("api.collab.neverSynced")}
         </Status>
         <Actions>
           <GhostButton onClick={copyInvite} disabled={busy} title={t("api.collab.copyInviteHint")}>

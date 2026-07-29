@@ -728,6 +728,10 @@ export const translations = {
     "api.collab.leaveConfirm":
       "Stop syncing \"{name}\" here? Your copy stays exactly as it is; the shared one is left untouched.",
     "api.collab.rowShared": "Shared and in sync",
+    "api.collab.rowPaused": "Shared — background sync is off",
+    "api.collab.paused": "Shared, not syncing",
+    "api.collab.pausedHint":
+      "Background sync is off, so your edits stay on this machine and your teammates' never arrive. Turn it on below, or press Sync now each time.",
     "api.collab.rowError": "Shared — the last sync failed",
     "api.collab.rowConflict": "Shared — a change is waiting on your decision",
     "api.collab.secretsNote":
@@ -2346,6 +2350,10 @@ export const translations = {
     "api.collab.leaveConfirm":
       "¿Dejar de sincronizar \"{name}\" aquí? Tu copia queda tal cual; la compartida no se toca.",
     "api.collab.rowShared": "Compartida y sincronizada",
+    "api.collab.rowPaused": "Compartida — la sincronización automática está apagada",
+    "api.collab.paused": "Compartida, sin sincronizar",
+    "api.collab.pausedHint":
+      "La sincronización automática está apagada: tus cambios se quedan en este equipo y los de tus compañeros no llegan. Actívala abajo, o usa Sincronizar ahora cada vez.",
     "api.collab.rowError": "Compartida — la última sincronización falló",
     "api.collab.rowConflict": "Compartida — hay un cambio esperando tu decisión",
     "api.collab.secretsNote":
