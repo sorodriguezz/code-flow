@@ -960,9 +960,12 @@ export const useApiStore = create<ApiState>((set, get) => ({
 /** Keeps a shared collection's remote label in step with a local rename, silently. */
 async function renameShareIfShared(collectionId: string, name: string) {
   const { useCollabStore } = await import("./collabStore");
-  if (useCollabStore.getState().shareFor(collectionId) === null) return;
-  const url = useApiStore.getState().settings.supabaseUrl;
-  if (url.trim() === "") return;
+  const share = useCollabStore.getState().shareFor(collectionId);
+  if (share === null) return;
+  // The share's own project, not the settings default. A guest has no default — so this used to
+  // return here and leave the label everyone else reads stuck on the name it was shared under.
+  const url = share.project_url.trim();
+  if (url === "") return;
   const { supabaseRenameShare } = await import("../lib/tauri/apiCommands");
   await supabaseRenameShare(url, collectionId, name).catch(() => {});
   await useCollabStore.getState().refresh();

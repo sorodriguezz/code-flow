@@ -300,8 +300,19 @@ function translate(key: keyof (typeof translations)["en"]): string {
 let sinceLastProbe = 0;
 
 function tick() {
-  const { syncAuto, supabaseUrl } = useApiStore.getState().settings;
-  if (!syncAuto || supabaseUrl.trim() === "") return;
+  // Gated on `syncAuto` and nothing else. The project a round talks to comes from the share —
+  // `syncCollection` and `probe` both read `share.project_url` — and the settings field is only
+  // where a *new* share would be created. Requiring one here meant a machine that had only ever
+  // accepted invitations, which by design has no project of its own (`disownInheritedProject`
+  // clears it, and never setting one is the normal state for a guest), returned on the first line
+  // of every heartbeat: it never probed, so it never pulled, so a teammate's edits arrived only if
+  // the guest happened to press "sync now". Their own edits still went out, because the push is
+  // scheduled from the store subscription below, which never asked about this field — which is
+  // what made the failure look one-directional from one side and total from the other.
+  //
+  // `activeShares()` a few lines down is the honest version of the question: nothing shared in the
+  // workspace on screen, nothing to do.
+  if (!useApiStore.getState().settings.syncAuto) return;
 
   // One interval drives both cadences: a second timer that had to be torn down and rebuilt on every
   // visibility change is two things to keep in step instead of one number to compare against.
