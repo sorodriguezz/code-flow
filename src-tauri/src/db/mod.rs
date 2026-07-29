@@ -1,4 +1,6 @@
+pub mod api_backup;
 pub mod api_queries;
+pub mod api_sync;
 pub mod migrations;
 pub mod models;
 pub mod queries;

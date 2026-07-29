@@ -10,6 +10,7 @@ mod db;
 mod debugger;
 mod fsops;
 mod codex;
+mod gdrive;
 mod gemini;
 mod git;
 mod github;
@@ -25,6 +26,7 @@ mod search;
 mod secret_scan;
 mod secrets;
 mod shell_profiles;
+mod supabase;
 mod terminal;
 mod tray;
 mod watcher;
@@ -205,6 +207,9 @@ pub fn run() {
             commands::secrets_cmd::set_ai_api_key,
             commands::secrets_cmd::has_ai_api_key,
             commands::secrets_cmd::delete_ai_api_key,
+            commands::secrets_cmd::set_api_backup_passphrase,
+            commands::secrets_cmd::get_api_backup_passphrase,
+            commands::secrets_cmd::delete_api_backup_passphrase,
             commands::claude_cmd::generate_commit_message,
             commands::claude_cmd::list_ai_models,
             commands::claude_cmd::check_ai_provider,
@@ -329,6 +334,27 @@ pub fn run() {
             commands::api_cmd::api_pick_file,
             commands::api_cmd::api_save_file,
             commands::api_cmd::api_read_text_file,
+            commands::api_cmd::api_write_text_file,
+            commands::api_cmd::api_export_all,
+            commands::api_cmd::api_import_all,
+            commands::api_cmd::gdrive_status,
+            commands::api_cmd::gdrive_set_client_secret,
+            commands::api_cmd::gdrive_connect,
+            commands::api_cmd::gdrive_disconnect,
+            commands::api_cmd::gdrive_find_file,
+            commands::api_cmd::gdrive_upload,
+            commands::api_cmd::gdrive_download,
+            commands::api_cmd::supabase_install_sql,
+            commands::api_cmd::supabase_set_anon_key,
+            commands::api_cmd::supabase_has_key,
+            commands::api_cmd::supabase_share_token,
+            commands::api_cmd::supabase_check,
+            commands::api_cmd::supabase_share,
+            commands::api_cmd::supabase_join,
+            commands::api_cmd::supabase_rotate,
+            commands::api_cmd::supabase_leave,
+            commands::api_cmd::supabase_push,
+            commands::api_cmd::supabase_pull,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

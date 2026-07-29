@@ -237,6 +237,10 @@ pub struct ApiFolder {
     pub post_script: String,
     pub sort_order: i64,
     pub created_at: String,
+    /// Defaulted so a payload written by an older build still deserialises; the migration
+    /// backfills stored rows from their `created_at`.
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +278,8 @@ pub struct ApiEnvironment {
     pub is_global: bool,
     pub sort_order: i64,
     pub created_at: String,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

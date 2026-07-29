@@ -17,6 +17,7 @@ import type {
   SocketIoConnectRequest,
   WsConnectRequest,
 } from "../../types/api";
+import type { ApiBackupPayload } from "../api/backup";
 
 /**
  * IPC surface for the built-in API client.
@@ -220,3 +221,137 @@ export const apiSaveFile = (defaultName: string, contents: string) =>
 
 /** Reads a text file the user picked (collection import, CSV/JSON runner data). */
 export const apiReadTextFile = (path: string) => invoke<string>("api_read_text_file", { path });
+
+/** Writes to a path already chosen — the automatic backup can't open a dialog on a timer. */
+export const apiWriteTextFile = (path: string, contents: string) =>
+  invoke<void>("api_write_text_file", { path, contents });
+
+// ---------- backup ----------
+
+/**
+ * Every workspace's collections, folders, requests and environments. History and cookies are
+ * deliberately absent: one is a log, the other holds live sessions.
+ */
+export const apiExportAll = () => invoke<ApiBackupPayload>("api_export_all");
+
+/**
+ * `replace = false` merges — newest `updated_at` wins and nothing is deleted; `replace = true`
+ * empties the workspaces named in the backup first.
+ */
+export const apiImportAll = (backup: ApiBackupPayload, replace: boolean) =>
+  invoke<ApiImportSummary>("api_import_all", { backup, replace });
+
+export interface ApiImportSummary {
+  workspaces: number;
+  collections: number;
+  folders: number;
+  requests: number;
+  environments: number;
+}
+
+// ---------- backup passphrase (OS credential store) ----------
+
+export const apiSetBackupPassphrase = (passphrase: string) =>
+  invoke<void>("set_api_backup_passphrase", { passphrase });
+
+export const apiGetBackupPassphrase = () => invoke<string | null>("get_api_backup_passphrase");
+
+export const apiDeleteBackupPassphrase = () => invoke<void>("delete_api_backup_passphrase");
+
+// ---------- backup destination: the user's own Google Drive ----------
+
+export interface DriveStatus {
+  /** The OAuth client secret is stored. */
+  has_secret: boolean;
+  /** Consent was granted and a refresh token is held. */
+  connected: boolean;
+}
+
+export const gdriveStatus = () => invoke<DriveStatus>("gdrive_status");
+
+export const gdriveSetClientSecret = (secret: string) =>
+  invoke<void>("gdrive_set_client_secret", { secret });
+
+/** Opens the browser for consent. Resolves with the account that granted it. */
+export const gdriveConnect = (clientId: string) =>
+  invoke<{ email: string }>("gdrive_connect", { clientId });
+
+export const gdriveDisconnect = () => invoke<void>("gdrive_disconnect");
+
+/** The backup this OAuth client already has in Drive, if another machine wrote one. */
+export const gdriveFindFile = (clientId: string, name: string) =>
+  invoke<string | null>("gdrive_find_file", { clientId, name });
+
+/** Creates or overwrites the backup file; returns its id. */
+export const gdriveUpload = (
+  clientId: string,
+  fileId: string | null,
+  name: string,
+  contents: string,
+) => invoke<string>("gdrive_upload", { clientId, fileId, name, contents });
+
+export const gdriveDownload = (clientId: string, fileId: string) =>
+  invoke<string>("gdrive_download", { clientId, fileId });
+
+// ---------- shared workspaces on the user's own Supabase project ----------
+
+export interface SupabaseCheck {
+  /** The project answered — URL and anon key are right. */
+  reachable: boolean;
+  /** `cf_ping` exists, so the schema script has been run. */
+  schema_installed: boolean;
+  /** The workspace this machine's token resolves to; empty when it resolves to nothing. */
+  workspace_name: string;
+}
+
+export interface SharedWorkspace {
+  id: string;
+  name: string;
+  share_token: string;
+}
+
+export interface SyncResult {
+  applied: ApiImportSummary;
+  deleted: number;
+  /** Newest `updated_at` seen — the cursor for the next pull. */
+  cursor: string;
+}
+
+/** The SQL the host runs once in their project's editor. */
+export const supabaseInstallSql = () => invoke<string>("supabase_install_sql");
+
+export const supabaseSetAnonKey = (anonKey: string) =>
+  invoke<void>("supabase_set_anon_key", { anonKey });
+
+export const supabaseHasKey = () => invoke<boolean>("supabase_has_key");
+
+export const supabaseShareToken = (workspaceId: string) =>
+  invoke<string | null>("supabase_share_token", { workspaceId });
+
+export const supabaseCheck = (url: string, workspaceId: string) =>
+  invoke<SupabaseCheck>("supabase_check", { url, workspaceId });
+
+/** Starts sharing this workspace and returns the token to hand out. */
+export const supabaseShare = (url: string, workspaceId: string, name: string) =>
+  invoke<SharedWorkspace>("supabase_share", { url, workspaceId, name });
+
+export const supabaseJoin = (url: string, token: string) =>
+  invoke<SharedWorkspace>("supabase_join", { url, token });
+
+/** Replaces the token — everyone still holding the old one loses access. */
+export const supabaseRotate = (url: string, workspaceId: string) =>
+  invoke<string>("supabase_rotate", { url, workspaceId });
+
+/** Stops syncing here. Local only: the remote copy is the host's to end, by rotating. */
+export const supabaseLeave = (workspaceId: string) =>
+  invoke<void>("supabase_leave", { workspaceId });
+
+export const supabasePush = (url: string, workspaceId: string) =>
+  invoke<number>("supabase_push", { url, workspaceId });
+
+export const supabasePull = (
+  url: string,
+  workspaceId: string,
+  workspaceName: string,
+  since: string,
+) => invoke<SyncResult>("supabase_pull", { url, workspaceId, workspaceName, since });

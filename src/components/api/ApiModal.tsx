@@ -174,15 +174,33 @@ export function Field({
   );
 }
 
-/** Label + control on one row, the density the settings panes use. */
-export function Row({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+/**
+ * Label + control on one row, the density the settings panes use.
+ *
+ * `wide` roughly doubles the control column, for the fields whose value is a URL, a filesystem
+ * path or a key: at the default width those show a dozen characters and a truncation, which is
+ * exactly the wrong end of a value you are trying to check.
+ */
+export function Row({
+  label,
+  hint,
+  wide = false,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  wide?: boolean;
+  children: ReactNode;
+}) {
   return (
     <label className="flex items-center gap-3 py-1">
       <span className="min-w-0 flex-1">
         <span className="block text-[12px] text-[var(--cf-text)]">{label}</span>
         {hint && <span className="block text-[11px] text-[var(--cf-text-muted)]">{hint}</span>}
       </span>
-      <span className="flex w-[180px] shrink-0 justify-end">{children}</span>
+      <span className={`flex shrink-0 justify-end ${wide ? "w-[360px] max-w-[62%]" : "w-[180px]"}`}>
+        {children}
+      </span>
     </label>
   );
 }

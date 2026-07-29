@@ -88,6 +88,38 @@ pub fn ai_api_key(provider: &str) -> String {
     format!("ai-api-key:{provider}")
 }
 
+/// Passphrase the API-client backup is encrypted with. In the credential store rather than in
+/// `app_settings` for the obvious reason, and there is exactly one: the automatic backup has to be
+/// able to write the file unattended, which it cannot do if the only copy is in the user's head.
+pub fn api_backup_passphrase_key() -> String {
+    "api-backup-passphrase".to_string()
+}
+
+/// The user's own Google OAuth client secret. For an installed app this is not a secret in the
+/// cryptographic sense — Google says as much — but it is still theirs, and `app_settings` is a
+/// plain SQLite file that ends up in a support bundle far more easily than the credential store.
+pub fn gdrive_client_secret_key() -> String {
+    "gdrive-client-secret".to_string()
+}
+
+/// The long-lived grant. This one *is* a credential: it can mint access tokens for the backup file
+/// until the user revokes it.
+pub fn gdrive_refresh_token_key() -> String {
+    "gdrive-refresh-token".to_string()
+}
+
+/// The anon key of the user's own Supabase project. Public by design, but it is still the key to
+/// *their* project and belongs beside the share tokens rather than in a settings blob.
+pub fn supabase_anon_key() -> String {
+    "supabase-anon-key".to_string()
+}
+
+/// The share token for one shared workspace — the whole credential for reaching it, so keyed per
+/// workspace: hosting one and being a guest in another are the normal case, not an edge one.
+pub fn supabase_share_token(workspace_id: &str) -> String {
+    format!("supabase-share:{workspace_id}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

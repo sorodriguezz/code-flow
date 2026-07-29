@@ -214,7 +214,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             pre_script    TEXT NOT NULL DEFAULT '',
             post_script   TEXT NOT NULL DEFAULT '',
             sort_order    INTEGER NOT NULL DEFAULT 0,
-            created_at    TEXT NOT NULL
+            created_at    TEXT NOT NULL,
+            -- Carried so a restore and a shared-workspace pull can both resolve last-write-wins on
+            -- a folder the same way they do on a request.
+            updated_at    TEXT NOT NULL DEFAULT ''
         );
         CREATE INDEX IF NOT EXISTS idx_api_folders_parent
             ON api_folders (collection_id, parent_id, sort_order);
@@ -250,7 +253,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             variables   TEXT NOT NULL DEFAULT '[]',
             is_global   INTEGER NOT NULL DEFAULT 0,
             sort_order  INTEGER NOT NULL DEFAULT 0,
-            created_at  TEXT NOT NULL
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL DEFAULT ''
         );
 
         -- Every send, whether or not it came from a saved request (`request_id` is NULL for
@@ -289,6 +293,23 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_api_cookies_key
             ON api_cookies (workspace_id, domain, path, name);
+
+        -- What was deleted, and when. A deletion has to leave a trace: to anything reading changes
+        -- since a point in time — a shared workspace, another machine — "absent" and "not created
+        -- yet" are the same observation, so without this row a delete would be undone by the next
+        -- pull instead of travelling.
+        --
+        -- Recorded for every workspace, not only shared ones: a workspace can be shared after the
+        -- fact, and a deletion history that started when sharing did would resurrect everything
+        -- removed before it.
+        CREATE TABLE IF NOT EXISTS api_tombstones (
+            id           TEXT NOT NULL,
+            workspace_id TEXT NOT NULL,
+            -- collection | folder | request | environment
+            kind         TEXT NOT NULL,
+            deleted_at   TEXT NOT NULL,
+            PRIMARY KEY (workspace_id, kind, id)
+        );
         "#,
     )?;
 
@@ -312,6 +333,28 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_enabled_to_workspace_skills(conn)?;
     add_provider_to_workspace_agents(conn)?;
     add_pinned_to_api_collections(conn)?;
+    add_updated_at_to_folders_and_environments(conn)?;
+    Ok(())
+}
+
+/// Folders and environments had only a `created_at`, which made them the two records nothing could
+/// order: a backup restore and a pull from a shared workspace both had to guess, and both guessed
+/// "the incoming copy wins". That is a silent wrong answer — the local edit disappears — and it is
+/// also what made a shared workspace never settle, because a record with no timestamp of its own
+/// had to be re-stamped on every push and so looked changed forever.
+///
+/// Existing rows inherit their `created_at`: it is the only honest thing known about them, and it
+/// sorts them below anything edited since.
+fn add_updated_at_to_folders_and_environments(conn: &Connection) -> rusqlite::Result<()> {
+    for table in ["api_folders", "api_environments"] {
+        if has_column(conn, table, "updated_at")? {
+            continue;
+        }
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';
+             UPDATE {table} SET updated_at = created_at WHERE updated_at = '';"
+        ))?;
+    }
     Ok(())
 }
 

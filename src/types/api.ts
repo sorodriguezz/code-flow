@@ -480,6 +480,8 @@ export interface ApiFolder {
   post_script: string;
   sort_order: number;
   created_at: string;
+  /** Bumped on every edit, so a restore and a shared-workspace pull can resolve last-write-wins. */
+  updated_at: string;
 }
 
 export interface ApiRequestRow {
@@ -532,6 +534,7 @@ export interface ApiEnvironment {
   is_global: boolean;
   sort_order: number;
   created_at: string;
+  updated_at: string;
 }
 
 /** Precedence, most specific first — matches Postman's resolution order. */
@@ -893,6 +896,44 @@ export interface ApiSettings {
   /** Save every send into `api_history`. */
   saveHistory: boolean;
   historyLimit: number;
+  /** Where the automatic backup goes: a file on this disk, or the user's own Google Drive. */
+  backupTarget: "local" | "drive";
+  /**
+   * Where the automatic backup is written when the target is `local`. Empty means no destination
+   * has been chosen yet, which is also the only reason `autoBackup` can't be turned on.
+   */
+  backupPath: string;
+  autoBackup: boolean;
+  /**
+   * The OAuth client of the user's *own* Google Cloud project — never one of ours, so their backup
+   * doesn't pass through anybody else's registration. The matching client secret and the refresh
+   * token live in the OS credential store; only this public half is a setting.
+   */
+  driveClientId: string;
+  /** The Drive file being kept up to date. Learned on the first upload, or found on another machine. */
+  driveFileId: string;
+  /** The connected account, shown so "connected" doesn't leave the user guessing which login. */
+  driveAccount: string;
+  /**
+   * The user's own Supabase project for shared workspaces. The anon key and every share token live
+   * in the OS credential store; only the project URL is a setting.
+   */
+  supabaseUrl: string;
+  /** Sync shared workspaces on a timer as well as on demand. */
+  syncAuto: boolean;
+  /**
+   * Newest change already applied, per workspace id — where the next pull starts. Keyed rather
+   * than a single value because one machine can host one shared workspace and be a guest in
+   * another, and their clocks advance independently.
+   */
+  syncCursors: Record<string, string>;
+  /**
+   * Seal the backup with the passphrase held in the OS credential store. Off means the file is
+   * readable JSON with every credential stripped out of it — see `lib/api/backup.ts`.
+   */
+  backupEncrypt: boolean;
+  /** ISO timestamp of the last successful write, for the line under the destination. */
+  lastBackupAt: string;
 }
 
 export interface ClientCert {
@@ -920,6 +961,17 @@ export function defaultApiSettings(): ApiSettings {
     prettyPrint: true,
     saveHistory: true,
     historyLimit: 500,
+    backupTarget: "local",
+    backupPath: "",
+    autoBackup: false,
+    driveClientId: "",
+    driveFileId: "",
+    driveAccount: "",
+    supabaseUrl: "",
+    syncAuto: false,
+    syncCursors: {},
+    backupEncrypt: true,
+    lastBackupAt: "",
   };
 }
 

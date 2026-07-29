@@ -50,3 +50,21 @@ pub fn has_ai_api_key(provider: String) -> Result<bool, String> {
 pub fn delete_ai_api_key(provider: String) -> Result<(), String> {
     secrets::delete_secret(&secrets::ai_api_key(&provider))
 }
+
+// The backup passphrase. Unlike the AI keys this one *is* readable from the frontend: the
+// encryption runs there (WebCrypto), so the passphrase has to reach it to encrypt an automatic
+// backup or to open one on restore.
+#[tauri::command]
+pub fn set_api_backup_passphrase(passphrase: String) -> Result<(), String> {
+    secrets::set_secret(&secrets::api_backup_passphrase_key(), &passphrase)
+}
+
+#[tauri::command]
+pub fn get_api_backup_passphrase() -> Result<Option<String>, String> {
+    secrets::get_secret(&secrets::api_backup_passphrase_key())
+}
+
+#[tauri::command]
+pub fn delete_api_backup_passphrase() -> Result<(), String> {
+    secrets::delete_secret(&secrets::api_backup_passphrase_key())
+}

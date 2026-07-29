@@ -211,6 +211,10 @@ export function ensureApiStoreLoaded(): Promise<void> {
   // Nothing to scope the data to yet — `App` calls `setWorkspace` as soon as there is one.
   if (workspaceId === null) return Promise.resolve();
   useApiRuntimeStore.getState().init();
+  // Imported lazily to keep the cycle (watcher → store → watcher) out of module evaluation: the
+  // watcher only touches the store from inside its own functions, all of which run after this.
+  void import("../lib/api/autoBackup").then((m) => m.startAutoBackupWatcher());
+  void import("../lib/api/sync").then((m) => m.startSyncWatcher());
   return useApiStore.getState().setWorkspace(workspaceId);
 }
 

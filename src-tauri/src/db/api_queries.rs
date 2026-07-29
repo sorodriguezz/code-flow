@@ -29,10 +29,11 @@ const MAX_FOLDER_DEPTH: usize = 256;
 const COLLECTION_COLUMNS: &str =
     "id, workspace_id, name, description, auth, pre_script, post_script, variables, sort_order, pinned, created_at, updated_at";
 const FOLDER_COLUMNS: &str =
-    "id, collection_id, parent_id, name, description, auth, pre_script, post_script, sort_order, created_at";
+    "id, collection_id, parent_id, name, description, auth, pre_script, post_script, sort_order, created_at, updated_at";
 const REQUEST_COLUMNS: &str =
     "id, collection_id, folder_id, name, protocol, method, url, spec, sort_order, created_at, updated_at";
-const ENVIRONMENT_COLUMNS: &str = "id, workspace_id, name, variables, is_global, sort_order, created_at";
+const ENVIRONMENT_COLUMNS: &str =
+    "id, workspace_id, name, variables, is_global, sort_order, created_at, updated_at";
 const HISTORY_COLUMNS: &str =
     "id, workspace_id, request_id, name, protocol, method, url, status, duration_ms, size_bytes, snapshot, created_at";
 const COOKIE_COLUMNS: &str =
@@ -67,6 +68,7 @@ fn map_folder(row: &rusqlite::Row) -> rusqlite::Result<ApiFolder> {
         post_script: row.get(7)?,
         sort_order: row.get(8)?,
         created_at: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -95,6 +97,7 @@ fn map_environment(row: &rusqlite::Row) -> rusqlite::Result<ApiEnvironment> {
         is_global: row.get(4)?,
         sort_order: row.get(5)?,
         created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 
@@ -236,9 +239,92 @@ pub fn update_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Resu
 
 /// Folders and requests go with it through `ON DELETE CASCADE` (the connection runs with
 /// `PRAGMA foreign_keys = ON`, set in `migrations::run`).
-pub fn delete_collection(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM api_collections WHERE id = ?1", params![id])?;
+// ---------- tombstones ----------
+
+/// Records that something was removed, so the deletion can travel to a shared workspace or another
+/// machine. See the `api_tombstones` comment in `migrations.rs` for why absence alone cannot.
+///
+/// SQLite cascades a delete down the tree, and the rows it takes with it have to be recorded too:
+/// a peer that learned only "the collection is gone" would keep its requests, and then re-upload
+/// them as children of a collection that no longer exists.
+fn record_tombstones(conn: &Connection, kind: &str, ids: &[String], workspace_id: &str) -> rusqlite::Result<()> {
+    let stamp = now();
+    for id in ids {
+        conn.execute(
+            "INSERT INTO api_tombstones (id, workspace_id, kind, deleted_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(workspace_id, kind, id) DO UPDATE SET deleted_at = excluded.deleted_at",
+            params![id, workspace_id, kind, stamp],
+        )?;
+    }
     Ok(())
+}
+
+/// The folders and requests a delete is about to take with it, plus the folder ids themselves.
+fn subtree_of_collection(conn: &Connection, collection_id: &str) -> rusqlite::Result<(Vec<String>, Vec<String>)> {
+    let mut folders = conn.prepare("SELECT id FROM api_folders WHERE collection_id = ?1")?;
+    let folders: Vec<String> = folders
+        .query_map(params![collection_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut requests = conn.prepare("SELECT id FROM api_requests WHERE collection_id = ?1")?;
+    let requests: Vec<String> = requests
+        .query_map(params![collection_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok((folders, requests))
+}
+
+/// Descendant folders of `folder_id`, itself included. Walks generation by generation rather than
+/// recursing, and stops at `MAX_FOLDER_DEPTH` for the same reason `move_node` does: a corrupt
+/// `parent_id` chain must fail, not spin.
+fn folder_and_descendants(conn: &Connection, folder_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut all = vec![folder_id.to_string()];
+    let mut frontier = vec![folder_id.to_string()];
+    for _ in 0..MAX_FOLDER_DEPTH {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next = Vec::new();
+        for parent in &frontier {
+            let mut stmt = conn.prepare("SELECT id FROM api_folders WHERE parent_id = ?1")?;
+            let children: Vec<String> = stmt
+                .query_map(params![parent], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for child in children {
+                if !all.contains(&child) {
+                    all.push(child.clone());
+                    next.push(child);
+                }
+            }
+        }
+        frontier = next;
+    }
+    Ok(all)
+}
+
+/// The workspace a collection, folder, request or environment belongs to.
+fn workspace_of(conn: &Connection, kind: &str, id: &str) -> rusqlite::Result<Option<String>> {
+    let sql = match kind {
+        "collection" => "SELECT workspace_id FROM api_collections WHERE id = ?1",
+        "environment" => "SELECT workspace_id FROM api_environments WHERE id = ?1",
+        "folder" => {
+            "SELECT c.workspace_id FROM api_folders f JOIN api_collections c ON c.id = f.collection_id WHERE f.id = ?1"
+        }
+        _ => {
+            "SELECT c.workspace_id FROM api_requests r JOIN api_collections c ON c.id = r.collection_id WHERE r.id = ?1"
+        }
+    };
+    conn.query_row(sql, params![id], |row| row.get(0)).optional()
+}
+
+pub fn delete_collection(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    if let Some(workspace_id) = workspace_of(&tx, "collection", id)? {
+        let (folders, requests) = subtree_of_collection(&tx, id)?;
+        record_tombstones(&tx, "collection", &[id.to_string()], &workspace_id)?;
+        record_tombstones(&tx, "folder", &folders, &workspace_id)?;
+        record_tombstones(&tx, "request", &requests, &workspace_id)?;
+    }
+    tx.execute("DELETE FROM api_collections WHERE id = ?1", params![id])?;
+    tx.commit()
 }
 
 /// Deep copy: every folder and request gets a fresh id and the parent links are remapped onto
@@ -343,8 +429,8 @@ pub fn reorder_collections(conn: &Connection, workspace_id: &str, ids: &[String]
 fn insert_folder(conn: &Connection, f: &ApiFolder) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO api_folders
-            (id, collection_id, parent_id, name, description, auth, pre_script, post_script, sort_order, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (id, collection_id, parent_id, name, description, auth, pre_script, post_script, sort_order, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             f.id,
             f.collection_id,
@@ -356,6 +442,7 @@ fn insert_folder(conn: &Connection, f: &ApiFolder) -> rusqlite::Result<()> {
             f.post_script,
             f.sort_order,
             f.created_at,
+            f.updated_at,
         ],
     )?;
     Ok(())
@@ -378,6 +465,7 @@ pub fn create_folder(
         post_script: String::new(),
         sort_order: next_child_order(conn, "api_folders", "parent_id", collection_id, parent_id)?,
         created_at: now(),
+        updated_at: now(),
     };
     insert_folder(conn, &folder)?;
     Ok(folder)
@@ -388,16 +476,31 @@ pub fn create_folder(
 pub fn update_folder(conn: &Connection, f: &ApiFolder) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE api_folders
-            SET name = ?2, description = ?3, auth = ?4, pre_script = ?5, post_script = ?6
+            SET name = ?2, description = ?3, auth = ?4, pre_script = ?5, post_script = ?6,
+                updated_at = ?7
           WHERE id = ?1",
-        params![f.id, f.name, f.description, f.auth, f.pre_script, f.post_script],
+        params![f.id, f.name, f.description, f.auth, f.pre_script, f.post_script, now()],
     )?;
     Ok(())
 }
 
 pub fn delete_folder(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM api_folders WHERE id = ?1", params![id])?;
-    Ok(())
+    let tx = conn.unchecked_transaction()?;
+    if let Some(workspace_id) = workspace_of(&tx, "folder", id)? {
+        let folders = folder_and_descendants(&tx, id)?;
+        let mut requests = Vec::new();
+        for folder in &folders {
+            let mut stmt = tx.prepare("SELECT id FROM api_requests WHERE folder_id = ?1")?;
+            let ids: Vec<String> = stmt
+                .query_map(params![folder], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            requests.extend(ids);
+        }
+        record_tombstones(&tx, "folder", &folders, &workspace_id)?;
+        record_tombstones(&tx, "request", &requests, &workspace_id)?;
+    }
+    tx.execute("DELETE FROM api_folders WHERE id = ?1", params![id])?;
+    tx.commit()
 }
 
 // ---------- requests ----------
@@ -473,8 +576,12 @@ pub fn update_request(conn: &Connection, r: &ApiRequestRow) -> rusqlite::Result<
 }
 
 pub fn delete_request(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM api_requests WHERE id = ?1", params![id])?;
-    Ok(())
+    let tx = conn.unchecked_transaction()?;
+    if let Some(workspace_id) = workspace_of(&tx, "request", id)? {
+        record_tombstones(&tx, "request", &[id.to_string()], &workspace_id)?;
+    }
+    tx.execute("DELETE FROM api_requests WHERE id = ?1", params![id])?;
+    tx.commit()
 }
 
 /// The copy lands last among its siblings, next to the original's folder.
@@ -686,9 +793,19 @@ pub fn list_environments(conn: &Connection, workspace_id: &str) -> rusqlite::Res
 
 fn insert_environment(conn: &Connection, e: &ApiEnvironment) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO api_environments (id, workspace_id, name, variables, is_global, sort_order, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![e.id, e.workspace_id, e.name, e.variables, e.is_global, e.sort_order, e.created_at],
+        "INSERT INTO api_environments
+            (id, workspace_id, name, variables, is_global, sort_order, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            e.id,
+            e.workspace_id,
+            e.name,
+            e.variables,
+            e.is_global,
+            e.sort_order,
+            e.created_at,
+            e.updated_at
+        ],
     )?;
     Ok(())
 }
@@ -710,6 +827,7 @@ pub fn create_environment(conn: &Connection, workspace_id: &str, name: &str) -> 
         is_global: false,
         sort_order: next_environment_order(conn, workspace_id)?,
         created_at: now(),
+        updated_at: now(),
     };
     insert_environment(conn, &environment)?;
     Ok(environment)
@@ -719,16 +837,20 @@ pub fn create_environment(conn: &Connection, workspace_id: &str, name: &str) -> 
 /// database's business, not something a client round trip gets to reassign.
 pub fn update_environment(conn: &Connection, e: &ApiEnvironment) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE api_environments SET name = ?2, variables = ?3 WHERE id = ?1",
-        params![e.id, e.name, e.variables],
+        "UPDATE api_environments SET name = ?2, variables = ?3, updated_at = ?4 WHERE id = ?1",
+        params![e.id, e.name, e.variables, now()],
     )?;
     Ok(())
 }
 
 /// A no-op on the Globals row: it is always in scope and there is no UI to recreate it.
 pub fn delete_environment(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM api_environments WHERE id = ?1 AND is_global = 0", params![id])?;
-    Ok(())
+    let tx = conn.unchecked_transaction()?;
+    if let Some(workspace_id) = workspace_of(&tx, "environment", id)? {
+        record_tombstones(&tx, "environment", &[id.to_string()], &workspace_id)?;
+    }
+    tx.execute("DELETE FROM api_environments WHERE id = ?1 AND is_global = 0", params![id])?;
+    tx.commit()
 }
 
 /// Duplicating Globals is allowed and yields an ordinary environment — its variables are a
@@ -747,6 +869,7 @@ pub fn duplicate_environment(conn: &Connection, id: &str) -> rusqlite::Result<Ap
         is_global: false,
         sort_order,
         created_at: now(),
+        updated_at: now(),
         ..source
     };
     insert_environment(&tx, &copy)?;
@@ -851,4 +974,14 @@ pub fn delete_cookie(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 pub fn clear_cookies(conn: &Connection, workspace_id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM api_cookies WHERE workspace_id = ?1", params![workspace_id])?;
     Ok(())
+}
+
+/// Everything deleted in this workspace, for the sync layer to turn into tombstone rows.
+pub fn list_tombstones(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<(String, String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT kind, id, deleted_at FROM api_tombstones WHERE workspace_id = ?1")?;
+    let rows = stmt.query_map(params![workspace_id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    rows.collect()
 }
