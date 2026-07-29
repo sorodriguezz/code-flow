@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "1.8.1",
+  "version": "1.8.2",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
