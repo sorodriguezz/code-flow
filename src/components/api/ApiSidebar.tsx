@@ -5,6 +5,7 @@ import {
   Download,
   Globe,
   MoreHorizontal,
+  Play,
   Plus,
   Search,
   Settings,
@@ -14,6 +15,7 @@ import {
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollectionTree, ContextMenu, MethodBadge, type MenuItem } from "./CollectionTree";
+import { EnvironmentBar } from "./EnvironmentBar";
 import { HistoryList } from "./HistoryList";
 import { CARD } from "./panelChrome";
 import { useApiStore } from "../../state/apiStore";
@@ -34,10 +36,12 @@ type Section = "collections" | "environments" | "history";
 function ToolbarButton({
   onClick,
   title,
+  disabled,
   children,
 }: {
   onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   title: string;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -45,7 +49,8 @@ function ToolbarButton({
       onClick={onClick}
       title={title}
       aria-label={title}
-      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+      disabled={disabled}
+      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] dark:hover:bg-white/[0.08]"
     >
       {children}
     </button>
@@ -213,6 +218,9 @@ export function ApiSidebar() {
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const createCollection = useApiStore((s) => s.createCollection);
+  const collections = useApiStore((s) => s.collections);
+  const openTabs = useApiStore((s) => s.openTabs);
+  const activeTabId = useApiStore((s) => s.activeTabId);
   const openModal = useApiModalStore((s) => s.openApiModal);
 
   const [section, setSection] = useState<Section>("collections");
@@ -232,6 +240,11 @@ export function ApiSidebar() {
     }
   };
 
+  // The runner always runs *something*: whatever collection the open request belongs to, or the
+  // first one, so the button doesn't need a picker of its own.
+  const runnerCollectionId =
+    openTabs.find((tab) => tab.id === activeTabId)?.collectionId ?? collections[0]?.id ?? null;
+
   const overflowItems: MenuItem[] = [
     { label: t("api.cookies"), icon: Cookie, onClick: () => openModal({ kind: "cookies" }) },
     { label: t("api.settings.title"), icon: Settings, onClick: () => openModal({ kind: "settings" }) },
@@ -249,6 +262,16 @@ export function ApiSidebar() {
           </span>
           <ToolbarButton onClick={() => void newCollection()} title={t("api.newCollection")}>
             <Plus size={13} />
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={() =>
+              runnerCollectionId &&
+              openModal({ kind: "runner", collectionId: runnerCollectionId, folderId: null })
+            }
+            disabled={runnerCollectionId === null}
+            title={t("api.runner.title")}
+          >
+            <Play size={13} />
           </ToolbarButton>
           <ToolbarButton onClick={() => openModal({ kind: "import" })} title={t("api.import.title")}>
             <Download size={13} />
@@ -320,6 +343,10 @@ export function ApiSidebar() {
             <HistoryList />
           )}
         </div>
+
+        {/* Docked to the foot of the card: the environment is a property of the whole client, not
+            of the section on screen, so it stays put while the tabs above it change. */}
+        <EnvironmentBar />
       </div>
 
       <ResizeHandle

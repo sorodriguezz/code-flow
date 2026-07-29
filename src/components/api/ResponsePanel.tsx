@@ -4,6 +4,7 @@ import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import {
   AlertTriangle,
+  Bookmark,
   BookmarkPlus,
   Check,
   CheckCircle2,
@@ -14,6 +15,7 @@ import {
   Inbox,
   Search,
   WrapText,
+  X,
   XCircle,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -26,6 +28,7 @@ import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { renderVisualizerTemplate } from "../../lib/api/visualizer";
 import { EmptyState } from "../common/EmptyState";
 import { SkeletonRows } from "../common/Skeleton";
+import { statusColor } from "./methodStyle";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { ApiResponse, KeyValue, ResponseTimings, SavedExample } from "../../types/api";
 
@@ -35,22 +38,28 @@ const PRETTY_LIMIT = 2 * 1024 * 1024;
 /** Monaco tokenizes the whole model up front; a 50 MB body would lock the app for seconds. */
 const DISPLAY_LIMIT = 5 * 1024 * 1024;
 
-type ResponseView =
-  | "pretty"
-  | "raw"
-  | "preview"
-  | "visualize"
-  | "headers"
-  | "cookies"
-  | "tests"
-  | "console"
-  | "timeline";
+/** The four ways of rendering the same payload — a choice *within* the body, not beside it. */
+type BodyView = "pretty" | "raw" | "preview" | "visualize";
 
-const VIEW_LABELS: Record<ResponseView, TranslationKey> = {
-  pretty: "api.response.pretty",
-  raw: "api.response.raw",
-  preview: "api.response.preview",
-  visualize: "api.response.visualize",
+/**
+ * What the panel is showing.
+ *
+ * The body's renderings used to sit in the tab strip as peers of headers and cookies, which made
+ * nine tabs where six of them were the same thing seen differently — and pushed the metadata off
+ * the end of a narrow panel. They collapse into one `body` tab with its own picker, leaving the
+ * strip to say what it actually offers: the payload, or something about the response.
+ */
+type ResponseTab = "body" | "headers" | "cookies" | "tests" | "console" | "timeline";
+
+const BODY_VIEWS: { id: BodyView; label: TranslationKey }[] = [
+  { id: "pretty", label: "api.response.pretty" },
+  { id: "raw", label: "api.response.raw" },
+  { id: "preview", label: "api.response.preview" },
+  { id: "visualize", label: "api.response.visualize" },
+];
+
+const TAB_LABELS: Record<ResponseTab, TranslationKey> = {
+  body: "api.tab.body",
   headers: "api.response.headers",
   cookies: "api.response.cookies",
   tests: "api.response.testResults",
@@ -58,33 +67,41 @@ const VIEW_LABELS: Record<ResponseView, TranslationKey> = {
   timeline: "api.response.timeline",
 };
 
-const VIEW_ORDER: ResponseView[] = [
-  "pretty",
-  "raw",
-  "preview",
-  "visualize",
-  "headers",
-  "cookies",
-  "tests",
-  "console",
-  "timeline",
-];
+const TAB_ORDER: ResponseTab[] = ["body", "headers", "cookies", "tests", "console", "timeline"];
 
 export function ResponsePanel({ tabId }: { tabId: string }) {
-  const response = useApiRuntimeStore((s) => s.responses[tabId] ?? null);
+  // A saved example shadows the live response while it's open, and gives it back untouched on
+  // close — reading one back shouldn't cost you the response you just sent.
+  const exampleView = useApiRuntimeStore((s) => s.exampleViews[tabId] ?? null);
+  const liveResponse = useApiRuntimeStore((s) => s.responses[tabId] ?? null);
+  const response = exampleView?.response ?? liveResponse;
   const sending = useApiRuntimeStore((s) => s.sending[tabId] ?? false);
   const setResponse = useApiRuntimeStore((s) => s.setResponse);
+  const closeExample = useApiRuntimeStore((s) => s.closeExample);
   const prettyPrint = useApiStore((s) => s.settings.prettyPrint);
   const maxResponseBytes = useApiStore((s) => s.settings.maxResponseBytes);
   const updateDraft = useApiStore((s) => s.updateDraft);
+  const setRequestExamples = useApiStore((s) => s.setRequestExamples);
   const t = useT();
 
-  const [view, setView] = useState<ResponseView>("pretty");
+  // Two axes now, and they're independent on purpose: tabbing to Headers and back leaves the body
+  // on whichever rendering you were reading it in.
+  const [tab, setTab] = useState<ResponseTab>("body");
+  // `null` means "whatever suits this payload". Only an explicit click on the picker pins a
+  // rendering, and only until the next response — see the reset below.
+  const [pickedBodyView, setPickedBodyView] = useState<BodyView | null>(null);
   const [copied, markCopied] = useCopyFlag();
 
   const contentType = response ? headerValue(response.headers, "content-type") : "";
   const binary = response?.body_base64 != null && response.body_base64 !== "";
   const bodyText = response?.body_text ?? "";
+  const bodyView = pickedBodyView ?? autoBodyView(contentType, response?.visualizer != null);
+
+  // A new payload picks again from scratch: the rendering that suited a JSON body is the wrong
+  // one for the PNG the next request answers with.
+  useEffect(() => {
+    setPickedBodyView(null);
+  }, [response]);
 
   const pretty = useMemo(() => {
     const language = languageForContentType(contentType);
@@ -139,8 +156,17 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
       headers: response.headers.map(([key, value], index) => headerRow(key, value, index)),
       body: bodyText,
     };
-    updateDraft(tabId, { examples: [...tab.draft.examples, example] });
-    useToastStore.getState().pushToast(t("api.response.exampleSaved", { name }), "success");
+    const examples = [...tab.draft.examples, example];
+    if (tab.requestId) {
+      // Straight to the row, so it shows up under the request in the tree immediately.
+      void setRequestExamples(tab.requestId, examples);
+      useToastStore.getState().pushToast(t("api.response.exampleSaved", { name }), "success");
+    } else {
+      // Nothing to hang it off yet: it stays in the draft, and the tree gets it once the user
+      // files the request into a collection.
+      updateDraft(tabId, { examples });
+      useToastStore.getState().pushToast(t("api.response.exampleSavedScratch", { name }), "success");
+    }
   };
 
   const notices: string[] = [];
@@ -152,10 +178,29 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--cf-surface)]">
+      {exampleView && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-accent-soft)] px-3 py-1 text-[11px] text-[var(--cf-accent)]">
+          <Bookmark size={12} className="shrink-0" />
+          <span className="min-w-0 truncate">
+            {t("api.example.viewing", { name: exampleView.name })}
+          </span>
+          <button
+            onClick={() => closeExample(tabId)}
+            className="ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 hover:bg-[color-mix(in_oklab,var(--cf-accent)_18%,transparent)]"
+          >
+            <X size={11} />
+            {t("api.example.close")}
+          </button>
+        </div>
+      )}
       <div className="flex shrink-0 items-center gap-3 border-b border-[var(--cf-border)] px-3 py-1.5">
         <StatusPill response={response} />
         <div className="flex min-w-0 items-center gap-3 text-[11px] text-[var(--cf-text-muted)]">
-          <Metric label={t("api.response.time")} value={formatDuration(response.duration_ms)} />
+          {/* An example never travelled, so it has no time to report — showing "0 ms" would read
+              as a measurement rather than the absence of one. */}
+          {!exampleView && (
+            <Metric label={t("api.response.time")} value={formatDuration(response.duration_ms)} />
+          )}
           <Metric label={t("api.response.size")} value={formatBytes(response.size_bytes)} />
           {response.redirects.length > 0 && (
             <span title={response.redirects.join("\n")}>
@@ -171,16 +216,22 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
             active={copied}
           />
           <IconButton icon={Download} title={t("api.response.save")} onClick={() => void saveToFile()} />
-          <IconButton
-            icon={BookmarkPlus}
-            title={t("api.response.saveAsExample")}
-            onClick={saveAsExample}
-          />
-          <IconButton
-            icon={Eraser}
-            title={t("api.response.clear")}
-            onClick={() => setResponse(tabId, null)}
-          />
+          {/* Capturing and clearing act on the live response; neither means anything while an
+              example is what's on screen, and the banner's own button is the way out. */}
+          {!exampleView && (
+            <>
+              <IconButton
+                icon={BookmarkPlus}
+                title={t("api.response.saveAsExample")}
+                onClick={saveAsExample}
+              />
+              <IconButton
+                icon={Eraser}
+                title={t("api.response.clear")}
+                onClick={() => setResponse(tabId, null)}
+              />
+            </>
+          )}
         </div>
       </div>
 
@@ -188,66 +239,78 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
         <ErrorView response={response} />
       ) : (
         <>
-          <div className="flex shrink-0 items-center gap-1 overflow-x-auto border-b border-[var(--cf-border)] px-2">
-            {VIEW_ORDER.map((id) => (
-              <ViewTab
-                key={id}
-                label={t(VIEW_LABELS[id])}
-                active={view === id}
-                onClick={() => setView(id)}
-                badge={
-                  id === "tests" && response.tests.length > 0
-                    ? {
-                        text: t("api.response.testsPassed", {
-                          passed: testsPassed,
-                          total: response.tests.length,
-                        }),
-                        tone: testsPassed === response.tests.length ? "success" : "danger",
-                      }
-                    : countBadge(id, response)
-                }
-              />
-            ))}
+          <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2">
+            {/* The tabs give way to the picker when the panel is narrow: which rendering you're
+                reading the body in has to stay reachable, where a tab you can scroll to doesn't. */}
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+              {TAB_ORDER.map((id) => (
+                <ViewTab
+                  key={id}
+                  label={t(TAB_LABELS[id])}
+                  active={tab === id}
+                  onClick={() => setTab(id)}
+                  badge={
+                    id === "tests" && response.tests.length > 0
+                      ? {
+                          text: t("api.response.testsPassed", {
+                            passed: testsPassed,
+                            total: response.tests.length,
+                          }),
+                          tone: testsPassed === response.tests.length ? "success" : "danger",
+                        }
+                      : countBadge(id, response)
+                  }
+                />
+              ))}
+            </div>
+            {tab === "body" && <BodyViewPicker value={bodyView} onChange={setPickedBodyView} />}
           </div>
 
           <div className="min-h-0 flex-1 overflow-hidden">
-            {view === "pretty" &&
-              (binary ? (
-                <BinaryBody response={response} onSave={() => void saveToFile()} />
-              ) : (
-                <BodyEditor
-                  path={`inmemory://api-response/${tabId}/pretty`}
-                  text={pretty.text}
-                  language={pretty.language}
-                  defaultWrap
-                  notices={[
-                    ...notices,
-                    ...(pretty.skipped
-                      ? [t("api.response.prettySkipped", { size: formatBytes(bodyText.length) })]
-                      : []),
-                  ]}
-                />
-              ))}
+            {tab === "body" && (
+              <>
+                {bodyView === "pretty" &&
+                  (binary ? (
+                    <BinaryBody response={response} onSave={() => void saveToFile()} />
+                  ) : (
+                    <BodyEditor
+                      path={`inmemory://api-response/${tabId}/pretty`}
+                      text={pretty.text}
+                      language={pretty.language}
+                      defaultWrap
+                      notices={[
+                        ...notices,
+                        ...(pretty.skipped
+                          ? [t("api.response.prettySkipped", { size: formatBytes(bodyText.length) })]
+                          : []),
+                      ]}
+                    />
+                  ))}
 
-            {view === "raw" &&
-              (binary ? (
-                <BinaryBody response={response} onSave={() => void saveToFile()} />
-              ) : (
-                <BodyEditor
-                  path={`inmemory://api-response/${tabId}/raw`}
-                  text={bodyText}
-                  language="plaintext"
-                  notices={notices}
-                />
-              ))}
+                {bodyView === "raw" &&
+                  (binary ? (
+                    <BinaryBody response={response} onSave={() => void saveToFile()} />
+                  ) : (
+                    <BodyEditor
+                      path={`inmemory://api-response/${tabId}/raw`}
+                      text={bodyText}
+                      language="plaintext"
+                      notices={notices}
+                    />
+                  ))}
 
-            {view === "preview" && <PreviewView response={response} contentType={contentType} />}
-            {view === "visualize" && <VisualizeView response={response} />}
-            {view === "headers" && <HeadersView headers={response.headers} />}
-            {view === "cookies" && <CookiesView response={response} />}
-            {view === "tests" && <TestsView response={response} />}
-            {view === "console" && <ConsoleView response={response} />}
-            {view === "timeline" && <TimelineView timings={response.timings} />}
+                {bodyView === "preview" && (
+                  <PreviewView response={response} contentType={contentType} />
+                )}
+                {bodyView === "visualize" && <VisualizeView response={response} />}
+              </>
+            )}
+
+            {tab === "headers" && <HeadersView headers={response.headers} />}
+            {tab === "cookies" && <CookiesView response={response} />}
+            {tab === "tests" && <TestsView response={response} />}
+            {tab === "console" && <ConsoleView response={response} />}
+            {tab === "timeline" && <TimelineView timings={response.timings} />}
           </div>
         </>
       )}
@@ -352,16 +415,51 @@ function badgeColor(tone: "muted" | "success" | "danger"): string {
   return "var(--cf-text-muted)";
 }
 
+/**
+ * The body's renderings, as a segmented control rather than four more tabs.
+ *
+ * Sits on the tab strip's own row: the response pane is the short one in the builder, and a
+ * second row would cost real reading height for four buttons.
+ */
+function BodyViewPicker({ value, onChange }: { value: BodyView; onChange: (view: BodyView) => void }) {
+  const t = useT();
+  return (
+    <div
+      role="tablist"
+      className="flex shrink-0 items-center gap-px rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-px"
+    >
+      {BODY_VIEWS.map(({ id, label }) => (
+        <button
+          key={id}
+          type="button"
+          role="tab"
+          aria-selected={value === id}
+          onClick={() => onChange(id)}
+          // Accent-soft for the selected one, the same pair the tree and the tab strip use for
+          // "this is the one you're on" — the earlier grey-on-grey pill had to be hunted for.
+          className={`whitespace-nowrap rounded-[5px] px-2 py-[3px] text-[11px] transition-colors ${
+            value === id
+              ? "bg-[var(--cf-accent-soft)] font-medium text-[var(--cf-accent)]"
+              : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+          }`}
+        >
+          {t(label)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function countBadge(
-  view: ResponseView,
+  tab: ResponseTab,
   response: ApiResponse,
 ): { text: string; tone: "muted" | "success" | "danger" } | null {
   const count =
-    view === "headers"
+    tab === "headers"
       ? response.headers.length
-      : view === "cookies"
+      : tab === "cookies"
         ? response.set_cookies.length
-        : view === "console"
+        : tab === "console"
           ? response.consoleLines.length
           : 0;
   return count > 0 ? { text: String(count), tone: "muted" } : null;
@@ -387,9 +485,13 @@ function ErrorView({ response }: { response: ApiResponse }) {
 
 function BinaryBody({ response, onSave }: { response: ApiResponse; onSave: () => void }) {
   const t = useT();
+  // The type is the first thing you want to know about bytes you can't read — "application/pdf"
+  // answers "what did I get?" where a byte count alone only answers "how much of it?".
+  const mime = mimeOf(headerValue(response.headers, "content-type"));
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
       <FileWarning size={26} className="text-[var(--cf-text-muted)]" />
+      {mime && <p className="font-mono text-[12px] text-[var(--cf-text-muted)]">{mime}</p>}
       <p className="text-[13px] text-[var(--cf-text)]">
         {t("api.response.binary", { size: formatBytes(response.size_bytes) })}
       </p>
@@ -813,14 +915,6 @@ function useCopyFlag(): [boolean, () => void] {
   return [copied, mark];
 }
 
-function statusColor(status: number): string {
-  if (status >= 200 && status < 300) return "var(--cf-success)";
-  if (status >= 300 && status < 400) return "var(--cf-accent)";
-  if (status >= 400 && status < 500) return "var(--cf-warning)";
-  if (status >= 500) return "var(--cf-danger)";
-  return "var(--cf-text-muted)";
-}
-
 function headerValue(headers: [string, string][], name: string): string {
   const wanted = name.toLowerCase();
   return headers.find(([key]) => key.toLowerCase() === wanted)?.[1] ?? "";
@@ -828,6 +922,27 @@ function headerValue(headers: [string, string][], name: string): string {
 
 function mimeOf(contentType: string): string {
   return contentType.split(";")[0].trim().toLowerCase();
+}
+
+/**
+ * Which rendering a response opens in, from what the server said it sent.
+ *
+ * The point is that a PNG shouldn't land you on a screen of mojibake and an HTML page shouldn't
+ * land you on its source: the payload already says which of the four views can read it, so the
+ * panel picks that one instead of always starting at Pretty.
+ *
+ * A visualizer wins over everything — a post-response script that called `pm.visualizer.set()`
+ * built a view of this exact response on purpose, which is a stronger statement of intent than
+ * any header.
+ */
+function autoBodyView(contentType: string, hasVisualizer: boolean): BodyView {
+  if (hasVisualizer) return "visualize";
+  const mime = mimeOf(contentType);
+  // Only what `PreviewView` can actually render. Sending anything else there would land on
+  // "nothing to preview", which is worse than the body view's own account of the payload — a PDF
+  // lands on Pretty, where `BinaryBody` names the type and offers to save it.
+  if (mime.startsWith("image/") || mime.includes("html") || mime.includes("xhtml")) return "preview";
+  return "pretty";
 }
 
 function languageForContentType(contentType: string): string {

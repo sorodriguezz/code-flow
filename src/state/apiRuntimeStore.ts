@@ -1,11 +1,13 @@
 import { create } from "zustand";
 import { onApiStreamMessage, onApiStreamStatus } from "../lib/tauri/events";
+import { exampleToResponse } from "../lib/api/examples";
 import type { GraphqlSchema } from "../lib/api/graphql";
 import type {
   ApiResponse,
   ConsoleLine,
   GrpcServiceInfo,
   RunnerReport,
+  SavedExample,
   StreamMessage,
   StreamStatusEvent,
 } from "../types/api";
@@ -34,8 +36,23 @@ export interface TabConnection {
   detail: string;
 }
 
+/** A saved example being read in the response panel, alongside — never on top of — the live one. */
+export interface ExampleView {
+  exampleId: string;
+  name: string;
+  response: ApiResponse;
+}
+
 interface ApiRuntimeState {
   responses: Record<string, ApiResponse | null>;
+  /**
+   * The example a tab is currently showing instead of its response, by tab id.
+   *
+   * Kept beside `responses` rather than written into it so that closing the example puts the
+   * live response back exactly as it was — reading a saved example shouldn't cost you the one
+   * you just sent.
+   */
+  exampleViews: Record<string, ExampleView>;
   sending: Record<string, boolean>;
   connections: Record<string, TabConnection>;
   messages: Record<string, StreamMessage[]>;
@@ -51,6 +68,10 @@ interface ApiRuntimeState {
 
   setResponse: (tabId: string, response: ApiResponse | null) => void;
   setSending: (tabId: string, sending: boolean) => void;
+
+  /** Shows a saved example in `tabId`'s response panel. */
+  showExample: (tabId: string, example: SavedExample) => void;
+  closeExample: (tabId: string) => void;
 
   /** Registers the connection id a tab just opened, in `connecting` until the backend says more. */
   openConnection: (tabId: string, connectionId: string) => void;
@@ -77,6 +98,7 @@ let subscribed = false;
 
 export const useApiRuntimeStore = create<ApiRuntimeState>((set, get) => ({
   responses: {},
+  exampleViews: {},
   sending: {},
   connections: {},
   messages: {},
@@ -109,10 +131,39 @@ export const useApiRuntimeStore = create<ApiRuntimeState>((set, get) => ({
     });
   },
 
+  // A response arriving is the tab going back to live: whatever example was being read is no
+  // longer what the user is looking at, and leaving it up would hide the send they just made.
   setResponse: (tabId, response) =>
-    set((s) => ({ responses: { ...s.responses, [tabId]: response } })),
+    set((s) => {
+      const { [tabId]: _viewed, ...exampleViews } = s.exampleViews;
+      return { responses: { ...s.responses, [tabId]: response }, exampleViews };
+    }),
 
-  setSending: (tabId, sending) => set((s) => ({ sending: { ...s.sending, [tabId]: sending } })),
+  // A tab that is sending is showing live: the skeleton, and then whatever comes back.
+  setSending: (tabId, sending) =>
+    set((s) => {
+      if (!sending) return { sending: { ...s.sending, [tabId]: sending } };
+      const { [tabId]: _viewed, ...exampleViews } = s.exampleViews;
+      return { sending: { ...s.sending, [tabId]: sending }, exampleViews };
+    }),
+
+  showExample: (tabId, example) =>
+    set((s) => ({
+      exampleViews: {
+        ...s.exampleViews,
+        [tabId]: {
+          exampleId: example.id,
+          name: example.name,
+          response: exampleToResponse(example),
+        },
+      },
+    })),
+
+  closeExample: (tabId) =>
+    set((s) => {
+      const { [tabId]: _closed, ...exampleViews } = s.exampleViews;
+      return { exampleViews };
+    }),
 
   openConnection: (tabId, connectionId) =>
     set((s) => ({
@@ -162,12 +213,13 @@ export const useApiRuntimeStore = create<ApiRuntimeState>((set, get) => ({
   disposeTab: (tabId) =>
     set((s) => {
       const { [tabId]: _response, ...responses } = s.responses;
+      const { [tabId]: _example, ...exampleViews } = s.exampleViews;
       const { [tabId]: _sending, ...sending } = s.sending;
       const { [tabId]: _connection, ...connections } = s.connections;
       const { [tabId]: _messages, ...messages } = s.messages;
       const { [tabId]: _services, ...grpcServices } = s.grpcServices;
       const { [tabId]: _schema, ...graphqlSchemas } = s.graphqlSchemas;
-      return { responses, sending, connections, messages, grpcServices, graphqlSchemas };
+      return { responses, exampleViews, sending, connections, messages, grpcServices, graphqlSchemas };
     }),
 }));
 

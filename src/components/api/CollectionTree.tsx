@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
+  Bookmark,
   Boxes,
   ChevronDown,
   ChevronRight,
@@ -14,24 +15,32 @@ import {
   Pencil,
   Play,
   Share2,
+  Star,
   Trash2,
   type LucideIcon,
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
-import { badgeColor, badgeLabel } from "./methodStyle";
+import { badgeColor, badgeLabel, statusColor } from "./methodStyle";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { canDrop, useApiDragStore, type ApiDrag, type ApiDropZone } from "../../state/apiDragStore";
 import { useApiStore } from "../../state/apiStore";
+import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { defaultRequestSpec } from "../../types/api";
-import type { ApiFolder, ApiProtocol, ApiRequestRow } from "../../types/api";
+import type { ApiFolder, ApiProtocol, ApiRequestRow, SavedExample } from "../../types/api";
 
 /** Row indent per level, and the left gutter every row starts from. */
 const INDENT = 14;
 const ROW_PAD = 6;
+
+/** The twisty column, and the glyph column beside it — the method badge on a request, the folder
+ * icon on a container. Sharing one width is what puts every name on the same left edge, so a
+ * request reads as the sibling of the folder above it rather than as something inside it. */
+const TWISTY_W = 12;
+const GLYPH_W = 38;
 
 /** How much of a folder row's height, top and bottom, aims *between* rows rather than into it.
  * Small enough that the middle — "into this folder" — is what you hit without trying. */
@@ -71,10 +80,42 @@ interface Draft {
 export function MethodBadge({ protocol, method }: { protocol: ApiProtocol; method: string }) {
   return (
     <span
-      className="w-[38px] shrink-0 truncate text-right font-mono text-[9px] font-bold uppercase leading-none tracking-tight"
-      style={{ color: badgeColor(protocol, method) }}
+      style={{ color: badgeColor(protocol, method), width: GLYPH_W }}
+      className="shrink-0 truncate text-right font-mono text-[9px] font-bold uppercase leading-none tracking-tight"
     >
       {badgeLabel(protocol, method)}
+    </span>
+  );
+}
+
+/**
+ * The hairlines tying a row to its ancestors, one per level above it.
+ *
+ * Each row draws only its own segment, so the lines read as continuous down a subtree without any
+ * row having to know how tall that subtree is. They sit on the centre of each level's twisty
+ * column, which is what makes a line point at the chevron that collapses the branch it belongs to.
+ */
+function IndentGuides({ depth }: { depth: number }) {
+  return (
+    <>
+      {Array.from({ length: depth }, (_, level) => (
+        <span
+          key={level}
+          aria-hidden
+          className="pointer-events-none absolute top-0 h-full w-px bg-[var(--cf-border)]"
+          style={{ left: level * INDENT + ROW_PAD + TWISTY_W / 2 }}
+        />
+      ))}
+    </>
+  );
+}
+
+/** The glyph column: whatever goes in it is pushed against the name, so icons of different sizes
+ * still leave every name on the same left edge. */
+function GlyphSlot({ children }: { children: ReactNode }) {
+  return (
+    <span style={{ width: GLYPH_W }} className="flex shrink-0 items-center justify-end">
+      {children}
     </span>
   );
 }
@@ -189,6 +230,16 @@ function pushInto<T>(map: Map<string, T[]>, key: string, value: T) {
   else map.set(key, [value]);
 }
 
+/** A row whose `spec` is corrupt simply has no examples, the same way it still opens as a request. */
+function readExamples(row: ApiRequestRow): SavedExample[] {
+  try {
+    const spec = JSON.parse(row.spec) as { examples?: unknown };
+    return Array.isArray(spec.examples) ? (spec.examples as SavedExample[]) : [];
+  } catch {
+    return [];
+  }
+}
+
 function groupTree(folders: ApiFolder[], requests: ApiRequestRow[]): GroupedTree {
   const grouped: GroupedTree = { folders: new Map(), requests: new Map() };
   for (const folder of [...folders].sort((a, b) => a.sort_order - b.sort_order)) {
@@ -219,8 +270,13 @@ function storeIndex(gap: number, draggedAt: number): number {
 interface TreeRowProps {
   node: NodeRef;
   depth: number;
-  /** Containers only; `undefined` on a request. */
+  /** Containers, and requests that have saved examples to unfold; `undefined` on a plain request. */
   expanded?: boolean;
+  /** Requests only: set when the row has examples, so it gets a twisty instead of the spacer. */
+  onToggle?: () => void;
+  /** Collections only: current pin state, and the toggle for it. */
+  pinned?: boolean;
+  onTogglePin?: () => void;
   protocol?: ApiProtocol;
   method?: string;
   renaming: boolean;
@@ -242,6 +298,9 @@ function TreeRow({
   node,
   depth,
   expanded,
+  onToggle,
+  pinned,
+  onTogglePin,
   protocol,
   method,
   renaming,
@@ -270,7 +329,7 @@ function TreeRow({
       data-cf-apicol={node.collectionId}
       data-cf-apiparent={node.parentId ?? ""}
       role="treeitem"
-      aria-expanded={isContainer ? expanded : undefined}
+      aria-expanded={isContainer || onToggle ? expanded : undefined}
       title={node.name}
       // A div rather than a button because the row carries its own "…" button, and a button
       // inside a button is invalid — so focus and the Enter/Space activation come back by hand.
@@ -297,31 +356,55 @@ function TreeRow({
         onMenu(e.clientX, e.clientY);
       }}
       style={{ paddingLeft: depth * INDENT + ROW_PAD }}
-      className={`group flex cursor-pointer items-center gap-1.5 rounded-md py-0.5 pr-1 text-[13px] ${
+      className={`group relative flex cursor-pointer items-center gap-1.5 rounded-md py-0.5 pr-1 text-[13px] ${
         // Nothing but the drop target lights up while a drag is in flight.
         isHovered && !anyDrag ? "cf-row-hover" : ""
       } ${
         dropInto ? "bg-[var(--cf-accent-soft)] ring-1 ring-inset ring-[var(--cf-accent)]" : ""
       } ${dragging ? "opacity-40" : ""}`}
     >
+      <IndentGuides depth={depth} />
+
       {isContainer ? (
         <>
-          {expanded ? (
-            <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-          ) : (
-            <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
-          )}
-          {node.kind === "collection" ? (
-            <Boxes size={13} className="shrink-0 text-[var(--cf-accent)]" />
-          ) : expanded ? (
-            <FolderOpen size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-          ) : (
-            <Folder size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-          )}
+          <span style={{ width: TWISTY_W }} className="flex shrink-0 justify-center">
+            {expanded ? (
+              <ChevronDown size={12} className="text-[var(--cf-text-muted)]" />
+            ) : (
+              <ChevronRight size={12} className="text-[var(--cf-text-muted)]" />
+            )}
+          </span>
+          <GlyphSlot>
+            {node.kind === "collection" ? (
+              <Boxes size={13} className="text-[var(--cf-accent)]" />
+            ) : expanded ? (
+              <FolderOpen size={13} className="text-[var(--cf-text-muted)]" />
+            ) : (
+              <Folder size={13} className="text-[var(--cf-text-muted)]" />
+            )}
+          </GlyphSlot>
         </>
       ) : (
         <>
-          <span className="w-3 shrink-0" />
+          {/* A request is a leaf until it has examples, and then it unfolds like a container —
+              except the row itself still opens the request, so the twisty takes its own click. */}
+          {onToggle ? (
+            <button
+              title={t("api.example.toggle")}
+              aria-label={t("api.example.toggle")}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onToggle();
+              }}
+              style={{ width: TWISTY_W }}
+              className="flex shrink-0 items-center justify-center text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            >
+              {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            </button>
+          ) : (
+            <span style={{ width: TWISTY_W }} className="shrink-0" />
+          )}
           <MethodBadge protocol={protocol ?? "http"} method={method ?? "GET"} />
         </>
       )}
@@ -355,6 +438,28 @@ function TreeRow({
         >
           {node.name || t("api.untitledRequest")}
         </span>
+      )}
+
+      {/* The one control here that stays lit when it's off-hover: a pin is state, not an action,
+          and it's the reason the row is where it is in the list. */}
+      {onTogglePin && (
+        <button
+          title={pinned ? t("api.unpinCollection") : t("api.pinCollection")}
+          aria-label={pinned ? t("api.unpinCollection") : t("api.pinCollection")}
+          aria-pressed={pinned}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onTogglePin();
+          }}
+          className={`flex h-4 w-4 shrink-0 items-center justify-center rounded ${
+            pinned
+              ? "text-[var(--cf-accent)]"
+              : "text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] group-hover:opacity-100"
+          }`}
+        >
+          <Star size={12} fill={pinned ? "currentColor" : "none"} />
+        </button>
       )}
 
       {/* Creating a request is the overwhelmingly common thing to do to a collection, and it was
@@ -391,6 +496,120 @@ function TreeRow({
   );
 }
 
+/**
+ * One saved example, nested under the request it was captured from.
+ *
+ * Deliberately outside the drag system: an example belongs to its request and can't be filed
+ * anywhere else, so it carries none of the `data-cf-api*` markers the hit-test reads and never
+ * arms a drag.
+ */
+function ExampleRow({
+  example,
+  depth,
+  active,
+  renaming,
+  onActivate,
+  onMenu,
+  onRename,
+  onCancelRename,
+}: {
+  example: SavedExample;
+  depth: number;
+  /** This example is the one the active tab is currently showing. */
+  active: boolean;
+  renaming: boolean;
+  onActivate: () => void;
+  onMenu: (x: number, y: number) => void;
+  onRename: (name: string) => void;
+  onCancelRename: () => void;
+}) {
+  const t = useT();
+  const hoverKey = `api-example:${example.id}`;
+  const isHovered = useRowHoverStore((s) => s.key === hoverKey);
+  const anyDrag = useApiDragStore((s) => s.drag !== null);
+
+  return (
+    <div
+      role="treeitem"
+      title={example.name}
+      tabIndex={renaming ? -1 : 0}
+      onPointerEnter={() => useRowHoverStore.getState().enter(hoverKey)}
+      onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={onActivate}
+      onKeyDown={(e) => {
+        if (renaming || e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onActivate();
+        }
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onMenu(e.clientX, e.clientY);
+      }}
+      style={{ paddingLeft: depth * INDENT + ROW_PAD }}
+      className={`group relative flex cursor-pointer items-center gap-1.5 rounded-md py-0.5 pr-1 text-[13px] ${
+        active ? "bg-[var(--cf-accent-soft)]" : isHovered && !anyDrag ? "cf-row-hover" : ""
+      }`}
+    >
+      <IndentGuides depth={depth} />
+      <span style={{ width: TWISTY_W }} className="flex shrink-0 justify-center">
+        <Bookmark size={11} className="text-[var(--cf-text-muted)]" />
+      </span>
+      <span
+        style={{ color: statusColor(example.status), width: GLYPH_W }}
+        className="shrink-0 truncate text-right font-mono text-[9px] font-bold leading-none tracking-tight"
+      >
+        {example.status}
+      </span>
+
+      {renaming ? (
+        <input
+          autoFocus
+          defaultValue={example.name}
+          onPointerDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              onRename(e.currentTarget.value);
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              onCancelRename();
+            }
+          }}
+          onBlur={onCancelRename}
+          className="min-w-0 flex-1 rounded-sm border border-[var(--cf-accent)] bg-[var(--cf-bg)] px-1 py-0 text-[13px] text-[var(--cf-text)] outline-none"
+        />
+      ) : (
+        <span
+          className={`min-w-0 flex-1 truncate ${
+            active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+          }`}
+        >
+          {example.name || t("api.example.untitled")}
+        </span>
+      )}
+
+      <button
+        title={t("api.moreActions")}
+        aria-label={t("api.moreActions")}
+        onPointerDown={(e) => e.stopPropagation()}
+        onClick={(e) => {
+          e.stopPropagation();
+          const rect = e.currentTarget.getBoundingClientRect();
+          onMenu(rect.left, rect.bottom + 2);
+        }}
+        className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] group-hover:opacity-100"
+      >
+        <MoreHorizontal size={13} />
+      </button>
+    </div>
+  );
+}
+
 function DraftRow({
   kind,
   depth,
@@ -406,14 +625,17 @@ function DraftRow({
   return (
     <div
       style={{ paddingLeft: depth * INDENT + ROW_PAD }}
-      className="flex items-center gap-1.5 py-0.5 pr-2 text-[13px]"
+      className="relative flex items-center gap-1.5 py-0.5 pr-2 text-[13px]"
     >
-      <span className="w-3 shrink-0" />
-      {kind === "folder" ? (
-        <Folder size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-      ) : (
-        <FilePlus size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-      )}
+      <IndentGuides depth={depth} />
+      <span style={{ width: TWISTY_W }} className="shrink-0" />
+      <GlyphSlot>
+        {kind === "folder" ? (
+          <Folder size={13} className="text-[var(--cf-text-muted)]" />
+        ) : (
+          <FilePlus size={13} className="text-[var(--cf-text-muted)]" />
+        )}
+      </GlyphSlot>
       <input
         autoFocus
         placeholder={t(kind === "folder" ? "api.untitledFolder" : "api.untitledRequest")}
@@ -445,21 +667,51 @@ export function CollectionTree() {
   const folders = useApiStore((s) => s.folders);
   const requests = useApiStore((s) => s.requests);
 
+  const activeTabId = useApiStore((s) => s.activeTabId);
+  // Which example the tab on screen is reading, so the tree can point at it.
+  const activeExampleId = useApiRuntimeStore((s) =>
+    activeTabId ? (s.exampleViews[activeTabId]?.exampleId ?? null) : null,
+  );
+
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [renaming, setRenaming] = useState<NodeRef | null>(null);
+  const [renamingExample, setRenamingExample] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; node: NodeRef } | null>(null);
+  const [exampleMenu, setExampleMenu] = useState<{
+    x: number;
+    y: number;
+    requestId: string;
+    example: SavedExample;
+  } | null>(null);
   const openModal = useApiModalStore((s) => s.openApiModal);
 
   const drag = useApiDragStore((s) => s.drag);
   const over = useApiDragStore((s) => s.over);
   const origin = useApiDragStore((s) => s.origin);
 
+  // Pinned first, then the workspace's own order within each group — so pinning is a promotion,
+  // not a reshuffle: unpin and a collection drops back exactly where it was.
   const ordered = useMemo(
-    () => [...collections].sort((a, b) => a.sort_order - b.sort_order),
+    () =>
+      [...collections].sort(
+        (a, b) => Number(b.pinned) - Number(a.pinned) || a.sort_order - b.sort_order,
+      ),
     [collections],
   );
   const grouped = useMemo(() => groupTree(folders, requests), [folders, requests]);
+
+  // Parsed per change to `requests`, not per render: `spec` is a JSON blob and this tree
+  // re-renders on every pointer move during a drag. Rows without examples stay out of the map so
+  // the common case is a miss, not an empty array.
+  const examplesByRequest = useMemo(() => {
+    const map = new Map<string, SavedExample[]>();
+    for (const row of requests) {
+      const examples = readExamples(row);
+      if (examples.length > 0) map.set(row.id, examples);
+    }
+    return map;
+  }, [requests]);
 
   // The drag's hit-test runs on every pointer move and needs the same grouping the render used;
   // a ref keeps it reading the current one without rebuilding the maps per move.
@@ -543,6 +795,67 @@ export function CollectionTree() {
     else await state.deleteRequest(node.id);
   };
 
+  // ---------- examples ----------
+
+  /** Read from the store rather than the render's map, since these run after an `await`. */
+  const currentExamples = (requestId: string): SavedExample[] => {
+    const row = useApiStore.getState().requests.find((r) => r.id === requestId);
+    return row ? readExamples(row) : [];
+  };
+
+  const openExample = (requestId: string, example: SavedExample) => {
+    useApiStore.getState().openRequest(requestId);
+    // `openRequest` is synchronous, so the tab it opened (or focused) is already there.
+    const tab = useApiStore.getState().openTabs.find((t) => t.requestId === requestId);
+    if (tab) useApiRuntimeStore.getState().showExample(tab.id, example);
+  };
+
+  /** Runs `update` over every tab that happens to be reading `exampleId` right now. */
+  const forEachViewer = (exampleId: string, update: (tabId: string) => void) => {
+    for (const [tabId, view] of Object.entries(useApiRuntimeStore.getState().exampleViews)) {
+      if (view.exampleId === exampleId) update(tabId);
+    }
+  };
+
+  const renameExample = async (requestId: string, example: SavedExample, name: string) => {
+    setRenamingExample(null);
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === example.name) return;
+    const renamed = { ...example, name: trimmed };
+    await useApiStore
+      .getState()
+      .setRequestExamples(
+        requestId,
+        currentExamples(requestId).map((e) => (e.id === example.id ? renamed : e)),
+      );
+    // The banner in the response panel names the example it's showing; leaving it on the old
+    // name would be the one place in the app still calling it that.
+    forEachViewer(example.id, (tabId) => useApiRuntimeStore.getState().showExample(tabId, renamed));
+  };
+
+  const deleteExample = async (requestId: string, example: SavedExample) => {
+    const message = t("api.example.deleteConfirm", { name: example.name });
+    if (!(await confirmAction(message, true, t("api.delete")))) return;
+    await useApiStore
+      .getState()
+      .setRequestExamples(
+        requestId,
+        currentExamples(requestId).filter((e) => e.id !== example.id),
+      );
+    forEachViewer(example.id, (tabId) => useApiRuntimeStore.getState().closeExample(tabId));
+  };
+
+  const exampleMenuItems = (requestId: string, example: SavedExample): MenuItem[] => [
+    { label: t("api.rename"), icon: Pencil, onClick: () => setRenamingExample(example.id) },
+    {
+      label: t("api.delete"),
+      icon: Trash2,
+      danger: true,
+      separated: true,
+      onClick: () => void deleteExample(requestId, example),
+    },
+  ];
+
   const menuItems = (node: NodeRef): MenuItem[] => {
     const items: MenuItem[] = [];
     if (node.kind !== "request") {
@@ -565,6 +878,13 @@ export function CollectionTree() {
       });
     }
     if (node.kind === "collection") {
+      const pinned = collections.find((c) => c.id === node.id)?.pinned ?? false;
+      items.push({
+        label: pinned ? t("api.unpinCollection") : t("api.pinCollection"),
+        icon: Star,
+        separated: true,
+        onClick: () => void useApiStore.getState().toggleCollectionPinned(node.id),
+      });
       items.push({
         label: t("api.export.title"),
         icon: Share2,
@@ -813,10 +1133,14 @@ export function CollectionTree() {
       parentId: request.folder_id,
       name: request.name,
     };
-    return (
+    const examples = examplesByRequest.get(request.id);
+    const isExpanded = examples !== undefined && expanded.has(request.id);
+    const row = (
       <TreeRow
         node={node}
         depth={depth}
+        expanded={examples ? isExpanded : undefined}
+        onToggle={examples ? () => toggle(request.id) : undefined}
         protocol={request.protocol}
         method={request.method}
         renaming={renaming?.id === request.id}
@@ -829,6 +1153,26 @@ export function CollectionTree() {
         onCancelRename={() => setRenaming(null)}
         suppressClick={takeSuppressedClick}
       />
+    );
+    if (!examples) return row;
+    return (
+      <div>
+        {row}
+        {isExpanded &&
+          examples.map((example) => (
+            <ExampleRow
+              key={example.id}
+              example={example}
+              depth={depth + 1}
+              active={activeExampleId === example.id}
+              renaming={renamingExample === example.id}
+              onActivate={() => openExample(request.id, example)}
+              onMenu={(x, y) => setExampleMenu({ x, y, requestId: request.id, example })}
+              onRename={(name) => void renameExample(request.id, example, name)}
+              onCancelRename={() => setRenamingExample(null)}
+            />
+          ))}
+      </div>
     );
   };
 
@@ -884,6 +1228,8 @@ export function CollectionTree() {
                   node={node}
                   depth={0}
                   expanded={isExpanded}
+                  pinned={collection.pinned}
+                  onTogglePin={() => void useApiStore.getState().toggleCollectionPinned(collection.id)}
                   renaming={renaming?.id === collection.id}
                   dragging={false}
                   dropInto={over?.mode === "into" && over.parentId === null && over.collectionId === collection.id}
@@ -903,6 +1249,15 @@ export function CollectionTree() {
 
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.node)} onClose={() => setMenu(null)} />
+      )}
+
+      {exampleMenu && (
+        <ContextMenu
+          x={exampleMenu.x}
+          y={exampleMenu.y}
+          items={exampleMenuItems(exampleMenu.requestId, exampleMenu.example)}
+          onClose={() => setExampleMenu(null)}
+        />
       )}
 
       {/* Portalled so no ancestor's `overflow` clips it, and click-through so it never becomes the

@@ -34,6 +34,15 @@ interface UpdateState {
   lastCheckedAt: number | null;
   /** Whether the "what's new" window is up. */
   notesOpen: boolean;
+  /**
+   * The version whose corner notice the user closed, or `""`.
+   *
+   * Held against the version rather than as a plain flag so that closing v1.7.4 says nothing
+   * about v1.7.5 — the next release has news of its own. Deliberately not persisted: an update
+   * you put off is one you should be reminded of next launch, and Settings › Updates is where
+   * "leave me alone about this for good" would belong if it ever exists.
+   */
+  dismissedVersion: string;
 
   loadCurrentVersion: () => Promise<void>;
   checkNow: (manual?: boolean) => Promise<void>;
@@ -41,6 +50,7 @@ interface UpdateState {
   restart: () => Promise<void>;
   openNotes: () => void;
   closeNotes: () => void;
+  dismiss: () => void;
 }
 
 /**
@@ -60,6 +70,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   installError: "",
   lastCheckedAt: null,
   notesOpen: false,
+  dismissedVersion: "",
 
   loadCurrentVersion: async () => {
     const version = await getVersion().catch(() => "");
@@ -129,4 +140,9 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
 
   openNotes: () => set({ notesOpen: true }),
   closeNotes: () => set({ notesOpen: false }),
+
+  dismiss: () => {
+    const { update } = get();
+    if (update) set({ dismissedVersion: update.version });
+  },
 }));

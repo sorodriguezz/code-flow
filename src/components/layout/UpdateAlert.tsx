@@ -1,19 +1,21 @@
 import { motion, useReducedMotion } from "framer-motion";
-import { ArrowUp, Loader2, RotateCw, TriangleAlert } from "lucide-react";
+import { ArrowUp, Loader2, RotateCw, TriangleAlert, X } from "lucide-react";
 import { useUpdateStore } from "../../state/updateStore";
 import { useT } from "../../state/languageStore";
 
 /**
  * The whole update flow, in a card parked above the status bar's left corner.
  *
- * It's the only place updates surface, and it runs the update from right here — found, download
- * with its progress, restart — rather than handing off to a panel somewhere else. The bottom-left
+ * It's the only place an update surfaces unprompted, and it runs the update from right here —
+ * found, download with its progress, restart — rather than handing off elsewhere. The bottom-left
  * corner is where the eye already goes for the project and branch, and the card floats over the
  * sidebar rather than sitting in the layout, so an update appearing mid-task can't reflow what
  * the user is looking at.
  *
- * Not dismissible: it *is* the update UI, so closing it would leave nothing to update from. It
- * goes away by being acted on — after the restart there's no newer version to report.
+ * Closing it is "not now", not "never": the card comes back next launch, and Settings › Updates
+ * runs the same flow in the meantime, so dismissing can't strand anyone without a way to update.
+ * The one moment it can't be closed is mid-download — hiding a transfer that keeps running would
+ * leave it finishing with nothing on screen to say the app is waiting on a restart.
  */
 export function UpdateAlert() {
   const t = useT();
@@ -25,8 +27,10 @@ export function UpdateAlert() {
   const install = useUpdateStore((s) => s.install);
   const restart = useUpdateStore((s) => s.restart);
   const openNotes = useUpdateStore((s) => s.openNotes);
+  const dismissedVersion = useUpdateStore((s) => s.dismissedVersion);
+  const dismiss = useUpdateStore((s) => s.dismiss);
 
-  if (!update) return null;
+  if (!update || update.version === dismissedVersion) return null;
 
   const downloading = status === "downloading";
   const ready = status === "ready";
@@ -76,7 +80,8 @@ export function UpdateAlert() {
       </span>
 
       <div className="min-w-0 flex-1">
-        <p className="text-[12px] font-semibold leading-snug text-[var(--cf-text)]">{title}</p>
+        {/* Clears the close button's corner so a long title wraps beside it, never under it. */}
+        <p className="pr-5 text-[12px] font-semibold leading-snug text-[var(--cf-text)]">{title}</p>
 
         {downloading ? (
           <>
@@ -121,6 +126,21 @@ export function UpdateAlert() {
           </>
         )}
       </div>
+
+      {/* Absent while downloading — see the note at the top. Taken out of the flow rather than
+          made a third column: the card only has ~190px of text to work with inside a default
+          sidebar, and the body and its buttons keep all of it this way. Only the title, which
+          wraps anyway, pays for the corner. */}
+      {!downloading && (
+        <button
+          onClick={dismiss}
+          title={t("update.dismiss")}
+          aria-label={t("update.dismiss")}
+          className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+        >
+          <X size={12} />
+        </button>
+      )}
     </motion.div>
   );
 }

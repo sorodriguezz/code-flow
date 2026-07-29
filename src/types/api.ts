@@ -462,6 +462,8 @@ export interface ApiCollection {
   /** JSON `ApiVariable[]` — collection-scoped variables. */
   variables: string;
   sort_order: number;
+  /** Sorts above the unpinned ones in the explorer, ahead of `sort_order`. */
+  pinned: boolean;
   created_at: string;
   updated_at: string;
 }

@@ -49,6 +49,7 @@ import type {
   ApiSettings,
   ApiVariable,
   AuthConfig,
+  SavedExample,
   VariableScope,
 } from "../types/api";
 import type { VariableContext } from "../lib/api/variables";
@@ -117,6 +118,8 @@ interface ApiState {
 
   createCollection: (name: string) => Promise<ApiCollection | null>;
   updateCollection: (collection: ApiCollection) => Promise<void>;
+  /** Flips a collection's pin, which is what floats it to the top of the explorer. */
+  toggleCollectionPinned: (id: string) => Promise<void>;
   deleteCollection: (id: string) => Promise<void>;
   duplicateCollection: (id: string) => Promise<void>;
   reorderCollections: (ids: string[]) => Promise<void>;
@@ -166,6 +169,18 @@ interface ApiState {
   setActiveTab: (tabId: string) => void;
   renameTab: (tabId: string, name: string) => void;
   updateDraft: (tabId: string, patch: Partial<ApiRequestSpec>) => void;
+  /**
+   * Replaces a saved request's example list, in the row and in any tab that has it open.
+   *
+   * Examples aren't an edit in progress the way the URL or the body are — the tree reads them
+   * off the row, so an example that only existed in a draft would be saved into a request the
+   * user can't see it under. Capturing or dropping one is therefore its own little save, and it
+   * deliberately leaves the tab's other unsaved edits exactly as unsaved as they were.
+   *
+   * Scratch tabs have no row to write to; their examples ride along in the draft until `saveTab`
+   * files the request.
+   */
+  setRequestExamples: (requestId: string, examples: SavedExample[]) => Promise<void>;
   saveTab: (
     tabId: string,
     target?: { collectionId: string; folderId: string | null },
@@ -333,6 +348,12 @@ export const useApiStore = create<ApiState>((set, get) => ({
       set((s) => ({ collections: [...s.collections, collection] }));
       return collection;
     });
+  },
+
+  toggleCollectionPinned: async (id) => {
+    const collection = get().collections.find((c) => c.id === id);
+    if (!collection) return;
+    await get().updateCollection({ ...collection, pinned: !collection.pinned });
   },
 
   updateCollection: async (collection) => {
@@ -666,6 +687,24 @@ export const useApiStore = create<ApiState>((set, get) => ({
       ),
     }));
     schedulePersistTabs(get);
+  },
+
+  setRequestExamples: async (requestId, examples) => {
+    const row = get().requests.find((r) => r.id === requestId);
+    if (!row) return;
+    // Patched onto the *stored* spec, not the draft: whatever the user is editing in the tab
+    // stays out of the row until they actually save it.
+    const updated: ApiRequestRow = {
+      ...row,
+      spec: JSON.stringify({ ...parseSpec(row), examples }),
+    };
+    await get().updateRequest(updated);
+    set((s) => ({
+      openTabs: s.openTabs.map((tab) =>
+        tab.requestId === requestId ? { ...tab, draft: { ...tab.draft, examples } } : tab,
+      ),
+    }));
+    persistTabs(get);
   },
 
   saveTab: async (tabId, target) => {

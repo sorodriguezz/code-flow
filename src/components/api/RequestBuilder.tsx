@@ -4,7 +4,7 @@ import { Select } from "../common/Select";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { KeyValueTable } from "./KeyValueTable";
 import { VariableInput } from "./VariableInput";
-import { badgeColor, badgeLabel } from "./methodStyle";
+import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
 import { AuthPanel } from "./AuthPanel";
 import { BodyPanel } from "./BodyPanel";
 import { GraphqlPanel } from "./GraphqlPanel";
@@ -305,6 +305,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
   const [panel, setPanel] = useState<PanelId>("params");
   const [menuOpen, setMenuOpen] = useState(false);
   const [savePicker, setSavePicker] = useState<{ collectionId: string; folderId: string } | null>(null);
+  const [protocolMenu, setProtocolMenu] = useState(false);
   const [implicitHeaders, setImplicitHeaders] = useState<KeyValue[]>([]);
   const [showImplicit, setShowImplicit] = useState(false);
   const trackRef = useRef<string | null>(null);
@@ -331,6 +332,9 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
     const store = useApiStore.getState();
     const current = store.openTabs.find((item) => item.id === tabId);
     if (!current) return;
+    // The button is disabled in this state, but ⌘S isn't — and re-writing a row with the spec it
+    // already holds would bump `updated_at` for a save that saved nothing.
+    if (!current.dirty) return;
     // A scratch tab that has never been filed has nowhere to go; that's the cue for the picker,
     // not an error.
     if (current.requestId === null && current.collectionId === null) {
@@ -338,17 +342,18 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
       setSavePicker({ collectionId: first?.id ?? "", folderId: "" });
       return;
     }
-    if (await store.saveTab(tabId)) pushToast(t("api.toast.requestSaved"), "success");
+    // No toast on success: the tab's dirty dot clearing is the confirmation, and a save is one
+    // keystroke people repeat constantly — a popup for each one is noise over the request.
+    await store.saveTab(tabId);
   };
 
   const saveToTarget = async () => {
     if (!savePicker || savePicker.collectionId === "") return;
-    const saved = await useApiStore.getState().saveTab(tabId, {
+    await useApiStore.getState().saveTab(tabId, {
       collectionId: savePicker.collectionId,
       folderId: savePicker.folderId === "" ? null : savePicker.folderId,
     });
     setSavePicker(null);
-    if (saved) pushToast(t("api.toast.requestSaved"), "success");
   };
 
 
@@ -550,8 +555,9 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
         ...consoleLines,
         { level: "error", text: message, at: Date.now() },
       ]);
+      // The failure is already the response — the panel shows it in full, with the message in the
+      // console — so a toast on top of it would say the same thing twice.
       useApiRuntimeStore.getState().setResponse(tabId, response);
-      pushErrorToast(t("api.toast.sendFailed", { error: message }));
       await recordHistory(response, request);
     } finally {
       useApiRuntimeStore.getState().setSending(tabId, false);
@@ -624,6 +630,11 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
 
   if (!tab || !spec) return <div className="h-full" />;
 
+  const ProtocolIcon = protocolIcon(spec.protocol);
+  // `requestId` is the honest test for "saved": a scratch tab has none until `saveTab` files it,
+  // and that is exactly the moment the protocol stops being a choice.
+  const protocolLocked = tab.requestId !== null;
+
   const isStreaming = STREAMING_PROTOCOLS.includes(protocol);
   const isGrpc = protocol === "grpc";
   const crumbs = breadcrumbFor(collections, folders, tab.collectionId, tab.folderId);
@@ -668,7 +679,80 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* ---------- name row ---------- */}
+      {/* Reads as one line — what kind of request, where it lives, what it's called — with only
+          the last part editable. The protocol leads because it's the thing that decides what
+          everything below the row even means. */}
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
+        <div className="relative shrink-0">
+          {/* Locked once the request has a row of its own: the protocol shapes the whole request —
+              a body, a subscription, a service call — so changing it on something already saved is
+              less "adjust a setting" than "replace this with a different request". While it's
+              still a scratch tab there's nothing to betray, so it stays editable. */}
+          {protocolLocked ? (
+            <span
+              title={`${PROTOCOL_NAMES[spec.protocol]} — ${t("api.protocolLocked")}`}
+              className="flex h-6 w-6 items-center justify-center"
+            >
+              <ProtocolIcon size={15} style={{ color: badgeColor(spec.protocol, "") }} />
+            </span>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setProtocolMenu((open) => !open)}
+              title={t("api.changeProtocol")}
+              aria-label={t("api.changeProtocol")}
+              aria-haspopup="menu"
+              aria-expanded={protocolMenu}
+              className="flex h-6 w-6 items-center justify-center rounded hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            >
+              <ProtocolIcon size={15} style={{ color: badgeColor(spec.protocol, "") }} />
+            </button>
+          )}
+
+          {protocolMenu && !protocolLocked && (
+            <>
+              {/* Full-viewport catcher, so the click that dismisses doesn't also press whatever
+                  is underneath it. */}
+              <div className="fixed inset-0 z-[9998]" onMouseDown={() => setProtocolMenu(false)} />
+              <div
+                role="menu"
+                className="absolute left-0 top-full z-[9999] mt-1 w-[180px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
+              >
+                {API_PROTOCOLS.map((id) => {
+                  const Icon = protocolIcon(id);
+                  return (
+                    <button
+                      key={id}
+                      role="menuitem"
+                      onClick={() => {
+                        setProtocolMenu(false);
+                        if (id !== spec.protocol) update(switchProtocol(spec, id));
+                      }}
+                      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)] ${
+                        id === spec.protocol ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
+                      }`}
+                    >
+                      <Icon size={14} className="shrink-0" style={{ color: badgeColor(id, "") }} />
+                      {PROTOCOL_NAMES[id]}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* The path, then the name as its last segment — the same trail the explorer shows, with
+            the one part you're allowed to change sitting where it actually belongs. */}
+        {crumbs.map((crumb, index) => (
+          <span
+            key={`${crumb}-${index}`}
+            className="flex min-w-0 shrink items-center gap-2 text-[12px] text-[var(--cf-text-muted)]"
+          >
+            <span className="truncate">{crumb}</span>
+            <ChevronRight size={12} className="shrink-0 opacity-60" />
+          </span>
+        ))}
         <input
           type="text"
           value={tab.name}
@@ -676,40 +760,23 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
           placeholder={t("api.untitledRequest")}
           aria-label={t("api.untitledRequest")}
           onChange={(e) => useApiStore.getState().renameTab(tabId, e.target.value)}
-          className="min-w-0 max-w-[280px] flex-none rounded bg-transparent px-1 py-0.5 text-[13px] font-medium text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:bg-[var(--cf-surface)]"
+          className="min-w-[80px] flex-1 rounded bg-transparent px-1 py-0.5 text-[13px] font-semibold text-[var(--cf-text)] outline-none placeholder:font-normal placeholder:text-[var(--cf-text-muted)] hover:bg-black/[0.04] focus:bg-[var(--cf-surface)] dark:hover:bg-white/[0.05]"
         />
-        {crumbs.length > 0 && (
-          <span className="flex min-w-0 items-center gap-1 truncate text-[11px] text-[var(--cf-text-muted)]">
-            {crumbs.map((crumb, index) => (
-              <span key={`${crumb}-${index}`} className="flex items-center gap-1">
-                {index > 0 && <ChevronRight size={11} className="shrink-0" />}
-                <span className="truncate">{crumb}</span>
-              </span>
-            ))}
-          </span>
-        )}
-        <div className="flex-1" />
-        {/* Sits with the name rather than in the URL bar because it retargets the whole request,
-            not just how it's addressed — and because the URL bar swaps its own controls per
-            protocol, so a picker living there would be rearranging the row it belongs to. */}
-        <div className="w-[136px] shrink-0" title={t("api.changeProtocol")}>
-          <Select
-            size="sm"
-            value={spec.protocol}
-            onChange={(value) => update(switchProtocol(spec, value as ApiProtocol))}
-            options={API_PROTOCOLS.map((id) => ({ value: id, label: PROTOCOL_NAMES[id] }))}
-            ariaLabel={t("api.protocol")}
-          />
-        </div>
         {tab.dirty && (
           <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]" title={t("api.unsaved")}>
             {t("api.unsaved")}
           </span>
         )}
         <div className="relative shrink-0">
+          {/* Live only when there's something to save. A button that looks the same whether or
+              not it would do anything makes "is my work in?" a question you have to answer some
+              other way — here the button itself is the answer, and the "unsaved" tag beside it
+              says the same thing twice on purpose. */}
           <button
             onClick={() => void save()}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+            disabled={!tab.dirty}
+            title={tab.dirty ? t("api.save") : t("api.noChangesToSave")}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:cursor-default disabled:border-[var(--cf-border)] disabled:text-[var(--cf-text-muted)] disabled:opacity-50 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text-muted)]"
           >
             <Save size={13} />
             {t("api.save")}

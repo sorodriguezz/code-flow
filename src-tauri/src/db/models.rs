@@ -218,6 +218,8 @@ pub struct ApiCollection {
     /// JSON `ApiVariable[]`.
     pub variables: String,
     pub sort_order: i64,
+    /// Sorts above the unpinned ones in the explorer, ahead of `sort_order`.
+    pub pinned: bool,
     pub created_at: String,
     pub updated_at: String,
 }

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Plus, X } from "lucide-react";
 import { createPortal } from "react-dom";
-import { badgeColor, badgeLabel } from "./methodStyle";
+import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
 import { useApiStore, type ApiTab } from "../../state/apiStore";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -161,24 +161,37 @@ export function RequestTabs() {
               style={{ position: "fixed", left: protocolMenu.left, top: protocolMenu.top }}
               className="z-[9999] w-[230px] -translate-x-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
             >
-              {API_PROTOCOLS.map((protocol: ApiProtocol) => (
-                <button
-                  key={protocol}
-                  role="menuitem"
-                  onClick={() => {
-                    setProtocolMenu(null);
-                    openScratchTab(protocol);
-                  }}
-                  className="flex w-full flex-col items-start rounded px-2 py-1 text-left hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
-                >
-                  <span className="text-[12px] font-medium text-[var(--cf-text)]">
-                    {t("api.newRequestOf", { protocol: PROTOCOL_NAMES[protocol] })}
-                  </span>
-                  <span className="text-[11px] text-[var(--cf-text-muted)]">
-                    {t(`api.protocolHint.${protocol}` as const)}
-                  </span>
-                </button>
-              ))}
+              {API_PROTOCOLS.map((protocol: ApiProtocol) => {
+                const Icon = protocolIcon(protocol);
+                return (
+                  <button
+                    key={protocol}
+                    role="menuitem"
+                    onClick={() => {
+                      setProtocolMenu(null);
+                      openScratchTab(protocol);
+                    }}
+                    className="flex w-full items-start gap-2 rounded px-2 py-1 text-left hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
+                  >
+                    {/* Nudged onto the title's baseline rather than centred on the whole item: the
+                        hint below wraps to two lines for half of these, and an icon centred on the
+                        pair drifts down the list as the wrapping changes. */}
+                    <Icon
+                      size={14}
+                      className="mt-[2px] shrink-0"
+                      style={{ color: badgeColor(protocol, "") }}
+                    />
+                    <span className="flex min-w-0 flex-col">
+                      <span className="text-[12px] font-medium text-[var(--cf-text)]">
+                        {t("api.newRequestOf", { protocol: PROTOCOL_NAMES[protocol] })}
+                      </span>
+                      <span className="text-[11px] text-[var(--cf-text-muted)]">
+                        {t(`api.protocolHint.${protocol}` as const)}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           </>,
           document.body,

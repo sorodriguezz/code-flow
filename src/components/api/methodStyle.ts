@@ -1,3 +1,4 @@
+import { ArrowLeftRight, Globe, Hexagon, Radio, Waypoints, Zap, type LucideIcon } from "lucide-react";
 import type { ApiProtocol } from "../../types/api";
 
 /**
@@ -35,4 +36,38 @@ export function badgeColor(protocol: ApiProtocol, method: string): string {
   if (protocol === "graphql") return "var(--cf-accent)";
   if (protocol !== "http") return "var(--cf-text-muted)";
   return METHOD_COLORS[(method.trim() || "GET").toUpperCase()] ?? "var(--cf-text-muted)";
+}
+
+/**
+ * A glyph per protocol, so a list of them is scannable by shape before it's read.
+ *
+ * Shape carries the whole distinction on purpose: the colours here come from `badgeColor`, which
+ * has only four semantic tokens to spend and gives every non-HTTP protocol the same muted one.
+ * Inventing a brand colour per protocol would be the literal-colour mistake this file exists to
+ * avoid — so an icon has to be recognisable in grey.
+ */
+const PROTOCOL_ICONS: Record<ApiProtocol, LucideIcon> = {
+  http: Globe,
+  // The GraphQL mark is a hexagon; this is as close as the icon set gets.
+  graphql: Hexagon,
+  // Both directions at once — the thing that makes a socket not a request.
+  websocket: ArrowLeftRight,
+  socketio: Zap,
+  // A call routed to a service, rather than fetched from a URL.
+  grpc: Waypoints,
+  // Broadcast to whoever subscribed.
+  mqtt: Radio,
+};
+
+export function protocolIcon(protocol: ApiProtocol): LucideIcon {
+  return PROTOCOL_ICONS[protocol] ?? Globe;
+}
+
+/** The colour of a status code, wherever one is shown — the response pill and the tree's examples. */
+export function statusColor(status: number): string {
+  if (status >= 200 && status < 300) return "var(--cf-success)";
+  if (status >= 300 && status < 400) return "var(--cf-accent)";
+  if (status >= 400 && status < 500) return "var(--cf-warning)";
+  if (status >= 500) return "var(--cf-danger)";
+  return "var(--cf-text-muted)";
 }

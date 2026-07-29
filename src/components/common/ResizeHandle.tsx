@@ -43,13 +43,27 @@ export function ResizeHandle({ axis, value, min, max, onChange, onCommit, invert
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
-      className={`group shrink-0 select-none ${
+      role="separator"
+      aria-orientation={axis === "x" ? "vertical" : "horizontal"}
+      className={`group relative shrink-0 select-none ${
         axis === "x" ? "w-1.5 cursor-col-resize" : "h-1.5 cursor-row-resize"
       }`}
     >
+      {/* The seam. Drawn in the border colour at rest so the edge reads as one of the app's own
+          dividers rather than as new chrome, and lights up on the way to being dragged. */}
       <div
-        className={`bg-transparent group-hover:bg-[var(--cf-accent)]/50 group-active:bg-[var(--cf-accent)] ${
+        className={`bg-[var(--cf-border)] transition-colors group-hover:bg-[var(--cf-accent)]/50 group-active:bg-[var(--cf-accent)] ${
           axis === "x" ? "mx-auto h-full w-px" : "my-auto h-px w-full"
+        }`}
+      />
+      {/* The grip. A line alone says "two panes meet here", not "and you can drag it" — this is
+          the part that says the seam is a control. Muted until the pointer is on it. */}
+      <span
+        aria-hidden
+        className={`pointer-events-none absolute rounded-full bg-[var(--cf-text-muted)]/40 transition-colors group-hover:bg-[var(--cf-accent)] group-active:bg-[var(--cf-accent)] ${
+          axis === "x"
+            ? "left-1/2 top-1/2 h-6 w-[3px] -translate-x-1/2 -translate-y-1/2"
+            : "left-1/2 top-1/2 h-[3px] w-6 -translate-x-1/2 -translate-y-1/2"
         }`}
       />
     </div>

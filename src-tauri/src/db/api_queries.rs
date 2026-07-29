@@ -27,7 +27,7 @@ const HISTORY_HARD_CAP: i64 = 2000;
 const MAX_FOLDER_DEPTH: usize = 256;
 
 const COLLECTION_COLUMNS: &str =
-    "id, workspace_id, name, description, auth, pre_script, post_script, variables, sort_order, created_at, updated_at";
+    "id, workspace_id, name, description, auth, pre_script, post_script, variables, sort_order, pinned, created_at, updated_at";
 const FOLDER_COLUMNS: &str =
     "id, collection_id, parent_id, name, description, auth, pre_script, post_script, sort_order, created_at";
 const REQUEST_COLUMNS: &str =
@@ -49,8 +49,9 @@ fn map_collection(row: &rusqlite::Row) -> rusqlite::Result<ApiCollection> {
         post_script: row.get(6)?,
         variables: row.get(7)?,
         sort_order: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        pinned: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 
@@ -171,8 +172,8 @@ fn insert_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Result<(
     conn.execute(
         "INSERT INTO api_collections
             (id, workspace_id, name, description, auth, pre_script, post_script, variables, sort_order,
-             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             pinned, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             c.id,
             c.workspace_id,
@@ -183,6 +184,7 @@ fn insert_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Result<(
             c.post_script,
             c.variables,
             c.sort_order,
+            c.pinned,
             c.created_at,
             c.updated_at,
         ],
@@ -202,6 +204,7 @@ pub fn create_collection(conn: &Connection, workspace_id: &str, name: &str) -> r
         post_script: String::new(),
         variables: "[]".to_string(),
         sort_order: next_collection_order(conn, workspace_id)?,
+        pinned: false,
         created_at: ts.clone(),
         updated_at: ts,
     };
@@ -224,9 +227,9 @@ pub fn update_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Resu
     conn.execute(
         "UPDATE api_collections
             SET name = ?2, description = ?3, auth = ?4, pre_script = ?5, post_script = ?6,
-                variables = ?7, updated_at = ?8
+                variables = ?7, pinned = ?8, updated_at = ?9
           WHERE id = ?1",
-        params![c.id, c.name, c.description, c.auth, c.pre_script, c.post_script, c.variables, now()],
+        params![c.id, c.name, c.description, c.auth, c.pre_script, c.post_script, c.variables, c.pinned, now()],
     )?;
     Ok(())
 }

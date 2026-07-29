@@ -195,6 +195,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- JSON ApiVariable[] — collection-scoped variables.
             variables   TEXT NOT NULL DEFAULT '[]',
             sort_order  INTEGER NOT NULL DEFAULT 0,
+            -- Pinned collections sort above the rest, whatever their sort_order.
+            pinned      INTEGER NOT NULL DEFAULT 0,
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL
         );
@@ -309,6 +311,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_github_host_to_projects(conn)?;
     add_enabled_to_workspace_skills(conn)?;
     add_provider_to_workspace_agents(conn)?;
+    add_pinned_to_api_collections(conn)?;
     Ok(())
 }
 
@@ -463,6 +466,15 @@ fn add_enabled_to_workspace_skills(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE workspace_skills ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;")
+}
+
+/// `api_collections` gained a `pinned` flag so the ones a workspace lives in sort to the top of
+/// the explorer. Existing rows default to unpinned — the pre-flag order, unchanged.
+fn add_pinned_to_api_collections(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "api_collections", "pinned")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE api_collections ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;")
 }
 
 fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
