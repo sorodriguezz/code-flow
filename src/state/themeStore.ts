@@ -109,12 +109,23 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
 
   setThemeId: async (mode, id) => {
     const theme = findTheme(id, mode);
-    set(mode === "dark" ? { darkThemeId: theme.id } : { lightThemeId: theme.id });
+    const remember = () =>
+      set(mode === "dark" ? { darkThemeId: theme.id } : { lightThemeId: theme.id });
+
     // Only repaints when the edited mode is the one on screen — picking a dark scheme while in
-    // light mode stores the choice for later instead of flashing it.
+    // light mode stores the choice for later instead of flashing it. When it does repaint, every
+    // surface in the window takes a new colour, which is the same event as flipping the mode and
+    // gets the same curtain; the choice itself is remembered inside the wipe so the card's ring
+    // moves in the photograph the new colours arrive with, rather than a frame ahead of them.
     if (get().resolved === mode) {
-      set({ monacoTheme: applyToDocument(mode, theme.id) });
+      withThemeTransition(() => {
+        remember();
+        set({ monacoTheme: applyToDocument(mode, theme.id) });
+      });
+    } else {
+      remember();
     }
+
     await setSetting(mode === "dark" ? DARK_KEY : LIGHT_KEY, theme.id);
   },
 }));

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
+import { withThemeTransition } from "../lib/themeTransition";
 
 export interface AccentOption {
   id: string;
@@ -47,8 +48,22 @@ export const useAccentStore = create<AccentState>((set, get) => ({
   },
 
   setAccent: async (id, resolvedTheme) => {
-    set({ accentId: id });
-    get().apply(resolvedTheme);
+    // Wiped across the window, exactly as the light/dark switch is: the accent is on something in
+    // every band of the app — the active tab, the selection pills, the send button, half the icons
+    // — so changing it is a repaint of the whole window and deserves the same curtain rather than
+    // a frame where all of it changes at once.
+    //
+    // Re-picking the colour already in force is not, though: a half-second of curtain over an
+    // identical window reads as a stutter. Still persisted, since the click is harmless.
+    if (get().accentId === id) {
+      await setSetting(KEY, id);
+      return;
+    }
+
+    withThemeTransition(() => {
+      set({ accentId: id });
+      get().apply(resolvedTheme);
+    });
     await setSetting(KEY, id);
   },
 

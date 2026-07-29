@@ -1,13 +1,14 @@
 import { flushSync } from "react-dom";
 
 /**
- * The light/dark switch, as a curtain rather than a cut.
+ * A change of colour across the whole window — light/dark, and the accent — as a curtain rather
+ * than a cut.
  *
- * Swapping the theme is a single synchronous write — `data-theme` plus a handful of CSS variables —
- * so the whole window changes colour between one frame and the next. That is correct and instant
- * and reads like a glitch. The View Transitions API lets the browser photograph the window before
- * and after, and animate between the two: here the new theme is wiped down over the old one from
- * the top edge, so the change has a direction and somewhere to have come from.
+ * Either one is a single synchronous write — `data-theme` plus a handful of CSS variables — so the
+ * whole window changes colour between one frame and the next. That is correct and instant and
+ * reads like a glitch. The View Transitions API lets the browser photograph the window before and
+ * after, and animate between the two: here the new colours are wiped across the old ones from the
+ * left edge, so the change has a direction and somewhere to have come from.
  *
  * The animation itself is CSS (`::view-transition-*(root)` and the `cf-theme-wipe` keyframes in
  * `index.css`). This module only decides *when* a transition is worth starting; keeping the two

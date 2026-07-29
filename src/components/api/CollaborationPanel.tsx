@@ -5,6 +5,7 @@ import {
   FolderInput,
   KeyRound,
   Link2,
+  Pencil,
   Server,
   Plus,
   RefreshCw,
@@ -81,11 +82,22 @@ export function CollaborationPanel() {
   const [checking, setChecking] = useState(false);
   const [hosting, setHosting] = useState(false);
   const [busy, setBusy] = useState(false);
+  /** Set by the edit button, and cleared again by a connection that works. */
+  const [editing, setEditing] = useState(false);
   /** Every workspace's collections, so a share can be picked without switching workspace first. */
   const [trees, setTrees] = useState<Record<string, ApiCollection[]>>({});
 
   const configured = settings.supabaseUrl.trim() !== "" && hasKey;
   const ownedShares = shares.filter((share) => share.role === "owner").length;
+
+  /**
+   * Once the project answers, these two fields stop being a form and become the record of a
+   * working connection — one every share already created points at. Left editable they are two
+   * keystrokes away from breaking all of them at once, and a stray character in a URL nobody
+   * meant to touch reads as "collaboration stopped working" rather than as an edit. Locked, with
+   * the way back one deliberate click away.
+   */
+  const locked = configured && settings.supabaseReady && !editing;
 
   useEffect(() => {
     void refresh();
@@ -118,23 +130,45 @@ export function CollaborationPanel() {
     };
   }, [workspaces, shares]);
 
-  const verify = async (silent: boolean) => {
-    if (!configured) return;
+  const verify = async (silent: boolean): Promise<boolean> => {
+    // Read at call time rather than off the render that scheduled this: `connect` files a key a
+    // moment before asking, and the render that learns about it has not happened yet.
+    const url = useApiStore.getState().settings.supabaseUrl;
+    if (url.trim() === "" || !useCollabStore.getState().hasKey) return false;
     setChecking(true);
     try {
-      const check = await supabaseCheck(settings.supabaseUrl);
+      const check = await supabaseCheck(url);
       const ready = check.reachable && check.schema_installed;
       await updateSettings({
         supabaseReady: ready,
         supabaseCheckedAt: new Date().toISOString(),
       });
       if (!silent && ready) pushToast(t("api.collab.checkPassed"), "success");
+      return ready;
     } catch (e) {
       await updateSettings({ supabaseReady: false, supabaseCheckedAt: new Date().toISOString() });
       if (!silent) pushErrorToast(String(e));
+      return false;
     } finally {
       setChecking(false);
     }
+  };
+
+  /**
+   * What the two fields say, made true — and only then locked again.
+   *
+   * The key is re-filed under whichever URL is in the field beside it first. `saveKey` writes as
+   * the key is typed, under the URL of that moment, so editing the URL afterwards leaves the key
+   * filed against the old project and the check asking a new one with credentials it never issued.
+   */
+  const connect = async () => {
+    if (anonKey.trim() !== "") {
+      await supabaseSetAnonKey(settings.supabaseUrl, anonKey).catch((e: unknown) =>
+        pushErrorToast(String(e)),
+      );
+      await refresh();
+    }
+    if (await verify(false)) setEditing(false);
   };
 
   // Opening the pane re-verifies quietly when the stored verdict has gone stale, so "connected"
@@ -231,6 +265,7 @@ export function CollaborationPanel() {
         <Row label={t("api.collab.projectUrl")} wide>
           <Field
             mono
+            disabled={locked}
             value={settings.supabaseUrl}
             placeholder="https://xxxx.supabase.co"
             onChange={(supabaseUrl) => void updateSettings({ supabaseUrl, supabaseReady: false })}
@@ -239,6 +274,7 @@ export function CollaborationPanel() {
         <Row label={t("api.collab.anonKey")} hint={t("api.collab.anonKeyHint")} wide>
           <Field
             type="password"
+            disabled={locked}
             value={anonKey}
             placeholder={hasKey ? t("api.collab.keyStored") : ""}
             onChange={(value) => void saveKey(value)}
@@ -268,10 +304,19 @@ export function CollaborationPanel() {
               <ClipboardCopy size={12} />
               {t("api.collab.copySql")}
             </GhostButton>
-            <GhostButton onClick={() => void verify(false)} disabled={checking || !configured}>
+            {/* One action either way — "make sure what these two fields say works" — under the two
+                names that mean it: re-checking a connection that already holds, and establishing
+                one after an edit. */}
+            <GhostButton onClick={() => void connect()} disabled={checking || !configured}>
               <RefreshCw size={12} />
-              {t("api.collab.test")}
+              {locked ? t("api.collab.test") : t("api.collab.connect")}
             </GhostButton>
+            {locked && (
+              <GhostButton onClick={() => setEditing(true)} title={t("api.collab.editHint")}>
+                <Pencil size={12} />
+                {t("api.collab.edit")}
+              </GhostButton>
+            )}
           </Actions>
         </div>
       </Group>
@@ -458,9 +503,14 @@ function ShareRow({ collectionId, anonKey }: { collectionId: string; anonKey: st
         pushErrorToast(t("api.collab.noTokenHere"));
         return;
       }
-      await navigator.clipboard.writeText(
-        encodeInvite({ url: settings.supabaseUrl, key: anonKey, token, name }),
-      );
+      // The share's own project, not the one currently in the settings field. They are usually the
+      // same, and the tag above this row exists precisely for when they are not — a share created
+      // before the project was changed still lives on the old one. Naming the current project in
+      // the code would hand out an invitation whose url and key point somewhere the token has
+      // never existed, which the guest reads as an invalid key.
+      const url = share.project_url.trim() || settings.supabaseUrl;
+      const key = (await supabaseAnonKey(url).catch(() => null)) ?? anonKey;
+      await navigator.clipboard.writeText(encodeInvite({ url, key, token, name }));
       pushToast(t("api.collab.inviteCopied"), "success");
     });
 
@@ -653,16 +703,19 @@ export function useImportCollaborative() {
     try {
       const { decodeInvite } = await import("../../lib/api/sync");
       const invite = decodeInvite(code);
-      // The key is stored *for the project the invitation names*, and the share records that
-      // project as its own. Nothing here touches the default above — that is the project this
-      // person shares their own collections from, and an invitation to someone else's is not a
-      // reason to redefine it. It used to be, which meant the second invitation silently cut off
-      // every collection accepted before it.
-      // The key is stored against the project the invitation names, and the share records that
-      // project as its own. Nothing is written to the settings above: that field is *this* person's
-      // project, the one they host their own collections on, and a guest never becomes the owner of
-      // somebody else's — putting the host's URL there would put their server on a settings pane
-      // belonging to someone who has no business reading it.
+
+      // Filed under the project the invitation names, before anything is asked of that project.
+      // Every request is built from the key stored for the URL it goes to, so skipping this is
+      // not "the key gets set up later" — it is the join reaching for whatever key happens to be
+      // lying around: the one for this person's *own* project, which the host's server rejects as
+      // an invalid key, or none at all, which is the "no anon key is stored for …" further down.
+      //
+      // Nothing here is written to the settings above. That field is this person's own project,
+      // the one they host their collections on, and accepting an invitation to somebody else's is
+      // not a reason to redefine it — it used to be, which meant the second invitation silently
+      // cut off every collection accepted before it, and left the host's server sitting on a
+      // settings pane belonging to someone with no business reading it.
+      await supabaseSetAnonKey(invite.url, invite.key);
 
       const collectionId = await join(invite.url, invite.token, workspaceId);
       if (collectionId === null) return false;
