@@ -77,7 +77,13 @@ export function RequestTabs() {
           // A frozen record is the one thing on this strip that is not about the tab's own state:
           // it says a decision is owed before this request can sync again, so it outranks both the
           // method badge's colour and the unsaved dot for attention.
-          const inConflict = tab.requestId !== null && conflicted.has(tab.requestId);
+          // Two sources, one badge. The sync layer freezes records whose *saved* versions diverged;
+          // `staleAgainst` catches the case it structurally cannot see — a change that arrived while
+          // this tab held unsaved edits. To the person looking at the tab they are the same
+          // sentence: someone else touched this, and you have to say which version wins.
+          const inConflict =
+            tab.staleAgainst !== undefined ||
+            (tab.requestId !== null && conflicted.has(tab.requestId));
           return (
             <div
               key={tab.id}
@@ -124,7 +130,10 @@ export function RequestTabs() {
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    openModal({ kind: "conflicts" });
+                    // A stale tab is resolved in the tab itself, where both versions are; only the
+                    // sync layer's frozen records have anything to show in the modal.
+                    if (tab.staleAgainst !== undefined) setActiveTab(tab.id);
+                    else openModal({ kind: "conflicts" });
                   }}
                   title={t("api.conflict.tabHint")}
                   className="flex shrink-0 items-center gap-1 rounded bg-[color-mix(in_oklab,var(--cf-warning)_22%,transparent)] px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide text-[var(--cf-warning)]"

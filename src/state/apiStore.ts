@@ -79,6 +79,21 @@ export interface ApiTab {
   /** Where `saveTab` files a scratch request; carried so the save needs no extra argument. */
   collectionId: string | null;
   folderId: string | null;
+  /**
+   * The row's `updated_at` at the moment this tab last agreed with it — on open, and on every
+   * save. What makes "the row changed underneath me" answerable at all: the draft has been edited,
+   * so it cannot be compared against anything, but this can.
+   */
+  rowUpdatedAt?: string;
+  /**
+   * A teammate's change landed on this request while the tab held unsaved edits.
+   *
+   * Not the same thing as the conflicts in `collabStore`, which are two *saved* versions the sync
+   * layer froze. This one is a draft that only exists here, so no amount of backend bookkeeping
+   * could have seen it — and without the flag the next save would quietly overwrite the change
+   * that arrived, which is the one outcome collaboration must never produce silently.
+   */
+  staleAgainst?: string;
 }
 
 /** Persisted shape of `api_open_tabs`. Versioned so a later change can be migrated, not guessed. */
@@ -186,6 +201,24 @@ interface ApiState {
     target?: { collectionId: string; folderId: string | null },
   ) => Promise<ApiRequestRow | null>;
 
+  /**
+   * Brings the open tabs back in line with the tree after a pull.
+   *
+   * A tab holds its own copy of a request; nothing about reloading the tree touches it. Left alone,
+   * an open tab shows the version it was opened with for as long as it stays open — and saving it
+   * writes that stale copy back over whatever arrived, with no conflict raised, because the sync
+   * layer compares saved rows and the divergence here was never saved.
+   *
+   * So: a clean tab simply follows its row, because a clean tab *is* a view of that row and has
+   * nothing of its own to lose. A dirty one is never touched — it is flagged, and the choice is
+   * the user's.
+   */
+  adoptRemoteChanges: () => void;
+  /** Drops this tab's unsaved edits and shows the version that arrived. */
+  takeRemoteVersion: (tabId: string) => void;
+  /** Keeps the unsaved edits; the next save deliberately overwrites what arrived. */
+  keepLocalVersion: (tabId: string) => void;
+
   variableContext: (collectionId: string | null) => VariableContext;
   effectiveAuthChain: (requestId: string) => (AuthConfig | null)[];
   /** Same walk as `effectiveAuthChain` but rooted in the tab's unsaved draft. */
@@ -281,6 +314,9 @@ export const useApiStore = create<ApiState>((set, get) => ({
         openTabs,
         activeTabId,
       });
+      // The tabs were restored from disk and the tree was just read: a request one of them points
+      // at may well have moved on since it was persisted.
+      get().adoptRemoteChanges();
     } catch (e) {
       pushErrorToast(String(e));
     } finally {
@@ -471,8 +507,16 @@ export const useApiStore = create<ApiState>((set, get) => ({
 
   updateRequest: async (request) => {
     await guarded(async () => {
-      await apiUpdateRequest(request);
-      set((s) => ({ requests: s.requests.map((r) => (r.id === request.id ? request : r)) }));
+      const stampedAt = await apiUpdateRequest(request);
+      const saved: ApiRequestRow = { ...request, updated_at: stampedAt };
+      set((s) => ({
+        requests: s.requests.map((r) => (r.id === saved.id ? saved : r)),
+        // A rename or an example captured from the tree is still this machine writing the row, so
+        // every tab showing it moves to the new version rather than reporting a remote change.
+        openTabs: s.openTabs.map((t) =>
+          t.requestId === saved.id ? { ...t, rowUpdatedAt: stampedAt } : t,
+        ),
+      }));
     });
   },
 
@@ -654,6 +698,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
       dirty: false,
       collectionId: row.collection_id,
       folderId: row.folder_id,
+      rowUpdatedAt: row.updated_at,
     };
     set((s) => ({ openTabs: [...s.openTabs, tab], activeTabId: tab.id }));
     persistTabs(get);
@@ -745,13 +790,20 @@ export const useApiStore = create<ApiState>((set, get) => ({
           url: tab.draft.url,
           spec,
         };
-        await apiUpdateRequest(updated);
+        // The stamp comes back from the write: keeping the tab on a timestamp the row does not
+        // actually have would make its own save look like somebody else's change one tick later.
+        const stampedAt = await apiUpdateRequest(updated);
+        const saved: ApiRequestRow = { ...updated, updated_at: stampedAt };
         set((s) => ({
-          requests: s.requests.map((r) => (r.id === updated.id ? updated : r)),
-          openTabs: s.openTabs.map((t) => (t.id === tabId ? { ...t, dirty: false } : t)),
+          requests: s.requests.map((r) => (r.id === saved.id ? saved : r)),
+          openTabs: s.openTabs.map((t) =>
+            t.id === tabId
+              ? { ...t, dirty: false, rowUpdatedAt: stampedAt, staleAgainst: undefined }
+              : t,
+          ),
         }));
         persistTabs(get);
-        return updated;
+        return saved;
       }
 
       const collectionId = target?.collectionId ?? tab.collectionId;
@@ -770,13 +822,109 @@ export const useApiStore = create<ApiState>((set, get) => ({
         requests: [...s.requests, created],
         openTabs: s.openTabs.map((t) =>
           t.id === tabId
-            ? { ...t, requestId: created.id, name: created.name, dirty: false, collectionId, folderId }
+            ? {
+                ...t,
+                requestId: created.id,
+                name: created.name,
+                dirty: false,
+                collectionId,
+                folderId,
+                rowUpdatedAt: created.updated_at,
+                staleAgainst: undefined,
+              }
             : t,
         ),
       }));
       persistTabs(get);
       return created;
     });
+  },
+
+  adoptRemoteChanges: () => {
+    const { openTabs, requests } = get();
+    let touched = false;
+
+    const next = openTabs.map((tab) => {
+      if (tab.requestId === null) return tab;
+      const row = requests.find((r) => r.id === tab.requestId);
+
+      // Deleted by whoever else has it. The draft is the user's only copy now, so the tab becomes
+      // a scratch one rather than closing — the same trade `detachTabs` makes for a local delete.
+      if (!row) {
+        touched = true;
+        return { ...tab, requestId: null, collectionId: null, folderId: null, dirty: true };
+      }
+
+      // Nothing moved, or this machine is the one that moved it.
+      if (tab.rowUpdatedAt === undefined || row.updated_at === tab.rowUpdatedAt) return tab;
+
+      if (tab.dirty) {
+        // Already flagged against this exact version — re-flagging would only churn the render.
+        if (tab.staleAgainst === row.updated_at) return tab;
+        touched = true;
+        return { ...tab, staleAgainst: row.updated_at };
+      }
+
+      // Clean: the tab is a view of the row, so it follows it. Compared before replacing, because
+      // an identical draft swapped for an identical draft is a re-render of the whole builder for
+      // nothing — and that is what a heartbeat would turn into a flicker.
+      const incoming = parseSpec(row);
+      if (JSON.stringify(incoming) === JSON.stringify(tab.draft) && row.name === tab.name) {
+        return { ...tab, rowUpdatedAt: row.updated_at };
+      }
+      touched = true;
+      return {
+        ...tab,
+        draft: incoming,
+        name: row.name,
+        collectionId: row.collection_id,
+        folderId: row.folder_id,
+        rowUpdatedAt: row.updated_at,
+        staleAgainst: undefined,
+      };
+    });
+
+    if (!touched) return;
+    set({ openTabs: next });
+    persistTabs(get);
+  },
+
+  takeRemoteVersion: (tabId) => {
+    const tab = get().openTabs.find((t) => t.id === tabId);
+    const row = tab?.requestId ? get().requests.find((r) => r.id === tab.requestId) : undefined;
+    if (!tab || !row) return;
+    set((s) => ({
+      openTabs: s.openTabs.map((t) =>
+        t.id === tabId
+          ? {
+              ...t,
+              draft: parseSpec(row),
+              name: row.name,
+              dirty: false,
+              rowUpdatedAt: row.updated_at,
+              staleAgainst: undefined,
+            }
+          : t,
+      ),
+    }));
+    persistTabs(get);
+  },
+
+  keepLocalVersion: (tabId) => {
+    const row = (() => {
+      const tab = get().openTabs.find((t) => t.id === tabId);
+      return tab?.requestId ? get().requests.find((r) => r.id === tab.requestId) : undefined;
+    })();
+    if (!row) return;
+    // Moving to the incoming version *without* taking its content is the whole point: the tab keeps
+    // its edits, and the next save is understood as deliberately replacing what arrived rather than
+    // as a fresh collision to ask about again.
+    set((s) => ({
+      openTabs: s.openTabs.map((t) =>
+        t.id === tabId ? { ...t, rowUpdatedAt: row.updated_at, staleAgainst: undefined } : t,
+      ),
+    }));
+    persistTabs(get);
   },
 
   // ---------- scope assembly ----------

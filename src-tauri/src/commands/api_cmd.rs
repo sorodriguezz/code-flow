@@ -92,8 +92,9 @@ pub fn api_create_request(
         .map_err(|e| e.to_string())
 }
 
+/// Returns the new `updated_at`, so an open editor tab knows which version of the row its copy is.
 #[tauri::command]
-pub fn api_update_request(db: State<Db>, request: ApiRequestRow) -> Result<(), String> {
+pub fn api_update_request(db: State<Db>, request: ApiRequestRow) -> Result<String, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     api_queries::update_request(&conn, &request).map_err(|e| e.to_string())
 }

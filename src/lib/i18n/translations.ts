@@ -727,6 +727,9 @@ export const translations = {
     "api.collab.leave": "Stop sharing",
     "api.collab.leaveConfirm":
       "Stop syncing \"{name}\" here? Your copy stays exactly as it is; the shared one is left untouched.",
+    "api.stale.message": "Someone else changed this request while you were editing it.",
+    "api.stale.takeTheirs": "Discard my changes",
+    "api.stale.keepMine": "Keep mine",
     "api.collab.rowShared": "Shared and in sync",
     "api.collab.rowPaused": "Shared — background sync is off",
     "api.collab.paused": "Shared, not syncing",
@@ -2349,6 +2352,9 @@ export const translations = {
     "api.collab.leave": "Dejar de compartir",
     "api.collab.leaveConfirm":
       "¿Dejar de sincronizar \"{name}\" aquí? Tu copia queda tal cual; la compartida no se toca.",
+    "api.stale.message": "Otra persona cambió este request mientras lo editabas.",
+    "api.stale.takeTheirs": "Descartar mis cambios",
+    "api.stale.keepMine": "Conservar el mío",
     "api.collab.rowShared": "Compartida y sincronizada",
     "api.collab.rowPaused": "Compartida — la sincronización automática está apagada",
     "api.collab.paused": "Compartida, sin sincronizar",

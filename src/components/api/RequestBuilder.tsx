@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Download, Loader2, Save, Send, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, Loader2, Save, Send, ShieldAlert, X } from "lucide-react";
 import { Select } from "../common/Select";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { KeyValueTable } from "./KeyValueTable";
@@ -678,6 +678,29 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {/* Only ever shown for a tab with unsaved edits: a clean tab has already taken the incoming
+          version, silently and correctly, because it had nothing of its own to lose. */}
+      {tab.staleAgainst !== undefined && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-3 py-1.5">
+          <ShieldAlert size={13} className="shrink-0 text-[var(--cf-warning)]" />
+          <span className="min-w-0 flex-1 text-[12px] text-[var(--cf-text)]">
+            {t("api.stale.message")}
+          </span>
+          <button
+            onClick={() => useApiStore.getState().takeRemoteVersion(tab.id)}
+            className="shrink-0 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+          >
+            {t("api.stale.takeTheirs")}
+          </button>
+          <button
+            onClick={() => useApiStore.getState().keepLocalVersion(tab.id)}
+            className="shrink-0 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[12px] font-medium text-white"
+          >
+            {t("api.stale.keepMine")}
+          </button>
+        </div>
+      )}
+
       {/* ---------- name row ---------- */}
       {/* Reads as one line — what kind of request, where it lives, what it's called — with only
           the last part editable. The protocol leads because it's the thing that decides what

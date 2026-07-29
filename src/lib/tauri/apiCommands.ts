@@ -74,8 +74,9 @@ export const apiCreateRequest = (
   spec: string,
 ) => invoke<ApiRequestRow>("api_create_request", { collectionId, folderId, name, protocol, spec });
 
+/** Resolves with the new `updated_at` the backend stamped — the version an open tab is now on. */
 export const apiUpdateRequest = (request: ApiRequestRow) =>
-  invoke<void>("api_update_request", { request });
+  invoke<string>("api_update_request", { request });
 
 export const apiDeleteRequest = (id: string) => invoke<void>("api_delete_request", { id });
 

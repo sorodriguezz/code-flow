@@ -91,7 +91,11 @@ const CommitTable = memo(function CommitTable() {
             <span className="min-w-0 flex-1 truncate text-center text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {col.label}
             </span>
+            {/* `quiet`: these divide columns of a table, not panes of a layout. The default seam
+                and grip are sized for the side of a panel, and in a 24px header they came out as
+                four full-height bars heavier than the labels they sat between. */}
             <ResizeHandle
+              quiet
               axis="x"
               value={col.width}
               min={COL_MIN}

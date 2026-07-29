@@ -621,14 +621,21 @@ pub fn create_request(
 }
 
 /// Editable fields only; see `update_folder` for why the structural columns are excluded.
-pub fn update_request(conn: &Connection, r: &ApiRequestRow) -> rusqlite::Result<()> {
+/// Returns the `updated_at` it wrote.
+///
+/// The caller cannot compute it: the stamp is this side's clock, and the whole point of the
+/// column is that one authority sets it. A frontend that kept its own idea of when the row was
+/// last written would disagree with the row a moment later — and that disagreement is exactly
+/// what an open editor tab uses to decide whether someone else has changed the request under it.
+pub fn update_request(conn: &Connection, r: &ApiRequestRow) -> rusqlite::Result<String> {
+    let stamp = now();
     conn.execute(
         "UPDATE api_requests
             SET name = ?2, protocol = ?3, method = ?4, url = ?5, spec = ?6, updated_at = ?7
           WHERE id = ?1",
-        params![r.id, r.name, r.protocol, r.method, r.url, r.spec, now()],
+        params![r.id, r.name, r.protocol, r.method, r.url, r.spec, stamp],
     )?;
-    Ok(())
+    Ok(stamp)
 }
 
 pub fn delete_request(conn: &Connection, id: &str) -> rusqlite::Result<()> {

@@ -142,6 +142,11 @@ export async function syncCollection(collectionId: string): Promise<SyncResult |
       applying = true;
       try {
         await useApiStore.getState().reloadTree();
+        // The tree is not the only thing showing these records: an open tab holds its own copy, and
+        // one that is never reconciled shows the version it was opened with until it is closed —
+        // then writes it back over whatever arrived, with no conflict raised anywhere, because the
+        // divergence lives in a draft the sync layer cannot see.
+        useApiStore.getState().adoptRemoteChanges();
       } finally {
         applying = false;
       }
