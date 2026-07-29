@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Cloud,
   Info,
@@ -786,8 +786,19 @@ export function ApiSettingsBody() {
     if (initialTab) setTab(initialTab);
   }, [initialTab]);
 
+  // The scrolling happens in the settings pane around this body, and the six panes are nowhere
+  // near the same height — switching from a tall one that had been scrolled down handed the next
+  // one a viewport starting somewhere in its middle, and the browser then clamped that offset
+  // against the new, shorter content while the rail's pill was still sliding. Back to the top on
+  // every switch, in a layout effect so it lands before the frame is painted rather than as a
+  // visible correction after it.
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    bodyRef.current?.closest("[data-settings-scroll]")?.scrollTo({ top: 0 });
+  }, [tab]);
+
   return (
-    <div className="flex gap-4">
+    <div ref={bodyRef} className="flex gap-4">
       {/* A rail rather than a strip across the top.
           Six sub-tabs with Spanish labels in a 576px column already wrapped, and the wrap put
           "Colaboración" — the one most used right now — alone on a second line; a "beta" badge was

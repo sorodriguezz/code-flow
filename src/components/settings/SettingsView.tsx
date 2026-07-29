@@ -187,7 +187,14 @@ export function SettingsView() {
             onChange={(w) => setSize("settingsNavWidth", w)}
             onCommit={(w) => commitSize("settingsNavWidth", w)}
           />
-          <div className="flex-1 overflow-auto p-6">
+          {/* `overflow-y-scroll`, not `auto`: the app styles its scrollbars, which makes them a
+              real 10px of layout rather than an overlay. Letting one come and go as a section
+              grows past the pane moved the centred column sideways on every switch — most visibly
+              inside the API section, whose own sub-tabs straddle the height at which it appears.
+              Reserving the gutter costs 10px of ~780 and keeps everything still; the track is
+              transparent and the thumb isn't drawn when there is nothing to scroll, so a short
+              section looks exactly as it did. */}
+          <div data-settings-scroll className="flex-1 overflow-x-auto overflow-y-scroll p-6">
             {/* Wider for the API client alone: it is the only section with a nav of its own, and
                 168px of that out of 576 would leave its forms in a column narrower than the labels
                 they carry. */}
