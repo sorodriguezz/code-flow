@@ -1,41 +1,79 @@
 import { useApiStore } from "../../state/apiStore";
+import { useCollabStore } from "../../state/collabStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import {
-  supabasePull,
-  supabasePush,
-  supabaseShareToken,
-  type SyncResult,
-} from "../tauri/apiCommands";
+import { supabaseSync, supabaseWatermark, type SyncResult } from "../tauri/apiCommands";
+import type { ApiCollection, ApiFolder, ApiRequestRow } from "../../types/api";
 
 /**
- * Keeping a shared workspace in step with everyone else's copy.
+ * Keeping shared collections in step with everyone else's copy.
  *
- * Push then pull, both against the user's own Supabase project. There is no realtime channel: this
- * syncs on demand and on a timer. For collections and requests — which is what a team actually
- * edits together — a minute of lag is invisible, and the WebSocket it would take to close that gap
- * is the one part of Supabase that a hand-rolled REST client has no cheap answer for.
+ * ## Why this is a poll and not a socket
  *
- * Conflicts resolve last-write-wins per record, on the server-side `updated_at`. Two people editing
- * *different* requests never conflict; two people editing the *same* request in the same minute
- * means the later save wins and the earlier one is lost. That is the honest limit of this design.
+ * The unit of change detection is `supabaseWatermark`: one indexed row, no payload, the newest
+ * server clock this share has seen. It is small enough to ask every three seconds without
+ * embarrassing a free-tier project, and a full sync only follows when it has actually moved. That
+ * puts a teammate's change on screen in about the time it takes to notice it arrived, with no
+ * WebSocket, no Phoenix handshake, no reconnection state machine, and no dependency on Realtime
+ * being enabled in whichever project the user happened to create.
+ *
+ * The poll is also honest about attention: while the window is hidden it drops to once every thirty
+ * seconds, and a share whose project is failing backs off geometrically instead of hammering it.
+ *
+ * ## Push and pull are one call
+ *
+ * A round is `supabase_sync` in the backend — push, then pull, then the base bookkeeping between
+ * them, under one command. Splitting it would leave a window in which the push has landed but the
+ * base has not moved, and every record we just sent would come back looking like someone else's
+ * edit on top of ours. See the module comment in `db/api_sync.rs`.
  */
 
-/** Long enough not to hammer a free-tier project, short enough that a teammate's change lands. */
-const INTERVAL_MS = 60_000;
+/** How often to ask "has anything changed?" while the window is in front of someone. */
+const PROBE_MS = 3_000;
 
-/** After a local edit, wait for the typing to stop before pushing it. */
-const PUSH_DEBOUNCE_MS = 5_000;
+/** And while it isn't. A background window is worth keeping current, not worth keeping instant. */
+const HIDDEN_PROBE_MS = 30_000;
 
-let timer: ReturnType<typeof setInterval> | null = null;
+/** After a local edit, wait for the typing to stop before sending it. */
+const PUSH_DEBOUNCE_MS = 1_200;
+
+/** A failing share doubles its wait up to this, so a project that is down is asked about rarely. */
+const BACKOFF_MAX_MS = 120_000;
+
+/** How many probes have to fail in a row before the panel is told. One is a blip, three is a fact. */
+const PROBE_FAILURES_BEFORE_REPORTING = 3;
+
+let probeTimer: ReturnType<typeof setInterval> | null = null;
 let pushTimer: ReturnType<typeof setTimeout> | null = null;
+let unsubscribe: (() => void) | null = null;
 let started = false;
-let running = false;
 
-/** The invitation a host hands out: everything a guest needs to reach the workspace, in one blob. */
+/** Rounds in flight, so a slow one never overlaps itself. */
+const running = new Set<string>();
+
+/** Consecutive failures per share, for the backoff. */
+const failures = new Map<string, number>();
+const nextAttempt = new Map<string, number>();
+
+/** Collections with a local change waiting to be sent. */
+const dirty = new Set<string>();
+
+/**
+ * Set while a pull is being written into the store. The tree reload that follows an apply looks
+ * exactly like a local edit to the subscriber below, and treating it as one would schedule a push
+ * for a change that came from the server — a loop that never settles and never stops talking.
+ */
+let applying = false;
+
+// ---------------------------------------------------------------------------
+// Invitations
+// ---------------------------------------------------------------------------
+
+/** The invitation a host hands out: everything a guest needs to reach the collection, in one blob. */
 export interface Invite {
   url: string;
   key: string;
   token: string;
+  /** The collection's name, so the guest can be told what they are about to accept. */
   name: string;
 }
 
@@ -69,68 +107,163 @@ export function decodeInvite(code: string): Invite {
   return invite;
 }
 
-/** The workspace being synced, or `null` when this one isn't shared. */
-async function sharedWorkspace(): Promise<{ id: string; name: string } | null> {
-  const { activeWorkspaceId, workspaces } = useWorkspaceStore.getState();
-  if (activeWorkspaceId === null) return null;
-  const token = await supabaseShareToken(activeWorkspaceId);
-  if (!token) return null;
-  return {
-    id: activeWorkspaceId,
-    name: workspaces.find((w) => w.id === activeWorkspaceId)?.name ?? "",
-  };
-}
+// ---------------------------------------------------------------------------
+// One round
+// ---------------------------------------------------------------------------
 
 /**
- * One full round: send what changed here, then take what changed elsewhere.
+ * Push what changed in one collection, then apply what changed elsewhere.
  *
- * Push first on purpose. The reverse order would apply a teammate's older copy of a record over an
- * edit made here that hasn't been sent yet, and the local edit would be gone before it was ever
- * shared.
+ * Returns `null` when there was nothing to do — no project configured, or a round already in
+ * flight — which is what the manual button distinguishes from "synced, nothing had changed".
  */
-export async function syncNow(): Promise<SyncResult | null> {
-  const workspace = await sharedWorkspace();
-  if (workspace === null) return null;
-  const { settings } = useApiStore.getState();
-  if (settings.supabaseUrl.trim() === "") return null;
-  if (running) return null;
+export async function syncCollection(collectionId: string): Promise<SyncResult | null> {
+  const url = useApiStore.getState().settings.supabaseUrl.trim();
+  if (url === "") return null;
+  if (running.has(collectionId)) return null;
 
-  running = true;
+  running.add(collectionId);
+  useCollabStore.getState().setBusy(collectionId, true);
   try {
-    await supabasePush(settings.supabaseUrl, workspace.id);
+    const result = await supabaseSync(url, collectionId);
+    dirty.delete(collectionId);
+    failures.delete(collectionId);
+    nextAttempt.delete(collectionId);
 
-    const since = settings.syncCursors[workspace.id] ?? "";
-    const result = await supabasePull(settings.supabaseUrl, workspace.id, workspace.name, since);
-
-    if (result.cursor !== "") {
-      await useApiStore.getState().updateSettings({
-        syncCursors: { ...useApiStore.getState().settings.syncCursors, [workspace.id]: result.cursor },
-      });
-    }
-
-    // A pull that changed nothing still costs a full tree reload if we reload unconditionally, and
-    // that reload is what makes the sidebar flicker on a quiet timer tick.
+    // A round that changed nothing still costs a full tree reload if we reload unconditionally,
+    // and that reload is what makes the sidebar flicker on a quiet heartbeat.
     const changed =
       result.deleted > 0 ||
+      result.conflicts > 0 ||
       result.applied.collections > 0 ||
-      result.applied.requests > 0 ||
-      result.applied.environments > 0;
+      result.applied.folders > 0 ||
+      result.applied.requests > 0;
     if (changed) {
-      await useApiStore.getState().reloadTree();
-      await useApiStore.getState().reloadEnvironments();
+      applying = true;
+      try {
+        await useApiStore.getState().reloadTree();
+      } finally {
+        applying = false;
+      }
     }
-
+    // Cheap, local, and the only way the panel's "last synced" and the tabs' conflict marks stay
+    // truthful without every component polling the database itself.
+    await useCollabStore.getState().refresh();
     return result;
+  } catch (e) {
+    const count = (failures.get(collectionId) ?? 0) + 1;
+    failures.set(collectionId, count);
+    nextAttempt.set(collectionId, Date.now() + Math.min(PROBE_MS * 2 ** count, BACKOFF_MAX_MS));
+    throw e;
   } finally {
-    running = false;
+    running.delete(collectionId);
+    useCollabStore.getState().setBusy(collectionId, false);
   }
 }
 
-/** Forgets a workspace's cursor, so the next sync pulls its whole history again. */
-export async function resetCursor(workspaceId: string) {
-  const cursors = { ...useApiStore.getState().settings.syncCursors };
-  delete cursors[workspaceId];
-  await useApiStore.getState().updateSettings({ syncCursors: cursors });
+/** Every shared collection in the workspace on screen. The others sync when it is their turn. */
+function activeShares(): string[] {
+  const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+  if (workspaceId === null) return [];
+  return useCollabStore
+    .getState()
+    .shares.filter((share) => share.workspace_id === workspaceId)
+    .map((share) => share.collection_id);
+}
+
+/** Forces a round on everything shared in this workspace, ignoring the backoff. */
+export async function syncNow(): Promise<SyncResult[]> {
+  const results: SyncResult[] = [];
+  for (const id of activeShares()) {
+    nextAttempt.delete(id);
+    const result = await syncCollection(id);
+    if (result) results.push(result);
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// The heartbeat
+// ---------------------------------------------------------------------------
+
+async function probe(collectionId: string) {
+  const url = useApiStore.getState().settings.supabaseUrl.trim();
+  if (url === "" || running.has(collectionId)) return;
+
+  const due = nextAttempt.get(collectionId) ?? 0;
+  if (Date.now() < due) return;
+
+  const before = failures.get(collectionId) ?? 0;
+  try {
+    const mark = await supabaseWatermark(url, collectionId);
+    failures.delete(collectionId);
+    // A share that was failing and now isn't has an error message on screen that is no longer
+    // true; the backend cleared it, so the panel has to be told to re-read it.
+    if (before > 0) void useCollabStore.getState().refresh();
+
+    // Compared against the share row rather than a cursor mirrored in this module. The backend owns
+    // that column, `syncCollection` re-reads the rows before it returns, and a local mirror that
+    // never learned about a share created mid-session would compare against "" — which is less than
+    // every timestamp, so the probe would fire a pointless full round every three seconds forever.
+    const cursor = useCollabStore.getState().shareFor(collectionId)?.cursor ?? "";
+    // String comparison is the right one: these are RFC 3339 timestamps with a fixed offset, which
+    // sort lexicographically, and the backend compares them the same way.
+    if (mark !== "" && mark > cursor) {
+      await syncCollection(collectionId);
+    }
+  } catch {
+    const count = before + 1;
+    failures.set(collectionId, count);
+    nextAttempt.set(collectionId, Date.now() + Math.min(PROBE_MS * 2 ** count, BACKOFF_MAX_MS));
+    // Surfaced once, on the third consecutive failure rather than the first: a single dropped
+    // request is noise, but a rotated invitation code looks exactly like this and would otherwise
+    // leave the panel claiming "synced 5 minutes ago" for the rest of the session.
+    if (count === PROBE_FAILURES_BEFORE_REPORTING) void useCollabStore.getState().refresh();
+  }
+}
+
+let sinceLastProbe = 0;
+
+function tick() {
+  const { syncAuto, supabaseUrl } = useApiStore.getState().settings;
+  if (!syncAuto || supabaseUrl.trim() === "") return;
+
+  // One interval drives both cadences: a second timer that had to be torn down and rebuilt on every
+  // visibility change is two things to keep in step instead of one number to compare against.
+  sinceLastProbe += PROBE_MS;
+  const wanted = document.visibilityState === "visible" ? PROBE_MS : HIDDEN_PROBE_MS;
+  if (sinceLastProbe < wanted) return;
+  sinceLastProbe = 0;
+
+  for (const id of activeShares()) void probe(id);
+}
+
+/** Which collections a store change touched, so a push doesn't wake every share in the workspace. */
+function changedCollections(
+  next: { collections: ApiCollection[]; folders: ApiFolder[]; requests: ApiRequestRow[] },
+  prev: { collections: ApiCollection[]; folders: ApiFolder[]; requests: ApiRequestRow[] },
+): Set<string> {
+  const touched = new Set<string>();
+
+  const compare = <T extends { id: string }>(
+    after: T[],
+    before: T[],
+    collectionOf: (row: T) => string,
+  ) => {
+    const previous = new Map(before.map((row) => [row.id, row]));
+    for (const row of after) {
+      // Reference equality is exact here: every mutation in `apiStore` replaces the row object, and
+      // nothing ever edits one in place.
+      if (previous.get(row.id) !== row) touched.add(collectionOf(row));
+      previous.delete(row.id);
+    }
+    for (const row of previous.values()) touched.add(collectionOf(row));
+  };
+
+  compare(next.collections, prev.collections, (c) => c.id);
+  compare(next.folders, prev.folders, (f) => f.collection_id);
+  compare(next.requests, prev.requests, (r) => r.collection_id);
+  return touched;
 }
 
 function schedulePush() {
@@ -138,9 +271,11 @@ function schedulePush() {
   pushTimer = setTimeout(() => {
     pushTimer = null;
     if (!useApiStore.getState().settings.syncAuto) return;
-    // Silent: this runs unattended, and a project that is briefly unreachable would otherwise
-    // produce a toast every time someone types.
-    void syncNow().catch(() => {});
+    for (const id of [...dirty]) {
+      // Silent: this runs unattended, and a project that is briefly unreachable would otherwise
+      // produce a toast every time someone types.
+      void syncCollection(id).catch(() => {});
+    }
   }, PUSH_DEBOUNCE_MS);
 }
 
@@ -149,30 +284,44 @@ export function startSyncWatcher() {
   if (started) return;
   started = true;
 
-  timer = setInterval(() => {
-    if (!useApiStore.getState().settings.syncAuto) return;
-    void syncNow().catch(() => {});
-  }, INTERVAL_MS);
+  void useCollabStore.getState().refresh();
 
-  useApiStore.subscribe((state, prev) => {
+  probeTimer = setInterval(tick, PROBE_MS);
+
+  unsubscribe = useApiStore.subscribe((state, prev) => {
     if (
       state.collections === prev.collections &&
       state.folders === prev.folders &&
-      state.requests === prev.requests &&
-      state.environments === prev.environments
+      state.requests === prev.requests
     ) {
       return;
     }
+    if (applying) return;
     if (!useApiStore.getState().settings.syncAuto) return;
-    schedulePush();
+
+    const shared = new Set(activeShares());
+    if (shared.size === 0) return;
+    let queued = false;
+    for (const id of changedCollections(state, prev)) {
+      if (!shared.has(id)) continue;
+      dirty.add(id);
+      queued = true;
+    }
+    if (queued) schedulePush();
   });
 }
 
 /** Only for tests and teardown; the watcher otherwise lives as long as the window. */
 export function stopSyncWatcher() {
-  if (timer) clearInterval(timer);
+  if (probeTimer) clearInterval(probeTimer);
   if (pushTimer) clearTimeout(pushTimer);
-  timer = null;
+  unsubscribe?.();
+  probeTimer = null;
   pushTimer = null;
+  unsubscribe = null;
   started = false;
+  running.clear();
+  failures.clear();
+  nextAttempt.clear();
+  dirty.clear();
 }

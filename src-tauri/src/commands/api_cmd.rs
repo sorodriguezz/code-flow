@@ -517,7 +517,7 @@ pub async fn gdrive_download(client_id: String, file_id: String) -> Result<Strin
     gdrive::download(client_id, file_id).await
 }
 
-// ---------- shared workspaces on the user's own Supabase project ----------
+// ---------- shared collections on the user's own Supabase project ----------
 
 /// The SQL the host runs once in their project's editor. Served from the backend so the "copy"
 /// button and the schema the code expects can never be two different things.
@@ -536,63 +536,220 @@ pub fn supabase_has_key() -> Result<bool, String> {
     supabase::has_credentials()
 }
 
-/// Whether this workspace is shared here, and under which token — the token is what the host hands
-/// out, so the UI has to be able to show it.
+/// The stored anon key. Public by design — see `supabase::public_anon_key`.
 #[tauri::command]
-pub fn supabase_share_token(workspace_id: String) -> Result<Option<String>, String> {
-    supabase::share_token(&workspace_id)
+pub fn supabase_anon_key() -> Result<Option<String>, String> {
+    supabase::public_anon_key()
 }
 
+/// The invitation token for one shared collection — what the host hands out, so the UI has to be
+/// able to read it back to build the invitation code.
 #[tauri::command]
-pub async fn supabase_check(url: String, workspace_id: String) -> Result<supabase::ConnectionCheck, String> {
-    supabase::check(url, workspace_id).await
+pub fn supabase_share_token(collection_id: String) -> Result<Option<String>, String> {
+    supabase::share_token(&collection_id)
 }
 
+/// Is the project reachable, and has the schema been installed. About the *project*, not about any
+/// one share — see `supabase_probe` for that.
+#[tauri::command]
+pub async fn supabase_check(url: String) -> Result<supabase::ConnectionCheck, String> {
+    supabase::check(url).await
+}
+
+/// The name the remote has for this collection's share, or `None` if the token no longer resolves —
+/// which is what a rotated or revoked invitation looks like from a member's machine.
+#[tauri::command]
+pub async fn supabase_probe(url: String, collection_id: String) -> Result<Option<String>, String> {
+    supabase::probe(url, collection_id).await
+}
+
+/// Every collection shared on this machine, across every workspace.
+#[tauri::command]
+pub fn api_shared_collections(db: State<Db>) -> Result<Vec<api_queries::SharedCollectionRow>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::list_shared_collections(&conn).map_err(|e| e.to_string())
+}
+
+/// Starts sharing one collection and returns the invitation material.
 #[tauri::command]
 pub async fn supabase_share(
-    url: String,
-    workspace_id: String,
-    name: String,
-) -> Result<supabase::SharedWorkspace, String> {
-    supabase::share(url, workspace_id, name).await
-}
-
-#[tauri::command]
-pub async fn supabase_join(url: String, token: String) -> Result<supabase::SharedWorkspace, String> {
-    supabase::join(url, token).await
-}
-
-#[tauri::command]
-pub async fn supabase_rotate(url: String, workspace_id: String) -> Result<String, String> {
-    supabase::rotate(url, workspace_id).await
-}
-
-#[tauri::command]
-pub fn supabase_leave(workspace_id: String) -> Result<(), String> {
-    supabase::leave(&workspace_id)
-}
-
-/// Sends this workspace up. Returns how many records were written.
-#[tauri::command]
-pub async fn supabase_push(db: State<'_, Db>, url: String, workspace_id: String) -> Result<usize, String> {
-    let items = {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        api_sync::local_items(&conn, &workspace_id).map_err(|e| e.to_string())?
-    };
-    supabase::push(url, workspace_id, items).await
-}
-
-/// Brings everyone else's changes down and applies them. `since` is the cursor from the last pull;
-/// empty asks for everything.
-#[tauri::command]
-pub async fn supabase_pull(
     db: State<'_, Db>,
     url: String,
+    collection_id: String,
     workspace_id: String,
-    workspace_name: String,
-    since: String,
+    name: String,
+) -> Result<supabase::SharedCollection, String> {
+    let shared = supabase::share(url, collection_id.clone(), name.clone()).await?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::upsert_shared_collection(&conn, &collection_id, &workspace_id, &name, "owner")
+        .map_err(|e| e.to_string())?;
+    Ok(shared)
+}
+
+/// Keeps the remote's display name in step with a local rename.
+#[tauri::command]
+pub async fn supabase_rename_share(
+    db: State<'_, Db>,
+    url: String,
+    collection_id: String,
+    name: String,
+) -> Result<(), String> {
+    supabase::rename(url, collection_id.clone(), name.clone()).await?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::rename_shared_collection(&conn, &collection_id, &name).map_err(|e| e.to_string())
+}
+
+/// Accepts an invitation: resolves the token, files the share under the workspace the user picked,
+/// and leaves the first pull to the caller's normal sync.
+#[tauri::command]
+pub async fn supabase_join(
+    db: State<'_, Db>,
+    url: String,
+    token: String,
+    workspace_id: String,
+) -> Result<supabase::SharedCollection, String> {
+    let shared = supabase::join(url, token).await?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::upsert_shared_collection(&conn, &shared.id, &workspace_id, &shared.name, "member")
+        .map_err(|e| e.to_string())?;
+    Ok(shared)
+}
+
+#[tauri::command]
+pub async fn supabase_rotate(url: String, collection_id: String) -> Result<String, String> {
+    supabase::rotate(url, collection_id).await
+}
+
+/// Stops syncing this collection here. The local copy stays; the remote one is the host's to end,
+/// by rotating the code.
+#[tauri::command]
+pub fn supabase_leave(db: State<Db>, collection_id: String) -> Result<(), String> {
+    supabase::leave(&collection_id)?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::forget_shared_collection(&conn, &collection_id).map_err(|e| e.to_string())
+}
+
+/// The newest change the server holds for this share, as its own clock saw it.
+///
+/// One indexed row and no payload — cheap enough to ask every few seconds, which is what stands in
+/// for a realtime socket here. The caller pulls only when this is ahead of the cursor.
+#[tauri::command]
+pub async fn supabase_watermark(
+    db: State<'_, Db>,
+    url: String,
+    collection_id: String,
+) -> Result<String, String> {
+    // The probe is also the health check. A revoked invitation code fails here and nowhere else —
+    // there is nothing left to sync, so `supabase_sync` never runs to record why — and a share that
+    // quietly stopped working while still claiming "synced 5 minutes ago" is the one failure mode
+    // this feature cannot afford.
+    match supabase::watermark(url, collection_id.clone()).await {
+        Ok(mark) => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            api_queries::set_sync_progress(&conn, &collection_id, None, Some(&mark), false, Some(""))
+                .map_err(|e| e.to_string())?;
+            Ok(mark)
+        }
+        Err(e) => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            api_queries::set_sync_progress(&conn, &collection_id, None, None, false, Some(&e))
+                .map_err(|e| e.to_string())?;
+            Err(e)
+        }
+    }
+}
+
+/// One full round for one shared collection: send what changed here, then take what changed
+/// elsewhere.
+///
+/// Push first on purpose. The reverse order would let a teammate's older copy of a record land over
+/// an edit made here that hasn't been sent yet, and — worse — that edit would then look like a
+/// remote change on the next round and freeze a record nobody is actually fighting over.
+///
+/// Kept in one command rather than orchestrated from the frontend because the bookkeeping between
+/// the two halves is not optional: the base has to move the instant the push is acknowledged, and a
+/// window where it hasn't is a window where every pushed record conflicts with its own echo.
+#[tauri::command]
+pub async fn supabase_sync(
+    db: State<'_, Db>,
+    url: String,
+    collection_id: String,
 ) -> Result<api_sync::SyncResult, String> {
-    let items = supabase::pull(url, workspace_id.clone(), since).await?;
+    let (outbound, workspace_id, since) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let share = api_queries::shared_collection(&conn, &collection_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("this collection is not shared")?;
+        let items = api_sync::local_items(&conn, &collection_id).map_err(|e| e.to_string())?;
+        (items, share.workspace_id, share.cursor)
+    };
+
+    if let Err(e) = supabase::push(url.clone(), collection_id.clone(), outbound.clone()).await {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        api_queries::set_sync_progress(&conn, &collection_id, None, None, false, Some(&e))
+            .map_err(|e| e.to_string())?;
+        return Err(e);
+    }
+
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        api_sync::record_base(&conn, &collection_id, &outbound).map_err(|e| e.to_string())?;
+        api_sync::clear_delivered_tombstones(&conn, &collection_id, &outbound)
+            .map_err(|e| e.to_string())?;
+    }
+
+    let incoming = match supabase::pull(url, collection_id.clone(), since).await {
+        Ok(items) => items,
+        Err(e) => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            api_queries::set_sync_progress(&conn, &collection_id, None, None, false, Some(&e))
+                .map_err(|e| e.to_string())?;
+            return Err(e);
+        }
+    };
+
     let mut conn = db.0.lock().map_err(|e| e.to_string())?;
-    api_sync::apply_items(&mut conn, &workspace_id, &workspace_name, items).map_err(|e| e.to_string())
+    let result = api_sync::apply_items(&mut conn, &collection_id, &workspace_id, incoming)
+        .map_err(|e| e.to_string())?;
+    // An empty cursor means the pull returned nothing; keeping the old one is what stops a quiet
+    // round from replaying the whole history next time.
+    let cursor = (!result.cursor.is_empty()).then_some(result.cursor.as_str());
+    api_queries::set_sync_progress(&conn, &collection_id, cursor, cursor, true, Some(""))
+        .map_err(|e| e.to_string())?;
+
+    // The collection is gone and the round that would have carried that fact has just finished:
+    // either we deleted it and the tombstone is now everyone's, or someone else did and we just
+    // applied theirs. Either way there is nothing left to sync, and a share row pointing at
+    // nothing would keep probing a collection that no longer exists on any machine.
+    if api_queries::load_collection(&conn, &collection_id)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        supabase::leave(&collection_id)?;
+        api_queries::forget_shared_collection(&conn, &collection_id).map_err(|e| e.to_string())?;
+    }
+    Ok(result)
+}
+
+/// Everything frozen in this workspace, waiting for someone to pick a side.
+#[tauri::command]
+pub fn api_sync_conflicts(
+    db: State<Db>,
+    workspace_id: String,
+) -> Result<Vec<api_sync::SyncConflict>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_sync::list_conflicts(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// Settles one frozen record. `keep` is `"mine"` or `"theirs"`.
+#[tauri::command]
+pub fn api_resolve_conflict(
+    db: State<Db>,
+    collection_id: String,
+    kind: String,
+    id: String,
+    keep: api_sync::Resolution,
+) -> Result<(), String> {
+    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_sync::resolve(&mut conn, &collection_id, &kind, &id, keep).map_err(|e| e.to_string())
 }

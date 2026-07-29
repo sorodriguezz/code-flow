@@ -14,9 +14,14 @@ import {
   Plus,
   Pencil,
   Play,
+  Link2,
+  RefreshCw,
   Share2,
+  ShieldAlert,
   Star,
   Trash2,
+  Unlink,
+  Users,
   type LucideIcon,
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
@@ -26,9 +31,13 @@ import { canDrop, useApiDragStore, type ApiDrag, type ApiDropZone } from "../../
 import { useApiStore } from "../../state/apiStore";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { useApiModalStore } from "../../state/apiModalStore";
+import { useCollabStore, type ShareHealth } from "../../state/collabStore";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { confirmAction } from "../../state/confirmStore";
+import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { encodeInvite, syncCollection } from "../../lib/api/sync";
+import { supabaseAnonKey } from "../../lib/tauri/apiCommands";
 import { defaultRequestSpec } from "../../types/api";
 import type { ApiFolder, ApiProtocol, ApiRequestRow, SavedExample } from "../../types/api";
 
@@ -277,6 +286,10 @@ interface TreeRowProps {
   /** Collections only: current pin state, and the toggle for it. */
   pinned?: boolean;
   onTogglePin?: () => void;
+  /** Collections only: `null` when the collection isn't shared. */
+  share?: ShareHealth | null;
+  /** Requests only: this record is frozen waiting for a decision. */
+  conflicted?: boolean;
   protocol?: ApiProtocol;
   method?: string;
   renaming: boolean;
@@ -301,6 +314,8 @@ function TreeRow({
   onToggle,
   pinned,
   onTogglePin,
+  share,
+  conflicted,
   protocol,
   method,
   renaming,
@@ -437,6 +452,39 @@ function TreeRow({
           }`}
         >
           {node.name || t("api.untitledRequest")}
+        </span>
+      )}
+
+      {/* Shared, and how it is going — one glyph rather than a row of tags, because the sidebar's
+          job is the tree and collaboration is a property of it, not a second thing in it. */}
+      {share && (
+        <span
+          title={
+            share === "conflict"
+              ? t("api.collab.rowConflict")
+              : share === "error"
+                ? t("api.collab.rowError")
+                : share === "syncing"
+                  ? t("api.collab.syncing")
+                  : t("api.collab.rowShared")
+          }
+          className={`flex h-4 w-4 shrink-0 items-center justify-center ${
+            share === "conflict" || share === "error"
+              ? "text-[var(--cf-warning)]"
+              : share === "syncing"
+                ? "animate-pulse text-[var(--cf-accent)]"
+                : "text-[var(--cf-text-muted)]"
+          }`}
+        >
+          {share === "conflict" ? <ShieldAlert size={12} /> : <Users size={12} />}
+        </span>
+      )}
+      {conflicted && (
+        <span
+          title={t("api.collab.rowConflict")}
+          className="flex h-4 w-4 shrink-0 items-center justify-center text-[var(--cf-warning)]"
+        >
+          <ShieldAlert size={12} />
         </span>
       )}
 
@@ -685,6 +733,19 @@ export function CollectionTree() {
     example: SavedExample;
   } | null>(null);
   const openModal = useApiModalStore((s) => s.openApiModal);
+  const pushToast = useToastStore((s) => s.pushToast);
+
+  // Reduced to id sets here rather than selected as sets in the store: a selector that builds a
+  // new Set every call is a new reference every render, which is the shape zustand re-renders on
+  // forever. The source arrays only change when a sync round actually applied something.
+  const shares = useCollabStore((s) => s.shares);
+  const conflicts = useCollabStore((s) => s.conflicts);
+  const shareHealth = useCollabStore((s) => s.health);
+  const sharedIds = useMemo(() => new Set(shares.map((share) => share.collection_id)), [shares]);
+  const conflictedIds = useMemo(
+    () => new Set(conflicts.filter((c) => c.kind === "request").map((c) => c.id)),
+    [conflicts],
+  );
 
   const drag = useApiDragStore((s) => s.drag);
   const over = useApiDragStore((s) => s.over);
@@ -856,6 +917,21 @@ export function CollectionTree() {
     },
   ];
 
+  const copyInvite = async (collectionId: string, name: string) => {
+    const token = await useCollabStore.getState().tokenFor(collectionId);
+    if (token === null) return;
+    const key = (await supabaseAnonKey().catch(() => null)) ?? "";
+    await navigator.clipboard.writeText(
+      encodeInvite({ url: useApiStore.getState().settings.supabaseUrl, key, token, name }),
+    );
+    pushToast(t("api.collab.inviteCopied"), "success");
+  };
+
+  const stopSharing = async (collectionId: string, name: string) => {
+    if (!(await confirmAction(t("api.collab.leaveConfirm", { name })))) return;
+    await useCollabStore.getState().leave(collectionId);
+  };
+
   const menuItems = (node: NodeRef): MenuItem[] => {
     const items: MenuItem[] = [];
     if (node.kind !== "request") {
@@ -890,6 +966,31 @@ export function CollectionTree() {
         icon: Share2,
         onClick: () => openModal({ kind: "export", collectionId: node.id }),
       });
+      if (sharedIds.has(node.id)) {
+        items.push({
+          label: t("api.collab.copyInvite"),
+          icon: Link2,
+          separated: true,
+          onClick: () => void copyInvite(node.id, node.name),
+        });
+        items.push({
+          label: t("api.collab.syncNow"),
+          icon: RefreshCw,
+          onClick: () => void syncCollection(node.id).catch(() => {}),
+        });
+        items.push({
+          label: t("api.collab.leave"),
+          icon: Unlink,
+          onClick: () => void stopSharing(node.id, node.name),
+        });
+      } else {
+        items.push({
+          label: t("api.collab.shareCollection"),
+          icon: Users,
+          separated: true,
+          onClick: () => openModal({ kind: "collab", collectionId: node.id }),
+        });
+      }
     }
     items.push({
       label: t("api.rename"),
@@ -1143,6 +1244,7 @@ export function CollectionTree() {
         onToggle={examples ? () => toggle(request.id) : undefined}
         protocol={request.protocol}
         method={request.method}
+        conflicted={conflictedIds.has(request.id)}
         renaming={renaming?.id === request.id}
         dragging={drag?.id === request.id}
         dropInto={false}
@@ -1230,6 +1332,7 @@ export function CollectionTree() {
                   expanded={isExpanded}
                   pinned={collection.pinned}
                   onTogglePin={() => void useApiStore.getState().toggleCollectionPinned(collection.id)}
+                  share={sharedIds.has(collection.id) ? shareHealth(collection.id) : null}
                   renaming={renaming?.id === collection.id}
                   dragging={false}
                   dropInto={over?.mode === "into" && over.parentId === null && over.collectionId === collection.id}

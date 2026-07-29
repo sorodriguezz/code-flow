@@ -347,14 +347,20 @@ pub fn run() {
             commands::api_cmd::supabase_install_sql,
             commands::api_cmd::supabase_set_anon_key,
             commands::api_cmd::supabase_has_key,
+            commands::api_cmd::supabase_anon_key,
             commands::api_cmd::supabase_share_token,
             commands::api_cmd::supabase_check,
+            commands::api_cmd::supabase_probe,
             commands::api_cmd::supabase_share,
+            commands::api_cmd::supabase_rename_share,
             commands::api_cmd::supabase_join,
             commands::api_cmd::supabase_rotate,
             commands::api_cmd::supabase_leave,
-            commands::api_cmd::supabase_push,
-            commands::api_cmd::supabase_pull,
+            commands::api_cmd::supabase_watermark,
+            commands::api_cmd::supabase_sync,
+            commands::api_cmd::api_shared_collections,
+            commands::api_cmd::api_sync_conflicts,
+            commands::api_cmd::api_resolve_conflict,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

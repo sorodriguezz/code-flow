@@ -915,18 +915,24 @@ export interface ApiSettings {
   /** The connected account, shown so "connected" doesn't leave the user guessing which login. */
   driveAccount: string;
   /**
-   * The user's own Supabase project for shared workspaces. The anon key and every share token live
+   * The user's own Supabase project for shared collections. The anon key and every share token live
    * in the OS credential store; only the project URL is a setting.
    */
   supabaseUrl: string;
-  /** Sync shared workspaces on a timer as well as on demand. */
-  syncAuto: boolean;
   /**
-   * Newest change already applied, per workspace id — where the next pull starts. Keyed rather
-   * than a single value because one machine can host one shared workspace and be a guest in
-   * another, and their clocks advance independently.
+   * The last connection test succeeded — the project answered and the schema is installed.
+   *
+   * Persisted rather than held in the panel, because a check that only lives in component state is
+   * lost the moment the modal closes: reopening it would say "not tested yet" about a project that
+   * has been syncing all along, and the only way back to "connected" is pressing a button that
+   * changes nothing. The panel re-verifies in the background on every open; this is what it shows
+   * while that is in flight.
    */
-  syncCursors: Record<string, string>;
+  supabaseReady: boolean;
+  /** When that check last passed, so the panel can say how fresh "connected" is. */
+  supabaseCheckedAt: string;
+  /** Keep shared collections in step in the background as well as on demand. */
+  syncAuto: boolean;
   /**
    * Seal the backup with the passphrase held in the OS credential store. Off means the file is
    * readable JSON with every credential stripped out of it — see `lib/api/backup.ts`.
@@ -968,8 +974,9 @@ export function defaultApiSettings(): ApiSettings {
     driveFileId: "",
     driveAccount: "",
     supabaseUrl: "",
-    syncAuto: false,
-    syncCursors: {},
+    supabaseReady: false,
+    supabaseCheckedAt: "",
+    syncAuto: true,
     backupEncrypt: true,
     lastBackupAt: "",
   };

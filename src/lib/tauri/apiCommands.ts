@@ -293,28 +293,68 @@ export const gdriveUpload = (
 export const gdriveDownload = (clientId: string, fileId: string) =>
   invoke<string>("gdrive_download", { clientId, fileId });
 
-// ---------- shared workspaces on the user's own Supabase project ----------
+// ---------- shared collections on the user's own Supabase project ----------
+
+/**
+ * Collaboration is per **collection**, not per workspace. A share and the collection it publishes
+ * carry the same id, which is what lets someone accept an invitation into a workspace they already
+ * have instead of adopting the host's entire sidebar.
+ */
 
 export interface SupabaseCheck {
   /** The project answered — URL and anon key are right. */
   reachable: boolean;
   /** `cf_ping` exists, so the schema script has been run. */
   schema_installed: boolean;
-  /** The workspace this machine's token resolves to; empty when it resolves to nothing. */
-  workspace_name: string;
 }
 
-export interface SharedWorkspace {
+export interface SharedCollection {
   id: string;
   name: string;
   share_token: string;
 }
 
+/** One shared collection as this machine knows it. Never carries the share token. */
+export interface SharedCollectionRow {
+  collection_id: string;
+  workspace_id: string;
+  /** The local collection's name; empty when the collection has been deleted here. */
+  name: string;
+  remote_name: string;
+  role: "owner" | "member";
+  cursor: string;
+  watermark: string;
+  last_sync_at: string;
+  last_error: string;
+  conflicts: number;
+}
+
 export interface SyncResult {
   applied: ApiImportSummary;
   deleted: number;
-  /** Newest `updated_at` seen — the cursor for the next pull. */
+  /** Records frozen this round, waiting for someone to pick a side. */
+  conflicts: number;
+  /** Newest server clock seen — the cursor for the next pull. */
   cursor: string;
+}
+
+/** One record frozen by a three-way merge, with both sides attached. */
+export interface SyncConflict {
+  collection_id: string;
+  collection_name: string;
+  kind: "collection" | "folder" | "request";
+  id: string;
+  name: string;
+  remote_name: string;
+  /** JSON of the incoming record — `"{}"` when the incoming change is a deletion. */
+  remote_payload: string;
+  /** JSON of the local record — `"{}"` when it was deleted here. */
+  local_payload: string;
+  remote_updated_at: string;
+  local_updated_at: string;
+  remote_deleted: boolean;
+  local_deleted: boolean;
+  detected_at: string;
 }
 
 /** The SQL the host runs once in their project's editor. */
@@ -325,33 +365,65 @@ export const supabaseSetAnonKey = (anonKey: string) =>
 
 export const supabaseHasKey = () => invoke<boolean>("supabase_has_key");
 
-export const supabaseShareToken = (workspaceId: string) =>
-  invoke<string | null>("supabase_share_token", { workspaceId });
+export const supabaseShareToken = (collectionId: string) =>
+  invoke<string | null>("supabase_share_token", { collectionId });
 
-export const supabaseCheck = (url: string, workspaceId: string) =>
-  invoke<SupabaseCheck>("supabase_check", { url, workspaceId });
+/** Is the project reachable and installed. About the project, not about any one share. */
+export const supabaseCheck = (url: string) => invoke<SupabaseCheck>("supabase_check", { url });
 
-/** Starts sharing this workspace and returns the token to hand out. */
-export const supabaseShare = (url: string, workspaceId: string, name: string) =>
-  invoke<SharedWorkspace>("supabase_share", { url, workspaceId, name });
+/** The name the remote has for this share, or `null` if the token no longer resolves. */
+export const supabaseProbe = (url: string, collectionId: string) =>
+  invoke<string | null>("supabase_probe", { url, collectionId });
 
-export const supabaseJoin = (url: string, token: string) =>
-  invoke<SharedWorkspace>("supabase_join", { url, token });
+/** Every collection shared on this machine, across every workspace. */
+export const apiSharedCollections = () =>
+  invoke<SharedCollectionRow[]>("api_shared_collections");
+
+/** Starts sharing one collection and returns the invitation material. */
+export const supabaseShare = (
+  url: string,
+  collectionId: string,
+  workspaceId: string,
+  name: string,
+) => invoke<SharedCollection>("supabase_share", { url, collectionId, workspaceId, name });
+
+/** Keeps the remote's display name in step with a local rename. */
+export const supabaseRenameShare = (url: string, collectionId: string, name: string) =>
+  invoke<void>("supabase_rename_share", { url, collectionId, name });
+
+/** Accepts an invitation, filing the collection under the workspace the user picked. */
+export const supabaseJoin = (url: string, token: string, workspaceId: string) =>
+  invoke<SharedCollection>("supabase_join", { url, token, workspaceId });
 
 /** Replaces the token — everyone still holding the old one loses access. */
-export const supabaseRotate = (url: string, workspaceId: string) =>
-  invoke<string>("supabase_rotate", { url, workspaceId });
+export const supabaseRotate = (url: string, collectionId: string) =>
+  invoke<string>("supabase_rotate", { url, collectionId });
 
 /** Stops syncing here. Local only: the remote copy is the host's to end, by rotating. */
-export const supabaseLeave = (workspaceId: string) =>
-  invoke<void>("supabase_leave", { workspaceId });
+export const supabaseLeave = (collectionId: string) =>
+  invoke<void>("supabase_leave", { collectionId });
 
-export const supabasePush = (url: string, workspaceId: string) =>
-  invoke<number>("supabase_push", { url, workspaceId });
+/**
+ * The newest change the server holds for this share. One indexed row and no payload — this is what
+ * makes a three-second poll affordable, and a full sync only follows when it has moved.
+ */
+export const supabaseWatermark = (url: string, collectionId: string) =>
+  invoke<string>("supabase_watermark", { url, collectionId });
 
-export const supabasePull = (
-  url: string,
-  workspaceId: string,
-  workspaceName: string,
-  since: string,
-) => invoke<SyncResult>("supabase_pull", { url, workspaceId, workspaceName, since });
+/** One full round for one share: push what changed here, then apply what changed elsewhere. */
+export const supabaseSync = (url: string, collectionId: string) =>
+  invoke<SyncResult>("supabase_sync", { url, collectionId });
+
+export const apiSyncConflicts = (workspaceId: string) =>
+  invoke<SyncConflict[]>("api_sync_conflicts", { workspaceId });
+
+/** Settles one frozen record. */
+export const apiResolveConflict = (
+  collectionId: string,
+  kind: string,
+  id: string,
+  keep: "mine" | "theirs",
+) => invoke<void>("api_resolve_conflict", { collectionId, kind, id, keep });
+
+/** The stored anon key, so an invitation can be built without re-typing it. Public by design. */
+export const supabaseAnonKey = () => invoke<string | null>("supabase_anon_key");

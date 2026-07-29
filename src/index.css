@@ -252,6 +252,49 @@ body {
   }
 }
 
+/* ==================================================================
+ * Theme switch — the vertical wipe
+ *
+ * A theme change is one synchronous write, so without this the whole window
+ * changes colour between two frames and reads as a glitch. `withThemeTransition`
+ * (src/lib/themeTransition.ts) wraps that write in a view transition; the rules
+ * below are what the browser plays between its before/after photographs.
+ *
+ * The default cross-fade is replaced deliberately: both snapshots are held
+ * still, the new one stacked on top, and revealed downward with an animated
+ * clip-path — a curtain coming down. `mix-blend-mode: normal` matters, because
+ * the default `plus-lighter` is built for a cross-fade and would wash the two
+ * themes into each other while they overlap.
+ * ================================================================== */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-old(root) {
+  z-index: 0;
+}
+::view-transition-new(root) {
+  z-index: 1;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-new(root) {
+    animation: cf-theme-wipe 0.55s cubic-bezier(0.65, 0, 0.35, 1) both;
+  }
+}
+
+@keyframes cf-theme-wipe {
+  /* inset(top right bottom left) — a bottom inset of 100% leaves a zero-height
+     sliver pinned to the top edge, which then grows down to full height. */
+  from {
+    clip-path: inset(0 0 100% 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
 .cf-editor-changed-gutter {
   border-left: 3px solid var(--cf-success);
   margin-left: 3px;

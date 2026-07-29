@@ -7,6 +7,8 @@ import {
   DEFAULT_DARK_THEME,
   DEFAULT_LIGHT_THEME,
 } from "../lib/codeThemes";
+import { withThemeTransition } from "../lib/themeTransition";
+import { useAccentStore } from "./accentStore";
 import type { ThemePreference } from "../types/domain";
 
 interface ThemeState {
@@ -36,11 +38,18 @@ function resolve(pref: ThemePreference): "light" | "dark" {
 }
 
 /** Applies a mode + its chosen scheme in one go: the `data-theme` attribute (which the CSS
- * defaults and every `dark:` variant key off) and then the scheme's own variables on top. */
+ * defaults and every `dark:` variant key off), the scheme's own variables on top, and finally the
+ * accent — whose hex differs per mode, and which `applyThemeVars` deliberately leaves alone because
+ * the accent picker owns it.
+ *
+ * The accent belongs in here rather than in the effect that used to be its only caller: an effect
+ * runs a frame after the swap, which was a brief flash of the wrong accent, and — now that the swap
+ * is photographed for the wipe — would be a whole frozen half-second of it. */
 function applyToDocument(resolved: "light" | "dark", themeId: string): string {
   document.documentElement.dataset.theme = resolved;
   const theme = findTheme(themeId, resolved);
   applyThemeVars(theme);
+  useAccentStore.getState().apply(resolved);
   return monacoThemeName(theme.id);
 }
 
@@ -68,15 +77,33 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
       if (get().preference !== "system") return;
       const next = resolve("system");
       const { darkThemeId: dark, lightThemeId: light } = get();
-      set({ resolved: next, monacoTheme: applyToDocument(next, next === "dark" ? dark : light) });
+      // Wiped, exactly as a deliberate switch is. The OS flipping at sunset is the one theme change
+      // nobody asked for, and having it announce itself is the difference between "the app changed"
+      // and "something went wrong with the app".
+      withThemeTransition(() => {
+        set({ resolved: next, monacoTheme: applyToDocument(next, next === "dark" ? dark : light) });
+      });
     });
   },
 
   setPreference: async (preference) => {
     const resolved = resolve(preference);
     const { darkThemeId, lightThemeId } = get();
-    const monacoTheme = applyToDocument(resolved, resolved === "dark" ? darkThemeId : lightThemeId);
-    set({ preference, resolved, monacoTheme });
+
+    const paint = () => {
+      const monacoTheme = applyToDocument(resolved, resolved === "dark" ? darkThemeId : lightThemeId);
+      set({ preference, resolved, monacoTheme });
+    };
+
+    // Only a change of *mode* is wiped. Picking "System" while already dark, or moving between the
+    // three buttons without the resolved mode changing, repaints nothing — half a second of curtain
+    // over an identical window would read as a stutter, not as an effect.
+    if (resolved === get().resolved) {
+      paint();
+    } else {
+      withThemeTransition(paint);
+    }
+
     await setSetting(SETTING_KEY, preference);
   },
 

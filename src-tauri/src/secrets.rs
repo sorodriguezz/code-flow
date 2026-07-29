@@ -114,10 +114,14 @@ pub fn supabase_anon_key() -> String {
     "supabase-anon-key".to_string()
 }
 
-/// The share token for one shared workspace — the whole credential for reaching it, so keyed per
-/// workspace: hosting one and being a guest in another are the normal case, not an edge one.
-pub fn supabase_share_token(workspace_id: &str) -> String {
-    format!("supabase-share:{workspace_id}")
+/// The share token for one shared collection — the whole credential for reaching it, so keyed per
+/// collection: hosting one and being a guest in another are the normal case, not an edge one.
+///
+/// The prefix is deliberately not the `supabase-share:` of the workspace-shaped share it replaced.
+/// Both are keyed by a v4 uuid, and a stale workspace token left in the credential store must not
+/// be able to resolve as a collection's.
+pub fn supabase_share_token(collection_id: &str) -> String {
+    format!("supabase-collection:{collection_id}")
 }
 
 #[cfg(test)]

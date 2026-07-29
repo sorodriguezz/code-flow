@@ -308,7 +308,77 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- collection | folder | request | environment
             kind         TEXT NOT NULL,
             deleted_at   TEXT NOT NULL,
+            -- The collection the deleted row belonged to ('' for environments, which belong to a
+            -- workspace). Sharing is per collection, so a push has to be able to select the
+            -- tombstones of *its* subtree and no one else's.
+            collection_id TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (workspace_id, kind, id)
+        );
+
+        -- ---------------------------------------------------------------------
+        -- Collaboration: one shared collection per row
+        -- ---------------------------------------------------------------------
+
+        -- Which collections are shared on the user's Supabase project, and where each one's sync
+        -- has got to. The share TOKEN is not here — it is the credential, and lives in the OS
+        -- credential store (see `secrets::supabase_share_token`).
+        --
+        -- `workspace_id` is denormalised from the collection so the collaboration panel can group
+        -- shares by workspace without loading every tree.
+        --
+        -- Deliberately NOT a foreign key onto `api_collections`. The row has to exist both before
+        -- the collection does (accepting an invitation registers the share, and the first pull is
+        -- what creates the collection) and after it stops (deleting a shared collection has to
+        -- stay shared long enough for the tombstone to be pushed, or the deletion never reaches
+        -- anyone else). A cascade would break the first case and silently swallow the second.
+        CREATE TABLE IF NOT EXISTS api_shared_collections (
+            collection_id TEXT PRIMARY KEY,
+            workspace_id  TEXT NOT NULL,
+            -- The name the remote knows it by; shown while joining, before the tree has it.
+            remote_name   TEXT NOT NULL DEFAULT '',
+            -- 'owner' for whoever created the share, 'member' for whoever accepted an invitation.
+            -- Purely informational: the token grants the same rights to both.
+            role          TEXT NOT NULL DEFAULT 'owner',
+            -- Newest server `synced_at` already applied — where the next pull starts.
+            cursor        TEXT NOT NULL DEFAULT '',
+            -- Newest server `synced_at` the watermark probe has *seen*. A pull is only worth
+            -- running when this is ahead of `cursor`.
+            watermark     TEXT NOT NULL DEFAULT '',
+            last_sync_at  TEXT NOT NULL DEFAULT '',
+            last_error    TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL
+        );
+
+        -- The common ancestor of a three-way merge: what each record looked like the last time this
+        -- machine and the server agreed about it.
+        --
+        -- Without it, "someone else changed this" and "I changed this" are indistinguishable, and
+        -- the only available policy is last-write-wins — which silently drops the losing edit. With
+        -- it, a record whose local timestamp moved *and* whose remote timestamp moved is a conflict
+        -- to be shown, not a coin toss to be resolved.
+        CREATE TABLE IF NOT EXISTS api_sync_base (
+            collection_id TEXT NOT NULL,
+            kind          TEXT NOT NULL,
+            id            TEXT NOT NULL,
+            -- The record's `updated_at` at the moment of agreement, as the *remote* carried it.
+            base_updated_at TEXT NOT NULL,
+            PRIMARY KEY (collection_id, kind, id)
+        );
+
+        -- Records frozen pending a decision: neither applied nor pushed until the user picks a
+        -- side. Holds the incoming payload verbatim so "take theirs" needs no second round trip,
+        -- and so the diff can be shown without one either.
+        CREATE TABLE IF NOT EXISTS api_sync_conflicts (
+            collection_id     TEXT NOT NULL,
+            kind              TEXT NOT NULL,
+            id                TEXT NOT NULL,
+            remote_payload    TEXT NOT NULL,
+            remote_updated_at TEXT NOT NULL,
+            local_updated_at  TEXT NOT NULL,
+            /* 1 when the incoming change is a deletion rather than an edit. */
+            remote_deleted    INTEGER NOT NULL DEFAULT 0,
+            detected_at       TEXT NOT NULL,
+            PRIMARY KEY (collection_id, kind, id)
         );
         "#,
     )?;
@@ -334,7 +404,34 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_provider_to_workspace_agents(conn)?;
     add_pinned_to_api_collections(conn)?;
     add_updated_at_to_folders_and_environments(conn)?;
+    add_collection_id_to_tombstones(conn)?;
     Ok(())
+}
+
+/// Sharing moved from the workspace to the collection, so a push has to be able to ask for the
+/// tombstones of one subtree. Rows written before this column existed get backfilled from whatever
+/// still resolves; a request whose collection is long gone keeps `''` and is simply never pushed,
+/// which is correct — nobody shares a collection that no longer exists.
+fn add_collection_id_to_tombstones(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "api_tombstones", "collection_id")? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        ALTER TABLE api_tombstones ADD COLUMN collection_id TEXT NOT NULL DEFAULT '';
+        UPDATE api_tombstones SET collection_id = id WHERE kind = 'collection';
+        UPDATE api_tombstones
+           SET collection_id = COALESCE(
+                   (SELECT collection_id FROM api_folders  WHERE api_folders.id  = api_tombstones.id),
+                   '')
+         WHERE kind = 'folder';
+        UPDATE api_tombstones
+           SET collection_id = COALESCE(
+                   (SELECT collection_id FROM api_requests WHERE api_requests.id = api_tombstones.id),
+                   '')
+         WHERE kind = 'request';
+        "#,
+    )
 }
 
 /// Folders and environments had only a `created_at`, which made them the two records nothing could

@@ -308,7 +308,12 @@ export const useApiStore = create<ApiState>((set, get) => ({
       activeTabId: null,
     });
 
-    const promise = get().init(workspaceId);
+    const promise = get().init(workspaceId).then(async () => {
+      // Conflicts are scoped to a workspace and paint its tabs; carrying the old workspace's list
+      // across a switch would mark requests that aren't even on screen.
+      const { useCollabStore } = await import("./collabStore");
+      await useCollabStore.getState().refresh();
+    });
     pendingLoad = { workspaceId, promise };
     return promise;
   },
@@ -361,12 +366,19 @@ export const useApiStore = create<ApiState>((set, get) => ({
   },
 
   updateCollection: async (collection) => {
+    const previousName = get().collections.find((c) => c.id === collection.id)?.name;
     await guarded(async () => {
       await apiUpdateCollection(collection);
       set((s) => ({
         collections: s.collections.map((c) => (c.id === collection.id ? collection : c)),
       }));
     });
+    // The share carries its own display name — it is what a guest sees while accepting an
+    // invitation, before the collection exists on their machine. Best-effort: a rename is not worth
+    // failing over a project that happens to be unreachable, and the next round corrects it.
+    if (previousName !== undefined && previousName !== collection.name) {
+      void renameShareIfShared(collection.id, collection.name);
+    }
   },
 
   deleteCollection: async (id) => {
@@ -791,6 +803,17 @@ export const useApiStore = create<ApiState>((set, get) => ({
     return [tab.draft.auth, ...ancestorAuth(get, tab.collectionId, tab.folderId)];
   },
 }));
+
+/** Keeps a shared collection's remote label in step with a local rename, silently. */
+async function renameShareIfShared(collectionId: string, name: string) {
+  const { useCollabStore } = await import("./collabStore");
+  if (useCollabStore.getState().shareFor(collectionId) === null) return;
+  const url = useApiStore.getState().settings.supabaseUrl;
+  if (url.trim() === "") return;
+  const { supabaseRenameShare } = await import("../lib/tauri/apiCommands");
+  await supabaseRenameShare(url, collectionId, name).catch(() => {});
+  await useCollabStore.getState().refresh();
+}
 
 // ---------------------------------------------------------------------------
 // Tab persistence

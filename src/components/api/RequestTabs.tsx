@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from "react";
-import { ChevronDown, Plus, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown, Plus, ShieldAlert, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
 import { useApiStore, type ApiTab } from "../../state/apiStore";
+import { useApiModalStore } from "../../state/apiModalStore";
+import { useCollabStore } from "../../state/collabStore";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -25,6 +27,14 @@ export function RequestTabs() {
   const closeTab = useApiStore((s) => s.closeTab);
   const openScratchTab = useApiStore((s) => s.openScratchTab);
   const hoveredKey = useRowHoverStore((s) => s.key);
+  const conflicts = useCollabStore((s) => s.conflicts);
+  const openModal = useApiModalStore((s) => s.openApiModal);
+
+  // Only requests can be open in a tab, so only those conflicts can be painted on one.
+  const conflicted = useMemo(
+    () => new Set(conflicts.filter((c) => c.kind === "request").map((c) => c.id)),
+    [conflicts],
+  );
 
   const stripRef = useRef<HTMLDivElement>(null);
   const plusRef = useRef<HTMLButtonElement>(null);
@@ -64,6 +74,10 @@ export function RequestTabs() {
         {openTabs.map((tab) => {
           const active = tab.id === activeTabId;
           const hoverKey = `apitab:${tab.id}`;
+          // A frozen record is the one thing on this strip that is not about the tab's own state:
+          // it says a decision is owed before this request can sync again, so it outranks both the
+          // method badge's colour and the unsaved dot for attention.
+          const inConflict = tab.requestId !== null && conflicted.has(tab.requestId);
           return (
             <div
               key={tab.id}
@@ -84,13 +98,19 @@ export function RequestTabs() {
                 e.preventDefault();
                 void requestClose(tab);
               }}
-              className={`group relative flex h-9 max-w-[240px] shrink-0 cursor-pointer select-none items-center gap-2 border-r border-[var(--cf-border)] pl-3 pr-2 text-[12px] transition-colors ${
+              className={`group relative flex h-9 max-w-[280px] shrink-0 cursor-pointer select-none items-center gap-2 border-r border-[var(--cf-border)] pl-3 pr-2 text-[12px] transition-colors ${
                 active
                   ? "bg-[var(--cf-surface)] text-[var(--cf-text)]"
                   : `text-[var(--cf-text-muted)] ${hoverKey === hoveredKey ? "cf-row-hover" : ""}`
-              }`}
+              } ${inConflict ? "bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)]" : ""}`}
             >
-              {active && <span className="absolute inset-x-0 top-0 h-[2px] bg-[var(--cf-accent)]" />}
+              {active && (
+                <span
+                  className={`absolute inset-x-0 top-0 h-[2px] ${
+                    inConflict ? "bg-[var(--cf-warning)]" : "bg-[var(--cf-accent)]"
+                  }`}
+                />
+              )}
               <span
                 className="shrink-0 font-mono text-[10px] font-semibold"
                 style={{ color: badgeColor(tab.draft.protocol, tab.draft.method) }}
@@ -100,6 +120,19 @@ export function RequestTabs() {
               <span className={`truncate ${tab.dirty ? "italic" : ""}`}>
                 {tab.name || t("api.untitledRequest")}
               </span>
+              {inConflict && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openModal({ kind: "conflicts" });
+                  }}
+                  title={t("api.conflict.tabHint")}
+                  className="flex shrink-0 items-center gap-1 rounded bg-[color-mix(in_oklab,var(--cf-warning)_22%,transparent)] px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide text-[var(--cf-warning)]"
+                >
+                  <ShieldAlert size={9} />
+                  {t("api.conflict.badge")}
+                </button>
+              )}
               <button
                 onClick={(e) => {
                   e.stopPropagation();

@@ -1,5 +1,5 @@
 import { useCallback, useEffect } from "react";
-import { Download, Plus, Zap, type LucideIcon } from "lucide-react";
+import { Download, Plus, Users, Zap, type LucideIcon } from "lucide-react";
 import { ApiSidebar } from "./ApiSidebar";
 import { RequestTabs } from "./RequestTabs";
 import { RequestBuilder } from "./RequestBuilder";
@@ -10,6 +10,8 @@ import { ExportModal } from "./ExportModal";
 import { RunnerModal } from "./RunnerModal";
 import { ApiSettingsModal } from "./ApiSettingsModal";
 import { CookieModal } from "./CookieModal";
+import { CollabModal } from "./CollabModal";
+import { ConflictModal } from "./ConflictModal";
 import { tabActions } from "./tabActions";
 import { CARD } from "./panelChrome";
 import { EmptyState } from "../common/EmptyState";
@@ -80,6 +82,7 @@ function ApiEmptyState() {
         {action(t("api.newRequest"), Plus, () => useApiStore.getState().openScratchTab(), true)}
         {action(t("api.newCollection"), Plus, () => void newCollection())}
         {action(t("api.import.title"), Download, () => openModal({ kind: "import" }))}
+        {action(t("api.collab.importCollaborative"), Users, () => openModal({ kind: "collab" }))}
       </div>
     </div>
   );
@@ -168,6 +171,10 @@ export function ApiView() {
       {modal?.kind === "runner" && (
         <RunnerModal collectionId={modal.collectionId} folderId={modal.folderId} onClose={closeModal} />
       )}
+      {modal?.kind === "collab" && (
+        <CollabModal collectionId={modal.collectionId} onClose={closeModal} />
+      )}
+      {modal?.kind === "conflicts" && <ConflictModal onClose={closeModal} />}
     </>
   );
 }

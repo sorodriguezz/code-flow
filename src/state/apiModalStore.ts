@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 /**
- * Which of the API client's six modals is on screen.
+ * Which of the API client's modals is on screen.
  *
  * They're opened from four places that can't see each other — the view toolbar, the sidebar's
  * overflow menu, the collection tree's context menu, and the command palette, which lives outside
@@ -18,7 +18,11 @@ export type ApiModal =
   | { kind: "cookies" }
   | { kind: "settings" }
   | { kind: "export"; collectionId: string }
-  | { kind: "runner"; collectionId: string; folderId: string | null };
+  | { kind: "runner"; collectionId: string; folderId: string | null }
+  /** Share a collection, or accept an invitation. `collectionId` preselects the one to share. */
+  | { kind: "collab"; collectionId?: string }
+  /** The records frozen by a three-way merge, and the choice for each. */
+  | { kind: "conflicts" };
 
 interface ApiModalState {
   modal: ApiModal | null;

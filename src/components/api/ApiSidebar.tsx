@@ -10,6 +10,8 @@ import {
   Search,
   Settings,
   Settings2,
+  ShieldAlert,
+  Users,
   X,
 } from "lucide-react";
 import { ActivePill } from "../common/ActivePill";
@@ -20,6 +22,7 @@ import { HistoryList } from "./HistoryList";
 import { CARD } from "./panelChrome";
 import { useApiStore } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
+import { useCollabStore } from "../../state/collabStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
@@ -222,6 +225,7 @@ export function ApiSidebar() {
   const openTabs = useApiStore((s) => s.openTabs);
   const activeTabId = useApiStore((s) => s.activeTabId);
   const openModal = useApiModalStore((s) => s.openApiModal);
+  const conflicts = useCollabStore((s) => s.conflicts);
 
   const [section, setSection] = useState<Section>("collections");
   const [query, setQuery] = useState("");
@@ -276,6 +280,23 @@ export function ApiSidebar() {
           <ToolbarButton onClick={() => openModal({ kind: "import" })} title={t("api.import.title")}>
             <Download size={13} />
           </ToolbarButton>
+          {/* Collaboration gets its own button rather than a line in the overflow menu: pasting an
+              invitation code is the first thing a new team member does in this app, and it should
+              not be two clicks behind a "…". */}
+          <ToolbarButton onClick={() => openModal({ kind: "collab" })} title={t("api.collab.modalTitle")}>
+            <Users size={13} />
+          </ToolbarButton>
+          {conflicts.length > 0 && (
+            <ToolbarButton
+              onClick={() => openModal({ kind: "conflicts" })}
+              title={t("api.conflict.subtitle", { n: String(conflicts.length) })}
+            >
+              <span className="relative flex items-center justify-center text-[var(--cf-warning)]">
+                <ShieldAlert size={13} />
+                <span className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-warning)]" />
+              </span>
+            </ToolbarButton>
+          )}
           <ToolbarButton
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();

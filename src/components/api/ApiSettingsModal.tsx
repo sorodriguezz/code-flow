@@ -1,11 +1,9 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import {
-  ClipboardCopy,
   Cloud,
+  Info,
   DatabaseBackup,
   Download,
-  ExternalLink,
-  Info,
   Network,
   Plus,
   RefreshCw,
@@ -13,7 +11,6 @@ import {
   Share2,
   ShieldCheck,
   Trash2,
-  TriangleAlert,
   Upload,
   Waypoints,
   type LucideIcon,
@@ -22,7 +19,10 @@ import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { ActiveUnderline } from "../common/ActivePill";
 import { ApiModal, Field, GhostButton, Row } from "./ApiModal";
+import { Actions, Group, HelpLink, Note, Panel, Status } from "./settingsChrome";
+import { CollaborationPanel } from "./CollaborationPanel";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
+import { useCollabStore } from "../../state/collabStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -42,21 +42,8 @@ import {
   gdriveFindFile,
   gdriveSetClientSecret,
   gdriveStatus,
-  supabaseCheck,
-  supabaseHasKey,
-  supabaseInstallSql,
-  supabaseJoin,
-  supabaseLeave,
-  supabasePull,
-  supabaseRotate,
-  supabaseSetAnonKey,
-  supabaseShare,
-  supabaseShareToken,
   type DriveStatus,
-  type SupabaseCheck,
 } from "../../lib/tauri/apiCommands";
-import { openExternalUrl } from "../../lib/tauri/commands";
-import { decodeInvite, encodeInvite, resetCursor, syncNow } from "../../lib/api/sync";
 import {
   backupFileName,
   backupIsEncrypted,
@@ -73,113 +60,22 @@ const CERT_EXTENSIONS = ["p12", "pfx", "pem", "crt", "cer"];
 const KEY_EXTENSIONS = ["pem", "key"];
 
 /**
- * The consoles the bring-your-own credentials come from. `project/_/` is Supabase's own placeholder
- * for "whichever project is selected", so these land on the right page without knowing its ref.
+ * The consoles the bring-your-own credentials come from.
  */
 const HELP_URLS = {
   googleCredentials: "https://console.cloud.google.com/apis/credentials",
   googleDriveApi: "https://console.cloud.google.com/apis/library/drive.googleapis.com",
   googleDesktopAppDocs: "https://developers.google.com/identity/protocols/oauth2/native-app",
-  supabaseNewProject: "https://supabase.com/dashboard/new",
-  supabaseApiSettings: "https://supabase.com/dashboard/project/_/settings/api",
-  supabaseSqlEditor: "https://supabase.com/dashboard/project/_/sql/new",
 } as const;
 
 function newCertId(): string {
   return `cert-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** One tab's worth of settings. The tab above already names it, so there is no heading here. */
-function Panel({ children }: { children: ReactNode }) {
-  return <div className="rounded-lg border border-[var(--cf-border)] px-3 py-2">{children}</div>;
-}
-
 /** Every numeric field here is a non-negative integer, and a half-typed one must not clear it. */
 function number(value: string, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
-}
-
-// ---------------------------------------------------------------------------
-// Shared bits for the two panels that are less "settings" than "a thing with a state"
-// ---------------------------------------------------------------------------
-
-/** A titled block inside a panel — the backup and collaboration tabs are each several of these. */
-function Group({ title, children }: { title: string; children: ReactNode }) {
-  return (
-    <section className="mt-3 border-t border-[var(--cf-border)] pt-2.5 first:mt-0 first:border-0 first:pt-0">
-      <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {title}
-      </h4>
-      {children}
-    </section>
-  );
-}
-
-type Tone = "muted" | "warning" | "success";
-
-const TONE_TEXT: Record<Tone, string> = {
-  muted: "text-[var(--cf-text-muted)]",
-  warning: "text-[var(--cf-warning)]",
-  success: "text-[var(--cf-success)]",
-};
-
-/**
- * An explanatory line. `warning` is reserved for the two places where the honest answer is "this
- * can lose your work" — spending it on ordinary guidance is what makes real warnings invisible.
- */
-function Note({ tone = "muted", children }: { tone?: Tone; children: ReactNode }) {
-  return (
-    <p className={`mb-1.5 flex items-start gap-1.5 text-[11px] leading-snug ${TONE_TEXT[tone]}`}>
-      {tone === "warning" ? (
-        <TriangleAlert size={11} className="mt-[2px] shrink-0" />
-      ) : (
-        <Info size={11} className="mt-[2px] shrink-0" />
-      )}
-      <span>{children}</span>
-    </p>
-  );
-}
-
-/** Connected / not connected, as a dot and a sentence rather than a paragraph to parse. */
-function Status({ tone, children }: { tone: Tone; children: ReactNode }) {
-  const dot = {
-    muted: "bg-[var(--cf-text-muted)]",
-    warning: "bg-[var(--cf-warning)]",
-    success: "bg-[var(--cf-success)]",
-  }[tone];
-  return (
-    <span className={`flex min-w-0 items-center gap-1.5 text-[11px] ${TONE_TEXT[tone]}`}>
-      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot}`} />
-      <span className="truncate">{children}</span>
-    </span>
-  );
-}
-
-/** A row of buttons, spaced and wrapping the same way everywhere. */
-function Actions({ children }: { children: ReactNode }) {
-  return <div className="flex flex-wrap items-center gap-1.5">{children}</div>;
-}
-
-/**
- * Where to get the credentials the field above is asking for.
- *
- * Both integrations are bring-your-own, which means the setup happens in someone else's console
- * before this panel is any use at all. A field labelled "Client ID" with no way to find out where a
- * client id comes from is where that setup stalls.
- */
-function HelpLink({ url, children }: { url: string; children: ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={() => void openExternalUrl(url).catch((e: unknown) => pushErrorToast(String(e)))}
-      title={url}
-      className="inline-flex items-center gap-1 rounded text-[11px] text-[var(--cf-accent)] hover:underline"
-    >
-      {children}
-      <ExternalLink size={10} className="shrink-0" />
-    </button>
-  );
 }
 
 /** A value the user reads rather than edits — a path, a token, an account. */
@@ -521,15 +417,12 @@ function BackupPanel() {
   // already subscribes to, so it is never stale and never worth a dependency list.
   const ready = backupDestinationReady();
 
-  // Whether this workspace is also synced — it changes what a `replace` restore actually does.
+  // Whether anything here is also synced with a team — it changes what a `replace` restore does,
+  // because the wipe it performs travels to everyone as a pile of deletions.
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const [shared, setShared] = useState(false);
-  useEffect(() => {
-    if (!workspaceId) return;
-    void supabaseShareToken(workspaceId)
-      .then((token) => setShared(token !== null))
-      .catch(() => {});
-  }, [workspaceId]);
+  const shared = useCollabStore((s) =>
+    s.shares.some((share) => share.workspace_id === workspaceId),
+  );
 
   useEffect(() => {
     void apiGetBackupPassphrase()
@@ -861,274 +754,6 @@ function DriveConnection({ busy, onRestore }: { busy: boolean; onRestore: () => 
         )}
       </div>
     </div>
-  );
-}
-
-/**
- * Shared workspaces on the user's own Supabase project.
- *
- * The security model is the share token, not an account: whoever holds the invitation code can
- * read and write the workspace. That is the "anyone with the link works on this with me" model the
- * panel is for, so the code is presented as the credential it is rather than as a harmless link.
- */
-function CollaborationPanel() {
-  const t = useT();
-  const settings = useApiStore((s) => s.settings);
-  const updateSettings = useApiStore((s) => s.updateSettings);
-  const pushToast = useToastStore((s) => s.pushToast);
-  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const workspaceName = useWorkspaceStore((s) => {
-    const id = s.activeWorkspaceId;
-    return s.workspaces.find((w) => w.id === id)?.name ?? "";
-  });
-
-  const [anonKey, setAnonKey] = useState("");
-  const [hasKey, setHasKey] = useState(false);
-  const [token, setToken] = useState<string | null>(null);
-  const [check, setCheck] = useState<SupabaseCheck | null>(null);
-  const [joinCode, setJoinCode] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const refresh = () => {
-    void supabaseHasKey().then(setHasKey).catch(() => {});
-    if (workspaceId) void supabaseShareToken(workspaceId).then(setToken).catch(() => {});
-  };
-  useEffect(refresh, [workspaceId]);
-
-  const guard = async (action: () => Promise<void>) => {
-    setBusy(true);
-    try {
-      await action();
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const saveKey = async (value: string) => {
-    setAnonKey(value);
-    await supabaseSetAnonKey(value).catch((e: unknown) => pushErrorToast(String(e)));
-    refresh();
-  };
-
-  const test = () =>
-    guard(async () => {
-      if (!workspaceId) return;
-      setCheck(await supabaseCheck(settings.supabaseUrl, workspaceId));
-    });
-
-  const copySql = () =>
-    guard(async () => {
-      await navigator.clipboard.writeText(await supabaseInstallSql());
-      pushToast(t("api.collab.sqlCopied"), "success");
-    });
-
-  const startSharing = () =>
-    guard(async () => {
-      if (!workspaceId) return;
-      const shared = await supabaseShare(settings.supabaseUrl, workspaceId, workspaceName);
-      setToken(shared.share_token);
-      // The first push is what makes the invitation useful: a guest joining an empty workspace
-      // would see nothing and reasonably conclude it was broken.
-      await syncNow();
-      pushToast(t("api.collab.sharingStarted"), "success");
-    });
-
-  const copyInvite = () =>
-    guard(async () => {
-      if (!token) return;
-      // The stored key is write-only from here — the credential store hands it to the backend, not
-      // to this panel — so building an invitation needs it typed in this session at least once.
-      if (anonKey === "") {
-        pushErrorToast(t("api.collab.needKeyForInvite"));
-        return;
-      }
-      await navigator.clipboard.writeText(
-        encodeInvite({ url: settings.supabaseUrl, key: anonKey, token, name: workspaceName }),
-      );
-      pushToast(t("api.collab.inviteCopied"), "success");
-    });
-
-  const join = () =>
-    guard(async () => {
-      const invite = decodeInvite(joinCode);
-      await supabaseSetAnonKey(invite.key);
-      await updateSettings({ supabaseUrl: invite.url });
-      const shared = await supabaseJoin(invite.url, invite.token);
-
-      // Joining can create a workspace this machine has never seen, so the list has to be re-read
-      // before it can be switched to.
-      await supabasePull(invite.url, shared.id, shared.name, "");
-      await useWorkspaceStore.getState().loadWorkspaces();
-      await useWorkspaceStore.getState().setActiveWorkspace(shared.id);
-
-      setJoinCode("");
-      refresh();
-      pushToast(t("api.collab.joined", { name: shared.name }), "success");
-    });
-
-  const rotate = () =>
-    guard(async () => {
-      if (!workspaceId) return;
-      if (!(await confirmAction(t("api.collab.rotateConfirm")))) return;
-      setToken(await supabaseRotate(settings.supabaseUrl, workspaceId));
-      pushToast(t("api.collab.rotated"), "success");
-    });
-
-  const leave = () =>
-    guard(async () => {
-      if (!workspaceId) return;
-      if (!(await confirmAction(t("api.collab.leaveConfirm")))) return;
-      await supabaseLeave(workspaceId);
-      await resetCursor(workspaceId);
-      setToken(null);
-      refresh();
-    });
-
-  const sync = () =>
-    guard(async () => {
-      const result = await syncNow();
-      if (result === null) {
-        pushToast(t("api.collab.notShared"), "info");
-        return;
-      }
-      pushToast(
-        t("api.collab.synced", {
-          applied: String(result.applied.collections + result.applied.requests),
-          deleted: String(result.deleted),
-        }),
-        "success",
-      );
-    });
-
-  const configured = settings.supabaseUrl.trim() !== "" && hasKey;
-
-  return (
-    <Panel>
-      <Note>{t("api.collab.about")}</Note>
-
-      <Group title={t("api.collab.groupProject")}>
-        {/* Create the project, copy its two values, then run the script — the three steps below,
-            in that order, each landing on the page they happen on. */}
-        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-          <HelpLink url={HELP_URLS.supabaseNewProject}>{t("api.collab.helpNewProject")}</HelpLink>
-          <HelpLink url={HELP_URLS.supabaseApiSettings}>{t("api.collab.helpApiKeys")}</HelpLink>
-          <HelpLink url={HELP_URLS.supabaseSqlEditor}>{t("api.collab.helpSqlEditor")}</HelpLink>
-        </div>
-
-        <Row label={t("api.collab.projectUrl")} wide>
-          <Field
-            mono
-            value={settings.supabaseUrl}
-            placeholder="https://xxxx.supabase.co"
-            onChange={(supabaseUrl) => void updateSettings({ supabaseUrl })}
-          />
-        </Row>
-        <Row label={t("api.collab.anonKey")} hint={t("api.collab.anonKeyHint")} wide>
-          <Field
-            type="password"
-            value={anonKey}
-            placeholder={hasKey ? t("api.collab.keyStored") : ""}
-            onChange={(value) => void saveKey(value)}
-          />
-        </Row>
-
-        <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
-          {check ? (
-            <Status
-              tone={!check.reachable || !check.schema_installed ? "warning" : "success"}
-            >
-              {!check.reachable
-                ? t("api.collab.unreachable")
-                : !check.schema_installed
-                  ? t("api.collab.schemaMissing")
-                  : check.workspace_name !== ""
-                    ? t("api.collab.checkShared", { name: check.workspace_name })
-                    : t("api.collab.checkReady")}
-            </Status>
-          ) : (
-            <Status tone="muted">{t("api.collab.untested")}</Status>
-          )}
-          <Actions>
-            <GhostButton onClick={copySql} disabled={busy}>
-              <ClipboardCopy size={12} />
-              {t("api.collab.copySql")}
-            </GhostButton>
-            <GhostButton onClick={test} disabled={busy || !configured}>
-              <RefreshCw size={12} />
-              {t("api.collab.test")}
-            </GhostButton>
-          </Actions>
-        </div>
-      </Group>
-
-      <Group title={t("api.collab.thisWorkspace", { name: workspaceName })}>
-        {token === null ? (
-          <>
-            <p className="mb-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-              {t("api.collab.shareHint")}
-            </p>
-            <Actions>
-              <GhostButton onClick={startSharing} disabled={busy || !configured}>
-                <Share2 size={12} />
-                {t("api.collab.share")}
-              </GhostButton>
-            </Actions>
-          </>
-        ) : (
-          <>
-            <div className="mb-1.5">
-              <Status tone="success">{t("api.collab.sharingActive")}</Status>
-            </div>
-            <Note tone="warning">{t("api.collab.tokenIsACredential")}</Note>
-            <Actions>
-              <GhostButton onClick={copyInvite} disabled={busy}>
-                <ClipboardCopy size={12} />
-                {t("api.collab.copyInvite")}
-              </GhostButton>
-              <GhostButton onClick={sync} disabled={busy}>
-                <RefreshCw size={12} />
-                {t("api.collab.syncNow")}
-              </GhostButton>
-              <GhostButton onClick={rotate} disabled={busy}>
-                {t("api.collab.rotate")}
-              </GhostButton>
-              <GhostButton onClick={leave} disabled={busy}>
-                {t("api.collab.leave")}
-              </GhostButton>
-            </Actions>
-            <Row label={t("api.collab.auto")} hint={t("api.collab.autoHint")}>
-              <Checkbox
-                checked={settings.syncAuto}
-                onChange={(syncAuto) => void updateSettings({ syncAuto })}
-              />
-            </Row>
-            {/* The two things a teammate needs to know before trusting this: what never leaves
-                the machine, and what happens when two people edit the same request. */}
-            <Note>{t("api.collab.secretsNote")}</Note>
-            <Note>{t("api.collab.conflictNote")}</Note>
-          </>
-        )}
-      </Group>
-
-      <Group title={t("api.collab.joinTitle")}>
-        <div className="flex items-center gap-1.5">
-          <Field
-            mono
-            value={joinCode}
-            placeholder={t("api.collab.joinPlaceholder")}
-            onChange={setJoinCode}
-          />
-          <GhostButton onClick={join} disabled={busy || joinCode.trim() === ""}>
-            {t("api.collab.join")}
-          </GhostButton>
-        </div>
-        <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-          {t("api.collab.joinHint")}
-        </p>
-      </Group>
-    </Panel>
   );
 }
 

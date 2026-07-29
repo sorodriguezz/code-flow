@@ -169,6 +169,40 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<ApiT
     Ok(ApiTree { collections, folders, requests })
 }
 
+/// One collection and everything beneath it, or `None` when the id names nothing.
+///
+/// The unit the collaboration layer works in: a share is a collection, so both the push payload and
+/// the local side of a three-way merge are exactly this subtree and never the workspace around it.
+pub fn load_collection(
+    conn: &Connection,
+    collection_id: &str,
+) -> rusqlite::Result<Option<(ApiCollection, Vec<ApiFolder>, Vec<ApiRequestRow>)>> {
+    let collection: Option<ApiCollection> = conn
+        .query_row(
+            &format!("SELECT {COLLECTION_COLUMNS} FROM api_collections WHERE id = ?1"),
+            params![collection_id],
+            map_collection,
+        )
+        .optional()?;
+    let Some(collection) = collection else { return Ok(None) };
+
+    let folders = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {FOLDER_COLUMNS} FROM api_folders WHERE collection_id = ?1 ORDER BY sort_order, created_at"
+        ))?;
+        let rows = stmt.query_map(params![collection_id], map_folder)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let requests = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {REQUEST_COLUMNS} FROM api_requests WHERE collection_id = ?1 ORDER BY sort_order, created_at"
+        ))?;
+        let rows = stmt.query_map(params![collection_id], map_request)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    Ok(Some((collection, folders, requests)))
+}
+
 // ---------- collections ----------
 
 fn insert_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Result<()> {
@@ -241,22 +275,43 @@ pub fn update_collection(conn: &Connection, c: &ApiCollection) -> rusqlite::Resu
 /// `PRAGMA foreign_keys = ON`, set in `migrations::run`).
 // ---------- tombstones ----------
 
-/// Records that something was removed, so the deletion can travel to a shared workspace or another
+/// Records that something was removed, so the deletion can travel to a shared collection or another
 /// machine. See the `api_tombstones` comment in `migrations.rs` for why absence alone cannot.
 ///
 /// SQLite cascades a delete down the tree, and the rows it takes with it have to be recorded too:
 /// a peer that learned only "the collection is gone" would keep its requests, and then re-upload
 /// them as children of a collection that no longer exists.
-fn record_tombstones(conn: &Connection, kind: &str, ids: &[String], workspace_id: &str) -> rusqlite::Result<()> {
+///
+/// `collection_id` is what scopes a push to one share — `''` for environments, which belong to a
+/// workspace and are never shared.
+fn record_tombstones(
+    conn: &Connection,
+    kind: &str,
+    ids: &[String],
+    workspace_id: &str,
+    collection_id: &str,
+) -> rusqlite::Result<()> {
     let stamp = now();
     for id in ids {
         conn.execute(
-            "INSERT INTO api_tombstones (id, workspace_id, kind, deleted_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(workspace_id, kind, id) DO UPDATE SET deleted_at = excluded.deleted_at",
-            params![id, workspace_id, kind, stamp],
+            "INSERT INTO api_tombstones (id, workspace_id, kind, deleted_at, collection_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(workspace_id, kind, id)
+             DO UPDATE SET deleted_at = excluded.deleted_at, collection_id = excluded.collection_id",
+            params![id, workspace_id, kind, stamp, collection_id],
         )?;
     }
     Ok(())
+}
+
+/// The collection a folder or request belongs to.
+fn collection_of(conn: &Connection, kind: &str, id: &str) -> rusqlite::Result<Option<String>> {
+    let sql = match kind {
+        "folder" => "SELECT collection_id FROM api_folders WHERE id = ?1",
+        "request" => "SELECT collection_id FROM api_requests WHERE id = ?1",
+        _ => return Ok(None),
+    };
+    conn.query_row(sql, params![id], |row| row.get(0)).optional()
 }
 
 /// The folders and requests a delete is about to take with it, plus the folder ids themselves.
@@ -319,9 +374,9 @@ pub fn delete_collection(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     if let Some(workspace_id) = workspace_of(&tx, "collection", id)? {
         let (folders, requests) = subtree_of_collection(&tx, id)?;
-        record_tombstones(&tx, "collection", &[id.to_string()], &workspace_id)?;
-        record_tombstones(&tx, "folder", &folders, &workspace_id)?;
-        record_tombstones(&tx, "request", &requests, &workspace_id)?;
+        record_tombstones(&tx, "collection", &[id.to_string()], &workspace_id, id)?;
+        record_tombstones(&tx, "folder", &folders, &workspace_id, id)?;
+        record_tombstones(&tx, "request", &requests, &workspace_id, id)?;
     }
     tx.execute("DELETE FROM api_collections WHERE id = ?1", params![id])?;
     tx.commit()
@@ -496,8 +551,9 @@ pub fn delete_folder(conn: &Connection, id: &str) -> rusqlite::Result<()> {
                 .collect::<rusqlite::Result<_>>()?;
             requests.extend(ids);
         }
-        record_tombstones(&tx, "folder", &folders, &workspace_id)?;
-        record_tombstones(&tx, "request", &requests, &workspace_id)?;
+        let collection_id = collection_of(&tx, "folder", id)?.unwrap_or_default();
+        record_tombstones(&tx, "folder", &folders, &workspace_id, &collection_id)?;
+        record_tombstones(&tx, "request", &requests, &workspace_id, &collection_id)?;
     }
     tx.execute("DELETE FROM api_folders WHERE id = ?1", params![id])?;
     tx.commit()
@@ -578,7 +634,8 @@ pub fn update_request(conn: &Connection, r: &ApiRequestRow) -> rusqlite::Result<
 pub fn delete_request(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     if let Some(workspace_id) = workspace_of(&tx, "request", id)? {
-        record_tombstones(&tx, "request", &[id.to_string()], &workspace_id)?;
+        let collection_id = collection_of(&tx, "request", id)?.unwrap_or_default();
+        record_tombstones(&tx, "request", &[id.to_string()], &workspace_id, &collection_id)?;
     }
     tx.execute("DELETE FROM api_requests WHERE id = ?1", params![id])?;
     tx.commit()
@@ -847,7 +904,7 @@ pub fn update_environment(conn: &Connection, e: &ApiEnvironment) -> rusqlite::Re
 pub fn delete_environment(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     let tx = conn.unchecked_transaction()?;
     if let Some(workspace_id) = workspace_of(&tx, "environment", id)? {
-        record_tombstones(&tx, "environment", &[id.to_string()], &workspace_id)?;
+        record_tombstones(&tx, "environment", &[id.to_string()], &workspace_id, "")?;
     }
     tx.execute("DELETE FROM api_environments WHERE id = ?1 AND is_global = 0", params![id])?;
     tx.commit()
@@ -976,12 +1033,163 @@ pub fn clear_cookies(conn: &Connection, workspace_id: &str) -> rusqlite::Result<
     Ok(())
 }
 
-/// Everything deleted in this workspace, for the sync layer to turn into tombstone rows.
-pub fn list_tombstones(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<(String, String, String)>> {
-    let mut stmt =
-        conn.prepare("SELECT kind, id, deleted_at FROM api_tombstones WHERE workspace_id = ?1")?;
-    let rows = stmt.query_map(params![workspace_id], |row| {
+/// Everything deleted inside one collection, for the sync layer to turn into tombstone rows.
+pub fn list_tombstones(
+    conn: &Connection,
+    collection_id: &str,
+) -> rusqlite::Result<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT kind, id, deleted_at FROM api_tombstones
+          WHERE collection_id = ?1 AND kind IN ('collection', 'folder', 'request')",
+    )?;
+    let rows = stmt.query_map(params![collection_id], |row| {
         Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     })?;
     rows.collect()
+}
+
+// ---------------------------------------------------------------------------
+// Shared collections
+// ---------------------------------------------------------------------------
+
+/// One collection's place in the collaboration model, as the UI needs it: enough to draw the row
+/// without a second query per collection, and never the share token, which is a credential.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SharedCollectionRow {
+    pub collection_id: String,
+    pub workspace_id: String,
+    /// The local collection's name — empty when the row has outlived its collection.
+    pub name: String,
+    pub remote_name: String,
+    pub role: String,
+    pub cursor: String,
+    pub watermark: String,
+    pub last_sync_at: String,
+    pub last_error: String,
+    /// How many of this collection's records are frozen waiting for a decision.
+    pub conflicts: i64,
+}
+
+fn map_shared(row: &rusqlite::Row) -> rusqlite::Result<SharedCollectionRow> {
+    Ok(SharedCollectionRow {
+        collection_id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        name: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+        remote_name: row.get(3)?,
+        role: row.get(4)?,
+        cursor: row.get(5)?,
+        watermark: row.get(6)?,
+        last_sync_at: row.get(7)?,
+        last_error: row.get(8)?,
+        conflicts: row.get(9)?,
+    })
+}
+
+const SHARED_COLUMNS: &str = "s.collection_id, s.workspace_id, c.name, s.remote_name, s.role, \
+     s.cursor, s.watermark, s.last_sync_at, s.last_error, \
+     (SELECT COUNT(*) FROM api_sync_conflicts k WHERE k.collection_id = s.collection_id)";
+
+/// Every shared collection on this machine, across every workspace — the collaboration panel is a
+/// list of workspaces, so it needs them all in one read rather than one query per workspace.
+pub fn list_shared_collections(conn: &Connection) -> rusqlite::Result<Vec<SharedCollectionRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {SHARED_COLUMNS} FROM api_shared_collections s
+         LEFT JOIN api_collections c ON c.id = s.collection_id
+         ORDER BY s.created_at"
+    ))?;
+    let rows = stmt.query_map([], map_shared)?;
+    rows.collect()
+}
+
+pub fn shared_collection(
+    conn: &Connection,
+    collection_id: &str,
+) -> rusqlite::Result<Option<SharedCollectionRow>> {
+    conn.query_row(
+        &format!(
+            "SELECT {SHARED_COLUMNS} FROM api_shared_collections s
+             LEFT JOIN api_collections c ON c.id = s.collection_id
+             WHERE s.collection_id = ?1"
+        ),
+        params![collection_id],
+        map_shared,
+    )
+    .optional()
+}
+
+/// Marks a collection as shared, or refreshes what is known about a share that already exists.
+/// Never resets the cursor: re-running this after a rename must not make the next pull replay the
+/// whole history.
+pub fn upsert_shared_collection(
+    conn: &Connection,
+    collection_id: &str,
+    workspace_id: &str,
+    remote_name: &str,
+    role: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO api_shared_collections
+            (collection_id, workspace_id, remote_name, role, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(collection_id) DO UPDATE SET
+            workspace_id = excluded.workspace_id,
+            remote_name  = excluded.remote_name,
+            role         = excluded.role",
+        params![collection_id, workspace_id, remote_name, role, now()],
+    )?;
+    Ok(())
+}
+
+/// Records the name the remote knows a share by, without touching its role or its cursor.
+pub fn rename_shared_collection(
+    conn: &Connection,
+    collection_id: &str,
+    name: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE api_shared_collections SET remote_name = ?2 WHERE collection_id = ?1",
+        params![collection_id, name],
+    )?;
+    Ok(())
+}
+
+/// Where the sync has got to. `cursor`/`watermark` are `None` when the caller has nothing new to
+/// say about them, which keeps a watermark probe from having to know the cursor.
+pub fn set_sync_progress(
+    conn: &Connection,
+    collection_id: &str,
+    cursor: Option<&str>,
+    watermark: Option<&str>,
+    synced: bool,
+    error: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE api_shared_collections SET
+            cursor       = COALESCE(?2, cursor),
+            watermark    = COALESCE(?3, watermark),
+            last_sync_at = CASE WHEN ?4 THEN ?5 ELSE last_sync_at END,
+            last_error   = COALESCE(?6, last_error)
+          WHERE collection_id = ?1",
+        params![collection_id, cursor, watermark, synced, now(), error],
+    )?;
+    Ok(())
+}
+
+/// Forgets a share here. The base and conflict rows go with it: keeping them would make a later
+/// re-join compare against an agreement that is no longer in force.
+pub fn forget_shared_collection(conn: &Connection, collection_id: &str) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM api_shared_collections WHERE collection_id = ?1",
+        params![collection_id],
+    )?;
+    tx.execute(
+        "DELETE FROM api_sync_base WHERE collection_id = ?1",
+        params![collection_id],
+    )?;
+    tx.execute(
+        "DELETE FROM api_sync_conflicts WHERE collection_id = ?1",
+        params![collection_id],
+    )?;
+    tx.commit()
 }

@@ -1,16 +1,20 @@
-//! Shared API workspaces on the user's *own* Supabase project.
+//! Shared API collections on the user's *own* Supabase project.
 //!
 //! Same principle as the Drive backup: nothing routes through a server of ours. The host creates a
 //! Supabase project, runs `supabase_schema.sql` in its SQL editor once, and everyone they share a
-//! workspace with talks straight to it.
+//! collection with talks straight to it.
 //!
 //! Authorisation is the share token, not an account — see the long comment at the top of
 //! `supabase_schema.sql`, which is the actual specification. Everything in this module does one of
 //! two things: send that token in `x-cf-share`, or move rows over PostgREST.
 //!
+//! **The unit of sharing is one collection.** A share row and the collection it publishes carry the
+//! same id, which is what lets a guest drop a shared collection into a workspace they already have
+//! instead of adopting the host's entire sidebar.
+//!
 //! There is no Supabase client library here on purpose. PostgREST is a REST API and `reqwest` is
-//! already a dependency; the realtime channel is the one part a library would genuinely help with,
-//! and this module doesn't open one — it syncs on demand and on a timer instead.
+//! already a dependency. Neither is there a realtime socket: `watermark` is a single-row read of an
+//! indexed column, cheap enough to run every few seconds, and a pull only follows when it moved.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,12 +29,14 @@ const SHARE_HEADER: &str = "x-cf-share";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedItem {
     pub id: String,
-    pub workspace_id: String,
-    /// `collection` | `folder` | `request` | `environment`
+    /// The shared collection's id — the same value for the collection row itself and every folder
+    /// and request beneath it.
+    pub share_id: String,
+    /// `collection` | `folder` | `request`
     pub kind: String,
     /// The record exactly as the client stores it.
     pub payload: serde_json::Value,
-    /// The client's own clock, and what last-write-wins compares.
+    /// The client's own clock, and what the three-way merge compares.
     pub updated_at: String,
     /// The *server's* clock, set by a trigger. Never sent — it is assigned on write and only read
     /// back, because paging on a client clock loses the changes of anyone whose machine is behind.
@@ -40,22 +46,22 @@ pub struct SharedItem {
     pub deleted: bool,
 }
 
+/// One share, as the remote knows it.
 #[derive(Debug, Clone, Serialize)]
-pub struct SharedWorkspace {
+pub struct SharedCollection {
     pub id: String,
     pub name: String,
     pub share_token: String,
 }
 
-/// What a connection test found, in the order the UI has to explain it.
+/// What a connection test found, in the order the UI has to explain it. Deliberately about the
+/// *project* only: which collections are shared is a per-collection question, answered by `probe`.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ConnectionCheck {
     /// The project answered at all — URL and anon key are right.
     pub reachable: bool,
     /// `cf_ping` exists, so the schema script has been run.
     pub schema_installed: bool,
-    /// The stored share token resolves to a workspace (empty when there is no token yet).
-    pub workspace_name: String,
 }
 
 fn trimmed_url(url: &str) -> String {
@@ -130,28 +136,39 @@ pub fn has_credentials() -> Result<bool, String> {
         .is_some())
 }
 
+/// The stored anon key, for building an invitation.
+///
+/// Handing it back to the UI is safe and deliberate: the anon key is public by design — it names
+/// the project, it authorises nothing, and the row-level-security policies ignore it entirely. It
+/// lives in the credential store because it is the user's project identifier and belongs beside the
+/// share tokens, not because it is a secret. Not reading it back is what used to make "copy
+/// invitation" fail until the key was typed in again from the dashboard.
+pub fn public_anon_key() -> Result<Option<String>, String> {
+    Ok(secrets::get_secret(&secrets::supabase_anon_key())?.filter(|k| !k.trim().is_empty()))
+}
+
 fn anon_key() -> Result<String, String> {
     secrets::get_secret(&secrets::supabase_anon_key())?
         .filter(|k| !k.trim().is_empty())
         .ok_or_else(|| "no Supabase anon key is configured".to_string())
 }
 
-/// The share token for one local workspace. Keyed per workspace so a user can host one shared
-/// workspace and be a guest in another at the same time.
-pub fn set_share_token(workspace_id: &str, token: &str) -> Result<(), String> {
+/// The share token for one local collection. Keyed per collection so a user can host one shared
+/// collection and be a guest in another at the same time.
+pub fn set_share_token(collection_id: &str, token: &str) -> Result<(), String> {
     if token.trim().is_empty() {
-        return secrets::delete_secret(&secrets::supabase_share_token(workspace_id));
+        return secrets::delete_secret(&secrets::supabase_share_token(collection_id));
     }
-    secrets::set_secret(&secrets::supabase_share_token(workspace_id), token)
+    secrets::set_secret(&secrets::supabase_share_token(collection_id), token)
 }
 
-pub fn share_token(workspace_id: &str) -> Result<Option<String>, String> {
-    Ok(secrets::get_secret(&secrets::supabase_share_token(workspace_id))?
+pub fn share_token(collection_id: &str) -> Result<Option<String>, String> {
+    Ok(secrets::get_secret(&secrets::supabase_share_token(collection_id))?
         .filter(|t| !t.trim().is_empty()))
 }
 
-fn require_token(workspace_id: &str) -> Result<String, String> {
-    share_token(workspace_id)?.ok_or_else(|| "this workspace is not shared".to_string())
+fn require_token(collection_id: &str) -> Result<String, String> {
+    share_token(collection_id)?.ok_or_else(|| "this collection is not shared".to_string())
 }
 
 /// 32 bytes of entropy, URL-safe. Two v4 UUIDs because `uuid` is already the crate backed by the
@@ -168,19 +185,51 @@ fn mint_token() -> String {
 // Connection
 // ---------------------------------------------------------------------------
 
-/// Answers the three questions the settings panel asks in order: can we reach the project, has the
-/// schema been installed, and does our token resolve.
-pub async fn check(url: String, workspace_id: String) -> Result<ConnectionCheck, String> {
+/// Answers the two questions the settings panel asks in order: can we reach the project, and has
+/// the schema been installed.
+///
+/// Runs with an empty share token on purpose. The check is about the project, and pinging with one
+/// collection's token would make "connected" mean something different depending on which row of the
+/// sidebar happened to be selected.
+pub async fn check(url: String) -> Result<ConnectionCheck, String> {
     let key = anon_key()?;
-    let token = share_token(&workspace_id)?.unwrap_or_default();
-    let http = client()?;
+    match ping(&url, &key, "").await? {
+        Some(_) => Ok(ConnectionCheck {
+            reachable: true,
+            schema_installed: true,
+        }),
+        None => Ok(ConnectionCheck {
+            reachable: true,
+            schema_installed: false,
+        }),
+    }
+}
 
+/// The name the remote has for this collection's share, or `None` when the token resolves to
+/// nothing — which is what a rotated or revoked token looks like from here.
+pub async fn probe(url: String, collection_id: String) -> Result<Option<String>, String> {
+    let key = anon_key()?;
+    let Some(token) = share_token(&collection_id)? else {
+        return Ok(None);
+    };
+    match ping(&url, &key, &token).await? {
+        // `cf_ping` answers with the empty string when the token matches no share.
+        Some(name) if !name.is_empty() => Ok(Some(name)),
+        _ => Ok(None),
+    }
+}
+
+/// One `cf_ping` round trip. `Ok(None)` means the project answered but the function isn't there —
+/// the schema has not been installed — which is a different problem from a project that is
+/// unreachable and has to be reported differently.
+async fn ping(url: &str, key: &str, token: &str) -> Result<Option<String>, String> {
+    let http = client()?;
     let response = request(
         &http,
         reqwest::Method::POST,
-        format!("{}/rest/v1/rpc/cf_ping", trimmed_url(&url)),
-        &key,
-        &token,
+        format!("{}/rest/v1/rpc/cf_ping", trimmed_url(url)),
+        key,
+        token,
     )
     .header(reqwest::header::CONTENT_TYPE, "application/json")
     .body("{}")
@@ -197,43 +246,39 @@ pub async fn check(url: String, workspace_id: String) -> Result<ConnectionCheck,
     let status = response.status();
     let body = response.text().await.map_err(|e| e.to_string())?;
 
-    if status == reqwest::StatusCode::NOT_FOUND || body.contains("cf_ping") && !status.is_success() {
-        return Ok(ConnectionCheck {
-            reachable: true,
-            schema_installed: false,
-            workspace_name: String::new(),
-        });
+    if status == reqwest::StatusCode::NOT_FOUND || (body.contains("cf_ping") && !status.is_success())
+    {
+        return Ok(None);
     }
     if !status.is_success() {
         return Err(describe(status, &body));
     }
 
-    // `cf_ping` returns the workspace name, or "" when the token matches nothing.
-    let name = serde_json::from_str::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_default();
-
-    Ok(ConnectionCheck {
-        reachable: true,
-        schema_installed: true,
-        workspace_name: name,
-    })
+    Ok(Some(
+        serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
 // Sharing
 // ---------------------------------------------------------------------------
 
-/// Mints a token, creates the remote workspace row, and stores the token locally. Returns what the
-/// host hands to the people they are inviting.
-pub async fn share(url: String, workspace_id: String, name: String) -> Result<SharedWorkspace, String> {
+/// Mints a token, creates the remote share row, and stores the token locally. Returns what the host
+/// hands to the people they are inviting.
+pub async fn share(
+    url: String,
+    collection_id: String,
+    name: String,
+) -> Result<SharedCollection, String> {
     let key = anon_key()?;
     let token = mint_token();
     let http = client()?;
 
     let row = serde_json::json!({
-        "id": workspace_id,
+        "id": collection_id,
         "name": name,
         "share_token": token,
     });
@@ -241,14 +286,14 @@ pub async fn share(url: String, workspace_id: String, name: String) -> Result<Sh
     let response = request(
         &http,
         reqwest::Method::POST,
-        format!("{}/rest/v1/cf_workspaces", trimmed_url(&url)),
+        format!("{}/rest/v1/cf_shares", trimmed_url(&url)),
         &key,
         // The insert is checked against the header, so the token has to travel with the request
         // that creates the row it authorises.
         &token,
     )
     .header(reqwest::header::CONTENT_TYPE, "application/json")
-    // `merge-duplicates` makes re-sharing a workspace that already exists remotely a rename plus a
+    // `merge-duplicates` makes re-sharing a collection that already exists remotely a rename plus a
     // token rotation rather than a primary-key violation.
     .header("Prefer", "resolution=merge-duplicates,return=representation")
     .body(row.to_string())
@@ -257,17 +302,47 @@ pub async fn share(url: String, workspace_id: String, name: String) -> Result<Sh
     .map_err(|e| e.to_string())?;
 
     read_body(response).await?;
-    set_share_token(&workspace_id, &token)?;
+    set_share_token(&collection_id, &token)?;
 
-    Ok(SharedWorkspace {
-        id: workspace_id,
+    Ok(SharedCollection {
+        id: collection_id,
         name,
         share_token: token,
     })
 }
 
-/// Adopts an invitation: resolves the token to its workspace and remembers it locally.
-pub async fn join(url: String, token: String) -> Result<SharedWorkspace, String> {
+/// Keeps the remote share's display name in step with a local rename. Best-effort by design: a
+/// rename that can't reach the project is not worth failing the rename itself over.
+pub async fn rename(url: String, collection_id: String, name: String) -> Result<(), String> {
+    let key = anon_key()?;
+    let token = require_token(&collection_id)?;
+    let http = client()?;
+
+    let response = request(
+        &http,
+        reqwest::Method::PATCH,
+        format!(
+            "{}/rest/v1/cf_shares?id=eq.{}",
+            trimmed_url(&url),
+            collection_id
+        ),
+        &key,
+        &token,
+    )
+    .header(reqwest::header::CONTENT_TYPE, "application/json")
+    .header("Prefer", "return=minimal")
+    .body(serde_json::json!({ "name": name }).to_string())
+    .send()
+    .await
+    .map_err(|e| e.to_string())?;
+
+    read_body(response).await?;
+    Ok(())
+}
+
+/// Resolves an invitation token to the share it names, and remembers the token locally. Does not
+/// touch the local database — the caller decides which workspace the collection lands in.
+pub async fn join(url: String, token: String) -> Result<SharedCollection, String> {
     let key = anon_key()?;
     let http = client()?;
 
@@ -275,7 +350,7 @@ pub async fn join(url: String, token: String) -> Result<SharedWorkspace, String>
         &http,
         reqwest::Method::GET,
         format!(
-            "{}/rest/v1/cf_workspaces?select=id,name&limit=1",
+            "{}/rest/v1/cf_shares?select=id,name&limit=1",
             trimmed_url(&url)
         ),
         &key,
@@ -289,12 +364,12 @@ pub async fn join(url: String, token: String) -> Result<SharedWorkspace, String>
     let rows: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     let row = rows
         .first()
-        .ok_or("that invitation code does not match a shared workspace")?;
+        .ok_or("that invitation code does not match a shared collection")?;
 
     let id = row
         .get("id")
         .and_then(|v| v.as_str())
-        .ok_or("the shared workspace has no id")?
+        .ok_or("the shared collection has no id")?
         .to_string();
     let name = row
         .get("name")
@@ -303,7 +378,7 @@ pub async fn join(url: String, token: String) -> Result<SharedWorkspace, String>
         .to_string();
 
     set_share_token(&id, &token)?;
-    Ok(SharedWorkspace {
+    Ok(SharedCollection {
         id,
         name,
         share_token: token,
@@ -312,9 +387,9 @@ pub async fn join(url: String, token: String) -> Result<SharedWorkspace, String>
 
 /// Replaces the token, which is how access is taken back: anyone still holding the old one stops
 /// matching every policy on their next request.
-pub async fn rotate(url: String, workspace_id: String) -> Result<String, String> {
+pub async fn rotate(url: String, collection_id: String) -> Result<String, String> {
     let key = anon_key()?;
-    let current = require_token(&workspace_id)?;
+    let current = require_token(&collection_id)?;
     let next = mint_token();
     let http = client()?;
 
@@ -332,14 +407,14 @@ pub async fn rotate(url: String, workspace_id: String) -> Result<String, String>
     .map_err(|e| e.to_string())?;
 
     read_body(response).await?;
-    set_share_token(&workspace_id, &next)?;
+    set_share_token(&collection_id, &next)?;
     Ok(next)
 }
 
-/// Stops syncing this workspace here. Deliberately local-only: the remote copy and everyone else's
+/// Stops syncing this collection here. Deliberately local-only: the remote copy and everyone else's
 /// access are the host's to end, with `rotate`.
-pub fn leave(workspace_id: &str) -> Result<(), String> {
-    set_share_token(workspace_id, "")
+pub fn leave(collection_id: &str) -> Result<(), String> {
+    set_share_token(collection_id, "")
 }
 
 // ---------------------------------------------------------------------------
@@ -347,13 +422,17 @@ pub fn leave(workspace_id: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// Upserts a batch of items. Chunked because PostgREST takes the whole batch in one statement and a
-/// workspace with a few thousand requests would otherwise be one enormous request.
-pub async fn push(url: String, workspace_id: String, items: Vec<SharedItem>) -> Result<usize, String> {
+/// collection with a few thousand requests would otherwise be one enormous request.
+pub async fn push(
+    url: String,
+    collection_id: String,
+    items: Vec<SharedItem>,
+) -> Result<usize, String> {
     if items.is_empty() {
         return Ok(0);
     }
     let key = anon_key()?;
-    let token = require_token(&workspace_id)?;
+    let token = require_token(&collection_id)?;
     let http = client()?;
 
     const CHUNK: usize = 200;
@@ -380,15 +459,19 @@ pub async fn push(url: String, workspace_id: String, items: Vec<SharedItem>) -> 
 }
 
 /// Everything the server has seen since `since` (a `synced_at`, or empty for a full pull).
-pub async fn pull(url: String, workspace_id: String, since: String) -> Result<Vec<SharedItem>, String> {
+pub async fn pull(
+    url: String,
+    collection_id: String,
+    since: String,
+) -> Result<Vec<SharedItem>, String> {
     let key = anon_key()?;
-    let token = require_token(&workspace_id)?;
+    let token = require_token(&collection_id)?;
     let http = client()?;
 
     let mut query = format!(
-        "{}/rest/v1/cf_items?workspace_id=eq.{}&select=*&order=synced_at.asc",
+        "{}/rest/v1/cf_items?share_id=eq.{}&select=*&order=synced_at.asc",
         trimmed_url(&url),
-        workspace_id
+        collection_id
     );
     if !since.trim().is_empty() {
         query.push_str(&format!("&synced_at=gt.{}", urlencoding(&since)));
@@ -401,6 +484,38 @@ pub async fn pull(url: String, workspace_id: String, since: String) -> Result<Ve
 
     let body = read_body(response).await?;
     serde_json::from_str(&body).map_err(|e| e.to_string())
+}
+
+/// The newest `synced_at` the server holds for this share, or `""` when it holds nothing yet.
+///
+/// This is the whole of the near-realtime path: one indexed row, no payload, small enough to run
+/// every few seconds. A pull is only worth its bandwidth once this has moved past the cursor, and
+/// asking a question this cheap is what makes a three-second poll reasonable on a free-tier project
+/// where a realtime socket would be the only alternative.
+pub async fn watermark(url: String, collection_id: String) -> Result<String, String> {
+    let key = anon_key()?;
+    let token = require_token(&collection_id)?;
+    let http = client()?;
+
+    let query = format!(
+        "{}/rest/v1/cf_items?share_id=eq.{}&select=synced_at&order=synced_at.desc&limit=1",
+        trimmed_url(&url),
+        collection_id
+    );
+
+    let response = request(&http, reqwest::Method::GET, query, &key, &token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let body = read_body(response).await?;
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).map_err(|e| e.to_string())?;
+    Ok(rows
+        .first()
+        .and_then(|row| row.get("synced_at"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string())
 }
 
 /// Timestamps carry `+` and `:`, which are not safe raw in a query value.
@@ -471,12 +586,19 @@ mod tests {
         assert!(INSTALL_SQL.contains("new.synced_at = now()"));
     }
 
+    /// The watermark probe runs every few seconds; on a share with thousands of rows it is only
+    /// affordable if the index it reads is ordered the way the query is.
+    #[test]
+    fn the_watermark_probe_has_an_index_to_read() {
+        assert!(INSTALL_SQL.contains("create index if not exists cf_items_sync on cf_items (share_id, synced_at desc)"));
+    }
+
     #[test]
     fn a_pushed_item_never_carries_a_synced_at() {
         // Sending it would let a client with a skewed clock write the column the cursor pages on.
         let item = SharedItem {
             id: "r1".into(),
-            workspace_id: "w1".into(),
+            share_id: "c1".into(),
             kind: "request".into(),
             payload: serde_json::json!({}),
             updated_at: "2026-01-01T00:00:00+00:00".into(),
@@ -486,6 +608,7 @@ mod tests {
         let body = serde_json::to_string(&item).unwrap();
         assert!(!body.contains("synced_at"), "synced_at must not be sent: {body}");
         assert!(body.contains("updated_at"));
+        assert!(body.contains("share_id"));
     }
 
     #[test]
@@ -500,9 +623,18 @@ mod tests {
             4,
             "every policy branch must reject an absent share token"
         );
-        for table in ["cf_workspaces", "cf_items"] {
+        for table in ["cf_shares", "cf_items"] {
             assert!(INSTALL_SQL.contains(&format!("alter table {table} enable row level security")));
             assert!(INSTALL_SQL.contains(&format!("alter table {table} force row level security")));
         }
+    }
+
+    /// `create table if not exists` silently leaves a workspace-shaped `cf_items` in place, and
+    /// every write against it would then fail on a `workspace_id` that no client sends any more.
+    #[test]
+    fn the_schema_replaces_the_workspace_shaped_tables() {
+        assert!(INSTALL_SQL.contains("drop table if exists cf_items cascade"));
+        assert!(INSTALL_SQL.contains("drop table if exists cf_workspaces cascade"));
+        assert!(INSTALL_SQL.contains("column_name = 'workspace_id'"));
     }
 }
