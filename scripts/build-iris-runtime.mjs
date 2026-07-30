@@ -18,7 +18,7 @@
 // platform), but it is the reason there is no `--target` flag here.
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -60,6 +60,16 @@ const MODULES = ["java.base", "java.sql", "java.naming", "java.logging", "java.s
 /** The oldest Java the bridge is compiled for, and so the oldest JDK that can build it. */
 const RELEASE = "17";
 
+/**
+ * Vendor directories worth descending into when scanning for an installed JDK. Without the filter,
+ * `C:\Program Files` alone means thousands of pointless directory reads.
+ *
+ * Declared up here with the other constants rather than beside its only caller: `main()` runs at
+ * the bottom of this file's evaluation, so anything it reaches synchronously must already exist.
+ */
+const JAVA_DIR =
+  /java|jdk|zulu|temurin|adoptium|corretto|sapmachine|semeru|graalvm|liberica|bellsoft|openjdk|oracle|microsoft/i;
+
 const force = process.argv.includes("--force");
 
 /**
@@ -98,39 +108,128 @@ async function main() {
 // ---------------------------------------------------------------------------
 
 function locateJdk() {
+  const seen = new Set();
   const candidates = [];
+  const consider = (home) => {
+    const key = home ?? "PATH";
+    if (!seen.has(key)) {
+      seen.add(key);
+      candidates.push(home);
+    }
+  };
+
+  // Explicit configuration first, so a machine that deliberately pins a JDK keeps it.
   if (process.env.JAVA_HOME) {
-    candidates.push(process.env.JAVA_HOME);
+    consider(process.env.JAVA_HOME);
   }
   if (process.platform === "darwin") {
     const found = spawnSync("/usr/libexec/java_home", { encoding: "utf8" });
     if (found.status === 0) {
-      candidates.push(found.stdout.trim());
+      consider(found.stdout.trim());
     }
   }
-  // Last resort: whatever `javac` is on PATH, resolved back to its home.
-  const onPath = spawnSync(exe("javac"), ["-version"], { encoding: "utf8" });
-  if (onPath.status === 0) {
-    candidates.push(null); // null means "use the bare tool names"
+  // `null` means "use the bare tool names" — whatever is on PATH.
+  if (spawnSync(exe("javac"), ["-version"], { encoding: "utf8" }).status === 0) {
+    consider(null);
+  }
+  // Then anything installed in the usual place, newest-looking first.
+  for (const home of discoverJavaHomes()) {
+    consider(home);
   }
 
+  const rejected = [];
   for (const home of candidates) {
     const version = probe(home);
-    if (!version) continue;
-    if (version < Number(RELEASE)) {
-      throw new Error(
-        `the JDK at ${home ?? "PATH"} is Java ${version}, but the IRIS bridge needs ${RELEASE} or newer`,
-      );
+    if (!version) {
+      // Overwhelmingly the JRE-not-JDK case, which is worth naming: it is invisible otherwise, and
+      // "JAVA_HOME is set" makes it look like the machine is configured when it isn't.
+      rejected.push(`${home ?? "PATH"} — no jlink here (a JRE, not a JDK)`);
+      continue;
     }
-    return { home: home ?? "PATH", version, tool: (name) => (home ? join(home, "bin", exe(name)) : exe(name)) };
+    if (version < Number(RELEASE)) {
+      rejected.push(`${home ?? "PATH"} — Java ${version}, needs ${RELEASE} or newer`);
+      continue;
+    }
+    return {
+      home: home ?? "PATH",
+      version,
+      tool: (name) => (home ? join(home, "bin", exe(name)) : exe(name)),
+    };
   }
 
+  // Everything that was looked at and why it didn't qualify. Without this the message is "no JDK
+  // found" on a machine that visibly has Java installed, which reads as the script being broken.
+  const summary = rejected.length
+    ? `\nJava was found, but none of it can build a runtime:\n${rejected.map((r) => `  · ${r}`).join("\n")}\n`
+    : "";
+
   throw new Error(
-    `no JDK found. Building CodeFlow's IRIS support needs one (javac, jar and jlink).\n\n  ${installHint()}\n\n` +
-      "Then re-run, or just start the app again — it is detected automatically.\n" +
-      "This is a build-time requirement only: the app bundles its own runtime, so nobody who " +
-      "installs CodeFlow needs Java.",
+    `no usable JDK. Building CodeFlow's IRIS support needs one (javac, jar and jlink).\n${summary}\n  ${installHint()}\n\n` +
+      "Then re-run, or just start the app again — it is detected automatically, PATH and JAVA_HOME " +
+      "included.\nThis is a build-time requirement only: the app bundles its own runtime, so nobody " +
+      "who installs CodeFlow needs Java.",
   );
+}
+
+/**
+ * Java homes sitting in the platform's usual install directory.
+ *
+ * Added after a Windows machine with *two* JDKs installed reported "no JDK found": neither was on
+ * PATH, and `JAVA_HOME` pointed at a JRE beside them. Looking only where the environment says to
+ * look is not enough — a JDK in its default location should never be missed.
+ */
+function discoverJavaHomes() {
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  let roots;
+  if (process.platform === "win32") {
+    roots = [
+      process.env.ProgramFiles,
+      process.env["ProgramFiles(x86)"],
+      home && join(home, "AppData", "Local", "Programs"),
+    ];
+  } else if (process.platform === "darwin") {
+    roots = [
+      "/Library/Java/JavaVirtualMachines",
+      home && join(home, "Library", "Java", "JavaVirtualMachines"),
+    ];
+  } else {
+    roots = ["/usr/lib/jvm", "/usr/java", "/opt/java"];
+  }
+
+  const found = [];
+  for (const root of roots) {
+    if (root) {
+      collectJavaHomes(root, 3, found);
+    }
+  }
+  // Descending, so a newer version is tried first: the names carry the version (`JDK\21`,
+  // `temurin-22.0.2`), which sorts close enough for a preference that only has to be reasonable.
+  return found.sort().reverse();
+}
+
+function collectJavaHomes(dir, depth, out) {
+  if (depth < 0 || !existsSync(dir)) {
+    return;
+  }
+  if (existsSync(join(dir, "bin", exe("jlink")))) {
+    out.push(dir); // a JDK — no reason to look inside it
+    return;
+  }
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return; // unreadable (permissions, a dead junction) — not this script's problem
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    if (depth === 3 && !JAVA_DIR.test(entry.name)) {
+      continue;
+    }
+    collectJavaHomes(join(dir, entry.name), depth - 1, out);
+  }
 }
 
 /** The one command that fixes it, for the platform actually running. */
