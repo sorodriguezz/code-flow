@@ -69,8 +69,13 @@ jobs:
         include:
           - platform: windows-latest
             args: ""
+          # Apple Silicon only, and deliberately not `universal-apple-darwin`: the app bundles a
+          # Java runtime for the IRIS driver, and `jlink` builds a runtime for exactly one
+          # architecture. A universal Rust binary paired with an arm64 JRE would install fine on an
+          # Intel Mac and then fail the moment an IRIS connection was opened — a broken feature is
+          # worse than an absent build.
           - platform: macos-latest
-            args: "--target universal-apple-darwin"
+            args: ""
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -82,8 +87,14 @@ jobs:
           node-version: 22
           cache: pnpm
 
-      - if: matrix.platform == 'macos-latest'
-        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      # Needed to *build* the app, never to run it: `pnpm iris:runtime` uses javac/jar/jlink to
+      # produce the trimmed Java runtime that ships inside the installer for the IRIS driver.
+      # Pinned rather than left to whatever the runner image happens to preinstall, because the
+      # runtime that reaches users is whatever version this step provides.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -92,6 +103,11 @@ jobs:
           workspaces: src-tauri
 
       - run: pnpm install --frozen-lockfile
+
+      # `tauri build` runs this again through `beforeBuildCommand`, where it is an incremental
+      # no-op. Doing it here first is for the log: when the Java toolchain is the thing that broke,
+      # this step fails on its own line instead of somewhere inside a ten-minute Rust build.
+      - run: pnpm iris:runtime
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -117,3 +133,21 @@ jobs:
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
+      # The one thing no unit test can check: that the Java runtime actually made it *inside* what
+      # was built. Everything upstream can pass while a `bundle.resources` change quietly drops it,
+      # and the symptom would be an installer that looks fine until a user opens an IRIS connection.
+      # Cheap enough to run on every release, and it fails the job rather than leaving that to them.
+      - name: Verify the IRIS runtime shipped inside the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=$(find src-tauri/target -type f \
+            \( -name java -o -name java.exe \) -path '*iris/runtime/bin/*' | head -n1 || true)
+          if [ -z "$found" ]; then
+            echo "::error::The bundled Java runtime is missing — this installer would ship an IRIS engine that cannot connect."
+            find src-tauri/target -maxdepth 6 -type d -name iris || true
+            exit 1
+          fi
+          echo "Bundled runtime: $found"
+          du -sh "$(dirname "$(dirname "$found")")"

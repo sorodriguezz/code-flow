@@ -364,22 +364,27 @@ fn which_java() -> Option<PathBuf> {
 /// In a packaged app that is the resource directory Tauri unpacks to. In a source checkout it is
 /// the build script's own output directory, which is why a dev build needs no install step.
 fn iris_resource_dir() -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(resources) = crate::paths::resource_dir() {
-        let bundled = resources.join("iris");
-        if bundled.is_dir() {
-            return Some(bundled);
-        }
+        candidates.push(resources.join("iris"));
     }
     // Debug only. In a release build this path names the *build* machine, so it could never
     // resolve on a user's — and baking it into the shipped binary would leak it for nothing.
     #[cfg(debug_assertions)]
-    {
-        let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join("iris");
-        if checkout.is_dir() {
-            return Some(checkout);
-        }
-    }
-    None
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join("iris"));
+
+    // "The directory exists" stopped being evidence of anything: *every* checkout has one now,
+    // holding only the README that keeps it in git so tauri-build can find it. Taking the first
+    // that existed meant a dev build locked onto Tauri's copy — which holds just that README until
+    // the generator has run — and never looked at the checkout that may have the real thing.
+    //
+    // So the usable directory is the one with jars in it. Only when none qualifies does the first
+    // existing path win, and that is purely so the error names somewhere real.
+    candidates
+        .iter()
+        .find(|dir| classpath(dir).is_ok())
+        .or_else(|| candidates.iter().find(|dir| dir.is_dir()))
+        .cloned()
 }
 
 #[cfg(test)]
@@ -403,6 +408,24 @@ mod tests {
         assert!(parts[0].ends_with("a-driver.jar"), "{built}");
         assert!(parts[1].ends_with("b-bridge.jar"), "{built}");
         assert!(!built.contains("notes.txt"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The README-only directory that every checkout has must not count as "the runtime is here".
+    ///
+    /// This is the exact shape that broke a Windows dev build: Tauri's copy under `target/debug`
+    /// held only that file, the old check accepted it for merely existing, and the real jars a few
+    /// directories away were never looked at.
+    #[test]
+    fn a_directory_holding_only_the_readme_does_not_qualify() {
+        let dir = std::env::temp_dir().join(format!("cf-iris-readme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("README.md"), b"# generated, not checked in").unwrap();
+        assert!(classpath(&dir).is_err(), "a README is not a runtime");
+
+        std::fs::write(dir.join("iris-bridge.jar"), b"").unwrap();
+        assert!(classpath(&dir).is_ok(), "a jar is");
 
         std::fs::remove_dir_all(&dir).ok();
     }
