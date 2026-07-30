@@ -407,6 +407,10 @@ async function buildBridge(jdk) {
       // *different* machine produced, and `--release` is what guarantees it will.
       "--release",
       RELEASE,
+      // The source is UTF-8; javac otherwise trusts the platform default, which on Windows is
+      // windows-1252 and chokes on the arrows in the protocol comments.
+      "-encoding",
+      "UTF-8",
       "-Xlint:all",
       "-classpath",
       join(OUT, DRIVER.jar),
