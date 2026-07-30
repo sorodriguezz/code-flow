@@ -60,7 +60,6 @@ const TOOLS: WorkspaceTool[] = [
     icon: Database,
     labelKey: "tabbar.databases",
     descriptionKey: "tabbar.databasesDescription",
-    beta: true,
   },
 ];
 
