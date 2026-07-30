@@ -880,6 +880,7 @@ mod tests {
             options: Vec::new(),
             read_only: false,
             connect_timeout_ms: 0,
+            show_all_databases: false,
         }
     }
 

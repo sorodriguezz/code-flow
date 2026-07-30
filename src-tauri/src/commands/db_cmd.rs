@@ -12,8 +12,9 @@
 use tauri::State;
 
 use crate::datasource::{
-    DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbNode, DbNodeRef, DbRegistry,
-    DbRowEdit, DbServerInfo, DbStatementResult, DbTableDataRequest, Session,
+    scope_to_current_database, DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult,
+    DbNode, DbNodeKind, DbNodeRef, DbRegistry, DbRowEdit, DbServerInfo, DbStatementResult,
+    DbTableDataRequest, Session,
 };
 use crate::db::datasource_queries as queries;
 use crate::db::{models::*, Db};
@@ -263,7 +264,13 @@ pub async fn db_children(
 ) -> Result<Vec<DbNode>, String> {
     let config = resolve_config(&db, &connection_id)?;
     let session = registry.session(&config, node.database.as_deref()).await?;
-    session.children(&node).await
+    let children = session.children(&node).await?;
+    // The root is the only level that lists databases, and the only one where the connection's own
+    // database means "start here" rather than "here is everything".
+    if node.kind == DbNodeKind::Root && !config.show_all_databases {
+        return Ok(scope_to_current_database(children, &session.info().database));
+    }
+    Ok(children)
 }
 
 #[tauri::command]

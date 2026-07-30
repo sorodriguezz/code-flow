@@ -134,6 +134,12 @@ pub struct DbConnectionConfig {
     pub read_only: bool,
     #[serde(default)]
     pub connect_timeout_ms: u64,
+    /// Whether the tree's root lists every database on the server or only the one this connection
+    /// is on. Off by default: naming a database is how the user says which one they came for, and
+    /// a root offering the other forty answers a question they didn't ask. See
+    /// [`scope_to_current_database`].
+    #[serde(default)]
+    pub show_all_databases: bool,
 }
 
 impl DbConnectionConfig {
@@ -397,6 +403,37 @@ impl DbNodeRef {
             .filter(|n| !n.is_empty())
             .ok_or_else(|| "This action needs a table or collection to work on.".to_string())
     }
+}
+
+/// Narrows the tree's root to the database the connection is actually on.
+///
+/// Every driver answers the root with what its account can *reach* — `pg_database`, `sys.databases`,
+/// `%SYS.Namespace_List()` — which is the right answer for browsing a server and the wrong one for a
+/// connection that named a database. This is the narrowing, applied over the drivers rather than
+/// inside them so the rule is one rule and not five.
+///
+/// `current` is the server's own spelling of the database (`current_database()`, the IRIS
+/// namespace), not the config field, so it holds for a connection made from a URL as well.
+///
+/// A `current` that matches nothing is left alone rather than filtered to an empty root: the name
+/// can be one this server doesn't have, and a tree showing too much is a smaller failure than a
+/// tree showing nothing.
+pub fn scope_to_current_database(mut nodes: Vec<DbNode>, current: &str) -> Vec<DbNode> {
+    if current.is_empty() {
+        return nodes;
+    }
+    // Exact before loose, since two databases can differ only in case. The loose pass is for IRIS,
+    // whose namespace list comes back upper-cased however the connection spelled it.
+    let exact = nodes.iter().any(|node| node.database.as_deref() == Some(current));
+    let keep = |node: &DbNode| match node.database.as_deref() {
+        Some(name) if exact => name == current,
+        Some(name) => name.eq_ignore_ascii_case(current),
+        None => false,
+    };
+    if nodes.iter().any(keep) {
+        nodes.retain(keep);
+    }
+    nodes
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +942,45 @@ mod tests {
         assert!(parts[0].contains("[a;b]"));
     }
 
+    fn db_node(name: &str) -> DbNode {
+        DbNode {
+            id: format!("db:{name}"),
+            kind: DbNodeKind::Database,
+            name: name.to_string(),
+            detail: String::new(),
+            database: Some(name.to_string()),
+            schema: None,
+            table: None,
+            has_children: true,
+            column: None,
+        }
+    }
+
+    #[test]
+    fn the_root_narrows_to_the_connected_database() {
+        let roots = || vec![db_node("SAP"), db_node("USER"), db_node("%SYS")];
+
+        let scoped = scope_to_current_database(roots(), "SAP");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].name, "SAP");
+
+        // IRIS answers `%SYS.Namespace_List()` in upper case however the connection spelled it.
+        assert_eq!(scope_to_current_database(roots(), "sap").len(), 1);
+
+        // Nothing to narrow to: a whole tree beats an empty one.
+        assert_eq!(scope_to_current_database(roots(), "").len(), 3);
+        assert_eq!(scope_to_current_database(roots(), "nowhere").len(), 3);
+    }
+
+    /// Two databases differing only in case are two databases — the exact one wins rather than both
+    /// surviving on the loose comparison.
+    #[test]
+    fn narrowing_prefers_an_exact_name() {
+        let scoped = scope_to_current_database(vec![db_node("Sap"), db_node("sap")], "sap");
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].name, "sap");
+    }
+
     /// The read-only guard has to let a `WITH … SELECT` through: refusing it would make the flag
     /// unusable on any real analytical query.
     #[test]
@@ -922,6 +998,7 @@ mod tests {
             options: Vec::new(),
             read_only: true,
             connect_timeout_ms: 0,
+            show_all_databases: false,
         };
         let guard = |sql: &str| read_only_guard(sql, config.read_only);
         assert!(guard("WITH x AS (SELECT 1) SELECT * FROM x").is_ok());

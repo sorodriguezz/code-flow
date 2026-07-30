@@ -38,6 +38,11 @@ export interface DbConnectionConfig {
   options: [string, string][];
   read_only: boolean;
   connect_timeout_ms: number;
+  /**
+   * Whether the tree's root lists every database on the server or only the one this connection is
+   * on. Off by default — a connection that names a database came for that database.
+   */
+  show_all_databases: boolean;
 }
 
 export interface DbColumn {
@@ -322,6 +327,7 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     options: [],
     read_only: false,
     connect_timeout_ms: 15000,
+    show_all_databases: false,
   };
 }
 

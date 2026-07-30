@@ -112,6 +112,7 @@ export function ConnectionModal({
       url: current.url,
       options: current.options,
       read_only: current.read_only,
+      show_all_databases: current.show_all_databases,
       // A port typed explicitly is kept; the engine's default (0) follows the new engine.
       port: current.port,
       database: current.database || defaults.database,
@@ -382,6 +383,7 @@ export function ConnectionModal({
                 {[
                   sslOptions.find((option) => option.value === config.ssl)?.label,
                   config.read_only ? t("db.readOnly") : null,
+                  config.show_all_databases ? t("db.showAllDatabases") : null,
                   config.options.filter(([key]) => key).length > 0
                     ? t("db.optionsN", { n: String(config.options.filter(([key]) => key).length) })
                     : null,
@@ -424,6 +426,22 @@ export function ConnectionModal({
                   </span>
                   <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">
                     {t("db.readOnlyHint")}
+                  </span>
+                </span>
+              </label>
+
+              <label className="flex cursor-pointer items-start gap-2">
+                <Checkbox
+                  checked={config.show_all_databases}
+                  onChange={(show_all_databases) => patch({ show_all_databases })}
+                  className="mt-[2px]"
+                />
+                <span>
+                  <span className="block text-[12px] text-[var(--cf-text)]">
+                    {t("db.showAllDatabases")}
+                  </span>
+                  <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("db.showAllDatabasesHint")}
                   </span>
                 </span>
               </label>

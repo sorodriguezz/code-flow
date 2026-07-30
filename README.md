@@ -10,7 +10,7 @@ Gestiona repositorios, revisa pull requests y deja que la IA escriba tus commits
 encuentre errores y resuelva conflictos — todo en una app rápida y nativa.
 **Y decides qué modelo hace cada cosa.**
 
-![version](https://img.shields.io/badge/versión-1.9.2-6C5CE7)
+![version](https://img.shields.io/badge/versión-1.9.3-6C5CE7)
 ![platform](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-Claude%20%7C%20Gemini%20%7C%20Open%20Code%20%7C%20Ollama-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-ES%20%7C%20EN-0984E3)
