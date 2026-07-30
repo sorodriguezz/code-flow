@@ -6,7 +6,7 @@ import { useT } from "../../state/languageStore";
 import type { DbColumn, DbForeignKey } from "../../types/database";
 
 /** `schema.table.column`, for the tooltips that say where an arrow leads. */
-function referenceLabel(key: DbForeignKey): string {
+export function referenceLabel(key: DbForeignKey): string {
   const table = key.ref_schema ? `${key.ref_schema}.${key.ref_table}` : key.ref_table;
   return `${table}.${key.ref_column}`;
 }
@@ -31,7 +31,7 @@ function referenceLabel(key: DbForeignKey): string {
  *    about to save" is answerable by looking.
  */
 
-const ROW_HEIGHT = 26;
+export const ROW_HEIGHT = 26;
 /** Two lines with room between them: the name, and the type under it. At the old 28px the type was
  * absolutely positioned into whatever space the name left, which was none — they touched. */
 const HEADER_HEIGHT = 40;
@@ -39,11 +39,11 @@ const HEADER_HEIGHT = 40;
 const OVERSCAN = 12;
 /** Wide enough for five digits and, when the panel asks for one, a select-all box over them. */
 const GUTTER_WIDTH = 52;
-const MIN_COLUMN_WIDTH = 64;
+export const MIN_COLUMN_WIDTH = 64;
 const DEFAULT_COLUMN_WIDTH = 160;
 /** Beyond this a cell is shown truncated with an expander — a 40KB JSON document in a 26px row is
  * unreadable, and laying it out costs more than reading it. */
-const CELL_PREVIEW_LIMIT = 300;
+export const CELL_PREVIEW_LIMIT = 300;
 
 export interface GridEdit {
   row: number;
@@ -84,6 +84,15 @@ export interface ResultGridProps {
    * conventions every list on both platforms already uses.
    */
   onSelectRow?: (row: number, modifiers: { range: boolean; toggle: boolean }) => void;
+  /**
+   * A run of rows swept out by dragging down the gutter, reported continuously while the pointer
+   * moves. `additive` means the drag began with ⌘/Ctrl held, so it adds to what was already there.
+   *
+   * Separate from `onSelectRow` because a drag is not a series of clicks: it has one anchor and one
+   * moving end, and re-deriving that from per-row events would make dragging back up the gutter
+   * *extend* the selection instead of shrinking it.
+   */
+  onSelectRange?: (from: number, to: number, additive: boolean) => void;
   /** The gutter's header box: every row, or none. */
   onSelectAllRows?: (selected: boolean) => void;
   /**
@@ -126,6 +135,7 @@ export function ResultGrid({
   onRowContextMenu,
   selectedRows,
   onSelectRow,
+  onSelectRange,
   onSelectAllRows,
   onSort,
   sort,
@@ -142,6 +152,12 @@ export function ResultGrid({
     null,
   );
   const openModal = useDbModalStore((s) => s.openDbModal);
+  const sweep = useRowSweep({
+    scrollRef,
+    headerHeight: HEADER_HEIGHT,
+    rowCount: rows.length,
+    onSelectRange,
+  });
 
   // The viewport's height decides how many rows to render, and it isn't known until layout.
   useEffect(() => {
@@ -200,7 +216,16 @@ export function ResultGrid({
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto" onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}>
+      {/* The sweep's move/up land here rather than on the row that was pressed: capture is held by
+          this element, because it is the one that survives the windowing. */}
+      <div
+        ref={scrollRef}
+        className="min-h-0 flex-1 overflow-auto"
+        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        onPointerMove={sweep.move}
+        onPointerUp={sweep.end}
+        onPointerCancel={sweep.end}
+      >
         <div style={{ minWidth: "100%", width: "max-content" }}>
           {/* Sticky so the column names survive scrolling a thousand rows — the single most useful
               thing a grid can do for a wide table. */}
@@ -352,18 +377,20 @@ export function ResultGrid({
                     ) : (
                       <button
                         type="button"
-                        // Not a drag-select: a click, ⇧-click for a run and ⌘/Ctrl-click to pick
-                        // rows apart is the same grammar as every file list, and it survives the
-                        // windowing this grid does — a drag across rows that aren't rendered yet
-                        // would have nothing to hit.
-                        onClick={(e) =>
+                        // Click, ⇧-click for a run and ⌘/Ctrl-click to pick rows apart — the same
+                        // grammar as every file list — *and* press-and-drag to sweep a range out.
+                        // The sweep can't work off the rows themselves, because this grid only
+                        // renders the ones near the viewport and a drag would fall through the gaps;
+                        // it reads the pointer's y instead. See `useRowSweep`.
+                        onPointerDown={(e) => {
                           onSelectRow(row, {
                             range: e.shiftKey,
                             toggle: e.metaKey || e.ctrlKey,
-                          })
-                        }
+                          });
+                          if (!e.shiftKey) sweep.start(e, row, e.metaKey || e.ctrlKey);
+                        }}
                         title={t("db.selectRowHint")}
-                        className="w-full cursor-pointer text-right"
+                        className="w-full cursor-pointer select-none text-right"
                       >
                         {row + 1}
                       </button>
@@ -462,9 +489,99 @@ export function ResultGrid({
   );
 }
 
+/**
+ * Press-and-drag row selection.
+ *
+ * The hard part is that this grid **doesn't render the rows you're dragging past**: it keeps a
+ * window around the viewport, so a drag that relied on `pointerenter` firing per row would select
+ * nothing below the fold and would stop dead the moment it outran the window. So the sweep never
+ * looks at rows at all — it converts the pointer's y into a row index arithmetically, from the
+ * scroll offset and the fixed row height, which is right whether or not that row exists in the DOM.
+ *
+ * Two things follow from the same choice. Pointer capture is taken on the **scroll container**, not
+ * on the row number that was pressed: that row unmounts as soon as the sweep scrolls it out of the
+ * window, and capture dies with the element — the drag would stop dead a screenful in. Capturing on
+ * the container also keeps the moves coming after the pointer leaves the grid or the window. And
+ * dragging past an edge scrolls on a timer rather than per event, because a pointer held still
+ * outside the edge sends no further events and must still keep pulling the selection along.
+ */
+function useRowSweep({
+  scrollRef,
+  headerHeight,
+  rowCount,
+  onSelectRange,
+}: {
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  headerHeight: number;
+  rowCount: number;
+  onSelectRange?: (from: number, to: number, additive: boolean) => void;
+}) {
+  const state = useRef<{ anchor: number; additive: boolean; clientY: number; last: number } | null>(
+    null,
+  );
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const rowAt = (clientY: number): number => {
+    const element = scrollRef.current;
+    if (!element) return 0;
+    const box = element.getBoundingClientRect();
+    const y = clientY - box.top + element.scrollTop - headerHeight;
+    return Math.min(rowCount - 1, Math.max(0, Math.floor(y / ROW_HEIGHT)));
+  };
+
+  const extend = () => {
+    const current = state.current;
+    if (!current || !onSelectRange) return;
+    const row = rowAt(current.clientY);
+    if (row === current.last) return;
+    current.last = row;
+    onSelectRange(current.anchor, row, current.additive);
+  };
+
+  const stopTimer = () => {
+    if (timer.current !== null) clearInterval(timer.current);
+    timer.current = null;
+  };
+
+  useEffect(() => stopTimer, []);
+
+  return {
+    start: (e: React.PointerEvent, row: number, additive: boolean) => {
+      if (!onSelectRange) return;
+      e.preventDefault();
+      scrollRef.current?.setPointerCapture?.(e.pointerId);
+      state.current = { anchor: row, additive, clientY: e.clientY, last: row };
+      stopTimer();
+      // 60ms is fast enough to feel continuous and slow enough that a schema of ten thousand rows
+      // doesn't fly past before the hand can react.
+      timer.current = setInterval(() => {
+        const element = scrollRef.current;
+        const current = state.current;
+        if (!element || !current) return;
+        const box = element.getBoundingClientRect();
+        const above = box.top + headerHeight - current.clientY;
+        const below = current.clientY - box.bottom;
+        if (above > 0) element.scrollTop -= Math.min(120, 12 + above);
+        else if (below > 0) element.scrollTop += Math.min(120, 12 + below);
+        else return;
+        extend();
+      }, 60);
+    },
+    move: (e: React.PointerEvent) => {
+      if (!state.current) return;
+      state.current.clientY = e.clientY;
+      extend();
+    },
+    end: () => {
+      state.current = null;
+      stopTimer();
+    },
+  };
+}
+
 /** Long values are shown as one line: a newline inside a 26px row would be invisible anyway, and
  * seeing `\n` is how you know it's there. */
-function preview(value: string): string {
+export function preview(value: string): string {
   const flat = value.replace(/\n/g, "\\n").replace(/\t/g, "\\t");
   return flat.length > CELL_PREVIEW_LIMIT ? `${flat.slice(0, CELL_PREVIEW_LIMIT)}…` : flat;
 }
@@ -476,7 +593,7 @@ function preview(value: string): string {
  * different edits and a text box can only express the first. Escape cancels, Enter commits, and blur
  * commits too, since clicking another cell is a natural way to mean "done".
  */
-function CellEditor({
+export function CellEditor({
   value,
   onCommit,
   onCancel,

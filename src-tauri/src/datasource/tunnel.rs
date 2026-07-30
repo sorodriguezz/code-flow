@@ -268,6 +268,7 @@ mod tests {
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),
+            schemas_filtered: false,
             object_filter: String::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,

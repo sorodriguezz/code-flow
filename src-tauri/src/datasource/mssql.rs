@@ -18,9 +18,9 @@ use super::postgres::{annotate_types, cell, relation_folders, schema_folders};
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
     describe_db_error, read_only_guard, read_only_refusal, split_statements, DbColumn,
-    DbColumnInfo, DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbForeignKey,
-    DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult,
-    DbTableDataRequest, SqlDialect,
+    DbColumnInfo, DbConnectionConfig, DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult,
+    DbExecContext, DbExecuteResult, DbForeignKey, DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit,
+    DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest, SqlDialect,
 };
 
 const DIALECT: SqlDialect = SqlDialect::TSql;
@@ -614,6 +614,118 @@ impl MssqlSession {
                 ref_column: cell(row, 3),
             })
             .collect())
+    }
+
+    // -------------------------------------------------------------- diagram
+
+    /// A whole schema in two queries. See [`super::DbSchemaDiagram`] for why it isn't assembled
+    /// from the per-table calls.
+    ///
+    /// `sys.partitions` gives the row count the same way the tables folder does — metadata, not a
+    /// scan — and the primary-key flag comes from `sys.index_columns` on the PK index, which is
+    /// where T-SQL actually keeps it.
+    pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
+        self.use_database(node).await?;
+        let schema = node.schema().unwrap_or("dbo");
+        let literal = quote_literal(Some(schema))?;
+
+        let rows = self
+            .text_rows(&format!(
+                "SELECT o.name, o.type, ISNULL(c.name, ''), \
+                        ISNULL(TYPE_NAME(c.user_type_id), ''), \
+                        ISNULL(c.max_length, 0), ISNULL(c.precision, 0), ISNULL(c.scale, 0), \
+                        ISNULL(c.is_nullable, 0), \
+                        CASE WHEN pk.column_id IS NULL THEN 0 ELSE 1 END, \
+                        ISNULL(p.rows, 0) \
+                 FROM sys.objects o \
+                 JOIN sys.schemas s ON s.schema_id = o.schema_id \
+                 LEFT JOIN sys.columns c ON c.object_id = o.object_id \
+                 LEFT JOIN (SELECT object_id, SUM(rows) AS rows FROM sys.partitions \
+                            WHERE index_id IN (0, 1) GROUP BY object_id) p \
+                        ON p.object_id = o.object_id \
+                 LEFT JOIN (SELECT ic.object_id, ic.column_id FROM sys.index_columns ic \
+                            JOIN sys.indexes i ON i.object_id = ic.object_id \
+                                              AND i.index_id = ic.index_id \
+                            WHERE i.is_primary_key = 1) pk \
+                        ON pk.object_id = c.object_id AND pk.column_id = c.column_id \
+                 WHERE s.name = {literal} AND o.type IN ('U', 'V') \
+                 ORDER BY o.name, c.column_id"
+            ))
+            .await?;
+
+        let mut tables: Vec<DbDiagramTable> = Vec::new();
+        for row in &rows {
+            let name = cell(row, 0);
+            let table = match tables.last_mut() {
+                Some(last) if last.name == name => last,
+                _ => {
+                    tables.push(DbDiagramTable {
+                        schema: Some(schema.to_string()),
+                        name: name.clone(),
+                        kind: if cell(row, 1).trim() == "V" {
+                            DbNodeKind::View
+                        } else {
+                            DbNodeKind::Table
+                        },
+                        columns: Vec::new(),
+                        row_estimate: cell(row, 9).parse().ok(),
+                    });
+                    tables.last_mut().expect("just pushed")
+                }
+            };
+            let column = cell(row, 2);
+            if column.is_empty() {
+                continue;
+            }
+            table.columns.push(DbDiagramColumn {
+                name: column,
+                data_type: tsql_type_name(
+                    &cell(row, 3),
+                    cell(row, 4).parse().ok(),
+                    cell(row, 5).parse().ok(),
+                    cell(row, 6).parse().ok(),
+                ),
+                nullable: cell(row, 7) == "1",
+                primary_key: cell(row, 8) == "1",
+                foreign_key: false,
+            });
+        }
+
+        let edges = self
+            .text_rows(&format!(
+                "SELECT f.name, OBJECT_NAME(fkc.parent_object_id), pc.name, \
+                        OBJECT_SCHEMA_NAME(fkc.referenced_object_id), \
+                        OBJECT_NAME(fkc.referenced_object_id), rc.name \
+                 FROM sys.foreign_keys f \
+                 JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = f.object_id \
+                 JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id \
+                                    AND pc.column_id = fkc.parent_column_id \
+                 JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id \
+                                    AND rc.column_id = fkc.referenced_column_id \
+                 WHERE OBJECT_SCHEMA_NAME(f.parent_object_id) = {literal} \
+                 ORDER BY f.name, fkc.constraint_column_id"
+            ))
+            .await?
+            .iter()
+            .map(|row| DbDiagramEdge {
+                constraint: cell(row, 0),
+                from_schema: Some(schema.to_string()),
+                from_table: cell(row, 1),
+                from_column: cell(row, 2),
+                to_schema: Some(cell(row, 3)),
+                to_table: cell(row, 4),
+                to_column: cell(row, 5),
+                inferred: false,
+            })
+            .collect();
+
+        Ok(DbSchemaDiagram {
+            database: node.db().map(str::to_string),
+            schema: Some(schema.to_string()),
+            tables,
+            edges,
+            notes: Vec::new(),
+        })
     }
 
     async fn keys(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {

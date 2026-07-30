@@ -4,6 +4,7 @@ import {
   Copy,
   Database,
   FileCode2,
+  Network,
   Plus,
   Rows3,
   Settings2,
@@ -16,6 +17,7 @@ import { DbExplorer } from "./DbExplorer";
 import { SqlConsolePanel } from "./SqlConsolePanel";
 import { DataTabPanel } from "./DataTabPanel";
 import { DdlPanel } from "./DdlPanel";
+import { DiagramPanel } from "./DiagramPanel";
 import { ConnectionModal } from "./ConnectionModal";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { CARD, EngineBadge, nodeIcon } from "./dbChrome";
@@ -82,6 +84,8 @@ export function DatabaseView() {
               <SqlConsolePanel tab={activeTab} />
             ) : activeTab.kind === "data" ? (
               <DataTabPanel tab={activeTab} />
+            ) : activeTab.kind === "diagram" ? (
+              <DiagramPanel tab={activeTab} />
             ) : (
               <DdlPanel tab={activeTab} />
             )}
@@ -154,7 +158,13 @@ function DbTabStrip() {
         const connection = connections.find((c) => c.id === tab.connectionId);
         const engine = connection ? engineInfo(connection.kind) : null;
         const Icon =
-          tab.kind === "console" ? FileCode2 : tab.kind === "ddl" ? nodeIcon("routine") : Table2;
+          tab.kind === "console"
+            ? FileCode2
+            : tab.kind === "ddl"
+              ? nodeIcon("routine")
+              : tab.kind === "diagram"
+                ? Network
+                : Table2;
         const dirty =
           (tab.kind === "console" && tab.dirty) ||
           (tab.kind === "data" && pendingCount(tab) > 0);

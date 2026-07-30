@@ -338,6 +338,7 @@ pub fn run() {
             commands::db_cmd::db_row_count,
             commands::db_cmd::db_apply_edits,
             commands::db_cmd::db_foreign_keys,
+            commands::db_cmd::db_schema_diagram,
             commands::db_cmd::db_object_ddl,
             commands::db_cmd::db_cancel,
             commands::api_cmd::api_load_tree,

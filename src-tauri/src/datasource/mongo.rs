@@ -24,15 +24,22 @@ use mongodb::options::{ClientOptions, Credential, ServerAddress, Tls, TlsOptions
 use serde::Deserialize;
 
 use super::{
-    describe_db_error, read_only_refusal, DbColumn, DbColumnInfo, DbConnectionConfig, DbEditResult,
-    DbExecContext, DbExecuteResult, DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit, DbRowEditKind,
-    DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest,
+    describe_db_error, read_only_refusal, DbColumn, DbColumnInfo, DbConnectionConfig,
+    DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult, DbExecContext, DbExecuteResult,
+    DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit, DbRowEditKind, DbSchemaDiagram, DbServerInfo,
+    DbSslMode, DbStatementResult, DbTableDataRequest,
 };
 
 /// How many documents to look at when working out a collection's fields. A collection has no
 /// schema, so the field list in the tree is a sample — and a sample big enough to be useful has to
 /// stay small enough that expanding a node isn't a scan.
 const FIELD_SAMPLE: i64 = 100;
+
+/// How many collections a diagram will sample, and how deep. Two commands per collection is two
+/// round trips per collection, so a database with hundreds of them would take minutes over the
+/// internet — the diagram stops here and says in its notes that it did.
+const DIAGRAM_COLLECTIONS: usize = 40;
+const DIAGRAM_SAMPLE: i64 = 20;
 
 pub struct MongoSession {
     client: mongodb::Client,
@@ -375,6 +382,141 @@ impl MongoSession {
                         position: 0,
                     }),
                 }
+            })
+            .collect())
+    }
+
+    // -------------------------------------------------------------- diagram
+
+    /// The database's collections, their sampled shape, and the references that shape *suggests*.
+    ///
+    /// Every other engine reads its relationships out of the catalog. Mongo has none to read: a
+    /// reference between collections is a convention the application holds, which is why
+    /// `foreign_keys` returns an empty list rather than guessing — following a guessed link would
+    /// land the user on a wrong document.
+    ///
+    /// A diagram is the one place where the guess is worth making, because it is *read* rather than
+    /// navigated, and because "which collections look like they point at each other" is the question
+    /// being asked. So the edges here are marked `inferred`, drawn dashed, and counted apart — and a
+    /// note says so on the panel. Nothing downstream may treat them as constraints.
+    pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
+        let database = node.db().unwrap_or(&self.database).to_string();
+        let mut names: Vec<String> = self
+            .collections(node)
+            .await?
+            .into_iter()
+            .map(|collection| collection.name)
+            .collect();
+
+        let mut notes = Vec::new();
+        if names.len() > DIAGRAM_COLLECTIONS {
+            notes.push(format!(
+                "Showing the first {DIAGRAM_COLLECTIONS} of {} collections.",
+                names.len()
+            ));
+            names.truncate(DIAGRAM_COLLECTIONS);
+        }
+
+        let mut tables = Vec::new();
+        for name in names {
+            let reference = DbNodeRef {
+                kind: DbNodeKind::ColumnFolder,
+                database: Some(database.clone()),
+                schema: None,
+                name: Some(name.clone()),
+            };
+            // A collection whose sample can't be read (a view over a missing source, a permission
+            // that stops at one namespace) still belongs on the canvas as an empty box: it exists,
+            // and other collections may point at it.
+            let fields = self.sampled_fields(&reference, DIAGRAM_SAMPLE).await.unwrap_or_default();
+            let count = self
+                .command(&database, doc! { "count": name.clone() })
+                .await
+                .ok()
+                .and_then(|answer| {
+                    answer
+                        .get_i64("n")
+                        .ok()
+                        .or_else(|| answer.get_i32("n").ok().map(i64::from))
+                });
+            tables.push(DbDiagramTable {
+                schema: None,
+                name,
+                kind: DbNodeKind::Collection,
+                columns: fields,
+                row_estimate: count,
+            });
+        }
+
+        let edges = infer_references(&tables);
+        if !edges.is_empty() {
+            notes.push(format!(
+                "MongoDB declares no foreign keys. The {} dashed link(s) are guesses from field \
+                 names, not constraints.",
+                edges.len()
+            ));
+        }
+        notes.push(format!(
+            "Fields come from a sample of {DIAGRAM_SAMPLE} documents per collection, so a field no \
+             sampled document held is not drawn."
+        ));
+
+        Ok(DbSchemaDiagram {
+            database: Some(database),
+            schema: None,
+            tables,
+            edges,
+            notes,
+        })
+    }
+
+    /// The distinct top-level field names in a sample of one collection, as diagram columns.
+    ///
+    /// The same walk [`Self::fields`] does for the tree, kept separate because the two want
+    /// different things out of it: the tree wants "in 7/20 sampled" spelled out per node, and this
+    /// wants a compact list it can draw fifty of.
+    async fn sampled_fields(
+        &self,
+        node: &DbNodeRef,
+        limit: i64,
+    ) -> Result<Vec<DbDiagramColumn>, String> {
+        let database = node.db().unwrap_or(&self.database).to_string();
+        let collection = node.name()?;
+        let (documents, _) = self
+            .cursor_command(
+                &database,
+                doc! { "find": collection, "limit": limit, "batchSize": limit },
+                Some(limit as usize),
+            )
+            .await?;
+
+        let sampled = documents.len();
+        let mut fields: Vec<(String, Vec<String>, usize)> = Vec::new();
+        for document in &documents {
+            for (key, value) in document {
+                let type_name = bson_type_name(value).to_string();
+                match fields.iter_mut().find(|(name, _, _)| name == key) {
+                    Some((_, types, seen)) => {
+                        *seen += 1;
+                        if !types.contains(&type_name) {
+                            types.push(type_name);
+                        }
+                    }
+                    None => fields.push((key.clone(), vec![type_name], 1)),
+                }
+            }
+        }
+
+        Ok(fields
+            .into_iter()
+            .map(|(name, types, seen)| DbDiagramColumn {
+                primary_key: name == "_id",
+                name,
+                data_type: types.join(" | "),
+                // "Absent from some documents" is the nearest thing a schemaless store has to a
+                // nullable column, and it is the more useful of the two facts at this zoom.
+                nullable: seen < sampled,
+                foreign_key: false,
             })
             .collect())
     }
@@ -1817,9 +1959,140 @@ fn mongo_error(error: &mongodb::error::Error) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Inferred references
+// ---------------------------------------------------------------------------
+
+/// Guesses which sampled fields are references to another collection.
+///
+/// One rule, deliberately: a field whose name ends in `id`/`ids` and whose stem names a collection
+/// in the same database — `userId` → `users`, `order_ids` → `orders`. That is the convention every
+/// Mongo ODM writes and the only one common enough to be worth drawing.
+///
+/// What it will not do is match on the *value*: an `ObjectId` field called `owner` could point
+/// anywhere, and a line drawn from a hunch is indistinguishable on screen from a line read out of a
+/// catalog. Every edge from here is marked `inferred` so the panel can keep the two apart.
+///
+/// `_id` is skipped — it is the collection's own key, not a pointer at anything.
+fn infer_references(tables: &[DbDiagramTable]) -> Vec<DbDiagramEdge> {
+    let targets: Vec<(&str, String)> = tables
+        .iter()
+        .map(|table| (table.name.as_str(), name_key(&table.name)))
+        .collect();
+
+    let mut edges = Vec::new();
+    for table in tables {
+        for column in &table.columns {
+            let Some(stem) = reference_stem(&column.name) else {
+                continue;
+            };
+            let forms = plural_forms(&stem);
+            let Some((target, _)) = targets
+                .iter()
+                .find(|(name, key)| forms.iter().any(|form| form == key) && *name != table.name)
+            else {
+                continue;
+            };
+            edges.push(DbDiagramEdge {
+                constraint: format!("{}.{} (inferred)", table.name, column.name),
+                from_schema: None,
+                from_table: table.name.clone(),
+                from_column: column.name.clone(),
+                to_schema: None,
+                to_table: (*target).to_string(),
+                to_column: "_id".to_string(),
+                inferred: true,
+            });
+        }
+    }
+    edges
+}
+
+/// What a field name is a reference *to*: `userId`, `user_id` and `userIds` all stem to `user`.
+/// `None` when the name isn't a reference at all.
+fn reference_stem(field: &str) -> Option<String> {
+    if field == "_id" {
+        return None;
+    }
+    let key = name_key(field);
+    let stem = key.strip_suffix("ids").or_else(|| key.strip_suffix("id"))?;
+    (!stem.is_empty()).then(|| stem.to_string())
+}
+
+/// A name with the spellings that don't carry meaning removed: case, and the `_`/`-`/space a field
+/// uses where a collection name might not.
+fn name_key(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// The collection names a singular stem could plausibly be stored under.
+///
+/// Generating candidates *forward* rather than stripping plurals off both sides, because
+/// de-pluralizing doesn't converge: `address` and `addresses` reduce to `addres` and `address`,
+/// which never meet. Adding suffixes to the stem does.
+fn plural_forms(stem: &str) -> Vec<String> {
+    let mut forms = vec![stem.to_string(), format!("{stem}s"), format!("{stem}es")];
+    if let Some(root) = stem.strip_suffix('y') {
+        forms.push(format!("{root}ies"));
+    }
+    forms
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn collection(name: &str, fields: &[&str]) -> DbDiagramTable {
+        DbDiagramTable {
+            schema: None,
+            name: name.to_string(),
+            kind: DbNodeKind::Collection,
+            columns: fields
+                .iter()
+                .map(|field| DbDiagramColumn {
+                    name: (*field).to_string(),
+                    data_type: "objectId".to_string(),
+                    nullable: false,
+                    primary_key: *field == "_id",
+                    foreign_key: false,
+                })
+                .collect(),
+            row_estimate: None,
+        }
+    }
+
+    /// The naming conventions an ODM actually writes, including the plurals that don't survive
+    /// being stripped from both ends (`address` / `addresses`).
+    #[test]
+    fn reference_fields_find_their_collection() {
+        let tables = vec![
+            collection("users", &["_id", "name"]),
+            collection("addresses", &["_id"]),
+            collection("categories", &["_id"]),
+            collection("orders", &["_id", "userId", "address_id", "categoryId", "total"]),
+        ];
+        let edges = infer_references(&tables);
+        let pairs: Vec<(&str, &str)> = edges
+            .iter()
+            .map(|edge| (edge.from_column.as_str(), edge.to_table.as_str()))
+            .collect();
+        assert_eq!(
+            pairs,
+            vec![("userId", "users"), ("address_id", "addresses"), ("categoryId", "categories")]
+        );
+        assert!(edges.iter().all(|edge| edge.inferred && edge.to_column == "_id"));
+    }
+
+    /// The collection's own key is not a pointer at anything, and a stem naming no collection is
+    /// left alone rather than drawn as a link to nowhere.
+    #[test]
+    fn unmatched_and_own_keys_produce_no_edge() {
+        let tables = vec![collection("orders", &["_id", "shippingId", "total"])];
+        assert!(infer_references(&tables).is_empty());
+    }
 
     /// The shell dialect people actually paste: unquoted keys, single quotes, `ObjectId(…)`.
     #[test]

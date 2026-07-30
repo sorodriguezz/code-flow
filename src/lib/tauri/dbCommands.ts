@@ -11,6 +11,7 @@ import type {
   DbNodeRef,
   DbQueryHistoryEntry,
   DbRowEdit,
+  DbSchemaDiagram,
   DbSchemaGroup,
   DbServerInfo,
   DbStatementResult,
@@ -160,5 +161,11 @@ export const dbObjectDdl = (connectionId: string, node: DbNodeRef) =>
 
 export const dbForeignKeys = (connectionId: string, node: DbNodeRef) =>
   invoke<DbForeignKey[]>("db_foreign_keys", { connectionId, node });
+
+/** A whole schema's structure for the diagram — two catalog queries, not two per table. Takes a
+ * run id because on a large schema it is the slowest thing the workspace sends, and it has to be
+ * cancellable. */
+export const dbSchemaDiagram = (connectionId: string, node: DbNodeRef, runId: string) =>
+  invoke<DbSchemaDiagram>("db_schema_diagram", { connectionId, node, runId });
 
 export const dbCancel = (runId: string) => invoke<void>("db_cancel", { runId });

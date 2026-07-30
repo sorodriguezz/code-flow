@@ -43,8 +43,17 @@ export interface DbConnectionConfig {
    * on. Off by default — a connection that names a database came for that database.
    */
   show_all_databases: boolean;
-  /** Which schemas the tree lists. Empty means all of them. */
+  /** Which schemas the tree lists, when `schemas_filtered` is on. */
   visible_schemas: string[];
+  /**
+   * Whether `visible_schemas` is a filter at all.
+   *
+   * Its own flag rather than "empty means everything", because those are three states and a list
+   * only carries two: never configured (show it all — the default), these ones, and **none of
+   * them**. The third has to be reachable: an IRIS namespace lists 348 schemas, and unticking the
+   * last box must mean what it says instead of silently reverting to all 348.
+   */
+  schemas_filtered: boolean;
   /** A substring every table, view and routine name must contain to be listed. */
   object_filter: string;
 
@@ -83,6 +92,53 @@ export interface DbForeignKey {
   ref_schema: string | null;
   ref_table: string;
   ref_column: string;
+}
+
+// ---------------------------------------------------------------------------
+// Schema diagram
+// ---------------------------------------------------------------------------
+
+/** One column, as the diagram draws it — what makes it structural, and nothing else. */
+export interface DbDiagramColumn {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+  primary_key: boolean;
+  /** Derived from the edge list on the backend, so the flag and the line can never disagree. */
+  foreign_key: boolean;
+}
+
+export interface DbDiagramTable {
+  schema: string | null;
+  name: string;
+  /** `table`, `view` or `collection`. A view holds no rows and declares no keys. */
+  kind: DbNodeKind;
+  columns: DbDiagramColumn[];
+  /** The server's own estimate where it keeps one — never a `COUNT(*)`. `null` on IRIS, which
+   * keeps no such figure. */
+  row_estimate: number | null;
+}
+
+export interface DbDiagramEdge {
+  constraint: string;
+  from_schema: string | null;
+  from_table: string;
+  from_column: string;
+  to_schema: string | null;
+  to_table: string;
+  to_column: string;
+  /** True when no catalog declares this and it was guessed from a field name — the only kind Mongo
+   * can have. Drawn dashed and counted apart: a guess shown as a constraint is worse than no line. */
+  inferred: boolean;
+}
+
+export interface DbSchemaDiagram {
+  database: string | null;
+  schema: string | null;
+  tables: DbDiagramTable[];
+  edges: DbDiagramEdge[];
+  /** What the reader needs in order to trust the picture: a sample size, a truncation. */
+  notes: string[];
 }
 
 export interface DbColumn {
@@ -381,6 +437,7 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     connect_timeout_ms: 15000,
     show_all_databases: false,
     visible_schemas: [],
+    schemas_filtered: false,
     object_filter: "",
     keep_alive_secs: 0,
     auto_disconnect_secs: 0,

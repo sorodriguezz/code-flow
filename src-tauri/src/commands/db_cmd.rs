@@ -14,7 +14,7 @@ use tauri::State;
 use crate::datasource::{
     filter_children, scope_to_current_database, DbConnectionConfig, DbEditResult, DbExecContext,
     DbExecuteResult, DbForeignKey, DbNode, DbNodeKind, DbNodeRef, DbRegistry, DbRowEdit,
-    DbSchemaGroup, DbServerInfo, DbStatementResult, DbTableDataRequest, Session,
+    DbSchemaDiagram, DbSchemaGroup, DbServerInfo, DbStatementResult, DbTableDataRequest, Session,
 };
 use crate::db::datasource_queries as queries;
 use crate::db::{models::*, Db};
@@ -446,6 +446,31 @@ pub async fn db_foreign_keys(
     let config = resolve_config(&db, &connection_id)?;
     let session = registry.session(&config, node.database.as_deref()).await?;
     session.foreign_keys(&node).await
+}
+
+/// A whole container's structure, for the diagram: every relation, its columns, and every
+/// relationship between them.
+///
+/// `node` is a schema on a SQL engine and a database on Mongo — the level at which "what is in here
+/// and how is it wired together" is a question worth asking.
+///
+/// Routed through `registry.run` so the Cancel button reaches it: on a schema with hundreds of
+/// tables these catalog queries are the slowest thing the workspace sends, and a diagram that can't
+/// be abandoned would hold the session until it finished.
+#[tauri::command]
+pub async fn db_schema_diagram(
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    node: DbNodeRef,
+    run_id: String,
+) -> Result<DbSchemaDiagram, String> {
+    let config = resolve_config(&db, &connection_id)?;
+    let session = registry.session(&config, node.database.as_deref()).await?;
+    let key = DbRegistry::session_key(&connection_id, node.database.as_deref());
+    registry
+        .run(&run_id, &session, &key, session.schema_diagram(&node))
+        .await
 }
 
 #[tauri::command]

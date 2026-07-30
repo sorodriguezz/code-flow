@@ -14,6 +14,7 @@ import {
   Hash,
   KeyRound,
   Loader2,
+  Network,
   Pencil,
   Play,
   Plug,
@@ -256,6 +257,22 @@ function NodeSubtree({
       onClick: () =>
         store.newConsole(connectionId, node.database ?? undefined, node.schema ?? undefined),
     });
+    // The diagram hangs off the level that *has* a shape to draw, which differs by engine: a schema
+    // on the four SQL engines, and a database on Mongo, which has no schema level at all. Offering
+    // it on a Mongo database rather than nowhere is the whole point — the collections and the
+    // references between them are exactly what nobody can see from a tree.
+    const drawable =
+      node.kind === "schema" ||
+      !engineInfo(
+        useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind ?? "postgres",
+      ).sql;
+    if (drawable) {
+      menuItems.push({
+        label: t("db.showDiagram"),
+        icon: Network,
+        onClick: () => store.openDiagram(connectionId, nodeRef, diagramLabel(node)),
+      });
+    }
     // Creating, from the container you are pointing at. A draft in a console rather than a form:
     // a table is columns, types, keys and defaults, and a dialog that asked for all of that would
     // be a worse editor than the console next door — while the part that *is* worth automating,
@@ -415,6 +432,12 @@ const GENERATED: {
 /** `schema.table`, or just the name when there is no schema (Mongo). */
 function qualifiedName(node: DbNode): string {
   return node.schema ? `${node.schema}.${node.name}` : node.name;
+}
+
+/** What a diagram tab is called. Qualified with the database, because two databases on the same
+ * server routinely have a `public` schema and the tab strip has to tell them apart. */
+function diagramLabel(node: DbNode): string {
+  return node.database && node.kind === "schema" ? `${node.database}.${node.name}` : node.name;
 }
 
 /** The starter statement "Select rows" drops into a new console. */

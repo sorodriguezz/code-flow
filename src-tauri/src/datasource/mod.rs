@@ -141,13 +141,23 @@ pub struct DbConnectionConfig {
     /// [`scope_to_current_database`].
     #[serde(default)]
     pub show_all_databases: bool,
-    /// Which schemas the tree lists. Empty means all of them — a filter nobody set is not a filter.
+    /// Which schemas the tree lists, when [`Self::schemas_filtered`] is on.
     ///
     /// An allowlist rather than a list of things to hide, because that is the question the user is
     /// actually answering: a database with ninety schemas and three that matter is named by the
     /// three. See [`filter_children`].
     #[serde(default)]
     pub visible_schemas: Vec<String>,
+    /// Whether [`Self::visible_schemas`] is a filter at all.
+    ///
+    /// Its own flag rather than "empty means everything", because those are three states and a list
+    /// only carries two: *never configured* (show it all — the default, and what every connection
+    /// made before this field existed keeps), *these ones*, and **none of them**. The third is
+    /// reachable and has to be: an IRIS namespace answers with 348 schemas of which the user wants
+    /// a handful, and unticking the last box has to be able to mean what it says instead of
+    /// silently reverting to all 348.
+    #[serde(default)]
+    pub schemas_filtered: bool,
     /// A substring every table, view and routine name must contain to be listed. Empty means no
     /// filter. Matched case-insensitively, since no engine here agrees with another about case.
     #[serde(default)]
@@ -517,15 +527,16 @@ pub fn scope_to_current_database(mut nodes: Vec<DbNode>, current: &str) -> Vec<D
 /// this is a rule about what *this user* wants to look at, not about what the engine holds, and a
 /// driver that knew about it would be answering a question it was never asked.
 ///
-/// Nothing is filtered when the corresponding setting is empty, and a filter that would empty a
-/// level still empties it — unlike the database narrowing, a schema list is something the user typed
-/// deliberately, so "you asked for a schema this database doesn't have" is worth seeing.
+/// Nothing is filtered when the corresponding setting is off, and a filter that would empty a level
+/// still empties it — unlike the database narrowing, a schema list is something the user chose
+/// deliberately, so "you asked for a schema this database doesn't have" is worth seeing, and so is
+/// "you asked for none".
 pub fn filter_children(
     config: &DbConnectionConfig,
     node: &DbNodeRef,
     mut nodes: Vec<DbNode>,
 ) -> Vec<DbNode> {
-    if node.kind == DbNodeKind::Database && !config.visible_schemas.is_empty() {
+    if node.kind == DbNodeKind::Database && config.schemas_filtered {
         nodes.retain(|child| {
             config.visible_schemas.iter().any(|name| name.eq_ignore_ascii_case(&child.name))
         });
@@ -605,6 +616,92 @@ pub struct DbForeignKey {
     pub ref_schema: Option<String>,
     pub ref_table: String,
     pub ref_column: String,
+}
+
+// ---------------------------------------------------------------------------
+// Schema diagram
+// ---------------------------------------------------------------------------
+
+/// One column, as the diagram draws it.
+///
+/// A trimmed [`DbColumnInfo`]: the diagram wants what makes a column *structural* — is it the
+/// identity of the row, does it point somewhere, can it be absent — and nothing else. Defaults and
+/// ordinals would be a hundred kilobytes of payload on a wide schema for text nobody reads at this
+/// zoom level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbDiagramColumn {
+    pub name: String,
+    pub data_type: String,
+    pub nullable: bool,
+    pub primary_key: bool,
+    /// Filled in from the edge list by [`mark_foreign_keys`], not by the catalog query — the two
+    /// would otherwise be able to disagree about the same constraint.
+    pub foreign_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbDiagramTable {
+    pub schema: Option<String>,
+    pub name: String,
+    /// `Table`, `View` or `Collection`. A view is drawn differently: it has columns and can be
+    /// referenced in conversation, but it holds no rows and declares no keys.
+    pub kind: DbNodeKind,
+    pub columns: Vec<DbDiagramColumn>,
+    /// The server's own estimate, where it keeps one. **Never a `COUNT(*)`** — one exact count per
+    /// table would turn opening a diagram into a full scan of the schema.
+    pub row_estimate: Option<i64>,
+}
+
+/// One column pointing at another, which is one line on the canvas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbDiagramEdge {
+    /// The constraint's own name, so a composite key's lines can be grouped back together.
+    pub constraint: String,
+    pub from_schema: Option<String>,
+    pub from_table: String,
+    pub from_column: String,
+    pub to_schema: Option<String>,
+    pub to_table: String,
+    pub to_column: String,
+    /// True when nothing in the catalog declares this relationship and it was guessed from a name —
+    /// which is the only kind Mongo can have. Drawn dashed, and counted separately, because a guess
+    /// presented as a constraint is worse than no line at all.
+    pub inferred: bool,
+}
+
+/// A whole schema's structure, in one answer.
+///
+/// Deliberately not assembled from the per-table calls the explorer already has: a schema with 300
+/// tables would be 600 round trips and would take minutes on anything remote. Every driver answers
+/// this with two catalog queries — all columns, then all foreign keys — and the frontend does the
+/// counting and the layout.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbSchemaDiagram {
+    pub database: Option<String>,
+    pub schema: Option<String>,
+    pub tables: Vec<DbDiagramTable>,
+    pub edges: Vec<DbDiagramEdge>,
+    /// What the reader needs in order to trust the picture: a sample size, a truncation, a
+    /// relationship that was inferred rather than read. Shown in the panel, not swallowed.
+    pub notes: Vec<String>,
+}
+
+/// Flags the columns that appear as the source of an edge.
+///
+/// Applied over the drivers rather than inside them, for the same reason as
+/// [`scope_to_current_database`]: "this column has a foreign key" and "this line exists" are the
+/// same fact, and deriving one from the other is what stops them drifting apart.
+pub fn mark_foreign_keys(tables: &mut [DbDiagramTable], edges: &[DbDiagramEdge]) {
+    for table in tables.iter_mut() {
+        for column in table.columns.iter_mut() {
+            column.foreign_key = edges.iter().any(|edge| {
+                edge.from_table == table.name
+                    && edge.from_column == column.name
+                    && edge.from_schema.as_deref().unwrap_or_default()
+                        == table.schema.as_deref().unwrap_or_default()
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -808,6 +905,22 @@ impl Session {
             Session::Mongo(_) => Ok(Vec::new()),
             Session::Iris(s) => s.foreign_keys(node).await,
         }
+    }
+
+    /// Everything a schema diagram needs, in one call.
+    ///
+    /// `node` is the container to draw: a schema on a SQL engine, a database on Mongo. Each driver
+    /// reads it wholesale rather than per table — see [`DbSchemaDiagram`] — and the `foreign_key`
+    /// flags are derived here so they cannot disagree with the lines.
+    pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
+        let mut diagram = match self {
+            Session::Postgres(s) => s.schema_diagram(node).await,
+            Session::Mssql(s) => s.schema_diagram(node).await,
+            Session::Mongo(s) => s.schema_diagram(node).await,
+            Session::Iris(s) => s.schema_diagram(node).await,
+        }?;
+        mark_foreign_keys(&mut diagram.tables, &diagram.edges);
+        Ok(diagram)
     }
 
     pub async fn row_count(&self, node: &DbNodeRef, filter: &str) -> Result<i64, String> {
@@ -1322,6 +1435,7 @@ mod tests {
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),
+            schemas_filtered: false,
             object_filter: String::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,
@@ -1369,6 +1483,7 @@ mod tests {
         // Nobody set a filter, so nothing is one.
         assert_eq!(filter_children(&config, &db, schemas()).len(), 3);
 
+        config.schemas_filtered = true;
         config.visible_schemas = vec!["public".into(), "sap".into()];
         let kept = filter_children(&config, &db, schemas());
         assert_eq!(kept.len(), 2, "{kept:?}");
@@ -1378,6 +1493,16 @@ mod tests {
         // typed it, and silently showing everything would hide the typo.
         config.visible_schemas = vec!["nowhere".into()];
         assert!(filter_children(&config, &db, schemas()).is_empty());
+
+        // Filtering to nothing shows nothing. The whole reason `schemas_filtered` exists: an empty
+        // list used to mean "all", so unticking the last schema silently undid the filter.
+        config.visible_schemas = Vec::new();
+        assert!(filter_children(&config, &db, schemas()).is_empty());
+
+        // And a list left behind by a filter that was turned off is not a filter.
+        config.schemas_filtered = false;
+        config.visible_schemas = vec!["public".into()];
+        assert_eq!(filter_children(&config, &db, schemas()).len(), 3);
     }
 
     #[test]
@@ -1430,6 +1555,7 @@ mod tests {
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),
+            schemas_filtered: false,
             object_filter: String::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,

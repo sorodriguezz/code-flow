@@ -35,8 +35,9 @@ use super::postgres::{annotate_types, cell, relation_folders, schema_folders};
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
     read_only_guard, read_only_refusal, split_statements, DbColumn, DbColumnInfo,
-    DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbForeignKey, DbKind, DbNode,
-    DbNodeKind, DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult,
+    DbConnectionConfig, DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult, DbExecContext,
+    DbExecuteResult, DbForeignKey, DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit,
+    DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult,
     DbTableDataRequest, SqlDialect,
 };
 
@@ -505,6 +506,108 @@ impl IrisSession {
             .collect())
     }
 
+    // -------------------------------------------------------------- diagram
+
+    /// A whole schema in two queries, from the standard catalog.
+    ///
+    /// No row estimate: IRIS keeps its counts in the class's storage definition rather than in
+    /// `INFORMATION_SCHEMA`, and a `COUNT(*)` per table is exactly what
+    /// [`super::DbSchemaDiagram`] says this must never do. The panel simply omits the figure rather
+    /// than showing a zero it can't stand behind.
+    pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
+        let schema = node.schema().unwrap_or("SQLUser");
+        let literal = quote_literal(Some(schema))?;
+
+        // `%STARTSWITH 'PK'` is the same primary-key test the column list uses: IRIS names the
+        // constraint after the class, and its own catalog offers no flag for it.
+        let rows = self
+            .rows(&format!(
+                "SELECT c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, \
+                        c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, \
+                        (SELECT COUNT(*) FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k \
+                         WHERE k.TABLE_SCHEMA = c.TABLE_SCHEMA AND k.TABLE_NAME = c.TABLE_NAME \
+                           AND k.COLUMN_NAME = c.COLUMN_NAME AND k.CONSTRAINT_NAME %STARTSWITH 'PK') \
+                 FROM INFORMATION_SCHEMA.COLUMNS c \
+                 JOIN INFORMATION_SCHEMA.TABLES t \
+                   ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
+                 WHERE c.TABLE_SCHEMA = {literal} \
+                 ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION"
+            ))
+            .await?;
+
+        let mut tables: Vec<DbDiagramTable> = Vec::new();
+        for row in &rows {
+            let name = cell(row, 0);
+            let table = match tables.last_mut() {
+                Some(last) if last.name == name => last,
+                _ => {
+                    tables.push(DbDiagramTable {
+                        schema: Some(schema.to_string()),
+                        name: name.clone(),
+                        kind: if cell(row, 1).eq_ignore_ascii_case("VIEW") {
+                            DbNodeKind::View
+                        } else {
+                            DbNodeKind::Table
+                        },
+                        columns: Vec::new(),
+                        row_estimate: None,
+                    });
+                    tables.last_mut().expect("just pushed")
+                }
+            };
+            let nullable = cell(row, 4);
+            table.columns.push(DbDiagramColumn {
+                name: cell(row, 2),
+                data_type: iris_type_name(
+                    &cell(row, 3),
+                    cell(row, 5).parse().ok(),
+                    cell(row, 6).parse().ok(),
+                    cell(row, 7).parse().ok(),
+                ),
+                nullable: nullable.eq_ignore_ascii_case("YES") || nullable == "1",
+                primary_key: cell(row, 8).parse::<i64>().unwrap_or(0) > 0,
+                foreign_key: false,
+            });
+        }
+
+        let edges = self
+            .rows(&format!(
+                "SELECT k.CONSTRAINT_NAME, k.TABLE_NAME, k.COLUMN_NAME, \
+                        t.TABLE_SCHEMA, t.TABLE_NAME, t.COLUMN_NAME \
+                 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k \
+                 JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS r \
+                   ON r.CONSTRAINT_NAME = k.CONSTRAINT_NAME \
+                  AND r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA \
+                 JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE t \
+                   ON t.CONSTRAINT_NAME = r.UNIQUE_CONSTRAINT_NAME \
+                  AND t.CONSTRAINT_SCHEMA = r.UNIQUE_CONSTRAINT_SCHEMA \
+                  AND t.ORDINAL_POSITION = k.ORDINAL_POSITION \
+                 WHERE k.TABLE_SCHEMA = {literal} \
+                 ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
+            ))
+            .await?
+            .iter()
+            .map(|row| DbDiagramEdge {
+                constraint: cell(row, 0),
+                from_schema: Some(schema.to_string()),
+                from_table: cell(row, 1),
+                from_column: cell(row, 2),
+                to_schema: Some(cell(row, 3)),
+                to_table: cell(row, 4),
+                to_column: cell(row, 5),
+                inferred: false,
+            })
+            .collect();
+
+        Ok(DbSchemaDiagram {
+            database: node.db().map(str::to_string),
+            schema: Some(schema.to_string()),
+            tables,
+            edges,
+            notes: Vec::new(),
+        })
+    }
+
     async fn keys(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {
         let schema = node.schema().unwrap_or("SQLUser");
         let table = node.name()?;
@@ -950,6 +1053,7 @@ mod tests {
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),
+            schemas_filtered: false,
             object_filter: String::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,

@@ -22,6 +22,7 @@ import {
   dbObjectDdl,
   dbReorderConnections,
   dbRowCount,
+  dbSchemaDiagram,
   dbSetPassword,
   dbTableData,
   dbUpdateConnection,
@@ -47,6 +48,7 @@ import {
   type DbNodeRef,
   type DbQueryHistoryEntry,
   type DbRowEdit,
+  type DbSchemaDiagram,
   type DbServerInfo,
   type DbSortKey,
   type DbStatementResult,
@@ -160,7 +162,27 @@ export interface DbDdlTab {
   loading: boolean;
 }
 
-export type DbTab = DbConsoleTab | DbDataTab | DbDdlTab;
+/**
+ * A whole schema drawn: its tables, their keys, and what points at what.
+ *
+ * The tab holds only what the server said. Every position, zoom level and highlight lives in the
+ * panel — they are a way of looking at this data, not part of it, and persisting them would mean a
+ * reopened tab could disagree with a schema that has changed underneath it.
+ */
+export interface DbDiagramTab {
+  id: string;
+  kind: "diagram";
+  connectionId: string;
+  /** The container drawn: a schema on a SQL engine, a database on Mongo. */
+  node: DbNodeRef;
+  name: string;
+  loading: boolean;
+  runId: string | null;
+  diagram: DbSchemaDiagram | null;
+  error: string | null;
+}
+
+export type DbTab = DbConsoleTab | DbDataTab | DbDdlTab | DbDiagramTab;
 
 /** Which explorer section the sidebar is showing. */
 export type DbSidebarSection = "explorer" | "history";
@@ -254,6 +276,11 @@ interface DbState {
   applyEdits: (tabId: string) => Promise<void>;
 
   openDdl: (connectionId: string, node: DbNodeRef, name: string) => Promise<void>;
+
+  /** Opens (or brings forward) the diagram of a schema — or, on Mongo, of a database. */
+  openDiagram: (connectionId: string, node: DbNodeRef, name: string) => void;
+  /** Re-reads the catalog for a diagram tab. Also what a restored tab calls to fill itself in. */
+  loadDiagram: (tabId: string) => Promise<void>;
 
   closeTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
@@ -759,7 +786,9 @@ export const useDbStore = create<DbState>((set, get) => ({
   cancelRun: async (tabId) => {
     const tab = get().tabs.find((entry) => entry.id === tabId);
     const runId =
-      tab && (tab.kind === "console" || tab.kind === "data") ? tab.runId : null;
+      tab && (tab.kind === "console" || tab.kind === "data" || tab.kind === "diagram")
+        ? tab.runId
+        : null;
     if (!runId) return;
     await guarded(() => dbCancel(runId));
   },
@@ -844,21 +873,27 @@ export const useDbStore = create<DbState>((set, get) => ({
   /**
    * Rewrites which schemas a connection's tree lists.
    *
-   * The updater is handed the *effective* list, not the stored one: an empty setting means "all",
-   * and "hide this one" has to start from the full set or it would turn into "show only the
-   * others of which there are none". What the explorer has loaded is that full set — which is why
-   * this is only offered from a tree that is already open.
+   * The updater is handed the *effective* list, not the stored one: with no filter on, "hide this
+   * one" has to start from the full set or it would turn into "show only the others, of which
+   * there are none". What the explorer has loaded is that full set — which is why this is only
+   * offered from a tree that is already open.
+   *
+   * Setting either turns the filter on, exactly as ticking a box in the dialog does, so the two
+   * ways in agree about what an empty list means.
    */
   setVisibleSchemas: async (connectionId, update) => {
     const state = get();
     const row = state.connections.find((c) => c.id === connectionId);
     const config = row ? parseSpec(row) : null;
     if (!row || !config) return;
-    const current =
-      config.visible_schemas.length > 0
-        ? config.visible_schemas
-        : loadedSchemas(state.children, connectionId);
-    await state.saveConnection(row, { ...config, visible_schemas: update(current) }, null);
+    const current = config.schemas_filtered
+      ? config.visible_schemas
+      : loadedSchemas(state.children, connectionId);
+    await state.saveConnection(
+      row,
+      { ...config, visible_schemas: update(current), schemas_filtered: true },
+      null,
+    );
   },
 
   updateData: (tabId, patch) => {
@@ -1075,6 +1110,71 @@ export const useDbStore = create<DbState>((set, get) => ({
         ...current,
         text: `-- ${String(e)}`,
         loading: false,
+      }));
+    }
+  },
+
+  // ----------------------------------------------------------------- diagram
+
+  openDiagram: (connectionId, node, name) => {
+    const existing = get().tabs.find(
+      (tab) =>
+        tab.kind === "diagram" && sameNode(tab.node, node) && tab.connectionId === connectionId,
+    );
+    if (existing) {
+      set({ activeTabId: existing.id });
+      return;
+    }
+    const id = newId();
+    addTab(set, get, {
+      id,
+      kind: "diagram",
+      connectionId,
+      node,
+      name,
+      loading: false,
+      runId: null,
+      diagram: null,
+      error: null,
+    });
+    void get().loadDiagram(id);
+  },
+
+  loadDiagram: async (tabId) => {
+    const tab = findTab<DbDiagramTab>(get, tabId, "diagram");
+    if (!tab || tab.loading) return;
+    const runId = newRunId();
+    patchTab<DbDiagramTab>(set, tabId, "diagram", (current) => ({
+      ...current,
+      loading: true,
+      runId,
+      error: null,
+    }));
+    const started = Date.now();
+    try {
+      const diagram = await dbSchemaDiagram(tab.connectionId, tab.node, runId);
+      patchTab<DbDiagramTab>(set, tabId, "diagram", (current) => ({ ...current, diagram }));
+      // Two catalog queries the user never wrote, on the schema they are looking at — exactly the
+      // kind of statement the log exists for. Logged as one line: what the panel *is*.
+      get().logSql({
+        connectionId: tab.connectionId,
+        sql: `-- schema diagram: ${[tab.node.database, tab.node.schema ?? tab.node.name]
+          .filter(Boolean)
+          .join(".")}`,
+        source: "grid",
+        durationMs: Date.now() - started,
+        rows: diagram.tables.length,
+        error: null,
+      });
+    } catch (e) {
+      // Against the tab, not as a toast: the panel is empty and has room to explain itself, which
+      // a toast that vanishes in four seconds does not.
+      patchTab<DbDiagramTab>(set, tabId, "diagram", (current) => ({ ...current, error: String(e) }));
+    } finally {
+      patchTab<DbDiagramTab>(set, tabId, "diagram", (current) => ({
+        ...current,
+        loading: false,
+        runId: null,
       }));
     }
   },
@@ -1459,6 +1559,21 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
     };
   }
   const node = persisted.node ?? { kind: "table", database: null, schema: null, name: null };
+  if (persisted.kind === "diagram") {
+    return {
+      id,
+      kind: "diagram",
+      connectionId: persisted.connectionId,
+      node,
+      name: persisted.name,
+      loading: false,
+      runId: null,
+      // Left empty for the same reason a restored data tab is: reopening the app must not fire a
+      // catalog sweep per tab at a database that may be behind a VPN. The panel asks when looked at.
+      diagram: null,
+      error: null,
+    };
+  }
   if (persisted.kind === "ddl") {
     return {
       id,

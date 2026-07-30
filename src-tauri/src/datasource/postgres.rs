@@ -17,9 +17,9 @@ use tokio_postgres::{AsyncMessage, Client, SimpleQueryMessage};
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
     describe_db_error, read_only_guard, read_only_refusal, split_statements, DbColumn,
-    DbColumnInfo, DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbForeignKey,
-    DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult,
-    DbTableDataRequest, SqlDialect,
+    DbColumnInfo, DbConnectionConfig, DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult,
+    DbExecContext, DbExecuteResult, DbForeignKey, DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit,
+    DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest, SqlDialect,
 };
 
 const DIALECT: SqlDialect = SqlDialect::Postgres;
@@ -593,6 +593,113 @@ impl PgSession {
             .collect())
     }
 
+    // -------------------------------------------------------------- diagram
+
+    /// A whole schema in two queries: every column of every relation, then every foreign key.
+    ///
+    /// The first one `LEFT JOIN`s `pg_attribute` so a table with no columns still appears — rare,
+    /// but a diagram that silently drops an object is worse than one that draws an empty box.
+    /// `relkind` keeps ordinary tables, partitioned tables, foreign tables, views and materialised
+    /// views; sequences and indexes have no place on an ER canvas.
+    pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
+        let schema = node.schema().unwrap_or("public");
+        let literal = quote_literal(Some(schema))?;
+
+        let rows = self
+            .text_rows(&format!(
+                "SELECT c.relname, c.relkind, \
+                        COALESCE(a.attname, ''), \
+                        COALESCE(format_type(a.atttypid, a.atttypmod), ''), \
+                        CASE WHEN a.attnotnull THEN 'f' ELSE 't' END, \
+                        CASE WHEN pk.attnum IS NULL THEN 'f' ELSE 't' END, \
+                        COALESCE(s.n_live_tup::text, '') \
+                 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid \
+                 LEFT JOIN pg_attribute a \
+                        ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped \
+                 LEFT JOIN (SELECT conrelid, unnest(conkey) AS attnum FROM pg_constraint \
+                            WHERE contype = 'p') pk \
+                        ON pk.conrelid = c.oid AND pk.attnum = a.attnum \
+                 WHERE n.nspname = {literal} AND c.relkind IN ('r', 'p', 'f', 'v', 'm') \
+                 ORDER BY c.relname, a.attnum"
+            ))
+            .await?;
+
+        let mut tables: Vec<DbDiagramTable> = Vec::new();
+        for row in &rows {
+            let name = cell(row, 0);
+            let table = match tables.last_mut() {
+                Some(last) if last.name == name => last,
+                _ => {
+                    tables.push(DbDiagramTable {
+                        schema: Some(schema.to_string()),
+                        name: name.clone(),
+                        kind: match cell(row, 1).as_str() {
+                            "v" | "m" => DbNodeKind::View,
+                            _ => DbNodeKind::Table,
+                        },
+                        columns: Vec::new(),
+                        // The planner's estimate, which is what `pg_stat_all_tables` holds — a
+                        // table never analysed reports 0, and that is still the truth about what
+                        // the server knows.
+                        row_estimate: cell(row, 6).parse().ok(),
+                    });
+                    tables.last_mut().expect("just pushed")
+                }
+            };
+            let column = cell(row, 2);
+            if column.is_empty() {
+                continue;
+            }
+            table.columns.push(DbDiagramColumn {
+                name: column,
+                data_type: cell(row, 3),
+                nullable: cell(row, 4) == "t",
+                primary_key: cell(row, 5) == "t",
+                foreign_key: false,
+            });
+        }
+
+        // Sources restricted to this schema, targets not: a key pointing at `auth.users` is a real
+        // edge, and the panel draws its far end as a box outside the schema rather than dropping it.
+        let edges = self
+            .text_rows(&format!(
+                "SELECT con.conname, c.relname, a.attname, rn.nspname, rc.relname, ra.attname \
+                 FROM pg_constraint con \
+                 JOIN pg_class c ON c.oid = con.conrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN pg_class rc ON rc.oid = con.confrelid \
+                 JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
+                 JOIN LATERAL unnest(con.conkey, con.confkey) AS k(att, ratt) ON true \
+                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.att \
+                 JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.ratt \
+                 WHERE con.contype = 'f' AND n.nspname = {literal} \
+                 ORDER BY con.conname"
+            ))
+            .await?
+            .iter()
+            .map(|row| DbDiagramEdge {
+                constraint: cell(row, 0),
+                from_schema: Some(schema.to_string()),
+                from_table: cell(row, 1),
+                from_column: cell(row, 2),
+                to_schema: Some(cell(row, 3)),
+                to_table: cell(row, 4),
+                to_column: cell(row, 5),
+                inferred: false,
+            })
+            .collect();
+
+        Ok(DbSchemaDiagram {
+            database: node.db().map(str::to_string),
+            schema: Some(schema.to_string()),
+            tables,
+            edges,
+            notes: Vec::new(),
+        })
+    }
+
     async fn keys(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {
         let schema = node.schema().unwrap_or("public");
         let table = node.name()?;
@@ -1145,6 +1252,7 @@ mod tests {
             connect_timeout_ms: 0,
             show_all_databases: false,
             visible_schemas: Vec::new(),
+            schemas_filtered: false,
             object_filter: String::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,

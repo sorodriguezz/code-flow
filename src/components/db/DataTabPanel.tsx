@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  Columns3,
   Copy,
   Download,
   Loader2,
@@ -17,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { RecordGrid } from "./RecordGrid";
 import { ResultGrid } from "./ResultGrid";
 import { nodeLabel } from "./SqlConsolePanel";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
@@ -80,8 +82,17 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
    * reopened with rows 3, 4 and 9 "selected" would be pointing at rows nobody chose.
    */
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  /**
+   * Grid or record: rows across, or one record per column read down the page.
+   *
+   * A view state, so it lives here and not in the store — it is about this look at the data, like
+   * the selection, and a persisted tab that reopened sideways would be surprising.
+   */
+  const [layout, setLayout] = useState<"grid" | "record">("grid");
   /** Where a ⇧-click measures its run from. */
   const anchor = useRef<number | null>(null);
+  /** What a ⌘-drag must not throw away: the selection as it stood when the drag began. */
+  const kept = useRef<Set<number>>(new Set());
 
   const engine = connection ? engineInfo(connection.kind) : null;
   const staged = pendingCount(tab);
@@ -98,6 +109,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   useEffect(() => {
     setSelected(new Set());
     anchor.current = null;
+    kept.current = new Set();
   }, [tab.result]);
 
   const primaryKeys = useMemo(
@@ -135,6 +147,9 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
    * the header box.
    */
   const selectRow = (row: number, mods: { range: boolean; toggle: boolean }) => {
+    // Always the first thing a press does, so a sweep that follows starts from what is on screen
+    // now rather than from what the previous sweep happened to leave behind.
+    kept.current = new Set();
     setSelected((current) => {
       if (mods.range && anchor.current !== null) {
         const [from, to] = [anchor.current, row].sort((a, b) => a - b);
@@ -153,8 +168,27 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
     });
   };
 
+  /**
+   * A run swept out by dragging down the row numbers.
+   *
+   * Recomputed from the anchor every time rather than accumulated, so dragging back up *shrinks*
+   * the run — which is what a drag means everywhere else and what accumulating would get wrong.
+   * `additive` (the drag began with ⌘/Ctrl) keeps whatever was selected before it started.
+   */
+  const selectRange = (from: number, to: number, additive: boolean) => {
+    const [start, end] = from <= to ? [from, to] : [to, from];
+    setSelected((current) => {
+      if (!additive) kept.current = new Set();
+      else if (kept.current.size === 0) kept.current = new Set(current);
+      const next = new Set(kept.current);
+      for (let index = start; index <= end; index += 1) next.add(index);
+      return next;
+    });
+  };
+
   const selectAll = (on: boolean) => {
     anchor.current = null;
+    kept.current = new Set();
     setSelected(on ? new Set((tab.result?.rows ?? []).map((_, index) => index)) : new Set());
   };
 
@@ -401,12 +435,15 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           >
             <RotateCcw size={12} />
           </ToolbarButton>
+          {/* How to look at the page, not what to do with a selection — which is why the "read
+              these as records" action lives on the selection bar instead of beside this. */}
           <ToolbarButton
-            onClick={() => openRecords(selectedRows)}
-            disabled={!tab.result || tab.result.rows.length === 0}
-            title={selectedRows.length > 0 ? t("db.viewRecordsSelected") : t("db.viewRecordsAll")}
+            onClick={() => setLayout((current) => (current === "grid" ? "record" : "grid"))}
+            active={layout === "record"}
+            disabled={!tab.result}
+            title={layout === "grid" ? t("db.recordLayout") : t("db.gridLayout")}
           >
-            <Rows3 size={12} />
+            {layout === "grid" ? <Columns3 size={12} /> : <Rows3 size={12} />}
           </ToolbarButton>
           <ToolbarButton
             onClick={(e) => {
@@ -484,33 +521,51 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
             </p>
           </div>
         ) : tab.result ? (
-          <ResultGrid
-            columns={tab.result.columns}
-            rows={tab.result.rows}
-            displayValue={(row, column) => displayCell(tab, row, column)}
-            onEdit={({ row, column, value }) => store.setCell(tab.id, row, column, value)}
-            changed={changed}
-            deletedRows={deleted}
-            insertedRows={tab.inserted}
-            onEditInserted={({ row, column, value }) =>
-              store.setInsertedCell(tab.id, row, column, value)
-            }
-            onRemoveInserted={(row) => store.removeInsertedRow(tab.id, row)}
-            onRowContextMenu={(row, event) => {
-              // Right-clicking outside the selection moves it, so the menu that opens is about the
-              // row under the pointer and not about rows somewhere else on screen.
-              if (!selected.has(row)) selectRow(row, { range: false, toggle: false });
-              setMenu({ x: event.clientX, y: event.clientY, kind: "row", row });
-            }}
-            selectedRows={selected}
-            onSelectRow={selectRow}
-            onSelectAllRows={selectAll}
-            onSort={cycleSort}
-            sort={tab.sort}
-            primaryKeys={primaryKeys}
-            foreignKeys={foreignKeys}
-            onFollowForeignKey={(key, value) => store.followForeignKey(tab, key, value)}
-          />
+          // The same props either way: the two are one dataset seen along different axes, and
+          // anything that behaved differently between them would be a bug rather than a feature.
+          (() => {
+            const shared = {
+              columns: tab.result.columns,
+              rows: tab.result.rows,
+              displayValue: (row: number, column: string) => displayCell(tab, row, column),
+              onEdit: ({ row, column, value }: { row: number; column: string; value: string | null }) =>
+                store.setCell(tab.id, row, column, value),
+              changed,
+              deletedRows: deleted,
+              insertedRows: tab.inserted,
+              onEditInserted: ({
+                row,
+                column,
+                value,
+              }: {
+                row: number;
+                column: string;
+                value: string | null;
+              }) => store.setInsertedCell(tab.id, row, column, value),
+              onRemoveInserted: (row: number) => store.removeInsertedRow(tab.id, row),
+              onRowContextMenu: (row: number, event: React.MouseEvent) => {
+                // Right-clicking outside the selection moves it, so the menu that opens is about
+                // the row under the pointer and not about rows somewhere else on screen.
+                if (!selected.has(row)) selectRow(row, { range: false, toggle: false });
+                setMenu({ x: event.clientX, y: event.clientY, kind: "row", row });
+              },
+              selectedRows: selected,
+              onSelectRow: selectRow,
+              onSelectRange: selectRange,
+              onSelectAllRows: selectAll,
+              primaryKeys,
+              foreignKeys,
+              onFollowForeignKey: (key: DbForeignKey, value: string | null) =>
+                store.followForeignKey(tab, key, value),
+            };
+            return layout === "record" ? (
+              <RecordGrid {...shared} />
+            ) : (
+              // Sorting is the grid's alone: it is a click on a column header, and in the record
+              // view a column header is a record.
+              <ResultGrid {...shared} onSort={cycleSort} sort={tab.sort} />
+            );
+          })()
         ) : null}
 
         {tab.loading && (

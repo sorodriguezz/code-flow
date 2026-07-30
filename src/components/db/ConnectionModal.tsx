@@ -123,6 +123,7 @@ function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
     a.ssh_port === b.ssh_port &&
     a.ssh_user === b.ssh_user &&
     a.ssh_key_file === b.ssh_key_file &&
+    a.schemas_filtered === b.schemas_filtered &&
     a.visible_schemas.length === b.visible_schemas.length &&
     a.visible_schemas.every((name, i) => b.visible_schemas[i] === name) &&
     a.options.length === b.options.length &&
@@ -809,6 +810,7 @@ export function ConnectionModal({
                 <SchemasTab
                   connectionId={selected}
                   visible={config.visible_schemas}
+                  filtered={config.schemas_filtered}
                   objectFilter={config.object_filter}
                   onChange={patch}
                 />
@@ -997,11 +999,14 @@ function startupScriptExample(kind: DbKind): string {
 function SchemasTab({
   connectionId,
   visible,
+  filtered: isFiltered,
   objectFilter,
   onChange,
 }: {
   connectionId: string | null;
   visible: string[];
+  /** Whether the list is being used as a filter at all. See `schemas_filtered`. */
+  filtered: boolean;
   objectFilter: string;
   onChange: (partial: Partial<DbConnectionConfig>) => void;
 }) {
@@ -1063,23 +1068,32 @@ function SchemasTab({
   const chosen = useMemo(() => new Set(visible.map((name) => name.toLowerCase())), [visible]);
   const isChosen = (name: string) => chosen.has(name.toLowerCase());
 
+  /**
+   * Every change here turns the list into a filter.
+   *
+   * Which is what makes unticking the last box mean "show none" instead of quietly reverting to
+   * "show all" — the two used to be the same value. Turning the filter back off is its own action,
+   * the "show every schema" link above, so it can never happen by accident.
+   */
+  const choose = (names: string[]) => onChange({ visible_schemas: names, schemas_filtered: true });
+
   const toggle = (name: string) => {
-    onChange({
-      visible_schemas: isChosen(name)
+    choose(
+      isChosen(name)
         ? visible.filter((entry) => entry.toLowerCase() !== name.toLowerCase())
         : [...visible, name],
-    });
+    );
   };
 
   /** The select-all, over whatever the search has left on screen. */
   const setAll = (on: boolean) => {
     const names = filtered.map((entry) => entry.name);
     if (on) {
-      onChange({ visible_schemas: [...visible, ...names.filter((name) => !isChosen(name))] });
+      choose([...visible, ...names.filter((name) => !isChosen(name))]);
       return;
     }
     const dropped = new Set(names.map((name) => name.toLowerCase()));
-    onChange({ visible_schemas: visible.filter((name) => !dropped.has(name.toLowerCase())) });
+    choose(visible.filter((name) => !dropped.has(name.toLowerCase())));
   };
 
   const shownChosen = filtered.filter((entry) => isChosen(entry.name)).length;
@@ -1101,7 +1115,7 @@ function SchemasTab({
   const add = () => {
     const name = typed.trim();
     if (!name || isChosen(name)) return;
-    onChange({ visible_schemas: [...visible, name] });
+    choose([...visible, name]);
     setTyped("");
   };
 
@@ -1110,18 +1124,30 @@ function SchemasTab({
       <div>
         <span className="mb-1 flex items-center gap-2 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("db.visibleSchemas")}
-          {visible.length > 0 && (
+          {/* The way back out of the filter, offered whenever one is on — including when it is
+              filtering to nothing, which is the state you most need a way out of. */}
+          {isFiltered && (
             <button
               type="button"
-              onClick={() => onChange({ visible_schemas: [] })}
+              onClick={() => onChange({ visible_schemas: [], schemas_filtered: false })}
               className="font-normal normal-case tracking-normal text-[var(--cf-accent)] hover:underline"
             >
               {t("db.showAllSchemas")}
             </button>
           )}
         </span>
-        <p className="mb-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-          {visible.length === 0 ? t("db.allSchemasShown") : t("db.someSchemasShown")}
+        <p
+          className={`mb-2 text-[11px] leading-snug ${
+            isFiltered && visible.length === 0
+              ? "text-[var(--cf-warning)]"
+              : "text-[var(--cf-text-muted)]"
+          }`}
+        >
+          {!isFiltered
+            ? t("db.allSchemasShown")
+            : visible.length === 0
+              ? t("db.noSchemasShown")
+              : t("db.someSchemasShown")}
         </p>
 
         <div className="overflow-hidden rounded-md border border-[var(--cf-border)]">
