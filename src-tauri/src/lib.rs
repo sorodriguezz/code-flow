@@ -105,6 +105,12 @@ pub fn run() {
         .setup(|app| {
             tray::setup(&app.handle())?;
             appmenu::setup(&app.handle())?;
+            // The IRIS driver reaches its bundled Java runtime through this. Recorded here because
+            // `setup` is the only place with an `AppHandle`, and the datasource layer deliberately
+            // has no Tauri types in it.
+            if let Ok(dir) = app.path().resource_dir() {
+                paths::set_resource_dir(dir);
+            }
             Ok(())
         })
         .on_window_event(|window, event| {

@@ -87,8 +87,14 @@ prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "0.9"
 
 # ---------------- Database client ----------------
-# One driver per engine, all pure Rust: the app installs nothing on the user's machine, so there
-# is no ODBC manager, no JDBC bridge and no vendor client library to make a prerequisite.
+# One driver per engine, and four of the five are pure Rust: the app installs nothing on the user's
+# machine, so there is no ODBC manager and no vendor client library to make a prerequisite.
+#
+# IRIS is the exception, and it costs no crate. It has no Rust driver and no third-party
+# implementation of its superserver protocol, so `datasource::iris` drives the InterSystems JDBC
+# driver through a small Java sidecar (`src-tauri/java/`, spoken to over stdio). The runtime and
+# the driver jar are `jlink`-trimmed into the bundle by `scripts/build-iris-runtime.mjs` — still
+# nothing for the user to install, and nothing here for cargo to build.
 #
 # Postgres covers Supabase too — a Supabase project *is* a Postgres instance, so the only
 # difference is which host/port/SSL defaults the connection form fills in.

@@ -73,7 +73,7 @@ export interface DbServerInfo {
   version: string;
   database: string;
   user: string;
-  /** Things worth knowing that aren't failures — a pooler's limitations, the Atelier API version. */
+  /** Things worth knowing that aren't failures — a pooler's limitations, the IRIS driver version. */
   notes: string[];
 }
 
@@ -282,11 +282,12 @@ export const DB_ENGINES: DbEngineInfo[] = [
   {
     kind: "iris",
     label: "InterSystems IRIS",
-    // The web server port, not the superserver's 1972: this driver speaks the Atelier REST API.
-    defaultPort: 52773,
+    // The superserver, which is what JDBC talks to — not the web server's 52773, where this
+    // driver used to go when it spoke the Atelier REST API.
+    defaultPort: 1972,
     sql: true,
     databaseLabel: "Namespace",
-    urlPlaceholder: "http://host:52773",
+    urlPlaceholder: "jdbc:IRIS://host:1972/USER",
     defaultSsl: "disable",
     defaultUser: "_SYSTEM",
   },

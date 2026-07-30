@@ -1,38 +1,40 @@
-//! InterSystems IRIS, over the **Atelier REST API**.
+//! InterSystems IRIS, over **JDBC**.
 //!
-//! IRIS has no pure-Rust driver. Its own clients are JDBC, ODBC and the native SDKs, every one of
-//! which would make a vendor runtime a prerequisite for opening this app — a JVM, an ODBC manager
-//! plus the InterSystems ODBC driver, or the Python/Node bridge. None of that belongs in a desktop
-//! git client's install instructions.
+//! IRIS has no pure-Rust driver and no third-party implementation of its superserver protocol. Its
+//! one real client is the InterSystems Type 4 JDBC driver, which is Java — so this file is a client
+//! of [`super::jvm`], a single `java` process running `com.codeflow.iris.IrisBridge` that CodeFlow
+//! spawns on the first IRIS connection and shuts down when the last one closes. Both the trimmed
+//! runtime and the driver jar ship inside the app, so nothing has to be installed for this to work.
 //!
-//! What IRIS *does* expose out of the box is the Source Code File REST API (`/api/atelier/`), the
-//! same one the VS Code ObjectScript extension uses. Its `action/query` endpoint runs arbitrary
-//! SQL and answers with JSON:
+//! Going through JDBC rather than the Atelier REST API (which this replaces) is what makes IRIS a
+//! first-class engine in the workspace instead of an approximation of one:
 //!
-//! ```text
-//! POST /api/atelier/v1/USER/action/query?max=1000
-//! {"query": "SELECT TOP 10 * FROM Sample.Person"}
-//! → {"status": {"errors": [], "summary": ""}, "console": [], "result": {"content": [ {…}, … ]}}
-//! ```
+//! - **The data editor gets a real transaction.** REST is stateless, so "Apply" used to be a series
+//!   of independent writes that could stop half-done. Edits now run inside one
+//!   `setAutoCommit(false) … commit()` and roll back together.
+//! - **Cancel reaches the server.** `Statement.cancel()` stops the query where it runs, so IRIS
+//!   joins Postgres as an engine where the Cancel button means something, rather than only dropping
+//!   our end of the call.
+//! - **Writes report what they touched.** `getUpdateCount()` is a real affected-row count, which
+//!   the REST endpoint never returned.
+//! - **Columns arrive typed and in order**, from `ResultSetMetaData`, instead of being recovered
+//!   from the key order of a JSON object.
 //!
-//! So this driver is an HTTP client. That has consequences worth knowing about, all of them
-//! surfaced to the user rather than hidden:
+//! It also moves the port: JDBC talks to the **superserver on 1972**, not the web server on 52773.
+//! A connection still pointed at the old port is caught in [`IrisSession::open`] and told so.
 //!
-//! - **It needs the web server**, port 52773 by default, not the superserver on 1972.
-//! - **Every statement is its own transaction.** REST is stateless, so there is no session to hold
-//!   one open across two requests — which is why the data editor reports each row separately
-//!   instead of promising all-or-nothing.
-//! - **Values arrive as JSON**, already rendered by IRIS, which is the same property the Postgres
-//!   driver gets from the simple query protocol.
-//! - **The account needs privileges** on `%Development` (or at least the `/api/atelier` web
-//!   application) as well as on the tables being read.
+//! Every value still crosses as text — the Java side reads each column with `getString`, which is
+//! the same invariant the other four drivers hold.
 
-use serde::Deserialize;
+use std::sync::Arc;
 
+use serde_json::{Map, Value};
+
+use super::jvm::{self, Bridge};
 use super::postgres::{annotate_types, cell, relation_folders, schema_folders};
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
-    describe_db_error, read_only_guard, read_only_refusal, split_statements, DbColumn, DbColumnInfo,
+    read_only_guard, read_only_refusal, split_statements, DbColumn, DbColumnInfo,
     DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbKind, DbNode, DbNodeKind,
     DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest,
     SqlDialect,
@@ -40,35 +42,35 @@ use super::{
 
 const DIALECT: SqlDialect = SqlDialect::Iris;
 
+/// The port the Atelier REST driver used. A saved connection that still names it is pointed at the
+/// web server, which speaks HTTP and will never answer a JDBC handshake.
+const WEB_SERVER_PORT: u16 = 52773;
+
 pub struct IrisSession {
-    http: reqwest::Client,
-    /// `https://host:52773` plus any web-application prefix, no trailing slash.
-    base: String,
+    bridge: Arc<Bridge>,
+    /// Identifies this connection inside the shared JVM. One per connection *and* namespace,
+    /// because a JDBC URL names its namespace and cannot be switched afterwards.
+    session_id: String,
     namespace: String,
     user: String,
-    password: String,
     version: String,
-    api_version: i64,
-    /// Namespaces the server told us about at connect time; the tree shows these rather than
-    /// querying a catalog, because `GET /api/atelier/` already answered the question.
+    driver: String,
+    /// Namespaces this instance has, when it would tell us. Empty means the tree shows just the one
+    /// we are connected to, which is truer than showing a list we had to guess at.
     namespaces: Vec<String>,
     read_only: bool,
-    endpoint: String,
+    /// Set when the connection asked for TLS, since the driver's idea of it differs from the other
+    /// engines' and the difference belongs in front of the user rather than in this comment alone.
+    tls_note: Option<String>,
+    /// Connection options that aren't JDBC properties — leftovers from the REST driver, named so
+    /// the user can delete them rather than wonder why they stopped mattering.
+    ignored_options: Vec<String>,
 }
 
 impl IrisSession {
     pub async fn open(config: &DbConnectionConfig, database: Option<&str>) -> Result<Self, String> {
         let mut config = config.clone();
         config.resolve_password();
-
-        let base = base_url(&config);
-        let http = reqwest::Client::builder()
-            .connect_timeout(config.connect_timeout())
-            // No overall request timeout: a report that takes four minutes is a report, not a
-            // hang, and the console's Cancel button is the way to stop one.
-            .danger_accept_invalid_certs(config.ssl != DbSslMode::VerifyFull)
-            .build()
-            .map_err(|e| e.to_string())?;
 
         let namespace = database
             .filter(|d| !d.is_empty())
@@ -81,46 +83,56 @@ impl IrisSession {
                 }
             });
 
+        let bridge = jvm::bridge().await?;
+        let session_id = format!("{}#{namespace}", config.id);
+        let (properties, ignored_options) = driver_properties(&config);
+
+        let mut request = Map::new();
+        request.insert("url".into(), Value::from(jdbc_url(&config, &namespace)));
+        request.insert("user".into(), Value::from(config.user.clone()));
+        // Over a pipe to a child process, never on its command line — argv is world-readable.
+        request.insert("password".into(), Value::from(config.password.clone()));
+        request.insert("readOnly".into(), Value::from(config.read_only));
+        request.insert("timeoutMs".into(), Value::from(config.connect_timeout().as_millis() as u64));
+        request.insert("properties".into(), Value::Object(properties));
+
+        let answer = bridge
+            .call("open", &session_id, request)
+            .await
+            .map_err(|e| explain_connect_failure(&config, &e))?;
+        bridge.session_opened();
+
         let mut session = Self {
-            http,
-            base,
+            bridge,
+            session_id,
             namespace,
-            user: config.user.clone(),
-            password: config.password.clone(),
-            version: String::new(),
-            api_version: 0,
+            user: text(&answer, "user").unwrap_or_else(|| config.user.clone()),
+            version: text(&answer, "version").unwrap_or_default(),
+            driver: text(&answer, "driver").unwrap_or_default(),
             namespaces: Vec::new(),
             read_only: config.read_only,
-            endpoint: config.endpoint(),
+            tls_note: tls_note(&config),
+            ignored_options,
         };
-
-        // `GET /api/atelier/` is the handshake: it authenticates, proves the web application is
-        // reachable, and returns the version and namespace list in one call.
-        let server: AtelierEnvelope<ServerContent> = session
-            .get("/api/atelier/")
-            .await
-            .map_err(|e| describe_db_error(&config, "Connecting", &e))?;
-        if let Some(error) = server.first_error() {
-            return Err(error);
-        }
-        if let Some(content) = server.result.and_then(|result| result.content) {
-            session.version = content.version.unwrap_or_default();
-            session.api_version = content.api.unwrap_or_default();
-            session.namespaces = content.namespaces.unwrap_or_default();
-        }
+        session.namespaces = session.list_namespaces().await;
         Ok(session)
     }
 
     pub fn info(&self) -> DbServerInfo {
         let mut notes = Vec::new();
-        if self.api_version > 0 {
-            notes.push(format!("Atelier REST API v{}", self.api_version));
+        if !self.driver.is_empty() {
+            notes.push(self.driver.clone());
         }
-        notes.push(
-            "Statements run over the Atelier REST API, so each one is its own transaction — there \
-             is no session to hold one open across requests."
-                .to_string(),
-        );
+        if let Some(tls) = &self.tls_note {
+            notes.push(tls.clone());
+        }
+        if !self.ignored_options.is_empty() {
+            notes.push(format!(
+                "These connection options aren't JDBC properties and were ignored: {}. They were \
+                 needed by the older REST-based driver and can be removed.",
+                self.ignored_options.join(", ")
+            ));
+        }
         DbServerInfo {
             kind: DbKind::Iris,
             version: self.version.clone(),
@@ -130,181 +142,55 @@ impl IrisSession {
         }
     }
 
-    // -------------------------------------------------------------------- HTTP
-
-    async fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, String> {
-        let url = format!("{}{path}", self.base);
-        let response = self
-            .http
-            .get(&url)
-            .basic_auth(&self.user, Some(&self.password))
-            .send()
-            .await
-            .map_err(|e| http_error(&self.endpoint, &e))?;
-        self.decode(response, &url).await
+    /// False once the JVM is gone, so the registry opens a fresh session instead of handing back
+    /// one whose every statement would fail.
+    pub fn is_alive(&self) -> bool {
+        self.bridge.is_alive()
     }
 
-    async fn post<T: for<'de> Deserialize<'de>>(
-        &self,
-        path: &str,
-        body: serde_json::Value,
-    ) -> Result<T, String> {
-        let url = format!("{}{path}", self.base);
-        let response = self
-            .http
-            .post(&url)
-            .basic_auth(&self.user, Some(&self.password))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| http_error(&self.endpoint, &e))?;
-        self.decode(response, &url).await
+    // ------------------------------------------------------------------ wire
+
+    /// Runs one statement and returns the bridge's raw answer.
+    async fn run(&self, sql: &str, max_rows: Option<usize>) -> Result<Value, String> {
+        let mut request = Map::new();
+        request.insert("sql".into(), Value::from(sql));
+        request.insert("maxRows".into(), Value::from(max_rows.unwrap_or(0) as u64));
+        self.bridge.call("exec", &self.session_id, request).await
     }
 
-    async fn decode<T: for<'de> Deserialize<'de>>(
-        &self,
-        response: reqwest::Response,
-        url: &str,
-    ) -> Result<T, String> {
-        let status = response.status();
-        let text = response.text().await.map_err(|e| e.to_string())?;
-
-        // IRIS answers a failed query with HTTP 500 and the real reason in `status.errors`, so the
-        // body is parsed before the status is judged — the status alone would throw the message
-        // away.
-        if let Ok(parsed) = serde_json::from_str::<T>(&text) {
-            return Ok(parsed);
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(format!(
-                "IRIS rejected the credentials for {}. Check the username and password, and that \
-                 the account is enabled for the /api/atelier web application.",
-                self.endpoint
-            ));
-        }
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(format!(
-                "{url} returned 404. The Atelier REST API doesn't seem to be enabled on this \
-                 instance — in the Management Portal, check that the /api/atelier web application \
-                 exists and is enabled."
-            ));
-        }
-        Err(format!(
-            "IRIS answered {status} with something that isn't the expected JSON:\n{}",
-            text.chars().take(500).collect::<String>()
-        ))
-    }
-
-    /// Runs one SQL statement through `action/query`.
-    ///
-    /// `max` is the endpoint's own row cap, which is better than a `TOP` rewritten into the user's
-    /// SQL: it applies to whatever they wrote, including a statement that already has its own
-    /// `TOP`.
-    async fn query(
-        &self,
-        namespace: &str,
-        sql: &str,
-        max_rows: Option<usize>,
-    ) -> Result<DbStatementResult, String> {
-        let started = std::time::Instant::now();
-        let namespace = if namespace.is_empty() { &self.namespace } else { namespace };
-        let path = match max_rows {
-            // One over the asked-for limit, so "there is more" can be detected rather than guessed.
-            Some(max) => format!(
-                "/api/atelier/v1/{}/action/query?max={}",
-                encode_namespace(namespace),
-                max.saturating_add(1)
-            ),
-            None => format!("/api/atelier/v1/{}/action/query", encode_namespace(namespace)),
-        };
-
-        let envelope: AtelierEnvelope<QueryContent> =
-            self.post(&path, serde_json::json!({ "query": sql })).await?;
-
-        let mut result = DbStatementResult::empty(sql);
-        result.duration_ms = started.elapsed().as_millis() as u64;
-        result.messages = envelope.console.clone().unwrap_or_default();
-        if let Some(error) = envelope.first_error() {
-            result.error = Some(error);
-            return Ok(result);
-        }
-
-        let rows = envelope
-            .result
-            .and_then(|result| result.content)
-            .map(|content| content.0)
-            .unwrap_or_default();
-
-        // The endpoint answers with an array of objects, so the column order has to be recovered
-        // from the objects themselves — first-seen order across the rows, which is the order IRIS
-        // projected them in.
-        let mut columns: Vec<String> = Vec::new();
-        for row in &rows {
-            for key in row.keys() {
-                if !columns.iter().any(|existing| existing == key) {
-                    columns.push(key.clone());
-                }
-            }
-        }
-        result.columns = columns.iter().map(|name| DbColumn::new(name, String::new())).collect();
-        result.rows = rows
-            .iter()
-            .map(|row| columns.iter().map(|name| render_value(row.get(name))).collect())
-            .collect();
-
-        if let Some(max) = max_rows {
-            if result.rows.len() > max {
-                result.rows.truncate(max);
-                result.truncated = true;
-            }
-        }
-        // A statement with no projection comes back with no rows and no error; "it ran" is the only
-        // honest thing to report, since `action/query` doesn't return an affected count.
-        Ok(result)
-    }
-
-    async fn text_rows(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
-        let result = self.query(&self.namespace, sql, None).await?;
-        match result.error {
-            Some(error) => Err(error),
-            None => Ok(result.rows),
+    /// Runs one statement as a console would: a failure becomes the result's `error` rather than
+    /// the call's, so a batch can report "three ran, the fourth failed here".
+    async fn statement(&self, sql: &str, max_rows: Option<usize>) -> DbStatementResult {
+        match self.run(sql, max_rows).await {
+            Ok(answer) => decode_statement(sql, &answer),
+            Err(error) => DbStatementResult::failed(sql, error),
         }
     }
 
-    async fn rows_in(
-        &self,
-        namespace: Option<&str>,
-        sql: &str,
-    ) -> Result<Vec<Vec<Option<String>>>, String> {
-        let result = self.query(namespace.unwrap_or(&self.namespace), sql, None).await?;
-        match result.error {
-            Some(error) => Err(error),
-            None => Ok(result.rows),
-        }
+    /// Rows only, with a failure as a real error. Every catalog query goes through this.
+    async fn rows(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>, String> {
+        let answer = self.run(sql, None).await?;
+        Ok(decode_statement(sql, &answer).rows)
     }
 
     async fn scalar(&self, sql: &str) -> Result<Option<String>, String> {
-        Ok(self.text_rows(sql).await?.first().and_then(|row| row.first().cloned()).flatten())
+        Ok(self.rows(sql).await?.first().and_then(|row| row.first().cloned()).flatten())
+    }
+
+    /// Asks the server to abandon whatever this session is running.
+    pub async fn cancel_running(&self) {
+        let _ = self.bridge.call("cancel", &self.session_id, Map::new()).await;
     }
 
     pub async fn execute(&self, sql: &str, ctx: &DbExecContext) -> Result<DbExecuteResult, String> {
         let started = std::time::Instant::now();
-        let namespace = ctx
-            .database
-            .clone()
-            .filter(|d| !d.is_empty())
-            .unwrap_or_else(|| self.namespace.clone());
-
         let mut results = Vec::new();
         for statement in split_statements(sql, Some(DIALECT)) {
             if let Err(refused) = read_only_guard(&statement, self.read_only) {
                 results.push(DbStatementResult::failed(&statement, refused));
                 break;
             }
-            // The console's schema picker doesn't reach here: IRIS has no `SET SCHEMA` that would
-            // outlive a REST request, so what it does instead is qualify the names it inserts into
-            // new statements. Rewriting the user's SQL to add a schema would be guesswork.
-            let result = self.query(&namespace, &statement, ctx.limit()).await?;
+            let result = self.statement(&statement, ctx.limit()).await;
             let failed = result.error.is_some();
             results.push(result);
             if failed {
@@ -315,13 +201,12 @@ impl IrisSession {
     }
 
     /// IRIS's plan comes from `EXPLAIN`, which returns it as an XML document in one cell.
-    pub async fn explain(&self, sql: &str, ctx: &DbExecContext) -> Result<String, String> {
+    pub async fn explain(&self, sql: &str, _ctx: &DbExecContext) -> Result<String, String> {
         let statement = split_statements(sql, Some(DIALECT))
             .into_iter()
             .next()
             .ok_or_else(|| "There is no statement to explain.".to_string())?;
-        let namespace = ctx.database.clone().unwrap_or_else(|| self.namespace.clone());
-        let result = self.query(&namespace, &format!("EXPLAIN {statement}"), None).await?;
+        let result = self.statement(&format!("EXPLAIN {statement}"), None).await;
         if let Some(error) = result.error {
             return Err(error);
         }
@@ -334,6 +219,22 @@ impl IrisSession {
     }
 
     // ------------------------------------------------------------ introspect
+
+    /// The namespaces this instance has.
+    ///
+    /// `%SYS.Namespace_List()` is the SQL projection of the class query every IRIS instance ships,
+    /// but reaching it needs privileges a locked-down account may not have — and an account that
+    /// can read one namespace's tables is still a useful connection. So a refusal here is not an
+    /// error: the tree falls back to showing the one namespace we are connected to.
+    async fn list_namespaces(&self) -> Vec<String> {
+        let Ok(rows) = self.rows("SELECT Nsp FROM %SYS.Namespace_List()").await else {
+            return Vec::new();
+        };
+        rows.iter()
+            .filter_map(|row| row.first().cloned().flatten())
+            .filter(|name| !name.is_empty())
+            .collect()
+    }
 
     pub async fn children(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {
         match node.kind {
@@ -377,10 +278,7 @@ impl IrisSession {
 
     async fn schemas(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {
         let rows = self
-            .rows_in(
-                node.db(),
-                "SELECT DISTINCT TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA",
-            )
+            .rows("SELECT DISTINCT TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA")
             .await?;
         Ok(rows
             .iter()
@@ -404,15 +302,12 @@ impl IrisSession {
     async fn relations(&self, node: &DbNodeRef, table_type: &str) -> Result<Vec<DbNode>, String> {
         let schema = node.schema().unwrap_or("SQLUser");
         let rows = self
-            .rows_in(
-                node.db(),
-                &format!(
-                    "SELECT TABLE_NAME, CLASSNAME FROM INFORMATION_SCHEMA.TABLES \
-                     WHERE TABLE_SCHEMA = {} AND TABLE_TYPE = {} ORDER BY TABLE_NAME",
-                    quote_literal(Some(schema))?,
-                    quote_literal(Some(table_type))?
-                ),
-            )
+            .rows(&format!(
+                "SELECT TABLE_NAME, CLASSNAME FROM INFORMATION_SCHEMA.TABLES \
+                 WHERE TABLE_SCHEMA = {} AND TABLE_TYPE = {} ORDER BY TABLE_NAME",
+                quote_literal(Some(schema))?,
+                quote_literal(Some(table_type))?
+            ))
             .await?;
         let kind = if table_type == "VIEW" { DbNodeKind::View } else { DbNodeKind::Table };
         Ok(rows
@@ -439,14 +334,11 @@ impl IrisSession {
     async fn routines(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {
         let schema = node.schema().unwrap_or("SQLUser");
         let rows = self
-            .rows_in(
-                node.db(),
-                &format!(
-                    "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES \
-                     WHERE ROUTINE_SCHEMA = {} ORDER BY ROUTINE_NAME",
-                    quote_literal(Some(schema))?
-                ),
-            )
+            .rows(&format!(
+                "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES \
+                 WHERE ROUTINE_SCHEMA = {} ORDER BY ROUTINE_NAME",
+                quote_literal(Some(schema))?
+            ))
             .await
             .unwrap_or_default();
         Ok(rows
@@ -472,22 +364,19 @@ impl IrisSession {
         let schema = node.schema().unwrap_or("SQLUser");
         let table = node.name()?;
         let rows = self
-            .rows_in(
-                node.db(),
-                &format!(
-                    "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
-                            c.ORDINAL_POSITION, c.CHARACTER_MAXIMUM_LENGTH, \
-                            c.NUMERIC_PRECISION, c.NUMERIC_SCALE, \
-                            (SELECT COUNT(*) FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k \
-                             WHERE k.TABLE_SCHEMA = c.TABLE_SCHEMA AND k.TABLE_NAME = c.TABLE_NAME \
-                               AND k.COLUMN_NAME = c.COLUMN_NAME AND k.CONSTRAINT_NAME %STARTSWITH 'PK') \
-                     FROM INFORMATION_SCHEMA.COLUMNS c \
-                     WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
-                     ORDER BY c.ORDINAL_POSITION",
-                    quote_literal(Some(schema))?,
-                    quote_literal(Some(table))?
-                ),
-            )
+            .rows(&format!(
+                "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, \
+                        c.ORDINAL_POSITION, c.CHARACTER_MAXIMUM_LENGTH, \
+                        c.NUMERIC_PRECISION, c.NUMERIC_SCALE, \
+                        (SELECT COUNT(*) FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k \
+                         WHERE k.TABLE_SCHEMA = c.TABLE_SCHEMA AND k.TABLE_NAME = c.TABLE_NAME \
+                           AND k.COLUMN_NAME = c.COLUMN_NAME AND k.CONSTRAINT_NAME %STARTSWITH 'PK') \
+                 FROM INFORMATION_SCHEMA.COLUMNS c \
+                 WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
+                 ORDER BY c.ORDINAL_POSITION",
+                quote_literal(Some(schema))?,
+                quote_literal(Some(table))?
+            ))
             .await?;
 
         Ok(rows
@@ -535,17 +424,14 @@ impl IrisSession {
         let schema = node.schema().unwrap_or("SQLUser");
         let table = node.name()?;
         let rows = self
-            .rows_in(
-                node.db(),
-                &format!(
-                    "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, PRIMARY_KEY \
-                     FROM INFORMATION_SCHEMA.INDEXES \
-                     WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
-                     ORDER BY INDEX_NAME, ORDINAL_POSITION",
-                    quote_literal(Some(schema))?,
-                    quote_literal(Some(table))?
-                ),
-            )
+            .rows(&format!(
+                "SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE, PRIMARY_KEY \
+                 FROM INFORMATION_SCHEMA.INDEXES \
+                 WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+                 ORDER BY INDEX_NAME, ORDINAL_POSITION",
+                quote_literal(Some(schema))?,
+                quote_literal(Some(table))?
+            ))
             .await?;
 
         // One row per indexed column; the tree wants one node per index.
@@ -565,11 +451,7 @@ impl IrisSession {
                 id: format!("idx:{schema}:{table}:{name}"),
                 kind: DbNodeKind::Index,
                 name: name.clone(),
-                detail: format!(
-                    "{}({})",
-                    if unique { "unique " } else { "" },
-                    columns.join(", ")
-                ),
+                detail: format!("{}({})", if unique { "unique " } else { "" }, columns.join(", ")),
                 database: node.db().map(str::to_string),
                 schema: Some(schema.to_string()),
                 table: Some(table.to_string()),
@@ -583,16 +465,13 @@ impl IrisSession {
         let schema = node.schema().unwrap_or("SQLUser");
         let table = node.name()?;
         let rows = self
-            .rows_in(
-                node.db(),
-                &format!(
-                    "SELECT CONSTRAINT_NAME, CONSTRAINT_TYPE \
-                     FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS \
-                     WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} ORDER BY CONSTRAINT_NAME",
-                    quote_literal(Some(schema))?,
-                    quote_literal(Some(table))?
-                ),
-            )
+            .rows(&format!(
+                "SELECT CONSTRAINT_NAME, CONSTRAINT_TYPE \
+                 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS \
+                 WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} ORDER BY CONSTRAINT_NAME",
+                quote_literal(Some(schema))?,
+                quote_literal(Some(table))?
+            ))
             .await
             .unwrap_or_default();
         Ok(rows
@@ -626,14 +505,15 @@ impl IrisSession {
             request.offset,
             request.limit,
         )?;
-        let namespace = request.node.db().unwrap_or(&self.namespace).to_string();
-        let mut result = self.query(&namespace, &sql, Some(request.limit as usize)).await?;
+        let answer = self.run(&sql, Some(request.limit as usize)).await?;
+        let mut result = decode_statement(&sql, &answer);
         if let Some(error) = result.error {
             return Err(error);
         }
         // The `%VID` paging trick adds a bookkeeping column; it is an artefact of how the window
         // was taken, not part of the table.
-        if let Some(index) = result.columns.iter().position(|c| c.name.eq_ignore_ascii_case("cf_vid"))
+        if let Some(index) =
+            result.columns.iter().position(|c| c.name.eq_ignore_ascii_case("cf_vid"))
         {
             result.columns.remove(index);
             for row in result.rows.iter_mut() {
@@ -642,6 +522,8 @@ impl IrisSession {
                 }
             }
         }
+        // The catalog knows `VARCHAR(50)` where the result set only knows `VARCHAR`, so the richer
+        // name wins when it is available.
         if let Ok(columns) = self.columns(&request.node).await {
             annotate_types(&mut result, &columns);
         }
@@ -650,26 +532,19 @@ impl IrisSession {
 
     pub async fn row_count(&self, node: &DbNodeRef, filter: &str) -> Result<i64, String> {
         let sql = sqlgen::count_rows(node, DIALECT, filter)?;
-        let namespace = node.db().unwrap_or(&self.namespace).to_string();
-        let result = self.query(&namespace, &sql, None).await?;
-        if let Some(error) = result.error {
-            return Err(error);
-        }
-        Ok(result
-            .rows
-            .first()
-            .and_then(|row| row.first().cloned())
-            .flatten()
+        Ok(self
+            .scalar(&sql)
+            .await?
             .and_then(|value| value.parse().ok())
             .unwrap_or_default())
     }
 
-    /// Applies the grid's edits, one request each.
+    /// Applies the grid's edits as one transaction.
     ///
-    /// Not a transaction, and it says so: the REST endpoint has no session to hold one in, so
-    /// `applied` is a count of what actually went through and the first failure stops the rest.
-    /// A set of edits that must be atomic belongs in a console statement wrapped in `START
-    /// TRANSACTION … COMMIT`, which IRIS does support within a single request.
+    /// The REST driver this replaced could not do that — a stateless request has no session to hold
+    /// a transaction open in, so its `applied` count was "how far it got before something broke".
+    /// Here the whole batch commits or none of it does, which is what the preview in the UI has
+    /// always implied.
     pub async fn apply_edits(
         &self,
         node: &DbNodeRef,
@@ -678,25 +553,24 @@ impl IrisSession {
         if self.read_only {
             return Err(read_only_refusal());
         }
-        let namespace = node.db().unwrap_or(&self.namespace).to_string();
-        let mut statements = Vec::with_capacity(edits.len());
-        for edit in edits {
-            statements.push(sqlgen::edit_statement(node, DIALECT, edit)?);
-        }
+        let statements = edits
+            .iter()
+            .map(|edit| sqlgen::edit_statement(node, DIALECT, edit))
+            .collect::<Result<Vec<String>, String>>()?;
 
-        let mut applied = 0u32;
-        for statement in &statements {
-            let result = self.query(&namespace, statement, None).await?;
-            if let Some(error) = result.error {
-                return Ok(DbEditResult {
-                    applied,
-                    statements: statements.clone(),
-                    error: Some(format!("{error}\n\n{statement}")),
-                });
+        let mut request = Map::new();
+        request.insert("statements".into(), Value::from(statements.clone()));
+        request.insert("transactional".into(), Value::from(true));
+        let answer = self.bridge.call("batch", &self.session_id, request).await?;
+
+        let applied = answer.get("applied").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let error = answer.get("error").and_then(Value::as_str).map(|message| {
+            match answer.get("failedStatement").and_then(Value::as_str) {
+                Some(statement) if !statement.is_empty() => format!("{message}\n\n{statement}"),
+                _ => message.to_string(),
             }
-            applied += 1;
-        }
-        Ok(DbEditResult { applied, statements, error: None })
+        });
+        Ok(DbEditResult { applied, statements, error })
     }
 
     pub async fn object_ddl(&self, node: &DbNodeRef) -> Result<String, String> {
@@ -732,7 +606,7 @@ impl IrisSession {
                     (
                         c.name.clone(),
                         info.map(|i| i.data_type.clone()).unwrap_or_default(),
-                        info.map_or(true, |i| i.nullable),
+                        info.is_none_or(|i| i.nullable),
                         info.and_then(|i| i.default_value.clone()),
                     )
                 })
@@ -769,118 +643,202 @@ impl IrisSession {
     }
 }
 
+impl Drop for IrisSession {
+    /// Releases the JDBC connection inside the JVM, and lets the JVM itself exit when this was the
+    /// last session.
+    ///
+    /// Detached rather than awaited, because `Drop` cannot be async — and routed through the
+    /// bridge's own runtime handle rather than `Handle::current()`, because this drop often happens
+    /// on a thread that has no runtime in context: `db_disconnect` is a sync command, and it is the
+    /// call that drops the session.
+    fn drop(&mut self) {
+        self.bridge.close_session_detached(std::mem::take(&mut self.session_id));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wire format
 // ---------------------------------------------------------------------------
 
-/// Every Atelier response has the same envelope: a `status` with an error array, a `console` array
-/// of anything the routine printed, and a `result` whose `content` differs per endpoint.
-#[derive(Debug, Deserialize)]
-struct AtelierEnvelope<T> {
-    status: Option<AtelierStatus>,
-    console: Option<Vec<String>>,
-    result: Option<AtelierResult<T>>,
+fn text(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_string).filter(|s| !s.is_empty())
 }
 
-#[derive(Debug, Deserialize)]
-struct AtelierResult<T> {
-    content: Option<T>,
+/// Turns the bridge's answer into the shape the whole workspace reads.
+fn decode_statement(sql: &str, answer: &Value) -> DbStatementResult {
+    let mut result = DbStatementResult::empty(sql);
+
+    result.columns = answer
+        .get("columns")
+        .and_then(Value::as_array)
+        .map(|columns| {
+            columns
+                .iter()
+                .map(|column| {
+                    DbColumn::new(
+                        column.get("name").and_then(Value::as_str).unwrap_or_default(),
+                        column.get("type").and_then(Value::as_str).unwrap_or_default(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    result.rows = answer
+        .get("rows")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .map(|row| {
+                    row.as_array()
+                        .map(|cells| {
+                            cells
+                                .iter()
+                                .map(|cell| match cell {
+                                    // JSON null is SQL NULL. `Some("")` is an empty string, and the
+                                    // two are never interchangeable.
+                                    Value::Null => None,
+                                    Value::String(text) => Some(text.clone()),
+                                    other => Some(other.to_string()),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    result.truncated = answer.get("truncated").and_then(Value::as_bool).unwrap_or(false);
+    result.duration_ms = answer.get("durationMs").and_then(Value::as_u64).unwrap_or(0);
+    // JDBC answers -1 for "this statement had no update count", which is not the same as zero rows
+    // touched and must not be shown as one.
+    result.rows_affected =
+        answer.get("rowsAffected").and_then(Value::as_i64).filter(|count| *count >= 0);
+    result.messages = answer
+        .get("messages")
+        .and_then(Value::as_array)
+        .map(|messages| {
+            messages.iter().filter_map(Value::as_str).map(str::to_string).collect()
+        })
+        .unwrap_or_default();
+    result
 }
 
-#[derive(Debug, Deserialize)]
-struct AtelierStatus {
-    errors: Option<Vec<serde_json::Value>>,
-    summary: Option<String>,
-}
+// ---------------------------------------------------------------------------
+// Connection shape
+// ---------------------------------------------------------------------------
 
-impl<T> AtelierEnvelope<T> {
-    /// The first error, phrased as a sentence.
-    ///
-    /// IRIS puts errors in an array whose entries are sometimes strings and sometimes objects
-    /// (`{"error": "…", "id": "…"}`), so both shapes are handled — a client that only read one of
-    /// them would show "something went wrong" for half of all failures.
-    fn first_error(&self) -> Option<String> {
-        let status = self.status.as_ref()?;
-        let errors = status.errors.as_ref()?;
-        let first = errors.first()?;
-        let text = match first {
-            serde_json::Value::String(text) => text.clone(),
-            serde_json::Value::Object(map) => map
-                .get("error")
-                .and_then(|value| value.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| first.to_string()),
-            other => other.to_string(),
-        };
-        if text.trim().is_empty() {
-            return status.summary.clone().filter(|summary| !summary.trim().is_empty());
-        }
-        Some(text)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ServerContent {
-    version: Option<String>,
-    api: Option<i64>,
-    namespaces: Option<Vec<String>>,
-}
-
-/// `action/query` answers with an array of objects — one per row, keyed by column name.
+/// `jdbc:IRIS://host:port/NAMESPACE`.
 ///
-/// `BTreeMap` would sort the columns alphabetically; `serde_json::Map` keeps insertion order only
-/// with the `preserve_order` feature, which isn't on. So the rows are kept as ordered pair lists
-/// and the column order is recovered from them.
-#[derive(Debug, Deserialize)]
-struct QueryContent(Vec<QueryRow>);
-
-#[derive(Debug)]
-struct QueryRow(Vec<(String, serde_json::Value)>);
-
-impl QueryRow {
-    fn keys(&self) -> impl Iterator<Item = &String> {
-        self.0.iter().map(|(key, _)| key)
+/// A `url` on the connection wins outright, because that is how these are handed out — but it is
+/// still pointed at this session's namespace, since the explorer's whole job is walking the others.
+fn jdbc_url(config: &DbConnectionConfig, namespace: &str) -> String {
+    let trimmed = config.url.trim();
+    if !trimmed.is_empty() {
+        // The namespace is the segment after the third slash of `jdbc:IRIS://host:port/NS`. Only
+        // that segment is replaced — anything past it is the driver's own parameters
+        // (`/?log=…`), and dropping those would silently undo the user's configuration.
+        let Some(start) = trimmed.match_indices('/').nth(2).map(|(index, _)| index + 1) else {
+            return format!("{}/{namespace}", trimmed.trim_end_matches('/'));
+        };
+        let rest = &trimmed[start..];
+        let end = start + rest.find(['/', '?']).unwrap_or(rest.len());
+        return format!("{}{namespace}{}", &trimmed[..start], &trimmed[end..]);
     }
-
-    fn get(&self, key: &str) -> Option<&serde_json::Value> {
-        self.0.iter().find(|(existing, _)| existing == key).map(|(_, value)| value)
-    }
+    format!("jdbc:IRIS://{}:{}/{namespace}", config.host, config.effective_port())
 }
 
-impl<'de> Deserialize<'de> for QueryRow {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct RowVisitor;
-        impl<'de> serde::de::Visitor<'de> for RowVisitor {
-            type Value = QueryRow;
+/// The driver's own property names, verified against `IRISDriver.getPropertyInfo`.
+///
+/// Options are matched against this list rather than passed through wholesale: the driver rejects a
+/// property it doesn't know, and a connection that fails because of a stale `path` left over from
+/// the REST driver would be a mystery. Anything unmatched is reported in [`IrisSession::info`]
+/// instead of being sent.
+const DRIVER_PROPERTIES: [&str; 18] = [
+    "AccessToken",
+    "TCP_NODELAY",
+    "SO_SNDBUF",
+    "SO_RCVBUF",
+    "TransactionIsolationLevel",
+    "service principal name",
+    "connection security level",
+    "SSL configuration name",
+    "key recovery password",
+    "dialect",
+    "autobalance",
+    "LoaderPoolSize",
+    "PipeJDBC",
+    "SharedMemory",
+    "SSLContext",
+    "log",
+    "FeatureOption",
+    "NetworkTimeout",
+];
 
-            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a JSON object holding one row")
-            }
+/// The JDBC properties for a connection, plus the option keys that aren't any.
+fn driver_properties(config: &DbConnectionConfig) -> (Map<String, Value>, Vec<String>) {
+    let mut properties = Map::new();
+    let mut ignored = Vec::new();
 
-            fn visit_map<M: serde::de::MapAccess<'de>>(
-                self,
-                mut map: M,
-            ) -> Result<Self::Value, M::Error> {
-                let mut pairs = Vec::new();
-                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
-                    pairs.push((key, value));
-                }
-                Ok(QueryRow(pairs))
-            }
+    // 10 is the driver's "SSL/TLS" level; 0 is password authentication over plaintext.
+    properties.insert(
+        "connection security level".into(),
+        Value::from(if config.ssl == DbSslMode::Disable { "0" } else { "10" }),
+    );
+
+    for (key, value) in &config.options {
+        if key.trim().is_empty() || value.is_empty() {
+            continue;
         }
-        deserializer.deserialize_map(RowVisitor)
+        match DRIVER_PROPERTIES.iter().find(|known| known.eq_ignore_ascii_case(key.trim())) {
+            // The driver's own spelling, so a user who typed `sslcontext` still gets `SSLContext`.
+            Some(known) => {
+                properties.insert((*known).to_string(), Value::from(value.clone()));
+            }
+            None => ignored.push(key.trim().to_string()),
+        }
+    }
+    (properties, ignored)
+}
+
+/// What to say about TLS, when the connection asked for it.
+///
+/// The other engines draw a line between "encrypt" and "encrypt and verify"; the IRIS driver does
+/// not. It always validates against the JVM's truststore, so `Require` is not the escape hatch for
+/// a self-signed certificate that it is elsewhere — and saying so up front is better than a
+/// handshake failure the user has no way to read.
+fn tls_note(config: &DbConnectionConfig) -> Option<String> {
+    match config.ssl {
+        DbSslMode::Disable => None,
+        DbSslMode::Require => Some(
+            "TLS is on. The InterSystems JDBC driver always verifies the server's certificate \
+             against the Java truststore, so \"Require\" behaves as \"Verify full\" here — a \
+             self-signed certificate needs its CA imported, or an \"SSL configuration name\" \
+             option naming a client configuration on the server."
+                .to_string(),
+        ),
+        DbSslMode::VerifyFull => Some(
+            "TLS is on, verified against the Java truststore that ships with CodeFlow.".to_string(),
+        ),
     }
 }
 
-/// A JSON value as grid text. `null` and a missing key are both SQL NULL.
-fn render_value(value: Option<&serde_json::Value>) -> Option<String> {
-    match value? {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(text) => Some(text.clone()),
-        serde_json::Value::Bool(flag) => Some(flag.to_string()),
-        serde_json::Value::Number(number) => Some(number.to_string()),
-        other => Some(other.to_string()),
+/// Adds the one piece of context a failed IRIS connection usually needs.
+///
+/// The Atelier REST driver this replaced ran on the web server's port. A connection saved back
+/// then still names it, and "connection refused on 52773" is a dead end unless someone points out
+/// that JDBC doesn't live there.
+fn explain_connect_failure(config: &DbConnectionConfig, error: &str) -> String {
+    if config.effective_port() == WEB_SERVER_PORT {
+        return format!(
+            "Connecting to {} failed: {error}\n\nPort {WEB_SERVER_PORT} is the IRIS web server. \
+             CodeFlow now reaches IRIS over JDBC, which talks to the superserver — usually port \
+             1972. Change the port in this connection's settings.",
+            config.endpoint()
+        );
     }
+    format!("Connecting to {} failed: {error}", config.endpoint())
 }
 
 /// `VARCHAR(50)`, `NUMERIC(18,2)` — the type as IRIS would declare it.
@@ -904,100 +862,12 @@ fn iris_type_name(
     base.to_string()
 }
 
-/// `%SYS` has to reach the server as `%25SYS`: a bare `%` in a path is the start of a percent
-/// escape, and `%SY` is not a valid one — the request would be rejected before IRIS saw it.
-fn encode_namespace(namespace: &str) -> String {
-    let mut out = String::with_capacity(namespace.len());
-    for byte in namespace.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
-}
-
-fn base_url(config: &DbConnectionConfig) -> String {
-    if !config.url.trim().is_empty() {
-        return config.url.trim().trim_end_matches('/').to_string();
-    }
-    let scheme = if config.ssl == DbSslMode::Disable { "http" } else { "https" };
-    // Some deployments front IRIS with a gateway that mounts it under a path (`/iris`), so the
-    // prefix is configurable rather than assumed to be the server root.
-    let prefix = config
-        .option("path")
-        .or_else(|| config.option("web_prefix"))
-        .unwrap_or_default()
-        .trim_end_matches('/')
-        .to_string();
-    format!("{scheme}://{}:{}{prefix}", config.host, config.effective_port())
-}
-
-fn http_error(endpoint: &str, error: &reqwest::Error) -> String {
-    crate::api::describe_transport_error(
-        &format!("The IRIS web server at {endpoint}"),
-        endpoint.split(':').next().unwrap_or(endpoint),
-        endpoint.rsplit(':').next().and_then(|port| port.parse().ok()),
-        error,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `%SYS` is the namespace every IRIS instance has, and it is the one that breaks a naive URL.
-    #[test]
-    fn a_percent_in_a_namespace_is_escaped() {
-        assert_eq!(encode_namespace("%SYS"), "%25SYS");
-        assert_eq!(encode_namespace("USER"), "USER");
-        assert_eq!(encode_namespace("MY-NS.1"), "MY-NS.1");
-    }
-
-    /// Both error shapes IRIS uses have to produce a message; reading only one would show half of
-    /// all failures as a blank error.
-    #[test]
-    fn both_error_shapes_are_understood() {
-        let object: AtelierEnvelope<ServerContent> = serde_json::from_str(
-            r#"{"status":{"errors":[{"error":"Table 'X.Y' not found","id":"5540"}],"summary":"x"},"console":[],"result":{"content":null}}"#,
-        )
-        .unwrap();
-        assert_eq!(object.first_error().unwrap(), "Table 'X.Y' not found");
-
-        let plain: AtelierEnvelope<ServerContent> = serde_json::from_str(
-            r#"{"status":{"errors":["boom"],"summary":""},"console":[],"result":{"content":null}}"#,
-        )
-        .unwrap();
-        assert_eq!(plain.first_error().unwrap(), "boom");
-
-        let fine: AtelierEnvelope<ServerContent> = serde_json::from_str(
-            r#"{"status":{"errors":[],"summary":""},"console":[],"result":{"content":{"version":"IRIS 2024.1","api":2,"namespaces":["%SYS","USER"]}}}"#,
-        )
-        .unwrap();
-        assert!(fine.first_error().is_none());
-        assert_eq!(fine.result.unwrap().content.unwrap().namespaces.unwrap().len(), 2);
-    }
-
-    /// Column order comes from the row objects, so it has to survive deserialization — sorting it
-    /// would put a table's columns in alphabetical order instead of the order it declares them.
-    #[test]
-    fn row_key_order_is_preserved() {
-        let content: QueryContent =
-            serde_json::from_str(r#"[{"Name":"Ana","Age":31,"City":null}]"#).unwrap();
-        let row = &content.0[0];
-        assert_eq!(
-            row.keys().cloned().collect::<Vec<_>>(),
-            vec!["Name".to_string(), "Age".to_string(), "City".to_string()]
-        );
-        assert_eq!(render_value(row.get("Age")), Some("31".to_string()));
-        assert_eq!(render_value(row.get("City")), None);
-    }
-
-    #[test]
-    fn the_base_url_follows_the_ssl_mode_and_prefix() {
-        let mut config = DbConnectionConfig {
+    fn config() -> DbConnectionConfig {
+        DbConnectionConfig {
             id: "c".into(),
             kind: DbKind::Iris,
             host: "iris.local".into(),
@@ -1010,10 +880,102 @@ mod tests {
             options: Vec::new(),
             read_only: false,
             connect_timeout_ms: 0,
-        };
-        assert_eq!(base_url(&config), "http://iris.local:52773");
+        }
+    }
+
+    /// The default port has to be the superserver's — 52773 is the web server, which never answers
+    /// a JDBC handshake.
+    #[test]
+    fn the_url_targets_the_superserver_and_the_session_namespace() {
+        assert_eq!(jdbc_url(&config(), "USER"), "jdbc:IRIS://iris.local:1972/USER");
+        assert_eq!(jdbc_url(&config(), "%SYS"), "jdbc:IRIS://iris.local:1972/%SYS");
+    }
+
+    /// A pasted URL is written for one namespace, and the explorer's job is walking the others —
+    /// so the namespace it names is replaced, not honoured.
+    #[test]
+    fn a_pasted_url_still_follows_the_explorer() {
+        let mut config = config();
+        config.url = "jdbc:IRIS://prod.example.com:1972/APP".into();
+        assert_eq!(jdbc_url(&config, "APP"), "jdbc:IRIS://prod.example.com:1972/APP");
+        assert_eq!(jdbc_url(&config, "%SYS"), "jdbc:IRIS://prod.example.com:1972/%SYS");
+
+        // Driver parameters live past the namespace, and swapping the namespace must not take them
+        // with it — losing them would silently undo whatever the user configured.
+        config.url = "jdbc:IRIS://h:1972/APP/?log=/tmp/jdbc.log".into();
+        assert_eq!(jdbc_url(&config, "%SYS"), "jdbc:IRIS://h:1972/%SYS/?log=/tmp/jdbc.log");
+
+        // A URL with no namespace at all still has to name one — the driver requires it.
+        config.url = "jdbc:IRIS://h:1972".into();
+        assert_eq!(jdbc_url(&config, "USER"), "jdbc:IRIS://h:1972/USER");
+    }
+
+    /// Options are the driver's properties, spelled the driver's way. A leftover from the REST
+    /// driver must not be sent — the driver rejects properties it doesn't know.
+    #[test]
+    fn options_become_driver_properties_and_leftovers_are_reported() {
+        let mut config = config();
+        config.options = vec![
+            ("sslcontext".into(), "mycontext".into()),
+            ("path".into(), "/iris".into()),
+            ("dialect".into(), "mssql".into()),
+            ("empty".into(), String::new()),
+        ];
+        let (properties, ignored) = driver_properties(&config);
+        assert_eq!(properties.get("SSLContext").unwrap(), "mycontext");
+        assert_eq!(properties.get("dialect").unwrap(), "mssql");
+        assert_eq!(properties.get("connection security level").unwrap(), "0");
+        assert_eq!(ignored, vec!["path".to_string()]);
+    }
+
+    #[test]
+    fn tls_raises_the_security_level() {
+        let mut config = config();
         config.ssl = DbSslMode::VerifyFull;
-        config.options = vec![("path".into(), "/iris/".into())];
-        assert_eq!(base_url(&config), "https://iris.local:52773/iris");
+        let (properties, _) = driver_properties(&config);
+        assert_eq!(properties.get("connection security level").unwrap(), "10");
+    }
+
+    /// A connection still on the old REST port fails in a way nobody could diagnose without being
+    /// told the port moved.
+    #[test]
+    fn the_old_rest_port_is_called_out() {
+        let mut config = config();
+        config.port = WEB_SERVER_PORT;
+        let explained = explain_connect_failure(&config, "Connection refused");
+        assert!(explained.contains("1972"), "{explained}");
+        assert!(explained.contains("superserver"), "{explained}");
+
+        config.port = 1972;
+        assert!(!explain_connect_failure(&config, "Connection refused").contains("superserver"));
+    }
+
+    /// NULL and the empty string are different values, and a grid that confuses them writes the
+    /// wrong one back.
+    #[test]
+    fn null_and_empty_stay_distinct() {
+        let answer = serde_json::json!({
+            "columns": [{"name": "Name", "type": "VARCHAR"}, {"name": "Note", "type": "VARCHAR"}],
+            "rows": [["Ana", null], ["", "x"]],
+            "truncated": false,
+            "rowsAffected": null,
+            "durationMs": 3,
+            "messages": []
+        });
+        let result = decode_statement("SELECT 1", &answer);
+        assert_eq!(result.columns[0].type_name, "VARCHAR");
+        assert_eq!(result.rows[0][0], Some("Ana".to_string()));
+        assert_eq!(result.rows[0][1], None);
+        assert_eq!(result.rows[1][0], Some(String::new()));
+        assert_eq!(result.rows_affected, None);
+    }
+
+    /// `-1` is JDBC's "there was no update count", which is not "nothing was touched".
+    #[test]
+    fn an_absent_update_count_is_not_zero() {
+        let none = decode_statement("x", &serde_json::json!({"rowsAffected": -1}));
+        assert_eq!(none.rows_affected, None);
+        let some = decode_statement("x", &serde_json::json!({"rowsAffected": 4}));
+        assert_eq!(some.rows_affected, Some(4));
     }
 }

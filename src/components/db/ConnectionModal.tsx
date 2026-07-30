@@ -150,10 +150,12 @@ export function ConnectionModal({
   const target = useMemo(() => {
     if (mode === "url" && config.url.trim()) return redactUrl(config.url.trim());
     const port = config.port || engine.defaultPort;
-    const scheme = config.kind === "iris" ? (config.ssl === "disable" ? "http" : "https") : "";
     const where = `${config.host || "localhost"}:${port}`;
     const path = config.database ? `/${config.database}` : "";
-    return scheme ? `${scheme}://${where}${path}` : `${where}${path}`;
+    // IRIS is addressed by a JDBC URL, and showing it in full is what makes a connection still
+    // pointed at the old REST port (52773) obvious before it is saved rather than after it fails.
+    if (config.kind === "iris") return `jdbc:IRIS://${where}${path}`;
+    return `${where}${path}`;
   }, [mode, config, engine.defaultPort]);
 
   const test = async () => {
@@ -668,8 +670,11 @@ function DriverOptions({
     postgres: ["application_name"],
     supabase: ["application_name"],
     sqlserver: ["instance_name", "application_name"],
-    // `path` is for a deployment that mounts IRIS under a gateway prefix rather than at the root.
-    iris: ["path"],
+    // Properties of the InterSystems JDBC driver, spelled the way it names them (they are matched
+    // case-insensitively, but suggesting the driver's own spelling keeps its docs searchable).
+    // `SSL configuration name` is the one that matters in practice: it is how a server-side client
+    // TLS configuration is selected.
+    iris: ["SSL configuration name", "TransactionIsolationLevel", "NetworkTimeout"],
     mongodb: ["authSource", "application_name"],
   };
   const unused = suggestions[kind].filter(

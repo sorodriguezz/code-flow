@@ -29,6 +29,7 @@
 //! wire names, so renaming one here is a breaking change on both sides.
 
 pub mod iris;
+pub mod jvm;
 pub mod mongo;
 pub mod mssql;
 pub mod postgres;
@@ -75,9 +76,9 @@ impl DbKind {
         match self {
             DbKind::Postgres | DbKind::Supabase => 5432,
             DbKind::Sqlserver => 1433,
-            // The IRIS web server, not the superserver (1972): this driver speaks the Atelier
-            // REST API over HTTP, not the proprietary TDS-like protocol JDBC/ODBC use.
-            DbKind::Iris => 52773,
+            // The IRIS superserver, which is what JDBC talks to. Not 52773 — that is the web
+            // server, and it is where this driver used to go when it spoke the Atelier REST API.
+            DbKind::Iris => 1972,
             DbKind::Mongodb => 27017,
         }
     }
@@ -300,8 +301,8 @@ pub struct DbServerInfo {
     pub version: String,
     pub database: String,
     pub user: String,
-    /// Anything the user should know that isn't a failure — "this IRIS instance reports Atelier
-    /// API v2", "the pooler doesn't support prepared statements".
+    /// Anything the user should know that isn't a failure — which IRIS JDBC driver answered, "the
+    /// pooler doesn't support prepared statements".
     #[serde(default)]
     pub notes: Vec<String>,
 }
@@ -514,11 +515,14 @@ impl Session {
     }
 
     /// False once the connection is unusable, so the registry replaces it instead of handing back
-    /// a client whose every call will fail. Only Postgres can answer this locally (its connection
-    /// task sets a flag); the rest find out by trying.
+    /// a client whose every call will fail.
+    ///
+    /// Postgres answers from its connection task's flag, and IRIS from whether the JVM carrying its
+    /// JDBC driver is still running. The other two find out by trying.
     pub fn is_alive(&self) -> bool {
         match self {
             Session::Postgres(s) => s.is_alive(),
+            Session::Iris(s) => s.is_alive(),
             _ => true,
         }
     }
@@ -595,12 +599,16 @@ impl Session {
 
     /// Asks the *server* to abandon the running statement.
     ///
-    /// Only Postgres can: its cancel token opens a second connection and sends `CancelRequest`, so
-    /// the query stops server-side and the transaction rolls back. For the others, cancelling only
-    /// drops our end of the call — see [`DbRegistry::run`] for what that means.
+    /// Two engines can. Postgres opens a second connection and sends `CancelRequest`; IRIS calls
+    /// `Statement.cancel()` on the JDBC statement, which the driver turns into the same request on
+    /// its own control channel. Either way the query stops server-side and its transaction rolls
+    /// back. For the other two, cancelling only drops our end of the call — see [`DbRegistry::run`]
+    /// for what that means.
     pub async fn cancel_running(&self) {
-        if let Session::Postgres(s) = self {
-            s.cancel_running().await;
+        match self {
+            Session::Postgres(s) => s.cancel_running().await,
+            Session::Iris(s) => s.cancel_running().await,
+            _ => {}
         }
     }
 

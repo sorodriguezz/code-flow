@@ -104,7 +104,7 @@ function WorkspaceSwitcher() {
     <div ref={rootRef} className="relative mb-4 px-1">
       <button
         onClick={() => (open ? dismiss() : setOpen(true))}
-        className="flex w-full items-center gap-2 rounded-md py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       >
         <span
           className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white"

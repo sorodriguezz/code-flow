@@ -1,4 +1,23 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+/// Where Tauri unpacked the app's bundled resources — today, the trimmed Java runtime and the
+/// InterSystems JDBC driver the IRIS datasource needs.
+///
+/// Recorded at startup rather than resolved on demand because the layers that need it (the
+/// `datasource` drivers) are deliberately free of Tauri types: they take a config and return rows,
+/// and threading an `AppHandle` down to them just to find a directory would undo that.
+static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+pub fn set_resource_dir(dir: PathBuf) {
+    let _ = RESOURCE_DIR.set(dir);
+}
+
+/// `None` outside a packaged app — a `cargo test` has no Tauri runtime to have set it. Callers
+/// treat that as "look for a source checkout instead", not as an error.
+pub fn resource_dir() -> Option<&'static Path> {
+    RESOURCE_DIR.get().map(PathBuf::as_path)
+}
 
 /// Root directory where CodeFlow keeps its database and local config.
 /// Windows: literally `C:\CodeFlow` (explicit product requirement, not `%LOCALAPPDATA%`).

@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && pnpm iris:runtime",
     "frontendDist": "../dist"
   },
   "app": {
@@ -36,6 +36,9 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "resources": {
+      "resources/iris/": "iris/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
