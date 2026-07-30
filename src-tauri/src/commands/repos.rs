@@ -52,6 +52,18 @@ pub fn update_workspace_color(db: State<Db>, id: String, color: String) -> Resul
     queries::update_workspace_color(&conn, &id, &color).map_err(|e| e.to_string())
 }
 
+/// Rejects a blank name rather than storing one: the sidebar and the workspace switcher both
+/// identify a workspace by its label, and an empty one leaves a row nothing can be told apart by.
+#[tauri::command]
+pub fn rename_workspace(db: State<Db>, id: String, name: String) -> Result<(), String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("Workspace name cannot be empty".into());
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::rename_workspace(&conn, &id, trimmed).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn create_project(db: State<Db>, input: NewProject) -> Result<Project, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;

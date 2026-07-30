@@ -70,10 +70,9 @@ export function GitHubSettings() {
   if (!loaded) return null;
 
   return (
+    // No heading or hint of its own: the Git hosting rail names the provider and its card already
+    // carries the hint, so repeating either here would say the same thing twice.
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.githubTitle")}</h3>
-      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.githubHint")}</p>
-
       {connections.length > 0 && (
         <div className="mb-3 space-y-2">
           {connections.map((conn) => (

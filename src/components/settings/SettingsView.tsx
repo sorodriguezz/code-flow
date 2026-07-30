@@ -54,6 +54,9 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
   { id: "api", labelKey: "api.settings.title", icon: Zap },
 ];
 
+// Sections whose body carries a side rail of its own, and so needs the wider content column.
+const WIDE_SECTIONS = new Set<SettingsSectionId>(["azure", "claude", "api"]);
+
 const WORKSPACE_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
   { id: "review", labelKey: "settings.review", icon: ShieldCheck },
   { id: "sdd", labelKey: "settings.sdd", icon: Workflow },
@@ -195,10 +198,9 @@ export function SettingsView() {
               transparent and the thumb isn't drawn when there is nothing to scroll, so a short
               section looks exactly as it did. */}
           <div data-settings-scroll className="flex-1 overflow-x-auto overflow-y-scroll p-6">
-            {/* Wider for the API client alone: it is the only section with a nav of its own, and
-                168px of that out of 576 would leave its forms in a column narrower than the labels
-                they carry. */}
-            <div className={`mx-auto ${section === "api" ? "max-w-3xl" : "max-w-xl"}`}>
+            {/* Wider for the two sections that carry a nav of their own: 168px of rail out of 576
+                would leave their forms in a column narrower than the labels they carry. */}
+            <div className={`mx-auto ${WIDE_SECTIONS.has(section) ? "max-w-3xl" : "max-w-xl"}`}>
               {section === "appearance" && <ThemeSettings />}
               {section === "general" && <GeneralSettings />}
               {section === "keybindings" && <ShortcutsSettings />}

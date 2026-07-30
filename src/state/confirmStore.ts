@@ -13,7 +13,10 @@ export type ConfirmFlowKind =
   | "branch-delete"
   | "stash-apply"
   | "stash-pop"
-  | "stash-drop";
+  | "stash-drop"
+  // Not a git operation, but the same "out of here, into there" question — and the same reason for
+  // drawing it: which workspace a project ends up in is exactly what a sentence gets to bury.
+  | "workspace-move";
 
 export interface ConfirmFlow {
   kind: ConfirmFlowKind;

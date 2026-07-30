@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Briefcase, Check, ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
+import { Briefcase, Check, ChevronDown, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
 import { useToastStore } from "../../state/toastStore";
@@ -16,8 +16,27 @@ export function ProjectsSettings() {
   const addWorkspace = useWorkspaceStore((s) => s.addWorkspace);
   const setWorkspaceColor = useWorkspaceStore((s) => s.setWorkspaceColor);
   const setProjectColor = useWorkspaceStore((s) => s.setProjectColor);
+  const renameWorkspace = useWorkspaceStore((s) => s.renameWorkspace);
   const [newName, setNewName] = useState("");
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  // Which workspace is being renamed, and the half-typed name — one at a time, so opening a
+  // second row's field closes the first rather than leaving two drafts on screen.
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [draftName, setDraftName] = useState("");
+
+  const startRename = (id: string, name: string) => {
+    setRenamingId(id);
+    setDraftName(name);
+  };
+
+  const commitRename = async () => {
+    if (!renamingId) return;
+    const trimmed = draftName.trim();
+    // An empty field means "changed my mind", not "call it nothing" — same as leaving the name
+    // untouched, both just close the field.
+    if (trimmed) await renameWorkspace(renamingId, trimmed);
+    setRenamingId(null);
+  };
 
   // `projectsByWorkspace` is normally only populated for whichever workspace is/was active
   // (the sidebar only ever needs that one) — this overview lists every workspace's projects
@@ -69,38 +88,87 @@ export function ProjectsSettings() {
           return (
             <div key={ws.id} className="rounded-lg border border-[var(--cf-border)] p-2.5">
               <div className={`flex items-center gap-2 text-[13px] font-medium ${expanded ? "mb-2" : ""}`}>
-                <button
-                  onClick={() => toggleExpanded(ws.id)}
-                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                >
-                  {expanded ? (
-                    <ChevronDown size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-                  ) : (
-                    <ChevronRight size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-                  )}
-                  <Briefcase size={13} style={{ color: ws.color }} className="shrink-0" />
-                  <span className="flex-1 truncate">{ws.name}</span>
-                  {!expanded && (
-                    <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-                      {projects.length}
-                    </span>
-                  )}
-                </button>
-                <div className="flex items-center gap-1.5">
-                  <ColorSwatchPicker value={ws.color} onChange={(color) => setWorkspaceColor(ws.id, color)} />
-                  <button
-                    onClick={async () => {
-                      if (await confirmAction(t("settings.removeWorkspaceConfirm", { name: ws.name }))) {
-                        void removeWorkspace(ws.id);
-                      }
-                    }}
-                    disabled={disableRemoveWorkspace}
-                    title={removeWorkspaceTitle}
-                    className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-30"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </div>
+                {renamingId === ws.id ? (
+                  // In place of the row's own label, so the name is edited where it is read. No
+                  // commit on blur: the tick and Escape/× are the two answers, and a blur-commit
+                  // would save the draft the moment you reached for ×.
+                  <>
+                    <Briefcase size={13} style={{ color: ws.color }} className="shrink-0" />
+                    <input
+                      autoFocus
+                      value={draftName}
+                      onChange={(e) => setDraftName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void commitRename();
+                        // Stopped here so it doesn't reach the Settings window's own Escape
+                        // handler, which would close the whole thing mid-rename.
+                        if (e.key === "Escape") {
+                          e.stopPropagation();
+                          setRenamingId(null);
+                        }
+                      }}
+                      aria-label={t("settings.renameWorkspace")}
+                      className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[13px] font-normal outline-none focus:border-[var(--cf-accent)]"
+                    />
+                    <button
+                      onClick={() => void commitRename()}
+                      disabled={!draftName.trim()}
+                      title={t("common.save")}
+                      className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-30"
+                    >
+                      <Check size={13} />
+                    </button>
+                    <button
+                      onClick={() => setRenamingId(null)}
+                      title={t("common.cancel")}
+                      className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                    >
+                      <X size={13} />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => toggleExpanded(ws.id)}
+                      className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                    >
+                      {expanded ? (
+                        <ChevronDown size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+                      ) : (
+                        <ChevronRight size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+                      )}
+                      <Briefcase size={13} style={{ color: ws.color }} className="shrink-0" />
+                      <span className="flex-1 truncate">{ws.name}</span>
+                      {!expanded && (
+                        <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+                          {projects.length}
+                        </span>
+                      )}
+                    </button>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        onClick={() => startRename(ws.id, ws.name)}
+                        title={t("settings.renameWorkspace")}
+                        className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                      >
+                        <Pencil size={13} />
+                      </button>
+                      <ColorSwatchPicker value={ws.color} onChange={(color) => setWorkspaceColor(ws.id, color)} />
+                      <button
+                        onClick={async () => {
+                          if (await confirmAction(t("settings.removeWorkspaceConfirm", { name: ws.name }))) {
+                            void removeWorkspace(ws.id);
+                          }
+                        }}
+                        disabled={disableRemoveWorkspace}
+                        title={removeWorkspaceTitle}
+                        className="text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-30"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
 
               {expanded && (

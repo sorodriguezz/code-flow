@@ -61,6 +61,8 @@ export const deleteWorkspace = (id: string) => invoke<void>("delete_workspace", 
 export const updateWorkspaceColor = (id: string, color: string) =>
   invoke<void>("update_workspace_color", { id, color });
 
+export const renameWorkspace = (id: string, name: string) => invoke<void>("rename_workspace", { id, name });
+
 export const createProject = (input: NewProject) => invoke<Project>("create_project", { input });
 
 export const listProjects = (workspaceId: string) =>

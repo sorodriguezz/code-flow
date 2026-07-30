@@ -21,6 +21,7 @@ interface WorkspaceState {
   addWorkspace: (name: string, icon: string, color: string) => Promise<Workspace>;
   removeWorkspace: (id: string) => Promise<void>;
   setWorkspaceColor: (id: string, color: string) => Promise<void>;
+  renameWorkspace: (id: string, name: string) => Promise<void>;
   addProject: (input: NewProject) => Promise<Project>;
   removeProject: (id: string, workspaceId: string) => Promise<void>;
   setProjectColor: (id: string, workspaceId: string, color: string) => Promise<void>;
@@ -103,6 +104,15 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setWorkspaceColor: async (id, color) => {
     await api.updateWorkspaceColor(id, color);
     set((s) => ({ workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, color } : w)) }));
+  },
+
+  // Written first, then mirrored into state — the backend is what rejects a blank name, and
+  // updating the list before it answered would leave the sidebar showing a name the db refused.
+  renameWorkspace: async (id, name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    await api.renameWorkspace(id, trimmed);
+    set((s) => ({ workspaces: s.workspaces.map((w) => (w.id === id ? { ...w, name: trimmed } : w)) }));
   },
 
   addProject: async (input) => {

@@ -48,6 +48,7 @@ import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { CreateBranchModal } from "./CreateBranchModal";
+import { MoveProjectModal } from "./MoveProjectModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
 import { CreatePrModal } from "./CreatePrModal";
@@ -56,6 +57,12 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import type { TranslationKey } from "../../lib/i18n/translations";
+
+// The hover-revealed actions on a project row: the same square chip the "clone"/"add repository"
+// buttons above the list wear, so every icon-only control in the sidebar answers the pointer the
+// same way. Reveal stays tied to the row's own `group` hover.
+const ROW_ACTION_CLASS =
+  "flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 hover:bg-black/[0.05] hover:text-[var(--cf-text)] group-hover:opacity-100 dark:hover:bg-white/[0.08]";
 
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 440;
@@ -816,7 +823,6 @@ function ProjectRow({ project }: { project: Project }) {
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
-  const moveProject = useWorkspaceStore((s) => s.moveProject);
   const branches = useRepoStore((s) => s.branches);
   const status = useRepoStore((s) => s.status);
   const checkoutBranch = useRepoStore((s) => s.checkoutBranch);
@@ -844,7 +850,7 @@ function ProjectRow({ project }: { project: Project }) {
   const currentBranch = branches.find((b) => b.is_head) ?? null;
   const mergeBlockedBy = currentBranch?.is_locked ? currentBranch.name : null;
   const [showCreateBranch, setShowCreateBranch] = useState(false);
-  const [showMoveMenu, setShowMoveMenu] = useState(false);
+  const [showMoveModal, setShowMoveModal] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [openingVsCode, setOpeningVsCode] = useState(false);
 
@@ -882,6 +888,10 @@ function ProjectRow({ project }: { project: Project }) {
         <button onClick={select} className="flex flex-1 min-w-0 items-center gap-2 text-left">
           <span className="flex-1 min-w-0 truncate font-medium">{project.name}</span>
         </button>
+        {/* Both row actions wear the same square as the "clone" and "add repository" chips above
+            the list — `h-5 w-5`, rounded, with a hover fill — so a control that only appears on
+            row hover still says it is one once it's there. They were bare icons, which lit up
+            nothing at all under the pointer. */}
         <button
           title={t("sidebar.openInVsCode")}
           onClick={async (e) => {
@@ -895,7 +905,7 @@ function ProjectRow({ project }: { project: Project }) {
               setOpeningVsCode(false);
             }
           }}
-          className="opacity-0 group-hover:opacity-100"
+          className={ROW_ACTION_CLASS}
         >
           {openingVsCode ? <Loader2 size={13} className="animate-spin" /> : <Code2 size={13} />}
         </button>
@@ -904,34 +914,16 @@ function ProjectRow({ project }: { project: Project }) {
             title={t("sidebar.moveToWorkspace")}
             onClick={(e) => {
               e.stopPropagation();
-              setShowMoveMenu((v) => !v);
+              setShowMoveModal(true);
             }}
-            className="opacity-0 group-hover:opacity-100"
+            className={ROW_ACTION_CLASS}
           >
             <FolderInput size={13} />
           </button>
         )}
-        {showMoveMenu && (
-          <div className="absolute right-0 top-full z-20 mt-1 w-44 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
-            <p className="px-2 py-1 text-[11px] font-semibold uppercase text-[var(--cf-text-muted)]">
-              {t("sidebar.moveToWorkspace")}
-            </p>
-            {otherWorkspaces.map((ws) => (
-              <button
-                key={ws.id}
-                onClick={async () => {
-                  await moveProject(project.id, project.workspace_id, ws.id);
-                  setShowMoveMenu(false);
-                }}
-                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-              >
-                <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: ws.color }} />
-                <span className="truncate">{ws.name}</span>
-              </button>
-            ))}
-          </div>
-        )}
       </div>
+
+      {showMoveModal && <MoveProjectModal project={project} onClose={() => setShowMoveModal(false)} />}
 
       {isActive && projectLoading && (
         <div className="ml-6 mt-1 border-l border-[var(--cf-border)] pl-3">

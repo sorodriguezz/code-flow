@@ -1,7 +1,9 @@
 import {
   Archive,
   ArrowRight,
+  Briefcase,
   Check,
+  FolderInput,
   GitBranch,
   GitBranchPlus,
   GitCommitHorizontal,
@@ -40,6 +42,7 @@ const PRESETS: Record<ConfirmFlowKind, Preset> = {
   "stash-apply": { badge: Check, sourceIcon: Archive, targetIcon: GitBranch },
   "stash-pop": { badge: Undo2, sourceIcon: Archive, targetIcon: GitBranch },
   "stash-drop": { badge: Trash2, sourceIcon: Archive, targetIcon: Trash2, danger: true },
+  "workspace-move": { badge: FolderInput, sourceIcon: Briefcase, targetIcon: Briefcase },
 };
 
 function Node({
@@ -79,13 +82,22 @@ export function ConfirmFlowDiagram({ flow }: { flow: ConfirmFlow }) {
   const tone = preset.danger ? "var(--cf-danger)" : "var(--cf-accent)";
 
   return (
-    <div className="mb-4 rounded-lg bg-black/[0.02] p-3 dark:bg-white/[0.03]">
+    // Extra room at the top, not padding for its own sake: the verb badge hangs above the
+    // connector and would otherwise ride out over the tinted box's edge.
+    <div className="mb-4 rounded-lg bg-black/[0.02] px-3 pb-3 pt-8 dark:bg-white/[0.03]">
       <div className="flex items-center gap-2">
         <Node icon={preset.sourceIcon} label={flow.source} emphasis={false} tone={tone} />
 
-        <div className="flex w-16 shrink-0 flex-col items-center gap-1.5">
+        {/* The connector is the only thing in normal flow here, so `items-center` on the row lands
+            it exactly on the two nodes' centre line — the line the eye reads the arrow along.
+            Stacking the badge above it in flow instead made the column the tallest item in the row,
+            which pushed the beam a badge's height below that line and left the arrow looking like
+            it had slipped off the bottom of the diagram. */}
+        <div className="relative flex w-16 shrink-0 items-center gap-0.5">
+          {/* Lifted out of flow and hung over the connector, which is why the box above reserves
+              the room for it. */}
           <span
-            className="flex h-6 w-6 items-center justify-center rounded-full"
+            className="absolute bottom-full left-1/2 mb-1.5 flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full"
             style={{
               background: `color-mix(in oklab, ${tone} 16%, transparent)`,
               color: tone,
@@ -94,18 +106,16 @@ export function ConfirmFlowDiagram({ flow }: { flow: ConfirmFlow }) {
           >
             <preset.badge size={13} />
           </span>
-          <div className="flex w-full items-center gap-0.5">
+          <span
+            className="relative h-[3px] flex-1 overflow-hidden rounded-full"
+            style={{ background: `color-mix(in oklab, ${tone} 22%, transparent)` }}
+          >
             <span
-              className="relative h-[3px] flex-1 overflow-hidden rounded-full"
-              style={{ background: `color-mix(in oklab, ${tone} 22%, transparent)` }}
-            >
-              <span
-                className="cf-flow-beam absolute inset-y-0 left-0 w-full"
-                style={{ background: `linear-gradient(90deg, transparent, ${tone}, transparent)` }}
-              />
-            </span>
-            <ArrowRight size={12} className="cf-flow-nudge shrink-0" style={{ color: tone }} />
-          </div>
+              className="cf-flow-beam absolute inset-y-0 left-0 w-full"
+              style={{ background: `linear-gradient(90deg, transparent, ${tone}, transparent)` }}
+            />
+          </span>
+          <ArrowRight size={12} className="cf-flow-nudge shrink-0" style={{ color: tone }} />
         </div>
 
         <Node icon={preset.targetIcon} label={flow.target} emphasis tone={tone} />

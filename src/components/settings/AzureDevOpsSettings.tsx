@@ -55,10 +55,9 @@ export function AzureDevOpsSettings() {
   if (!loaded) return null;
 
   return (
+    // No heading or hint of its own, for the reason given in `GitHubSettings`: the rail names the
+    // provider and the card around this form carries the hint.
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.azureTitle")}</h3>
-      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.azureHint")}</p>
-
       {connections.length > 0 && (
         <div className="mb-3 space-y-2">
           {connections.map((conn) => (

@@ -269,6 +269,11 @@ pub fn update_workspace_color(conn: &Connection, id: &str, color: &str) -> rusql
     Ok(())
 }
 
+pub fn rename_workspace(conn: &Connection, id: &str, name: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE workspaces SET name = ?1 WHERE id = ?2", params![name, id])?;
+    Ok(())
+}
+
 // ---------- projects ----------
 
 pub fn create_project(conn: &Connection, input: NewProject) -> rusqlite::Result<Project> {

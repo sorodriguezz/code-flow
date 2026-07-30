@@ -129,6 +129,7 @@ pub fn run() {
             commands::repos::list_workspaces,
             commands::repos::delete_workspace,
             commands::repos::update_workspace_color,
+            commands::repos::rename_workspace,
             commands::repos::update_project_color,
             commands::repos::create_project,
             commands::repos::list_projects,
