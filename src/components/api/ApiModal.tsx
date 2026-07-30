@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { X, type LucideIcon } from "lucide-react";
 import { useT } from "../../state/languageStore";
 
@@ -12,6 +12,10 @@ import { useT } from "../../state/languageStore";
  *
  * `busy` locks the exits: a modal in the middle of an import or a collection run must not be
  * dismissed by a stray backdrop click, because the work would carry on with nothing to show it.
+ *
+ * `dismissOnBackdrop` locks the same exit for a different reason: a modal whose body is a form the
+ * user has been typing into has nothing to recover from a mis-click, so the ones that hold unsaved
+ * input turn it off and keep the close button, Cancel and Escape as the only ways out.
  */
 export function ApiModal({
   icon: Icon,
@@ -20,6 +24,7 @@ export function ApiModal({
   width = "max-w-lg",
   height,
   busy = false,
+  dismissOnBackdrop = true,
   onClose,
   toolbar,
   footer,
@@ -33,6 +38,8 @@ export function ApiModal({
   /** Tailwind height class; the panel is capped at 80vh either way. */
   height?: string;
   busy?: boolean;
+  /** Whether a click on the backdrop closes the modal. Off for forms holding unsaved input. */
+  dismissOnBackdrop?: boolean;
   onClose: () => void;
   /** Rendered at the right of the header, before the close button. */
   toolbar?: ReactNode;
@@ -40,6 +47,8 @@ export function ApiModal({
   children: ReactNode;
 }) {
   const t = useT();
+  /** Whether the press that produced the current click started on the backdrop. */
+  const pressedBackdrop = useRef(false);
 
   useEffect(() => {
     if (busy) return;
@@ -53,10 +62,20 @@ export function ApiModal({
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
-      onClick={busy ? undefined : onClose}
+      onMouseDown={(e) => {
+        pressedBackdrop.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (busy || !dismissOnBackdrop) return;
+        // Both ends of the click have to be the backdrop itself. A press that starts inside the
+        // panel — selecting the text of a field, dragging past the edge — releases outside it and
+        // still delivers a click here, on the nearest common ancestor, and that is not "clicked
+        // away". The same check is what keeps clicks inside the panel from closing it, so the panel
+        // needs no `stopPropagation` of its own.
+        if (pressedBackdrop.current && e.target === e.currentTarget) onClose();
+      }}
     >
       <div
-        onClick={(e) => e.stopPropagation()}
         className={`flex max-h-[80vh] w-full flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${width} ${height ?? ""}`}
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-4 py-2.5">

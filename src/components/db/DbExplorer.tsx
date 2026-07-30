@@ -316,7 +316,14 @@ function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: 
   const error = useDbStore((s) => s.nodeErrors[key]);
   const connected = useDbStore((s) => s.connected.includes(row.id));
   const connections = useDbStore((s) => s.connections);
-  const consoles = useDbStore((s) => s.consoles.filter((c) => c.connection_id === row.id));
+  // Filtered *outside* the selector: a selector that builds a new array returns a different snapshot
+  // on every store read, which is an infinite render loop the moment anything else in the store
+  // changes — connecting, which writes `connected` and `children`, was enough to trip it.
+  const allConsoles = useDbStore((s) => s.consoles);
+  const consoles = useMemo(
+    () => allConsoles.filter((c) => c.connection_id === row.id),
+    [allConsoles, row.id],
+  );
   const openModal = useDbModalStore((s) => s.openDbModal);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 

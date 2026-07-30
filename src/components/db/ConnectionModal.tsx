@@ -221,6 +221,9 @@ export function ConnectionModal({
       subtitle={engine.label}
       width="max-w-xl"
       busy={saving}
+      // A dozen fields and a password, none of it drafted anywhere: a click on the backdrop must not
+      // be what throws it away. Close, Cancel and Escape stay.
+      dismissOnBackdrop={false}
       onClose={onClose}
       footer={
         <div className="flex w-full items-center gap-2">
