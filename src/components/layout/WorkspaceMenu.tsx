@@ -19,6 +19,7 @@ import {
   Send,
   type LucideIcon,
 } from "lucide-react";
+import { BetaBadge } from "../common/BetaBadge";
 import { useUiStore, type ApiWorkspace, type MainView } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
@@ -38,6 +39,9 @@ interface WorkspaceTool {
   labelKey: TranslationKey;
   /** The second line of the row: what the tool holds, so the name doesn't have to carry it. */
   descriptionKey: TranslationKey;
+  /** Marks a tool that is still settling, so the row says so before it is opened rather than after
+   * something behaves unexpectedly inside it. */
+  beta?: boolean;
 }
 
 /** Everything that belongs to the workspace rather than to the selected repository. Adding the
@@ -56,6 +60,7 @@ const TOOLS: WorkspaceTool[] = [
     icon: Database,
     labelKey: "tabbar.databases",
     descriptionKey: "tabbar.databasesDescription",
+    beta: true,
   },
 ];
 
@@ -407,12 +412,18 @@ export function WorkspaceMenu() {
                           <Icon size={14} />
                         </span>
                         <span className="min-w-0 flex-1">
-                          <span
-                            className={`block truncate text-[13px] font-medium ${
-                              isActive ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
-                            }`}
-                          >
-                            {t(tool.labelKey)}
+                          {/* The badge rides the name line rather than the status slot on the right:
+                              that slot is the row's "you're here / this navigates" affordance, and a
+                              tag parked there would be read as one of those. */}
+                          <span className="flex items-center gap-1.5">
+                            <span
+                              className={`min-w-0 truncate text-[13px] font-medium ${
+                                isActive ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
+                              }`}
+                            >
+                              {t(tool.labelKey)}
+                            </span>
+                            {tool.beta && <BetaBadge />}
                           </span>
                           <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
                             {t(tool.descriptionKey)}

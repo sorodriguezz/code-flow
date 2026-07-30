@@ -19,6 +19,14 @@ export interface SelectOption {
    * the menu and on the closed trigger, so the kind of the current value stays readable once the
    * menu is gone. Optional: an option list where every entry is the same kind doesn't need it. */
   icon?: LucideIcon;
+  /**
+   * A mark rendered before the label, in the menu and on the closed trigger.
+   *
+   * Where `icon` inherits the row's colour, this keeps whatever colour it brings — it is for marks
+   * whose colour *is* the information, like a database engine's brand hue, which must not fade to
+   * muted grey on the rows that happen not to be selected.
+   */
+  leading?: ReactNode;
 }
 
 export interface SelectGroup {
@@ -225,6 +233,7 @@ export function Select({
         {/* The icon sits inside the label's flex box so it inherits the row's colour — muted,
             accent when selected — rather than being a separate thing to keep in step. */}
         <span className="flex min-w-0 flex-1 items-center gap-1.5">
+          {opt.leading}
           {Icon && <Icon size={13} className="shrink-0 opacity-70" />}
           <span className="truncate">{opt.label}</span>
         </span>
@@ -266,6 +275,7 @@ export function Select({
         <span
           className={`flex min-w-0 flex-1 items-center gap-1.5 ${selected ? "" : "text-[var(--cf-text-muted)]"}`}
         >
+          {selected?.leading}
           {SelectedIcon && <SelectedIcon size={13} className="shrink-0 opacity-70" />}
           <span className="truncate">{label}</span>
         </span>

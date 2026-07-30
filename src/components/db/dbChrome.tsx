@@ -12,6 +12,7 @@ import {
   Server,
   Table2,
   View,
+  Zap,
   type LucideIcon,
 } from "lucide-react";
 import type { DbKind, DbNodeKind } from "../../types/database";
@@ -72,6 +73,35 @@ const ENGINE_COLORS: Record<DbKind, string> = {
 
 export function engineColor(kind: DbKind): string {
   return ENGINE_COLORS[kind] ?? "var(--cf-accent)";
+}
+
+/**
+ * A glyph per engine, for the lists where the engine is the thing being chosen.
+ *
+ * Deliberately not brand logos: lucide ships none of them, and five trademarks redrawn by hand is a
+ * licensing question rather than a design one. These are the shapes each engine's own mark suggests
+ * — Mongo's leaf, Supabase's bolt — or what the engine plainly is: a server for SQL Server, layers
+ * for IRIS's multi-model store. Five distinct silhouettes is all a list of five rows needs.
+ *
+ * Tinted with `engineColor` wherever they are drawn, so the glyph in the picker and the dot beside a
+ * connection in the explorer are the same colour for the same engine.
+ */
+const ENGINE_ICONS: Record<DbKind, LucideIcon> = {
+  postgres: Database,
+  supabase: Zap,
+  sqlserver: Server,
+  iris: Layers,
+  mongodb: Leaf,
+};
+
+export function engineIcon(kind: DbKind): LucideIcon {
+  return ENGINE_ICONS[kind] ?? Database;
+}
+
+/** The engine's glyph in the engine's own colour. */
+export function EngineGlyph({ kind, size = 14 }: { kind: DbKind; size?: number }) {
+  const Icon = engineIcon(kind);
+  return <Icon size={size} className="shrink-0" style={{ color: engineColor(kind) }} />;
 }
 
 /** The dot next to a connection: its engine's colour, hollow when nothing is connected. */

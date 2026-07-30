@@ -1,4 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { X, type LucideIcon } from "lucide-react";
 import { useT } from "../../state/languageStore";
 
@@ -16,6 +17,19 @@ import { useT } from "../../state/languageStore";
  * `dismissOnBackdrop` locks the same exit for a different reason: a modal whose body is a form the
  * user has been typing into has nothing to recover from a mis-click, so the ones that hold unsaved
  * input turn it off and keep the close button, Cancel and Escape as the only ways out.
+ *
+ * **It portals to `document.body`, and it has to.** These modals are opened from inside the main
+ * content area, which is `.cf-ambient-bg` — and that carries `isolation: isolate` so its ambient
+ * gradient (a `::before` at `z-index: -1`) stays behind the view instead of the whole app. Isolation
+ * makes a stacking context, which traps every overlay rendered inside it: no `z-index` on a
+ * descendant can lift it over the terminal dock, the AI panel or the status bar, because those are
+ * later siblings of the isolated element. Rendered there, the dialog came out *under* the app chrome
+ * and the bar beneath it stayed clickable — a modal you can click straight through.
+ *
+ * `z-40` is deliberate, not a leftover. Out here the layers are: app chrome (unnumbered) < this
+ * dialog < the overlays mounted at the app root — Settings, the command palette, toasts (`z-50`) <
+ * `ConfirmModal` (`z-[60]`, since it is raised *on top* of dialogs) < popovers (`z-[9999]`, which is
+ * what a `Select` inside this dialog opens with).
  */
 export function ApiModal({
   icon: Icon,
@@ -53,15 +67,20 @@ export function ApiModal({
   useEffect(() => {
     if (busy) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      // A popover open inside the dialog owns Escape first. Its own handler is a React one on the
+      // trigger, which can't stop this native listener, so the dialog has to yield: otherwise
+      // dismissing the engine list would take the half-filled form under it with it.
+      if (document.querySelector('[role="listbox"], [role="menu"]')) return;
+      onClose();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [busy, onClose]);
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6"
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-6"
       onMouseDown={(e) => {
         pressedBackdrop.current = e.target === e.currentTarget;
       }}
@@ -109,7 +128,8 @@ export function ApiModal({
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

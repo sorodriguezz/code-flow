@@ -15,6 +15,7 @@ import {
   Waypoints,
   type LucideIcon,
 } from "lucide-react";
+import { BetaBadge } from "../common/BetaBadge";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { motion } from "framer-motion";
@@ -838,13 +839,7 @@ export function ApiSettingsBody() {
             <span className="relative flex min-w-0 flex-1 items-center gap-1.5">
               <Icon size={13} className="shrink-0" />
               <span className="truncate">{t(labelKey)}</span>
-              {/* Says "this one has not been through as many hands as the rest yet" — sized and
-                  coloured to be read once and then ignored, not to compete with the label. */}
-              {beta && (
-                <span className="ml-auto shrink-0 rounded bg-[color-mix(in_oklab,var(--cf-warning)_18%,transparent)] px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide text-[var(--cf-warning)]">
-                  {t("common.beta")}
-                </span>
-              )}
+              {beta && <BetaBadge className="ml-auto" />}
             </span>
           </button>
         ))}

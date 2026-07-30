@@ -234,11 +234,6 @@ export interface DbWorkspaceTree {
 export interface DbEngineInfo {
   kind: DbKind;
   label: string;
-  /**
-   * The name where width is scarce — the engine chips in the connection dialog, which fit on one row
-   * only if the longest name is short. Everywhere with room uses `label`.
-   */
-  short: string;
   defaultPort: number;
   /** SQL engines get a schema level in the tree and a SQL console; Mongo gets neither. */
   sql: boolean;
@@ -254,7 +249,6 @@ export interface DbEngineInfo {
 export const DB_ENGINES: DbEngineInfo[] = [
   {
     kind: "postgres",
-    short: "Postgres",
     label: "PostgreSQL",
     defaultPort: 5432,
     sql: true,
@@ -265,7 +259,6 @@ export const DB_ENGINES: DbEngineInfo[] = [
   },
   {
     kind: "supabase",
-    short: "Supabase",
     label: "Supabase",
     defaultPort: 5432,
     sql: true,
@@ -278,7 +271,6 @@ export const DB_ENGINES: DbEngineInfo[] = [
   },
   {
     kind: "sqlserver",
-    short: "SQL Server",
     label: "SQL Server",
     defaultPort: 1433,
     sql: true,
@@ -289,7 +281,6 @@ export const DB_ENGINES: DbEngineInfo[] = [
   },
   {
     kind: "iris",
-    short: "IRIS",
     label: "InterSystems IRIS",
     // The web server port, not the superserver's 1972: this driver speaks the Atelier REST API.
     defaultPort: 52773,
@@ -301,7 +292,6 @@ export const DB_ENGINES: DbEngineInfo[] = [
   },
   {
     kind: "mongodb",
-    short: "MongoDB",
     label: "MongoDB",
     defaultPort: 27017,
     sql: false,

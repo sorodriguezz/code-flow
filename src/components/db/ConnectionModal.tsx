@@ -18,9 +18,8 @@ import {
 } from "lucide-react";
 import { ApiModal, GhostButton } from "../api/ApiModal";
 import { Checkbox } from "../common/Checkbox";
-import { ActivePill } from "../common/ActivePill";
-import { Select } from "../common/Select";
-import { engineColor } from "./dbChrome";
+import { Select, type SelectItems } from "../common/Select";
+import { EngineGlyph } from "./dbChrome";
 import { parseSpec, redactUrl, useDbStore } from "../../state/dbStore";
 import { dbHasPassword } from "../../lib/tauri/dbCommands";
 import { useT } from "../../state/languageStore";
@@ -248,7 +247,9 @@ export function ConnectionModal({
           scroll container. Without them the form sits flush against the frame and a tall one
           overflows the sheet instead of scrolling inside it. */}
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
-        <EnginePicker active={config.kind} onSelect={setKind} />
+        <Row label={t("db.engine")}>
+          <EnginePicker active={config.kind} onSelect={setKind} />
+        </Row>
 
         <Row label={t("db.name")}>
           <input
@@ -493,13 +494,16 @@ export function ConnectionModal({
 // ---------------------------------------------------------------------------
 
 /**
- * The engine picker.
+ * The engine picker: a named list, the way a database tool names its drivers.
  *
- * Chips rather than a dropdown, because which engine this is changes every field below it and is
- * worth seeing without opening anything. Each carries a dot in the engine's own brand hue — the same
- * colour the explorer and the tab strip use — so the choice made here is recognizable everywhere
- * else. The sliding pill is the app's shared `ActivePill`, so this reads like the AI-provider and
- * Git-hosting pickers rather than a one-off.
+ * A dropdown rather than the row of chips this used to be. Chips fit the short names and nothing
+ * else — "SQL Server" and "IRIS" as chips are abbreviations of a choice that decides every field
+ * below them, and the row had no room to say which engines exist and how well each is supported. As
+ * a list each engine gets its full name, its glyph in its own brand hue, and a heading over the set,
+ * and the closed trigger still shows the current engine, which is what the chips were protecting.
+ *
+ * It is the app's shared `Select`, so the menu is keyboard-navigable and portalled out of the
+ * dialog's scroll container for free, and the glyphs ride its `leading` slot to keep their colour.
  */
 function EnginePicker({
   active,
@@ -508,38 +512,29 @@ function EnginePicker({
   active: DbKind;
   onSelect: (kind: DbKind) => void;
 }) {
+  const t = useT();
+  const options = useMemo<SelectItems>(
+    () => [
+      {
+        label: t("db.engineGroup"),
+        options: DB_ENGINES.map((entry) => ({
+          value: entry.kind,
+          label: entry.label,
+          leading: <EngineGlyph kind={entry.kind} />,
+        })),
+      },
+    ],
+    [t],
+  );
+
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {DB_ENGINES.map((entry) => {
-        const selected = entry.kind === active;
-        return (
-          <button
-            key={entry.kind}
-            type="button"
-            onClick={() => onSelect(entry.kind)}
-            title={entry.label}
-            aria-pressed={selected}
-            className={`relative flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
-              selected
-                ? "border-transparent text-[var(--cf-accent)]"
-                : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-            }`}
-          >
-            {selected && (
-              <ActivePill layoutId="cf-db-engine-pill" inset="-inset-px" radius="rounded-lg" />
-            )}
-            <span className="relative flex items-center gap-1.5">
-              <span
-                aria-hidden
-                className="h-2 w-2 rounded-full"
-                style={{ backgroundColor: engineColor(entry.kind) }}
-              />
-              {entry.short}
-            </span>
-          </button>
-        );
-      })}
-    </div>
+    <Select
+      value={active}
+      options={options}
+      onChange={(kind) => onSelect(kind as DbKind)}
+      size="md"
+      ariaLabel={t("db.engine")}
+    />
   );
 }
 

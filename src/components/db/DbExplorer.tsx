@@ -21,6 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { BetaBadge } from "../common/BetaBadge";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ActivePill } from "../common/ActivePill";
 import { CARD, ConnectionDot, ToolbarButton, nodeIcon } from "./dbChrome";
@@ -579,8 +580,13 @@ export function DbExplorer() {
         className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
       >
         <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1">
-          <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {t("db.title")}
+          {/* The badge is here too, not only on the menu row that leads here: a beta mark that is
+              visible for the second the menu is open has told nobody anything. */}
+          <span className="mr-auto flex min-w-0 items-center gap-1.5">
+            <span className="truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              {t("db.title")}
+            </span>
+            <BetaBadge />
           </span>
           <ToolbarButton
             onClick={() => openModal({ kind: "newConnection" })}
