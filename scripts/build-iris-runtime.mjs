@@ -126,11 +126,23 @@ function locateJdk() {
   }
 
   throw new Error(
-    "no JDK found. Building CodeFlow's IRIS support needs one (javac, jar and jlink) — set " +
-      "JAVA_HOME, or install a JDK " +
-      RELEASE +
-      "+ such as Temurin. This is a build-time requirement only; the app ships its own runtime.",
+    `no JDK found. Building CodeFlow's IRIS support needs one (javac, jar and jlink).\n\n  ${installHint()}\n\n` +
+      "Then re-run, or just start the app again — it is detected automatically.\n" +
+      "This is a build-time requirement only: the app bundles its own runtime, so nobody who " +
+      "installs CodeFlow needs Java.",
   );
+}
+
+/** The one command that fixes it, for the platform actually running. */
+function installHint() {
+  switch (process.platform) {
+    case "win32":
+      return `winget install EclipseAdoptium.Temurin.${RELEASE}.JDK`;
+    case "darwin":
+      return "brew install --cask temurin";
+    default:
+      return `sudo apt install openjdk-${RELEASE}-jdk    (or your distro's equivalent)`;
+  }
 }
 
 /** The feature version of a candidate JDK, or null when it isn't one (a JRE has no `jlink`). */

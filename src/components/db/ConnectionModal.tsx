@@ -6,7 +6,6 @@ import {
   Database,
   Eye,
   EyeOff,
-  Info,
   Link2,
   Loader2,
   Plug,
@@ -437,13 +436,6 @@ export function ConnectionModal({
             </div>
           )}
         </div>
-
-        {config.kind === "iris" && (
-          <p className="flex items-start gap-1.5 rounded-lg border border-[var(--cf-border)] bg-black/[0.02] p-2.5 text-[11px] leading-snug text-[var(--cf-text-muted)] dark:bg-white/[0.03]">
-            <Info size={12} className="mt-[1px] shrink-0" />
-            {t("db.irisNote")}
-          </p>
-        )}
 
         {/* What a connect will actually address. The one line that catches a port left on the
             default, or a URL that quietly overrode the fields. */}

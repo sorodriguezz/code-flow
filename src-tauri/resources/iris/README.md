@@ -18,10 +18,24 @@ install nothing.
 pnpm iris:runtime
 ```
 
-Needs a JDK 17 or newer on the build machine (`javac`, `jar`, `jlink`). It is incremental, so a
-re-run when nothing changed costs nothing. `pnpm tauri build` runs it automatically;
-`pnpm tauri dev` runs the `--optional` variant, which warns instead of failing when there is no JDK
-so that unrelated work isn't blocked by one.
+Needs a JDK 17 or newer on the build machine (`javac`, `jar`, `jlink`) — once per machine:
+
+| | |
+|---|---|
+| Windows | `winget install EclipseAdoptium.Temurin.17.JDK` |
+| macOS | `brew install --cask temurin` |
+| Linux | `sudo apt install openjdk-17-jdk` |
+
+Nothing to configure afterwards: `JAVA_HOME` and `PATH` are both checked, as is
+`/usr/libexec/java_home` on macOS.
+
+**This is a build-time requirement only.** Nobody who *installs* CodeFlow needs Java — the runtime
+below ships inside the installer.
+
+The script is incremental, so a re-run when nothing changed costs nothing. `pnpm tauri build` runs
+it automatically and **fails the build** when there is no JDK, which is what stops a broken
+installer from ever being published. `pnpm tauri dev` runs the `--optional` variant, which warns
+instead of failing so that work on the rest of the app isn't blocked by a missing JDK.
 
 `jlink` cannot cross-compile — it builds a runtime for the platform it runs on — so each release
 platform has to build on its own runner.
