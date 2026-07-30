@@ -1245,6 +1245,8 @@ mod tests {
             database: "app".into(),
             user: "postgres".into(),
             password: String::new(),
+            auth_method: crate::datasource::DbAuthMethod::Password,
+            tenant_id: String::new(),
             url: String::new(),
             ssl: DbSslMode::VerifyFull,
             options: Vec::new(),

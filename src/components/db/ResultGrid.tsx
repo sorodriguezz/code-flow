@@ -501,9 +501,14 @@ export function ResultGrid({
  * Two things follow from the same choice. Pointer capture is taken on the **scroll container**, not
  * on the row number that was pressed: that row unmounts as soon as the sweep scrolls it out of the
  * window, and capture dies with the element — the drag would stop dead a screenful in. Capturing on
- * the container also keeps the moves coming after the pointer leaves the grid or the window. And
- * dragging past an edge scrolls on a timer rather than per event, because a pointer held still
- * outside the edge sends no further events and must still keep pulling the selection along.
+ * the container also keeps the moves coming after the pointer leaves the grid or the window.
+ *
+ * **The whole drag runs off one animation frame loop**, and that is what makes it feel like dragging
+ * rather than like a series of jumps. `move` writes the pointer's position to a ref and returns —
+ * it renders nothing. Once per frame the loop scrolls, works out which row is under the pointer, and
+ * updates the selection at most once. A pointer device sending 120 events a second would otherwise
+ * push 120 renders a second through a grid of several hundred cells, and the edge scroll on a timer
+ * moved in visible steps between them.
  */
 function useRowSweep({
   scrollRef,
@@ -516,65 +521,78 @@ function useRowSweep({
   rowCount: number;
   onSelectRange?: (from: number, to: number, additive: boolean) => void;
 }) {
-  const state = useRef<{ anchor: number; additive: boolean; clientY: number; last: number } | null>(
-    null,
-  );
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const state = useRef<{
+    anchor: number;
+    additive: boolean;
+    clientY: number;
+    last: number;
+    time: number;
+  } | null>(null);
+  const frame = useRef<number | null>(null);
+  // Read through a ref so the loop, which is started once per drag, always calls the current
+  // handler instead of the one that existed when the pointer went down.
+  const latest = useRef({ headerHeight, rowCount, onSelectRange });
+  latest.current = { headerHeight, rowCount, onSelectRange };
 
-  const rowAt = (clientY: number): number => {
-    const element = scrollRef.current;
-    if (!element) return 0;
-    const box = element.getBoundingClientRect();
-    const y = clientY - box.top + element.scrollTop - headerHeight;
-    return Math.min(rowCount - 1, Math.max(0, Math.floor(y / ROW_HEIGHT)));
+  const stop = () => {
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+    frame.current = null;
   };
 
-  const extend = () => {
+  useEffect(() => stop, []);
+
+  const tick = (now: number) => {
     const current = state.current;
-    if (!current || !onSelectRange) return;
-    const row = rowAt(current.clientY);
-    if (row === current.last) return;
-    current.last = row;
-    onSelectRange(current.anchor, row, current.additive);
-  };
+    const element = scrollRef.current;
+    if (!current || !element) {
+      frame.current = null;
+      return;
+    }
+    // Clamped, so one dropped frame — a garbage collection, a slow paint — doesn't teleport the
+    // scroll a thousand rows.
+    const elapsed = Math.min(64, current.time === 0 ? 16 : now - current.time);
+    current.time = now;
 
-  const stopTimer = () => {
-    if (timer.current !== null) clearInterval(timer.current);
-    timer.current = null;
-  };
+    const box = element.getBoundingClientRect();
+    const above = box.top + latest.current.headerHeight - current.clientY;
+    const below = current.clientY - box.bottom;
+    const past = above > 0 ? -above : below > 0 ? below : 0;
+    if (past !== 0) {
+      // Pixels per second, ramped by how far past the edge the pointer is: a hair over the edge
+      // creeps, an inch past it flies. Multiplied by the frame's own duration, so the speed is the
+      // same on a 60Hz panel and a 120Hz one.
+      const speed = Math.sign(past) * Math.min(3000, 260 + Math.abs(past) * 26);
+      element.scrollTop += (speed * elapsed) / 1000;
+    }
 
-  useEffect(() => stopTimer, []);
+    const y = current.clientY - box.top + element.scrollTop - latest.current.headerHeight;
+    const row = Math.min(
+      latest.current.rowCount - 1,
+      Math.max(0, Math.floor(y / ROW_HEIGHT)),
+    );
+    if (row !== current.last) {
+      current.last = row;
+      latest.current.onSelectRange?.(current.anchor, row, current.additive);
+    }
+    frame.current = requestAnimationFrame(tick);
+  };
 
   return {
     start: (e: React.PointerEvent, row: number, additive: boolean) => {
       if (!onSelectRange) return;
       e.preventDefault();
       scrollRef.current?.setPointerCapture?.(e.pointerId);
-      state.current = { anchor: row, additive, clientY: e.clientY, last: row };
-      stopTimer();
-      // 60ms is fast enough to feel continuous and slow enough that a schema of ten thousand rows
-      // doesn't fly past before the hand can react.
-      timer.current = setInterval(() => {
-        const element = scrollRef.current;
-        const current = state.current;
-        if (!element || !current) return;
-        const box = element.getBoundingClientRect();
-        const above = box.top + headerHeight - current.clientY;
-        const below = current.clientY - box.bottom;
-        if (above > 0) element.scrollTop -= Math.min(120, 12 + above);
-        else if (below > 0) element.scrollTop += Math.min(120, 12 + below);
-        else return;
-        extend();
-      }, 60);
+      state.current = { anchor: row, additive, clientY: e.clientY, last: row, time: 0 };
+      stop();
+      frame.current = requestAnimationFrame(tick);
     },
     move: (e: React.PointerEvent) => {
-      if (!state.current) return;
-      state.current.clientY = e.clientY;
-      extend();
+      // Deliberately just a write. Everything the move implies happens on the next frame.
+      if (state.current) state.current.clientY = e.clientY;
     },
     end: () => {
       state.current = null;
-      stopTimer();
+      stop();
     },
   };
 }

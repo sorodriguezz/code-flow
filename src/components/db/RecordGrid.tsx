@@ -317,7 +317,9 @@ export function RecordGrid({
  * Press-and-drag record selection, the sideways twin of the grid's `useRowSweep`.
  *
  * Same reasoning, one axis over: records are windowed here, so the sweep converts the pointer's x
- * into a record index instead of waiting for events from headers that may not be rendered.
+ * into a record index rather than waiting for events from headers that may not be rendered — and
+ * the whole drag runs off one animation frame loop, so a move costs a ref write and the selection
+ * updates once per frame instead of once per pointer event.
  */
 function useRecordSweep({
   scrollRef,
@@ -332,34 +334,56 @@ function useRecordSweep({
   count: number;
   onSelectRange?: (from: number, to: number, additive: boolean) => void;
 }) {
-  const state = useRef<{ anchor: number; additive: boolean; clientX: number; last: number } | null>(
-    null,
-  );
-  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const state = useRef<{
+    anchor: number;
+    additive: boolean;
+    clientX: number;
+    last: number;
+    time: number;
+  } | null>(null);
+  const frame = useRef<number | null>(null);
+  const latest = useRef({ fieldWidth, recordWidth, count, onSelectRange });
+  latest.current = { fieldWidth, recordWidth, count, onSelectRange };
 
-  const recordAt = (clientX: number): number => {
-    const element = scrollRef.current;
-    if (!element) return 0;
-    const box = element.getBoundingClientRect();
-    const x = clientX - box.left + element.scrollLeft - fieldWidth;
-    return Math.min(count - 1, Math.max(0, Math.floor(x / recordWidth)));
+  const stop = () => {
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+    frame.current = null;
   };
 
-  const extend = () => {
+  useEffect(() => stop, []);
+
+  const tick = (now: number) => {
     const current = state.current;
-    if (!current || !onSelectRange) return;
-    const record = recordAt(current.clientX);
-    if (record === current.last) return;
-    current.last = record;
-    onSelectRange(current.anchor, record, current.additive);
-  };
+    const element = scrollRef.current;
+    if (!current || !element) {
+      frame.current = null;
+      return;
+    }
+    const elapsed = Math.min(64, current.time === 0 ? 16 : now - current.time);
+    current.time = now;
 
-  const stopTimer = () => {
-    if (timer.current !== null) clearInterval(timer.current);
-    timer.current = null;
-  };
+    const box = element.getBoundingClientRect();
+    const before = box.left + latest.current.fieldWidth - current.clientX;
+    const after = current.clientX - box.right;
+    const past = before > 0 ? -before : after > 0 ? after : 0;
+    if (past !== 0) {
+      // Faster than the vertical sweep's, because a record is ten times as wide as a row is tall
+      // and the same speed in pixels would feel like wading.
+      const speed = Math.sign(past) * Math.min(4000, 400 + Math.abs(past) * 30);
+      element.scrollLeft += (speed * elapsed) / 1000;
+    }
 
-  useEffect(() => stopTimer, []);
+    const x = current.clientX - box.left + element.scrollLeft - latest.current.fieldWidth;
+    const record = Math.min(
+      latest.current.count - 1,
+      Math.max(0, Math.floor(x / latest.current.recordWidth)),
+    );
+    if (record !== current.last) {
+      current.last = record;
+      latest.current.onSelectRange?.(current.anchor, record, current.additive);
+    }
+    frame.current = requestAnimationFrame(tick);
+  };
 
   return {
     start: (e: React.PointerEvent, record: number, additive: boolean) => {
@@ -368,29 +392,16 @@ function useRecordSweep({
       // On the scroll container, not the header that was pressed: that header unmounts as soon as
       // the sweep scrolls it out of the window, and capture would die with it.
       scrollRef.current?.setPointerCapture?.(e.pointerId);
-      state.current = { anchor: record, additive, clientX: e.clientX, last: record };
-      stopTimer();
-      timer.current = setInterval(() => {
-        const element = scrollRef.current;
-        const current = state.current;
-        if (!element || !current) return;
-        const box = element.getBoundingClientRect();
-        const before = box.left + fieldWidth - current.clientX;
-        const after = current.clientX - box.right;
-        if (before > 0) element.scrollLeft -= Math.min(240, 24 + before);
-        else if (after > 0) element.scrollLeft += Math.min(240, 24 + after);
-        else return;
-        extend();
-      }, 60);
+      state.current = { anchor: record, additive, clientX: e.clientX, last: record, time: 0 };
+      stop();
+      frame.current = requestAnimationFrame(tick);
     },
     move: (e: React.PointerEvent) => {
-      if (!state.current) return;
-      state.current.clientX = e.clientX;
-      extend();
+      if (state.current) state.current.clientX = e.clientX;
     },
     end: () => {
       state.current = null;
-      stopTimer();
+      stop();
     },
   };
 }

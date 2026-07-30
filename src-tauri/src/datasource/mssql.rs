@@ -14,6 +14,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
+use super::entra;
 use super::postgres::{annotate_types, cell, relation_folders, schema_folders};
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
@@ -39,7 +40,16 @@ impl MssqlSession {
     pub async fn open(config: &DbConnectionConfig, database: Option<&str>) -> Result<Self, String> {
         let mut config = config.clone();
         config.resolve_password();
-        let tds = tds_config(&config, database)?;
+        // Fetched before the TDS config is built, because it *is* the credential: an Entra-only
+        // Azure SQL server has SQL logins disabled and will refuse anything else. Its failures are
+        // about the sign-in rather than about the database, so they surface verbatim instead of
+        // being wrapped in "couldn't connect to host".
+        let token = if config.auth_method.is_entra() {
+            Some(entra::access_token(&config, entra::SQL_RESOURCE).await?)
+        } else {
+            None
+        };
+        let tds = tds_config(&config, database, token)?;
         let label = format!("Connecting to {}", config.endpoint());
 
         // A named instance (`HOST\SQLEXPRESS`) listens on a port assigned at startup; the SQL
@@ -1023,7 +1033,14 @@ fn is_go_with_count(line: &str) -> bool {
         && parts.next().is_none()
 }
 
-fn tds_config(config: &DbConnectionConfig, database: Option<&str>) -> Result<Config, String> {
+/// Builds the TDS configuration. `token` is a Microsoft Entra ID access token when the connection
+/// authenticates that way, and wins over anything the fields or the connection string say about a
+/// login — see [`entra`].
+fn tds_config(
+    config: &DbConnectionConfig,
+    database: Option<&str>,
+    token: Option<String>,
+) -> Result<Config, String> {
     let mut tds = if config.url.trim().is_empty() {
         let mut tds = Config::new();
         tds.host(&config.host);
@@ -1048,7 +1065,21 @@ fn tds_config(config: &DbConnectionConfig, database: Option<&str>) -> Result<Con
     if !target.is_empty() {
         tds.database(target);
     }
+
+    // Set after the connection string is parsed, so a pasted `User Id=…;Password=…` can't quietly
+    // win over the sign-in the user chose in the dialog.
+    if let Some(token) = token {
+        tds.authentication(AuthMethod::aad_token(token));
+    }
+
     match config.ssl {
+        // A bearer token in cleartext is a credential anyone on the path can replay, so this is one
+        // of the few places where the connection's own setting doesn't get the last word. Azure SQL
+        // mandates TLS regardless; the refusal to send the token unencrypted is ours.
+        DbSslMode::Disable if config.auth_method.is_entra() => {
+            tds.encryption(EncryptionLevel::Required);
+            tds.trust_cert();
+        }
         DbSslMode::Disable => tds.encryption(EncryptionLevel::NotSupported),
         DbSslMode::Require => {
             tds.encryption(EncryptionLevel::Required);

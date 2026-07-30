@@ -478,39 +478,6 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
         </p>
       )}
 
-      {/* What the selection can do, only while there is one — a bar of disabled buttons over every
-          grid would cost a row of screen to say "nothing is selected". */}
-      {selectedRows.length > 0 && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-accent)_10%,transparent)] px-2 py-1">
-          <span className="text-[11px] font-medium text-[var(--cf-text)]">
-            {t("db.rowsSelectedN", { n: String(selectedRows.length) })}
-          </span>
-          <ToolbarButton onClick={() => openRecords(selectedRows)} title={t("db.viewRecordsSelected")}>
-            <Rows3 size={12} />
-          </ToolbarButton>
-          <ToolbarButton
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              setMenu({ x: rect.left, y: rect.bottom + 2, kind: "export", rows: selectedRows });
-            }}
-            title={t("db.exportSelectedN", { n: String(selectedRows.length) })}
-          >
-            <Download size={12} />
-          </ToolbarButton>
-          <ToolbarButton onClick={deleteSelected} title={t("db.deleteSelectedHint")}>
-            <Trash2 size={12} className="text-[var(--cf-danger)]" />
-          </ToolbarButton>
-          <button
-            type="button"
-            onClick={() => selectAll(false)}
-            className="ml-auto flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          >
-            <X size={11} />
-            {t("db.clearSelection")}
-          </button>
-        </div>
-      )}
-
       {/* Grid */}
       <div className="relative min-h-0 flex-1">
         {tab.error ? (
@@ -567,6 +534,47 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
             );
           })()
         ) : null}
+
+        {/* What the selection can do, only while there is one — and floating over the grid rather
+            than stacked above it. In the flow it pushed the whole grid down the instant a selection
+            appeared, which during a press-and-drag means the rows move out from under the pointer
+            on the very first one. A bar that is always there would cost a row of screen to say
+            "nothing is selected". */}
+        {selectedRows.length > 0 && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-2 z-20 flex justify-center px-2">
+            <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-1.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1 shadow-[var(--cf-shadow)]">
+              <span className="text-[11px] font-medium text-[var(--cf-text)]">
+                {t("db.rowsSelectedN", { n: String(selectedRows.length) })}
+              </span>
+              <ToolbarButton
+                onClick={() => openRecords(selectedRows)}
+                title={t("db.viewRecordsSelected")}
+              >
+                <Rows3 size={12} />
+              </ToolbarButton>
+              <ToolbarButton
+                onClick={(e) => {
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setMenu({ x: rect.left, y: rect.top - 4, kind: "export", rows: selectedRows });
+                }}
+                title={t("db.exportSelectedN", { n: String(selectedRows.length) })}
+              >
+                <Download size={12} />
+              </ToolbarButton>
+              <ToolbarButton onClick={deleteSelected} title={t("db.deleteSelectedHint")}>
+                <Trash2 size={12} className="text-[var(--cf-danger)]" />
+              </ToolbarButton>
+              <button
+                type="button"
+                onClick={() => selectAll(false)}
+                className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              >
+                <X size={11} />
+                {t("db.clearSelection")}
+              </button>
+            </div>
+          </div>
+        )}
 
         {tab.loading && (
           <div className="absolute inset-0 flex items-center justify-center gap-2 bg-[var(--cf-surface)]/70 text-[12px] text-[var(--cf-text-muted)]">

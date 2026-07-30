@@ -28,6 +28,7 @@
 //! Every type below is mirrored one-for-one in `src/types/database.ts`; field names are the serde
 //! wire names, so renaming one here is a breaking change on both sides.
 
+pub mod entra;
 pub mod iris;
 pub mod jvm;
 pub mod mongo;
@@ -96,6 +97,39 @@ pub enum DbSslMode {
     VerifyFull,
 }
 
+/// Who the server is being asked to believe we are.
+///
+/// A separate axis from the engine, because the same SQL Server accepts several: a SQL login it
+/// checks itself, or a Microsoft Entra ID token it validates against the directory. An Azure SQL
+/// server configured as **Entra-only** has SQL logins disabled altogether, which makes this the
+/// difference between the engine working and not existing. See [`entra`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbAuthMethod {
+    /// User and password, checked by the database itself. Every engine here supports it, and it is
+    /// what a connection that predates this field gets.
+    Password,
+    /// Microsoft Entra ID, borrowing the session `az login` already established. No credential is
+    /// stored, and MFA and conditional access happen in Microsoft's own flow.
+    EntraCli,
+    /// Microsoft Entra ID as an application: directory (tenant) ID, application (client) ID and a
+    /// client secret, exchanged for a token. The secret lives in the keychain like any password.
+    EntraServicePrincipal,
+}
+
+impl Default for DbAuthMethod {
+    fn default() -> Self {
+        Self::Password
+    }
+}
+
+impl DbAuthMethod {
+    /// Whether this method authenticates with an Entra token rather than a password.
+    pub fn is_entra(self) -> bool {
+        matches!(self, DbAuthMethod::EntraCli | DbAuthMethod::EntraServicePrincipal)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Connection configuration
 // ---------------------------------------------------------------------------
@@ -112,13 +146,25 @@ pub struct DbConnectionConfig {
     /// Postgres database / SQL Server database / IRIS namespace / Mongo database.
     #[serde(default)]
     pub database: String,
+    /// The login. Under [`DbAuthMethod::EntraServicePrincipal`] this is the application (client)
+    /// ID instead — same field, because it is the same question and reusing it keeps one credential
+    /// path rather than two.
     #[serde(default)]
     pub user: String,
     /// Empty on every stored connection: the real value is read from the OS keychain by
     /// [`resolve_password`]. Only "Test connection" on an unsaved form fills it in, because there
-    /// is nothing in the keychain to read yet.
+    /// is nothing in the keychain to read yet. Holds the client secret under
+    /// [`DbAuthMethod::EntraServicePrincipal`].
     #[serde(default)]
     pub password: String,
+    /// How to authenticate. Defaults to [`DbAuthMethod::Password`], which is what every connection
+    /// made before this field existed keeps.
+    #[serde(default)]
+    pub auth_method: DbAuthMethod,
+    /// The Microsoft Entra ID directory (tenant) to sign in against. Required for a service
+    /// principal; optional for the CLI path, where it picks the account's default tenant.
+    #[serde(default)]
+    pub tenant_id: String,
     /// A full connection URI, which wins over every field above when set. Present because that is
     /// how these credentials are actually handed out — Supabase and Mongo Atlas both give you a
     /// URI to paste, and re-typing it into six boxes is a chance to get it wrong.
@@ -1428,6 +1474,8 @@ mod tests {
             database: "app".into(),
             user: "postgres".into(),
             password: String::new(),
+            auth_method: DbAuthMethod::Password,
+            tenant_id: String::new(),
             url: String::new(),
             ssl: DbSslMode::Disable,
             options: Vec::new(),
@@ -1548,6 +1596,8 @@ mod tests {
             database: "app".into(),
             user: "postgres".into(),
             password: String::new(),
+            auth_method: DbAuthMethod::Password,
+            tenant_id: String::new(),
             url: String::new(),
             ssl: DbSslMode::Disable,
             options: Vec::new(),

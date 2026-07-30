@@ -17,6 +17,17 @@ export type DbKind = "postgres" | "supabase" | "sqlserver" | "iris" | "mongodb";
 
 export type DbSslMode = "disable" | "require" | "verify_full";
 
+/**
+ * Who the server is being asked to believe we are — a separate axis from the engine.
+ *
+ * `entra_cli` borrows the session `az login` already established, so no credential is stored here
+ * and MFA / conditional access happen in Microsoft's own flow. `entra_service_principal` exchanges
+ * a tenant + client id + client secret for a token. SQL Server only: an Azure SQL server set to
+ * Entra-only has SQL logins disabled, which makes this the difference between the engine working
+ * and being unreachable.
+ */
+export type DbAuthMethod = "password" | "entra_cli" | "entra_service_principal";
+
 export interface DbConnectionConfig {
   id: string;
   kind: DbKind;
@@ -25,12 +36,18 @@ export interface DbConnectionConfig {
   port: number;
   /** Postgres database / SQL Server database / IRIS namespace / Mongo database. */
   database: string;
+  /** The login — or the application (client) ID under `entra_service_principal`. */
   user: string;
   /**
    * Only ever set on an unsaved form being tested. A stored connection's password lives in the OS
-   * keychain and never reaches the webview — there is no command that reads it back.
+   * keychain and never reaches the webview — there is no command that reads it back. Holds the
+   * client secret under `entra_service_principal`.
    */
   password: string;
+  /** How to authenticate. `password` for everything made before this field existed. */
+  auth_method: DbAuthMethod;
+  /** The Entra ID directory (tenant). Required for a service principal, optional for the CLI. */
+  tenant_id: string;
   /** A full connection URI, which wins over every field above when set. */
   url: string;
   ssl: DbSslMode;
@@ -430,6 +447,8 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     database: kind === "iris" ? "USER" : "",
     user: engine.defaultUser,
     password: "",
+    auth_method: "password",
+    tenant_id: "",
     url: "",
     ssl: engine.defaultSsl,
     options: [],

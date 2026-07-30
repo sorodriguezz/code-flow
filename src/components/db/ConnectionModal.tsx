@@ -29,10 +29,12 @@ import { parseSpec, redactUrl, useDbStore } from "../../state/dbStore";
 import { dbHasPassword, dbSchemaCatalog } from "../../lib/tauri/dbCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import {
   DB_ENGINES,
   defaultConnectionConfig,
   engineInfo,
+  type DbAuthMethod,
   type DbConnectionConfig,
   type DbConnectionRow,
   type DbKind,
@@ -123,6 +125,8 @@ function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
     a.ssh_port === b.ssh_port &&
     a.ssh_user === b.ssh_user &&
     a.ssh_key_file === b.ssh_key_file &&
+    a.auth_method === b.auth_method &&
+    a.tenant_id === b.tenant_id &&
     a.schemas_filtered === b.schemas_filtered &&
     a.visible_schemas.length === b.visible_schemas.length &&
     a.visible_schemas.every((name, i) => b.visible_schemas[i] === name) &&
@@ -600,10 +604,23 @@ export function ConnectionModal({
                               className={INPUT}
                             />
                           </Row>
-                          <Row label={t("db.user")}>
+                          {/* Under a service principal this box is the application (client) ID —
+                              the same question, so the same field rather than a second one that
+                              would have to be kept in step with it. */}
+                          <Row
+                            label={
+                              config.auth_method === "entra_service_principal"
+                                ? t("db.clientId")
+                                : t("db.user")
+                            }
+                          >
                             <input
                               value={config.user}
                               onChange={(e) => patch({ user: e.target.value })}
+                              disabled={config.auth_method === "entra_cli"}
+                              placeholder={
+                                config.auth_method === "entra_cli" ? t("db.userFromAzureCli") : ""
+                              }
                               spellCheck={false}
                               autoComplete="off"
                               className={INPUT}
@@ -614,8 +631,56 @@ export function ConnectionModal({
                     )}
                   </div>
 
+                  {/* Only SQL Server: it is the one engine here that takes a Microsoft Entra ID
+                      token, and an Azure SQL server set to Entra-only refuses SQL logins outright —
+                      so for those users this control is the difference between the engine working
+                      and being unreachable. */}
+                  {config.kind === "sqlserver" && (
+                    <Row label={t("db.authMethod")} hint={authHint(config.auth_method, t)}>
+                      <Select
+                        value={config.auth_method}
+                        onChange={(auth_method) => {
+                          patch({ auth_method: auth_method as DbAuthMethod });
+                          setOutcome(null);
+                        }}
+                        options={[
+                          { value: "password", label: t("db.authPassword") },
+                          { value: "entra_cli", label: t("db.authEntraCli") },
+                          { value: "entra_service_principal", label: t("db.authEntraApp") },
+                        ]}
+                      />
+                    </Row>
+                  )}
+
+                  {config.auth_method !== "password" && (
+                    <Row
+                      label={t("db.tenantId")}
+                      hint={
+                        config.auth_method === "entra_cli"
+                          ? t("db.tenantIdOptionalHint")
+                          : t("db.tenantIdHint")
+                      }
+                    >
+                      <input
+                        value={config.tenant_id}
+                        onChange={(e) => patch({ tenant_id: e.target.value })}
+                        placeholder="00000000-0000-0000-0000-000000000000"
+                        spellCheck={false}
+                        autoComplete="off"
+                        className={`${INPUT} font-mono`}
+                      />
+                    </Row>
+                  )}
+
+                  {/* The CLI path stores nothing, so there is no password box to show — the whole
+                      point is that the credential stays with `az`. */}
+                  {config.auth_method !== "entra_cli" && (
                   <Row
-                    label={t("db.password")}
+                    label={
+                      config.auth_method === "entra_service_principal"
+                        ? t("db.clientSecret")
+                        : t("db.password")
+                    }
                     hint={hasStored && !passwordTouched ? t("db.passwordStored") : t("db.passwordHint")}
                   >
                     <div className="relative flex items-center">
@@ -652,6 +717,7 @@ export function ConnectionModal({
                       </div>
                     </div>
                   </Row>
+                  )}
                 </>
               ) : tab === "options" ? (
                 <>
@@ -1400,6 +1466,17 @@ function Row({
       )}
     </label>
   );
+}
+
+/**
+ * What choosing each sign-in actually commits the user to — which is the part that isn't obvious
+ * from the name, and the reason the CLI option is worth preferring: nothing is stored here, and
+ * MFA and conditional access happen in Microsoft's own flow rather than in a box in this dialog.
+ */
+function authHint(method: DbAuthMethod, t: (key: TranslationKey) => string): string {
+  if (method === "entra_cli") return t("db.authEntraCliHint");
+  if (method === "entra_service_principal") return t("db.authEntraAppHint");
+  return t("db.authPasswordHint");
 }
 
 /**
