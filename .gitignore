@@ -26,4 +26,9 @@ dist-ssr
 # Built by scripts/build-iris-runtime.mjs: the trimmed Java runtime, the InterSystems JDBC driver
 # downloaded from Maven Central, and the compiled bridge jar. All three are build outputs (~37 MB),
 # reproducible from `pnpm iris:runtime` — the source is src-tauri/java/.
-src-tauri/resources/iris/
+#
+# The *contents* are ignored, not the directory: `tauri.conf.json` lists it under `bundle.resources`
+# and tauri-build refuses to compile when a configured resource path doesn't exist. Ignoring the
+# directory itself would break `cargo check` on every fresh clone.
+src-tauri/resources/iris/*
+!src-tauri/resources/iris/README.md

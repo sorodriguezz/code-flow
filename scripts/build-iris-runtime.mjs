@@ -62,7 +62,21 @@ const RELEASE = "17";
 
 const force = process.argv.includes("--force");
 
+/**
+ * Turns a failure into a warning.
+ *
+ * Used by `tauri dev`, where a missing JDK must not stop someone working on the git UI. Packaging
+ * never passes it: an installer without the runtime would ship an IRIS engine that cannot connect,
+ * and that has to fail loudly.
+ */
+const optional = process.argv.includes("--optional");
+
 main().catch((error) => {
+  if (optional) {
+    console.warn(`\niris-runtime: skipped — ${error.message}`);
+    console.warn("iris-runtime: the app will build and run; IRIS connections won't work until this succeeds.\n");
+    process.exit(0);
+  }
   console.error(`\niris-runtime: ${error.message}\n`);
   process.exit(1);
 });

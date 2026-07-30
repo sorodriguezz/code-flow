@@ -9,7 +9,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "iris:runtime": "node scripts/build-iris-runtime.mjs"
+    "iris:runtime": "node scripts/build-iris-runtime.mjs",
+    "iris:runtime:dev": "node scripts/build-iris-runtime.mjs --optional"
   },
   "dependencies": {
     "@dbml/core": "^8.3.1",

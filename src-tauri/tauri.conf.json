@@ -4,7 +4,7 @@
   "version": "../package.json",
   "identifier": "com.codeflow.app",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm iris:runtime:dev && pnpm dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "pnpm build && pnpm iris:runtime",
     "frontendDist": "../dist"

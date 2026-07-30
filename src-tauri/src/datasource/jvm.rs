@@ -281,7 +281,7 @@ impl Runtime {
     /// before `scripts/build-iris-runtime.mjs` has produced the bundle, and what keeps a damaged
     /// install recoverable instead of simply broken.
     fn locate() -> Result<Self, String> {
-        let dir = iris_resource_dir().ok_or_else(|| MISSING_RESOURCES.to_string())?;
+        let dir = iris_resource_dir().ok_or_else(|| missing_resources().to_string())?;
         let classpath = classpath(&dir)?;
 
         let bundled = dir.join("runtime").join("bin").join(java_exe());
@@ -313,14 +313,14 @@ impl Runtime {
 fn classpath(dir: &Path) -> Result<String, String> {
     let separator = if cfg!(windows) { ';' } else { ':' };
     let mut jars: Vec<String> = std::fs::read_dir(dir)
-        .map_err(|e| format!("{MISSING_RESOURCES} ({}: {e})", dir.display()))?
+        .map_err(|e| format!("{} ({}: {e})", missing_resources(), dir.display()))?
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("jar")))
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
     if jars.is_empty() {
-        return Err(format!("{MISSING_RESOURCES} (no .jar in {})", dir.display()));
+        return Err(format!("{} (no .jar in {})", missing_resources(), dir.display()));
     }
     // Deterministic, so a classpath conflict fails the same way twice rather than by directory
     // iteration order.
@@ -328,9 +328,21 @@ fn classpath(dir: &Path) -> Result<String, String> {
     Ok(jars.join(&separator.to_string()))
 }
 
-const MISSING_RESOURCES: &str =
-    "CodeFlow's IRIS support files (the Java bridge and the InterSystems JDBC driver) aren't \
-     where they should be. Reinstalling the app restores them.";
+/// What to say when the runtime and jars aren't there.
+///
+/// The advice differs by build, and giving the wrong one wastes real time: a packaged app has a
+/// damaged install, while a source checkout has simply never run the generator — the directory is
+/// in git but its contents are build outputs.
+fn missing_resources() -> &'static str {
+    if cfg!(debug_assertions) {
+        "CodeFlow's IRIS support files (the Java runtime, the bridge and the InterSystems JDBC \
+         driver) haven't been built. Run `pnpm iris:runtime` — it needs a JDK 17+ and only has to \
+         be done once."
+    } else {
+        "CodeFlow's IRIS support files (the Java runtime, the bridge and the InterSystems JDBC \
+         driver) aren't where they should be. Reinstalling the app restores them."
+    }
+}
 
 fn java_exe() -> &'static str {
     if cfg!(windows) {
@@ -412,11 +424,13 @@ mod tests {
     /// to the caller that is waiting for it. A unit test of any one of those would have passed
     /// while the chain was broken.
     ///
-    /// Skipped rather than failed when the runtime hasn't been built — a fresh checkout has no
-    /// `resources/iris` until `pnpm iris:runtime` runs, and that is not a broken test.
+    /// Skipped rather than failed when the runtime hasn't been built — a fresh checkout has the
+    /// directory (git keeps it, so tauri-build can find it) but none of its generated contents
+    /// until `pnpm iris:runtime` runs, and that is not a broken test. The condition is therefore
+    /// "are the jars there", not "is there a directory".
     #[tokio::test]
     async fn the_bundled_runtime_answers() {
-        if iris_resource_dir().is_none() {
+        if !iris_resource_dir().is_some_and(|dir| classpath(&dir).is_ok()) {
             eprintln!("skipping: no IRIS runtime built — run `pnpm iris:runtime`");
             return;
         }
