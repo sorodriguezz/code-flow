@@ -1,0 +1,476 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import Editor, { type OnMount } from "@monaco-editor/react";
+import type { editor as MonacoEditorNS } from "monaco-editor";
+import {
+  AlertTriangle,
+  Braces,
+  Check,
+  Download,
+  Copy,
+  Loader2,
+  Play,
+  Save,
+  Square,
+  Table2,
+  Waypoints,
+} from "lucide-react";
+import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
+import { ResizeHandle } from "../common/ResizeHandle";
+import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ResultGrid } from "./ResultGrid";
+import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
+import { nodeKey, useDbStore, type DbConsoleTab } from "../../state/dbStore";
+import { useLayoutStore } from "../../state/layoutStore";
+import { useThemeStore } from "../../state/themeStore";
+import { useToastStore } from "../../state/toastStore";
+import { useT } from "../../state/languageStore";
+import { apiSaveFile } from "../../lib/tauri/apiCommands";
+import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
+import { engineInfo, type DbNodeRef } from "../../types/database";
+
+const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
+  ...OVERFLOW_SAFE_OPTIONS,
+  minimap: { enabled: false },
+  fontSize: 12.5,
+  automaticLayout: true,
+  scrollBeyondLastLine: false,
+  tabSize: 2,
+  renderLineHighlight: "line",
+  overviewRulerLanes: 0,
+  padding: { top: 8, bottom: 8 },
+  scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
+  // On by default for SQL: a console is where you type table and column names you half-remember.
+  quickSuggestions: true,
+  suggestOnTriggerCharacters: true,
+};
+
+const ROW_LIMITS = [100, 500, 1000, 5000, 0];
+
+/**
+ * A statement, and what came back.
+ *
+ * The keyboard is the interface here, so three bindings are wired directly into Monaco rather than
+ * left to the window handler: ⌘↵ runs, ⇧⌘↵ runs only the selection, and ⌘S saves the console. The
+ * first two are different commands on purpose — "run what I highlighted" is how you work through a
+ * script one statement at a time, and making it the same key as "run everything" would eventually
+ * run everything by accident.
+ */
+export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
+  const t = useT();
+  const monacoTheme = useThemeStore((s) => s.monacoTheme);
+  const height = useLayoutStore((s) => s.sizes.dbResultHeight);
+  const setSize = useLayoutStore((s) => s.setSize);
+  const commitSize = useLayoutStore((s) => s.commitSize);
+  const connection = useDbStore((s) => s.connections.find((c) => c.id === tab.connectionId));
+  const children = useDbStore((s) => s.children);
+  const store = useDbStore.getState();
+  const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
+
+  const engine = connection ? engineInfo(connection.kind) : null;
+  const isSql = engine?.sql ?? true;
+
+  // The databases and schemas already read for this connection, so the pickers offer real names.
+  // Free text stays allowed — a database the tree hasn't been expanded into is still valid.
+  const databases = useMemo(() => {
+    const rootKey = nodeKey(tab.connectionId, {
+      kind: "root",
+      database: null,
+      schema: null,
+      name: null,
+    });
+    return (children[rootKey] ?? []).map((node) => node.name);
+  }, [children, tab.connectionId]);
+
+  const schemas = useMemo(() => {
+    if (!tab.database) return [];
+    const key = nodeKey(tab.connectionId, {
+      kind: "database",
+      database: tab.database,
+      schema: null,
+      name: null,
+    });
+    return (children[key] ?? []).map((node) => node.name);
+  }, [children, tab.connectionId, tab.database]);
+
+  const run = (selectionOnly: boolean) => {
+    const editor = editorRef.current;
+    if (selectionOnly && editor) {
+      const selection = editor.getSelection();
+      const text = selection ? editor.getModel()?.getValueInRange(selection) : "";
+      if (text && text.trim()) {
+        void store.runConsole(tab.id, text);
+        return;
+      }
+    }
+    void store.runConsole(tab.id);
+  };
+
+  const handleMount: OnMount = (editor, monaco) => {
+    editorRef.current = editor;
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => run(false));
+    editor.addCommand(
+      monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter,
+      () => run(true),
+    );
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () =>
+      void store.saveConsole(tab.id),
+    );
+  };
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      {/* Toolbar */}
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
+        {connection && <EngineBadge kind={connection.kind} label={engine?.label ?? ""} />}
+        <span className="max-w-[160px] truncate text-[12px] font-medium text-[var(--cf-text)]">
+          {connection?.name ?? t("db.connectionGone")}
+        </span>
+
+        <span className="mx-0.5 h-4 w-px bg-[var(--cf-border)]" />
+
+        <label className="flex items-center gap-1">
+          <span className="text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+            {engine?.databaseLabel ?? t("db.database")}
+          </span>
+          <input
+            list={`db-databases-${tab.id}`}
+            value={tab.database}
+            onChange={(e) => store.updateConsole(tab.id, { database: e.target.value, dirty: true })}
+            placeholder={t("db.default")}
+            className="w-[130px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-[3px] text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+          />
+          <datalist id={`db-databases-${tab.id}`}>
+            {databases.map((name) => (
+              <option key={name} value={name} />
+            ))}
+          </datalist>
+        </label>
+
+        {isSql && (
+          <label className="flex items-center gap-1">
+            <span className="text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+              {t("db.schema")}
+            </span>
+            <input
+              list={`db-schemas-${tab.id}`}
+              value={tab.schema}
+              onChange={(e) => store.updateConsole(tab.id, { schema: e.target.value, dirty: true })}
+              placeholder={t("db.default")}
+              className="w-[120px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-[3px] text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+            />
+            <datalist id={`db-schemas-${tab.id}`}>
+              {schemas.map((name) => (
+                <option key={name} value={name} />
+              ))}
+            </datalist>
+          </label>
+        )}
+
+        <label className="flex items-center gap-1">
+          <span className="text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+            {t("db.limit")}
+          </span>
+          <select
+            value={tab.maxRows}
+            onChange={(e) => store.updateConsole(tab.id, { maxRows: Number(e.target.value) })}
+            className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1 py-[3px] text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+          >
+            {ROW_LIMITS.map((limit) => (
+              <option key={limit} value={limit}>
+                {limit === 0 ? t("db.noLimit") : formatCount(limit)}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="ml-auto flex items-center gap-1">
+          {tab.running ? (
+            <button
+              onClick={() => void store.cancelRun(tab.id)}
+              className="flex items-center gap-1 rounded-md border border-[var(--cf-danger)] px-2 py-[3px] text-[12px] font-medium text-[var(--cf-danger)] hover:bg-[var(--cf-danger)]/10"
+            >
+              <Square size={11} />
+              {t("db.cancel")}
+            </button>
+          ) : (
+            <button
+              onClick={() => run(false)}
+              title={t("db.runHint")}
+              className="flex items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-[3px] text-[12px] font-medium text-white hover:brightness-110"
+            >
+              <Play size={11} />
+              {t("db.run")}
+            </button>
+          )}
+          <ToolbarButton
+            onClick={() => run(true)}
+            disabled={tab.running}
+            title={t("db.runSelectionHint")}
+          >
+            <Waypoints size={13} />
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={() => void store.explainConsole(tab.id)}
+            disabled={tab.running}
+            title={t("db.explain")}
+          >
+            <span className="text-[10px] font-bold">EX</span>
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={() => void store.saveConsole(tab.id)}
+            title={tab.dirty ? t("db.saveConsole") : t("db.saved")}
+            active={tab.dirty}
+          >
+            {tab.dirty ? <Save size={13} /> : <Check size={13} />}
+          </ToolbarButton>
+        </div>
+      </div>
+
+      {/* Editor */}
+      <div className="min-h-0 flex-1">
+        <Editor
+          height="100%"
+          // One model per tab, so two consoles keep their own undo history and cursor. The scheme
+          // is this panel's own — `cf-editor` URIs are file models and would be offered to
+          // "go to definition".
+          path={`cf-db:/console/${tab.id}.${isSql ? "sql" : "js"}`}
+          language={isSql ? "sql" : "javascript"}
+          value={tab.body}
+          theme={monacoTheme}
+          onChange={(value) => store.updateConsole(tab.id, { body: value ?? "", dirty: true })}
+          onMount={handleMount}
+          options={EDITOR_OPTIONS}
+        />
+      </div>
+
+      <ResizeHandle
+        axis="y"
+        value={height}
+        min={140}
+        max={900}
+        invert
+        onChange={(value) => setSize("dbResultHeight", value)}
+        onCommit={(value) => commitSize("dbResultHeight", value)}
+      />
+
+      <div style={{ height }} className="flex shrink-0 flex-col overflow-hidden border-t border-[var(--cf-border)]">
+        <ConsoleResults tab={tab} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Results
+// ---------------------------------------------------------------------------
+
+function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
+  const t = useT();
+  const store = useDbStore.getState();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [jsonView, setJsonView] = useState(false);
+
+  // A Mongo result carries real documents; the JSON view is the useful one for those, so it opens
+  // there rather than on a grid of flattened keys.
+  useEffect(() => {
+    const active = tab.result?.results[tab.activeResult];
+    setJsonView((active?.documents.length ?? 0) > 0);
+  }, [tab.result, tab.activeResult]);
+
+  if (tab.running) {
+    return (
+      <div className="flex h-full items-center justify-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+        <Loader2 size={13} className="animate-spin" />
+        {t("db.running")}
+      </div>
+    );
+  }
+
+  if (tab.plan !== null) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            {t("db.queryPlan")}
+          </span>
+          <ToolbarButton
+            onClick={() => void navigator.clipboard.writeText(tab.plan ?? "")}
+            title={t("db.copy")}
+          >
+            <Copy size={12} />
+          </ToolbarButton>
+        </div>
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-2 font-mono text-[11.5px] text-[var(--cf-text)]">
+          {tab.plan}
+        </pre>
+      </div>
+    );
+  }
+
+  const result = tab.result;
+  if (!result) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
+        <Table2 size={18} className="text-[var(--cf-text-muted)]" />
+        <p className="text-[12px] text-[var(--cf-text-muted)]">{t("db.noResultYet")}</p>
+        <p className="text-[11px] text-[var(--cf-text-muted)]">{t("db.runHint")}</p>
+      </div>
+    );
+  }
+
+  const active = result.results[tab.activeResult] ?? result.results[0];
+  if (!active) {
+    return (
+      <p className="flex h-full items-center justify-center text-[12px] text-[var(--cf-text-muted)]">
+        {t("db.noResultYet")}
+      </p>
+    );
+  }
+
+  const exportItems: MenuItem[] = (
+    ["csv", "tsv", "json", "sql", "markdown"] as ExportFormat[]
+  ).map((format) => ({
+    label: t("db.exportAs", { format: format.toUpperCase() }),
+    icon: Download,
+    onClick: async () => {
+      const contents = formatResult(active, format, "table");
+      const saved = await apiSaveFile(`result.${EXPORT_EXTENSIONS[format]}`, contents).catch(
+        () => null,
+      );
+      if (saved) {
+        useToastStore.getState().pushToast(t("db.exported", { path: saved }), "success");
+      }
+    },
+  }));
+  exportItems.unshift({
+    label: t("db.copyAsCsv"),
+    icon: Copy,
+    onClick: () => void navigator.clipboard.writeText(formatResult(active, "csv")),
+    separated: false,
+  });
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      {/* Result tabs — one per statement in the batch. */}
+      {result.results.length > 1 && (
+        <div className="flex shrink-0 gap-0.5 overflow-x-auto border-b border-[var(--cf-border)] px-1.5 py-1">
+          {result.results.map((entry, index) => (
+            <button
+              key={index}
+              onClick={() =>
+                store.updateConsole(tab.id, { activeResult: index })
+              }
+              title={entry.statement}
+              className={`shrink-0 rounded-md px-2 py-[2px] text-[11px] font-medium ${
+                index === tab.activeResult
+                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+              } ${entry.error ? "text-[var(--cf-danger)]" : ""}`}
+            >
+              {entry.error ? "⚠ " : ""}
+              {index + 1}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Status line */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)]">
+        <span className="tabular-nums">{formatDuration(active.duration_ms)}</span>
+        {active.rows_affected !== null ? (
+          <span className="tabular-nums">
+            {t("db.rowsAffected", { n: formatCount(active.rows_affected) })}
+          </span>
+        ) : (
+          <span className="tabular-nums">
+            {t("db.rowsN", { n: formatCount(active.rows.length) })}
+          </span>
+        )}
+        {active.truncated && (
+          <span
+            title={t("db.truncatedHint")}
+            className="flex items-center gap-1 text-[var(--cf-warning)]"
+          >
+            <AlertTriangle size={11} />
+            {t("db.truncated")}
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-1">
+          {active.documents.length > 0 && (
+            <ToolbarButton
+              onClick={() => setJsonView((current) => !current)}
+              active={jsonView}
+              title={jsonView ? t("db.showGrid") : t("db.showJson")}
+            >
+              <Braces size={12} />
+            </ToolbarButton>
+          )}
+          <ToolbarButton
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setMenu({ x: rect.right - 180, y: rect.bottom + 2 });
+            }}
+            disabled={active.rows.length === 0}
+            title={t("db.export")}
+          >
+            <Download size={12} />
+          </ToolbarButton>
+        </div>
+      </div>
+
+      {active.error ? (
+        <div className="min-h-0 flex-1 overflow-auto p-3">
+          <p className="flex items-start gap-2 rounded-md border border-[var(--cf-danger)]/40 bg-[var(--cf-danger)]/[0.06] p-2 font-mono text-[12px] text-[var(--cf-danger)]">
+            <AlertTriangle size={13} className="mt-[2px] shrink-0" />
+            <span className="min-w-0 whitespace-pre-wrap break-words">{active.error}</span>
+          </p>
+          <pre className="mt-2 whitespace-pre-wrap break-words font-mono text-[11px] text-[var(--cf-text-muted)]">
+            {active.statement}
+          </pre>
+        </div>
+      ) : jsonView && active.documents.length > 0 ? (
+        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-2 font-mono text-[11.5px] text-[var(--cf-text)]">
+          {active.documents.join("\n")}
+        </pre>
+      ) : (
+        <div className="min-h-0 flex-1">
+          <ResultGrid columns={active.columns} rows={active.rows} />
+        </div>
+      )}
+
+      {/* Server chatter. Below the grid, not instead of it: a procedure that returns rows *and*
+          raises notices should show both. */}
+      {active.messages.length > 0 && <Messages messages={active.messages} />}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={exportItems} onClose={() => setMenu(null)} />
+      )}
+    </div>
+  );
+}
+
+function Messages({ messages }: { messages: string[] }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="shrink-0 border-t border-[var(--cf-border)]">
+      <button
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+      >
+        {t("db.serverMessages", { n: String(messages.length) })}
+      </button>
+      {open && (
+        <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-words px-2 pb-1 font-mono text-[11px] text-[var(--cf-text-muted)]">
+          {messages.join("\n")}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+/** `schema.table`, or just the name where there is no schema. Here rather than in each panel so the
+ * tab strip, the data grid's toolbar and the generated `SELECT` all name an object the same way. */
+export function nodeLabel(node: DbNodeRef): string {
+  return node.schema ? `${node.schema}.${node.name ?? ""}` : (node.name ?? "");
+}

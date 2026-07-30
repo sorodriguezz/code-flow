@@ -28,6 +28,7 @@ import { useWorkspaceStore } from "./state/workspaceStore";
 import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
 import { useApiStore } from "./state/apiStore";
+import { useDbStore } from "./state/dbStore";
 import { usePreferencesStore } from "./state/preferencesStore";
 import { useAiProviderStore } from "./state/aiProviderStore";
 import { useLanguageStore } from "./state/languageStore";
@@ -175,6 +176,10 @@ export default function App() {
   useEffect(() => {
     if (!workspaceId) return;
     void useApiStore.getState().setWorkspace(workspaceId);
+    // The database workspace is scoped the same way and swaps on the same signal: its connections,
+    // saved consoles and query history belong to the workspace, and its live sessions belong to the
+    // connections it is about to drop.
+    void useDbStore.getState().setWorkspace(workspaceId);
   }, [workspaceId]);
 
   // Looks for a newer release: once on launch, then every hour for as long as the app is open.

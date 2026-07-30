@@ -21,6 +21,16 @@ export type SettingsSectionId =
   | "mcps"
   | "api";
 
+/**
+ * The two workspaces inside the API tab.
+ *
+ * `requests` is the Postman-style client, `database` the DataGrip-style one. They share a tab
+ * because they share a *scope*: both belong to the workspace and neither follows the selected
+ * repository, which is exactly what the note at the top of `TabBar` is about. Splitting them into
+ * two main tabs would put a workspace-scoped tab next to three repo-scoped ones twice over.
+ */
+export type ApiWorkspace = "requests" | "database";
+
 /** Which group the command palette lists. Scoped openings come from the keyboard shortcuts —
  * "switch repository" wants a list of repositories, not everything the app can do. */
 export type PaletteScope = "all" | "workspaces" | "projects";
@@ -58,6 +68,8 @@ interface UiState {
   prLinkModalOpen: boolean;
   /** Which sub-tab the API client's settings section should open on, when asked for a specific one. */
   apiSettingsTab: ApiSettingsTab | undefined;
+  /** Which of the API tab's two workspaces is on screen. */
+  apiWorkspace: ApiWorkspace;
   toggleSidebar: () => void;
   setActiveView: (view: MainView) => void;
   openSettings: (section: SettingsSectionId, hostingProvider?: VcsProvider) => void;
@@ -69,6 +81,10 @@ interface UiState {
    * parameter on every call site that has nothing to do with the API client.
    */
   openApiSettings: (tab?: ApiSettingsTab) => void;
+  setApiWorkspace: (workspace: ApiWorkspace) => void;
+  /** Opens the API tab straight onto one of its workspaces — for the command palette and shortcuts,
+   * which have to both switch view and pick a side. */
+  openApiWorkspace: (workspace: ApiWorkspace) => void;
   toggleSettings: () => void;
   closeSettings: () => void;
   openInEditor: (relPath: string, line?: number) => void;
@@ -96,6 +112,7 @@ export const useUiStore = create<UiState>((set) => ({
   settingsSection: "appearance",
   settingsHostingProvider: "azure",
   apiSettingsTab: undefined,
+  apiWorkspace: "requests",
   pendingEditorPath: null,
   pendingEditorLine: null,
   aiPanelOpen: false,
@@ -114,6 +131,9 @@ export const useUiStore = create<UiState>((set) => ({
     })),
   openApiSettings: (tab) =>
     set({ settingsOpen: true, settingsSection: "api", apiSettingsTab: tab }),
+  setApiWorkspace: (apiWorkspace) => set({ apiWorkspace }),
+  openApiWorkspace: (apiWorkspace) =>
+    set({ activeView: "api", apiWorkspace, settingsOpen: false }),
   toggleSettings: () => set((s) => ({ settingsOpen: !s.settingsOpen })),
   closeSettings: () => set({ settingsOpen: false }),
   openInEditor: (relPath, line) =>

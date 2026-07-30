@@ -405,6 +405,74 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             detected_at       TEXT NOT NULL,
             PRIMARY KEY (collection_id, kind, id)
         );
+
+        -- ---------------------------------------------------------------------
+        -- Database workspace
+        -- ---------------------------------------------------------------------
+        --
+        -- Scoped to the workspace, exactly like `api_collections`: a database is a property of the
+        -- service a workspace's repositories talk to, not of any one repository, so switching
+        -- repository must not change which databases are on screen.
+        --
+        -- **No password column, by construction.** Credentials live in the OS keychain under
+        -- `db-password:<id>` (see `datasource::password_key`). This table is a plain-text file in
+        -- the user's config directory; a database password in it would be readable by anything that
+        -- can read a file.
+        CREATE TABLE IF NOT EXISTS db_connections (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            -- postgres | supabase | sqlserver | iris | mongodb
+            kind         TEXT NOT NULL,
+            -- JSON: host, port, database, user, url, ssl, options, read_only, timeout. One blob
+            -- rather than columns for the same reason `api_requests` keeps a `spec` — a new engine
+            -- or a new driver option ships without a migration.
+            spec         TEXT NOT NULL DEFAULT '{}',
+            -- Tints the connection's row and its consoles' tabs, so "am I on production?" is
+            -- answerable at a glance rather than by reading a hostname.
+            color        TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        -- A saved SQL/Mongo console. Its own table rather than a file on disk because a console is
+        -- bound to a connection (and to a database within it) and is meaningless without one.
+        CREATE TABLE IF NOT EXISTS db_consoles (
+            id            TEXT PRIMARY KEY,
+            connection_id TEXT NOT NULL REFERENCES db_connections(id) ON DELETE CASCADE,
+            name          TEXT NOT NULL,
+            body          TEXT NOT NULL DEFAULT '',
+            -- Which database/namespace and schema the console is pointed at. Stored so reopening it
+            -- lands where it was left, rather than on the connection's default.
+            database_name TEXT NOT NULL DEFAULT '',
+            schema_name   TEXT NOT NULL DEFAULT '',
+            sort_order    INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+
+        -- Every statement that ran, with what it cost.
+        --
+        -- `connection_id` deliberately carries no foreign key: deleting a connection must not erase
+        -- the record of what was run against it. `connection_name` is denormalized for the same
+        -- reason — it is the only thing left naming the connection once the row is gone.
+        CREATE TABLE IF NOT EXISTS db_query_history (
+            id              TEXT PRIMARY KEY,
+            workspace_id    TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            connection_id   TEXT NOT NULL DEFAULT '',
+            connection_name TEXT NOT NULL DEFAULT '',
+            statement       TEXT NOT NULL,
+            database_name   TEXT NOT NULL DEFAULT '',
+            duration_ms     INTEGER NOT NULL DEFAULT 0,
+            row_count       INTEGER NOT NULL DEFAULT 0,
+            -- Empty when the statement succeeded. Kept rather than dropped: a failed statement is
+            -- the one most worth finding again, because it is about to be fixed and re-run.
+            error           TEXT NOT NULL DEFAULT '',
+            ran_at          TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_db_history_time
+            ON db_query_history (workspace_id, ran_at DESC);
         "#,
     )?;
 

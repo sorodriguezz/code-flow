@@ -331,3 +331,61 @@ pub struct ApiCookie {
     pub expires: Option<String>,
     pub updated_at: String,
 }
+
+// ---------------------------------------------------------------------------
+// Database workspace
+// ---------------------------------------------------------------------------
+
+/// A saved database connection.
+///
+/// `spec` is the JSON the driver layer deserializes into a `datasource::DbConnectionConfig`, minus
+/// the password — that lives in the OS keychain, so this row can be read by anything that can read
+/// the config file without leaking a credential.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbConnectionRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub kind: String,
+    pub spec: String,
+    pub color: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A saved SQL (or Mongo) console, bound to one connection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbConsole {
+    pub id: String,
+    pub connection_id: String,
+    pub name: String,
+    pub body: String,
+    pub database_name: String,
+    pub schema_name: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One statement that ran. `error` is empty on success.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbQueryHistoryEntry {
+    pub id: String,
+    pub workspace_id: String,
+    pub connection_id: String,
+    pub connection_name: String,
+    pub statement: String,
+    pub database_name: String,
+    pub duration_ms: i64,
+    pub row_count: i64,
+    pub error: String,
+    pub ran_at: String,
+}
+
+/// Everything the database workspace needs on load, in one round trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbWorkspaceTree {
+    pub connections: Vec<DbConnectionRow>,
+    pub consoles: Vec<DbConsole>,
+}

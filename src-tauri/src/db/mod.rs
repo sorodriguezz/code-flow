@@ -1,6 +1,7 @@
 pub mod api_backup;
 pub mod api_queries;
 pub mod api_sync;
+pub mod datasource_queries;
 pub mod migrations;
 pub mod models;
 pub mod queries;

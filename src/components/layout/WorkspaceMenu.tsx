@@ -9,14 +9,31 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion, type Variants } from "framer-motion";
-import { ArrowRight, Check, ChevronDown, Info, Layers, Send, type LucideIcon } from "lucide-react";
-import { useUiStore, type MainView } from "../../state/uiStore";
+import {
+  ArrowRight,
+  Check,
+  ChevronDown,
+  Database,
+  Info,
+  Layers,
+  Send,
+  type LucideIcon,
+} from "lucide-react";
+import { useUiStore, type ApiWorkspace, type MainView } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 interface WorkspaceTool {
   id: MainView;
+  /**
+   * Which workspace *inside* that view, for a view that holds more than one.
+   *
+   * The API tab holds two — requests and databases — because both are workspace-scoped and neither
+   * follows the selected repository. They are separate rows here so each is findable by name;
+   * `undefined` means the view has only one.
+   */
+  workspace?: ApiWorkspace;
   icon: LucideIcon;
   labelKey: TranslationKey;
   /** The second line of the row: what the tool holds, so the name doesn't have to carry it. */
@@ -26,8 +43,26 @@ interface WorkspaceTool {
 /** Everything that belongs to the workspace rather than to the selected repository. Adding the
  * next one is a single entry here — the menu, its keyboard order and its empty state all follow. */
 const TOOLS: WorkspaceTool[] = [
-  { id: "api", icon: Send, labelKey: "tabbar.api", descriptionKey: "tabbar.apiDescription" },
+  {
+    id: "api",
+    workspace: "requests",
+    icon: Send,
+    labelKey: "tabbar.api",
+    descriptionKey: "tabbar.apiDescription",
+  },
+  {
+    id: "api",
+    workspace: "database",
+    icon: Database,
+    labelKey: "tabbar.databases",
+    descriptionKey: "tabbar.databasesDescription",
+  },
 ];
+
+/** Rows are keyed and compared by view *and* workspace, since two of them share a view. */
+function toolKey(tool: WorkspaceTool): string {
+  return tool.workspace ? `${tool.id}:${tool.workspace}` : tool.id;
+}
 
 const MENU_WIDTH = 296;
 
@@ -85,7 +120,9 @@ const ROW_VARIANTS: Variants = {
  */
 export function WorkspaceMenu() {
   const activeView = useUiStore((s) => s.activeView);
+  const apiWorkspace = useUiStore((s) => s.apiWorkspace);
   const setActiveView = useUiStore((s) => s.setActiveView);
+  const openApiWorkspace = useUiStore((s) => s.openApiWorkspace);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const t = useT();
@@ -102,7 +139,10 @@ export function WorkspaceMenu() {
   // No workspace yet (first launch, or one was just deleted): fall back to the accent so the
   // chrome still looks deliberate instead of losing its colour entirely.
   const wsColor = workspace?.color ?? "var(--cf-accent)";
-  const activeTool = TOOLS.find((tool) => tool.id === activeView) ?? null;
+  const activeTool =
+    TOOLS.find(
+      (tool) => tool.id === activeView && (tool.workspace ?? apiWorkspace) === apiWorkspace,
+    ) ?? null;
   // The one sentence that explains the scope. It is the trigger's `title` and the panel's footer;
   // the `aria-label` stays just the control's name, since gluing the two together would put
   // separator punctuation outside i18n.
@@ -171,7 +211,9 @@ export function WorkspaceMenu() {
   }, [open, activeIndex]);
 
   const openMenu = () => {
-    const current = TOOLS.findIndex((tool) => tool.id === activeView);
+    const current = TOOLS.findIndex(
+      (tool) => tool.id === activeView && (tool.workspace ?? apiWorkspace) === apiWorkspace,
+    );
     // -1 when there is nothing to land on, so the trigger doesn't point
     // `aria-activedescendant` at a row that was never rendered.
     setActiveIndex(TOOLS.length === 0 ? -1 : Math.max(current, 0));
@@ -179,7 +221,10 @@ export function WorkspaceMenu() {
   };
 
   const commit = (tool: WorkspaceTool) => {
-    setActiveView(tool.id);
+    // A view with sub-workspaces needs both set at once, or the tab would open on whichever side was
+    // last on screen rather than the one just picked.
+    if (tool.workspace) openApiWorkspace(tool.workspace);
+    else setActiveView(tool.id);
     setOpen(false);
     triggerRef.current?.focus();
   };
@@ -237,7 +282,11 @@ export function WorkspaceMenu() {
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menuId : undefined}
-        aria-activedescendant={open && activeIndex >= 0 ? `${menuId}-${TOOLS[activeIndex]?.id}` : undefined}
+        aria-activedescendant={
+          open && activeIndex >= 0 && TOOLS[activeIndex]
+            ? `${menuId}-${toolKey(TOOLS[activeIndex])}`
+            : undefined
+        }
         aria-label={t("tabbar.workspaceTools")}
         title={scopeHint}
         onClick={() => (open ? setOpen(false) : openMenu())}
@@ -318,12 +367,14 @@ export function WorkspaceMenu() {
                 ) : (
                   TOOLS.map((tool, i) => {
                     const Icon = tool.icon;
-                    const isActive = tool.id === activeView;
+                    const isActive =
+                      tool.id === activeView &&
+                      (tool.workspace ?? apiWorkspace) === apiWorkspace;
                     const isHighlighted = i === activeIndex;
                     return (
                       <motion.button
-                        key={tool.id}
-                        id={`${menuId}-${tool.id}`}
+                        key={toolKey(tool)}
+                        id={`${menuId}-${toolKey(tool)}`}
                         type="button"
                         role="menuitem"
                         data-index={i}

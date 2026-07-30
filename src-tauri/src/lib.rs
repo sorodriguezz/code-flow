@@ -6,6 +6,7 @@ mod ai_runs;
 mod claude;
 mod commands;
 mod dap;
+mod datasource;
 mod db;
 mod debugger;
 mod fsops;
@@ -33,6 +34,7 @@ mod watcher;
 
 use tauri::Manager;
 use api::ApiRegistry;
+use datasource::DbRegistry;
 use terminal::TerminalRegistry;
 use watcher::WatcherRegistry;
 
@@ -81,6 +83,13 @@ pub fn run() {
         let _ = std::fs::remove_dir_all(paths::base_dir());
     }
 
+    // rustls 0.23 panics from `ClientConfig::builder()` when it can't tell which crypto provider to
+    // use, and several dependencies (reqwest, mongodb, tokio-postgres-rustls, tonic) each build one.
+    // Naming the process default here makes that unambiguous once, instead of every call site
+    // having to pass a provider explicitly. `Err` means something already installed one — which is
+    // just as good an answer.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -90,6 +99,7 @@ pub fn run() {
         .manage(db::init().expect("failed to initialize CodeFlow database"))
         .manage(TerminalRegistry::default())
         .manage(ApiRegistry::default())
+        .manage(DbRegistry::default())
         .manage(WatcherRegistry::default())
         .manage(tray::QuittingFlag::default())
         .setup(|app| {
@@ -293,6 +303,32 @@ pub fn run() {
             commands::watcher_cmd::start_watching,
             commands::watcher_cmd::stop_watching,
             // ---- API client (global: no repo, workspace or project involved) ----
+            commands::db_cmd::db_load_tree,
+            commands::db_cmd::db_create_connection,
+            commands::db_cmd::db_update_connection,
+            commands::db_cmd::db_delete_connection,
+            commands::db_cmd::db_duplicate_connection,
+            commands::db_cmd::db_reorder_connections,
+            commands::db_cmd::db_set_password,
+            commands::db_cmd::db_has_password,
+            commands::db_cmd::db_create_console,
+            commands::db_cmd::db_update_console,
+            commands::db_cmd::db_delete_console,
+            commands::db_cmd::db_list_history,
+            commands::db_cmd::db_add_history,
+            commands::db_cmd::db_delete_history,
+            commands::db_cmd::db_clear_history,
+            commands::db_cmd::db_connect,
+            commands::db_cmd::db_disconnect,
+            commands::db_cmd::db_connected,
+            commands::db_cmd::db_children,
+            commands::db_cmd::db_execute,
+            commands::db_cmd::db_explain,
+            commands::db_cmd::db_table_data,
+            commands::db_cmd::db_row_count,
+            commands::db_cmd::db_apply_edits,
+            commands::db_cmd::db_object_ddl,
+            commands::db_cmd::db_cancel,
             commands::api_cmd::api_load_tree,
             commands::api_cmd::api_create_collection,
             commands::api_cmd::api_update_collection,

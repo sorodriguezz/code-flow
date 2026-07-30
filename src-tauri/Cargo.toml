@@ -86,6 +86,47 @@ prost-types = "0.14"
 prost-reflect = { version = "0.16", features = ["serde"] }
 protox = "0.9"
 
+# ---------------- Database client ----------------
+# One driver per engine, all pure Rust: the app installs nothing on the user's machine, so there
+# is no ODBC manager, no JDBC bridge and no vendor client library to make a prerequisite.
+#
+# Postgres covers Supabase too — a Supabase project *is* a Postgres instance, so the only
+# difference is which host/port/SSL defaults the connection form fills in.
+tokio-postgres = "0.7"
+# Postgres over TLS. `ring` (not aws-lc-rs) to match the provider `rustls` above resolves, and
+# both root sources because the two deployments differ: a hosted database (Supabase, RDS) is
+# signed by a public CA that `webpki-roots` carries, while a self-hosted one is usually signed by
+# a company CA that only the OS store knows about.
+tokio-postgres-rustls = { version = "0.14", default-features = false, features = [
+    "ring",
+    "native-certs",
+    "webpki-roots",
+] }
+# SQL Server speaks TDS, which nothing else here can carry. `default-features = false` drops
+# tiberius's native-tls default (it would want OpenSSL on Linux); `sql-browser-tokio` is what
+# resolves a named instance (`HOST\SQLEXPRESS`) to its dynamic port over the SQL Browser service.
+tiberius = { version = "0.12", default-features = false, features = [
+    "tds73",
+    "rustls",
+    "chrono",
+    "sql-browser-tokio",
+] }
+# tiberius is runtime-agnostic and wants a futures-io stream; this adapts tokio's TcpStream.
+tokio-util = { version = "0.7", features = ["compat"] }
+# `default-features = false` to keep the optional KMS/compression backends out, but three features
+# are not optional in practice: `bson-2` is the document type the whole API is written in (with no
+# bson feature the crate compiles and exposes almost nothing), `dns-resolver` is what resolves a
+# `mongodb+srv://` URI — the only form Atlas hands out — and `rustls-tls` avoids an OpenSSL
+# dependency on Linux.
+mongodb = { version = "3", default-features = false, features = [
+    "bson-2",
+    # The crate refuses to compile without this: it is the marker that says the calling code was
+    # written against the 3.3 API, so a future minor release can change defaults without breaking us.
+    "compat-3-3-0",
+    "dns-resolver",
+    "rustls-tls",
+] }
+
 # `keyring` ships with no OS credential-store backend enabled by default — without one
 # of these, Entry::set_password()/get_password() silently round-trip through a
 # non-persistent stub (writes "succeed", reads come back empty).

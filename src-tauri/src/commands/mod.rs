@@ -4,6 +4,7 @@ pub mod api_cmd;
 pub mod app_cmd;
 pub mod checkpoint_cmd;
 pub mod claude_cmd;
+pub mod db_cmd;
 pub mod debug_cmd;
 pub mod fs_cmd;
 pub mod git_ops;

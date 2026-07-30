@@ -1,6 +1,7 @@
 import { useCallback, useEffect } from "react";
 import { Download, Plus, Users, Zap, type LucideIcon } from "lucide-react";
 import { ApiSidebar } from "./ApiSidebar";
+import { DatabaseView } from "../db/DatabaseView";
 import { RequestTabs } from "./RequestTabs";
 import { RequestBuilder } from "./RequestBuilder";
 import { CodeSnippetPanel } from "./CodeSnippetPanel";
@@ -94,6 +95,7 @@ export function ApiView() {
   const openTabs = useApiStore((s) => s.openTabs);
   const activeTabId = useApiStore((s) => s.activeTabId);
   const activeView = useUiStore((s) => s.activeView);
+  const apiWorkspace = useUiStore((s) => s.apiWorkspace);
   const modal = useApiModalStore((s) => s.modal);
   const closeModal = useApiModalStore((s) => s.closeApiModal);
 
@@ -117,7 +119,9 @@ export function ApiView() {
   // Scoped to the view: it stays mounted once opened, so an unscoped ⌘S would save an API request
   // while the user is looking at the diff of a commit.
   useEffect(() => {
-    if (activeView !== "api") return;
+    // Also scoped to the requests side: the database workspace binds ⌘W to its own tab strip, and
+    // both handlers firing would close a request tab the user can't see.
+    if (activeView !== "api" || apiWorkspace !== "requests") return;
     const handler = (e: KeyboardEvent) => {
       if (e.defaultPrevented || !(e.metaKey || e.ctrlKey) || e.altKey) return;
       // A modal covers the builder, so ⌘W there would close a tab the user can't even see.
@@ -137,7 +141,7 @@ export function ApiView() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeView, closeActiveTab]);
+  }, [activeView, apiWorkspace, closeActiveTab]);
 
   return (
     <>
@@ -146,17 +150,31 @@ export function ApiView() {
             out its rail, tree and editor. The request area is the one that gains most from it:
             flush against the window it looked like a form bolted to the frame. */}
         <div className="flex min-h-0 flex-1 gap-1.5 overflow-hidden p-2">
-          <ApiSidebar />
+          {/* Both workspaces stay mounted once visited, so switching back doesn't re-fetch a tree or
+              throw away a result grid — the same reason `App` keeps its views mounted.
 
-          <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD}`}>
-            {openTabs.length > 0 && <RequestTabs />}
-            <div className="min-h-0 flex-1">
-              {activeTab ? <RequestBuilder tabId={activeTab.id} /> : <ApiEmptyState />}
+              Which one is on screen is switched from the workspace menu at the right of the tab bar,
+              where the two sit as sibling rows — the same control that opens this tab in the first
+              place, so there is no second switcher to keep in step with it. */}
+          <div
+            className={`flex min-w-0 flex-1 gap-1.5 overflow-hidden ${
+              apiWorkspace === "requests" ? "" : "hidden"
+            }`}
+          >
+            <ApiSidebar />
+
+            <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD}`}>
+              {openTabs.length > 0 && <RequestTabs />}
+              <div className="min-h-0 flex-1">
+                {activeTab ? <RequestBuilder tabId={activeTab.id} /> : <ApiEmptyState />}
+              </div>
             </div>
+
+            {/* The snippet mirrors one request, so it has nothing to show without an open tab. */}
+            {activeTab && <CodeSnippetPanel tabId={activeTab.id} />}
           </div>
 
-          {/* The snippet mirrors one request, so it has nothing to show without an open tab. */}
-          {activeTab && <CodeSnippetPanel tabId={activeTab.id} />}
+          {apiWorkspace === "database" && <DatabaseView />}
         </div>
       </div>
 
