@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp, ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, Lock, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
@@ -104,6 +104,11 @@ export function StatusBar() {
       >
         <GitBranch size={12} />
         {status?.current_branch ?? (status?.is_detached ? t("statusbar.detachedHead") : "—")}
+        {current?.is_locked && (
+          <span className="text-[var(--cf-warning)]" title={t("branch.lockedBadge")}>
+            <Lock size={11} />
+          </span>
+        )}
         <ChevronDown size={11} className="text-[var(--cf-text-muted)]" />
       </button>
 
@@ -175,7 +180,15 @@ export function StatusBar() {
             <button
               disabled={remoteOp !== null || !pushEnabled}
               onClick={pushNow}
-              title={pushEnabled ? hint("git.push", t("statusbar.pushTo")) : t("statusbar.nothingToPush")}
+              // A locked branch is a different reason for the same greyed-out button, and
+              // "nothing to push" would be the wrong explanation for it.
+              title={
+                pushEnabled
+                  ? hint("git.push", t("statusbar.pushTo"))
+                  : current?.is_locked
+                    ? t("branch.lockedCannotPush", { name: current.name })
+                    : t("statusbar.nothingToPush")
+              }
               className="flex h-6 items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:brightness-100"
             >
               {remoteOp === "push" ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}

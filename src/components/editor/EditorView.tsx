@@ -1,10 +1,11 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
-import { Bug, FileCode, FileSearch, Files, Keyboard, Search, Tags } from "lucide-react";
+import { Bookmark, Bug, FileCode, FileSearch, Files, Keyboard, Search, Tags } from "lucide-react";
 import { FileTree } from "./FileTree";
 import { FilePalette } from "./FilePalette";
 import { SearchPanel } from "./SearchPanel";
 import { AnchorsPanel } from "./AnchorsPanel";
+import { BookmarksPanel } from "./BookmarksPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
 import { EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
@@ -28,12 +29,15 @@ import { useLayoutStore } from "../../state/layoutStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
+import { useBookmarkStore } from "../../state/bookmarkStore";
+import { useEditorCommandStore } from "../../state/editorCommandStore";
 import type { TabDrag } from "../../state/tabDragStore";
 import { confirmAction } from "../../state/confirmStore";
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
+import { useShortcutHint } from "../../lib/useShortcutHint";
 
 const TREE_MIN = 200;
 const TREE_MAX = 480;
@@ -54,6 +58,7 @@ const GROUP_MIN = 320;
 
 export function EditorView() {
   const t = useT();
+  const shortcutHint = useShortcutHint();
   const project = useWorkspaceStore((s) => s.activeProject());
   const status = useRepoStore((s) => s.status);
   const changedPaths = useMemo(() => {
@@ -93,7 +98,7 @@ export function EditorView() {
   const [activeGroupId, setActiveGroupId] = useState<string>(() => groups[0].id);
   const [saving, setSaving] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [sidePanel, setSidePanel] = useState<"files" | "search" | "anchors" | "debug">("files");
+  const [sidePanel, setSidePanel] = useState<"files" | "search" | "anchors" | "bookmarks" | "debug">("files");
   /** The snapshot being composed, or `null` when the dialog is closed. */
   const [codeSnap, setCodeSnap] = useState<CodeSnapTarget | null>(null);
   /** Which group should jump where. Scoped to a group because "go to this search hit" means the
@@ -107,6 +112,8 @@ export function EditorView() {
   /** The focused pane's "capture a snapshot" function, re-registered whenever focus moves, so
    * the keyboard shortcut reaches the group the user is looking at even from outside the code. */
   const captureRef = useRef<(() => void) | null>(null);
+  /** Same idea for "bookmark the line the caret is on" — only the pane holding the caret can. */
+  const bookmarkToggleRef = useRef<(() => void) | null>(null);
 
   // Assigned during render, not in an effect: the callbacks below read them to decide what to do
   // *now*, and a ref that lagged a render would act on the previous tab or group.
@@ -326,6 +333,13 @@ export function EditorView() {
     }
   }, [openPathsKey, project]);
 
+  // Bookmarks are stored per project, so opening one is what decides which set is in force. The
+  // store no-ops when the path hasn't changed, which is what makes this safe to run on a render
+  // that only changed a tab.
+  useEffect(() => {
+    if (project) void useBookmarkStore.getState().load(project.local_path);
+  }, [project]);
+
   // Reload open files from disk when they change externally — a terminal `git` command, an
   // edit in another editor, a branch checkout — instead of silently showing stale content
   // until the user happens to reopen them. Tabs with unsaved local edits are skipped so this
@@ -386,40 +400,58 @@ export function EditorView() {
     clearPendingEditorPath();
   }, [pendingEditorPath, pendingEditorLine, openFile, openHit, clearPendingEditorPath]);
 
-  // Editor-wide shortcuts, gated on the Editor being the visible view (this panel stays mounted
-  // in the background once opened).
+  /**
+   * The editor's own shortcuts, arriving as requests rather than as keystrokes.
+   *
+   * This was a `keydown` listener comparing `e.key` to literals, which is why these were the only
+   * actions in the app that couldn't be rebound. The chords now live in the shortcut registry with
+   * everything else and post an `EditorCommand`; what is left here is what each one does.
+   *
+   * `codeSnap` goes through the focused pane's registered capture rather than Monaco's own action,
+   * so it also works in preview-only mode, where there is no editor instance to have registered
+   * anything. `bookmarkToggle` reaches the caret the same way.
+   */
+  const editorCommand = useEditorCommandStore((s) => s.request);
   useEffect(() => {
-    if (activeView !== "editor") return;
-    const handler = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey)) return;
-      const key = e.key.toLowerCase();
-      if (key === "p" && !e.shiftKey) {
-        e.preventDefault();
+    if (!editorCommand) return;
+    useEditorCommandStore.getState().consume();
+    switch (editorCommand.command) {
+      case "goToFile":
         setPaletteOpen(true);
-      } else if (key === "f" && e.shiftKey) {
-        e.preventDefault();
+        break;
+      case "explorer":
+        setSidePanel("files");
+        break;
+      case "findInProject":
         setSidePanel("search");
-      } else if (key === "m" && e.shiftKey) {
-        e.preventDefault();
+        break;
+      case "anchors":
         setSidePanel("anchors");
-      } else if (key === "\\") {
-        // VS Code's own split binding, so muscle memory carries over.
-        e.preventDefault();
+        break;
+      case "bookmarks":
+        setSidePanel("bookmarks");
+        break;
+      case "debug":
+        setSidePanel("debug");
+        break;
+      case "splitRight":
         splitGroup();
-      } else if (key === "c" && e.shiftKey) {
-        // Monaco's own binding covers the case where the caret is in the code; this one makes
-        // the shortcut work from anywhere in the Editor tab, including preview-only mode where
-        // there is no editor instance to have registered it.
-        e.preventDefault();
+        break;
+      case "codeSnap":
         captureRef.current?.();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [activeView, splitGroup]);
+        break;
+      case "bookmarkToggle":
+        bookmarkToggleRef.current?.();
+        break;
+    }
+  }, [editorCommand, splitGroup]);
 
   const registerCapture = useCallback((capture: () => void) => {
     captureRef.current = capture;
+  }, []);
+
+  const registerBookmarkToggle = useCallback((toggle: () => void) => {
+    bookmarkToggleRef.current = toggle;
   }, []);
 
   const setGroupActive = useCallback((groupId: string, path: string) => {
@@ -499,6 +531,7 @@ export function EditorView() {
       onSave={() => group.activePath && void save(group.activePath)}
       onCodeSnap={setCodeSnap}
       registerCapture={registerCapture}
+      registerBookmarkToggle={registerBookmarkToggle}
       // Always available — VS Code lets you keep splitting, and each press splits *this* group
       // rather than whichever one happens to hold focus.
       onSplit={group.activePath ? () => splitGroup(group.id) : null}
@@ -514,18 +547,24 @@ export function EditorView() {
         {/* Activity rail: the panel toggles up top, one-shot actions pinned to the bottom the
             way an editor keeps its settings gear there. */}
         <div className="flex w-9 shrink-0 flex-col items-center gap-1 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] py-1.5 shadow-[var(--cf-shadow)]">
+          {/* The chord in each tooltip comes from the binding registry, not from a string next to
+              the label: two of these used to carry a hand-written "(Ctrl+Shift+F)" that said Ctrl
+              on a Mac and went stale the moment anyone rebound it, and the other three said
+              nothing at all. `aria-label` stays the bare name — a screen reader announces the
+              key from the binding, not from the accessible name. */}
           {(
             [
-              { id: "files", icon: Files, label: t("editor.explorer"), hint: "" },
-              { id: "search", icon: Search, label: t("editor.searchInProject"), hint: " (Ctrl+Shift+F)" },
-              { id: "anchors", icon: Tags, label: t("anchors.title"), hint: " (Ctrl+Shift+M)" },
-              { id: "debug", icon: Bug, label: t("debug.title"), hint: "" },
+              { id: "files", shortcut: "editor.explorer", icon: Files, label: t("editor.explorer") },
+              { id: "search", shortcut: "editor.findInProject", icon: Search, label: t("editor.searchInProject") },
+              { id: "anchors", shortcut: "editor.anchors", icon: Tags, label: t("anchors.title") },
+              { id: "bookmarks", shortcut: "editor.bookmarks", icon: Bookmark, label: t("bookmarks.title") },
+              { id: "debug", shortcut: "editor.debug", icon: Bug, label: t("debug.title") },
             ] as const
-          ).map(({ id, icon: Icon, label, hint }) => (
+          ).map(({ id, shortcut, icon: Icon, label }) => (
             <button
               key={id}
               onClick={() => setSidePanel(id)}
-              title={`${label}${hint}`}
+              title={shortcutHint(shortcut, label)}
               aria-label={label}
               className={`relative flex h-7 w-7 items-center justify-center rounded-md ${
                 sidePanel === id
@@ -549,7 +588,7 @@ export function EditorView() {
               panel, and it has to be reachable with no file open — which the tab bar isn't. */}
           <button
             onClick={() => setPaletteOpen(true)}
-            title={`${t("editor.goToFile")} (Ctrl+P)`}
+            title={shortcutHint("editor.goToFile", t("editor.goToFile"))}
             aria-label={t("editor.goToFile")}
             className="mt-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
           >
@@ -557,7 +596,7 @@ export function EditorView() {
           </button>
           <button
             onClick={() => useUiStore.getState().toggleShortcutsModal()}
-            title={t("shortcuts.title")}
+            title={shortcutHint("app.shortcuts", t("shortcuts.title"))}
             aria-label={t("shortcuts.title")}
             className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
           >
@@ -581,6 +620,8 @@ export function EditorView() {
               activeContent={activeContent}
               onOpenAnchor={openHit}
             />
+          ) : sidePanel === "bookmarks" ? (
+            <BookmarksPanel repoPath={project.local_path} onOpen={openHit} />
           ) : sidePanel === "debug" ? (
             <DebugPanel
               repoPath={project.local_path}

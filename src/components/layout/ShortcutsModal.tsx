@@ -6,7 +6,7 @@ import { useShortcutsStore, bindingFor } from "../../state/shortcutsStore";
 import { SHORTCUT_COMMANDS, SHORTCUT_GROUP_LABELS, EDITOR_RESERVED, type ShortcutGroup } from "../../lib/shortcuts";
 import { chordKeycaps } from "../../lib/keys";
 
-const GROUP_ORDER: ShortcutGroup[] = ["general", "panels", "views", "navigation", "workspace", "git"];
+const GROUP_ORDER: ShortcutGroup[] = ["general", "panels", "views", "editor", "navigation", "workspace", "git"];
 
 export function Keycap({ children }: { children: string }) {
   return (
@@ -96,7 +96,7 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
 
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("shortcuts.groupEditor")}
+              {t("shortcuts.groupEditorBuiltIn")}
             </p>
             <p className="mb-1.5 text-[11px] text-[var(--cf-text-muted)]">{t("shortcuts.editorFixedHint")}</p>
             <div className="space-y-1">

@@ -1,7 +1,15 @@
 import { create } from "zustand";
 import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
-import { listJobHistory, renameJobHistoryEntry, deleteJobHistoryEntry } from "../lib/tauri/commands";
-import type { JobHistoryEntry } from "../types/domain";
+import {
+  listJobHistory,
+  renameJobHistoryEntry,
+  deleteJobHistoryEntry,
+  listWorkspaceActivity,
+  renameWorkspaceActivityEntry,
+  deleteWorkspaceActivityEntry,
+} from "../lib/tauri/commands";
+import { isWorkspaceBucket, workspaceIdFromBucket } from "../lib/prTarget";
+import type { JobHistoryEntry, WorkspaceActivityEntry } from "../types/domain";
 import { useLanguageStore } from "./languageStore";
 import { isCancellation, useAiRunStore } from "./aiRunStore";
 import { translations } from "../lib/i18n/translations";
@@ -17,6 +25,11 @@ export type JobStatus = "running" | "done" | "error" | "cancelled";
 
 export interface Job {
   id: string;
+  /** The *bucket* this job is filed under, which is a project id for almost everything — but a
+   * workspace key (see `workspaceActivityKey`) for a PR reviewed from a link, which belongs to no
+   * repository here. It's the field that says which table the row lives in, so anything acting on
+   * a job (rename, delete) should take it from here rather than from whatever the surrounding
+   * screen happens to be showing: one Activity list mixes both. */
   projectId: string;
   kind: JobKind;
   label: string;
@@ -49,11 +62,12 @@ interface JobsState {
   }) => string;
   /** Files an already-completed history row into Activity without a round-trip to disk — used by
    * a PR decision, which the backend persists as it happens rather than running as a job. */
-  record: (projectId: string, entry: JobHistoryEntry) => void;
-  /** Hydrates this project's finished PR reviews / pre-commit analyses from disk — `run()`
-   * only ever lived in memory, so without this every past result vanished on restart. Runs
-   * once per project per session; a job already in memory (freshly run before this resolves)
-   * is merged in rather than replaced. */
+  record: (projectId: string, entry: ActivityRow) => void;
+  /** Hydrates a bucket's finished runs from disk — a project's PR reviews / pre-commit analyses
+   * from `job_history`, or a workspace's link reviews from `workspace_activity`. `run()` only
+   * ever lived in memory, so without this every past result vanished on restart. Runs once per
+   * bucket per session; a job already in memory (freshly run before this resolves) is merged in
+   * rather than replaced. */
   load: (projectId: string) => Promise<void>;
   rename: (projectId: string, jobId: string, label: string) => Promise<void>;
   /** Best-effort against the persisted row — a job still `running` has no `job_history` row
@@ -88,11 +102,24 @@ const PR_ACTION_LABEL_KEY: Record<string, keyof typeof translations.en> = {
   close: "activity.prClosed",
 };
 
+/** A persisted Activity row, from either table — they carry the same fields apart from what they
+ * hang off (a project or a workspace), which the bucket key already says. */
+type ActivityRow = JobHistoryEntry | WorkspaceActivityEntry;
+
 /** Turns a persisted history row into the in-memory job the Activity list renders. Shared by the
  * initial load and by a decision recorded this session, so a row reads the same either way. */
-function toJob(projectId: string, row: JobHistoryEntry): Job {
+function toJob(projectId: string, row: ActivityRow): Job {
   const meta = safeParseMeta(row.meta);
-  const prLabel = typeof meta.prTitle === "string" ? `#${meta.prId} ${meta.prTitle}` : row.label;
+  // A repo-less review names its repository, because nothing else in the row does: it sits in the
+  // list next to reviews of repositories the user actually has, and "#42 Fix login" alone gives no
+  // clue which one it came from — "#42 acme/widgets · Fix login" does, and is searchable by repo.
+  const repoLabel = typeof meta.repoLabel === "string" ? meta.repoLabel : null;
+  const prLabel =
+    typeof meta.prTitle === "string"
+      ? repoLabel
+        ? `#${meta.prId} ${repoLabel} · ${meta.prTitle}`
+        : `#${meta.prId} ${meta.prTitle}`
+      : row.label;
   const label =
     row.custom_label ??
     (row.kind === "analyze-changes"
@@ -189,7 +216,13 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     // React two list items with the same key, which then misbinds clicks on nearby rows).
     set((s) => ({ loaded: { ...s.loaded, [projectId]: true } }));
 
-    const rows = await listJobHistory(projectId).catch(() => []);
+    // A workspace bucket reads the other table: everything reviewed from a link, which belongs to
+    // no repository and so follows the workspace instead. See `targetKey`.
+    const workspaceId = workspaceIdFromBucket(projectId);
+    const rows: ActivityRow[] = await (workspaceId === null
+      ? listJobHistory(projectId)
+      : listWorkspaceActivity(workspaceId)
+    ).catch(() => []);
     const loadedJobs: Job[] = rows.map((row) => toJob(projectId, row));
     set((s) => {
       const existing = s.byProject[projectId] ?? [];
@@ -202,7 +235,9 @@ export const useJobsStore = create<JobsState>((set, get) => ({
   },
 
   rename: async (projectId, jobId, label) => {
-    await renameJobHistoryEntry(jobId, label);
+    await (isWorkspaceBucket(projectId)
+      ? renameWorkspaceActivityEntry(jobId, label)
+      : renameJobHistoryEntry(jobId, label));
     set((s) => ({
       byProject: {
         ...s.byProject,
@@ -212,7 +247,10 @@ export const useJobsStore = create<JobsState>((set, get) => ({
   },
 
   remove: async (projectId, jobId) => {
-    await deleteJobHistoryEntry(jobId).catch(() => {});
+    await (isWorkspaceBucket(projectId)
+      ? deleteWorkspaceActivityEntry(jobId)
+      : deleteJobHistoryEntry(jobId)
+    ).catch(() => {});
     set((s) => ({
       byProject: { ...s.byProject, [projectId]: (s.byProject[projectId] ?? []).filter((j) => j.id !== jobId) },
     }));

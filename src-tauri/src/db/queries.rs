@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use super::models::{
     ActivityLogEntry, ChatConversationSummary, JobHistoryEntry, NewProject, Project, ReviewContext, ReviewRunDetail,
-    ReviewRunSummary, Workspace, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill,
+    ReviewRunSummary, Workspace, WorkspaceActivityEntry, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill,
 };
 
 /// The timestamp every record is stamped with, truncated to **microseconds**.
@@ -964,6 +964,89 @@ pub fn delete_job_history(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+// ---------- workspace activity (reviews of PRs with no repository here) ----------
+
+/// The `job_history` writer's twin for work that belongs to no project. Same contract: `id` comes
+/// from the caller (the frontend's in-memory job id), so the running job and the row it leaves
+/// behind are one identity and renaming/deleting either always hits the right row.
+#[allow(clippy::too_many_arguments)]
+pub fn add_workspace_activity(
+    conn: &Connection,
+    id: &str,
+    workspace_id: &str,
+    kind: &str,
+    label: &str,
+    status: &str,
+    result: Option<&str>,
+    error: Option<&str>,
+    meta: &str,
+) -> rusqlite::Result<WorkspaceActivityEntry> {
+    let entry = WorkspaceActivityEntry {
+        id: id.to_string(),
+        workspace_id: workspace_id.to_string(),
+        kind: kind.to_string(),
+        label: label.to_string(),
+        custom_label: None,
+        status: status.to_string(),
+        result: result.map(str::to_string),
+        error: error.map(str::to_string),
+        meta: meta.to_string(),
+        created_at: now(),
+    };
+    conn.execute(
+        "INSERT INTO workspace_activity (id, workspace_id, kind, label, status, result, error, meta, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            entry.id,
+            entry.workspace_id,
+            entry.kind,
+            entry.label,
+            entry.status,
+            entry.result,
+            entry.error,
+            entry.meta,
+            entry.created_at
+        ],
+    )?;
+    Ok(entry)
+}
+
+pub fn list_workspace_activity(
+    conn: &Connection,
+    workspace_id: &str,
+) -> rusqlite::Result<Vec<WorkspaceActivityEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, kind, label, custom_label, status, result, error, meta, created_at
+         FROM workspace_activity WHERE workspace_id = ?1 ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |row| {
+        Ok(WorkspaceActivityEntry {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            kind: row.get(2)?,
+            label: row.get(3)?,
+            custom_label: row.get(4)?,
+            status: row.get(5)?,
+            result: row.get(6)?,
+            error: row.get(7)?,
+            meta: row.get(8)?,
+            created_at: row.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn rename_workspace_activity(conn: &Connection, id: &str, label: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE workspace_activity SET custom_label = ?1 WHERE id = ?2", params![label, id])?;
+    Ok(())
+}
+
+/// Best-effort, exactly like [`delete_job_history`] — a run still in flight has no row yet.
+pub fn delete_workspace_activity(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM workspace_activity WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 // ---------- app settings (key/value) ----------
 
 pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -1105,5 +1188,46 @@ mod tests {
         let turns = get_conversation_messages(&conn, &project, "conv-1").unwrap();
         let latest = turns.iter().filter_map(|t| t.engine_session_id.clone()).next_back();
         assert_eq!(latest.as_deref(), Some("session-b"));
+    }
+
+    /// The whole point of `workspace_activity`: a PR reviewed from a link has no project, so it
+    /// follows the workspace — visible whichever repository of it is open, invisible from another.
+    #[test]
+    fn workspace_activity_is_scoped_to_its_workspace_and_not_to_any_project() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let mine = create_workspace(&conn, "mine", "folder", "#fff").unwrap();
+        let other = create_workspace(&conn, "other", "folder", "#fff").unwrap();
+
+        add_workspace_activity(
+            &conn, "job-1", &mine.id, "pr-review", "#42 acme/widgets · Fix login", "done", Some("ok"), None,
+            r#"{"prId":42,"repoLabel":"acme/widgets"}"#,
+        )
+        .unwrap();
+
+        let rows = list_workspace_activity(&conn, &mine.id).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "#42 acme/widgets · Fix login");
+        assert!(list_workspace_activity(&conn, &other.id).unwrap().is_empty());
+    }
+
+    /// Renaming and deleting have to reach these rows too — they show in the same list, with the
+    /// same pencil and the same trash, as the rows that live in `job_history`.
+    #[test]
+    fn workspace_activity_can_be_renamed_and_deleted() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let ws = create_workspace(&conn, "ws", "folder", "#fff").unwrap();
+        add_workspace_activity(&conn, "job-1", &ws.id, "pr-review", "#42 acme/widgets", "done", None, None, "{}")
+            .unwrap();
+
+        rename_workspace_activity(&conn, "job-1", "Revisión del viernes").unwrap();
+        assert_eq!(
+            list_workspace_activity(&conn, &ws.id).unwrap()[0].custom_label.as_deref(),
+            Some("Revisión del viernes")
+        );
+
+        delete_workspace_activity(&conn, "job-1").unwrap();
+        assert!(list_workspace_activity(&conn, &ws.id).unwrap().is_empty());
     }
 }

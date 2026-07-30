@@ -27,15 +27,19 @@ export type ActivityEntry =
  * once; the representative `job` is the newest, which is why a closed PR's row reads "#3 Tests ·
  * Closed". Chats are one activity each already. */
 export function mergeActivityEntries(jobs: Job[], conversations: ChatConversationSummary[]): ActivityEntry[] {
-  const prRuns = new Map<number, Job[]>();
+  const prRuns = new Map<string | number, Job[]>();
   const analyzeRuns: Job[] = [];
   const standalone: Job[] = [];
   for (const job of jobs) {
     const belongsToPr = job.kind === "pr-review" || job.kind === "pr-action";
     if (belongsToPr && typeof job.meta.prId === "number") {
-      const runs = prRuns.get(job.meta.prId);
+      // Keyed by URL when there is one: a workspace's Activity holds reviews of *several*
+      // repositories reached by link, and a PR number only identifies a PR within one repo — so
+      // grouping on the number alone would fold two unrelated "#42"s into a single row.
+      const key = jobPrUrl(job) ?? job.meta.prId;
+      const runs = prRuns.get(key);
       if (runs) runs.push(job);
-      else prRuns.set(job.meta.prId, [job]);
+      else prRuns.set(key, [job]);
     } else if (job.kind === "analyze-changes") {
       analyzeRuns.push(job);
     } else {
@@ -59,6 +63,20 @@ export function mergeActivityEntries(jobs: Job[], conversations: ChatConversatio
     ...conversations.map((conv): ActivityEntry => ({ type: "chat", conv })),
   ];
   return entries.sort((a, b) => entryTimestamp(b) - entryTimestamp(a));
+}
+
+/** The link a job's pull request was reached by, or `null` for a PR that came from a project's own
+ * list. This is what marks a row as workspace-global: the repository isn't on this machine, so the
+ * URL is the only handle on it — and the only identity that doesn't collide across repos. */
+export function jobPrUrl(job: Job): string | null {
+  return typeof job.meta.prUrl === "string" ? job.meta.prUrl : null;
+}
+
+/** Whether this row belongs to the workspace rather than to a repository — a PR reviewed from a
+ * link alone. Drawn with a globe, since it sits in the same list as the reviews of repositories
+ * the user does have and belongs to none of them. */
+export function entryIsGlobal(entry: ActivityEntry): boolean {
+  return entry.type === "job" && jobPrUrl(entry.job) !== null;
 }
 
 /** How many *runs* a job row stands for (1 for a chat or a single-run job).
@@ -112,8 +130,20 @@ export function entryVisual(entry: ActivityEntry): { icon: LucideIcon; color: st
  * selected PR hasn't been reviewed yet and so has no job entry). */
 export function findActiveEntryKey(
   entries: ActivityEntry[],
-  state: { selectedPrId: number | null; analyzeOpen: boolean; analyzeJobId: string | null; activeSessionId: string | null },
+  state: {
+    selectedPrId: number | null;
+    /** Set when the PR on screen was reached by link — matched instead of the number, which
+     * repeats across the repositories a workspace's Activity now spans. */
+    linkPrUrl: string | null;
+    analyzeOpen: boolean;
+    analyzeJobId: string | null;
+    activeSessionId: string | null;
+  },
 ): string | null {
+  if (state.linkPrUrl !== null) {
+    const match = entries.find((e) => e.type === "job" && e.runs.some((run) => jobPrUrl(run) === state.linkPrUrl));
+    return match ? entryKey(match) : null;
+  }
   if (state.selectedPrId !== null) {
     // Matched against every entry in the row, not just its newest: a PR whose latest event is a
     // decision rather than a review still has to highlight when that PR is open.
@@ -121,7 +151,11 @@ export function findActiveEntryKey(
       (e) =>
         e.type === "job" &&
         e.runs.some(
-          (run) => (run.kind === "pr-review" || run.kind === "pr-action") && run.meta.prId === state.selectedPrId,
+          (run) =>
+            (run.kind === "pr-review" || run.kind === "pr-action") &&
+            run.meta.prId === state.selectedPrId &&
+            // A link review of some other repo's "#42" is not this PR.
+            jobPrUrl(run) === null,
         ),
     );
     return match ? entryKey(match) : null;

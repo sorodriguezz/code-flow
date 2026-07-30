@@ -24,8 +24,10 @@ import { fileIconFor } from "../../lib/fileIcon";
 import { parseDbml } from "../../lib/dbml";
 import { anchorColor, anchorTagClass, parseAnchors } from "../../lib/anchors";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
+import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useTabDragStore, type TabDrag } from "../../state/tabDragStore";
 import { useT } from "../../state/languageStore";
+import { useShortcutHint } from "../../lib/useShortcutHint";
 import { BouncingDots } from "../common/BouncingDots";
 import { EmptyState } from "../common/EmptyState";
 import type { FileDiffInfo, Project } from "../../types/domain";
@@ -145,6 +147,7 @@ export function EditorPane({
   onSave,
   onCodeSnap,
   registerCapture,
+  registerBookmarkToggle,
   onSplit,
   onCloseGroup,
 }: {
@@ -175,12 +178,15 @@ export function EditorPane({
   /** Hands the parent a way to trigger this pane's snapshot capture, so the shortcut works even
    * when focus is somewhere else in the Editor tab. */
   registerCapture: (capture: () => void) => void;
+  /** Same channel as `registerCapture`, for "bookmark the caret's line" — see `EditorView`. */
+  registerBookmarkToggle: (toggle: () => void) => void;
   /** `null` hides the split button — there's already a second group. */
   onSplit: (() => void) | null;
   /** `null` for the only group; a group you can't close is one without a close button. */
   onCloseGroup: (() => void) | null;
 }) {
   const t = useT();
+  const shortcutHint = useShortcutHint();
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   // Decoration ids are per *model*, so they have to be tracked per open file — reusing one
@@ -219,6 +225,10 @@ export function EditorPane({
   // file rather than whichever one was open when it was wired up.
   const activeAbsolutePathRef = useRef<string | null>(null);
   activeAbsolutePathRef.current = activeAbsolutePath;
+  // Bookmarks are filed repo-relative, the way the editor and its panel address a file; the
+  // breakpoint above is absolute because that is what a debug adapter speaks.
+  const activePathRef = useRef<string | null>(null);
+  activePathRef.current = activePath;
   const pausedFrame = useDebugStore((s) => (s.status === "paused" ? s.frames[s.selectedFrame] : undefined));
 
   // Same "unstaged wins, else staged" priority as the file tree's own indicator, so the
@@ -280,6 +290,33 @@ export function EditorPane({
     }
     debugDecorationsRef.current = ed.deltaDecorations(debugDecorationsRef.current, decorations);
   }, [breakpoints, activeAbsolutePath, pausedFrame, editorReady, activeTab?.loading]);
+
+  /**
+   * Bookmarked lines, in the lines-decorations lane rather than the glyph margin.
+   *
+   * The glyph margin is the breakpoint's, and the two land on the same line often enough — you
+   * bookmark what you are debugging — that sharing it would mean one silently hiding the other.
+   * The overview ruler tick is what makes a mark in a 2000-line file findable without scrolling
+   * to it.
+   */
+  const bookmarks = useBookmarkStore((s) => s.bookmarks);
+  const bookmarkDecorationsRef = useRef<string[]>([]);
+  useEffect(() => {
+    const ed = editorRef.current;
+    const mon = monacoRef.current;
+    if (!ed || !mon || !ed.getModel()) return;
+    const decorations: MonacoEditorNS.IModelDeltaDecoration[] = bookmarks
+      .filter((mark) => mark.path === activePath)
+      .map((mark) => ({
+        range: new mon.Range(mark.line, 1, mark.line, 1),
+        options: {
+          isWholeLine: true,
+          linesDecorationsClassName: "cf-bookmark-mark",
+          overviewRuler: { color: "#f59e0b", position: mon.editor.OverviewRulerLane.Right },
+        },
+      }));
+    bookmarkDecorationsRef.current = ed.deltaDecorations(bookmarkDecorationsRef.current, decorations);
+  }, [bookmarks, activePath, editorReady, activeTab?.loading]);
 
   // Tagged comments in the open buffer — recomputed as you type, so an anchor you just wrote is
   // navigable before the file is even saved.
@@ -348,6 +385,28 @@ export function EditorPane({
     if (focused) registerCapture(() => captureRef.current());
   }, [focused, registerCapture]);
 
+  /**
+   * Marks the caret's line, for the app-level shortcut.
+   *
+   * The context-menu entry below runs the same thing through Monaco, which is the path that has
+   * the caret to hand. This one exists because the keybinding is configurable and therefore lives
+   * in the app's registry, not in Monaco's — and a registry command has no idea which of several
+   * panes the caret is in. The focused pane answering that is the same arrangement the snapshot
+   * shortcut already uses.
+   */
+  const toggleBookmarkAtCaret = useCallback(() => {
+    const model = editorRef.current?.getModel();
+    const line = editorRef.current?.getPosition()?.lineNumber;
+    if (!model || !line || !activePath) return;
+    useBookmarkStore.getState().toggle(activePath, line, model.getLineContent(line));
+  }, [activePath]);
+
+  const bookmarkToggleRef = useRef(toggleBookmarkAtCaret);
+  bookmarkToggleRef.current = toggleBookmarkAtCaret;
+  useEffect(() => {
+    if (focused) registerBookmarkToggle(() => bookmarkToggleRef.current());
+  }, [focused, registerBookmarkToggle]);
+
   const onFocusRef = useRef(onFocus);
   onFocusRef.current = onFocus;
 
@@ -388,6 +447,25 @@ export function EditorPane({
       contextMenuOrder: 4,
       keybindings: [monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyMod.Shift | monacoInstance.KeyCode.KeyC],
       run: () => captureRef.current(),
+    });
+    // Right-click on the line, next to the other navigation entries — a bookmark is about *where*
+    // you are, so `navigation` is the group it belongs in. No keybinding here: that one is in the
+    // app's shortcut registry, where it can be rebound, and two owners of one chord is how they
+    // drift apart.
+    editorInstance.addAction({
+      id: "cf-bookmark-toggle",
+      label: tRef.current("bookmarks.toggle"),
+      contextMenuGroupId: "navigation",
+      contextMenuOrder: 5,
+      run: (ed) => {
+        const model = ed.getModel();
+        const line = ed.getPosition()?.lineNumber;
+        const path = activePathRef.current;
+        if (!model || !line || !path) return;
+        // The line's text becomes the label, so the panel shows what was marked rather than a
+        // file name and a number.
+        useBookmarkStore.getState().toggle(path, line, model.getLineContent(line));
+      },
     });
     // Clicking the gutter toggles a breakpoint — the only way anyone expects to set one.
     editorInstance.onMouseDown((event) => {
@@ -518,6 +596,18 @@ export function EditorPane({
           // Without a glyph margin there is nowhere to click for a breakpoint, and nowhere to
           // draw one.
           glyphMargin: true,
+          /**
+           * Room for the bookmark icon beside the folding chevron.
+           *
+           * Every `linesDecorationsClassName` Monaco draws lands in one lane, at the same `left`
+           * and the same width (`linesDecorations.js` renders them all with one shared style), and
+           * the folding chevron is one of them — centred in the lane. So the lane's width is the
+           * only thing that decides whether a second mark in it has anywhere to go, and at the
+           * default it does not: a bookmark almost always sits on a foldable line, being the top
+           * of whatever was worth marking. Monaco adds 16px of its own when folding is on, so this
+           * is a 36px lane: the chevron centred in it, the icon flush left, no overlap.
+           */
+          lineDecorationsWidth: 20,
         }}
       />
     ) : null;
@@ -571,7 +661,7 @@ export function EditorPane({
                 <button
                   onClick={captureSnapshot}
                   disabled={activeTab.loading}
-                  title={`${t("codesnap.action")} (Ctrl+Shift+C)`}
+                  title={shortcutHint("editor.codeSnap", t("codesnap.action"))}
                   aria-label={t("codesnap.action")}
                   className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-40 dark:hover:bg-white/[0.08]"
                 >
@@ -580,7 +670,7 @@ export function EditorPane({
                 {onSplit && (
                   <button
                     onClick={onSplit}
-                    title={`${t("editor.splitRight")} (Ctrl+\\)`}
+                    title={shortcutHint("editor.splitRight", t("editor.splitRight"))}
                     aria-label={t("editor.splitRight")}
                     className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
                   >

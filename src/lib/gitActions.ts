@@ -18,14 +18,17 @@ export function canPull(branch: BranchInfo | null | undefined): boolean {
   return !!branch?.upstream && branch.behind > 0;
 }
 
-/** A branch with no upstream yet is published rather than pushed — always available. */
+/** A branch with no upstream yet is published rather than pushed — always available, unless the
+ * branch is locked, which is exactly a refusal to publish it. */
 export function canPublish(branch: BranchInfo | null | undefined): boolean {
-  return !!branch && !branch.upstream;
+  return !!branch && !branch.upstream && !branch.is_locked;
 }
 
-/** Nothing to push unless there are local commits the remote doesn't have. */
+/** Nothing to push unless there are local commits the remote doesn't have — and nothing to push
+ * from a locked branch either. The Rust side refuses too; this is so the button and the shortcut
+ * are greyed out together instead of both failing with a toast. */
 export function canPush(branch: BranchInfo | null | undefined): boolean {
-  return !!branch?.upstream && branch.ahead > 0;
+  return !!branch?.upstream && branch.ahead > 0 && !branch.is_locked;
 }
 
 /** Fetch now, and restart the auto-fetch countdown — an explicit fetch makes the pending

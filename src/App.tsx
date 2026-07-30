@@ -38,6 +38,7 @@ import { useNavigationStore } from "./state/navigationStore";
 import { useTerminalStore } from "./state/terminalStore";
 import { useShortcutsStore } from "./state/shortcutsStore";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
+import { startWindowBoundsTracking } from "./lib/windowControls";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
 import { onRepoFsChanged } from "./lib/tauri/events";
 
@@ -137,6 +138,9 @@ export default function App() {
         initTerminal(),
         initAiProvider(),
         initShortcuts(),
+        // Starts before the user can reach the maximize button, so the size the window opened at is
+        // already recorded as somewhere to restore to.
+        startWindowBoundsTracking(),
       ]);
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
     })();

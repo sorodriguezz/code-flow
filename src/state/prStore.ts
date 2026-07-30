@@ -6,12 +6,9 @@ import { useChatStore } from "./chatStore";
 import { useLanguageStore } from "./languageStore";
 import { translations } from "../lib/i18n/translations";
 import * as prTarget from "../lib/prTarget";
-import { targetKey, type PrTarget } from "../lib/prTarget";
+import { targetKey, targetPrKey, type PrTarget } from "../lib/prTarget";
 import type { PrDecision, PullRequestSummary } from "../types/domain";
 import type { PrAction, PostFindingItem } from "../lib/tauri/commands";
-
-/** Cache key for a PR's decision — a PR id is only unique within the repo it belongs to. */
-const decisionKey = (target: PrTarget, prId: number) => `${targetKey(target)}:${prId}`;
 
 /** Enough parked link reviews to cover an afternoon of "someone sent me this PR" without the
  * list becoming its own navigation problem. */
@@ -72,6 +69,13 @@ interface PrState {
    */
   linkPrHistory: LinkPrSession[];
   openLinkPr: (session: LinkPrSession) => void;
+  /** Reopens the review behind a workspace Activity row.
+   *
+   * That row outlives the app run that produced it, so by the time it's clicked there may be no
+   * session in memory to bring back — everything needed to rebuild one is in the row's `meta`
+   * (see `link_activity_meta` in the backend). Returns `false` when it isn't, which is the honest
+   * answer for a row written before that was recorded rather than a half-built session. */
+  openLinkPrFromMeta: (meta: Record<string, unknown>, workspaceId: string) => boolean;
   closeLinkPr: () => void;
   /** Drops a parked session from the list. Its jobs stay in `jobsStore` — this is about the list
    * not growing forever, not about erasing what happened. */
@@ -152,6 +156,20 @@ export const usePrStore = create<PrState>((set, get) => ({
       // session object wins, since it carries the PR as the host last described it.
       linkPrHistory: [session, ...s.linkPrHistory.filter((e) => e.url !== session.url)].slice(0, MAX_LINK_HISTORY),
     })),
+  openLinkPrFromMeta: (meta, workspaceId) => {
+    const url = typeof meta.prUrl === "string" ? meta.prUrl : null;
+    const pr = (meta.pr ?? null) as PullRequestSummary | null;
+    if (!url || !pr || typeof pr.id !== "number") return false;
+    get().openLinkPr({
+      url,
+      pr,
+      repoLabel: typeof meta.repoLabel === "string" ? meta.repoLabel : "",
+      cloneUrl: typeof meta.cloneUrl === "string" ? meta.cloneUrl : "",
+      workspaceId,
+    });
+    return true;
+  },
+
   // Closing only takes it off screen. It stays in `linkPrHistory` so one click brings the whole
   // review back — that's what makes the session's in-memory Activity worth keeping.
   closeLinkPr: () => set({ linkPr: null, posted: false }),
@@ -178,11 +196,31 @@ export const usePrStore = create<PrState>((set, get) => ({
     // The workspace's active SDD/Harness agent (if any) reviews as that role. A link session has
     // no project to have picked an agent for, so it reviews as itself.
     const agent = target.kind === "project" ? useChatStore.getState().agentByProject[target.projectId] ?? null : null;
+    // A link review shares its bucket with every other repository reviewed from a link in this
+    // workspace, so the row has to say which repo it is — and carry enough to reopen the session
+    // later. The same shape the backend persists (see `link_activity_meta`), so the row reads
+    // identically before and after a restart.
+    const session = target.kind === "link" && get().linkPr?.url === target.url ? get().linkPr : null;
+    const linkMeta =
+      session
+        ? {
+            prUrl: session.url,
+            repoLabel: session.repoLabel,
+            cloneUrl: session.cloneUrl,
+            prTitle: session.pr.title,
+            pr: session.pr,
+          }
+        : {};
+    const label = pr
+      ? session
+        ? `#${pr.id} ${session.repoLabel} · ${pr.title}`
+        : `#${pr.id} ${pr.title}`
+      : `PR #${prId}`;
     useJobsStore.getState().run({
       projectId: key,
       kind: "pr-review",
-      label: pr ? `#${pr.id} ${pr.title}` : `PR #${prId}`,
-      meta: { prId, level: activeLevel },
+      label,
+      meta: { prId, level: activeLevel, ...linkMeta },
       task: (jobId) => prTarget.review(target, prId, jobId, activeLevel, agent),
     });
   },
@@ -205,7 +243,7 @@ export const usePrStore = create<PrState>((set, get) => ({
   loadPrDecision: async (target, prId) => {
     try {
       const decision = await prTarget.reviewDecision(target, prId);
-      set((s) => ({ decisionByPr: { ...s.decisionByPr, [decisionKey(target, prId)]: decision } }));
+      set((s) => ({ decisionByPr: { ...s.decisionByPr, [targetPrKey(target, prId)]: decision } }));
     } catch {
       // The host wouldn't say — leave it unknown, which just means the buttons stay offered.
     }
@@ -221,7 +259,7 @@ export const usePrStore = create<PrState>((set, get) => ({
       const decision: PrDecision =
         action === "approve" ? "approved" : action === "request_changes" ? "changes_requested" : "none";
       set((s) => ({
-        decisionByPr: { ...s.decisionByPr, [decisionKey(target, prId)]: decision },
+        decisionByPr: { ...s.decisionByPr, [targetPrKey(target, prId)]: decision },
         // The host's own answer, so a closed PR reads as closed rather than staying "open" until
         // the list refresh lands. The PR deliberately stays on screen — including after closing
         // it, where dropping it used to look like the PR had disappeared.
@@ -242,23 +280,10 @@ export const usePrStore = create<PrState>((set, get) => ({
               }
             : s.prsByProject,
       }));
-      // A project-backed decision comes back with its persisted Activity row; a link session has
-      // no project to file one under, so the row is synthesised here and lives with the session.
-      useJobsStore.getState().record(
-        key,
-        activity ?? {
-          id: `pr-action-${key}-${prId}-${action}`,
-          project_id: key,
-          kind: "pr-action",
-          label: `#${pr.id} ${pr.title}`,
-          custom_label: null,
-          status: "done",
-          result: pr.url,
-          error: null,
-          meta: JSON.stringify({ prId: pr.id, prTitle: pr.title, action }),
-          created_at: new Date().toISOString(),
-        },
-      );
+      // Both targets come back with a persisted Activity row — `job_history` for a project,
+      // `workspace_activity` for a link — so the decision reads the same after a restart as it
+      // does the moment it's taken.
+      useJobsStore.getState().record(key, activity);
       const toastKey =
         action === "approve" ? "pr.approved" : action === "request_changes" ? "pr.changesRequested" : "pr.closed";
       useToastStore.getState().pushToast(translate(toastKey), "success");

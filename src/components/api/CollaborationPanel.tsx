@@ -115,6 +115,13 @@ export function CollaborationPanel() {
 
   // Collections come from the database rather than from `apiStore`, which only ever holds the
   // active workspace's tree — and this panel is a list of *all* of them.
+  //
+  // Not on `shares`, which used to be in here too: `refresh()` above hands back a freshly
+  // deserialised array every time, so every mount ran the whole load twice — one tree read per
+  // workspace, then the same reads again the moment the shares landed — and the second round
+  // arrived while the settings rail's pill was still sliding over to this pane. Nothing it bought
+  // was needed: sharing a collection changes which of these are *pickable*, not which exist, and
+  // `shareable` below already recomputes that from `shares` without going back to the database.
   useEffect(() => {
     let cancelled = false;
     void Promise.all(
@@ -128,7 +135,7 @@ export function CollaborationPanel() {
     return () => {
       cancelled = true;
     };
-  }, [workspaces, shares]);
+  }, [workspaces]);
 
   const verify = async (silent: boolean): Promise<boolean> => {
     // Read at call time rather than off the render that scheduled this: `connect` files a key a

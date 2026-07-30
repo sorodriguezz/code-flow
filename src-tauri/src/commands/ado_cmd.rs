@@ -564,25 +564,96 @@ fn link_credentials(
     Ok((target, credential))
 }
 
+/// How a repo-less pull request names the repository it lives in — "owner/repo" on GitHub,
+/// "project/repo" on Azure DevOps — plus where that repository could be cloned from.
+///
+/// Same strings [`resolve_pr_link`] reports for `NoLocalRepo`, so a review filed in Activity names
+/// its repository exactly like the modal that opened it did. `canonical` carries the project/repo
+/// names the provider itself reported: an Azure link addresses them by GUID often enough (its
+/// notification e-mails do) that the raw link is not a name worth showing.
+fn link_repo_coords(target: &crate::pr_link::PrLinkTarget, canonical: Option<(&str, &str)>) -> (String, String) {
+    match target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, .. } => {
+            (format!("{owner}/{repo}"), format!("https://{host}/{owner}/{repo}.git"))
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, .. } => {
+            let (project, repo) = canonical.unwrap_or((project, repo));
+            (
+                format!("{project}/{repo}"),
+                format!(
+                    "https://dev.azure.com/{}/{}/_git/{}",
+                    web_encode(org),
+                    web_encode(project),
+                    web_encode(repo)
+                ),
+            )
+        }
+    }
+}
+
+/// A pull request read from its host with nothing checked out: the PR, its diff, and the two
+/// strings that let the review be named and (if the user changes their mind) cloned.
+struct LinkPr {
+    pr: ado::PullRequestSummary,
+    diff: String,
+    repo_label: String,
+    clone_url: String,
+}
+
 /// Reads a pull request and its diff from the host's API alone — no clone, no `projects` row.
 async fn fetch_pr_and_diff(
     target: &crate::pr_link::PrLinkTarget,
     credential: &str,
-) -> Result<(ado::PullRequestSummary, String), String> {
+) -> Result<LinkPr, String> {
     match target {
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             let pr = github::get_pull_request(host, owner, repo, *number, credential).await?;
             let diff = github::pull_request_diff(host, owner, repo, *number, credential).await?;
-            Ok((pr, diff))
+            let (repo_label, clone_url) = link_repo_coords(target, None);
+            Ok(LinkPr { pr, diff, repo_label, clone_url })
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             // Canonical names, so a link carrying GUIDs still addresses the blobs endpoint.
             let detail = ado::get_pull_request(org, project, repo, *number, credential).await?;
             let diff =
                 ado::pull_request_diff(org, &detail.project_name, &detail.repo_name, *number, credential).await?;
-            Ok((detail.summary, diff))
+            let (repo_label, clone_url) =
+                link_repo_coords(target, Some((&detail.project_name, &detail.repo_name)));
+            Ok(LinkPr { pr: detail.summary, diff, repo_label, clone_url })
         }
     }
+}
+
+/// What a repo-less review or decision carries into Activity: enough to name the row ("#42
+/// owner/repo · Fix login") and to reopen the whole review later without the link being pasted
+/// again — including a snapshot of the pull request, so reopening it works offline.
+fn link_activity_meta(
+    url: &str,
+    pr: &ado::PullRequestSummary,
+    repo_label: &str,
+    clone_url: &str,
+    extra: serde_json::Value,
+) -> String {
+    let mut meta = serde_json::json!({
+        "prId": pr.id,
+        "prTitle": pr.title,
+        "prUrl": url,
+        "repoLabel": repo_label,
+        "cloneUrl": clone_url,
+        "pr": pr,
+    });
+    if let (Some(base), Some(extra)) = (meta.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    meta.to_string()
+}
+
+/// "#42 owner/repo · Fix login" — the repository is in the title because nothing else here says
+/// which one it was: the row shows next to reviews of repositories the user actually has.
+fn link_activity_label(pr: &ado::PullRequestSummary, repo_label: &str) -> String {
+    format!("#{} {} · {}", pr.id, repo_label, pr.title)
 }
 
 /// Keeps a directory name to what every filesystem accepts.
@@ -636,8 +707,12 @@ const NO_CLONE_CONTEXT: &str = "Esta revisión corre SIN un clon local del repos
 /// This trades depth for reach, on purpose: the model sees the diff and the PR's description but
 /// not the surrounding codebase, so it can't confirm a caller, check whether a test exists, or
 /// have a fix applied afterwards. That's a genuinely weaker review than the project-backed one
-/// ([`review_pull_request`]), and the prompt says so to the model. Nothing is written to
-/// `job_history` either — a run with no project has no project to file itself under.
+/// ([`review_pull_request`]), and the prompt says so to the model.
+///
+/// The run is still recorded, in `workspace_activity` rather than `job_history`: it has no project
+/// to file itself under, but it does have the workspace it ran in, and that is the scope at which
+/// it is useful — a review of a repository this machine doesn't have shouldn't vanish just because
+/// the user moved to another repo, nor follow them into an unrelated workspace.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn review_pr_from_link(
@@ -669,7 +744,7 @@ pub async fn review_pr_from_link(
         (contexts, mcps, skills, config, review_template)
     };
 
-    let (pr, diff_text) = fetch_pr_and_diff(&target, &credential).await?;
+    let LinkPr { pr, diff: diff_text, repo_label, clone_url } = fetch_pr_and_diff(&target, &credential).await?;
     let cwd = link_review_workspace(&target, &pr, &diff_text)?;
     // Best-effort, same as the project-backed review: skills are a nice-to-have, not a
     // precondition.
@@ -687,7 +762,7 @@ pub async fn review_pr_from_link(
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
-    crate::ai_runs::scoped(app, Some(job_id), async {
+    let result = crate::ai_runs::scoped(app, Some(job_id.clone()), async {
         ai::review_pull_request(
             &*config.engine,
             &config.binary,
@@ -704,7 +779,33 @@ pub async fn review_pr_from_link(
         )
         .await
     })
-    .await
+    .await;
+
+    // A stopped run leaves nothing behind, same as the project-backed review.
+    if matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
+        return result;
+    }
+
+    let label = link_activity_label(&pr, &repo_label);
+    let meta = link_activity_meta(
+        &url,
+        &pr,
+        &repo_label,
+        &clone_url,
+        serde_json::json!({ "level": level }),
+    );
+    // Best-effort: failing to remember a review must never turn a good one into an error.
+    if let Ok(conn) = db.0.lock() {
+        let (status, text, error) = match &result {
+            Ok(text) => ("done", Some(text.as_str()), None),
+            Err(e) => ("error", None, Some(e.as_str())),
+        };
+        let _ = queries::add_workspace_activity(
+            &conn, &job_id, &workspace_id, "pr-review", &label, status, text, error, &meta,
+        );
+    }
+
+    result
 }
 
 /// The pull request behind a link, re-read from its host. Lets a review with no clone refresh
@@ -754,20 +855,20 @@ pub async fn pr_link_decision(db: State<'_, Db>, url: String) -> Result<String, 
 
 /// Approve / request-changes / close the PR behind a link — the repo-less twin of
 /// [`act_on_pull_request`], and the reason a review with no clone is a real review rather than a
-/// read-only preview. Returns the pull request as the host reports it afterwards.
-///
-/// No Activity row is written here: that table belongs to a project, and this PR has none. The
-/// caller files the decision in the session's own in-memory Activity instead.
+/// read-only preview. Returns the pull request as the host reports it afterwards, together with
+/// the Activity row the decision was filed as — in `workspace_activity`, for the same reason the
+/// review itself is: no project to file it against, but a workspace that outlives the session.
 #[tauri::command]
 pub async fn act_on_pr_link(
     db: State<'_, Db>,
     url: String,
+    workspace_id: String,
     action: String,
     body: Option<String>,
-) -> Result<ado::PullRequestSummary, String> {
+) -> Result<PrLinkActionOutcome, String> {
     let (target, credential) = link_credentials(&db, &url)?;
     let comment = body.unwrap_or_default();
-    match &target {
+    let (pr, canonical) = match &target {
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             match action.as_str() {
                 "approve" => github::submit_pr_review(host, owner, repo, *number, "APPROVE", &comment, &credential).await,
@@ -778,7 +879,7 @@ pub async fn act_on_pr_link(
                 "close" => github::close_pull_request(host, owner, repo, *number, &credential).await,
                 other => Err(format!("unknown PR action: {other}")),
             }?;
-            github::get_pull_request(host, owner, repo, *number, &credential).await
+            (github::get_pull_request(host, owner, repo, *number, &credential).await?, None)
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             match action.as_str() {
@@ -787,9 +888,34 @@ pub async fn act_on_pr_link(
                 "close" => ado::abandon_pull_request(org, project, repo, *number, &credential).await,
                 other => Err(format!("unknown PR action: {other}")),
             }?;
-            Ok(ado::get_pull_request(org, project, repo, *number, &credential).await?.summary)
+            let detail = ado::get_pull_request(org, project, repo, *number, &credential).await?;
+            let names = (detail.project_name.clone(), detail.repo_name.clone());
+            (detail.summary, Some(names))
         }
-    }
+    };
+
+    let (repo_label, clone_url) =
+        link_repo_coords(&target, canonical.as_ref().map(|(p, r)| (p.as_str(), r.as_str())));
+    let id = uuid::Uuid::new_v4().to_string();
+    let label = link_activity_label(&pr, &repo_label);
+    let meta = link_activity_meta(&url, &pr, &repo_label, &clone_url, serde_json::json!({ "action": action }));
+    let activity = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::add_workspace_activity(
+            &conn,
+            &id,
+            &workspace_id,
+            "pr-action",
+            &label,
+            "done",
+            Some(&pr.url),
+            None,
+            &meta,
+        )
+        .map_err(|e| e.to_string())?
+    };
+
+    Ok(PrLinkActionOutcome { pr, activity })
 }
 
 /// Posts the selected findings of a repo-less review onto the pull request, addressed by link.
@@ -1446,6 +1572,14 @@ pub async fn pr_review_decision(db: State<'_, Db>, project_id: String, pr_id: i6
 pub struct PrActionOutcome {
     pub pr: ado::PullRequestSummary,
     pub activity: crate::db::models::JobHistoryEntry,
+}
+
+/// The same, for a decision taken on a PR reached by link — its Activity row belongs to the
+/// workspace rather than to a project.
+#[derive(Serialize)]
+pub struct PrLinkActionOutcome {
+    pub pr: ado::PullRequestSummary,
+    pub activity: crate::db::models::WorkspaceActivityEntry,
 }
 
 /// Approve / request-changes / close a pull request on whichever host it's linked to. `action`

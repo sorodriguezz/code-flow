@@ -36,7 +36,7 @@ function formatFullDateTime(ts: number): string {
 const CommitTable = memo(function CommitTable() {
   const commits = useRepoStore((s) => s.commits);
   const commitsLoading = useRepoStore((s) => s.commitsLoading);
-  const branches = useRepoStore((s) => s.branches);
+  const status = useRepoStore((s) => s.status);
   const selectedCommitId = useRepoStore((s) => s.selectedCommitId);
   const selectCommit = useRepoStore((s) => s.selectCommit);
   const undoCommit = useRepoStore((s) => s.undoCommit);
@@ -50,7 +50,10 @@ const CommitTable = memo(function CommitTable() {
   const t = useT();
 
   const layout = useMemo(() => computeGraphLayout(commits), [commits]);
-  const headCommitId = branches.find((b) => b.is_head)?.target ?? null;
+  // From HEAD itself, not from whichever branch claims to be head: on a detached HEAD no branch
+  // does, and deriving it from the branch list dropped the marker off the graph entirely just
+  // when knowing where you are matters most.
+  const headCommitId = status?.head_oid ?? null;
 
   if (commits.length === 0 && commitsLoading) {
     return <SkeletonRows count={12} className="cf-fade-in" />;

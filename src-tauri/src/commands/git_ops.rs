@@ -34,6 +34,11 @@ pub fn delete_branch(repo_path: String, name: String, is_remote: bool) -> Result
 }
 
 #[tauri::command]
+pub fn set_branch_locked(repo_path: String, name: String, locked: bool) -> Result<(), String> {
+    branch::set_branch_locked(&repo_path, &name, locked)
+}
+
+#[tauri::command]
 pub fn checkout_local_branch(repo_path: String, name: String) -> Result<(), String> {
     branch::checkout_local_branch(&repo_path, &name)
 }

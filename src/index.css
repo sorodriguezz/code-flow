@@ -252,6 +252,71 @@ body {
   }
 }
 
+/* The confirm modal's flow diagram (src/components/common/ConfirmFlowDiagram.tsx): a light
+   travelling along the connector, in the direction the change is about to move. The beam is as
+   wide as its own track, so `translateX(±100%)` carries it exactly from one end to the other —
+   which keeps this a transform-only animation with no width or offset to measure. */
+@keyframes cf-flow-beam {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+.cf-flow-beam {
+  animation: cf-flow-beam 1.6s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+@keyframes cf-flow-nudge {
+  0%,
+  100% {
+    transform: translateX(0);
+    opacity: 0.5;
+  }
+  50% {
+    transform: translateX(2px);
+    opacity: 1;
+  }
+}
+
+.cf-flow-nudge {
+  animation: cf-flow-nudge 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cf-flow-beam,
+  .cf-flow-nudge {
+    animation: none;
+  }
+  /* Without the travelling light the connector would read as empty, so it becomes a solid one. */
+  .cf-flow-beam {
+    opacity: 0.7;
+    transform: none;
+  }
+}
+
+/* Tailwind v4's preflight gives buttons `cursor: default`, which left most of the app's icon
+   buttons looking like decoration. In `base` on purpose: any explicit `cursor-*` utility on an
+   element still wins, since utilities are a later layer. */
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]) {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
+/* A colour chip that is also a button — the project's folder square in the sidebar. The ring is
+   drawn with box-shadow rather than a border so hovering doesn't resize the square and shift the
+   name beside it. */
+.cf-chip-button:hover {
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--cf-text) 38%, transparent);
+}
+
 /* ==================================================================
  * Recolouring the window — the sideways wipe
  *
@@ -354,6 +419,29 @@ body.cf-dragging * {
 .cf-anchor-xxx { color: #94a3b8 !important; }
 
 /* A breakpoint: the red dot editors have drawn in the gutter for thirty years. */
+/* A bookmarked line, in the lines-decorations lane between the numbers and the code — the glyph
+   margin beside it belongs to breakpoints, and a line can carry both.
+   The shape is the bookmark itself rather than a coloured bar: the panel, the rail and the menu
+   entry all say "bookmark" with this icon, and a stripe in the margin was the one place the
+   feature was spelled differently. Drawn as a mask over a solid colour so it inherits nothing
+   from the theme's token palette and stays legible on every background. */
+.cf-bookmark-mark::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 11px;
+  height: 11px;
+  transform: translateY(-50%);
+  background-color: #f59e0b;
+  -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M6 2h12a2 2 0 0 1 2 2v19l-8-5.6L4 23V4a2 2 0 0 1 2-2z'/></svg>");
+  mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path d='M6 2h12a2 2 0 0 1 2 2v19l-8-5.6L4 23V4a2 2 0 0 1 2-2z'/></svg>");
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
 .cf-breakpoint-glyph::before {
   content: "";
   position: absolute;

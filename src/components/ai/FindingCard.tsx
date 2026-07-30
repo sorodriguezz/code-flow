@@ -88,7 +88,9 @@ export function useResolveWithAi(
         try {
           const hasLocal = branches.some((b) => b.name === prSourceBranch && !b.is_remote);
           if (hasLocal) await checkoutBranch(prSourceBranch);
-          else await checkoutRemoteBranch(`origin/${prSourceBranch}`);
+          // Already confirmed just above, in terms of the finding being fixed — don't ask the
+          // generic branch question on top of it.
+          else await checkoutRemoteBranch(`origin/${prSourceBranch}`, true);
         } catch (e) {
           pushErrorToast(t("finding.branchSwitchFailed", { error: String(e) }));
           return;

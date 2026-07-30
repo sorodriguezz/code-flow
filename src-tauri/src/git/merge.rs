@@ -36,6 +36,9 @@ fn conflict_paths(index: &git2::Index) -> Result<Vec<String>, String> {
 
 pub fn merge_branch(path: &str, branch_name: &str) -> Result<MergeOutcome, String> {
     let repo = open(path)?;
+    // A merge moves the branch we're standing on, so it's that one the lock has to protect —
+    // merging *from* a locked branch leaves the locked branch untouched and stays allowed.
+    super::branch::guard_head_unlocked(&repo)?;
     let their_branch = repo
         .find_branch(branch_name, BranchType::Local)
         .or_else(|_| repo.find_branch(branch_name, BranchType::Remote))
@@ -200,6 +203,9 @@ pub fn mark_conflict_resolved(path: &str, rel_path: &str) -> Result<(), String> 
 
 pub fn complete_merge(path: &str, message: &str) -> Result<String, String> {
     let repo = open(path)?;
+    // Closes the "start the merge, then lock the branch" hole. Aborting stays available, so a
+    // merge locked mid-flight still has a way out.
+    super::branch::guard_head_unlocked(&repo)?;
     let mut index = repo.index().map_err(|e| e.message().to_string())?;
     if index.has_conflicts() {
         return Err("There are still unresolved conflicts".to_string());

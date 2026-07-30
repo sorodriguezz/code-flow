@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Cloud, GitBranch, X } from "lucide-react";
+import { Cloud, GitBranch, Lock, X } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useT } from "../../state/languageStore";
 
@@ -62,7 +62,14 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
                   }`}
                 >
                   <GitBranch size={13} className="shrink-0" />
-                  <span className="truncate">{b.name}</span>
+                  <span className="min-w-0 flex-1 truncate">{b.name}</span>
+                  {/* A locked branch reads as locked wherever branches are listed, not only in
+                      the sidebar row that owns the toggle. */}
+                  {b.is_locked && (
+                    <span className="shrink-0 text-[var(--cf-warning)]" title={t("branch.lockedBadge")}>
+                      <Lock size={11} />
+                    </span>
+                  )}
                 </button>
               ))}
             </div>

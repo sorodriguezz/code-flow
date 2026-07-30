@@ -160,6 +160,26 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             created_at   TEXT NOT NULL
         );
 
+        -- The same record as `job_history`, for the work that belongs to no repository: a pull
+        -- request reviewed straight from its link, with nothing cloned. Such a review can't be
+        -- filed against a project (there isn't one, and inventing a row for a repo the user
+        -- doesn't have would put a phantom in the sidebar), yet it is still something that
+        -- happened and is worth reopening — so it is filed against the WORKSPACE it was run in.
+        -- That is also the scope the user sees it at: it shows in Activity whichever repository
+        -- of the workspace is open, and disappears on switching to another workspace.
+        CREATE TABLE IF NOT EXISTS workspace_activity (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            kind         TEXT NOT NULL,
+            label        TEXT NOT NULL,
+            custom_label TEXT,
+            status       TEXT NOT NULL,
+            result       TEXT,
+            error        TEXT,
+            meta         TEXT NOT NULL DEFAULT '{}',
+            created_at   TEXT NOT NULL
+        );
+
         -- A user-given rename for a chat conversation (`activity_log` rows grouped by
         -- `session_id`) — conversations don't otherwise have a row of their own to attach a
         -- title to, since they're just a GROUP BY over individual question/answer turns.

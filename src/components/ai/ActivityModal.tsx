@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Pencil, Search, Trash2, X } from "lucide-react";
+import { Globe, Pencil, Search, Trash2, X } from "lucide-react";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { usePrStore } from "../../state/prStore";
@@ -7,35 +7,55 @@ import { useChatStore } from "../../state/chatStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { workspaceActivityKey, workspaceIdFromBucket } from "../../lib/prTarget";
 import {
   mergeActivityEntries,
   entryKey,
   entryTitle,
   entryVisual,
   entryRunCount,
+  entryIsGlobal,
   findActiveEntryKey,
   type ActivityEntry,
 } from "../../lib/activityEntries";
 
-export function ActivityModal({ projectId, onClose }: { projectId: string; onClose: () => void }) {
+/** The full Activity list: this project's history plus the workspace's own — the reviews of pull
+ * requests that belong to no repository here, marked with a globe and named after the repository
+ * they came from so they can be searched for by it. */
+export function ActivityModal({
+  projectId,
+  workspaceId,
+  onClose,
+}: {
+  projectId: string | null;
+  workspaceId: string | null;
+  onClose: () => void;
+}) {
   const t = useT();
-  const jobs = useJobsStore((s) => s.byProject[projectId] ?? EMPTY_JOBS);
+  const workspaceBucket = workspaceId ? workspaceActivityKey(workspaceId) : null;
+  const projectJobs = useJobsStore((s) => (projectId ? s.byProject[projectId] : undefined) ?? EMPTY_JOBS);
+  const workspaceJobs = useJobsStore((s) => (workspaceBucket ? s.byProject[workspaceBucket] : undefined) ?? EMPTY_JOBS);
   const renameJob = useJobsStore((s) => s.rename);
   const removeJob = useJobsStore((s) => s.remove);
-  const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
+  const conversations = useChatHistoryStore((s) => (projectId ? s.byProject[projectId] : undefined) ?? EMPTY_CONVERSATIONS);
   const removeConversation = useChatHistoryStore((s) => s.remove);
   const renameConversation = useChatHistoryStore((s) => s.rename);
   const prsByProject = usePrStore((s) => s.prsByProject);
   const selectedPr = usePrStore((s) => s.selectedPr);
+  const linkPr = usePrStore((s) => s.linkPr);
   const selectPr = usePrStore((s) => s.selectPr);
   const analyzeOpen = useAnalyzeUiStore((s) => s.open);
   const analyzeJobId = useAnalyzeUiStore((s) => s.selectedJobId);
-  const activeSessionId = useChatStore((s) => s.byProject[projectId]?.conversationId ?? null);
+  const activeSessionId = useChatStore((s) => (projectId ? s.byProject[projectId]?.conversationId : null) ?? null);
   const switchTo = useChatStore((s) => s.switchTo);
   const [query, setQuery] = useState("");
   const [renamingKey, setRenamingKey] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
 
+  const jobs = useMemo(
+    () => (workspaceJobs.length === 0 ? projectJobs : [...projectJobs, ...workspaceJobs]),
+    [projectJobs, workspaceJobs],
+  );
   const entries = useMemo(() => mergeActivityEntries(jobs, conversations), [jobs, conversations]);
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -45,21 +65,35 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
 
   const activeEntryKey = findActiveEntryKey(entries, {
     selectedPrId: selectedPr?.id ?? null,
+    linkPrUrl: linkPr?.workspaceId === workspaceId ? linkPr.url : null,
     analyzeOpen,
     analyzeJobId,
     activeSessionId,
   });
 
+  /** Which store the row lives in — a job carries its own bucket, a chat is always the project's. */
+  const bucketOf = (entry: ActivityEntry) => (entry.type === "job" ? entry.job.projectId : projectId);
+
   const open = (entry: ActivityEntry) => {
     if (entry.type === "chat") {
+      if (!projectId) return;
       // Clear whatever else the panel might currently be showing — otherwise the chat
       // switches underneath a still-visible PR review or analysis section.
       selectPr(null);
       useAnalyzeUiStore.getState().hide();
       void switchTo(projectId, entry.conv.session_id);
+      onClose();
+      return;
+    }
+    // A workspace row rebuilds its link session from the row itself: after a restart nothing is
+    // parked in memory, and there's no project list the PR could be looked up in.
+    const rowWorkspaceId = workspaceIdFromBucket(entry.job.projectId);
+    if (rowWorkspaceId) {
+      useAnalyzeUiStore.getState().hide();
+      usePrStore.getState().openLinkPrFromMeta(entry.job.meta, rowWorkspaceId);
       // A row whose newest entry is a decision still opens the PR it was taken on.
     } else if (entry.job.kind === "pr-review" || entry.job.kind === "pr-action") {
-      const pr = prsByProject[projectId]?.find((p) => p.id === entry.job.meta.prId);
+      const pr = projectId ? prsByProject[projectId]?.find((p) => p.id === entry.job.meta.prId) : undefined;
       if (!pr) return;
       useAnalyzeUiStore.getState().hide();
       selectPr(pr);
@@ -71,6 +105,8 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
   };
 
   const handleDelete = async (entry: ActivityEntry) => {
+    const bucket = bucketOf(entry);
+    if (!bucket) return;
     const runs = entry.type === "job" ? entry.runs.length : 1;
     // When the activity bundles history (a PR / pre-commit with several runs) spell that out, so a
     // single click deleting the whole thing isn't a surprise.
@@ -79,10 +115,10 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
     // Deleting a chat updates the persisted conversation list; the chat panel reconciles against
     // that list and resets itself if the open conversation no longer exists (see AiPanel
     // ChatSection) — which also covers a chat that spans several session ids.
-    if (entry.type === "chat") await removeConversation(projectId, entry.conv.session_id);
+    if (entry.type === "chat") await removeConversation(bucket, entry.conv.session_id);
     // A job row owns every run of that activity — remove them all so the whole history goes, not
     // just the latest run (which would leave the row behind with one fewer run each click).
-    else await Promise.all(entry.runs.map((j) => removeJob(projectId, j.id)));
+    else await Promise.all(entry.runs.map((j) => removeJob(j.projectId, j.id)));
   };
 
   const startRename = (entry: ActivityEntry) => {
@@ -91,11 +127,12 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
   };
 
   const commitRename = async (entry: ActivityEntry) => {
+    const bucket = bucketOf(entry);
     const title = renameValue.trim();
     setRenamingKey(null);
-    if (!title || title === entryTitle(entry)) return;
-    if (entry.type === "chat") await renameConversation(projectId, entry.conv.session_id, title);
-    else await renameJob(projectId, entry.job.id, title);
+    if (!bucket || !title || title === entryTitle(entry)) return;
+    if (entry.type === "chat") await renameConversation(bucket, entry.conv.session_id, title);
+    else await renameJob(bucket, entry.job.id, title);
   };
 
   return (
@@ -158,6 +195,13 @@ export function ActivityModal({ projectId, onClose }: { projectId: string; onClo
                         <Icon size={13} className={spinning ? "shrink-0 animate-spin" : "shrink-0"} style={{ color }} />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">
+                            {entryIsGlobal(entry) && (
+                              <Globe
+                                size={12}
+                                className="shrink-0 text-[var(--cf-text-muted)]"
+                                aria-label={t("activity.workspaceWide")}
+                              />
+                            )}
                             <p className="truncate text-[12px] font-medium text-[var(--cf-text)]">{entryTitle(entry)}</p>
                             {entryRunCount(entry) > 1 && (
                               <span

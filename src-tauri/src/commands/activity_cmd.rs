@@ -1,7 +1,7 @@
 use tauri::State;
 
 use crate::db::{
-    models::{ActivityLogEntry, ChatConversationSummary, JobHistoryEntry},
+    models::{ActivityLogEntry, ChatConversationSummary, JobHistoryEntry, WorkspaceActivityEntry},
     queries, Db,
 };
 
@@ -53,4 +53,28 @@ pub fn rename_job_history_entry(db: State<'_, Db>, id: String, label: String) ->
 pub fn delete_job_history_entry(db: State<'_, Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::delete_job_history(&conn, &id).map_err(|e| e.to_string())
+}
+
+/// Everything reviewed from a link in this workspace. Repository-agnostic on purpose: these runs
+/// have no project, so they follow the workspace instead — visible whichever repo is open, gone
+/// once another workspace is.
+#[tauri::command]
+pub fn list_workspace_activity(
+    db: State<'_, Db>,
+    workspace_id: String,
+) -> Result<Vec<WorkspaceActivityEntry>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_workspace_activity(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn rename_workspace_activity_entry(db: State<'_, Db>, id: String, label: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::rename_workspace_activity(&conn, &id, &label).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_workspace_activity_entry(db: State<'_, Db>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::delete_workspace_activity(&conn, &id).map_err(|e| e.to_string())
 }

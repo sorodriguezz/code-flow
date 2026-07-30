@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ChevronLeft,
   ChevronRight,
+  Copy,
   Link2,
   MessageCircle,
   Minus,
@@ -21,6 +22,7 @@ import { usePrStore } from "../../state/prStore";
 import { useT } from "../../state/languageStore";
 import { goHistory } from "../../lib/shortcuts";
 import { useShortcutHint } from "../../lib/useShortcutHint";
+import { toggleMaximize } from "../../lib/windowControls";
 
 const win = getCurrentWindow();
 
@@ -34,6 +36,29 @@ function MacControlsSpacer() {
 }
 
 function WindowsControls() {
+  /**
+   * Whether the window is maximized, so the button can say which of the two things it does.
+   *
+   * Read from the window rather than toggled locally: the OS maximizes it too — double-clicking the
+   * drag region, or dragging it to the top edge — and a flag flipped only by this button would then
+   * be describing the opposite of what is on screen.
+   */
+  const [maximized, setMaximized] = useState(false);
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    const sync = () => void win.isMaximized().then(setMaximized).catch(() => {});
+    sync();
+    void win.onResized(sync).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   return (
     <div className="flex items-center">
       <button
@@ -44,11 +69,11 @@ function WindowsControls() {
         <Minus size={14} />
       </button>
       <button
-        aria-label="Maximize"
-        onClick={() => win.toggleMaximize()}
+        aria-label={maximized ? "Restore" : "Maximize"}
+        onClick={() => void toggleMaximize()}
         className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-black/10"
       >
-        <Square size={12} />
+        {maximized ? <Copy size={11} className="-scale-x-100" /> : <Square size={12} />}
       </button>
       <button
         aria-label="Close"

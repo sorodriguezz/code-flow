@@ -15,6 +15,9 @@ pub struct RepoStatusInfo {
     pub conflicted: Vec<FileStatusEntry>,
     pub current_branch: Option<String>,
     pub is_detached: bool,
+    /// The commit HEAD points at, branch or not. The UI can't derive this from the branch list
+    /// once HEAD is detached — no branch is head then — so it's reported here instead.
+    pub head_oid: Option<String>,
 }
 
 pub fn open(path: &str) -> Result<Repository, String> {
@@ -74,6 +77,7 @@ pub fn get_status(path: &str) -> Result<RepoStatusInfo, String> {
         conflicted: vec![],
         current_branch: None,
         is_detached: repo.head_detached().unwrap_or(false),
+        head_oid: None,
     };
 
     for entry in statuses.iter() {
@@ -96,6 +100,7 @@ pub fn get_status(path: &str) -> Result<RepoStatusInfo, String> {
         if head.is_branch() {
             info.current_branch = head.shorthand().map(|s| s.to_string());
         }
+        info.head_oid = head.peel_to_commit().ok().map(|c| c.id().to_string());
     }
 
     Ok(info)

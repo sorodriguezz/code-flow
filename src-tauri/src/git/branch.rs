@@ -1,4 +1,4 @@
-use git2::{BranchType, ErrorCode, ObjectType};
+use git2::{BranchType, ConfigLevel, ErrorCode, ObjectType, Repository};
 use serde::{Deserialize, Serialize};
 
 use super::repo::open;
@@ -17,6 +17,49 @@ fn checkout_error(e: git2::Error) -> String {
     }
 }
 
+/// Marks a refusal that came from a locked local branch rather than from git itself. The frontend
+/// keys off this prefix to say "this branch is locked" instead of surfacing a bare error — same
+/// contract as `CHECKOUT_CONFLICT_PREFIX` above.
+pub const BRANCH_LOCKED_PREFIX: &str = "BRANCH_LOCKED: ";
+
+/// A branch lock lives in the repository's own config, alongside the `branch.<name>.remote` and
+/// `.merge` entries git keeps there itself. That, rather than a row in codeflow.db, because it
+/// means the guards below can run inside the git layer — where a repo path is all that's known,
+/// with no project id to look a lock up by — and because the lock then survives a wiped database
+/// and follows the repo into any other workspace it's added to.
+///
+/// libgit2 splits a config key on its first and last dot, so the branch name lands in the
+/// (case-sensitive) subsection intact even when it contains dots or slashes: `feature/a.b`
+/// becomes section `branch`, subsection `feature/a.b`, name `codeflowlocked`.
+fn lock_key(branch: &str) -> String {
+    format!("branch.{branch}.codeflowLocked")
+}
+
+fn read_lock(config: &git2::Config, branch: &str) -> bool {
+    config.get_bool(&lock_key(branch)).unwrap_or(false)
+}
+
+/// Writes the lock entry without checking that the branch exists — `delete_branch` needs to clear
+/// a lock for a branch that has just stopped existing.
+fn write_lock(repo: &Repository, branch: &str, locked: bool) -> Result<(), String> {
+    // Write to the repository's own config explicitly — the multi-level config a repo hands back
+    // would otherwise be free to land this in ~/.gitconfig, where it would leak across repos.
+    let mut config = repo
+        .config()
+        .and_then(|c| c.open_level(ConfigLevel::Local))
+        .map_err(|e| e.message().to_string())?;
+
+    if locked {
+        config.set_bool(&lock_key(branch), true).map_err(|e| e.message().to_string())?;
+    } else if let Err(e) = config.remove(&lock_key(branch)) {
+        // Unlocking something that was never locked is the requested end state, not a failure.
+        if e.code() != ErrorCode::NotFound {
+            return Err(e.message().to_string());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BranchInfo {
     pub name: String,
@@ -26,11 +69,15 @@ pub struct BranchInfo {
     pub ahead: usize,
     pub behind: usize,
     pub target: Option<String>,
+    /// Locked by the user to keep merges and pushes off it. Always false for remote-tracking
+    /// branches — the lock is a local guard rail, not a server-side protected branch.
+    pub is_locked: bool,
 }
 
 pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
     let repo = open(path)?;
     let mut result = Vec::new();
+    let config = repo.config().map_err(|e| e.message().to_string())?;
 
     let branches = repo.branches(None).map_err(|e| e.message().to_string())?;
     for item in branches {
@@ -57,6 +104,7 @@ pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
         }
 
         result.push(BranchInfo {
+            is_locked: !is_remote && read_lock(&config, &name),
             name,
             is_head: branch.is_head(),
             is_remote,
@@ -68,6 +116,44 @@ pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
     }
 
     Ok(result)
+}
+
+/// Locks or unlocks a local branch. Unlocking drops the config entry rather than writing `false`,
+/// so an unlocked branch leaves nothing behind in `.git/config`.
+pub fn set_branch_locked(path: &str, name: &str, locked: bool) -> Result<(), String> {
+    let repo = open(path)?;
+    // Refuse a name that isn't a local branch: the key would sit in the config forever with
+    // nothing to apply to, and `list_branches` would never surface it again.
+    repo.find_branch(name, BranchType::Local)
+        .map_err(|e| e.message().to_string())?;
+    write_lock(&repo, name, locked)
+}
+
+/// The checked-out branch's name if it's locked. `None` on a detached HEAD or an unborn branch —
+/// there's no branch there to protect.
+pub fn locked_head_branch(repo: &Repository) -> Option<String> {
+    let head = repo.head().ok()?;
+    if !head.is_branch() {
+        return None;
+    }
+    let name = head.shorthand()?;
+    let config = repo.config().ok()?;
+    read_lock(&config, name).then(|| name.to_string())
+}
+
+/// Gate for anything that would move or publish the current branch. Lives here, in the git layer,
+/// so every route to a merge or a push goes through it — a disabled button in the sidebar only
+/// covers the one the user can see.
+pub fn guard_head_unlocked(repo: &Repository) -> Result<(), String> {
+    match locked_head_branch(repo) {
+        Some(name) => Err(format!("{BRANCH_LOCKED_PREFIX}{name}")),
+        None => Ok(()),
+    }
+}
+
+/// Same guard for the callers that only hold a path (the async remote operations).
+pub fn guard_head_unlocked_at(path: &str) -> Result<(), String> {
+    guard_head_unlocked(&open(path)?)
 }
 
 pub fn create_branch(path: &str, name: &str, start_point: Option<String>) -> Result<(), String> {
@@ -95,6 +181,11 @@ pub fn delete_branch(path: &str, name: &str, is_remote: bool) -> Result<(), Stri
         .find_branch(name, kind)
         .map_err(|e| e.message().to_string())?;
     branch.delete().map_err(|e| e.message().to_string())?;
+    // Take any lock down with the branch, so re-creating the name later doesn't come back locked
+    // by a config entry nothing on screen accounts for.
+    if !is_remote {
+        write_lock(&repo, name, false)?;
+    }
     Ok(())
 }
 
@@ -206,6 +297,89 @@ mod tests {
         checkout_local_branch(path, &base).unwrap();
 
         (dir, base)
+    }
+
+    /// Detaching has to do three things at once — move the working tree, leave HEAD unattached, and
+    /// leave no branch claiming to be head — and the sidebar/graph read all three back. Pinned
+    /// together because a detach that only did two of them looked, on screen, like nothing happened.
+    #[test]
+    fn detaching_moves_the_tree_and_leaves_head_unattached() {
+        let (dir, base) = fixture();
+        let path = dir.to_str().unwrap();
+
+        checkout_detached(path, "feature").unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "feature\n");
+        let repo = git2::Repository::open(path).unwrap();
+        assert!(repo.head_detached().unwrap());
+        // Nothing shows as modified: the index moved with the tree.
+        assert_eq!(repo.statuses(None).unwrap().len(), 0);
+        drop(repo);
+
+        let listed = list_branches(path).unwrap();
+        assert!(listed.iter().all(|b| !b.is_head), "no branch is head while detached");
+        // `get_status` is what tells the UI where the detached HEAD landed.
+        let status = super::super::repo::get_status(path).unwrap();
+        assert!(status.is_detached);
+        assert_eq!(status.current_branch, None);
+        assert!(status.head_oid.is_some());
+
+        // And re-attaching to a branch puts everything back.
+        checkout_local_branch(path, &base).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
+        let status = super::super::repo::get_status(path).unwrap();
+        assert!(!status.is_detached);
+        assert_eq!(status.current_branch.as_deref(), Some(base.as_str()));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_lock_blocks_merging_into_the_locked_branch_but_not_out_of_it() {
+        let (dir, base) = fixture();
+        let path = dir.to_str().unwrap();
+
+        set_branch_locked(path, &base, true).unwrap();
+        assert!(list_branches(path)
+            .unwrap()
+            .iter()
+            .any(|b| b.name == base && b.is_locked));
+
+        // On the locked branch: merging anything in is refused, and tagged for the UI.
+        let err = super::super::merge::merge_branch(path, "feature").unwrap_err();
+        assert!(err.starts_with(BRANCH_LOCKED_PREFIX), "unexpected error: {err}");
+
+        // From an unlocked branch, merging *from* the locked one is fine — it doesn't move it.
+        checkout_local_branch(path, "feature").unwrap();
+        super::super::merge::merge_branch(path, &base).unwrap();
+
+        // Unlocking clears the entry rather than storing `false`.
+        set_branch_locked(path, &base, false).unwrap();
+        assert!(list_branches(path).unwrap().iter().all(|b| !b.is_locked));
+        checkout_local_branch(path, &base).unwrap();
+        super::super::merge::merge_branch(path, "feature").unwrap();
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Branch names carrying slashes and dots are exactly where a config key built by string
+    /// formatting goes wrong, so the round-trip is pinned on one.
+    #[test]
+    fn a_lock_survives_a_branch_name_with_dots_and_slashes() {
+        let (dir, _base) = fixture();
+        let path = dir.to_str().unwrap();
+        let name = "release/1.2.x";
+
+        create_branch(path, name, None).unwrap();
+        set_branch_locked(path, name, true).unwrap();
+        assert!(list_branches(path).unwrap().iter().any(|b| b.name == name && b.is_locked));
+
+        // Deleting the branch takes its lock with it, so re-creating the name comes back unlocked.
+        delete_branch(path, name, false).unwrap();
+        create_branch(path, name, None).unwrap();
+        assert!(list_branches(path).unwrap().iter().any(|b| b.name == name && !b.is_locked));
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

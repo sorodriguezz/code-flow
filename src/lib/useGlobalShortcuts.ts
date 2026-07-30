@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { useShortcutsStore, activeChords } from "../state/shortcutsStore";
 import { SHORTCUT_BY_ID } from "./shortcuts";
-import { eventToChord, isTypingTarget, usesMod } from "./keys";
+import { eventToChord, isFunctionKey, isTypingTarget, usesMod } from "./keys";
 
 /**
  * Binds every configured app shortcut to the window, once, from `App`.
@@ -26,9 +26,14 @@ export function useGlobalShortcuts(): void {
       if (!chord) return;
       const id = chords.get(chord);
       if (!id) return;
-      // Shortcuts without ⌘/Ctrl (Alt+←, F-keys) would fight with text input, so they only fire
-      // when the user isn't typing. Mod chords always fire, as they do in every editor.
-      if (!usesMod(chord) && isTypingTarget(e.target)) return;
+      // Shortcuts without ⌘/Ctrl would fight with text input, so they only fire when the user
+      // isn't typing. Mod chords always fire, as they do in every editor.
+      //
+      // Function keys are the exception, and a deliberate one: they produce no text, so there is
+      // nothing for them to fight with, and the editor actions people most want on one (F11 for a
+      // bookmark, the way JetBrains binds it) are pressed with the caret in the code. Without this
+      // they were bindable in settings and then silently dead in the only place they were for.
+      if (!usesMod(chord) && !isFunctionKey(chord) && isTypingTarget(e.target)) return;
       e.preventDefault();
       SHORTCUT_BY_ID.get(id)?.run();
     };

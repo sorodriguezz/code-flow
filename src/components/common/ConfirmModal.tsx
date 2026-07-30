@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { TriangleAlert } from "lucide-react";
 import { useConfirmStore } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { ConfirmFlowDiagram } from "./ConfirmFlowDiagram";
 
 export function ConfirmModal() {
   const request = useConfirmStore((s) => s.request);
@@ -21,10 +22,14 @@ export function ConfirmModal() {
   if (!request) return null;
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30" onClick={() => respond(false)}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4" onClick={() => respond(false)}>
       <div
         onClick={(e) => e.stopPropagation()}
-        className="w-[380px] max-w-[90vw] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        // Wider with a diagram than without: the two branch pills need room to show enough of a
+        // long branch name to be told apart.
+        className={`cf-fade-in max-h-[calc(100vh-2rem)] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)] ${
+          request.flow ? "w-[460px]" : "w-[380px]"
+        }`}
       >
         <div className="mb-4 flex items-start gap-3">
           <span
@@ -38,6 +43,8 @@ export function ConfirmModal() {
           </span>
           <p className="flex-1 pt-1 text-[13px] leading-snug text-[var(--cf-text)]">{request.message}</p>
         </div>
+
+        {request.flow && <ConfirmFlowDiagram flow={request.flow} />}
         <div className="flex justify-end gap-2">
           <button
             onClick={() => respond(false)}

@@ -65,6 +65,8 @@ export interface RepoStatusInfo {
   conflicted: FileStatusEntry[];
   current_branch: string | null;
   is_detached: boolean;
+  /** Commit HEAD points at, branch or not — the only way to place HEAD once it's detached. */
+  head_oid: string | null;
 }
 
 export interface CommitInfo {
@@ -86,6 +88,8 @@ export interface BranchInfo {
   ahead: number;
   behind: number;
   target: string | null;
+  /** Locked by the user: no merges onto it and no pushes of it. Always false when remote. */
+  is_locked: boolean;
 }
 
 export interface StashInfo {
@@ -278,6 +282,23 @@ export interface JobHistoryEntry {
   created_at: string;
 }
 
+/** The repo-less twin of {@link JobHistoryEntry}: a PR reviewed (or decided on) from its link
+ * alone, filed against the *workspace* because there is no project to file it against. Its `meta`
+ * carries `prUrl`, `repoLabel`, `cloneUrl` and a `pr` snapshot — everything needed to reopen the
+ * review without the link being pasted again. */
+export interface WorkspaceActivityEntry {
+  id: string;
+  workspace_id: string;
+  kind: string;
+  label: string;
+  custom_label: string | null;
+  status: string;
+  result: string | null;
+  error: string | null;
+  meta: string;
+  created_at: string;
+}
+
 export interface ChatConversationSummary {
   session_id: string;
   project_id: string;
@@ -361,6 +382,13 @@ export type PrDecision = "approved" | "changes_requested" | "none";
 export interface PrActionOutcome {
   pr: PullRequestSummary;
   activity: JobHistoryEntry;
+}
+
+/** The same, for a decision taken on a PR reached by link — its Activity row belongs to the
+ * workspace rather than to a project. */
+export interface PrLinkActionOutcome {
+  pr: PullRequestSummary;
+  activity: WorkspaceActivityEntry;
 }
 
 /** What a pasted pull-request link turned out to be. `Ready` is the happy path: the PR was read

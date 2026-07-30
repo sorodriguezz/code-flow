@@ -169,6 +169,25 @@ pub struct JobHistoryEntry {
     pub created_at: String,
 }
 
+/// The repo-less twin of [`JobHistoryEntry`]: a PR review (or a decision taken on it) that ran
+/// from a link alone, filed against the workspace it ran in because there is no project to file
+/// it against. Same shape on purpose — the frontend folds both into the one Activity list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceActivityEntry {
+    pub id: String,
+    pub workspace_id: String,
+    pub kind: String,
+    pub label: String,
+    pub custom_label: Option<String>,
+    pub status: String,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    /// Carries everything needed to reopen the review without the link being pasted again:
+    /// `prUrl`, `repoLabel`, `cloneUrl` and a snapshot of the pull request itself.
+    pub meta: String,
+    pub created_at: String,
+}
+
 /// One row per Claude Code `session_id` seen in `activity_log` for a project — the
 /// conversation-level view the "Chat history" sidebar/modal actually lists, as opposed to
 /// the individual question/answer turns underneath it.

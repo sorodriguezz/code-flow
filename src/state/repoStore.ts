@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "./toastStore";
-import { confirmAction } from "./confirmStore";
+import { confirmAction, confirmFlow } from "./confirmStore";
 import { useLanguageStore } from "./languageStore";
 import { translations, type TranslationKey } from "../lib/i18n/translations";
 import type {
@@ -68,9 +68,12 @@ interface RepoState {
 
   checkoutBranch: (name: string) => Promise<void>;
   checkoutDetached: (refname: string) => Promise<void>;
-  checkoutRemoteBranch: (remoteBranch: string) => Promise<void>;
+  /** `alreadyConfirmed` is for the one caller that asks its own, more contextual question first
+   * (the AI finding card, jumping to a PR's branch) — everywhere else confirms here. */
+  checkoutRemoteBranch: (remoteBranch: string, alreadyConfirmed?: boolean) => Promise<void>;
   createBranch: (name: string, startPoint?: string) => Promise<void>;
   deleteBranch: (name: string, isRemote: boolean) => Promise<void>;
+  setBranchLocked: (name: string, locked: boolean) => Promise<void>;
   setRemoteUrl: (name: string, url: string) => Promise<void>;
   undoCommit: (commitId: string) => Promise<void>;
 
@@ -90,7 +93,7 @@ async function guarded(set: (partial: Partial<RepoState>) => void, fn: () => Pro
   try {
     await fn();
   } catch (e) {
-    const message = String(e);
+    const message = describeError(e);
     set({ error: message });
     pushErrorToast(message);
   } finally {
@@ -110,6 +113,27 @@ function translate(key: TranslationKey, params?: Record<string, string>): string
 /** Set by the Rust side on the one checkout failure that has a way out — see
  * `CHECKOUT_CONFLICT_PREFIX` in `src-tauri/src/git/branch.rs`. */
 const CHECKOUT_CONFLICT_PREFIX = "CHECKOUT_CONFLICT: ";
+
+/** Set by the Rust side when a locked branch is what refused the operation — see
+ * `BRANCH_LOCKED_PREFIX` in `src-tauri/src/git/branch.rs`. */
+const BRANCH_LOCKED_PREFIX = "BRANCH_LOCKED: ";
+
+/** Turns the tagged errors the git layer raises into something worth reading. Every store action
+ * reports through here, so a lock refusal explains itself no matter which route hit it — the
+ * status bar's push button, a keyboard shortcut, or the sidebar's merge action. */
+function describeError(e: unknown): string {
+  const raw = String(e);
+  const locked = raw.indexOf(BRANCH_LOCKED_PREFIX);
+  if (locked !== -1) {
+    return translate("branch.lockedBlocked", { name: raw.slice(locked + BRANCH_LOCKED_PREFIX.length).trim() });
+  }
+  return raw.replace(CHECKOUT_CONFLICT_PREFIX, "");
+}
+
+/** The branch a merge/stash would land on, named the way the confirmation should say it. */
+function currentTargetLabel(get: () => RepoState): string {
+  return get().status?.current_branch ?? translate("statusbar.detachedHead");
+}
 
 /** Runs a checkout and, when uncommitted work is what blocks it, offers to stash that work
  * and retry rather than just reporting the failure — the same escape hatch you'd reach for
@@ -140,12 +164,38 @@ async function checkoutGuarded(
     }
     await get().refreshAll();
   } catch (e) {
-    const message = String(e).replace(CHECKOUT_CONFLICT_PREFIX, "");
+    const message = describeError(e);
     set({ error: message });
     pushErrorToast(message);
   } finally {
     set({ busy: false, checkingOutBranch: null });
   }
+}
+
+/** Apply/pop/drop differ only in wording, tone and whether the stash survives, so the three
+ * confirmations are built from one table rather than three near-copies. */
+const STASH_CONFIRMS = {
+  apply: { kind: "stash-apply", danger: false },
+  pop: { kind: "stash-pop", danger: false },
+  drop: { kind: "stash-drop", danger: true },
+} as const;
+
+async function confirmStashAction(
+  get: () => RepoState,
+  op: keyof typeof STASH_CONFIRMS,
+  index: number,
+): Promise<boolean> {
+  const { kind, danger } = STASH_CONFIRMS[op];
+  // The list is keyed by git's own stash index, and a stale one would confirm the wrong entry —
+  // fall back to naming the slot rather than showing an empty pill.
+  const source = get().stashes.find((s) => s.index === index)?.message ?? `stash@{${index}}`;
+  const target = op === "drop" ? translate("confirm.stashDropTarget") : currentTargetLabel(get);
+  return confirmFlow({
+    flow: { kind, source, target, note: translate(`confirm.${op}StashNote`, { target }) },
+    message: translate(`confirm.${op}StashTitle`, { source }),
+    confirmLabel: translate(`confirm.${op}StashConfirm`),
+    danger,
+  });
 }
 
 export const useRepoStore = create<RepoState>((set, get) => ({
@@ -270,6 +320,21 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   mergeBranch: async (branchName) => {
     const { repoPath } = get();
     if (!repoPath) return null;
+    // Which branch moves is the whole question here, and the answer isn't the one you clicked —
+    // so it's confirmed with the direction drawn out, from every caller.
+    const target = currentTargetLabel(get);
+    const confirmed = await confirmFlow({
+      flow: {
+        kind: "merge",
+        source: branchName,
+        target,
+        note: translate("confirm.mergeNote", { source: branchName, target }),
+      },
+      message: translate("confirm.mergeTitle", { source: branchName, target }),
+      confirmLabel: translate("confirm.mergeConfirm"),
+    });
+    if (!confirmed) return null;
+
     let outcome: import("../types/domain").MergeOutcome | null = null;
     await guarded(set, async () => {
       outcome = await api.mergeBranch(repoPath, branchName);
@@ -395,12 +460,48 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   checkoutDetached: async (refname) => {
     const { repoPath } = get();
     if (!repoPath) return;
+    const confirmed = await confirmFlow({
+      flow: {
+        kind: "detach",
+        source: refname,
+        target: translate("statusbar.detachedHead"),
+        note: translate("confirm.detachNote"),
+      },
+      message: translate("confirm.detachTitle", { name: refname }),
+      confirmLabel: translate("confirm.detachConfirm"),
+    });
+    if (!confirmed) return;
+
     await checkoutGuarded(set, get, refname, () => api.checkoutDetached(repoPath, refname));
+
+    // Detaching leaves no branch marked as head, so the branch list — the place you were just
+    // looking — goes quiet and the switch reads as a no-op. Name the commit HEAD landed on.
+    const status = get().status;
+    if (status?.is_detached && status.head_oid) {
+      useToastStore
+        .getState()
+        .pushToast(translate("checkout.detachedAt", { sha: status.head_oid.slice(0, 7) }), "info");
+    }
   },
 
-  checkoutRemoteBranch: async (remoteBranch) => {
+  checkoutRemoteBranch: async (remoteBranch, alreadyConfirmed = false) => {
     const { repoPath } = get();
     if (!repoPath) return;
+    // Everything after the remote name: `origin/feature/x` tracks a local `feature/x`.
+    const local = remoteBranch.split("/").slice(1).join("/") || remoteBranch;
+    if (!alreadyConfirmed) {
+      const confirmed = await confirmFlow({
+        flow: {
+          kind: "checkout",
+          source: remoteBranch,
+          target: local,
+          note: translate("confirm.checkoutRemoteNote", { local }),
+        },
+        message: translate("confirm.checkoutRemoteTitle", { name: remoteBranch }),
+        confirmLabel: translate("confirm.checkoutRemoteConfirm"),
+      });
+      if (!confirmed) return;
+    }
     await checkoutGuarded(set, get, remoteBranch, async () => {
       await api.checkoutRemoteTracking(repoPath, remoteBranch);
     });
@@ -418,8 +519,29 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   deleteBranch: async (name, isRemote) => {
     const { repoPath } = get();
     if (!repoPath) return;
+    const confirmed = await confirmFlow({
+      flow: {
+        kind: "branch-delete",
+        source: name,
+        target: translate("confirm.deleteBranchTarget"),
+        note: translate("confirm.deleteBranchNote"),
+      },
+      message: translate("confirm.deleteBranchTitle", { name }),
+      confirmLabel: translate("confirm.deleteBranchConfirm"),
+      danger: true,
+    });
+    if (!confirmed) return;
     await guarded(set, async () => {
       await api.deleteBranch(repoPath, name, isRemote);
+      await get().refreshBranches();
+    });
+  },
+
+  setBranchLocked: async (name, locked) => {
+    const { repoPath } = get();
+    if (!repoPath) return;
+    await guarded(set, async () => {
+      await api.setBranchLocked(repoPath, name, locked);
       await get().refreshBranches();
     });
   },
@@ -453,9 +575,13 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     });
   },
 
+  // Apply, pop and drop all write to the working tree or throw stashed work away, so each is
+  // confirmed here rather than at the button — viewing and renaming a stash change nothing and
+  // stay immediate.
   stashApply: async (index) => {
     const { repoPath } = get();
     if (!repoPath) return;
+    if (!(await confirmStashAction(get, "apply", index))) return;
     await guarded(set, async () => {
       await api.stashApply(repoPath, index);
       await get().refreshStatus();
@@ -465,6 +591,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   stashPop: async (index) => {
     const { repoPath } = get();
     if (!repoPath) return;
+    if (!(await confirmStashAction(get, "pop", index))) return;
     await guarded(set, async () => {
       await api.stashPop(repoPath, index);
       await get().refreshAll();
@@ -474,6 +601,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   stashDrop: async (index) => {
     const { repoPath } = get();
     if (!repoPath) return;
+    if (!(await confirmStashAction(get, "drop", index))) return;
     await guarded(set, async () => {
       await api.stashDrop(repoPath, index);
       await get().refreshStashes();

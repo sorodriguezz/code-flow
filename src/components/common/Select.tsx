@@ -9,12 +9,16 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, type LucideIcon } from "lucide-react";
 
 export interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
+  /** Marks what kind of thing the option is — a local branch vs a remote one, say. Shown both in
+   * the menu and on the closed trigger, so the kind of the current value stays readable once the
+   * menu is gone. Optional: an option list where every entry is the same kind doesn't need it. */
+  icon?: LucideIcon;
 }
 
 export interface SelectGroup {
@@ -86,6 +90,7 @@ export function Select({
   const flat = useMemo(() => flatten(options), [options]);
   const selected = flat.find((o) => o.value === value);
   const label = selected?.label ?? placeholder ?? "";
+  const SelectedIcon = selected?.icon;
 
   const reposition = useCallback(() => {
     const el = triggerRef.current;
@@ -199,6 +204,7 @@ export function Select({
   const renderOption = (opt: SelectOption, i: number) => {
     const isActive = i === activeIndex;
     const isSelected = opt.value === value;
+    const Icon = opt.icon;
     return (
       <div
         key={`o-${opt.value}-${i}`}
@@ -216,7 +222,12 @@ export function Select({
               }`
         }`}
       >
-        <span className="truncate">{opt.label}</span>
+        {/* The icon sits inside the label's flex box so it inherits the row's colour — muted,
+            accent when selected — rather than being a separate thing to keep in step. */}
+        <span className="flex min-w-0 flex-1 items-center gap-1.5">
+          {Icon && <Icon size={13} className="shrink-0 opacity-70" />}
+          <span className="truncate">{opt.label}</span>
+        </span>
         {isSelected && <Check size={14} className="shrink-0 text-[var(--cf-accent)]" />}
       </div>
     );
@@ -252,7 +263,12 @@ export function Select({
           SIZE[size]
         } ${open ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)] focus:border-[var(--cf-accent)]"} ${className}`}
       >
-        <span className={`truncate ${selected ? "" : "text-[var(--cf-text-muted)]"}`}>{label}</span>
+        <span
+          className={`flex min-w-0 flex-1 items-center gap-1.5 ${selected ? "" : "text-[var(--cf-text-muted)]"}`}
+        >
+          {SelectedIcon && <SelectedIcon size={13} className="shrink-0 opacity-70" />}
+          <span className="truncate">{label}</span>
+        </span>
         <ChevronDown
           size={15}
           className={`shrink-0 text-[var(--cf-text-muted)] transition-transform ${open ? "rotate-180" : ""}`}

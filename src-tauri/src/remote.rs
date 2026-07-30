@@ -112,6 +112,8 @@ pub async fn pull(app: AppHandle, repo_path: String) -> Result<(), String> {
 }
 
 pub async fn push(app: AppHandle, repo_path: String, set_upstream: bool) -> Result<(), String> {
+    // `git push` publishes whatever branch is checked out, so the lock is checked against HEAD.
+    crate::git::branch::guard_head_unlocked_at(&repo_path)?;
     if set_upstream {
         let branch = {
             let repo = crate::git::repo::open(&repo_path)?;

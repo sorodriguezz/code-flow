@@ -118,13 +118,19 @@ export function usesMod(chord: Chord): boolean {
   return chord.split("+").includes("Mod");
 }
 
+/** Whether the chord's base key is a function key — the one kind that produces no text, which is
+ * what lets it be bound bare and fire even with the caret in a field. */
+export function isFunctionKey(chord: Chord): boolean {
+  const parts = chord.split("+");
+  return /^F\d{1,2}$/.test(parts[parts.length - 1]);
+}
+
 /** A chord with no modifier at all would swallow ordinary typing, so the recorder rejects it.
  * Function keys are the exception: they produce no text. */
 export function isBindable(chord: Chord): boolean {
   const parts = chord.split("+");
-  const key = parts[parts.length - 1];
   const hasModifier = parts.length > 1 && parts.slice(0, -1).some((p) => p !== "Shift");
-  return hasModifier || /^F\d{1,2}$/.test(key);
+  return hasModifier || isFunctionKey(chord);
 }
 
 const MAC_MODIFIER_SYMBOLS: Record<string, string> = { Mod: "⌘", Ctrl: "⌃", Alt: "⌥", Shift: "⇧" };

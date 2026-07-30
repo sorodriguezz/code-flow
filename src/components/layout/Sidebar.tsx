@@ -1,10 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Archive,
   Briefcase,
   Check,
   ChevronDown,
-  ChevronRight,
   CircleDot,
   Cloud,
   Code2,
@@ -21,6 +20,7 @@ import {
   RefreshCw,
   Loader2,
   Lock,
+  LockOpen,
   Pencil,
   Plus,
   Trash2,
@@ -46,15 +46,15 @@ import type { BranchInfo, GithubConnection, Project, PullRequestSummary, StashIn
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
-import { Select } from "../common/Select";
 import { CloneRepoModal } from "./CloneRepoModal";
+import { CreateBranchModal } from "./CreateBranchModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
 import { CreatePrModal } from "./CreatePrModal";
 import { StashDiffModal } from "./StashDiffModal";
-import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 const SIDEBAR_MIN = 200;
@@ -79,10 +79,24 @@ function WorkspaceSwitcher() {
 
   const active = workspaces.find((w) => w.id === activeWorkspaceId);
 
+  /**
+   * Clicking anywhere else puts it away — it was staying open over whatever you clicked next.
+   *
+   * The half-typed name of a new workspace goes with it. Reopening to find a name you had already
+   * abandoned, in a field you had already left, is worse than starting it again.
+   */
+  const rootRef = useRef<HTMLDivElement>(null);
+  const dismiss = useCallback(() => {
+    setOpen(false);
+    setCreating(false);
+    setNewName("");
+  }, []);
+  useDismissOnOutside(open, dismiss, [rootRef]);
+
   return (
-    <div className="relative mb-4 px-1">
+    <div ref={rootRef} className="relative mb-4 px-1">
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => (open ? dismiss() : setOpen(true))}
         className="flex w-full items-center gap-2 rounded-md py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       >
         <span
@@ -298,11 +312,11 @@ function StashesSection() {
               </button>
               <button
                 title={t("sidebar.drop")}
-                onClick={async (e) => {
+                // The confirmation for this (and for apply/pop) lives in the store, so it can't be
+                // skipped by a caller that doesn't know to ask.
+                onClick={(e) => {
                   e.stopPropagation();
-                  if (await confirmAction(t("sidebar.dropStashConfirm", { message: s.message }))) {
-                    stashDrop(s.index);
-                  }
+                  stashDrop(s.index);
                 }}
                 className="hidden text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] group-hover:block"
               >
@@ -480,52 +494,6 @@ function RemoteUrlSection() {
         <RemoteUrlEditModal name={editingRemote.name} currentUrl={editingRemote.url} onClose={() => setEditing(null)} />
       )}
     </CollapsibleSection>
-  );
-}
-
-function CreateBranchForm({ branches, onDone }: { branches: BranchInfo[]; onDone: () => void }) {
-  const createBranch = useRepoStore((s) => s.createBranch);
-  const [name, setName] = useState("");
-  const [startPoint, setStartPoint] = useState("");
-  const t = useT();
-
-  return (
-    <div className="mb-1.5 space-y-1 rounded-md border border-[var(--cf-border)] p-1.5">
-      <input
-        autoFocus
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        onKeyDown={(e) => e.key === "Escape" && onDone()}
-        placeholder={t("sidebar.newBranchName")}
-        className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-1.5 py-0.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
-      />
-      <Select
-        value={startPoint}
-        onChange={setStartPoint}
-        size="sm"
-        ariaLabel={t("sidebar.fromCurrentHead")}
-        options={[
-          { value: "", label: t("sidebar.fromCurrentHead") },
-          { label: t("sidebar.local"), options: branches.filter((b) => !b.is_remote).map((b) => ({ value: b.name, label: b.name })) },
-          { label: t("sidebar.remote"), options: branches.filter((b) => b.is_remote).map((b) => ({ value: b.name, label: b.name })) },
-        ]}
-      />
-      <div className="flex justify-end gap-2 pt-0.5">
-        <button onClick={onDone} className="text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
-          {t("common.cancel")}
-        </button>
-        <button
-          disabled={!name.trim()}
-          onClick={async () => {
-            await createBranch(name.trim(), startPoint || undefined);
-            onDone();
-          }}
-          className="rounded-md bg-[var(--cf-accent)] px-2 py-0.5 text-[11px] text-white disabled:opacity-40"
-        >
-          {t("sidebar.create")}
-        </button>
-      </div>
-    </div>
   );
 }
 
@@ -850,26 +818,37 @@ function ProjectRow({ project }: { project: Project }) {
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const moveProject = useWorkspaceStore((s) => s.moveProject);
   const branches = useRepoStore((s) => s.branches);
+  const status = useRepoStore((s) => s.status);
   const checkoutBranch = useRepoStore((s) => s.checkoutBranch);
   const checkoutDetached = useRepoStore((s) => s.checkoutDetached);
   const deleteBranch = useRepoStore((s) => s.deleteBranch);
+  const setBranchLocked = useRepoStore((s) => s.setBranchLocked);
   const mergeBranch = useRepoStore((s) => s.mergeBranch);
   const checkingOutBranch = useRepoStore((s) => s.checkingOutBranch);
   const projectLoading = useRepoStore((s) => s.projectLoading);
   const setActiveView = useUiStore((s) => s.setActiveView);
   const t = useT();
 
+  // Being the project in use *is* being unfolded: the branches, stashes and pull requests under a
+  // row are the one unambiguous "this is the repo everything else on screen is about", and the tint
+  // on the row alone was easy to lose track of with several projects listed. So there is no
+  // expanded state to get out of step with the selection — and no fold control on the active row,
+  // which could only ever have been used to hide the very thing that marks it.
+  //
+  // It replaces a `useState(isActive)` that read the selection once, on mount, and so opened
+  // collapsed for the project restored at launch: `activeProjectId` arrives from the database after
+  // the rows have already rendered, and nothing afterwards was telling the row to unfold.
   const isActive = project.id === activeProjectId;
-  const [expanded, setExpanded] = useState(isActive);
+  // A merge lands on the *current* branch, so it's that branch's lock that stops one — not the
+  // lock of whichever row the merge button happens to sit on.
+  const currentBranch = branches.find((b) => b.is_head) ?? null;
+  const mergeBlockedBy = currentBranch?.is_locked ? currentBranch.name : null;
   const [showCreateBranch, setShowCreateBranch] = useState(false);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [openingVsCode, setOpeningVsCode] = useState(false);
 
-  const select = () => {
-    setActiveProject(project.id);
-    setExpanded(true);
-  };
+  const select = () => setActiveProject(project.id);
 
   const otherWorkspaces = workspaces.filter((w) => w.id !== project.workspace_id);
 
@@ -893,7 +872,9 @@ function ProjectRow({ project }: { project: Project }) {
               setRevealing(false);
             }
           }}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-white"
+          // `cf-chip-button` rings the square on hover (see index.css) — without it the chip was
+          // the one control in the row that gave no sign of being one.
+          className="cf-chip-button flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-white"
           style={{ background: project.color }}
         >
           {revealing ? <Loader2 size={12} className="animate-spin" /> : <Folder size={12} />}
@@ -930,18 +911,6 @@ function ProjectRow({ project }: { project: Project }) {
             <FolderInput size={13} />
           </button>
         )}
-        {isActive && (
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setExpanded((v) => !v);
-            }}
-            className="opacity-0 group-hover:opacity-100"
-          >
-            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          </button>
-        )}
-
         {showMoveMenu && (
           <div className="absolute right-0 top-full z-20 mt-1 w-44 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
             <p className="px-2 py-1 text-[11px] font-semibold uppercase text-[var(--cf-text-muted)]">
@@ -964,24 +933,24 @@ function ProjectRow({ project }: { project: Project }) {
         )}
       </div>
 
-      {isActive && expanded && projectLoading && (
+      {isActive && projectLoading && (
         <div className="ml-6 mt-1 border-l border-[var(--cf-border)] pl-3">
           <SkeletonRows count={5} className="p-0" />
         </div>
       )}
 
-      {isActive && expanded && !projectLoading && (
+      {isActive && !projectLoading && (
         <div className="ml-6 mt-1 space-y-3 border-l border-[var(--cf-border)] pl-3">
           <CollapsibleSection
             icon={GitBranch}
             title={t("sidebar.localBranches")}
-            action={({ open, expand }) => (
+            action={({ expand }) => (
               <button
-                // While collapsed the form isn't on screen, so "+" can only mean "show it";
-                // once the section is open it keeps working as a toggle.
+                // The form is a modal now, so "+" always means the same thing. The section is
+                // still unfolded, so the branch that gets created is visible when it lands.
                 onClick={() => {
                   expand();
-                  setShowCreateBranch(open ? !showCreateBranch : true);
+                  setShowCreateBranch(true);
                 }}
                 className="flex h-4 w-4 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
                 title={t("sidebar.newBranch")}
@@ -990,10 +959,17 @@ function ProjectRow({ project }: { project: Project }) {
               </button>
             )}
           >
-            {showCreateBranch && (
-              <CreateBranchForm branches={branches} onDone={() => setShowCreateBranch(false)} />
-            )}
             <div className="space-y-0.5">
+              {/* Detaching leaves every row unhighlighted, which on its own is indistinguishable
+                  from "the checkout did nothing". This row is what says otherwise. */}
+              {status?.is_detached && (
+                <div className="mb-1 flex items-center gap-1.5 rounded-md border border-dashed border-[var(--cf-border)] px-1.5 py-1 text-[12px] text-[var(--cf-warning)]">
+                  <Unlink size={11} className="shrink-0" />
+                  <span className="min-w-0 flex-1 truncate" title={t("sidebar.detachedHint")}>
+                    {t("sidebar.detachedAt", { sha: status.head_oid?.slice(0, 7) ?? "?" })}
+                  </span>
+                </div>
+              )}
               {branches
                 .filter((b) => !b.is_remote)
                 .map((b) => {
@@ -1022,6 +998,21 @@ function ProjectRow({ project }: { project: Project }) {
                           </span>
                         )}
                       </button>
+                      {/* One padlock, drawn as the state it is in — shut when locked, open when
+                          not — and clicking it flips that state. A separate always-on badge next
+                          to it meant a shut padlock and an open one sat side by side, which read
+                          as a contradiction rather than as "locked, click to unlock". */}
+                      <button
+                        title={b.is_locked ? t("branch.lockedToggle") : t("branch.lock")}
+                        onClick={() => setBranchLocked(b.name, !b.is_locked)}
+                        className={`ml-1 shrink-0 hover:text-[var(--cf-warning)] ${
+                          b.is_locked
+                            ? "block text-[var(--cf-warning)]"
+                            : "hidden text-[var(--cf-text-muted)] group-hover:block"
+                        }`}
+                      >
+                        {b.is_locked ? <Lock size={12} /> : <LockOpen size={12} />}
+                      </button>
                       <button
                         title={t("sidebar.checkoutDetached")}
                         disabled={checkingOutBranch !== null}
@@ -1032,13 +1023,17 @@ function ProjectRow({ project }: { project: Project }) {
                       </button>
                       {!b.is_head && (
                         <button
-                          title={t("sidebar.mergeIntoCurrent")}
-                          disabled={checkingOutBranch !== null}
+                          title={
+                            mergeBlockedBy
+                              ? t("branch.lockedCannotMerge", { name: mergeBlockedBy })
+                              : t("sidebar.mergeIntoCurrent")
+                          }
+                          disabled={checkingOutBranch !== null || mergeBlockedBy !== null}
                           onClick={async () => {
                             const outcome = await mergeBranch(b.name);
                             if (outcome?.status === "conflicts") setActiveView("changes");
                           }}
-                          className="ml-1 hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+                          className="ml-1 hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:text-[var(--cf-text-muted)] group-hover:block"
                         >
                           <GitMerge size={12} />
                         </button>
@@ -1046,11 +1041,9 @@ function ProjectRow({ project }: { project: Project }) {
                       {!b.is_head && (
                         <button
                           title={t("sidebar.deleteBranch")}
-                          onClick={async () => {
-                            if (await confirmAction(t("sidebar.deleteBranchConfirm", { name: b.name }))) {
-                              deleteBranch(b.name, false);
-                            }
-                          }}
+                          // Confirmed in the store, like the merge and stash actions, so the
+                          // diagram is the same one everywhere and no caller can skip it.
+                          onClick={() => deleteBranch(b.name, false)}
                           className="ml-1 hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] group-hover:block"
                         >
                           <Trash2 size={12} />
@@ -1073,6 +1066,10 @@ function ProjectRow({ project }: { project: Project }) {
 
           <PullRequestsSection project={project} />
         </div>
+      )}
+
+      {showCreateBranch && (
+        <CreateBranchModal branches={branches} onClose={() => setShowCreateBranch(false)} />
       )}
     </div>
   );

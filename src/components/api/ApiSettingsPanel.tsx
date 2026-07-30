@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
+import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import { Field, GhostButton, Row } from "./ApiModal";
 import { Actions, Group, HelpLink, Note, Panel, Status } from "./settingsChrome";
@@ -806,7 +807,18 @@ export function ApiSettingsBody() {
           longer translation or another badge all just make the list one row taller. It is also the
           shape the settings window around it already uses, which is why a nested nav reads as part
           of the same furniture instead of as a second idea. */}
-      <nav className="sticky top-0 w-[168px] shrink-0 self-start">
+      {/* `layoutRoot`, and it has to be a `motion.nav` to carry it.
+          The pill inside is a shared-layout animation: framer measures where it was, measures where
+          it lands, and tweens between the two. Those measurements are taken against the page unless
+          something says otherwise — and this rail is `sticky`, which means its own offset depends on
+          a scroll position that the arriving pane has just changed underneath it. Picking
+          "Colaboración" is the case that shows it: it is the one pane tall enough to turn the
+          settings column into a scrolling one, so the frame the pill was measured in stopped
+          matching the frame it was measured into, and the slide arrived as a jump. `layoutRoot`
+          makes this element the frame of reference, so the pill travels relative to the rail — which
+          never moves — and behaves exactly like the outer settings nav, whose own pill has always
+          been smooth for the simple reason that it isn't sticky. */}
+      <motion.nav layoutRoot className="sticky top-0 w-[168px] shrink-0 self-start">
         {TABS.map(({ id, labelKey, icon: Icon, beta }) => (
           <button
             key={id}
@@ -836,7 +848,7 @@ export function ApiSettingsBody() {
             </span>
           </button>
         ))}
-      </nav>
+      </motion.nav>
 
       <div className="min-w-0 flex-1">
         {tab === "network" && <NetworkPanel />}

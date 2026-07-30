@@ -18,6 +18,7 @@ import type {
   PrCommentThread,
   PrDecision,
   PrDescriptionDraft,
+  PrLinkActionOutcome,
   PrLinkResolution,
   Project,
   PullRequestSummary,
@@ -31,6 +32,7 @@ import type {
   ReviewRunDetail,
   ReviewRunSummary,
   Workspace,
+  WorkspaceActivityEntry,
   WorkspaceAgent,
   WorkspaceMcp,
   WorkspaceSkill,
@@ -104,6 +106,9 @@ export const createBranch = (repoPath: string, name: string, startPoint?: string
 
 export const deleteBranch = (repoPath: string, name: string, isRemote: boolean) =>
   invoke<void>("delete_branch", { repoPath, name, isRemote });
+
+export const setBranchLocked = (repoPath: string, name: string, locked: boolean) =>
+  invoke<void>("set_branch_locked", { repoPath, name, locked });
 
 export const checkoutLocalBranch = (repoPath: string, name: string) =>
   invoke<void>("checkout_local_branch", { repoPath, name });
@@ -580,9 +585,10 @@ export const reviewPullRequest = (
 
 /** Reviews a pull request from its link alone: the diff comes from the host's API, not from a
  * working copy. Weaker than {@link reviewPullRequest} by construction — the model sees the diff
- * but not the surrounding codebase — and nothing is written to job history, since a run with no
- * project has no project to file itself under. `jobId` doubles as the run id the CLI streams on,
- * which is what makes the live log and the stop button work. */
+ * but not the surrounding codebase. It is recorded in `workspace_activity` rather than job
+ * history: no project to file it under, but the workspace it ran in outlives the session.
+ * `jobId` doubles as the run id the CLI streams on, which is what makes the live log and the
+ * stop button work. */
 export const reviewPrFromLink = (url: string, jobId: string, level: string, workspaceId: string) =>
   invoke<string>("review_pr_from_link", {
     url,
@@ -761,6 +767,19 @@ export const renameJobHistoryEntry = (id: string, label: string) => invoke<void>
 
 export const deleteJobHistoryEntry = (id: string) => invoke<void>("delete_job_history_entry", { id });
 
+// ---------- workspace activity (reviews of PRs with no repository here) ----------
+
+/** Everything reviewed from a link in this workspace, newest first. Repository-agnostic by
+ * design: these runs have no project, so they follow the workspace instead. */
+export const listWorkspaceActivity = (workspaceId: string) =>
+  invoke<WorkspaceActivityEntry[]>("list_workspace_activity", { workspaceId });
+
+export const renameWorkspaceActivityEntry = (id: string, label: string) =>
+  invoke<void>("rename_workspace_activity_entry", { id, label });
+
+export const deleteWorkspaceActivityEntry = (id: string) =>
+  invoke<void>("delete_workspace_activity_entry", { id });
+
 // ---------- debugger (Node / JavaScript) ----------
 
 export interface StackFrame {
@@ -830,6 +849,7 @@ export const prLinkCommentThreads = (url: string) =>
 /** What the signed-in user has already decided on the PR behind a link. */
 export const prLinkDecision = (url: string) => invoke<PrDecision>("pr_link_decision", { url });
 
-/** Approve / request changes / close the PR behind a link. Returns it as the host now reports it. */
-export const actOnPrLink = (url: string, action: PrAction, body?: string) =>
-  invoke<PullRequestSummary>("act_on_pr_link", { url, action, body });
+/** Approve / request changes / close the PR behind a link. Returns it as the host now reports it,
+ * plus the workspace Activity row the decision was filed under. */
+export const actOnPrLink = (url: string, workspaceId: string, action: PrAction, body?: string) =>
+  invoke<PrLinkActionOutcome>("act_on_pr_link", { url, workspaceId, action, body });

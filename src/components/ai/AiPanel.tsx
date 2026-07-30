@@ -9,6 +9,7 @@ import {
   Copy,
   ExternalLink,
   GitMerge,
+  Globe,
   History,
   Link2,
   Loader2,
@@ -24,7 +25,15 @@ import {
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
 import { parseClaudeError } from "../../lib/claudeError";
-import { listCommentThreads, targetKey, targetProjectId, type PrTarget } from "../../lib/prTarget";
+import {
+  listCommentThreads,
+  targetKey,
+  targetPrKey,
+  targetProjectId,
+  workspaceActivityKey,
+  workspaceIdFromBucket,
+  type PrTarget,
+} from "../../lib/prTarget";
 import { parseAnalysis, buildFixpack, formatFindingAsComment, formatSummaryComment } from "../../lib/parseAnalysis";
 import { Checkbox } from "../common/Checkbox";
 import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
@@ -36,7 +45,9 @@ import {
   entryTimestamp,
   entryVisual,
   entryRunCount,
+  entryIsGlobal,
   findActiveEntryKey,
+  jobPrUrl,
   type ActivityEntry,
 } from "../../lib/activityEntries";
 import { useUiStore } from "../../state/uiStore";
@@ -88,12 +99,20 @@ function relativeTime(ts: number, t: (key: TranslationKey, vars?: Record<string,
  * Rendered only when no link session is on screen, since the one on screen doesn't need a way
  * back to itself.
  */
-function LinkSessionsSection() {
+function LinkSessionsSection({ workspaceId }: { workspaceId: string | null }) {
   const t = useT();
-  const sessions = usePrStore((s) => s.linkPrHistory);
+  const allSessions = usePrStore((s) => s.linkPrHistory);
   const openLinkPr = usePrStore((s) => s.openLinkPr);
   const forgetLinkPr = usePrStore((s) => s.forgetLinkPr);
   const jobsByBucket = useJobsStore((s) => s.byProject);
+
+  // Scoped to the workspace the review ran under, same as its Activity: a PR someone sent you
+  // while you were working on one workspace has no business showing up in another.
+  const sessions = useMemo(
+    () => (workspaceId ? allSessions.filter((s) => s.workspaceId === workspaceId) : []),
+    [allSessions, workspaceId],
+  );
+  const workspaceJobs = workspaceId ? jobsByBucket[workspaceActivityKey(workspaceId)] ?? EMPTY_JOBS : EMPTY_JOBS;
 
   if (sessions.length === 0) return null;
 
@@ -105,7 +124,7 @@ function LinkSessionsSection() {
       </p>
       <div className="px-1.5 pb-1.5">
         {sessions.map((session) => {
-          const runs = (jobsByBucket[`pr-link:${session.url}`] ?? EMPTY_JOBS).length;
+          const runs = workspaceJobs.filter((job) => jobPrUrl(job) === session.url).length;
           return (
             <div key={session.url} className="group flex items-center gap-1">
               <button
@@ -139,13 +158,24 @@ function LinkSessionsSection() {
   );
 }
 
-/** Unified "Activity" list — background jobs (PR review / pre-commit analysis) and past
- * chat conversations combined and sorted by recency, so there's one place to reopen anything
- * Claude has done for this project instead of two separate sections. */
-function ActivitySection({ projectId }: { projectId: string }) {
+/**
+ * Unified "Activity" list — background jobs (PR review / pre-commit analysis) and past chat
+ * conversations combined and sorted by recency, so there's one place to reopen anything Claude has
+ * done instead of several separate sections.
+ *
+ * Two buckets feed it. The project's own history is the obvious one. The other is the
+ * *workspace's*: a PR reviewed from a link belongs to a repository this machine doesn't have, so
+ * it can't be filed against a project — but it still happened, and it's still worth reopening. It
+ * is therefore shown whichever repository of the workspace is open (marked with a globe, since it
+ * belongs to none of them) and stops showing on switching to another workspace.
+ */
+function ActivitySection({ projectId, workspaceId }: { projectId: string | null; workspaceId: string | null }) {
   const t = useT();
-  const jobs = useJobsStore((s) => s.byProject[projectId] ?? EMPTY_JOBS);
-  const jobsLoaded = useJobsStore((s) => s.loaded[projectId]);
+  const workspaceBucket = workspaceId ? workspaceActivityKey(workspaceId) : null;
+  const projectJobs = useJobsStore((s) => (projectId ? s.byProject[projectId] : undefined) ?? EMPTY_JOBS);
+  const workspaceJobs = useJobsStore((s) => (workspaceBucket ? s.byProject[workspaceBucket] : undefined) ?? EMPTY_JOBS);
+  const jobsLoaded = useJobsStore((s) => (projectId ? s.loaded[projectId] : true));
+  const workspaceLoaded = useJobsStore((s) => (workspaceBucket ? s.loaded[workspaceBucket] : true));
   const loadJobHistory = useJobsStore((s) => s.load);
   const prsByProject = usePrStore((s) => s.prsByProject);
   const selectedPr = usePrStore((s) => s.selectedPr);
@@ -153,16 +183,17 @@ function ActivitySection({ projectId }: { projectId: string }) {
   const selectPr = usePrStore((s) => s.selectPr);
   const analyzeOpen = useAnalyzeUiStore((s) => s.open);
   const analyzeJobId = useAnalyzeUiStore((s) => s.selectedJobId);
-  const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
-  const chatLoaded = useChatHistoryStore((s) => s.loaded[projectId]);
+  const conversations = useChatHistoryStore((s) => (projectId ? s.byProject[projectId] : undefined) ?? EMPTY_CONVERSATIONS);
+  const chatLoaded = useChatHistoryStore((s) => (projectId ? s.loaded[projectId] : true));
   const loadChatHistory = useChatHistoryStore((s) => s.load);
   const loadResolutions = useResolutionsStore((s) => s.load);
-  const activeSessionId = useChatStore((s) => s.byProject[projectId]?.conversationId ?? null);
+  const activeSessionId = useChatStore((s) => (projectId ? s.byProject[projectId]?.conversationId : null) ?? null);
   const switchTo = useChatStore((s) => s.switchTo);
   const [collapsed, setCollapsed] = useState(true);
   const [showModal, setShowModal] = useState(false);
 
   useEffect(() => {
+    if (!projectId) return;
     if (!chatLoaded) void loadChatHistory(projectId);
     if (!jobsLoaded) void loadJobHistory(projectId);
     // Hydrate persisted "resolve with AI" outcomes so an already-resolved finding/comment shows
@@ -170,12 +201,23 @@ function ActivitySection({ projectId }: { projectId: string }) {
     void loadResolutions(projectId);
   }, [projectId, chatLoaded, loadChatHistory, jobsLoaded, loadJobHistory, loadResolutions]);
 
+  useEffect(() => {
+    if (workspaceBucket && !workspaceLoaded) void loadJobHistory(workspaceBucket);
+  }, [workspaceBucket, workspaceLoaded, loadJobHistory]);
+
+  const jobs = useMemo(
+    () => (workspaceJobs.length === 0 ? projectJobs : [...projectJobs, ...workspaceJobs]),
+    [projectJobs, workspaceJobs],
+  );
   const entries = useMemo(() => mergeActivityEntries(jobs, conversations), [jobs, conversations]);
   if (entries.length === 0) return null;
 
   const activeEntryKey = findActiveEntryKey(entries, {
-    // A link session's PR is shown the same way a selected one is, so its row highlights too.
-    selectedPrId: selectedPr?.id ?? linkPr?.pr.id ?? null,
+    selectedPrId: selectedPr?.id ?? null,
+    // A link session's PR is shown the same way a selected one is, so its row highlights too —
+    // matched by URL, since its number belongs to a repository the other rows know nothing about.
+    // Only when it's this workspace's: one parked under another isn't on screen to highlight.
+    linkPrUrl: linkPr?.workspaceId === workspaceId ? linkPr.url : null,
     analyzeOpen,
     analyzeJobId,
     activeSessionId,
@@ -186,6 +228,7 @@ function ActivitySection({ projectId }: { projectId: string }) {
 
   const openEntry = (entry: ActivityEntry) => {
     if (entry.type === "chat") {
+      if (!projectId) return;
       // Clear whatever else the panel might currently be showing — otherwise the chat
       // switches underneath a still-visible PR review or analysis section.
       selectPr(null);
@@ -193,9 +236,17 @@ function ActivitySection({ projectId }: { projectId: string }) {
       void switchTo(projectId, entry.conv.session_id);
       return;
     }
+    // A workspace row rebuilds its whole link session from the row itself: after a restart there
+    // is no parked session to bring back, and no project list to look the PR up in.
+    const rowWorkspaceId = workspaceIdFromBucket(entry.job.projectId);
+    if (rowWorkspaceId) {
+      useAnalyzeUiStore.getState().hide();
+      usePrStore.getState().openLinkPrFromMeta(entry.job.meta, rowWorkspaceId);
+      return;
+    }
     // A recorded decision opens the PR it was taken on, same as a review of it would.
     if (entry.job.kind === "pr-review" || entry.job.kind === "pr-action") {
-      const pr = prsByProject[projectId]?.find((p) => p.id === entry.job.meta.prId);
+      const pr = projectId ? prsByProject[projectId]?.find((p) => p.id === entry.job.meta.prId) : undefined;
       if (pr) {
         useAnalyzeUiStore.getState().hide();
         selectPr(pr);
@@ -239,6 +290,13 @@ function ActivitySection({ projectId }: { projectId: string }) {
                 }`}
               >
                 <Icon size={12} className={spinning ? "shrink-0 animate-spin" : "shrink-0"} style={{ color }} />
+                {entryIsGlobal(entry) && (
+                  <Globe
+                    size={11}
+                    className="shrink-0 text-[var(--cf-text-muted)]"
+                    aria-label={t("activity.workspaceWide")}
+                  />
+                )}
                 <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{entryTitle(entry)}</span>
                 {runCount > 1 && (
                   <span
@@ -262,7 +320,9 @@ function ActivitySection({ projectId }: { projectId: string }) {
           </button>
         </div>
       )}
-      {showModal && <ActivityModal projectId={projectId} onClose={() => setShowModal(false)} />}
+      {showModal && (
+        <ActivityModal projectId={projectId} workspaceId={workspaceId} onClose={() => setShowModal(false)} />
+      )}
     </div>
   );
 }
@@ -279,6 +339,11 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   const t = useT();
   const projectId = targetProjectId(target);
   const bucket = targetKey(target);
+  // What this section *addresses*, as opposed to which bucket it reads from: the bucket of a link
+  // review is its whole workspace, shared with every other repository reached by link, so it
+  // doesn't change when the panel moves from one such PR to another — and effects keyed on it
+  // would skip their refetch between two repositories that both happen to have a "#42".
+  const prKey = targetPrKey(target, pr.id);
   const linkOnly = target.kind === "link";
   const reviewPr = usePrStore((s) => s.reviewPr);
   const reviewLevel = usePrStore((s) => s.reviewLevel);
@@ -291,9 +356,15 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   const actOnPr = usePrStore((s) => s.actOnPr);
   const prActionBusy = usePrStore((s) => s.prActionBusy);
   const jobs = useJobsStore((s) => s.byProject[bucket] ?? EMPTY_JOBS);
+  // A workspace bucket holds the reviews of every repository reached by link, so the PR number
+  // alone would happily match some other repo's "#42" — the URL is what identifies this one.
+  const linkUrl = target.kind === "link" ? target.url : null;
   const job = useMemo(
-    () => jobs.find((j) => j.kind === "pr-review" && j.meta.prId === pr.id) ?? null,
-    [jobs, pr.id],
+    () =>
+      jobs.find((j) =>
+        j.kind === "pr-review" && (linkUrl !== null ? jobPrUrl(j) === linkUrl : j.meta.prId === pr.id),
+      ) ?? null,
+    [jobs, pr.id, linkUrl],
   );
 
   const [logExpanded, setLogExpanded] = useState(false);
@@ -340,14 +411,14 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
 
   // A decision already on the record (here or on the website) retires the button that would take
   // it again — and a merged/closed PR retires all three, since there's nothing left to decide.
-  const decision = usePrStore((s) => s.decisionByPr[`${bucket}:${pr.id}`] ?? "none");
+  const decision = usePrStore((s) => s.decisionByPr[prKey] ?? "none");
   const loadPrDecision = usePrStore((s) => s.loadPrDecision);
   useEffect(() => {
     void loadPrDecision(target, pr.id);
     // `target` is rebuilt on every render by the caller, so the identity that matters is what it
-    // addresses — the bucket key and the PR.
+    // addresses — the pull request itself.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loadPrDecision, bucket, pr.id]);
+  }, [loadPrDecision, prKey]);
 
   const prClosed = pr.status === "merged" || pr.status === "closed";
   const doPrAction = async (action: "approve" | "request_changes" | "close") => {
@@ -385,7 +456,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
         if (threadsReqRef.current === token) setThreadsLoading(false);
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bucket, pr.id]);
+  }, [prKey]);
   useEffect(() => {
     void loadThreads();
   }, [loadThreads]);
@@ -1059,8 +1130,14 @@ function ChatSection({ projectId }: { projectId: string }) {
 export function AiPanel() {
   const t = useT();
   const project = useWorkspaceStore((s) => s.activeProject());
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const selectedPr = usePrStore((s) => s.selectedPr);
-  const linkPr = usePrStore((s) => s.linkPr);
+  const openLinkPr = usePrStore((s) => s.linkPr);
+  // A link review is a review *of this workspace* — it runs under its review standard, contexts
+  // and MCP servers, and it's filed in its Activity. Moving to another workspace therefore takes
+  // it off screen, exactly as it takes that workspace's Activity off screen. The session isn't
+  // dropped, only hidden: coming back shows it again.
+  const linkPr = openLinkPr?.workspaceId === activeWorkspaceId ? openLinkPr : null;
   const linkTarget = useMemo<PrTarget | null>(
     () => (linkPr ? { kind: "link", url: linkPr.url, workspaceId: linkPr.workspaceId } : null),
     [linkPr],
@@ -1143,9 +1220,13 @@ export function AiPanel() {
         </div>
         {/* A PR opened from a link outranks the project view and works without one — that's the
             whole point: it belongs to a repository this machine may not have. */}
+        {/* Activity is the same list in every case: the active project's history plus the
+            workspace's own — the reviews of PRs that belong to no repository here. It renders
+            above whatever the panel is showing, including a link review, which is exactly where
+            the way back to the other ones has to be. */}
         {linkPr ? (
           <>
-            <ActivitySection projectId={targetKey(linkTarget!)} />
+            <ActivitySection projectId={project?.id ?? null} workspaceId={activeWorkspaceId} />
             <div className="min-h-0 flex-1">
               <PrReviewSection target={linkTarget!} pr={linkPr.pr} />
             </div>
@@ -1154,13 +1235,14 @@ export function AiPanel() {
           // Still offer the way back into a parked link review — with no project open this used
           // to be a dead end, which is exactly where "New chat" landed the user.
           <>
-            <LinkSessionsSection />
+            <LinkSessionsSection workspaceId={activeWorkspaceId} />
+            <ActivitySection projectId={null} workspaceId={activeWorkspaceId} />
             <EmptyState icon={Sparkles} title={t("ai.noProject")} />
           </>
         ) : (
           <>
-            <LinkSessionsSection />
-            <ActivitySection projectId={project.id} />
+            <LinkSessionsSection workspaceId={activeWorkspaceId} />
+            <ActivitySection projectId={project.id} workspaceId={activeWorkspaceId} />
             <div className="min-h-0 flex-1">
               {selectedPr ? (
                 <PrReviewSection target={{ kind: "project", projectId: project.id }} pr={selectedPr} />
