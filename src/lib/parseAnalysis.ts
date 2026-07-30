@@ -1,3 +1,5 @@
+import type { SavedFinding } from "../types/domain";
+
 export interface FindingLocation {
   file: string;
   startLine: number;
@@ -241,7 +243,54 @@ export function buildFixpack(parsed: ParsedAnalysis, prId: number): string {
  * meaningless badge. When the two sets differ, the count says so, so nobody reads a FAILED gate
  * over a one-row table as a contradiction.
  */
-export function formatSummaryComment(parsed: ParsedAnalysis, date: string, posted: AnalysisFinding[]): string {
+/**
+ * What the durable review memory adds to a summary that the review text alone can't say: which
+ * findings this PR has already *closed* over its iterations, and under what scope and depth the
+ * run happened. Read from the saved run (`get_review_run`), so it is the reviewer's own record
+ * rather than anything the model reports about itself.
+ */
+export interface SummaryMemory {
+  /** Findings the memory holds as `resuelto` — reported in an earlier iteration, gone in this one. */
+  resolved: SavedFinding[];
+  /** Which run of this PR this is (1 = first review). */
+  iter: number;
+  /** `basico` · `completo` · `ultra`. */
+  level: string;
+  engine: string;
+  model: string;
+  files: number;
+  additions: number;
+  deletions: number;
+}
+
+/** The lenses each depth actually applies — the same split the backend's level directive makes
+ * (`ai.rs`: básico is a Blocker/Crítico triage, completo runs the five main lenses, ultra adds
+ * maintainability in depth). Printed in the summary so a reader knows what was *not* looked at. */
+const REVIEW_LENSES: Record<string, string[]> = {
+  basico: ["correctness", "seguridad", "solo Blocker/Crítico de alta confianza"],
+  completo: ["correctness", "seguridad", "rendimiento", "contrato / integridad de datos", "tests"],
+  ultra: [
+    "correctness",
+    "seguridad",
+    "rendimiento",
+    "contrato / integridad de datos",
+    "tests",
+    "mantenibilidad a fondo",
+  ],
+};
+
+/** A stored finding's severity is a free string; anything unrecognized reads as `info` rather than
+ * crashing the table it's rendered into. */
+function severityOf(raw: string): AnalysisFinding["severity"] {
+  return raw === "critical" || raw === "warning" ? raw : "info";
+}
+
+export function formatSummaryComment(
+  parsed: ParsedAnalysis,
+  date: string,
+  posted: AnalysisFinding[],
+  memory?: SummaryMemory | null,
+): string {
   const passed = computeQualityGatePassed(parsed.findings);
   const lines = [`### 📋 Revisión automatizada (pr-review) — ${date}`, "", `🛡️ **Quality Gate:** ${passed ? "✅ PASSED" : "❌ FAILED"}`];
   if (parsed.grades) {
@@ -251,28 +300,79 @@ export function formatSummaryComment(parsed: ParsedAnalysis, date: string, poste
   }
   lines.push("");
 
-  if (parsed.findings.length === 0) {
-    lines.push(parsed.summary || "✅ No se encontraron problemas en este cambio.");
-    return lines.join("\n");
-  }
-  if (posted.length === 0) {
+  // Everything the memory carries as done: what earlier iterations of this same PR reported and
+  // this one no longer finds. It's the half of the story the review text can't tell — a clean run
+  // looks identical whether the PR never had a defect or had three that were all fixed.
+  const resolved = memory?.resolved ?? [];
+  const counts = (["critical", "warning", "info"] as const)
+    .map((sev) => ({ sev, n: posted.filter((f) => f.severity === sev).length }))
+    .filter(({ n }) => n > 0)
+    .map(({ sev, n }) => `${n} ${SEVERITY_LABEL_ES[sev]}`);
+
+  if (posted.length === 0 && resolved.length === 0) {
+    // Nothing open and nothing on the record: the review's own prose is the whole summary.
     lines.push(
-      `La revisión encontró ${parsed.findings.length} hallazgo(s), ninguno de los cuales se publicó como comentario.`,
+      parsed.findings.length > 0
+        ? `La revisión encontró ${parsed.findings.length} hallazgo(s), ninguno de los cuales se publicó como comentario.`
+        : parsed.summary || "✅ No se encontraron problemas en este cambio.",
     );
+    lines.push(...scopeLines(memory));
     return lines.join("\n");
   }
 
-  const bySeverity = (sev: AnalysisFinding["severity"]) => posted.filter((f) => f.severity === sev).length;
-  const counts = (["critical", "warning", "info"] as const)
-    .map((sev) => ({ sev, n: bySeverity(sev) }))
-    .filter(({ n }) => n > 0)
-    .map(({ sev, n }) => `${n} ${SEVERITY_LABEL_ES[sev]}`);
-  const outOf = posted.length < parsed.findings.length ? ` de ${parsed.findings.length}` : "";
-  lines.push(`**Hallazgos posteados:** ${posted.length}${outOf} (${counts.join(" · ")})`, "");
-  lines.push("| | ID | Hallazgo | Archivo | Confianza |", "|---|---|---|---|---|");
+  const tally: string[] = [];
+  if (posted.length > 0) {
+    const outOf = posted.length < parsed.findings.length ? ` de ${parsed.findings.length}` : "";
+    tally.push(`📌 ${posted.length}${outOf} publicado(s) (${counts.join(" · ")})`);
+  }
+  if (resolved.length > 0) tally.push(`✔️ ${resolved.length} resuelto(s)`);
+  lines.push(`**Hallazgos:** ${tally.join(" · ")}`, "");
+
+  lines.push("| | ID | Hallazgo | Archivo | 🎯 | Estado |", "|---|---|---|---|---|---|");
   for (const f of posted) {
     const loc = f.location ? `\`${locationLabel(f.location)}\`` : "—";
-    lines.push(`| ${SEVERITY_DOT[f.severity]} | ${f.id} | ${f.type} / ${f.category} | ${loc} | ${f.confidence ?? "—"} |`);
+    lines.push(
+      `| ${SEVERITY_DOT[f.severity]} | ${f.id} | ${f.type} / ${f.category} | ${loc} | ${f.confidence ?? "—"} | 🔸 Abierto |`,
+    );
+  }
+  // Struck through, because the row is history rather than a request: the reader should see at a
+  // glance which lines still need something from them.
+  for (const f of resolved) {
+    const loc = f.archivo ? `~~\`${f.archivo}${f.lineas ? `:${f.lineas}` : ""}\`~~` : "—";
+    const dot = SEVERITY_DOT[severityOf(f.severity)];
+    lines.push(
+      `| ${dot} | ~~${f.id}~~ | ~~${f.categoria}~~ | ${loc} | ${f.confianza != null ? `~~${f.confianza}~~` : "—"} | ✔️ Resuelto |`,
+    );
+  }
+
+  lines.push(...scopeLines(memory));
+  if (parsed.summary.trim()) lines.push("", parsed.summary.trim());
+  if (memory?.engine) {
+    lines.push(
+      "",
+      "---",
+      `🤖 _Generado desde la memoria local de revisiones de CodeFlow · Revisor: **${memory.engine}${
+        memory.model ? ` (${memory.model})` : ""
+      }** · Selección hecha por el humano._`,
+    );
   }
   return lines.join("\n");
+}
+
+/** What the run actually looked at, and under which lenses — the two lines that turn a verdict
+ * into something auditable. Empty when the run predates scope tracking, rather than printing a
+ * confident "0 archivos". */
+function scopeLines(memory?: SummaryMemory | null): string[] {
+  if (!memory) return [];
+  const out: string[] = [];
+  const scope: string[] = [];
+  if (memory.files > 0) {
+    scope.push(`${memory.files} archivo(s)`, `+${memory.additions} / -${memory.deletions}`);
+  }
+  if (memory.iter > 0) scope.push(`iteración ${memory.iter}`);
+  if (memory.level) scope.push(`nivel **${memory.level}**`);
+  if (scope.length > 0) out.push("", `**Alcance analizado:** ${scope.join(" · ")}`);
+  const lenses = REVIEW_LENSES[memory.level];
+  if (lenses) out.push(`**Lentes aplicadas:** ${lenses.join(" · ")}`);
+  return out;
 }

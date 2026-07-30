@@ -4,6 +4,7 @@ import type {
   DbConnectionRow,
   DbConsole,
   DbEditResult,
+  DbForeignKey,
   DbExecContext,
   DbExecuteResult,
   DbNode,
@@ -144,5 +145,8 @@ export const dbApplyEdits = (connectionId: string, node: DbNodeRef, edits: DbRow
 
 export const dbObjectDdl = (connectionId: string, node: DbNodeRef) =>
   invoke<string>("db_object_ddl", { connectionId, node });
+
+export const dbForeignKeys = (connectionId: string, node: DbNodeRef) =>
+  invoke<DbForeignKey[]>("db_foreign_keys", { connectionId, node });
 
 export const dbCancel = (runId: string) => invoke<void>("db_cancel", { runId });

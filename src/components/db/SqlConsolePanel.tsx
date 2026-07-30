@@ -5,8 +5,10 @@ import {
   AlertTriangle,
   Braces,
   Check,
+  Database,
   Download,
   Copy,
+  Layers,
   Loader2,
   Play,
   Save,
@@ -16,8 +18,10 @@ import {
 } from "lucide-react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { Select } from "../common/Select";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { ResultGrid } from "./ResultGrid";
+import { ScopePicker } from "./ScopePicker";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
 import { nodeKey, useDbStore, type DbConsoleTab } from "../../state/dbStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -63,34 +67,33 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
   const commitSize = useLayoutStore((s) => s.commitSize);
   const connection = useDbStore((s) => s.connections.find((c) => c.id === tab.connectionId));
   const children = useDbStore((s) => s.children);
+  const loadingNodes = useDbStore((s) => s.loadingNodes);
+  const nodeErrors = useDbStore((s) => s.nodeErrors);
   const store = useDbStore.getState();
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
 
   const engine = connection ? engineInfo(connection.kind) : null;
   const isSql = engine?.sql ?? true;
 
-  // The databases and schemas already read for this connection, so the pickers offer real names.
-  // Free text stays allowed — a database the tree hasn't been expanded into is still valid.
-  const databases = useMemo(() => {
-    const rootKey = nodeKey(tab.connectionId, {
-      kind: "root",
-      database: null,
-      schema: null,
-      name: null,
-    });
-    return (children[rootKey] ?? []).map((node) => node.name);
-  }, [children, tab.connectionId]);
+  // What the pickers offer: the databases and schemas read for this connection. The nodes are the
+  // explorer's own, so expanding the tree and opening a picker feed each other — and a picker
+  // opened before the tree was ever expanded asks for them itself (`onOpen` below).
+  const rootRef: DbNodeRef = { kind: "root", database: null, schema: null, name: null };
+  const rootKey = nodeKey(tab.connectionId, rootRef);
+  const dbRef: DbNodeRef = { kind: "database", database: tab.database, schema: null, name: null };
+  const dbKey = nodeKey(tab.connectionId, dbRef);
 
-  const schemas = useMemo(() => {
-    if (!tab.database) return [];
-    const key = nodeKey(tab.connectionId, {
-      kind: "database",
-      database: tab.database,
-      schema: null,
-      name: null,
-    });
-    return (children[key] ?? []).map((node) => node.name);
-  }, [children, tab.connectionId, tab.database]);
+  const databases = useMemo(
+    () => (children[rootKey] ?? []).filter((node) => node.kind === "database").map((node) => node.name),
+    [children, rootKey],
+  );
+  const schemas = useMemo(
+    () =>
+      tab.database
+        ? (children[dbKey] ?? []).filter((node) => node.kind === "schema").map((node) => node.name)
+        : [],
+    [children, dbKey, tab.database],
+  );
 
   const run = (selectionOnly: boolean) => {
     const editor = editorRef.current;
@@ -128,60 +131,57 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 
         <span className="mx-0.5 h-4 w-px bg-[var(--cf-border)]" />
 
-        <label className="flex items-center gap-1">
-          <span className="text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {engine?.databaseLabel ?? t("db.database")}
-          </span>
-          <input
-            list={`db-databases-${tab.id}`}
-            value={tab.database}
-            onChange={(e) => store.updateConsole(tab.id, { database: e.target.value, dirty: true })}
-            placeholder={t("db.default")}
-            className="w-[130px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-[3px] text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
-          />
-          <datalist id={`db-databases-${tab.id}`}>
-            {databases.map((name) => (
-              <option key={name} value={name} />
-            ))}
-          </datalist>
-        </label>
+        <ScopePicker
+          label={engine?.databaseLabel ?? t("db.database")}
+          icon={Database}
+          value={tab.database}
+          options={databases}
+          loading={loadingNodes.includes(rootKey)}
+          error={nodeErrors[rootKey] ?? null}
+          onChange={(value) =>
+            // The schema belongs to the database it was picked under, so switching database drops
+            // it rather than carrying a name that doesn't exist over there.
+            store.updateConsole(tab.id, { database: value, schema: "", dirty: true })
+          }
+          onOpen={() => {
+            if (!children[rootKey]) void store.refreshNode(tab.connectionId, rootRef, rootKey);
+          }}
+        />
 
         {isSql && (
-          <label className="flex items-center gap-1">
-            <span className="text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("db.schema")}
-            </span>
-            <input
-              list={`db-schemas-${tab.id}`}
-              value={tab.schema}
-              onChange={(e) => store.updateConsole(tab.id, { schema: e.target.value, dirty: true })}
-              placeholder={t("db.default")}
-              className="w-[120px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-[3px] text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
-            />
-            <datalist id={`db-schemas-${tab.id}`}>
-              {schemas.map((name) => (
-                <option key={name} value={name} />
-              ))}
-            </datalist>
-          </label>
+          <ScopePicker
+            label={t("db.schema")}
+            icon={Layers}
+            value={tab.schema}
+            options={schemas}
+            width={140}
+            loading={loadingNodes.includes(dbKey)}
+            error={tab.database ? nodeErrors[dbKey] ?? null : null}
+            disabled={!tab.database}
+            disabledHint={t("db.pickDatabaseFirst")}
+            onChange={(value) => store.updateConsole(tab.id, { schema: value, dirty: true })}
+            onOpen={() => {
+              if (tab.database && !children[dbKey]) void store.refreshNode(tab.connectionId, dbRef, dbKey);
+            }}
+          />
         )}
 
-        <label className="flex items-center gap-1">
+        <span className="flex items-center gap-1">
           <span className="text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("db.limit")}
           </span>
-          <select
-            value={tab.maxRows}
-            onChange={(e) => store.updateConsole(tab.id, { maxRows: Number(e.target.value) })}
-            className="rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1 py-[3px] text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
-          >
-            {ROW_LIMITS.map((limit) => (
-              <option key={limit} value={limit}>
-                {limit === 0 ? t("db.noLimit") : formatCount(limit)}
-              </option>
-            ))}
-          </select>
-        </label>
+          <Select
+            size="sm"
+            className="w-[92px]"
+            ariaLabel={t("db.limit")}
+            value={String(tab.maxRows)}
+            onChange={(value) => store.updateConsole(tab.id, { maxRows: Number(value) })}
+            options={ROW_LIMITS.map((limit) => ({
+              value: String(limit),
+              label: limit === 0 ? t("db.noLimit") : formatCount(limit),
+            }))}
+          />
+        </span>
 
         <div className="ml-auto flex items-center gap-1">
           {tab.running ? (

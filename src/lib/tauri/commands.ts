@@ -568,6 +568,10 @@ export const resolvePrLink = (url: string) => invoke<PrLinkResolution>("resolve_
 export const listPrCommentThreads = (projectId: string, prId: number) =>
   invoke<PrCommentThread[]>("list_pr_comment_threads", { projectId, prId });
 
+/** Closes one comment thread on the host — Azure's "fixed", GitHub's resolved review thread. */
+export const resolvePrCommentThread = (projectId: string, prId: number, threadId: number) =>
+  invoke<void>("resolve_pr_comment_thread", { projectId, prId, threadId });
+
 export const reviewPullRequest = (
   projectId: string,
   prId: number,
@@ -847,6 +851,10 @@ export const prLinkPullRequest = (url: string) =>
 /** The PR's existing comment threads, addressed by link. */
 export const prLinkCommentThreads = (url: string) =>
   invoke<PrCommentThread[]>("pr_link_comment_threads", { url });
+
+/** Closes one comment thread of the PR behind a link. */
+export const prLinkResolveCommentThread = (url: string, threadId: number) =>
+  invoke<void>("pr_link_resolve_comment_thread", { url, threadId });
 
 /** What the signed-in user has already decided on the PR behind a link. */
 export const prLinkDecision = (url: string) => invoke<PrDecision>("pr_link_decision", { url });

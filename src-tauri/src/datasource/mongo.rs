@@ -1717,6 +1717,42 @@ fn default_database(config: &DbConnectionConfig) -> String {
         .unwrap_or_else(|| "admin".to_string())
 }
 
+/// Attaches the connection's CA and client certificate to Mongo's TLS options.
+///
+/// The Mongo driver wants *paths*, not parsed material, and it wants the client certificate and its
+/// key in **one** PEM file — which is worth saying out loud, because every other engine here takes
+/// them as two and a user who has two files needs to know to concatenate them.
+fn with_certificates(
+    mut tls: TlsOptions,
+    config: &DbConnectionConfig,
+) -> Result<TlsOptions, String> {
+    let exists = |path: &str, what: &str| -> Result<std::path::PathBuf, String> {
+        let path = std::path::PathBuf::from(path);
+        if path.is_file() {
+            Ok(path)
+        } else {
+            Err(format!("There is no {what} at {}.", path.display()))
+        }
+    };
+
+    let ca = config.ssl_ca_file.trim();
+    if !ca.is_empty() {
+        tls.ca_file_path = Some(exists(ca, "CA file")?);
+    }
+    let certificate = config.ssl_cert_file.trim();
+    if !certificate.is_empty() {
+        tls.cert_key_file_path = Some(exists(certificate, "client certificate")?);
+    }
+    if !config.ssl_key_file.trim().is_empty() && certificate.is_empty() {
+        return Err(
+            "MongoDB reads the client certificate and its key from a single PEM file. Put both in \
+             one file and name it in the certificate box, leaving the key box empty."
+                .to_string(),
+        );
+    }
+    Ok(tls)
+}
+
 async fn client_options(config: &DbConnectionConfig) -> Result<ClientOptions, String> {
     let mut options = if config.url.trim().is_empty() {
         let mut options = ClientOptions::default();
@@ -1752,10 +1788,10 @@ async fn client_options(config: &DbConnectionConfig) -> Result<ClientOptions, St
         DbSslMode::Require => {
             let mut tls = TlsOptions::default();
             tls.allow_invalid_certificates = Some(true);
-            options.tls = Some(Tls::Enabled(tls));
+            options.tls = Some(Tls::Enabled(with_certificates(tls, config)?));
         }
         DbSslMode::VerifyFull => {
-            options.tls = Some(Tls::Enabled(TlsOptions::default()));
+            options.tls = Some(Tls::Enabled(with_certificates(TlsOptions::default(), config)?));
         }
     }
     options.app_name = Some(

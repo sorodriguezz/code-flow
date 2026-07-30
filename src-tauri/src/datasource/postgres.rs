@@ -16,10 +16,10 @@ use tokio_postgres::{AsyncMessage, Client, SimpleQueryMessage};
 
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
-    describe_db_error, read_only_guard, read_only_refusal, split_statements, DbColumn, DbColumnInfo,
-    DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbKind, DbNode, DbNodeKind,
-    DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest,
-    SqlDialect,
+    describe_db_error, read_only_guard, read_only_refusal, split_statements, DbColumn,
+    DbColumnInfo, DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbForeignKey,
+    DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult,
+    DbTableDataRequest, SqlDialect,
 };
 
 const DIALECT: SqlDialect = SqlDialect::Postgres;
@@ -145,18 +145,30 @@ impl PgSession {
         let mut rows = Vec::new();
         for message in messages {
             if let SimpleQueryMessage::Row(row) = message {
-                rows.push((0..row.len()).map(|i| row.get(i).map(str::to_string)).collect());
+                rows.push(
+                    (0..row.len())
+                        .map(|i| row.get(i).map(str::to_string))
+                        .collect(),
+                );
             }
         }
         Ok(rows)
     }
 
     async fn scalar(&self, sql: &str) -> Result<Option<String>, String> {
-        Ok(self.text_rows(sql).await?.first().and_then(|row| row.first().cloned()).flatten())
+        Ok(self
+            .text_rows(sql)
+            .await?
+            .first()
+            .and_then(|row| row.first().cloned())
+            .flatten())
     }
 
     fn drain_notices(&self) -> Vec<String> {
-        self.notices.lock().map(|mut queue| std::mem::take(&mut *queue)).unwrap_or_default()
+        self.notices
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default()
     }
 
     /// Runs one statement, stopping as soon as the row limit is reached.
@@ -200,9 +212,11 @@ impl PgSession {
                         result.truncated = true;
                         break;
                     }
-                    result
-                        .rows
-                        .push((0..row.len()).map(|i| row.get(i).map(str::to_string)).collect());
+                    result.rows.push(
+                        (0..row.len())
+                            .map(|i| row.get(i).map(str::to_string))
+                            .collect(),
+                    );
                 }
                 Ok(SimpleQueryMessage::CommandComplete(affected)) => {
                     // A `SELECT` reports its row count here too; only a statement with no
@@ -238,11 +252,7 @@ impl PgSession {
         }
     }
 
-    pub async fn execute(
-        &self,
-        sql: &str,
-        ctx: &DbExecContext,
-    ) -> Result<DbExecuteResult, String> {
+    pub async fn execute(&self, sql: &str, ctx: &DbExecContext) -> Result<DbExecuteResult, String> {
         let started = std::time::Instant::now();
         self.apply_search_path(ctx).await;
 
@@ -265,7 +275,10 @@ impl PgSession {
                 break;
             }
         }
-        Ok(DbExecuteResult { results, duration_ms: started.elapsed().as_millis() as u64 })
+        Ok(DbExecuteResult {
+            results,
+            duration_ms: started.elapsed().as_millis() as u64,
+        })
     }
 
     pub async fn explain(&self, sql: &str, ctx: &DbExecContext) -> Result<String, String> {
@@ -545,6 +558,41 @@ impl PgSession {
             .collect())
     }
 
+    /// The foreign keys of one table, one row per column pair.
+    ///
+    /// `unnest(conkey, confkey)` walks the two arrays in step, which is what pairs each column with
+    /// the one it points at — a composite key's columns are matched by position, not by name.
+    pub async fn foreign_keys(&self, node: &DbNodeRef) -> Result<Vec<DbForeignKey>, String> {
+        let schema = node.schema().unwrap_or("public");
+        let table = node.name()?;
+        let rows = self
+            .text_rows(&format!(
+                "SELECT a.attname, rn.nspname, rc.relname, ra.attname \
+                 FROM pg_constraint con \
+                 JOIN pg_class c ON c.oid = con.conrelid \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 JOIN pg_class rc ON rc.oid = con.confrelid \
+                 JOIN pg_namespace rn ON rn.oid = rc.relnamespace \
+                 JOIN LATERAL unnest(con.conkey, con.confkey) AS k(att, ratt) ON true \
+                 JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.att \
+                 JOIN pg_attribute ra ON ra.attrelid = con.confrelid AND ra.attnum = k.ratt \
+                 WHERE con.contype = 'f' AND n.nspname = {} AND c.relname = {} \
+                 ORDER BY con.conname",
+                quote_literal(Some(schema))?,
+                quote_literal(Some(table))?
+            ))
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| DbForeignKey {
+                column: cell(row, 0),
+                ref_schema: Some(cell(row, 1)),
+                ref_table: cell(row, 2),
+                ref_column: cell(row, 3),
+            })
+            .collect())
+    }
+
     async fn keys(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {
         let schema = node.schema().unwrap_or("public");
         let table = node.name()?;
@@ -651,7 +699,11 @@ impl PgSession {
             applied += 1;
         }
         self.client.simple_query("COMMIT").await.map_err(pg_error)?;
-        Ok(DbEditResult { applied, statements, error: None })
+        Ok(DbEditResult {
+            applied,
+            statements,
+            error: None,
+        })
     }
 
     pub async fn object_ddl(&self, node: &DbNodeRef) -> Result<String, String> {
@@ -880,24 +932,113 @@ fn pg_config(
 fn tls_connector(
     config: &DbConnectionConfig,
 ) -> Result<tokio_postgres_rustls::MakeRustlsConnect, String> {
+    let provider = rustls::crypto::CryptoProvider::get_default()
+        .cloned()
+        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
+
     if config.ssl == DbSslMode::VerifyFull {
-        return Ok(tokio_postgres_rustls::MakeRustlsConnect::with_native_certs()
-            .map(|(connector, _errors)| connector)
-            .unwrap_or_else(|_| tokio_postgres_rustls::MakeRustlsConnect::with_webpki_roots()));
+        // The shortcut, for the common case of a public or OS-known CA and no client certificate.
+        // Kept because it is also the path that works when the config names no files at all.
+        //
+        // The key is checked as well as the certificate: a key on its own is a half-filled form,
+        // and taking the shortcut past it would silently ignore something the user typed.
+        if config.ssl_ca_file.trim().is_empty()
+            && config.ssl_cert_file.trim().is_empty()
+            && config.ssl_key_file.trim().is_empty()
+        {
+            return Ok(tokio_postgres_rustls::MakeRustlsConnect::with_native_certs()
+                .map(|(connector, _errors)| connector)
+                .unwrap_or_else(|_| tokio_postgres_rustls::MakeRustlsConnect::with_webpki_roots()));
+        }
+        let builder = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|e| e.to_string())?
+            .with_root_certificates(root_store(config)?);
+        return Ok(tokio_postgres_rustls::MakeRustlsConnect::new(with_client_auth(
+            builder, config,
+        )?));
     }
 
     // `Require` means "encrypt, don't validate" — the mode a dev server with a self-signed
     // certificate needs. Signature checking stays on, so a genuinely broken peer still fails.
-    let provider = rustls::crypto::CryptoProvider::get_default()
-        .cloned()
-        .unwrap_or_else(|| Arc::new(rustls::crypto::ring::default_provider()));
-    let client_config = rustls::ClientConfig::builder_with_provider(provider.clone())
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?
         .dangerous()
-        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert(provider)))
-        .with_no_client_auth();
-    Ok(tokio_postgres_rustls::MakeRustlsConnect::new(client_config))
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert(provider)));
+    Ok(tokio_postgres_rustls::MakeRustlsConnect::new(with_client_auth(builder, config)?))
+}
+
+/// The roots to trust: the platform's, plus the CA file when one is named.
+///
+/// *Plus*, not *instead of*. A private CA is almost always an addition to the public ones — the
+/// database is behind it, the rest of the world isn't — and replacing the store would break every
+/// other name the same connection might have to verify.
+fn root_store(config: &DbConnectionConfig) -> Result<rustls::RootCertStore, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in rustls_native_certs::load_native_certs().certs {
+        let _ = roots.add(certificate);
+    }
+    let path = config.ssl_ca_file.trim();
+    if !path.is_empty() {
+        let pem = std::fs::read(path)
+            .map_err(|e| format!("couldn't read the CA file at {path}: {e}"))?;
+        let mut reader = std::io::BufReader::new(pem.as_slice());
+        let mut added = 0usize;
+        for certificate in rustls_pemfile::certs(&mut reader) {
+            let certificate =
+                certificate.map_err(|e| format!("{path} isn't a readable PEM certificate: {e}"))?;
+            roots.add(certificate).map_err(|e| format!("{path} was rejected: {e}"))?;
+            added += 1;
+        }
+        if added == 0 {
+            return Err(format!("{path} holds no certificates."));
+        }
+    }
+    Ok(roots)
+}
+
+/// Attaches the client certificate, when the connection names one.
+///
+/// Both halves or neither: a certificate without its key cannot authenticate anything, and saying
+/// so here is better than a TLS handshake that fails with the server's opinion of the problem.
+fn with_client_auth(
+    builder: rustls::ConfigBuilder<rustls::ClientConfig, rustls::client::WantsClientCert>,
+    config: &DbConnectionConfig,
+) -> Result<rustls::ClientConfig, String> {
+    let cert_path = config.ssl_cert_file.trim();
+    let key_path = config.ssl_key_file.trim();
+    if cert_path.is_empty() && key_path.is_empty() {
+        return Ok(builder.with_no_client_auth());
+    }
+    if cert_path.is_empty() || key_path.is_empty() {
+        return Err(
+            "A client certificate needs both the certificate and its private key. Fill in the \
+             missing one, or clear both."
+                .to_string(),
+        );
+    }
+
+    let cert_pem = std::fs::read(cert_path)
+        .map_err(|e| format!("couldn't read the client certificate at {cert_path}: {e}"))?;
+    let certificates = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_pem.as_slice()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("{cert_path} isn't a readable PEM certificate: {e}"))?;
+    if certificates.is_empty() {
+        return Err(format!("{cert_path} holds no certificates."));
+    }
+
+    let key_pem = std::fs::read(key_path)
+        .map_err(|e| format!("couldn't read the client key at {key_path}: {e}"))?;
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_pem.as_slice()))
+        .map_err(|e| format!("couldn't read the client key at {key_path}: {e}"))?
+        .ok_or_else(|| {
+            format!("{key_path} holds no private key. An encrypted key has to be decrypted first.")
+        })?;
+
+    builder
+        .with_client_auth_cert(certificates, key)
+        .map_err(|e| format!("the client certificate and key were rejected: {e}"))
 }
 
 /// Drives the connection and collects the server's out-of-band messages.
@@ -981,5 +1122,67 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyServerCert {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datasource::DbSslMode;
+
+    fn config() -> DbConnectionConfig {
+        DbConnectionConfig {
+            id: "c".into(),
+            kind: DbKind::Postgres,
+            host: "localhost".into(),
+            port: 0,
+            database: "app".into(),
+            user: "postgres".into(),
+            password: String::new(),
+            url: String::new(),
+            ssl: DbSslMode::VerifyFull,
+            options: Vec::new(),
+            read_only: false,
+            connect_timeout_ms: 0,
+            show_all_databases: false,
+            visible_schemas: Vec::new(),
+            object_filter: String::new(),
+            keep_alive_secs: 0,
+            auto_disconnect_secs: 0,
+            startup_script: String::new(),
+            ssl_ca_file: String::new(),
+            ssl_cert_file: String::new(),
+            ssl_key_file: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            ssh_user: String::new(),
+            ssh_key_file: String::new(),
+        }
+    }
+
+    /// Half a client certificate authenticates nothing. Saying so here beats a TLS handshake that
+    /// fails with the server's opinion of what went wrong.
+    #[test]
+    fn a_client_certificate_needs_both_halves() {
+        let mut config = config();
+        config.ssl_cert_file = "/tmp/client.pem".into();
+        let refused = tls_connector(&config).err().expect("half a certificate is refused");
+        assert!(refused.contains("private key"), "{refused}");
+
+        config.ssl_cert_file = String::new();
+        config.ssl_key_file = "/tmp/client.key".into();
+        let refused = tls_connector(&config).err().expect("half a certificate is refused");
+        assert!(refused.contains("certificate"), "{refused}");
+    }
+
+    /// A CA path that isn't there has to be reported as that, and not as a connection failure ten
+    /// seconds later.
+    #[test]
+    fn a_missing_ca_file_is_named() {
+        let mut config = config();
+        config.ssl_ca_file = "/nowhere/ca.pem".into();
+        let refused = tls_connector(&config).err().expect("a missing CA file is refused");
+        assert!(refused.contains("/nowhere/ca.pem"), "{refused}");
     }
 }

@@ -760,6 +760,20 @@ pub async fn review_pr_from_link(
         enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
     }
 
+    // The conversation already open on the PR, same as the project-backed review — minus the
+    // memory half, which a link session never has (nothing is saved for a PR with no project).
+    let open_threads = match &target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            github::list_pr_comment_threads(host, owner, repo, *number, &credential).await.unwrap_or_default()
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            ado::list_pr_comment_threads(org, project, repo, *number, &credential).await.unwrap_or_default()
+        }
+    };
+    if let Some(block) = pending_comments_block(&[], &open_threads) {
+        enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
+    }
+
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
     let result = crate::ai_runs::scoped(app, Some(job_id.clone()), async {
@@ -834,6 +848,22 @@ pub async fn pr_link_comment_threads(db: State<'_, Db>, url: String) -> Result<V
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             ado::list_pr_comment_threads(org, project, repo, *number, &credential).await
+        }
+    }
+}
+
+/// Closing a conversation on the host, addressed by link — the repo-less twin of
+/// [`resolve_pr_comment_thread`]. Resolving a thread is a host call, so a review with no clone can
+/// do it too.
+#[tauri::command]
+pub async fn pr_link_resolve_comment_thread(db: State<'_, Db>, url: String, thread_id: i64) -> Result<(), String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    match &target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
+            github::resolve_review_thread_for_comment(host, owner, repo, *number, thread_id, &credential).await
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            ado::set_pr_thread_status(org, project, repo, *number, thread_id, THREAD_FIXED, &credential).await
         }
     }
 }
@@ -1121,6 +1151,39 @@ pub async fn list_pr_comment_threads(
     }
 }
 
+/// Azure DevOps' thread status for "this was fixed" — what its own **Resolve** button sets. The
+/// other statuses (won't fix, by design) are judgements CodeFlow has no business making on the
+/// reviewer's behalf, so resolving from here always means this one.
+const THREAD_FIXED: i32 = 2;
+
+/// Marks one comment thread as resolved on the host: Azure's `fixed`, GitHub's
+/// `resolveReviewThread`. The counterpart of "resolve with AI" — once the fix is applied, the
+/// conversation it came from can be closed without leaving the app.
+///
+/// `thread_id` is the id [`list_pr_comment_threads`] reported, which is a real thread on Azure and
+/// the root comment of a review thread on GitHub (the shape each host's API addresses). GitHub's
+/// conversation-level comments belong to no review thread and cannot be resolved at all — that
+/// surfaces as an error from the GraphQL lookup rather than silently doing nothing.
+#[tauri::command]
+pub async fn resolve_pr_comment_thread(
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+    thread_id: i64,
+) -> Result<(), String> {
+    let project = load_project(&db, &project_id)?;
+    match linked_repo(&project)? {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            let pat = pat_for_org(&org)?;
+            ado::set_pr_thread_status(&org, &ado_project, &repo_id, pr_id, thread_id, THREAD_FIXED, &pat).await
+        }
+        LinkedRepo::GitHub { host, owner, repo } => {
+            let token = github_token(&host)?;
+            github::resolve_review_thread_for_comment(&host, &owner, &repo, pr_id, thread_id, &token).await
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn review_pull_request(
     app: AppHandle,
@@ -1220,6 +1283,7 @@ pub async fn review_pull_request(
 
     let diff_files = git::diff::get_branch_diff(&project.local_path, &pr.target_branch, &head_ref)?;
     let diff_text = git::diff::render_diff_for_prompt(&diff_files);
+    let scope = diff_scope(&diff_files);
 
     let mut enabled_contexts: Vec<(String, String)> = contexts
         .into_iter()
@@ -1229,6 +1293,35 @@ pub async fn review_pull_request(
     // The active agent's own instructions go first, so the role frames the review.
     if let Some(prompt) = agent_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
         enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
+    }
+
+    // What the conversation on the PR still has open — the findings this app published and that
+    // the last run left active, plus whatever else the host still shows unresolved. A re-review
+    // without them only re-derives defects from the diff, and says nothing about the question the
+    // second run is actually asked: were the comments already left on this PR addressed?
+    //
+    // Both halves are best-effort. Losing the reviewer's own memory or the host's thread list
+    // costs context, and context is not worth failing a review the user is waiting on.
+    let remembered: Vec<crate::review_memory::MemoryFinding> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::latest_review_findings(&conn, &project_id, pr_id)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    };
+    let open_threads = match &link {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => match pat_for_org(org) {
+            Ok(pat) => ado::list_pr_comment_threads(org, ado_project, repo_id, pr_id, &pat).await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        },
+        LinkedRepo::GitHub { host, owner, repo } => match github_token(host) {
+            Ok(token) => github::list_pr_comment_threads(host, owner, repo, pr_id, &token).await.unwrap_or_default(),
+            Err(_) => Vec::new(),
+        },
+    };
+    if let Some(block) = pending_comments_block(&remembered, &open_threads) {
+        enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
     }
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
@@ -1270,7 +1363,7 @@ pub async fn review_pull_request(
         Ok(text) => {
             let text = persist_review_run(
                 &conn, &job_id, &project, &workspace_id, &pr, &level, config.engine.label(), &config.model,
-                &diff_text, &head_sha, changed_files.as_deref(), text,
+                &diff_text, &head_sha, scope, changed_files.as_deref(), text,
             );
             let _ = queries::add_job_history(
                 &conn, &job_id, &project_id, "pr-review", &label, "done", Some(&text), None, &history_meta,
@@ -1286,6 +1379,115 @@ pub async fn review_pull_request(
     };
 
     result
+}
+
+/// Files touched and lines added / removed in the diff this review was handed — the numbers behind
+/// the summary's "scope analysed" line. Counted from the same `FileDiffInfo` the prompt was
+/// rendered from, so the summary can never claim a scope the review didn't actually see.
+fn diff_scope(files: &[git::diff::FileDiffInfo]) -> crate::review_memory::DiffScope {
+    let mut scope = crate::review_memory::DiffScope { files: files.len(), additions: 0, deletions: 0 };
+    for file in files {
+        for hunk in &file.hunks {
+            for line in &hunk.lines {
+                match line.origin.as_str() {
+                    "+" => scope.additions += 1,
+                    "-" => scope.deletions += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    scope
+}
+
+/// How much of one comment's text is carried into the prompt. Enough to know what was asked;
+/// short enough that twenty threads don't crowd out the diff.
+const COMMENT_EXCERPT: usize = 500;
+
+/// At most this many host threads are carried. Past it the conversation is long enough that the
+/// tail adds noise rather than context, and the truncation is stated in the block itself.
+const MAX_THREADS: usize = 20;
+
+/// The still-open conversation on a pull request, rendered as one context block for the review
+/// prompt.
+///
+/// Two sources, deliberately kept apart: the findings **this app** published and still holds
+/// active (from the durable review memory — they carry their stable `F-NNN` id, which is what lets
+/// reconciliation match the re-review's findings back to the threads already opened for them), and
+/// every other thread the host still shows open (a human reviewer's). The instructions matter as
+/// much as the list: a finding that persists must be re-reported *with the same file and category*
+/// or reconciliation reads it as fixed, and one that really was fixed must be left out and said so
+/// in the summary — that is exactly the signal that flips it to `resuelto`.
+///
+/// Returns `None` when nothing is pending: a first review has no conversation to carry, and an
+/// empty "still open" section only invites the model to invent one.
+fn pending_comments_block(
+    remembered: &[crate::review_memory::MemoryFinding],
+    threads: &[ado::PrCommentThread],
+) -> Option<String> {
+    let published: Vec<&crate::review_memory::MemoryFinding> = remembered
+        .iter()
+        .filter(|f| f.is_active() && f.thread_id.is_some())
+        .collect();
+    // Threads CodeFlow opened are already described, in richer terms, by the memory above —
+    // listing them again would ask the model to answer the same finding twice.
+    let ours: std::collections::HashSet<i64> = remembered.iter().filter_map(|f| f.thread_id).collect();
+    let others: Vec<&ado::PrCommentThread> = threads.iter().filter(|t| !ours.contains(&t.id)).collect();
+    if published.is_empty() && others.is_empty() {
+        return None;
+    }
+
+    // Leading newline: contexts are rendered as `- {name}: {content}`, and a multi-line block
+    // reads as part of that bullet unless it starts on its own line.
+    let mut out = String::from(
+        "\nEste pull request ya tiene conversación abierta. Además de revisar el diff actual, \
+         responde explícitamente por cada punto pendiente si esta iteración lo corrige.\n",
+    );
+
+    if !published.is_empty() {
+        out.push_str(
+            "\n## Hallazgos que esta app publicó y siguen abiertos\n\
+             Reglas: si el hallazgo SIGUE presente, vuelve a reportarlo con el mismo archivo y la \
+             misma categoría (así se reconoce como el mismo hallazgo y se responde en su hilo). Si \
+             ya está corregido, NO lo reportes como hallazgo y dilo en el resumen.\n\n",
+        );
+        for f in &published {
+            let loc = match (&f.archivo, &f.lineas) {
+                (Some(file), Some(lines)) => format!(" · `{file}:{lines}`"),
+                (Some(file), None) => format!(" · `{file}`"),
+                _ => String::new(),
+            };
+            out.push_str(&format!(
+                "- **{}** · {} · categoría `{}`{} — {}\n",
+                f.id, f.severity, f.categoria, loc, f.subtitulo
+            ));
+        }
+    }
+
+    if !others.is_empty() {
+        out.push_str(
+            "\n## Otros comentarios abiertos en el PR\n\
+             Son de personas revisoras. Indica en el resumen si el cambio actual los atiende.\n\n",
+        );
+        for thread in others.iter().take(MAX_THREADS) {
+            let loc = match (&thread.file_path, thread.start_line) {
+                (Some(file), Some(line)) => format!(" (`{file}:{line}`)"),
+                (Some(file), None) => format!(" (`{file}`)"),
+                _ => String::new(),
+            };
+            out.push_str(&format!("- Hilo #{}{}\n", thread.id, loc));
+            for c in &thread.comments {
+                let text: String = c.content.chars().take(COMMENT_EXCERPT).collect();
+                let ellipsis = if c.content.chars().count() > COMMENT_EXCERPT { "…" } else { "" };
+                out.push_str(&format!("  - {}: {}{}\n", c.author, text.replace('\n', " "), ellipsis));
+            }
+        }
+        if others.len() > MAX_THREADS {
+            out.push_str(&format!("\n_(+{} hilos abiertos no listados.)_\n", others.len() - MAX_THREADS));
+        }
+    }
+
+    Some(out)
 }
 
 /// Saves one completed review into `review_runs` (durable memory, in the DB) and, when the PR has
@@ -1304,6 +1506,7 @@ fn persist_review_run(
     model: &str,
     diff_text: &str,
     head_sha: &str,
+    scope: crate::review_memory::DiffScope,
     changed_files: Option<&[String]>,
     text: String,
 ) -> String {
@@ -1359,6 +1562,9 @@ fn persist_review_run(
         timestamp: chrono::Local::now().to_rfc3339(),
         iter,
         head_sha: head_sha.to_string(),
+        files: scope.files,
+        additions: scope.additions,
+        deletions: scope.deletions,
     };
 
     let meta_json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
@@ -1453,7 +1659,9 @@ pub async fn post_pr_review_comment(
                         };
                         let r = ado::reply_pr_thread(org, ado_project, repo_id, pr_id, tid, &text, &pat).await;
                         if r.is_ok() && resolved {
-                            let _ = ado::set_pr_thread_status(org, ado_project, repo_id, pr_id, tid, 2, &pat).await;
+                            let _ =
+                                ado::set_pr_thread_status(org, ado_project, repo_id, pr_id, tid, THREAD_FIXED, &pat)
+                                    .await;
                         }
                         r.map(|_| None)
                     }

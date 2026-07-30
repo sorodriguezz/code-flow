@@ -12,9 +12,9 @@
 use tauri::State;
 
 use crate::datasource::{
-    scope_to_current_database, DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult,
-    DbNode, DbNodeKind, DbNodeRef, DbRegistry, DbRowEdit, DbServerInfo, DbStatementResult,
-    DbTableDataRequest, Session,
+    filter_children, scope_to_current_database, DbConnectionConfig, DbEditResult, DbExecContext,
+    DbExecuteResult, DbForeignKey, DbNode, DbNodeKind, DbNodeRef, DbRegistry, DbRowEdit,
+    DbServerInfo, DbStatementResult, DbTableDataRequest, Session,
 };
 use crate::db::datasource_queries as queries;
 use crate::db::{models::*, Db};
@@ -114,8 +114,10 @@ pub fn db_set_password(
 /// like the credential was lost.
 #[tauri::command]
 pub fn db_has_password(connection_id: String) -> Result<bool, String> {
-    Ok(secrets::get_secret(&crate::datasource::password_key(&connection_id))?
-        .is_some_and(|value| !value.is_empty()))
+    Ok(
+        secrets::get_secret(&crate::datasource::password_key(&connection_id))?
+            .is_some_and(|value| !value.is_empty()),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -132,8 +134,15 @@ pub fn db_create_console(
     schema_name: String,
 ) -> Result<DbConsole, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::create_console(&conn, &connection_id, &name, &body, &database_name, &schema_name)
-        .map_err(|e| e.to_string())
+    queries::create_console(
+        &conn,
+        &connection_id,
+        &name,
+        &body,
+        &database_name,
+        &schema_name,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -204,8 +213,13 @@ fn resolve_config(db: &State<Db>, connection_id: &str) -> Result<DbConnectionCon
     // The row is authoritative for both: `spec` is a blob the frontend wrote and could have gone
     // stale against a rename or a re-typed engine.
     config.id = row.id;
-    config.kind = serde_json::from_value(serde_json::Value::String(row.kind.clone()))
-        .map_err(|_| format!("`{}` isn't a database engine this build knows about.", row.kind))?;
+    config.kind =
+        serde_json::from_value(serde_json::Value::String(row.kind.clone())).map_err(|_| {
+            format!(
+                "`{}` isn't a database engine this build knows about.",
+                row.kind
+            )
+        })?;
     config.resolve_password();
     Ok(config)
 }
@@ -229,7 +243,15 @@ pub async fn db_connect(
             // that is what makes "change the port, test" work without re-typing the password.
             inline.resolve_password();
             let session = Session::open(&inline, database.as_deref()).await?;
-            Ok(session.info())
+            let info = session.info();
+            drop(session);
+            // A test leaves nothing running. The tunnel this may have raised belongs to the
+            // attempt, not to a connection that hasn't been saved yet — and an unsaved form has no
+            // id, so leaving it would park an SSH process under an empty key that nothing closes.
+            if inline.ssh_enabled {
+                crate::datasource::tunnel::close(&inline.id);
+            }
+            Ok(info)
         }
         None => {
             let config = resolve_config(&db, &connection_id)?;
@@ -268,9 +290,12 @@ pub async fn db_children(
     // The root is the only level that lists databases, and the only one where the connection's own
     // database means "start here" rather than "here is everything".
     if node.kind == DbNodeKind::Root && !config.show_all_databases {
-        return Ok(scope_to_current_database(children, &session.info().database));
+        return Ok(scope_to_current_database(
+            children,
+            &session.info().database,
+        ));
     }
-    Ok(children)
+    Ok(filter_children(&config, &node, children))
 }
 
 #[tauri::command]
@@ -344,6 +369,19 @@ pub async fn db_row_count(
     registry
         .run(&run_id, &session, &key, session.row_count(&node, &filter))
         .await
+}
+
+/// Which columns of this table point somewhere else, so the grid can offer to follow them.
+#[tauri::command]
+pub async fn db_foreign_keys(
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    node: DbNodeRef,
+) -> Result<Vec<DbForeignKey>, String> {
+    let config = resolve_config(&db, &connection_id)?;
+    let session = registry.session(&config, node.database.as_deref()).await?;
+    session.foreign_keys(&node).await
 }
 
 #[tauri::command]

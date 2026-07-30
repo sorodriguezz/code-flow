@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { AlertOctagon, AlertTriangle, Check, ChevronDown, ChevronRight, Info, Loader2, MapPin, Wand2, X } from "lucide-react";
 import {
   computeQualityGatePassed,
@@ -129,6 +129,8 @@ export function ResolveWithAiButton({
   runId,
   onClick,
   onClear,
+  trailing,
+  showAi = true,
 }: {
   resolving: boolean;
   resolution: string | null;
@@ -136,6 +138,11 @@ export function ResolveWithAiButton({
   runId?: string | null;
   onClick: () => void;
   onClear?: () => void;
+  /** An extra action sharing this row — a PR comment's "resolve the thread on the host", which
+   * belongs beside the fix that earned it rather than on a line of its own. */
+  trailing?: ReactNode;
+  /** False where there is no working copy to fix: `trailing` still renders, the AI half doesn't. */
+  showAi?: boolean;
 }) {
   const t = useT();
   const [logExpanded, setLogExpanded] = useState(false);
@@ -143,18 +150,22 @@ export function ResolveWithAiButton({
   // so there's no dead button, unless there's already a resolution to show from an earlier run.
   // Keyed on the *fix* task's provider, which routing may point somewhere other than the default.
   const providerId = useTaskProvider("fix");
-  if (!isAgenticProvider(providerId) && !resolution) return null;
+  const hideAi = !showAi || (!isAgenticProvider(providerId) && !resolution);
+  if (hideAi && !trailing) return null;
   return (
     <>
-      <div className="flex items-center gap-2 pt-1">
-        <button
-          onClick={onClick}
-          disabled={resolving}
-          className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
-        >
-          {resolving ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
-          {resolving ? t("finding.resolving") : resolution ? t("finding.resolveAgain") : t("finding.resolve")}
-        </button>
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        {!hideAi && (
+          <button
+            onClick={onClick}
+            disabled={resolving}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+          >
+            {resolving ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
+            {resolving ? t("finding.resolving") : resolution ? t("finding.resolveAgain") : t("finding.resolve")}
+          </button>
+        )}
+        {trailing}
       </div>
       {resolving && runId && (
         <AiRunLog runId={runId} running expanded={logExpanded} onToggle={() => setLogExpanded((v) => !v)} />

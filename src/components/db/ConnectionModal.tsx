@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
-  ChevronDown,
-  ChevronRight,
+  Copy,
   Database,
   Eye,
   EyeOff,
+  FolderOpen,
   Link2,
   Loader2,
+  Minus,
   Plug,
   Plus,
   Server,
@@ -15,43 +16,58 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { ApiModal, GhostButton } from "../api/ApiModal";
 import { Checkbox } from "../common/Checkbox";
+import { EmptyState } from "../common/EmptyState";
 import { Select, type SelectItems } from "../common/Select";
 import { EngineGlyph } from "./dbChrome";
+import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { parseSpec, redactUrl, useDbStore } from "../../state/dbStore";
 import { dbHasPassword } from "../../lib/tauri/dbCommands";
+import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import {
   DB_ENGINES,
   defaultConnectionConfig,
   engineInfo,
   type DbConnectionConfig,
+  type DbConnectionRow,
   type DbKind,
   type DbServerInfo,
   type DbSslMode,
 } from "../../types/database";
 
 /**
- * The connection dialog.
+ * The connection dialog: every saved connection down the left, the selected one's settings on the
+ * right.
  *
- * The layout is the design here. A database connection has a dozen settings and only four of them
- * are ever typed, so the dialog is built in three tiers: the engine, the four fields that matter,
- * and everything else behind a disclosure. The first version put all twelve in one column, which
- * made a 1300px-tall sheet where the important box and the one nobody touches looked equally
- * important.
+ * It used to be a single-connection sheet, opened once per connection from the tree. That is the
+ * wrong shape for the job it is actually asked to do — "set up my databases" is a session, not one
+ * edit, and doing it a sheet at a time meant closing and reopening the dialog to copy a host from
+ * one connection to the next. The list makes the set the subject, which is also what makes the
+ * dialog worth opening from the workspace itself and not only from a connection's own menu.
  *
- * Two more things it is careful about:
+ * What it is careful about, beyond the layout:
+ *
+ * **The engine is chosen before this opens.** It decides what every field below it means — the
+ * default port, the word for "database", the shape of the URL — so it is asked by the menu the `+`
+ * expands (see `EngineMenu`) and the dialog opens already dressed for the answer. The picker stays
+ * on the General tab, because changing your mind about an existing connection is a real edit.
  *
  * **Fields or URL, never both.** They are alternatives — a pasted URI overrides every field — so
- * they are a two-mode switch rather than two sections where one silently wins. The old version dimmed
- * the fields when a URL was present, which left the user reading greyed-out boxes to work out which
- * half was live.
+ * they are a two-mode switch rather than two sections where one silently wins. The old version
+ * dimmed the fields when a URL was present, which left the user reading greyed-out boxes to work out
+ * which half was live.
  *
- * **The password.** A saved one is never read back — there is no command that returns it — so the box
- * shows a "saved" placeholder and stays empty. Leaving it empty on save keeps whatever is in the
+ * **The password.** A saved one is never read back — there is no command that returns it — so the
+ * box shows a "saved" placeholder and stays empty. Leaving it empty on save keeps whatever is in the
  * keychain; typing replaces it; the trash button removes it. That is the only model that doesn't
  * either lie about what is stored or make the user re-type a credential to change a port.
+ *
+ * **Unsaved edits are guarded on the way *out of a connection*, not on the way out of the dialog.**
+ * Cancel and Escape discard, as they always have — that is what the words mean. But clicking another
+ * connection in the list is not a discard, so that one asks.
  */
 
 /** Shared with `Field` in `ApiModal`, so a local input styled here can't drift from the rest. */
@@ -59,28 +75,91 @@ const INPUT =
   "w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:opacity-50";
 
 type Mode = "fields" | "url";
+type Tab = "general" | "options" | "ssh" | "schemas" | "advanced";
+
+/** The three states the right-hand pane loads from an entry in the list. */
+function editorState(row: DbConnectionRow | null, engine: DbKind | null) {
+  const spec = row ? parseSpec(row) : null;
+  return {
+    name: row?.name ?? "",
+    config: spec ?? defaultConnectionConfig(engine ?? "postgres"),
+    // Opens on whichever half is actually in use, so editing a URL-based connection doesn't start
+    // on a form of empty fields that aren't being used.
+    mode: (spec?.url ? "url" : "fields") as Mode,
+  };
+}
+
+/**
+ * Whether two configs would connect to the same place.
+ *
+ * Field by field rather than a `JSON.stringify` comparison: one side comes from a form and the other
+ * from `JSON.parse`, and their key order is only incidentally the same — a stringify would call a
+ * connection dirty because its spec was written by an older build.
+ */
+function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
+  return (
+    a.kind === b.kind &&
+    a.host === b.host &&
+    a.port === b.port &&
+    a.database === b.database &&
+    a.user === b.user &&
+    a.url === b.url &&
+    a.ssl === b.ssl &&
+    a.read_only === b.read_only &&
+    a.connect_timeout_ms === b.connect_timeout_ms &&
+    a.show_all_databases === b.show_all_databases &&
+    a.object_filter === b.object_filter &&
+    a.keep_alive_secs === b.keep_alive_secs &&
+    a.auto_disconnect_secs === b.auto_disconnect_secs &&
+    a.startup_script === b.startup_script &&
+    a.ssl_ca_file === b.ssl_ca_file &&
+    a.ssl_cert_file === b.ssl_cert_file &&
+    a.ssl_key_file === b.ssl_key_file &&
+    a.ssh_enabled === b.ssh_enabled &&
+    a.ssh_host === b.ssh_host &&
+    a.ssh_port === b.ssh_port &&
+    a.ssh_user === b.ssh_user &&
+    a.ssh_key_file === b.ssh_key_file &&
+    a.visible_schemas.length === b.visible_schemas.length &&
+    a.visible_schemas.every((name, i) => b.visible_schemas[i] === name) &&
+    a.options.length === b.options.length &&
+    a.options.every(([key, value], i) => b.options[i]?.[0] === key && b.options[i]?.[1] === value)
+  );
+}
 
 export function ConnectionModal({
   connectionId,
+  newEngine,
   onClose,
 }: {
+  /** The connection to open on. Ignored when `newEngine` is set. */
   connectionId: string | null;
+  /** Set when the dialog was opened to create a connection, holding the engine already chosen. */
+  newEngine: DbKind | null;
   onClose: () => void;
 }) {
   const t = useT();
-  const row = useDbStore((s) => s.connections.find((c) => c.id === connectionId) ?? null);
+  const connections = useDbStore((s) => s.connections);
   const store = useDbStore.getState();
 
-  const [name, setName] = useState(row?.name ?? "");
-  const [config, setConfig] = useState<DbConnectionConfig>(
-    () => (row ? parseSpec(row) : null) ?? defaultConnectionConfig("postgres"),
+  /** The row being edited. `null` means the draft — the unsaved new connection, when one exists. */
+  const [selected, setSelected] = useState<string | null>(
+    newEngine ? null : connectionId ?? connections[0]?.id ?? null,
   );
-  // Opens on whichever half is actually in use, so editing a URL-based connection doesn't start on
-  // a form of empty fields that aren't being used.
-  const [mode, setMode] = useState<Mode>(() =>
-    (row ? parseSpec(row)?.url : "") ? "url" : "fields",
+  /** Non-null while an unsaved new connection sits at the bottom of the list. */
+  const [draftEngine, setDraftEngine] = useState<DbKind | null>(newEngine);
+  const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const first = useMemo(
+    () => editorState(connections.find((c) => c.id === selected) ?? null, draftEngine),
+    // Once, for the initial selection. Every later load goes through `load`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
   );
-  const [advanced, setAdvanced] = useState(false);
+  const [name, setName] = useState(first.name);
+  const [config, setConfig] = useState<DbConnectionConfig>(first.config);
+  const [mode, setMode] = useState<Mode>(first.mode);
+  const [tab, setTab] = useState<Tab>("general");
   const [password, setPassword] = useState("");
   const [revealPassword, setRevealPassword] = useState(false);
   /** Whether the keychain already holds one. Decides the placeholder and whether "clear" is shown. */
@@ -93,13 +172,22 @@ export function ConnectionModal({
   const [saving, setSaving] = useState(false);
 
   const engine = engineInfo(config.kind);
+  const row = connections.find((c) => c.id === selected) ?? null;
+  const savedSpec = row ? parseSpec(row) : null;
 
   useEffect(() => {
-    if (!connectionId) return;
-    void dbHasPassword(connectionId)
+    if (!selected) return;
+    void dbHasPassword(selected)
       .then(setHasStored)
       .catch(() => setHasStored(false));
-  }, [connectionId]);
+    // Only for the connection the dialog opened on; `load` handles every later selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const patch = (partial: Partial<DbConnectionConfig>) => {
+    setConfig((current) => ({ ...current, ...partial }));
+    setOutcome(null);
+  };
 
   /** Switching engine keeps what is engine-independent — a host and user typed before the switch. */
   const setKind = (kind: DbKind) => {
@@ -113,15 +201,23 @@ export function ConnectionModal({
       options: current.options,
       read_only: current.read_only,
       show_all_databases: current.show_all_databases,
+      // How you reach the host and how long you hold it are true of the network and the machine,
+      // not of the engine listening on it — a tunnel to a bastion survives realising you meant
+      // MySQL rather than Postgres.
+      keep_alive_secs: current.keep_alive_secs,
+      auto_disconnect_secs: current.auto_disconnect_secs,
+      ssl_ca_file: current.ssl_ca_file,
+      ssl_cert_file: current.ssl_cert_file,
+      ssl_key_file: current.ssl_key_file,
+      ssh_enabled: current.ssh_enabled,
+      ssh_host: current.ssh_host,
+      ssh_port: current.ssh_port,
+      ssh_user: current.ssh_user,
+      ssh_key_file: current.ssh_key_file,
       // A port typed explicitly is kept; the engine's default (0) follows the new engine.
       port: current.port,
       database: current.database || defaults.database,
     }));
-    setOutcome(null);
-  };
-
-  const patch = (partial: Partial<DbConnectionConfig>) => {
-    setConfig((current) => ({ ...current, ...partial }));
     setOutcome(null);
   };
 
@@ -148,15 +244,64 @@ export function ConnectionModal({
 
   /** What a connect will actually address, once defaults are filled in. */
   const target = useMemo(() => {
-    if (mode === "url" && config.url.trim()) return redactUrl(config.url.trim());
+    // Named first, because a tunnel changes what "reachable" means: the host below is resolved on
+    // the far side of it, and a name that only exists inside that network is then correct rather
+    // than a typo.
+    const via = config.ssh_enabled
+      ? ` ${t("db.viaTunnel", { host: config.ssh_host.trim() || "ssh" })}`
+      : "";
+    if (mode === "url" && config.url.trim()) return `${redactUrl(config.url.trim())}${via}`;
     const port = config.port || engine.defaultPort;
     const where = `${config.host || "localhost"}:${port}`;
     const path = config.database ? `/${config.database}` : "";
     // IRIS is addressed by a JDBC URL, and showing it in full is what makes a connection still
     // pointed at the old REST port (52773) obvious before it is saved rather than after it fails.
-    if (config.kind === "iris") return `jdbc:IRIS://${where}${path}`;
-    return `${where}${path}`;
-  }, [mode, config, engine.defaultPort]);
+    if (config.kind === "iris") return `jdbc:IRIS://${where}${path}${via}`;
+    return `${where}${path}${via}`;
+  }, [mode, config, engine.defaultPort, t]);
+
+  /** What `save` would write, which is what "has this changed?" has to be asked about. */
+  const pending = useMemo(
+    () => ({ ...config, url: mode === "url" ? config.url : "" }),
+    [config, mode],
+  );
+
+  const dirty = useMemo(() => {
+    if (passwordTouched) return true;
+    // A draft counts as dirty once it stops being the blank form its engine came with — so
+    // clicking away from one you opened by accident doesn't ask about nothing.
+    if (!row || !savedSpec) {
+      return name.trim() !== "" || !sameConfig(pending, defaultConnectionConfig(config.kind));
+    }
+    return name.trim() !== row.name || !sameConfig(pending, savedSpec);
+  }, [passwordTouched, row, savedSpec, name, pending, config.kind]);
+
+  /** Points the right-hand pane at another entry, discarding whatever the old one held. */
+  const load = (id: string | null, engineForDraft: DbKind | null) => {
+    const next = editorState(connections.find((c) => c.id === id) ?? null, engineForDraft);
+    setSelected(id);
+    setDraftEngine(engineForDraft);
+    setName(next.name);
+    setConfig(next.config);
+    setMode(next.mode);
+    setPassword("");
+    setPasswordTouched(false);
+    setRevealPassword(false);
+    setOutcome(null);
+    setHasStored(false);
+    if (id) {
+      void dbHasPassword(id)
+        .then(setHasStored)
+        .catch(() => setHasStored(false));
+    }
+  };
+
+  /** `load`, but it asks first when the pane holds work that isn't saved anywhere. */
+  const select = async (id: string | null, engineForDraft: DbKind | null) => {
+    if (id === selected && engineForDraft === draftEngine) return;
+    if (dirty && !(await confirmAction(t("db.discardConnectionChanges")))) return;
+    load(id, engineForDraft);
+  };
 
   const test = async () => {
     setTesting(true);
@@ -164,7 +309,7 @@ export function ConnectionModal({
     try {
       const info = await store.testConnection({
         ...config,
-        id: connectionId ?? "",
+        id: selected ?? "",
         // The typed password wins; an untouched box means "use what's in the keychain", which the
         // backend resolves from the id.
         password: passwordTouched ? password : "",
@@ -180,30 +325,72 @@ export function ConnectionModal({
     }
   };
 
-  const save = async () => {
+  /** Writes the pane to the store. Returns the connection's id, or null when nothing was written. */
+  const save = async (): Promise<string | null> => {
     setSaving(true);
     try {
       const finalName = name.trim() || derivedName;
       let saved = row;
       if (!saved) {
         saved = await store.createConnection(config.kind, finalName);
-        if (!saved) return;
+        if (!saved) return null;
       }
       const ok = await store.saveConnection(
         { ...saved, name: finalName },
-        {
-          ...config,
-          id: saved.id,
-          password: "",
-          url: mode === "url" ? config.url : "",
-        },
+        { ...pending, id: saved.id, password: "" },
         // `null` means "leave the keychain alone" — which is what an untouched box means.
         passwordTouched ? password : null,
       );
-      if (ok) onClose();
+      return ok ? saved.id : null;
     } finally {
       setSaving(false);
     }
+  };
+
+  /** Save and stay, so a session of edits doesn't cost a reopen per connection. */
+  const apply = async () => {
+    const id = await save();
+    if (!id) return;
+    setSelected(id);
+    setDraftEngine(null);
+    setName(name.trim() || derivedName);
+    // The typed password is in the keychain now, so the box goes back to showing that.
+    setPassword("");
+    setPasswordTouched(false);
+    void dbHasPassword(id)
+      .then(setHasStored)
+      .catch(() => setHasStored(false));
+  };
+
+  const saveAndClose = async () => {
+    if (await save()) onClose();
+  };
+
+  /**
+   * Clones the selected connection and lands on the copy.
+   *
+   * The copy carries the settings and not the password — the keychain entry belongs to the
+   * connection that earned it, and a duplicate that silently inherited a credential would be a way
+   * to hand production's password to a connection named "staging".
+   */
+  const clone = async () => {
+    if (!row) return;
+    if (dirty && !(await confirmAction(t("db.discardConnectionChanges")))) return;
+    const copy = await store.duplicateConnection(row.id);
+    if (copy) load(copy.id, null);
+  };
+
+  /** `−`: drops the draft, or deletes the saved connection after asking. */
+  const remove = async () => {
+    if (!row) {
+      if (draftEngine === null) return;
+      if (dirty && !(await confirmAction(t("db.discardConnectionChanges")))) return;
+      load(connections[0]?.id ?? null, null);
+      return;
+    }
+    if (!(await confirmAction(t("db.deleteConfirm", { name: row.name })))) return;
+    await store.deleteConnection(row.id);
+    load(connections.find((c) => c.id !== row.id)?.id ?? null, null);
   };
 
   const sslOptions = useMemo(
@@ -215,12 +402,15 @@ export function ConnectionModal({
     [t],
   );
 
+  const nothingSelected = !row && draftEngine === null;
+
   return (
     <ApiModal
       icon={Database}
-      title={connectionId ? t("db.editConnection") : t("db.newConnection")}
-      subtitle={engine.label}
-      width="max-w-xl"
+      title={t("db.dataSources")}
+      subtitle={nothingSelected ? undefined : engine.label}
+      width="max-w-4xl"
+      height="h-[78vh]"
       busy={saving}
       // A dozen fields and a password, none of it drafted anywhere: a click on the backdrop must not
       // be what throws it away. Close, Cancel and Escape stay.
@@ -228,15 +418,18 @@ export function ConnectionModal({
       onClose={onClose}
       footer={
         <div className="flex w-full items-center gap-2">
-          <GhostButton onClick={() => void test()} disabled={testing}>
+          <GhostButton onClick={() => void test()} disabled={testing || nothingSelected}>
             {testing ? <Loader2 size={12} className="animate-spin" /> : <Plug size={12} />}
             {t("db.testConnection")}
           </GhostButton>
           <div className="ml-auto flex items-center gap-2">
             <GhostButton onClick={onClose}>{t("common.cancel")}</GhostButton>
+            <GhostButton onClick={() => void apply()} disabled={saving || nothingSelected || !dirty}>
+              {t("db.apply")}
+            </GhostButton>
             <button
-              onClick={() => void save()}
-              disabled={saving}
+              onClick={() => void saveAndClose()}
+              disabled={saving || nothingSelected}
               className="rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:opacity-50"
             >
               {t("common.save")}
@@ -245,258 +438,443 @@ export function ConnectionModal({
         </div>
       }
     >
-      {/* `ApiModal`'s body is a bare flex column — each modal brings its own padding and its own
-          scroll container. Without them the form sits flush against the frame and a tall one
-          overflows the sheet instead of scrolling inside it. */}
-      <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
-        <Row label={t("db.engine")}>
-          <EnginePicker active={config.kind} onSelect={setKind} />
-        </Row>
-
-        <Row label={t("db.name")}>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={derivedName}
-            className={INPUT}
-          />
-        </Row>
-
-        {/* Fields or URL — alternatives, so only one is on screen. */}
-        <div>
-          <ModeSwitch mode={mode} onChange={(next) => { setMode(next); setOutcome(null); }} />
-
-          {mode === "url" ? (
-            <div className="mt-2">
-              <input
-                value={config.url}
-                onChange={(e) => patch({ url: e.target.value })}
-                placeholder={engine.urlPlaceholder}
-                spellCheck={false}
-                autoComplete="off"
-                className={`${INPUT} font-mono`}
-              />
-              <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">
-                {t("db.urlOverrides")}
-              </p>
-            </div>
-          ) : (
-            <div className="mt-2 space-y-2.5">
-              <div className="grid grid-cols-[1fr_104px] gap-2">
-                <Row label={t("db.host")}>
-                  <input
-                    value={config.host}
-                    onChange={(e) => patch({ host: e.target.value })}
-                    spellCheck={false}
-                    autoComplete="off"
-                    className={INPUT}
-                  />
-                </Row>
-                <Row label={t("db.port")}>
-                  <NumberInput
-                    value={config.port}
-                    onChange={(port) => patch({ port })}
-                    placeholder={String(engine.defaultPort)}
-                  />
-                </Row>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2">
-                <Row label={engine.databaseLabel}>
-                  <input
-                    value={config.database}
-                    onChange={(e) => patch({ database: e.target.value })}
-                    placeholder={engine.databaseLabel}
-                    spellCheck={false}
-                    autoComplete="off"
-                    className={INPUT}
-                  />
-                </Row>
-                <Row label={t("db.user")}>
-                  <input
-                    value={config.user}
-                    onChange={(e) => patch({ user: e.target.value })}
-                    spellCheck={false}
-                    autoComplete="off"
-                    className={INPUT}
-                  />
-                </Row>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <Row
-          label={t("db.password")}
-          hint={hasStored && !passwordTouched ? t("db.passwordStored") : t("db.passwordHint")}
-        >
-          <div className="relative flex items-center">
-            <input
-              type={revealPassword ? "text" : "password"}
-              value={password}
-              onChange={(e) => {
-                setPassword(e.target.value);
-                setPasswordTouched(true);
-                setOutcome(null);
-              }}
-              placeholder={hasStored && !passwordTouched ? "••••••••" : ""}
-              autoComplete="new-password"
-              className={`${INPUT} ${hasStored ? "pr-14" : "pr-8"}`}
-            />
-            <div className="absolute right-1.5 flex items-center gap-0.5">
-              <IconButton
-                onClick={() => setRevealPassword((current) => !current)}
-                title={revealPassword ? t("db.hidePassword") : t("db.showPassword")}
-              >
-                {revealPassword ? <EyeOff size={12} /> : <Eye size={12} />}
-              </IconButton>
-              {hasStored && (
-                <IconButton
-                  onClick={() => {
-                    setPassword("");
-                    setPasswordTouched(true);
-                  }}
-                  title={t("db.clearPassword")}
-                >
-                  <Trash2 size={12} />
-                </IconButton>
-              )}
-            </div>
+      <div className="flex min-h-0 flex-1">
+        {/* The set of connections, which is what makes this a dialog about the workspace's
+            databases rather than about one of them. */}
+        <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--cf-border)]">
+          <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1.5">
+            <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              {t("db.connectionsHeading")}
+            </span>
+            <IconButton
+              onClick={(e) => setEngineMenu(menuAnchor(e))}
+              title={t("db.newConnection")}
+            >
+              <Plus size={13} />
+            </IconButton>
+            <IconButton onClick={() => void remove()} title={t("db.removeConnection")}>
+              <Minus size={13} />
+            </IconButton>
+            <IconButton onClick={() => void clone()} title={t("db.duplicate")}>
+              <Copy size={12} />
+            </IconButton>
           </div>
-        </Row>
 
-        {/* Everything nobody types. Collapsed by default: the four boxes above are the connection,
-            and these are the exceptions to it. */}
-        <div className="rounded-lg border border-[var(--cf-border)]">
-          <button
-            type="button"
-            onClick={() => setAdvanced((current) => !current)}
-            aria-expanded={advanced}
-            className="flex w-full items-center gap-1.5 px-2.5 py-2 text-left text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          >
-            {advanced ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-            <SlidersHorizontal size={12} />
-            {t("db.advanced")}
-            {/* A summary while it is closed, so a non-default setting isn't hidden by the fold. */}
-            {!advanced && (
-              <span className="ml-auto min-w-0 truncate font-normal normal-case tracking-normal">
-                {[
-                  sslOptions.find((option) => option.value === config.ssl)?.label,
-                  config.read_only ? t("db.readOnly") : null,
-                  config.show_all_databases ? t("db.showAllDatabases") : null,
-                  config.options.filter(([key]) => key).length > 0
-                    ? t("db.optionsN", { n: String(config.options.filter(([key]) => key).length) })
-                    : null,
-                ]
-                  .filter(Boolean)
-                  .join(" · ")}
-              </span>
+          <div className="min-h-0 flex-1 overflow-auto p-1">
+            {connections.map((entry) => (
+              <ConnectionRow
+                key={entry.id}
+                glyph={<EngineGlyph kind={entry.kind} />}
+                name={entry.name}
+                detail={parseSpec(entry)?.host ?? ""}
+                active={entry.id === selected}
+                onClick={() => void select(entry.id, null)}
+              />
+            ))}
+            {draftEngine !== null && (
+              <ConnectionRow
+                glyph={<EngineGlyph kind={draftEngine} />}
+                name={name.trim() || derivedName}
+                detail={t("db.draftConnection")}
+                active={selected === null}
+                onClick={() => void select(null, draftEngine)}
+              />
             )}
-          </button>
+          </div>
+        </aside>
 
-          {advanced && (
-            <div className="space-y-3 border-t border-[var(--cf-border)] p-2.5">
-              <div className="grid grid-cols-2 gap-2">
-                <Row label={t("db.ssl.label")}>
-                  <Select
-                    value={config.ssl}
-                    options={sslOptions}
-                    onChange={(ssl) => patch({ ssl: ssl as DbSslMode })}
-                    size="md"
+        {nothingSelected ? (
+          <div className="min-h-0 flex-1">
+            <EmptyState
+              icon={Database}
+              title={t("db.noConnections")}
+              subtitle={t("db.noConnectionsHint")}
+            />
+          </div>
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col">
+            {/* Name and engine sit above the tabs: both are true of the connection whichever tab is
+                open, and burying the engine in one of them would hide what the other one means. */}
+            <div className="shrink-0 border-b border-[var(--cf-border)] px-4 py-3">
+              <div className="grid grid-cols-[1fr_180px] gap-3">
+                <Row label={t("db.name")}>
+                  <input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    placeholder={derivedName}
+                    className={INPUT}
                   />
                 </Row>
-                <Row label={t("db.timeout")}>
-                  <NumberInput
-                    value={config.connect_timeout_ms}
-                    onChange={(connect_timeout_ms) => patch({ connect_timeout_ms })}
-                    placeholder="15000"
-                  />
+                <Row label={t("db.engine")}>
+                  <EnginePicker active={config.kind} onSelect={setKind} />
                 </Row>
               </div>
-
-              <label className="flex cursor-pointer items-start gap-2">
-                <Checkbox
-                  checked={config.read_only}
-                  onChange={(read_only) => patch({ read_only })}
-                  className="mt-[2px]"
-                />
-                <span>
-                  <span className="block text-[12px] text-[var(--cf-text)]">
-                    {t("db.readOnly")}
-                  </span>
-                  <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                    {t("db.readOnlyHint")}
-                  </span>
-                </span>
-              </label>
-
-              <label className="flex cursor-pointer items-start gap-2">
-                <Checkbox
-                  checked={config.show_all_databases}
-                  onChange={(show_all_databases) => patch({ show_all_databases })}
-                  className="mt-[2px]"
-                />
-                <span>
-                  <span className="block text-[12px] text-[var(--cf-text)]">
-                    {t("db.showAllDatabases")}
-                  </span>
-                  <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                    {t("db.showAllDatabasesHint")}
-                  </span>
-                </span>
-              </label>
-
-              <DriverOptions
-                options={config.options}
-                onChange={(options) => patch({ options })}
-                kind={config.kind}
-              />
             </div>
-          )}
-        </div>
 
-        {/* What a connect will actually address. The one line that catches a port left on the
-            default, or a URL that quietly overrode the fields. */}
-        <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
-          <Server size={11} className="shrink-0" />
-          <span className="shrink-0 uppercase tracking-wide">{t("db.target")}</span>
-          <span className="min-w-0 truncate font-mono text-[var(--cf-text)]">{target}</span>
-        </p>
-
-        {outcome && (
-          <div
-            className={`rounded-lg border p-2.5 text-[12px] ${
-              outcome.ok
-                ? "border-[var(--cf-success)]/40 bg-[var(--cf-success)]/[0.07]"
-                : "border-[var(--cf-danger)]/40 bg-[var(--cf-danger)]/[0.07]"
-            }`}
-          >
-            <p className="flex items-start gap-1.5">
-              {outcome.ok ? (
-                <CheckCircle2 size={13} className="mt-[2px] shrink-0 text-[var(--cf-success)]" />
-              ) : (
-                <XCircle size={13} className="mt-[2px] shrink-0 text-[var(--cf-danger)]" />
-              )}
-              <span className="min-w-0 break-words leading-snug text-[var(--cf-text)]">
-                {outcome.ok
-                  ? [outcome.info.version, outcome.info.database, outcome.info.user]
-                      .filter(Boolean)
-                      .join(" · ")
-                  : outcome.error}
-              </span>
-            </p>
-            {outcome.ok &&
-              outcome.info.notes.map((note) => (
-                <p
-                  key={note}
-                  className="mt-1.5 pl-5 text-[11px] leading-snug text-[var(--cf-text-muted)]"
+            <div className="flex shrink-0 gap-0.5 border-b border-[var(--cf-border)] px-2 pt-1.5">
+              {(
+                [
+                  { id: "general", label: t("db.tab.general") },
+                  { id: "options", label: t("db.tab.options") },
+                  { id: "ssh", label: t("db.tab.ssh") },
+                  { id: "schemas", label: t("db.tab.schemas") },
+                  { id: "advanced", label: t("db.advanced") },
+                ] as { id: Tab; label: string }[]
+              ).map((entry) => (
+                <button
+                  key={entry.id}
+                  type="button"
+                  onClick={() => setTab(entry.id)}
+                  aria-selected={tab === entry.id}
+                  className={`-mb-px border-b-2 px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
+                    tab === entry.id
+                      ? "border-[var(--cf-accent)] text-[var(--cf-text)]"
+                      : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                  }`}
                 >
-                  {note}
-                </p>
+                  {entry.label}
+                </button>
               ))}
+            </div>
+
+            <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+              {tab === "general" ? (
+                <>
+                  {/* Fields or URL — alternatives, so only one is on screen. */}
+                  <div>
+                    <ModeSwitch
+                      mode={mode}
+                      onChange={(next) => {
+                        setMode(next);
+                        setOutcome(null);
+                      }}
+                    />
+
+                    {mode === "url" ? (
+                      <div className="mt-2">
+                        <input
+                          value={config.url}
+                          onChange={(e) => patch({ url: e.target.value })}
+                          placeholder={engine.urlPlaceholder}
+                          spellCheck={false}
+                          autoComplete="off"
+                          className={`${INPUT} font-mono`}
+                        />
+                        <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">
+                          {t("db.urlOverrides")}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="mt-2 space-y-2.5">
+                        <div className="grid grid-cols-[1fr_104px] gap-2">
+                          <Row label={t("db.host")}>
+                            <input
+                              value={config.host}
+                              onChange={(e) => patch({ host: e.target.value })}
+                              spellCheck={false}
+                              autoComplete="off"
+                              className={INPUT}
+                            />
+                          </Row>
+                          <Row label={t("db.port")}>
+                            <NumberInput
+                              value={config.port}
+                              onChange={(port) => patch({ port })}
+                              placeholder={String(engine.defaultPort)}
+                            />
+                          </Row>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <Row label={engine.databaseLabel}>
+                            <input
+                              value={config.database}
+                              onChange={(e) => patch({ database: e.target.value })}
+                              placeholder={engine.databaseLabel}
+                              spellCheck={false}
+                              autoComplete="off"
+                              className={INPUT}
+                            />
+                          </Row>
+                          <Row label={t("db.user")}>
+                            <input
+                              value={config.user}
+                              onChange={(e) => patch({ user: e.target.value })}
+                              spellCheck={false}
+                              autoComplete="off"
+                              className={INPUT}
+                            />
+                          </Row>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <Row
+                    label={t("db.password")}
+                    hint={hasStored && !passwordTouched ? t("db.passwordStored") : t("db.passwordHint")}
+                  >
+                    <div className="relative flex items-center">
+                      <input
+                        type={revealPassword ? "text" : "password"}
+                        value={password}
+                        onChange={(e) => {
+                          setPassword(e.target.value);
+                          setPasswordTouched(true);
+                          setOutcome(null);
+                        }}
+                        placeholder={hasStored && !passwordTouched ? "••••••••" : ""}
+                        autoComplete="new-password"
+                        className={`${INPUT} ${hasStored ? "pr-14" : "pr-8"}`}
+                      />
+                      <div className="absolute right-1.5 flex items-center gap-0.5">
+                        <IconButton
+                          onClick={() => setRevealPassword((current) => !current)}
+                          title={revealPassword ? t("db.hidePassword") : t("db.showPassword")}
+                        >
+                          {revealPassword ? <EyeOff size={12} /> : <Eye size={12} />}
+                        </IconButton>
+                        {hasStored && (
+                          <IconButton
+                            onClick={() => {
+                              setPassword("");
+                              setPasswordTouched(true);
+                            }}
+                            title={t("db.clearPassword")}
+                          >
+                            <Trash2 size={12} />
+                          </IconButton>
+                        )}
+                      </div>
+                    </div>
+                  </Row>
+                </>
+              ) : tab === "options" ? (
+                <>
+                  <Toggle
+                    checked={config.read_only}
+                    onChange={(read_only) => patch({ read_only })}
+                    label={t("db.readOnly")}
+                    hint={t("db.readOnlyHint")}
+                  />
+                  <Toggle
+                    checked={config.show_all_databases}
+                    onChange={(show_all_databases) => patch({ show_all_databases })}
+                    label={t("db.showAllDatabases")}
+                    hint={t("db.showAllDatabasesHint")}
+                  />
+
+                  <div className="grid grid-cols-3 gap-2">
+                    <Row label={t("db.timeout")}>
+                      <NumberInput
+                        value={config.connect_timeout_ms}
+                        onChange={(connect_timeout_ms) => patch({ connect_timeout_ms })}
+                        placeholder="15000"
+                      />
+                    </Row>
+                    <Row label={t("db.keepAlive")}>
+                      <NumberInput
+                        value={config.keep_alive_secs}
+                        onChange={(keep_alive_secs) => patch({ keep_alive_secs })}
+                        placeholder={t("db.off")}
+                      />
+                    </Row>
+                    <Row label={t("db.autoDisconnect")}>
+                      <NumberInput
+                        value={config.auto_disconnect_secs}
+                        onChange={(auto_disconnect_secs) => patch({ auto_disconnect_secs })}
+                        placeholder={t("db.off")}
+                      />
+                    </Row>
+                  </div>
+                  <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("db.sessionTimersHint")}
+                  </p>
+
+                  <Row label={t("db.startupScript")} hint={t("db.startupScriptHint")}>
+                    <textarea
+                      value={config.startup_script}
+                      onChange={(e) => patch({ startup_script: e.target.value })}
+                      rows={4}
+                      spellCheck={false}
+                      placeholder={startupScriptExample(config.kind)}
+                      className={`${INPUT} resize-y font-mono`}
+                    />
+                  </Row>
+                </>
+              ) : tab === "ssh" ? (
+                <>
+                  <Toggle
+                    checked={config.ssh_enabled}
+                    onChange={(ssh_enabled) => patch({ ssh_enabled })}
+                    label={t("db.sshTunnel")}
+                    hint={t("db.sshTunnelHint")}
+                  />
+                  {/* Said here rather than only at connect time: a URL names the host to reach
+                      directly, which is the one thing a tunnel exists to avoid. */}
+                  {config.ssh_enabled && mode === "url" && (
+                    <p className="rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/[0.07] p-2.5 text-[11px] leading-snug text-[var(--cf-text)]">
+                      {t("db.sshNeedsFields")}
+                    </p>
+                  )}
+                  {config.ssh_enabled && (
+                    <div className="space-y-2.5 border-l-2 border-[var(--cf-border)] pl-3">
+                      <div className="grid grid-cols-[1fr_104px] gap-2">
+                        <Row label={t("db.sshHost")}>
+                          <input
+                            value={config.ssh_host}
+                            onChange={(e) => patch({ ssh_host: e.target.value })}
+                            placeholder="bastion.example.com"
+                            spellCheck={false}
+                            autoComplete="off"
+                            className={INPUT}
+                          />
+                        </Row>
+                        <Row label={t("db.port")}>
+                          <NumberInput
+                            value={config.ssh_port}
+                            onChange={(ssh_port) => patch({ ssh_port })}
+                            placeholder="22"
+                          />
+                        </Row>
+                      </div>
+                      <Row label={t("db.user")} hint={t("db.sshUserHint")}>
+                        <input
+                          value={config.ssh_user}
+                          onChange={(e) => patch({ ssh_user: e.target.value })}
+                          spellCheck={false}
+                          autoComplete="off"
+                          className={INPUT}
+                        />
+                      </Row>
+                      <FileRow
+                        label={t("db.sshKey")}
+                        hint={t("db.sshKeyHint")}
+                        value={config.ssh_key_file}
+                        onChange={(ssh_key_file) => patch({ ssh_key_file })}
+                      />
+                    </div>
+                  )}
+
+                  <div className="border-t border-[var(--cf-border)] pt-3">
+                    <Row label={t("db.ssl.label")}>
+                      <Select
+                        value={config.ssl}
+                        options={sslOptions}
+                        onChange={(ssl) => patch({ ssl: ssl as DbSslMode })}
+                        size="md"
+                      />
+                    </Row>
+                  </div>
+                  {config.ssl !== "disable" && (
+                    <div className="space-y-2.5 border-l-2 border-[var(--cf-border)] pl-3">
+                      <FileRow
+                        label={t("db.sslCa")}
+                        hint={t("db.sslCaHint")}
+                        value={config.ssl_ca_file}
+                        onChange={(ssl_ca_file) => patch({ ssl_ca_file })}
+                      />
+                      <FileRow
+                        label={t("db.sslCert")}
+                        hint={
+                          config.kind === "mongodb" ? t("db.sslCertMongoHint") : t("db.sslCertHint")
+                        }
+                        value={config.ssl_cert_file}
+                        onChange={(ssl_cert_file) => patch({ ssl_cert_file })}
+                      />
+                      {config.kind !== "mongodb" && (
+                        <FileRow
+                          label={t("db.sslKey")}
+                          value={config.ssl_key_file}
+                          onChange={(ssl_key_file) => patch({ ssl_key_file })}
+                        />
+                      )}
+                      {config.kind === "iris" && (
+                        <p className="text-[11px] leading-snug text-[var(--cf-warning)]">
+                          {t("db.sslIrisNote")}
+                        </p>
+                      )}
+                      {config.kind === "sqlserver" && (
+                        <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                          {t("db.sslMssqlNote")}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </>
+              ) : tab === "schemas" ? (
+                <SchemasTab
+                  connectionId={selected}
+                  visible={config.visible_schemas}
+                  objectFilter={config.object_filter}
+                  onChange={patch}
+                />
+              ) : (
+                <DriverOptions
+                  options={config.options}
+                  onChange={(options) => patch({ options })}
+                  kind={config.kind}
+                />
+              )}
+            </div>
+
+            {/* Pinned under the tabs rather than inside one: what a connect will address, and how
+                the last one went, are true of the connection and not of the tab you happen to be
+                reading. The one line that catches a port left on the default, or a URL that quietly
+                overrode the fields. */}
+            <div className="shrink-0 space-y-2 border-t border-[var(--cf-border)] px-4 py-2.5">
+              <p className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+                <Server size={11} className="shrink-0" />
+                <span className="shrink-0 uppercase tracking-wide">{t("db.target")}</span>
+                <span className="min-w-0 truncate font-mono text-[var(--cf-text)]">{target}</span>
+              </p>
+
+              {outcome && (
+                <div
+                  className={`max-h-32 overflow-auto rounded-lg border p-2.5 text-[12px] ${
+                    outcome.ok
+                      ? "border-[var(--cf-success)]/40 bg-[var(--cf-success)]/[0.07]"
+                      : "border-[var(--cf-danger)]/40 bg-[var(--cf-danger)]/[0.07]"
+                  }`}
+                >
+                  <p className="flex items-start gap-1.5">
+                    {outcome.ok ? (
+                      <CheckCircle2 size={13} className="mt-[2px] shrink-0 text-[var(--cf-success)]" />
+                    ) : (
+                      <XCircle size={13} className="mt-[2px] shrink-0 text-[var(--cf-danger)]" />
+                    )}
+                    <span className="min-w-0 break-words leading-snug text-[var(--cf-text)]">
+                      {outcome.ok
+                        ? [outcome.info.version, outcome.info.database, outcome.info.user]
+                            .filter(Boolean)
+                            .join(" · ")
+                        : outcome.error}
+                    </span>
+                  </p>
+                  {outcome.ok &&
+                    outcome.info.notes.map((note) => (
+                      <p
+                        key={note}
+                        className="mt-1.5 pl-5 text-[11px] leading-snug text-[var(--cf-text-muted)]"
+                      >
+                        {note}
+                      </p>
+                    ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </div>
+
+      {engineMenu && (
+        <EngineMenu
+          x={engineMenu.x}
+          y={engineMenu.y}
+          onPick={(kind) => void select(null, kind)}
+          onClose={() => setEngineMenu(null)}
+        />
+      )}
     </ApiModal>
   );
 }
@@ -504,6 +882,250 @@ export function ConnectionModal({
 // ---------------------------------------------------------------------------
 // Pieces
 // ---------------------------------------------------------------------------
+
+/** A checkbox with its own label and explanation, which is the shape every switch here wants. */
+function Toggle({
+  checked,
+  onChange,
+  label,
+  hint,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+  hint: string;
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-2">
+      <Checkbox checked={checked} onChange={onChange} className="mt-[2px]" />
+      <span>
+        <span className="block text-[12px] text-[var(--cf-text)]">{label}</span>
+        <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">{hint}</span>
+      </span>
+    </label>
+  );
+}
+
+/**
+ * A path, with a picker beside it.
+ *
+ * Typed as well as picked: these files live in `~/.ssh` and `/etc/ssl`, which several platforms'
+ * file dialogs hide, and a user who knows the path should not have to fight a dialog to use it.
+ */
+function FileRow({
+  label,
+  hint,
+  value,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const t = useT();
+  const browse = async () => {
+    const picked = await open({ multiple: false, directory: false });
+    if (typeof picked === "string") onChange(picked);
+  };
+  return (
+    <Row label={label} hint={hint}>
+      <div className="flex items-center gap-1.5">
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          spellCheck={false}
+          autoComplete="off"
+          className={`${INPUT} font-mono`}
+        />
+        <GhostButton onClick={() => void browse()}>
+          <FolderOpen size={12} />
+          {t("db.browse")}
+        </GhostButton>
+        {value && (
+          <IconButton onClick={() => onChange("")} title={t("db.clearFile")}>
+            <Trash2 size={12} />
+          </IconButton>
+        )}
+      </div>
+    </Row>
+  );
+}
+
+/** A starting point for the startup script, in the dialect the connection speaks. */
+function startupScriptExample(kind: DbKind): string {
+  switch (kind) {
+    case "sqlserver":
+      return "SET LOCK_TIMEOUT 5000;";
+    case "iris":
+      return "SET OPTION SUPPORT_DELIMITED_IDENTIFIERS = 1";
+    case "mongodb":
+      return "";
+    default:
+      return "SET search_path TO app, public;";
+  }
+}
+
+/**
+ * Which schemas the tree lists, and a name filter over what's inside them.
+ *
+ * The checkboxes are drawn from what the explorer has already loaded rather than from a fresh
+ * introspection: this dialog must stay usable on a connection that is closed, behind a VPN or
+ * simply wrong, and a tab that had to connect before it could show you anything would be useless in
+ * exactly the case you opened it to fix. Anything not in that cache is still reachable — the box
+ * below adds a name by hand, which is also how you pre-filter a connection you have never opened.
+ *
+ * Nothing checked means everything shows. That is the same rule the backend applies, and it is the
+ * one that makes the feature safe to discover: unchecking your way to an empty tree takes a
+ * deliberate act, and re-checking nothing undoes it.
+ */
+function SchemasTab({
+  connectionId,
+  visible,
+  objectFilter,
+  onChange,
+}: {
+  connectionId: string | null;
+  visible: string[];
+  objectFilter: string;
+  onChange: (partial: Partial<DbConnectionConfig>) => void;
+}) {
+  const t = useT();
+  const children = useDbStore((s) => s.children);
+  const [typed, setTyped] = useState("");
+
+  /** Every schema the explorer has seen under this connection, plus the ones already chosen. */
+  const known = useMemo(() => {
+    const names = new Set(visible);
+    if (connectionId) {
+      for (const [key, nodes] of Object.entries(children)) {
+        if (!key.startsWith(`${connectionId}|`)) continue;
+        for (const node of nodes) {
+          if (node.kind === "schema") names.add(node.name);
+        }
+      }
+    }
+    return [...names].sort((a, b) => a.localeCompare(b));
+  }, [children, connectionId, visible]);
+
+  const toggle = (name: string) => {
+    onChange({
+      visible_schemas: visible.includes(name)
+        ? visible.filter((entry) => entry !== name)
+        : [...visible, name],
+    });
+  };
+
+  const add = () => {
+    const name = typed.trim();
+    if (!name || visible.includes(name)) return;
+    onChange({ visible_schemas: [...visible, name] });
+    setTyped("");
+  };
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <span className="mb-1 flex items-center gap-2 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          {t("db.visibleSchemas")}
+          {visible.length > 0 && (
+            <button
+              type="button"
+              onClick={() => onChange({ visible_schemas: [] })}
+              className="font-normal normal-case tracking-normal text-[var(--cf-accent)] hover:underline"
+            >
+              {t("db.showAllSchemas")}
+            </button>
+          )}
+        </span>
+        <p className="mb-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {visible.length === 0 ? t("db.allSchemasShown") : t("db.someSchemasShown")}
+        </p>
+
+        {known.length === 0 ? (
+          <p className="rounded-md border border-dashed border-[var(--cf-border)] p-2.5 text-[11px] text-[var(--cf-text-muted)]">
+            {t("db.noSchemasKnown")}
+          </p>
+        ) : (
+          <div className="max-h-52 space-y-1 overflow-auto rounded-md border border-[var(--cf-border)] p-1.5">
+            {known.map((name) => (
+              <label key={name} className="flex cursor-pointer items-center gap-2">
+                <Checkbox checked={visible.includes(name)} onChange={() => toggle(name)} />
+                <span className="min-w-0 truncate text-[12px] text-[var(--cf-text)]">{name}</span>
+              </label>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-1.5 flex items-center gap-1.5">
+          <input
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                add();
+              }
+            }}
+            placeholder={t("db.addSchemaPlaceholder")}
+            spellCheck={false}
+            className={INPUT}
+          />
+          <GhostButton onClick={add} disabled={!typed.trim()}>
+            <Plus size={12} />
+            {t("db.addSchema")}
+          </GhostButton>
+        </div>
+      </div>
+
+      <Row label={t("db.objectFilter")} hint={t("db.objectFilterHint")}>
+        <input
+          value={objectFilter}
+          onChange={(e) => onChange({ object_filter: e.target.value })}
+          placeholder={t("db.objectFilterPlaceholder")}
+          spellCheck={false}
+          className={INPUT}
+        />
+      </Row>
+    </div>
+  );
+}
+
+/** One entry in the dialog's list of connections. */
+function ConnectionRow({
+  glyph,
+  name,
+  detail,
+  active,
+  onClick,
+}: {
+  glyph: React.ReactNode;
+  name: string;
+  detail: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-current={active}
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${
+        active
+          ? "bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
+          : "hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+      }`}
+    >
+      <span className="shrink-0">{glyph}</span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-[12px] text-[var(--cf-text)]">{name}</span>
+        {detail && (
+          <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">{detail}</span>
+        )}
+      </span>
+    </button>
+  );
+}
 
 /**
  * The engine picker: a named list, the way a database tool names its drivers.
@@ -641,7 +1263,7 @@ function IconButton({
   title,
   children,
 }: {
-  onClick: () => void;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   title: string;
   children: React.ReactNode;
 }) {

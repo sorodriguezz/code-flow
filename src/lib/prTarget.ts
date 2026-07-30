@@ -79,6 +79,14 @@ export function listCommentThreads(target: PrTarget, prId: number): Promise<PrCo
     : api.prLinkCommentThreads(target.url);
 }
 
+/** Closes one of the PR's comment threads on the host. Needs no working copy either way — it's a
+ * host call, so a link session resolves a conversation exactly like a project does. */
+export function resolveCommentThread(target: PrTarget, prId: number, threadId: number): Promise<void> {
+  return target.kind === "project"
+    ? api.resolvePrCommentThread(target.projectId, prId, threadId)
+    : api.prLinkResolveCommentThread(target.url, threadId);
+}
+
 export function reviewDecision(target: PrTarget, prId: number): Promise<PrDecision> {
   return target.kind === "project" ? api.prReviewDecision(target.projectId, prId) : api.prLinkDecision(target.url);
 }

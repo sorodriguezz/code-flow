@@ -17,10 +17,10 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use super::postgres::{annotate_types, cell, relation_folders, schema_folders};
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
-    describe_db_error, read_only_guard, read_only_refusal, split_statements, DbColumn, DbColumnInfo,
-    DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbKind, DbNode, DbNodeKind,
-    DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest,
-    SqlDialect,
+    describe_db_error, read_only_guard, read_only_refusal, split_statements, DbColumn,
+    DbColumnInfo, DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbForeignKey,
+    DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult,
+    DbTableDataRequest, SqlDialect,
 };
 
 const DIALECT: SqlDialect = SqlDialect::TSql;
@@ -131,7 +131,9 @@ impl MssqlSession {
                 continue;
             }
             let Some(row) = item.as_row() else { continue };
-            let Some(result) = current.as_mut() else { continue };
+            let Some(result) = current.as_mut() else {
+                continue;
+            };
             if limit.is_some_and(|max| result.rows.len() >= max) {
                 // Unlike Postgres, stopping here is not free: TDS would leave the remaining rows
                 // in the stream and the next statement would read them as its own answer. So the
@@ -140,9 +142,11 @@ impl MssqlSession {
                 result.truncated = true;
                 continue;
             }
-            result
-                .rows
-                .push(row.cells().map(|(_, data)| format_cell(data)).collect::<Vec<_>>());
+            result.rows.push(
+                row.cells()
+                    .map(|(_, data)| format_cell(data))
+                    .collect::<Vec<_>>(),
+            );
         }
 
         if let Some(previous) = current.take() {
@@ -213,7 +217,10 @@ impl MssqlSession {
                 }
             }
         }
-        Ok(DbExecuteResult { results, duration_ms: started.elapsed().as_millis() as u64 })
+        Ok(DbExecuteResult {
+            results,
+            duration_ms: started.elapsed().as_millis() as u64,
+        })
     }
 
     /// `SHOWPLAN_ALL` — the estimated plan, without running the statement.
@@ -576,6 +583,39 @@ impl MssqlSession {
             .collect())
     }
 
+    /// The foreign keys of one table, one row per column pair.
+    ///
+    /// `sys.foreign_key_columns` is already the per-column view — one row per pair, with the
+    /// ordinal handled for us — so there is no array to unpack the way Postgres needs.
+    pub async fn foreign_keys(&self, node: &DbNodeRef) -> Result<Vec<DbForeignKey>, String> {
+        self.use_database(node).await?;
+        let schema = node.schema().unwrap_or("dbo");
+        let table = node.name()?;
+        let object = quote_literal(Some(&format!("{schema}.{table}")))?;
+        let rows = self
+            .text_rows(&format!(
+                "SELECT pc.name, OBJECT_SCHEMA_NAME(fkc.referenced_object_id), \
+                        OBJECT_NAME(fkc.referenced_object_id), rc.name \
+                 FROM sys.foreign_key_columns fkc \
+                 JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id \
+                                    AND pc.column_id = fkc.parent_column_id \
+                 JOIN sys.columns rc ON rc.object_id = fkc.referenced_object_id \
+                                    AND rc.column_id = fkc.referenced_column_id \
+                 WHERE fkc.parent_object_id = OBJECT_ID({object}) \
+                 ORDER BY fkc.constraint_object_id, fkc.constraint_column_id"
+            ))
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| DbForeignKey {
+                column: cell(row, 0),
+                ref_schema: Some(cell(row, 1)),
+                ref_table: cell(row, 2),
+                ref_column: cell(row, 3),
+            })
+            .collect())
+    }
+
     async fn keys(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {
         self.use_database(node).await?;
         let schema = node.schema().unwrap_or("dbo");
@@ -677,7 +717,11 @@ impl MssqlSession {
             applied += 1;
         }
         self.run_silent("COMMIT").await?;
-        Ok(DbEditResult { applied, statements, error: None })
+        Ok(DbEditResult {
+            applied,
+            statements,
+            error: None,
+        })
     }
 
     pub async fn object_ddl(&self, node: &DbNodeRef) -> Result<String, String> {
@@ -768,24 +812,24 @@ fn format_temporal(data: &ColumnData<'static>) -> Option<String> {
     use tiberius::FromSql;
 
     match data {
-        ColumnData::Date(_) => {
-            NaiveDate::from_sql(data).ok().flatten().map(|d| d.format("%Y-%m-%d").to_string())
-        }
-        ColumnData::Time(_) => {
-            NaiveTime::from_sql(data).ok().flatten().map(|t| t.format("%H:%M:%S%.f").to_string())
-        }
+        ColumnData::Date(_) => NaiveDate::from_sql(data)
+            .ok()
+            .flatten()
+            .map(|d| d.format("%Y-%m-%d").to_string()),
+        ColumnData::Time(_) => NaiveTime::from_sql(data)
+            .ok()
+            .flatten()
+            .map(|t| t.format("%H:%M:%S%.f").to_string()),
         ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
             NaiveDateTime::from_sql(data)
                 .ok()
                 .flatten()
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S%.f").to_string())
         }
-        ColumnData::DateTimeOffset(_) => {
-            chrono::DateTime::<chrono::FixedOffset>::from_sql(data)
-                .ok()
-                .flatten()
-                .map(|dt| dt.to_rfc3339())
-        }
+        ColumnData::DateTimeOffset(_) => chrono::DateTime::<chrono::FixedOffset>::from_sql(data)
+            .ok()
+            .flatten()
+            .map(|dt| dt.to_rfc3339()),
         _ => None,
     }
 }
@@ -902,6 +946,16 @@ fn tds_config(config: &DbConnectionConfig, database: Option<&str>) -> Result<Con
             tds.trust_cert();
         }
         DbSslMode::VerifyFull => tds.encryption(EncryptionLevel::Required),
+    }
+    // Verified against a private CA. tiberius takes the path itself rather than a built trust
+    // store, so unlike the Postgres driver there is nothing to merge with the system's — naming a
+    // CA here means the server's certificate is checked against *that* file.
+    if !config.ssl_ca_file.trim().is_empty() {
+        let path = config.ssl_ca_file.trim();
+        if !std::path::Path::new(path).is_file() {
+            return Err(format!("There is no CA file at {path}."));
+        }
+        tds.trust_cert_ca(path);
     }
     if let Some(instance) = config.option("instance_name") {
         tds.instance_name(instance);

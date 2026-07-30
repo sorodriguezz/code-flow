@@ -14,6 +14,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { Select } from "../common/Select";
 import { ResultGrid } from "./ResultGrid";
 import { nodeLabel } from "./SqlConsolePanel";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
@@ -31,7 +32,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
-import { engineInfo } from "../../types/database";
+import { engineInfo, type DbForeignKey } from "../../types/database";
 
 const PAGE_SIZES = [50, 100, 200, 500, 1000];
 
@@ -72,6 +73,16 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
       ),
     [tab.columns],
   );
+
+  /** By column, since that is how the grid asks — "the cell I'm on, where does it lead?". A column
+   * in two foreign keys keeps the first, which is the one the catalog listed first. */
+  const foreignKeys = useMemo(() => {
+    const byColumn = new Map<string, DbForeignKey>();
+    for (const key of tab.foreignKeys) {
+      if (!byColumn.has(key.column)) byColumn.set(key.column, key);
+    }
+    return byColumn;
+  }, [tab.foreignKeys]);
 
   const changed = useMemo(() => new Set(Object.keys(tab.pending)), [tab.pending]);
   const deleted = useMemo(() => new Set(tab.deleted), [tab.deleted]);
@@ -252,6 +263,8 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
             sortColumn={tab.orderBy}
             sortDescending={tab.descending}
             primaryKeys={primaryKeys}
+            foreignKeys={foreignKeys}
+            onFollowForeignKey={(key, value) => store.followForeignKey(tab, key, value)}
           />
         ) : null}
 
@@ -295,20 +308,20 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           <ChevronRight size={13} />
         </ToolbarButton>
 
-        <select
-          value={tab.limit}
-          onChange={(e) => {
-            store.updateData(tab.id, { limit: Number(e.target.value), offset: 0 });
+        <Select
+          size="sm"
+          className="w-[112px]"
+          ariaLabel={t("db.perPage", { n: formatCount(tab.limit) })}
+          value={String(tab.limit)}
+          onChange={(value) => {
+            store.updateData(tab.id, { limit: Number(value), offset: 0 });
             void store.loadData(tab.id);
           }}
-          className="rounded border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1 py-[1px] text-[11px] text-[var(--cf-text)] outline-none"
-        >
-          {PAGE_SIZES.map((size) => (
-            <option key={size} value={size}>
-              {t("db.perPage", { n: formatCount(size) })}
-            </option>
-          ))}
-        </select>
+          options={PAGE_SIZES.map((size) => ({
+            value: String(size),
+            label: t("db.perPage", { n: formatCount(size) }),
+          }))}
+        />
 
         <span className="ml-auto flex items-center gap-2 tabular-nums">
           {tab.result && <span>{formatDuration(tab.result.duration_ms)}</span>}

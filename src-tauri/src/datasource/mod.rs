@@ -34,10 +34,11 @@ pub mod mongo;
 pub mod mssql;
 pub mod postgres;
 pub mod sqlgen;
+pub mod tunnel;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -140,6 +141,66 @@ pub struct DbConnectionConfig {
     /// [`scope_to_current_database`].
     #[serde(default)]
     pub show_all_databases: bool,
+    /// Which schemas the tree lists. Empty means all of them — a filter nobody set is not a filter.
+    ///
+    /// An allowlist rather than a list of things to hide, because that is the question the user is
+    /// actually answering: a database with ninety schemas and three that matter is named by the
+    /// three. See [`filter_children`].
+    #[serde(default)]
+    pub visible_schemas: Vec<String>,
+    /// A substring every table, view and routine name must contain to be listed. Empty means no
+    /// filter. Matched case-insensitively, since no engine here agrees with another about case.
+    #[serde(default)]
+    pub object_filter: String,
+
+    // ----------------------------------------------------------------- session
+
+    /// Seconds of idleness after which a trivial statement is sent to keep the connection open.
+    /// 0 is off. For the firewalls and pgbouncer-style poolers that drop a quiet socket without
+    /// telling either end — the failure that otherwise shows up as one mysterious dead query.
+    #[serde(default)]
+    pub keep_alive_secs: u32,
+    /// Seconds of idleness after which the session is closed. 0 is off. The opposite trade from
+    /// keep-alive, and both are legitimate: a licence-limited server wants the connection back.
+    #[serde(default)]
+    pub auto_disconnect_secs: u32,
+    /// SQL run once, immediately after connecting — a `SET search_path`, a role, a timezone.
+    /// A failure here fails the connection: a session that silently didn't get its `search_path`
+    /// answers every later query from the wrong schema.
+    #[serde(default)]
+    pub startup_script: String,
+
+    // --------------------------------------------------------------------- TLS
+
+    /// A PEM certificate authority to trust *in addition to* the system's. For the self-signed and
+    /// private-CA servers that `verify_full` would otherwise reject and `require` would accept
+    /// without checking anything.
+    #[serde(default)]
+    pub ssl_ca_file: String,
+    /// Client certificate and its private key, both PEM, for servers that authenticate the client
+    /// by certificate rather than (or as well as) by password.
+    #[serde(default)]
+    pub ssl_cert_file: String,
+    #[serde(default)]
+    pub ssl_key_file: String,
+
+    // --------------------------------------------------------------------- SSH
+
+    /// Whether to reach the database through an SSH tunnel. See [`super::tunnel`].
+    #[serde(default)]
+    pub ssh_enabled: bool,
+    #[serde(default)]
+    pub ssh_host: String,
+    /// 0 means 22.
+    #[serde(default)]
+    pub ssh_port: u16,
+    /// Empty defers to `~/.ssh/config` and then to the local username, exactly as `ssh` itself does.
+    #[serde(default)]
+    pub ssh_user: String,
+    /// A private key to use. Empty means whatever `ssh` would pick on its own — the agent, then the
+    /// default identities — which is usually the right answer on a machine that already pushes.
+    #[serde(default)]
+    pub ssh_key_file: String,
 }
 
 impl DbConnectionConfig {
@@ -185,7 +246,6 @@ impl DbConnectionConfig {
             self.password = secret;
         }
     }
-
 }
 
 /// Rejects a statement that would write, when the connection is marked read-only.
@@ -204,8 +264,9 @@ pub fn read_only_guard(statement: &str, read_only: bool) -> Result<(), String> {
         .find(|word| !word.is_empty())
         .unwrap_or("")
         .to_ascii_uppercase();
-    const READS: [&str; 9] =
-        ["SELECT", "WITH", "SHOW", "EXPLAIN", "DESCRIBE", "DESC", "SET", "USE", "CALL"];
+    const READS: [&str; 9] = [
+        "SELECT", "WITH", "SHOW", "EXPLAIN", "DESCRIBE", "DESC", "SET", "USE", "CALL",
+    ];
     if READS.contains(&head.as_str()) || head.is_empty() {
         return Ok(());
     }
@@ -244,7 +305,10 @@ pub struct DbColumn {
 
 impl DbColumn {
     pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
-        Self { name: name.into(), type_name: type_name.into() }
+        Self {
+            name: name.into(),
+            type_name: type_name.into(),
+        }
     }
 }
 
@@ -436,6 +500,39 @@ pub fn scope_to_current_database(mut nodes: Vec<DbNode>, current: &str) -> Vec<D
     nodes
 }
 
+/// Applies the connection's own visibility rules to a level of the tree.
+///
+/// Over the drivers rather than inside them, for the same reason as [`scope_to_current_database`]:
+/// this is a rule about what *this user* wants to look at, not about what the engine holds, and a
+/// driver that knew about it would be answering a question it was never asked.
+///
+/// Nothing is filtered when the corresponding setting is empty, and a filter that would empty a
+/// level still empties it — unlike the database narrowing, a schema list is something the user typed
+/// deliberately, so "you asked for a schema this database doesn't have" is worth seeing.
+pub fn filter_children(
+    config: &DbConnectionConfig,
+    node: &DbNodeRef,
+    mut nodes: Vec<DbNode>,
+) -> Vec<DbNode> {
+    if node.kind == DbNodeKind::Database && !config.visible_schemas.is_empty() {
+        nodes.retain(|child| {
+            config.visible_schemas.iter().any(|name| name.eq_ignore_ascii_case(&child.name))
+        });
+    }
+    let named = matches!(
+        node.kind,
+        DbNodeKind::TableFolder
+            | DbNodeKind::ViewFolder
+            | DbNodeKind::RoutineFolder
+            | DbNodeKind::SequenceFolder
+    );
+    if named && !config.object_filter.is_empty() {
+        let needle = config.object_filter.to_lowercase();
+        nodes.retain(|child| child.name.to_lowercase().contains(&needle));
+    }
+    nodes
+}
+
 // ---------------------------------------------------------------------------
 // Requests
 // ---------------------------------------------------------------------------
@@ -473,6 +570,20 @@ pub struct DbTableDataRequest {
     /// is the point — this is a database client, and the user is entitled to write predicates.
     #[serde(default)]
     pub filter: String,
+}
+
+/// One column of this table, and the column it points at.
+///
+/// Per *column* rather than per constraint, because the question the grid asks is "I am standing on
+/// this cell — where does it lead?". A composite foreign key answers that question once per column;
+/// following any one of them lands on the right row, since the others are constrained to match.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbForeignKey {
+    /// The column in the table being viewed.
+    pub column: String,
+    pub ref_schema: Option<String>,
+    pub ref_table: String,
+    pub ref_column: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,14 +642,84 @@ pub enum Session {
 impl Session {
     /// Opens a connection. `database` overrides the config's own — that is how the explorer walks
     /// a server with several databases on it.
+    ///
+    /// Two things happen around the driver's own connect: the SSH tunnel is raised first and the
+    /// config re-pointed at its local end, so no driver has to know tunnelling exists; and the
+    /// startup script runs last, so a session is only ever handed out already set up.
     pub async fn open(config: &DbConnectionConfig, database: Option<&str>) -> Result<Self, String> {
-        match config.kind {
-            DbKind::Postgres | DbKind::Supabase => {
-                postgres::PgSession::open(config, database).await.map(Session::Postgres)
+        let tunnelled;
+        let config = if config.ssh_enabled {
+            // A URL names the real host and port, and every driver here prefers it over the
+            // fields — so a tunnelled connection defined by URL would quietly connect *around* the
+            // tunnel, to a host that is usually unreachable and occasionally the wrong one. Silently
+            // dropping the URL is worse still: it carries the credentials. So this is refused.
+            if !config.url.trim().is_empty() {
+                return Err("A connection through an SSH tunnel has to be defined by fields, not \
+                            by a URL: the URL names the host to connect to directly, which is what \
+                            the tunnel exists to avoid. Switch to Fields on the General tab, or \
+                            turn the tunnel off."
+                    .to_string());
             }
-            DbKind::Sqlserver => mssql::MssqlSession::open(config, database).await.map(Session::Mssql),
-            DbKind::Mongodb => mongo::MongoSession::open(config, database).await.map(Session::Mongo),
-            DbKind::Iris => iris::IrisSession::open(config, database).await.map(Session::Iris),
+            let tunnel = tunnel::open(config).await?;
+            let mut through = config.clone();
+            through.host = "127.0.0.1".to_string();
+            through.port = tunnel.local_port;
+            tunnelled = through;
+            &tunnelled
+        } else {
+            config
+        };
+
+        let session = match config.kind {
+            DbKind::Postgres | DbKind::Supabase => postgres::PgSession::open(config, database)
+                .await
+                .map(Session::Postgres),
+            DbKind::Sqlserver => mssql::MssqlSession::open(config, database)
+                .await
+                .map(Session::Mssql),
+            DbKind::Mongodb => mongo::MongoSession::open(config, database)
+                .await
+                .map(Session::Mongo),
+            DbKind::Iris => iris::IrisSession::open(config, database)
+                .await
+                .map(Session::Iris),
+        }?;
+        session.run_startup_script(config).await?;
+        Ok(session)
+    }
+
+    /// Runs the connection's startup script, if it has one.
+    ///
+    /// A failure fails the *connection*, rather than being reported and moved past. The script's
+    /// whole purpose is to put the session into a state the rest of the work assumes — a
+    /// `search_path`, a role, a timezone — so a session that didn't get it is not a working session
+    /// with a warning attached, it is a session that will answer later questions wrongly.
+    async fn run_startup_script(&self, config: &DbConnectionConfig) -> Result<(), String> {
+        if config.startup_script.trim().is_empty() {
+            return Ok(());
+        }
+        let ctx = DbExecContext { database: None, schema: None, max_rows: 1 };
+        let result = self.execute(&config.startup_script, &ctx).await?;
+        let failed = result
+            .results
+            .iter()
+            .find_map(|statement| statement.error.as_ref().map(|error| (statement, error)));
+        if let Some((statement, error)) = failed {
+            return Err(format!(
+                "This connection's startup script failed, so the connection was not opened.\n\n{}\n\n{error}",
+                statement.statement.trim()
+            ));
+        }
+        Ok(())
+    }
+
+    /// The cheapest statement that proves the connection still works, for the keep-alive sweep.
+    async fn ping(&self) -> Result<(), String> {
+        let ctx = DbExecContext { database: None, schema: None, max_rows: 1 };
+        match self {
+            // `{ ping: 1 }` is the command Mongo's own drivers use for exactly this.
+            Session::Mongo(_) => self.execute("{ \"ping\": 1 }", &ctx).await.map(|_| ()),
+            _ => self.execute("SELECT 1", &ctx).await.map(|_| ()),
         }
     }
 
@@ -591,6 +772,20 @@ impl Session {
             Session::Mssql(s) => s.table_data(request).await,
             Session::Mongo(s) => s.table_data(request).await,
             Session::Iris(s) => s.table_data(request).await,
+        }
+    }
+
+    /// This table's foreign keys, for the grid to follow. Empty is a real answer — a table without
+    /// them, or an engine with no such concept — and never an error: no column of this table leads
+    /// anywhere is exactly what the grid needs to know.
+    pub async fn foreign_keys(&self, node: &DbNodeRef) -> Result<Vec<DbForeignKey>, String> {
+        match self {
+            Session::Postgres(s) => s.foreign_keys(node).await,
+            Session::Mssql(s) => s.foreign_keys(node).await,
+            // Mongo has no foreign keys to read: a reference between collections is a convention
+            // held by the application, and guessing at one would send the user to a wrong document.
+            Session::Mongo(_) => Ok(Vec::new()),
+            Session::Iris(s) => s.foreign_keys(node).await,
         }
     }
 
@@ -672,12 +867,41 @@ fn session_key(connection_id: &str, database: Option<&str>) -> String {
     }
 }
 
+/// One open session, plus what the idle sweep needs to know about it.
+struct Live {
+    session: Arc<Session>,
+    connection_id: String,
+    /// Milliseconds since process start, at the last time this session was handed to a caller.
+    /// Monotonic and atomic, so the sweep can read it without taking the map's lock.
+    last_used: std::sync::atomic::AtomicU64,
+    /// Zero means off, for both.
+    keep_alive: std::time::Duration,
+    auto_disconnect: std::time::Duration,
+}
+
+type Sessions = Arc<Mutex<HashMap<String, Arc<Live>>>>;
+
+/// How often the idle sweep runs. Coarse on purpose: both settings it serves are measured in tens
+/// of seconds, and a sweep is a lock and some arithmetic per open session.
+const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Default)]
 pub struct DbRegistry {
-    sessions: Mutex<HashMap<String, Arc<Session>>>,
+    sessions: Sessions,
     /// `run_id` → the switch that stops it. A `oneshot` rather than a flag so the waiting side is
     /// a future `select!` can race, the same shape `ApiRegistry` uses for an in-flight send.
     cancels: Mutex<HashMap<String, oneshot::Sender<()>>>,
+    /// Whether the idle sweep has been started. Started on the first session rather than at
+    /// construction, because the registry is built before there is a Tokio runtime to spawn into.
+    sweeping: std::sync::atomic::AtomicBool,
+}
+
+/// Milliseconds since the first call. Monotonic — unlike the wall clock, which a machine waking
+/// from sleep or an NTP correction can move backwards, and which would then make a session look
+/// like it was used in the future.
+fn now_millis() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
 }
 
 impl DbRegistry {
@@ -691,21 +915,44 @@ impl DbRegistry {
         config: &DbConnectionConfig,
         database: Option<&str>,
     ) -> Result<Arc<Session>, String> {
+        self.ensure_sweeper();
         let key = session_key(&config.id, database);
         if let Some(existing) = self.lookup(&key) {
-            if existing.is_alive() {
-                return Ok(existing);
+            if existing.session.is_alive() {
+                existing.last_used.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
+                return Ok(existing.session.clone());
             }
             self.forget(&key);
         }
         let session = Arc::new(Session::open(config, database).await?);
+        let live = Arc::new(Live {
+            session: session.clone(),
+            connection_id: config.id.clone(),
+            last_used: std::sync::atomic::AtomicU64::new(now_millis()),
+            keep_alive: std::time::Duration::from_secs(config.keep_alive_secs as u64),
+            auto_disconnect: std::time::Duration::from_secs(config.auto_disconnect_secs as u64),
+        });
         if let Ok(mut map) = self.sessions.lock() {
-            map.insert(key, session.clone());
+            map.insert(key, live);
         }
         Ok(session)
     }
 
-    fn lookup(&self, key: &str) -> Option<Arc<Session>> {
+    /// Starts the idle sweep, once. See [`sweep`] for what it does.
+    fn ensure_sweeper(&self) {
+        if self.sweeping.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let sessions = self.sessions.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(SWEEP_INTERVAL).await;
+                sweep(&sessions).await;
+            }
+        });
+    }
+
+    fn lookup(&self, key: &str) -> Option<Arc<Live>> {
         self.sessions.lock().ok()?.get(key).cloned()
     }
 
@@ -715,8 +962,10 @@ impl DbRegistry {
         }
     }
 
-    /// Closes every session of a connection — both the bare key and the per-database ones.
+    /// Closes every session of a connection — both the bare key and the per-database ones — and the
+    /// SSH tunnel they shared, which has nothing left to carry.
     pub fn disconnect(&self, connection_id: &str) {
+        tunnel::close(connection_id);
         let prefix = format!("{connection_id}#");
         if let Ok(mut map) = self.sessions.lock() {
             map.retain(|key, _| key != connection_id && !key.starts_with(&prefix));
@@ -726,7 +975,9 @@ impl DbRegistry {
     /// Which connections currently hold at least one open session. Drives the dot next to a
     /// connection in the explorer.
     pub fn connected(&self) -> Vec<String> {
-        let Ok(map) = self.sessions.lock() else { return Vec::new() };
+        let Ok(map) = self.sessions.lock() else {
+            return Vec::new();
+        };
         let mut ids: Vec<String> = map
             .keys()
             .map(|key| key.split('#').next().unwrap_or(key).to_string())
@@ -781,6 +1032,68 @@ impl DbRegistry {
 
     pub fn session_key(connection_id: &str, database: Option<&str>) -> String {
         session_key(connection_id, database)
+    }
+}
+
+/// One pass of the idle sweep: close what has gone quiet for too long, and poke what would
+/// otherwise be closed *for* us.
+///
+/// The two settings pull opposite ways and both are legitimate, so a session can have either, and
+/// auto-disconnect wins when it somehow has both — the connection the user asked to be let go of is
+/// not one to keep alive.
+///
+/// **A session in use is never dropped.** `Arc::strong_count == 1` means nobody but this map holds
+/// it; a query in flight holds a second `Arc` from [`DbRegistry::session`], so the sweep skips it
+/// however idle the clock says it is. Without that check a long-running query would have the
+/// session closed out from under it at exactly the moment it looked idlest.
+async fn sweep(sessions: &Sessions) {
+    use std::sync::atomic::Ordering;
+
+    let now = now_millis();
+    let mut expired: Vec<(String, String)> = Vec::new();
+    let mut due: Vec<Arc<Live>> = Vec::new();
+
+    if let Ok(map) = sessions.lock() {
+        for (key, live) in map.iter() {
+            let idle = now.saturating_sub(live.last_used.load(Ordering::Relaxed));
+            let past = |limit: std::time::Duration| {
+                !limit.is_zero() && idle >= limit.as_millis() as u64
+            };
+            if past(live.auto_disconnect) && Arc::strong_count(&live.session) == 1 {
+                expired.push((key.clone(), live.connection_id.clone()));
+            } else if past(live.keep_alive) {
+                due.push(live.clone());
+            }
+        }
+    }
+
+    if !expired.is_empty() {
+        let mut orphaned: Vec<String> = Vec::new();
+        if let Ok(mut map) = sessions.lock() {
+            for (key, connection_id) in &expired {
+                map.remove(key);
+                // The tunnel belongs to the connection, not to one of its sessions, so it only goes
+                // when the last of them has.
+                let prefix = format!("{connection_id}#");
+                let still_open = map
+                    .keys()
+                    .any(|other| other == connection_id || other.starts_with(&prefix));
+                if !still_open {
+                    orphaned.push(connection_id.clone());
+                }
+            }
+        }
+        for connection_id in orphaned {
+            tunnel::close(&connection_id);
+        }
+    }
+
+    for live in due {
+        // Stamped before the ping rather than after: a ping that is slow — which is exactly what
+        // happens on the flaky link this feature exists for — must not make the next sweep think
+        // the session went idle again and send a second one.
+        live.last_used.store(now_millis(), Ordering::Relaxed);
+        let _ = live.session.ping().await;
     }
 }
 
@@ -972,6 +1285,102 @@ mod tests {
         assert_eq!(scope_to_current_database(roots(), "nowhere").len(), 3);
     }
 
+    fn config_for_tests() -> DbConnectionConfig {
+        DbConnectionConfig {
+            id: "c".into(),
+            kind: DbKind::Postgres,
+            host: "localhost".into(),
+            port: 0,
+            database: "app".into(),
+            user: "postgres".into(),
+            password: String::new(),
+            url: String::new(),
+            ssl: DbSslMode::Disable,
+            options: Vec::new(),
+            read_only: false,
+            connect_timeout_ms: 0,
+            show_all_databases: false,
+            visible_schemas: Vec::new(),
+            object_filter: String::new(),
+            keep_alive_secs: 0,
+            auto_disconnect_secs: 0,
+            startup_script: String::new(),
+            ssl_ca_file: String::new(),
+            ssl_cert_file: String::new(),
+            ssl_key_file: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            ssh_user: String::new(),
+            ssh_key_file: String::new(),
+        }
+    }
+
+    fn schema_node(name: &str) -> DbNode {
+        DbNode {
+            id: format!("schema:{name}"),
+            kind: DbNodeKind::Schema,
+            name: name.to_string(),
+            detail: String::new(),
+            database: Some("app".into()),
+            schema: Some(name.to_string()),
+            table: None,
+            has_children: true,
+            column: None,
+        }
+    }
+
+    fn table_node(name: &str) -> DbNode {
+        DbNode { kind: DbNodeKind::Table, ..schema_node(name) }
+    }
+
+    #[test]
+    fn the_tree_lists_only_the_schemas_that_were_asked_for() {
+        let db = DbNodeRef {
+            kind: DbNodeKind::Database,
+            database: Some("app".into()),
+            schema: None,
+            name: None,
+        };
+        let schemas = || vec![schema_node("public"), schema_node("audit"), schema_node("SAP")];
+        let mut config = config_for_tests();
+
+        // Nobody set a filter, so nothing is one.
+        assert_eq!(filter_children(&config, &db, schemas()).len(), 3);
+
+        config.visible_schemas = vec!["public".into(), "sap".into()];
+        let kept = filter_children(&config, &db, schemas());
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert!(kept.iter().any(|node| node.name == "SAP"), "case must not decide this");
+
+        // A name this database doesn't have empties the level rather than being ignored: the user
+        // typed it, and silently showing everything would hide the typo.
+        config.visible_schemas = vec!["nowhere".into()];
+        assert!(filter_children(&config, &db, schemas()).is_empty());
+    }
+
+    #[test]
+    fn the_name_filter_applies_to_relations_and_not_to_schemas() {
+        let folder = DbNodeRef {
+            kind: DbNodeKind::TableFolder,
+            database: Some("app".into()),
+            schema: Some("public".into()),
+            name: None,
+        };
+        let db = DbNodeRef { kind: DbNodeKind::Database, ..folder.clone() };
+        let mut config = config_for_tests();
+        config.object_filter = "invoice".into();
+
+        let tables = vec![table_node("invoice_line"), table_node("Invoices"), table_node("orders")];
+        let kept = filter_children(&config, &folder, tables);
+        assert_eq!(kept.len(), 2, "{kept:?}");
+
+        // A schema is not an object: narrowing table names must not also hide the schema they live
+        // in, or the filter would take its own results off screen.
+        let schemas = vec![schema_node("public"), schema_node("audit")];
+        assert_eq!(filter_children(&config, &db, schemas).len(), 2);
+    }
+
     /// Two databases differing only in case are two databases — the exact one wins rather than both
     /// surviving on the loose comparison.
     #[test]
@@ -999,6 +1408,19 @@ mod tests {
             read_only: true,
             connect_timeout_ms: 0,
             show_all_databases: false,
+            visible_schemas: Vec::new(),
+            object_filter: String::new(),
+            keep_alive_secs: 0,
+            auto_disconnect_secs: 0,
+            startup_script: String::new(),
+            ssl_ca_file: String::new(),
+            ssl_cert_file: String::new(),
+            ssl_key_file: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            ssh_user: String::new(),
+            ssh_key_file: String::new(),
         };
         let guard = |sql: &str| read_only_guard(sql, config.read_only);
         assert!(guard("WITH x AS (SELECT 1) SELECT * FROM x").is_ok());

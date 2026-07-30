@@ -137,7 +137,10 @@ function GlyphSlot({ children }: { children: ReactNode }) {
 
 export interface MenuItem {
   label: string;
-  icon: LucideIcon;
+  icon?: LucideIcon;
+  /** Rendered in place of `icon`, for the marks a Lucide glyph can't be — a database engine's own
+   * logo in its own hue, say. */
+  leading?: ReactNode;
   onClick: () => void;
   danger?: boolean;
   /** Draws a hairline above this item. */
@@ -151,11 +154,15 @@ export function ContextMenu({
   x,
   y,
   items,
+  heading,
   onClose,
 }: {
   x: number;
   y: number;
   items: MenuItem[];
+  /** A question or label over the set. A menu of alternatives ("which engine?") needs one; a menu
+   * of actions on the thing you right-clicked does not. */
+  heading?: string;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -199,6 +206,11 @@ export function ContextMenu({
       style={{ position: "fixed", left: pos.left, top: pos.top }}
       className="z-[9999] min-w-[172px] rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]"
     >
+      {heading && (
+        <p className="px-2 pb-1 pt-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          {heading}
+        </p>
+      )}
       {items.map((item, i) => (
         <Fragment key={`${item.label}-${i}`}>
           {item.separated && i > 0 && <div className="my-1 h-px bg-[var(--cf-border)]" />}
@@ -212,7 +224,7 @@ export function ContextMenu({
               item.danger ? "text-[var(--cf-danger)]" : "text-[var(--cf-text)]"
             }`}
           >
-            <item.icon size={13} className="shrink-0 opacity-70" />
+            {item.leading ?? (item.icon && <item.icon size={13} className="shrink-0 opacity-70" />)}
             <span className="truncate">{item.label}</span>
           </button>
         </Fragment>

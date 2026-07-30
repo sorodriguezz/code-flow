@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, Maximize2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ExternalLink, Maximize2 } from "lucide-react";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useT } from "../../state/languageStore";
-import type { DbColumn } from "../../types/database";
+import type { DbColumn, DbForeignKey } from "../../types/database";
+
+/** `schema.table.column`, for the tooltips that say where an arrow leads. */
+function referenceLabel(key: DbForeignKey): string {
+  const table = key.ref_schema ? `${key.ref_schema}.${key.ref_table}` : key.ref_table;
+  return `${table}.${key.ref_column}`;
+}
 
 /**
  * The result grid — read-only or editable, one implementation.
@@ -25,7 +31,9 @@ import type { DbColumn } from "../../types/database";
  */
 
 const ROW_HEIGHT = 26;
-const HEADER_HEIGHT = 28;
+/** Two lines with room between them: the name, and the type under it. At the old 28px the type was
+ * absolutely positioned into whatever space the name left, which was none — they touched. */
+const HEADER_HEIGHT = 40;
 /** Rows rendered above and below the viewport, so a fast scroll doesn't flash empty space. */
 const OVERSCAN = 12;
 const MIN_COLUMN_WIDTH = 64;
@@ -63,6 +71,18 @@ export interface ResultGridProps {
   sortDescending?: boolean;
   /** Marks primary-key columns, which the header shows and the editor relies on. */
   primaryKeys?: Set<string>;
+  /** Columns that point at another table, keyed by column name. */
+  foreignKeys?: Map<string, DbForeignKey>;
+  /**
+   * Follow a foreign key. `value` is the cell's, or `null` for "the whole referenced table" — which
+   * is what the header's arrow means.
+   *
+   * Both are their own affordance rather than a plain click, because a plain click on a header
+   * already sorts and a plain click on a cell already selects it for editing. Taking either over
+   * would trade a thing the user does constantly for one they do occasionally. Cmd/Ctrl-clicking a
+   * cell follows it too, for when it *is* the thing being done constantly.
+   */
+  onFollowForeignKey?: (key: DbForeignKey, value: string | null) => void;
 }
 
 export function ResultGrid({
@@ -80,6 +100,8 @@ export function ResultGrid({
   sortColumn,
   sortDescending,
   primaryKeys,
+  foreignKeys,
+  onFollowForeignKey,
 }: ResultGridProps) {
   const t = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -162,22 +184,22 @@ export function ResultGrid({
               <div
                 key={`${column.name}-${columnIndex}`}
                 style={{ width: widthOf(column.name) }}
-                className="relative flex shrink-0 items-center gap-1 border-r border-[var(--cf-border)] px-2"
+                className="relative flex shrink-0 flex-col justify-center gap-[3px] border-r border-[var(--cf-border)] px-2 py-1"
               >
                 <button
                   type="button"
                   onClick={() => onSort?.(column.name)}
                   disabled={!onSort}
                   title={column.type_name ? `${column.name} · ${column.type_name}` : column.name}
-                  className="flex min-w-0 flex-1 items-center gap-1 text-left disabled:cursor-default"
+                  className="flex min-w-0 items-center gap-1 text-left disabled:cursor-default"
                 >
-                  <span className="min-w-0 flex-1 truncate text-[11px] font-semibold text-[var(--cf-text)]">
+                  <span className="min-w-0 flex-1 truncate text-[11px] font-semibold leading-none text-[var(--cf-text)]">
                     {column.name}
                   </span>
                   {primaryKeys?.has(column.name) && (
                     <span
                       title={t("db.primaryKey")}
-                      className="shrink-0 text-[9px] font-bold text-[var(--cf-accent)]"
+                      className="shrink-0 text-[9px] font-bold leading-none text-[var(--cf-accent)]"
                     >
                       PK
                     </span>
@@ -185,10 +207,27 @@ export function ResultGrid({
                   {sortColumn === column.name &&
                     (sortDescending ? <ArrowDown size={10} /> : <ArrowUp size={10} />)}
                 </button>
+                {/* The arrow rides beside the name, not over it: the header's job is still to sort.
+                    Its tooltip names the destination, which is the only place the referenced table
+                    is spelled out. */}
+                {foreignKeys?.get(column.name) && onFollowForeignKey && (
+                  <button
+                    type="button"
+                    onClick={() => onFollowForeignKey(foreignKeys.get(column.name)!, null)}
+                    title={t("db.openReferencedTable", {
+                      table: referenceLabel(foreignKeys.get(column.name)!),
+                    })}
+                    className="absolute right-2.5 top-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                  >
+                    <ExternalLink size={10} />
+                  </button>
+                )}
                 {/* The type under the name: it is what decides whether a value will be accepted,
-                    and the thing you check before typing into a cell. */}
+                    and the thing you check before typing into a cell. Its own line in the flow
+                    rather than an absolutely-positioned overlay, which is what used to leave it
+                    crammed against the name on a short column. */}
                 {column.type_name && (
-                  <span className="pointer-events-none absolute bottom-[1px] left-2 truncate text-[9px] text-[var(--cf-text-muted)]">
+                  <span className="pointer-events-none min-w-0 truncate text-[9px] leading-none text-[var(--cf-text-muted)]">
                     {column.type_name}
                   </span>
                 )}
@@ -260,6 +299,14 @@ export function ResultGrid({
                         onDoubleClick={() =>
                           editable && setEditing({ row, column: column.name, inserted })
                         }
+                        onClick={(e) => {
+                          // The shortcut for a click that would otherwise only select the cell.
+                          // Plain clicks are left alone — see `onFollowForeignKey`.
+                          const key = foreignKeys?.get(column.name);
+                          if (!key || !onFollowForeignKey || !(e.metaKey || e.ctrlKey)) return;
+                          e.preventDefault();
+                          onFollowForeignKey(key, value);
+                        }}
                         className={`group/cell relative flex shrink-0 items-center border-r border-[var(--cf-border)] px-2 ${
                           isChanged && !inserted ? "bg-[var(--cf-warning)]/[0.12]" : ""
                         } ${deleted ? "line-through opacity-60" : ""}`}
@@ -298,6 +345,22 @@ export function ResultGrid({
                                 className="shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-accent)] group-hover/cell:opacity-100"
                               >
                                 <Maximize2 size={10} />
+                              </button>
+                            )}
+                            {/* On hover rather than always: one arrow per foreign-key cell, on
+                                every row, would be a column of arrows competing with the data. */}
+                            {foreignKeys?.get(column.name) && onFollowForeignKey && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onFollowForeignKey(foreignKeys.get(column.name)!, value);
+                                }}
+                                title={t("db.followForeignKey", {
+                                  table: referenceLabel(foreignKeys.get(column.name)!),
+                                })}
+                                className="shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-accent)] group-hover/cell:opacity-100"
+                              >
+                                <ExternalLink size={10} />
                               </button>
                             )}
                           </>

@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use tokio::process::ChildStdin;
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
 /// The live bridge, or nothing when IRIS isn't in use.
@@ -67,6 +67,11 @@ pub struct Bridge {
     sessions: AtomicUsize,
     /// Held so that replacing a dead bridge reaps its process rather than leaving a zombie.
     child: Mutex<tokio::process::Child>,
+    /// Which `java` this was started with, so a failure can say *whose* runtime failed — the
+    /// bundled one and a system JDK fail in very different ways, and the fix differs with them.
+    java: String,
+    /// What the JVM wrote to stderr before it died. See [`Diagnostics`].
+    diagnostics: Diagnostics,
     /// The runtime this was started on, captured because a session's `Drop` needs to spawn the
     /// close and cannot rely on running inside one: `db_disconnect` is a *sync* Tauri command, so
     /// the drop that closes a session happens on a thread with no runtime in context. Without this
@@ -74,11 +79,33 @@ pub struct Bridge {
     handle: tokio::runtime::Handle,
 }
 
+/// The opening lines the JVM wrote to stderr, kept so that a bridge which dies can say why.
+///
+/// The *opening* lines, not the last ones: when a JVM fails to start — class files built for a
+/// newer release than it implements, a jar it can't read, a missing main class — it says so
+/// immediately, and that first line is the one a user can act on. A stack trace from a query that
+/// went wrong later is already reported through that query's own error.
+///
+/// This exists because `eprintln!` reaches nobody in a packaged build: on Windows the app runs
+/// under `windows_subsystem = "windows"` and has no console at all, so without keeping the lines
+/// here the only thing left of a failed start is "the bridge stopped running" — the symptom, never
+/// the cause.
+type Diagnostics = Arc<Mutex<Vec<String>>>;
+
+/// How many lines to keep, and how many of them to put in front of the user. The cap is what keeps
+/// a chatty driver from growing this without limit.
+const DIAGNOSTICS_KEPT: usize = 8;
+const DIAGNOSTICS_SHOWN: usize = 4;
+
 impl Bridge {
     async fn spawn() -> Result<Self, String> {
         let runtime = Runtime::locate()?;
 
-        let mut child = Command::new(&runtime.java)
+        // Through `proc` rather than `Command::new`: `java.exe` is a console binary, and Windows
+        // hands one a `conhost` window of its own. Opening a database would flash a black console
+        // over the app — which reads as the app running something behind your back, not as a driver
+        // starting.
+        let mut child = crate::proc::command(&runtime.java)
             .arg("-cp")
             .arg(&runtime.classpath)
             // The bridge is a request/response servant, not a server: a small heap keeps a result
@@ -105,27 +132,47 @@ impl Bridge {
                 )
             })?;
 
-        let stdin = child.stdin.take().ok_or("the Java bridge exposed no stdin")?;
-        let stdout = child.stdout.take().ok_or("the Java bridge exposed no stdout")?;
-        let stderr = child.stderr.take().ok_or("the Java bridge exposed no stderr")?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or("the Java bridge exposed no stdin")?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("the Java bridge exposed no stdout")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("the Java bridge exposed no stderr")?;
 
         let alive = Arc::new(AtomicBool::new(true));
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
 
         // Anything the JVM or the driver writes to stderr is a diagnostic, not a frame. It is worth
         // keeping — a stack trace here is the only clue when the bridge dies mid-query.
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                eprintln!("iris-bridge: {line}");
-            }
-        });
+        let diagnostics: Diagnostics = Arc::new(Mutex::new(Vec::new()));
+        {
+            let sink = diagnostics.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("iris-bridge: {line}");
+                    if let Ok(mut kept) = sink.lock() {
+                        if kept.len() < DIAGNOSTICS_KEPT && !line.trim().is_empty() {
+                            kept.push(line);
+                        }
+                    }
+                }
+            });
+        }
 
         // The reader owns response routing. When stdout ends the process is gone, so every caller
         // still waiting is failed rather than left hanging forever.
         {
             let alive = alive.clone();
             let pending = pending.clone();
+            let diagnostics = diagnostics.clone();
+            let java = runtime.java.display().to_string();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -136,7 +183,9 @@ impl Bridge {
                         eprintln!("iris-bridge: unreadable frame: {line}");
                         continue;
                     };
-                    let Some(id) = frame.get("id").and_then(Value::as_u64) else { continue };
+                    let Some(id) = frame.get("id").and_then(Value::as_u64) else {
+                        continue;
+                    };
                     let waiting = pending.lock().ok().and_then(|mut map| map.remove(&id));
                     let Some(waiting) = waiting else { continue };
                     let answer = if frame.get("ok").and_then(Value::as_bool).unwrap_or(false) {
@@ -155,8 +204,9 @@ impl Bridge {
                     .lock()
                     .map(|mut map| map.drain().map(|(_, tx)| tx).collect())
                     .unwrap_or_default();
+                let reason = died_message(&java, &diagnostics);
                 for tx in orphaned {
-                    let _ = tx.send(Err(BRIDGE_DIED.to_string()));
+                    let _ = tx.send(Err(reason.clone()));
                 }
             });
         }
@@ -168,6 +218,8 @@ impl Bridge {
             alive,
             sessions: AtomicUsize::new(0),
             child: Mutex::new(child),
+            java: runtime.java.display().to_string(),
+            diagnostics,
             // Always valid here: spawning is only ever reached from an async command.
             handle: tokio::runtime::Handle::current(),
         })
@@ -177,7 +229,8 @@ impl Bridge {
     /// inside the async runtime. This is what [`super::iris::IrisSession`]'s `Drop` uses.
     pub fn close_session_detached(self: &Arc<Self>, session: String) {
         let bridge = self.clone();
-        self.handle.spawn(async move { bridge.close_session(&session).await });
+        self.handle
+            .spawn(async move { bridge.close_session(&session).await });
     }
 
     /// Sends one request and waits for its answer.
@@ -193,7 +246,7 @@ impl Bridge {
         fields: Map<String, Value>,
     ) -> Result<Value, String> {
         if !self.alive.load(Ordering::SeqCst) {
-            return Err(BRIDGE_DIED.to_string());
+            return Err(self.died());
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
 
@@ -216,13 +269,23 @@ impl Bridge {
         if let Err(e) = write.await {
             self.pending.lock().map_err(|_| POISONED)?.remove(&id);
             self.alive.store(false, Ordering::SeqCst);
-            return Err(format!("{BRIDGE_DIED} ({e})"));
+            return Err(format!("{} ({e})", self.died()));
         }
 
         match rx.await {
             Ok(answer) => answer,
-            Err(_) => Err(BRIDGE_DIED.to_string()),
+            Err(_) => Err(self.died()),
         }
+    }
+
+    /// [`BRIDGE_DIED`], with whatever the JVM said on its way out.
+    ///
+    /// Every path that reports a dead bridge goes through this, because "it stopped running" on its
+    /// own is unactionable: it is the same sentence whether the runtime is missing, is too old for
+    /// these class files, or the server hung up. The JVM already said which — this is what carries
+    /// that sentence to the person reading the dialog.
+    fn died(&self) -> String {
+        died_message(&self.java, &self.diagnostics)
     }
 
     /// False once the JVM is gone. The IRIS driver reports this as the session being dead, which is
@@ -260,10 +323,23 @@ impl Bridge {
 
 const POISONED: &str = "The IRIS bridge's request table was left in a broken state.";
 
-/// What every in-flight call fails with when the JVM goes away. Matched by the IRIS driver so a
-/// dead bridge reads as a lost connection rather than a query error.
+/// What every in-flight call fails with when the JVM goes away. Never reported bare — it says what
+/// happened and not why, so it is always composed by [`died_message`], which adds the cause.
 pub const BRIDGE_DIED: &str =
     "The Java bridge CodeFlow uses to reach IRIS stopped running. The next statement reconnects.";
+
+/// See [`Bridge::died`]. A free function because the reader task needs it too, and that task
+/// outlives no `Bridge` — it is spawned while one is still being built.
+fn died_message(java: &str, diagnostics: &Diagnostics) -> String {
+    let said: Vec<String> = diagnostics
+        .lock()
+        .map(|kept| kept.iter().take(DIAGNOSTICS_SHOWN).cloned().collect())
+        .unwrap_or_default();
+    if said.is_empty() {
+        return format!("{BRIDGE_DIED}\n\n{java} exited without saying why.");
+    }
+    format!("{BRIDGE_DIED}\n\n{java} reported:\n{}", said.join("\n"))
+}
 
 // ---------------------------------------------------------------------------
 // Locating the runtime
@@ -286,16 +362,31 @@ impl Runtime {
 
         let bundled = dir.join("runtime").join("bin").join(java_exe());
         if bundled.is_file() {
-            return Ok(Self { java: bundled, classpath });
+            return Ok(Self {
+                java: bundled,
+                classpath,
+            });
         }
+        // Only the fallbacks are version-checked. The bundled runtime is built by
+        // `scripts/build-iris-runtime.mjs` against the same release the bridge is compiled for, so
+        // it cannot be too old; a JDK that happens to be on the machine very much can, and a JVM
+        // started on one dies on its first class file with a message no dialog ever sees.
         if let Some(home) = std::env::var_os("JAVA_HOME") {
             let candidate = Path::new(&home).join("bin").join(java_exe());
             if candidate.is_file() {
-                return Ok(Self { java: candidate, classpath });
+                too_old(&candidate, "JAVA_HOME")?;
+                return Ok(Self {
+                    java: candidate,
+                    classpath,
+                });
             }
         }
-        if which_java().is_some() {
-            return Ok(Self { java: PathBuf::from("java"), classpath });
+        if let Some(candidate) = which_java() {
+            too_old(&candidate, "PATH")?;
+            return Ok(Self {
+                java: PathBuf::from("java"),
+                classpath,
+            });
         }
         Err(format!(
             "CodeFlow ships its own Java runtime for IRIS, and this install doesn't have it \
@@ -305,6 +396,10 @@ impl Runtime {
         ))
     }
 }
+
+/// The jar `scripts/build-iris-runtime.mjs` compiles from `src-tauri/java`. Named here because its
+/// absence is the one classpath problem worth its own message.
+const BRIDGE_JAR: &str = "iris-bridge.jar";
 
 /// Every jar in the resource directory, in one classpath.
 ///
@@ -316,11 +411,29 @@ fn classpath(dir: &Path) -> Result<String, String> {
         .map_err(|e| format!("{} ({}: {e})", missing_resources(), dir.display()))?
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("jar")))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jar"))
+        })
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
     if jars.is_empty() {
-        return Err(format!("{} (no .jar in {})", missing_resources(), dir.display()));
+        return Err(format!(
+            "{} (no .jar in {})",
+            missing_resources(),
+            dir.display()
+        ));
+    }
+    // The bridge by name, not just "some jar". A build whose `javac` step failed still leaves the
+    // driver jar here — it is downloaded first — and a classpath of only the driver starts a JVM
+    // that dies on `Could not find or load main class`, which reaches the user as "the bridge
+    // stopped running" and names nothing that can be fixed.
+    if !jars.iter().any(|jar| jar.ends_with(BRIDGE_JAR)) {
+        return Err(format!(
+            "{} ({BRIDGE_JAR} is not in {})",
+            missing_resources(),
+            dir.display()
+        ));
     }
     // Deterministic, so a classpath conflict fails the same way twice rather than by directory
     // iteration order.
@@ -342,6 +455,60 @@ fn missing_resources() -> &'static str {
         "CodeFlow's IRIS support files (the Java runtime, the bridge and the InterSystems JDBC \
          driver) aren't where they should be. Reinstalling the app restores them."
     }
+}
+
+/// The Java release the bridge's class files are built for — `RELEASE` in
+/// `scripts/build-iris-runtime.mjs`. A JVM older than this cannot load them at all.
+const REQUIRED_JAVA: u32 = 17;
+
+/// Refuses a fallback JVM that is too old to load the bridge, and says so in the terms the user can
+/// act on.
+///
+/// Fails *open*: an unparseable `-version` is allowed through. The banner is here to replace a
+/// confusing failure with a clear one, and refusing a JDK we simply failed to interrogate would be
+/// a new failure of its own — one that breaks a machine where everything actually works.
+fn too_old(java: &Path, found_via: &str) -> Result<(), String> {
+    let Some(version) = java_release(java) else {
+        return Ok(());
+    };
+    if version >= REQUIRED_JAVA {
+        return Ok(());
+    }
+    Err(format!(
+        "CodeFlow's own Java runtime for IRIS isn't in this install, and the Java it fell back to \
+         is too old: {} (on {found_via}) is Java {version}, and the IRIS bridge needs {REQUIRED_JAVA} \
+         or newer. Reinstalling CodeFlow restores the bundled runtime; installing a JDK \
+         {REQUIRED_JAVA}+ and pointing JAVA_HOME at it also works.",
+        java.display()
+    ))
+}
+
+/// The feature version of a `java` binary, or `None` when it can't be read. `-version` writes to
+/// stderr, which is why both streams are searched.
+fn java_release(java: &Path) -> Option<u32> {
+    let output = crate::proc::std_command(java)
+        .arg("-version")
+        .output()
+        .ok()?;
+    parse_java_release(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    ))
+}
+
+/// 17 from `openjdk version "17.0.9" …`, 8 from `java version "1.8.0_402"`. Every JVM quotes its
+/// version on the first line of `-version`, which is the one thing about that output that has been
+/// stable across every vendor and every release.
+fn parse_java_release(text: &str) -> Option<u32> {
+    let quoted = text.split('"').nth(1)?;
+    let mut parts = quoted.split(['.', '-', '_', '+']);
+    let first: u32 = parts.next()?.parse().ok()?;
+    // `1.8.0` is Java 8: everything before 9 numbered itself `1.x`.
+    if first == 1 {
+        return parts.next()?.parse().ok();
+    }
+    Some(first)
 }
 
 fn java_exe() -> &'static str {
@@ -371,7 +538,11 @@ fn iris_resource_dir() -> Option<PathBuf> {
     // Debug only. In a release build this path names the *build* machine, so it could never
     // resolve on a user's — and baking it into the shipped binary would leak it for nothing.
     #[cfg(debug_assertions)]
-    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("resources").join("iris"));
+    candidates.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("iris"),
+    );
 
     // "The directory exists" stopped being evidence of anything: *every* checkout has one now,
     // holding only the README that keeps it in git so tauri-build can find it. Taking the first
@@ -391,14 +562,47 @@ fn iris_resource_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    /// The version guard is only worth having if it reads the real thing, and every vendor prints
+    /// its own wording around the one quoted number.
+    #[test]
+    fn a_jvm_reports_its_feature_version() {
+        let cases = [
+            (
+                "openjdk version \"17.0.9\" 2023-10-17\nOpenJDK Runtime Environment",
+                Some(17),
+            ),
+            (
+                "java version \"1.8.0_402\"\nJava(TM) SE Runtime Environment",
+                Some(8),
+            ),
+            ("openjdk version \"21\" 2023-09-19", Some(21)),
+            ("openjdk version \"11.0.21\" 2023-10-17", Some(11)),
+            ("openjdk version \"22-ea\" 2024-03-19", Some(22)),
+            // Not a JVM's answer at all: no quoted version, so nothing is claimed about it.
+            ("bash: java: command not found", None),
+            ("", None),
+        ];
+        for (output, expected) in cases {
+            assert_eq!(parse_java_release(output), expected, "{output:?}");
+        }
+    }
+
+    /// The one that matters: Java 8 is the version a Windows machine is most likely to already have
+    /// on PATH, and it cannot load a class file built for 17.
+    #[test]
+    fn a_java_too_old_for_the_bridge_is_refused_by_number() {
+        assert!(parse_java_release("java version \"1.8.0_402\"").unwrap() < REQUIRED_JAVA);
+        assert!(parse_java_release("openjdk version \"17.0.9\"").unwrap() >= REQUIRED_JAVA);
+    }
+
     /// The classpath has to hold every jar in the directory — the bridge and the driver are two
     /// separate files, and dropping either one makes the JVM start and immediately fail.
     #[test]
     fn the_classpath_collects_every_jar() {
         let dir = std::env::temp_dir().join(format!("cf-iris-cp-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("b-bridge.jar"), b"").unwrap();
         std::fs::write(dir.join("a-driver.jar"), b"").unwrap();
+        std::fs::write(dir.join(BRIDGE_JAR), b"").unwrap();
         std::fs::write(dir.join("notes.txt"), b"").unwrap();
 
         let built = classpath(&dir).unwrap();
@@ -406,8 +610,25 @@ mod tests {
         let parts: Vec<&str> = built.split(separator).collect();
         assert_eq!(parts.len(), 2, "{built}");
         assert!(parts[0].ends_with("a-driver.jar"), "{built}");
-        assert!(parts[1].ends_with("b-bridge.jar"), "{built}");
+        assert!(parts[1].ends_with(BRIDGE_JAR), "{built}");
         assert!(!built.contains("notes.txt"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The exact leftover a failed build produces: `javac` never ran, so the driver jar — which is
+    /// downloaded before it — is the only thing in the directory. Accepting that starts a JVM with
+    /// no main class to run.
+    #[test]
+    fn the_driver_alone_is_not_a_runtime() {
+        let dir = std::env::temp_dir().join(format!("cf-iris-nobridge-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("intersystems-jdbc-3.11.0.jar"), b"").unwrap();
+        let refused = classpath(&dir).unwrap_err();
+        assert!(refused.contains(BRIDGE_JAR), "{refused}");
+
+        std::fs::write(dir.join(BRIDGE_JAR), b"").unwrap();
+        assert!(classpath(&dir).is_ok());
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -461,7 +682,10 @@ mod tests {
             Ok(bridge) => bridge,
             Err(e) => panic!("could not start the IRIS bridge: {e}"),
         };
-        let answer = bridge.call("ping", "", Map::new()).await.expect("ping failed");
+        let answer = bridge
+            .call("ping", "", Map::new())
+            .await
+            .expect("ping failed");
         assert_eq!(answer.get("pong").and_then(Value::as_bool), Some(true));
 
         // A session that was never opened must be refused by name, not crash the bridge — this is

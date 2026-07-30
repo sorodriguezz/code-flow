@@ -4,6 +4,7 @@ import {
   ArrowUp,
   Ban,
   Check,
+  CheckCheck,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -24,9 +25,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
+import { getReviewRun } from "../../lib/tauri/commands";
 import { parseClaudeError } from "../../lib/claudeError";
 import {
   listCommentThreads,
+  resolveCommentThread,
   targetKey,
   targetPrKey,
   targetProjectId,
@@ -34,7 +37,13 @@ import {
   workspaceIdFromBucket,
   type PrTarget,
 } from "../../lib/prTarget";
-import { parseAnalysis, buildFixpack, formatFindingAsComment, formatSummaryComment } from "../../lib/parseAnalysis";
+import {
+  parseAnalysis,
+  buildFixpack,
+  formatFindingAsComment,
+  formatSummaryComment,
+  type SummaryMemory,
+} from "../../lib/parseAnalysis";
 import { Checkbox } from "../common/Checkbox";
 import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
 import { PrCommentCard, PrCommentsSkeleton } from "./PrCommentCard";
@@ -60,6 +69,7 @@ import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activitySt
 import { useResolutionsStore } from "../../state/resolutionsStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { confirmAction } from "../../state/confirmStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -74,10 +84,20 @@ import { ChatModelPicker } from "./ChatModelPicker";
 import { ChatAgentPicker } from "./ChatAgentPicker";
 import { ReviewLevelSelector } from "./ReviewLevelSelector";
 import { AiErrorBanner } from "./AiErrorBanner";
-import type { PrDecision, PullRequestSummary, PrCommentThread } from "../../types/domain";
+import type { PrDecision, PullRequestSummary, PrCommentThread, SavedFinding } from "../../types/domain";
 
 const PANEL_MIN = 280;
 const PANEL_MAX = 520;
+
+/** A stored JSON column (a run's `meta` / `findings`), or `null` when it can't be read — memory
+ * written by an older version is context to do without, never a crash. */
+function safeJson<T>(raw: string): T | null {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
 
 function relativeTime(ts: number, t: (key: TranslationKey, vars?: Record<string, string | number>) => string): string {
   const mins = Math.round((Date.now() - ts) / 60000);
@@ -390,13 +410,53 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
       return next;
     });
 
+  // The reviewer's own record of this PR: which findings earlier iterations closed, and the scope
+  // and depth this run happened under. It's what lets the published summary say "one finding, now
+  // fixed" instead of an unqualified "nothing found" — a clean run reads identically whether the
+  // PR never had a defect or had three that were all corrected. Only project-backed reviews keep
+  // memory (a link session has no run to save), so it stays null for those.
+  const [runMemory, setRunMemory] = useState<SummaryMemory | null>(null);
+  useEffect(() => {
+    setRunMemory(null);
+    if (!job || job.status !== "done" || linkOnly) return;
+    let live = true;
+    void getReviewRun(job.id)
+      .then((run) => {
+        if (!live || !run) return;
+        const saved: SavedFinding[] = safeJson<SavedFinding[]>(run.findings) ?? [];
+        const meta = safeJson<Record<string, unknown>>(run.meta) ?? {};
+        setRunMemory({
+          resolved: saved.filter((f) => f.estado === "resuelto"),
+          iter: run.iter,
+          level: run.level,
+          engine: typeof meta.engine === "string" ? meta.engine : "",
+          model: typeof meta.model === "string" ? meta.model : "",
+          files: typeof meta.files === "number" ? meta.files : 0,
+          additions: typeof meta.additions === "number" ? meta.additions : 0,
+          deletions: typeof meta.deletions === "number" ? meta.deletions : 0,
+        });
+      })
+      .catch(() => {
+        // The summary simply loses its "already fixed" half — never a reason to break the panel.
+      });
+    return () => {
+      live = false;
+    };
+  }, [job?.id, job?.status, linkOnly]);
+
   const [fixpackCopied, copyFixpack] = useCopy();
   const runReview = () => reviewPr(target, pr.id);
   const publish = async () => {
     if (!parsed || !job) return;
     const chosen = findings.filter((f) => selectedIds.has(f.id));
     if (chosen.length === 0 && !postSummary) return;
-    const confirmKey = pr.provider === "github" ? "chat.confirmPostGithub" : "chat.confirmPost";
+    // Publishing only the summary is its own sentence: "post 0 comment(s)" describes nothing.
+    const confirmKey =
+      chosen.length === 0
+        ? "pr.confirmPostSummaryOnly"
+        : pr.provider === "github"
+          ? "chat.confirmPostGithub"
+          : "chat.confirmPost";
     if (!(await confirmAction(t(confirmKey, { id: pr.id, n: chosen.length }), false))) return;
     const items = chosen.map((f) => ({
       file: f.location?.file ?? null,
@@ -404,8 +464,12 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
       content: formatFindingAsComment(f),
       location: f.location,
     }));
-    // `chosen`, not every finding: the summary describes what actually gets posted.
-    const summary = postSummary ? formatSummaryComment(parsed, new Date().toISOString().slice(0, 10), chosen) : null;
+    // `chosen`, not every finding: the summary describes what actually gets posted — plus what the
+    // memory says this PR already closed, which is the whole point of publishing a summary on a
+    // re-review that found nothing left.
+    const summary = postSummary
+      ? formatSummaryComment(parsed, new Date().toISOString().slice(0, 10), chosen, runMemory)
+      : null;
     void postReview(target, pr.id, job.id, items, postSummary, summary);
   };
 
@@ -460,6 +524,19 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   useEffect(() => {
     void loadThreads();
   }, [loadThreads]);
+
+  /** Closes a conversation on the host and drops it from the list — the host's own listing
+   * already excludes resolved threads, so keeping the card around would just be a row that
+   * reappears as gone on the next refresh. */
+  const resolveThread = async (threadId: number) => {
+    try {
+      await resolveCommentThread(target, pr.id, threadId);
+      setOpenThreads((threads) => threads.filter((thread) => thread.id !== threadId));
+      useToastStore.getState().pushToast(t("pr.threadResolved"), "success");
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
 
   // Footer buttons truncate when the panel is narrow, so their label doubles as the tooltip.
   const publishLabel = posted
@@ -536,6 +613,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
                 projectId={projectId}
                 prSourceBranch={pr.source_branch}
                 resolutionKey={`pr:${pr.id}:thread:${thread.id}`}
+                onResolveThread={() => resolveThread(thread.id)}
               />
             ))}
           </div>
@@ -570,6 +648,15 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
         )}
 
         {!loading && error && <AiErrorBanner error={error} compact />}
+
+        {/* Nothing open, and the memory says this PR closed things along the way. Without this the
+            panel shows a bare "no issues" that reads the same on a PR that never had one. */}
+        {!loading && !error && reviewText && findings.length === 0 && (runMemory?.resolved.length ?? 0) > 0 && (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-[color-mix(in_oklab,var(--cf-success)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_9%,transparent)] px-3 py-2 text-[12px] text-[var(--cf-text)]">
+            <CheckCheck size={13} className="shrink-0 text-[var(--cf-success)]" />
+            {t("pr.allResolved", { n: runMemory?.resolved.length ?? 0 })}
+          </div>
+        )}
 
         {!loading && !error && reviewText && findings.length === 0 && (
           summary.length > SHORT_SUMMARY_MAX ? (
@@ -676,23 +763,26 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
               {/* Agents are picked per project; a link session has none to pick for. */}
               {projectId && <ChatAgentPicker projectId={projectId} />}
               {reviewText && !loading && findings.length > 0 && (
-                <>
-                  <button
-                    onClick={() => parsed && copyFixpack(buildFixpack(parsed, pr.id))}
-                    title={t("pr.fixpackHint")}
-                    className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-                  >
-                    {fixpackCopied ? <Check size={11} /> : <Copy size={11} />}
-                    {t("pr.fixpack")}
-                  </button>
-                  <label
-                    className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
-                    title={t("pr.postSummaryHint")}
-                  >
-                    <Checkbox checked={postSummary} onChange={setPostSummary} />
-                    {t("pr.postSummary")}
-                  </label>
-                </>
+                <button
+                  onClick={() => parsed && copyFixpack(buildFixpack(parsed, pr.id))}
+                  title={t("pr.fixpackHint")}
+                  className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                >
+                  {fixpackCopied ? <Check size={11} /> : <Copy size={11} />}
+                  {t("pr.fixpack")}
+                </button>
+              )}
+              {/* Offered for a clean run too, not just one with findings: a re-review that finds
+                  nothing left is exactly when the summary — what was covered, what got fixed — is
+                  the only thing worth publishing. */}
+              {reviewText && !loading && (
+                <label
+                  className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
+                  title={t("pr.postSummaryHint")}
+                >
+                  <Checkbox checked={postSummary} onChange={setPostSummary} />
+                  {t("pr.postSummary")}
+                </label>
               )}
             </div>
             <div className="flex items-center gap-1.5">

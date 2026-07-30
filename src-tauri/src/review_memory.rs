@@ -93,6 +93,25 @@ pub struct ReviewMeta {
     /// which files changed since. Empty for runs recorded before this was tracked.
     #[serde(default)]
     pub head_sha: String,
+    /// What this run actually looked at: files touched and lines added/removed in the reviewed
+    /// diff. Zero on runs recorded before this was tracked, which is why the summary that prints
+    /// it treats an all-zero scope as "unknown" rather than as an empty change.
+    #[serde(default)]
+    pub files: usize,
+    #[serde(default)]
+    pub additions: usize,
+    #[serde(default)]
+    pub deletions: usize,
+}
+
+/// Files touched and lines added / removed across a reviewed diff — the "scope" line of a review
+/// summary. Counted from the diff the review was actually given, so it describes the review rather
+/// than the branch.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DiffScope {
+    pub files: usize,
+    pub additions: usize,
+    pub deletions: usize,
 }
 
 /// Parses the slim finding projection from a review's markdown. Mirrors the finding header the

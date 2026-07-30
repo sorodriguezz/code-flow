@@ -58,6 +58,12 @@ futures-util = "0.3.33"
 # reqwest already resolves (ring, no aws-lc-rs) — enabling a second crypto provider would make
 # `ClientConfig::builder()` panic at runtime for want of a process default.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# A database connection can name a private CA and a client certificate; these read the PEM files
+# and the OS trust store to build the `rustls::ClientConfig` that results. Both versions are already
+# in the tree as transitive dependencies of the drivers — naming them here only makes them ours to
+# call directly.
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
 globset = "0.4.19"
 
 # ---------------- API client ----------------

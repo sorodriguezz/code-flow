@@ -18,6 +18,7 @@ import {
   dbExplain,
   dbListHistory,
   dbLoadTree,
+  dbForeignKeys,
   dbObjectDdl,
   dbReorderConnections,
   dbRowCount,
@@ -35,6 +36,7 @@ import {
   defaultConnectionConfig,
   engineInfo,
   type DbConnectionConfig,
+  type DbForeignKey,
   type DbConnectionRow,
   type DbConsole,
   type DbExecuteResult,
@@ -126,6 +128,9 @@ export interface DbDataTab {
   total: number | null;
   /** The relation's columns, for the primary key the data editor needs. */
   columns: DbNode[];
+  /** Which columns point at another table, so the grid can offer to follow them. Loaded once per
+   * tab, alongside the first page — it is catalog metadata and doesn't change between pages. */
+  foreignKeys: DbForeignKey[];
   /** Staged cell edits, keyed `rowIndex:column`. */
   pending: Record<string, string | null>;
   /** Row indexes staged for deletion. */
@@ -202,7 +207,8 @@ interface DbState {
     password: string | null,
   ) => Promise<boolean>;
   deleteConnection: (id: string) => Promise<void>;
-  duplicateConnection: (id: string) => Promise<void>;
+  /** Returns the copy, so a caller that has somewhere to put it — the dialog's list — can select it. */
+  duplicateConnection: (id: string) => Promise<DbConnectionRow | null>;
   reorderConnections: (ids: string[]) => Promise<void>;
   connect: (id: string) => Promise<boolean>;
   disconnect: (id: string) => Promise<void>;
@@ -220,7 +226,12 @@ interface DbState {
   explainConsole: (tabId: string, sql?: string) => Promise<void>;
   cancelRun: (tabId: string) => Promise<void>;
 
-  openData: (connectionId: string, node: DbNodeRef, name: string) => void;
+  openData: (connectionId: string, node: DbNodeRef, name: string, filter?: string) => void;
+  /** Opens the table a foreign-key column points at. `null` opens it whole. */
+  followForeignKey: (tab: DbDataTab, key: DbForeignKey, value: string | null) => void;
+  /** Rewrites which schemas a connection's tree lists. See the implementation for what the
+   * updater is handed when nothing has been filtered yet. */
+  setVisibleSchemas: (connectionId: string, update: (current: string[]) => string[]) => Promise<void>;
   updateData: (tabId: string, patch: Partial<DbDataTab>) => void;
   loadData: (tabId: string) => Promise<void>;
   setCell: (tabId: string, row: number, column: string, value: string | null) => void;
@@ -396,11 +407,13 @@ export const useDbStore = create<DbState>((set, get) => ({
   },
 
   duplicateConnection: async (id) => {
+    let copy: DbConnectionRow | null = null;
     await guarded(async () => {
-      const row = await dbDuplicateConnection(id);
-      set((s) => ({ connections: [...s.connections, row] }));
+      copy = await dbDuplicateConnection(id);
+      set((s) => ({ connections: [...s.connections, copy as DbConnectionRow] }));
       return true;
     });
+    return copy;
   },
 
   reorderConnections: async (ids) => {
@@ -687,12 +700,23 @@ export const useDbStore = create<DbState>((set, get) => ({
 
   // -------------------------------------------------------------------- data
 
-  openData: (connectionId, node, name) => {
+  openData: (connectionId, node, name, filter = "") => {
     const existing = get().tabs.find(
       (tab) => tab.kind === "data" && sameNode(tab.node, node) && tab.connectionId === connectionId,
     );
     if (existing) {
       set({ activeTabId: existing.id });
+      // Following a foreign key into a table that is already open has to re-point it, or the click
+      // looks like it did nothing: the tab comes forward still showing the previous row's filter.
+      if (filter && existing.kind === "data" && existing.filter !== filter) {
+        patchTab<DbDataTab>(set, existing.id, "data", (tab) => ({
+          ...tab,
+          filter,
+          filterDraft: filter,
+          offset: 0,
+        }));
+        void get().loadData(existing.id);
+      }
       return;
     }
     const id = newId();
@@ -704,8 +728,8 @@ export const useDbStore = create<DbState>((set, get) => ({
       name,
       offset: 0,
       limit: DEFAULT_PAGE_SIZE,
-      filter: "",
-      filterDraft: "",
+      filter,
+      filterDraft: filter,
       orderBy: null,
       descending: false,
       loading: false,
@@ -713,12 +737,63 @@ export const useDbStore = create<DbState>((set, get) => ({
       result: null,
       total: null,
       columns: [],
+      foreignKeys: [],
       pending: {},
       deleted: [],
       inserted: [],
       error: null,
     });
     void get().loadData(id);
+    // Alongside the rows rather than before them: the grid is useful without this, and a catalog
+    // query that is slow or refused must not be what decides whether the data appears.
+    void dbForeignKeys(connectionId, node)
+      .then((foreignKeys) =>
+        patchTab<DbDataTab>(set, id, "data", (tab) => ({ ...tab, foreignKeys })),
+      )
+      .catch(() => {});
+  },
+
+  /**
+   * Opens the table a foreign-key column points at.
+   *
+   * `value === null` opens it whole — that is the header's meaning, "show me what this column
+   * refers to". A value narrows it to the row being pointed at, which is the cell's.
+   */
+  followForeignKey: (tab, key, value) => {
+    const node: DbNodeRef = {
+      kind: "table",
+      database: tab.node.database,
+      schema: key.ref_schema ?? tab.node.schema,
+      name: key.ref_table,
+    };
+    const kind = get().connections.find((c) => c.id === tab.connectionId)?.kind ?? "postgres";
+    // A NULL foreign key points at nothing, so the honest destination is the whole table rather
+    // than a filter that would match no row.
+    const filter =
+      value === null
+        ? ""
+        : `${quoteIdent(key.ref_column, kind)} = ${quoteLiteral(value)}`;
+    get().openData(tab.connectionId, node, key.ref_table, filter);
+  },
+
+  /**
+   * Rewrites which schemas a connection's tree lists.
+   *
+   * The updater is handed the *effective* list, not the stored one: an empty setting means "all",
+   * and "hide this one" has to start from the full set or it would turn into "show only the
+   * others of which there are none". What the explorer has loaded is that full set — which is why
+   * this is only offered from a tree that is already open.
+   */
+  setVisibleSchemas: async (connectionId, update) => {
+    const state = get();
+    const row = state.connections.find((c) => c.id === connectionId);
+    const config = row ? parseSpec(row) : null;
+    if (!row || !config) return;
+    const current =
+      config.visible_schemas.length > 0
+        ? config.visible_schemas
+        : loadedSchemas(state.children, connectionId);
+    await state.saveConnection(row, { ...config, visible_schemas: update(current) }, null);
   },
 
   updateData: (tabId, patch) => {
@@ -1052,6 +1127,37 @@ function contextOf(tab: DbConsoleTab) {
   };
 }
 
+/** Every schema the explorer has loaded under one connection, in the order it found them. */
+function loadedSchemas(children: Record<string, DbNode[]>, connectionId: string): string[] {
+  const names = new Set<string>();
+  for (const [key, nodes] of Object.entries(children)) {
+    if (!key.startsWith(`${connectionId}|`)) continue;
+    for (const node of nodes) {
+      if (node.kind === "schema") names.add(node.name);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * An identifier, quoted the way this engine spells one.
+ *
+ * A second, smaller copy of what `sqlgen::quote_ident` does in Rust — deliberately, and only for
+ * the filter fragments built here. The backend keeps owning every statement it *runs*; this is the
+ * text that goes into the filter box, which the user then sees and can edit, so it has to be
+ * spelled in their dialect rather than handed over as an opaque blob.
+ */
+function quoteIdent(name: string, kind: DbKind): string {
+  if (kind === "sqlserver") return `[${name.replace(/]/g, "]]")}]`;
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+/** A string literal. Every SQL engine here spells one the same way, and every engine here coerces
+ * it to the column's type — so a numeric key quoted this way still compares correctly. */
+function quoteLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 /** The connection's saved settings. Returns null on a blob that predates a field rename rather than
  * throwing — the connection dialog is where that gets fixed. */
 export function parseSpec(row: DbConnectionRow): DbConnectionConfig | null {
@@ -1264,6 +1370,7 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
     result: null,
     total: null,
     columns: [],
+    foreignKeys: [],
     pending: {},
     deleted: [],
     inserted: [],

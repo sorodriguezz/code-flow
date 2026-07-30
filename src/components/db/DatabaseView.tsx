@@ -1,5 +1,5 @@
-import { useEffect } from "react";
-import { Database, FileCode2, Plus, Table2, X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Database, FileCode2, Plus, Settings2, Table2, X } from "lucide-react";
 import { ApiModal, GhostButton } from "../api/ApiModal";
 import { EmptyState } from "../common/EmptyState";
 import { DbExplorer } from "./DbExplorer";
@@ -7,6 +7,7 @@ import { SqlConsolePanel } from "./SqlConsolePanel";
 import { DataTabPanel } from "./DataTabPanel";
 import { DdlPanel } from "./DdlPanel";
 import { ConnectionModal } from "./ConnectionModal";
+import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { CARD, EngineBadge, nodeIcon } from "./dbChrome";
 import { ensureDbStoreLoaded, pendingCount, useDbStore, type DbTab } from "../../state/dbStore";
 import { useDbModalStore } from "../../state/dbModalStore";
@@ -78,9 +79,12 @@ export function DatabaseView() {
         </div>
       </div>
 
-      {(modal?.kind === "newConnection" || modal?.kind === "connection") && (
+      {(modal?.kind === "newConnection" ||
+        modal?.kind === "connection" ||
+        modal?.kind === "connections") && (
         <ConnectionModal
           connectionId={modal.kind === "connection" ? modal.connectionId : null}
+          newEngine={modal.kind === "newConnection" ? modal.engine : null}
           onClose={closeModal}
         />
       )}
@@ -186,6 +190,7 @@ function DbEmptyState() {
   const connections = useDbStore((s) => s.connections);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const store = useDbStore.getState();
+  const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
 
   return (
     <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3">
@@ -199,7 +204,7 @@ function DbEmptyState() {
       <div className="flex flex-wrap items-center justify-center gap-2">
         {connections.length === 0 ? (
           <button
-            onClick={() => openModal({ kind: "newConnection" })}
+            onClick={(e) => setEngineMenu(menuAnchor(e))}
             className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white hover:brightness-110"
           >
             <Plus size={13} />
@@ -215,15 +220,33 @@ function DbEmptyState() {
               {t("db.newConsole")}
             </button>
             <button
-              onClick={() => openModal({ kind: "newConnection" })}
+              onClick={(e) => setEngineMenu(menuAnchor(e))}
               className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
             >
               <Plus size={13} />
               {t("db.newConnection")}
             </button>
+            {/* The whole set, for when the connections exist and it's one of them that needs
+                changing — the same dialog the explorer's gear opens. */}
+            <button
+              onClick={() => openModal({ kind: "connections" })}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+            >
+              <Settings2 size={13} />
+              {t("db.manageConnections")}
+            </button>
           </>
         )}
       </div>
+
+      {engineMenu && (
+        <EngineMenu
+          x={engineMenu.x}
+          y={engineMenu.y}
+          onPick={(engine) => openModal({ kind: "newConnection", engine })}
+          onClose={() => setEngineMenu(null)}
+        />
+      )}
     </div>
   );
 }

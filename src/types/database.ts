@@ -43,6 +43,46 @@ export interface DbConnectionConfig {
    * on. Off by default — a connection that names a database came for that database.
    */
   show_all_databases: boolean;
+  /** Which schemas the tree lists. Empty means all of them. */
+  visible_schemas: string[];
+  /** A substring every table, view and routine name must contain to be listed. */
+  object_filter: string;
+
+  /** Seconds of idleness before a trivial statement is sent to hold the connection open. 0 is off. */
+  keep_alive_secs: number;
+  /** Seconds of idleness before the session is closed. 0 is off. */
+  auto_disconnect_secs: number;
+  /** SQL run once, right after connecting. A failure fails the connection. */
+  startup_script: string;
+
+  /** A PEM certificate authority to trust in addition to the system's. */
+  ssl_ca_file: string;
+  /** Client certificate and key, both PEM, for certificate authentication. */
+  ssl_cert_file: string;
+  ssl_key_file: string;
+
+  /** Reach the database through an SSH tunnel. */
+  ssh_enabled: boolean;
+  ssh_host: string;
+  /** 0 means 22. */
+  ssh_port: number;
+  /** Empty defers to `~/.ssh/config`, as `ssh` itself would. */
+  ssh_user: string;
+  /** A private key to use. Empty means whatever `ssh` would pick — the agent, then the defaults. */
+  ssh_key_file: string;
+}
+
+/**
+ * One column of a table, and the column it points at.
+ *
+ * Per column rather than per constraint: the question the grid asks is "I am on this cell — where
+ * does it lead?", and a composite key answers that once per column.
+ */
+export interface DbForeignKey {
+  column: string;
+  ref_schema: string | null;
+  ref_table: string;
+  ref_column: string;
 }
 
 export interface DbColumn {
@@ -328,6 +368,19 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     read_only: false,
     connect_timeout_ms: 15000,
     show_all_databases: false,
+    visible_schemas: [],
+    object_filter: "",
+    keep_alive_secs: 0,
+    auto_disconnect_secs: 0,
+    startup_script: "",
+    ssl_ca_file: "",
+    ssl_cert_file: "",
+    ssl_key_file: "",
+    ssh_enabled: false,
+    ssh_host: "",
+    ssh_port: 0,
+    ssh_user: "",
+    ssh_key_file: "",
   };
 }
 

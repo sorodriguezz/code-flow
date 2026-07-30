@@ -1,7 +1,9 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, Loader2, MapPin, MessageCircle } from "lucide-react";
+import { CheckCheck, ChevronDown, ChevronRight, Loader2, MapPin, MessageCircle } from "lucide-react";
 import type { PrCommentThread } from "../../types/domain";
 import { Skeleton } from "../common/Skeleton";
+import { confirmAction } from "../../state/confirmStore";
+import { useT } from "../../state/languageStore";
 import { InlineMarkdown, ResolveWithAiButton, ResolvedChip, useResolveWithAi } from "./FindingCard";
 
 /** Shimmer placeholder shown while a PR's existing comment threads are being fetched, so the
@@ -55,6 +57,7 @@ export function PrCommentCard({
   projectId,
   prSourceBranch,
   resolutionKey,
+  onResolveThread,
 }: {
   thread: PrCommentThread;
   /** Omitted for a PR reviewed from a link with no clone: there's no working copy for "resolve
@@ -63,13 +66,32 @@ export function PrCommentCard({
   prSourceBranch: string;
   /** Stable id under which this comment thread's "resolve with AI" outcome is persisted. */
   resolutionKey?: string;
+  /** Closes this conversation on the host (Azure "fixed" / GitHub "resolved"). Omitted where
+   * there's nothing to close it on. */
+  onResolveThread?: () => Promise<void>;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const { resolving, resolution, resolve, clearResolution, runId } = useResolveWithAi(
     projectId,
     prSourceBranch,
     resolutionKey,
   );
+  const [closingThread, setClosingThread] = useState(false);
+  // The host's own "Resolve" waits for the fix: a thread closed before the code changed is a
+  // conversation ended with nothing done. So where AI can apply the fix, this unlocks once it
+  // has — and where it can't (no working copy), there's nothing to wait for.
+  const canCloseThread = !projectId || resolution !== null;
+  const closeThread = async () => {
+    if (!onResolveThread) return;
+    if (!(await confirmAction(t("pr.confirmResolveThread"), false))) return;
+    setClosingThread(true);
+    try {
+      await onResolveThread();
+    } finally {
+      setClosingThread(false);
+    }
+  };
   const [first, ...rest] = thread.comments;
   const loc = locationLabel(thread);
 
@@ -109,15 +131,34 @@ export function PrCommentCard({
               <InlineMarkdown text={c.content} className="cf-markdown-inline text-[var(--cf-text-muted)]" />
             </p>
           ))}
-          {/* Nothing to apply a fix to without a working copy. */}
-          {projectId && (
-            <ResolveWithAiButton
-              resolving={resolving}
-              resolution={resolution}
-              runId={runId}
-              onClick={() => void resolve(buildFixPrompt(thread))}
-              onClear={clearResolution}
-            />
+          {/* Without a working copy there's no fix to apply, but the conversation can still be
+              closed on the host — so the row is rendered either way, and only the AI half of it
+              depends on a project. */}
+          <ResolveWithAiButton
+            showAi={!!projectId}
+            resolving={resolving}
+            resolution={resolution}
+            runId={runId}
+            onClick={() => void resolve(buildFixPrompt(thread))}
+            onClear={clearResolution}
+            trailing={
+              onResolveThread && (
+                <button
+                  onClick={() => void closeThread()}
+                  disabled={!canCloseThread || closingThread}
+                  title={canCloseThread ? t("pr.resolveThreadHint") : t("pr.resolveThreadLocked")}
+                  className="flex items-center gap-1.5 rounded-md border border-[color-mix(in_oklab,var(--cf-success)_45%,transparent)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-success)] hover:bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {closingThread ? <Loader2 size={11} className="animate-spin" /> : <CheckCheck size={11} />}
+                  {t("pr.resolveThread")}
+                </button>
+              )
+            }
+          />
+          {/* The AI half is what a missing working copy removes — say so once, rather than
+              leaving a button that silently does nothing. */}
+          {!projectId && (
+            <p className="text-[11px] text-[var(--cf-text-muted)]">{t("pr.noWorkingCopyForFix")}</p>
           )}
         </div>
       )}

@@ -6,6 +6,8 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
+  EyeOff,
+  Filter,
   Database,
   FileCode2,
   Loader2,
@@ -16,6 +18,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Settings2,
   Table2,
   Trash2,
   X,
@@ -26,6 +29,7 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { ActivePill } from "../common/ActivePill";
 import { CARD, ConnectionDot, ToolbarButton, nodeIcon } from "./dbChrome";
 import { DbHistoryList } from "./DbHistoryList";
+import { EngineMenu, menuAnchor } from "./EngineMenu";
 import {
   describeConnection,
   nodeKey,
@@ -213,6 +217,24 @@ function NodeSubtree({
       icon: FileCode2,
       onClick: () =>
         store.newConsole(connectionId, node.database ?? undefined, node.schema ?? undefined),
+    });
+  }
+  // Filtering from the tree, on the schema you are looking at — which is where you realise you
+  // never want to see it again. The dialog's Schemas tab is the same list, for editing it as a set.
+  if (node.kind === "schema") {
+    menuItems.push({
+      label: t("db.onlyThisSchema"),
+      icon: Filter,
+      separated: true,
+      onClick: () => void store.setVisibleSchemas(connectionId, () => [node.name]),
+    });
+    menuItems.push({
+      label: t("db.hideThisSchema"),
+      icon: EyeOff,
+      onClick: () =>
+        void store.setVisibleSchemas(connectionId, (known) =>
+          known.filter((name) => name !== node.name),
+        ),
     });
   }
   menuItems.push({
@@ -567,6 +589,8 @@ export function DbExplorer() {
   const setSection = useDbStore((s) => s.setSection);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const [query, setQuery] = useState("");
+  /** Where the "which engine?" menu is anchored, when the `+` has expanded it. */
+  const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
 
   const sections: { id: DbSidebarSection; label: string }[] = [
     { id: "explorer", label: t("db.explorer") },
@@ -588,8 +612,16 @@ export function DbExplorer() {
             </span>
             <BetaBadge />
           </span>
+          {/* The whole set, not one connection: the way into "set my databases up" that doesn't
+              require having a connection to right-click first. */}
           <ToolbarButton
-            onClick={() => openModal({ kind: "newConnection" })}
+            onClick={() => openModal({ kind: "connections" })}
+            title={t("db.manageConnections")}
+          >
+            <Settings2 size={13} />
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={(e) => setEngineMenu(menuAnchor(e))}
             title={t("db.newConnection")}
           >
             <Plus size={13} />
@@ -645,18 +677,13 @@ export function DbExplorer() {
           ) : query.trim() ? (
             <SearchResults query={query} />
           ) : connections.length === 0 ? (
+            // Just the state, no call to action: the "+" in the header is already the one way to
+            // add a connection, and repeating it here as a second button (plus a list of the
+            // engines, which the engine menu itself shows) made an empty panel look busier than a
+            // full one.
             <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
               <Database size={22} className="text-[var(--cf-text-muted)]" />
               <p className="text-[13px] text-[var(--cf-text)]">{t("db.noConnections")}</p>
-              <p className="text-[11px] text-[var(--cf-text-muted)]">
-                {t("db.noConnectionsHint")}
-              </p>
-              <button
-                onClick={() => openModal({ kind: "newConnection" })}
-                className="mt-1 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white hover:brightness-110"
-              >
-                {t("db.newConnection")}
-              </button>
             </div>
           ) : (
             <div role="tree" className="min-h-0 flex-1 overflow-auto p-1">
@@ -681,6 +708,15 @@ export function DbExplorer() {
         onChange={(value) => setSize("dbSidebarWidth", value)}
         onCommit={(value) => commitSize("dbSidebarWidth", value)}
       />
+
+      {engineMenu && (
+        <EngineMenu
+          x={engineMenu.x}
+          y={engineMenu.y}
+          onPick={(engine) => openModal({ kind: "newConnection", engine })}
+          onClose={() => setEngineMenu(null)}
+        />
+      )}
     </>
   );
 }

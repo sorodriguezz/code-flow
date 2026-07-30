@@ -35,9 +35,9 @@ use super::postgres::{annotate_types, cell, relation_folders, schema_folders};
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
     read_only_guard, read_only_refusal, split_statements, DbColumn, DbColumnInfo,
-    DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbKind, DbNode, DbNodeKind,
-    DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest,
-    SqlDialect,
+    DbConnectionConfig, DbEditResult, DbExecContext, DbExecuteResult, DbForeignKey, DbKind, DbNode,
+    DbNodeKind, DbNodeRef, DbRowEdit, DbServerInfo, DbSslMode, DbStatementResult,
+    DbTableDataRequest, SqlDialect,
 };
 
 const DIALECT: SqlDialect = SqlDialect::Iris;
@@ -93,7 +93,10 @@ impl IrisSession {
         // Over a pipe to a child process, never on its command line — argv is world-readable.
         request.insert("password".into(), Value::from(config.password.clone()));
         request.insert("readOnly".into(), Value::from(config.read_only));
-        request.insert("timeoutMs".into(), Value::from(config.connect_timeout().as_millis() as u64));
+        request.insert(
+            "timeoutMs".into(),
+            Value::from(config.connect_timeout().as_millis() as u64),
+        );
         request.insert("properties".into(), Value::Object(properties));
 
         let answer = bridge
@@ -197,7 +200,10 @@ impl IrisSession {
                 break;
             }
         }
-        Ok(DbExecuteResult { results, duration_ms: started.elapsed().as_millis() as u64 })
+        Ok(DbExecuteResult {
+            results,
+            duration_ms: started.elapsed().as_millis() as u64,
+        })
     }
 
     /// IRIS's plan comes from `EXPLAIN`, which returns it as an XML document in one cell.
@@ -278,7 +284,9 @@ impl IrisSession {
 
     async fn schemas(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {
         let rows = self
-            .rows("SELECT DISTINCT TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA")
+            .rows(
+                "SELECT DISTINCT TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA",
+            )
             .await?;
         Ok(rows
             .iter()
@@ -461,6 +469,42 @@ impl IrisSession {
             .collect())
     }
 
+    /// The foreign keys of one table, one row per column pair.
+    ///
+    /// Through `REFERENTIAL_CONSTRAINTS`, which is the standard catalog's way of saying "this key
+    /// points at that one": the second join back into `KEY_COLUMN_USAGE` resolves the referenced
+    /// constraint into the columns it is made of, matched to ours by ordinal.
+    pub async fn foreign_keys(&self, node: &DbNodeRef) -> Result<Vec<DbForeignKey>, String> {
+        let schema = node.schema().unwrap_or("SQLUser");
+        let table = node.name()?;
+        let rows = self
+            .rows(&format!(
+                "SELECT k.COLUMN_NAME, t.TABLE_SCHEMA, t.TABLE_NAME, t.COLUMN_NAME \
+                 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k \
+                 JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS r \
+                   ON r.CONSTRAINT_NAME = k.CONSTRAINT_NAME \
+                  AND r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA \
+                 JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE t \
+                   ON t.CONSTRAINT_NAME = r.UNIQUE_CONSTRAINT_NAME \
+                  AND t.CONSTRAINT_SCHEMA = r.UNIQUE_CONSTRAINT_SCHEMA \
+                  AND t.ORDINAL_POSITION = k.ORDINAL_POSITION \
+                 WHERE k.TABLE_SCHEMA = {} AND k.TABLE_NAME = {} \
+                 ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION",
+                quote_literal(Some(schema))?,
+                quote_literal(Some(table))?
+            ))
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| DbForeignKey {
+                column: cell(row, 0),
+                ref_schema: Some(cell(row, 1)),
+                ref_table: cell(row, 2),
+                ref_column: cell(row, 3),
+            })
+            .collect())
+    }
+
     async fn keys(&self, node: &DbNodeRef) -> Result<Vec<DbNode>, String> {
         let schema = node.schema().unwrap_or("SQLUser");
         let table = node.name()?;
@@ -570,7 +614,11 @@ impl IrisSession {
                 _ => message.to_string(),
             }
         });
-        Ok(DbEditResult { applied, statements, error })
+        Ok(DbEditResult {
+            applied,
+            statements,
+            error,
+        })
     }
 
     pub async fn object_ddl(&self, node: &DbNodeRef) -> Result<String, String> {
@@ -809,6 +857,27 @@ fn driver_properties(config: &DbConnectionConfig) -> (Map<String, Value>, Vec<St
 /// a self-signed certificate that it is elsewhere — and saying so up front is better than a
 /// handshake failure the user has no way to read.
 fn tls_note(config: &DbConnectionConfig) -> Option<String> {
+    // Said before anything about the mode, because a user who filled these in believes they are in
+    // effect, and silence would leave them debugging a certificate that was never presented.
+    let named_files = [
+        (&config.ssl_ca_file, "CA file"),
+        (&config.ssl_cert_file, "client certificate"),
+        (&config.ssl_key_file, "client key"),
+    ]
+    .into_iter()
+    .filter(|(path, _)| !path.trim().is_empty())
+    .map(|(_, what)| what)
+    .collect::<Vec<_>>();
+    if !named_files.is_empty() {
+        return Some(format!(
+            "The {} set on this connection {} ignored: the InterSystems JDBC driver takes no \
+             certificate paths. It verifies against the Java truststore, and a client \
+             configuration is selected by adding an \"SSL configuration name\" driver option \
+             naming one defined on the IRIS server.",
+            named_files.join(", "),
+            if named_files.len() == 1 { "is" } else { "are" }
+        ));
+    }
     match config.ssl {
         DbSslMode::Disable => None,
         DbSslMode::Require => Some(
@@ -881,6 +950,19 @@ mod tests {
             read_only: false,
             connect_timeout_ms: 0,
             show_all_databases: false,
+            visible_schemas: Vec::new(),
+            object_filter: String::new(),
+            keep_alive_secs: 0,
+            auto_disconnect_secs: 0,
+            startup_script: String::new(),
+            ssl_ca_file: String::new(),
+            ssl_cert_file: String::new(),
+            ssl_key_file: String::new(),
+            ssh_enabled: false,
+            ssh_host: String::new(),
+            ssh_port: 0,
+            ssh_user: String::new(),
+            ssh_key_file: String::new(),
         }
     }
 
