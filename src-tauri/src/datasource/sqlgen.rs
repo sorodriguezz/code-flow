@@ -16,7 +16,7 @@
 //! quote and refuses a value carrying a NUL byte, the one character no dialect can escape inside a
 //! literal. Its test is the one to keep passing.
 
-use super::{DbCell, DbNodeRef, DbRowEdit, DbRowEditKind, SqlDialect};
+use super::{DbCell, DbNodeRef, DbRowEdit, DbRowEditKind, DbSortKey, SqlDialect};
 
 /// Wraps an identifier so a name that is a keyword, mixed-case or contains a space still resolves.
 ///
@@ -64,8 +64,7 @@ pub fn select_page(
     node: &DbNodeRef,
     dialect: SqlDialect,
     filter: &str,
-    order_by: Option<&str>,
-    descending: bool,
+    sort: &[DbSortKey],
     offset: u32,
     limit: u32,
 ) -> Result<String, String> {
@@ -75,10 +74,20 @@ pub fn select_page(
     } else {
         format!(" WHERE {}", filter.trim())
     };
-    let direction = if descending { " DESC" } else { " ASC" };
-    let order = order_by
-        .filter(|column| !column.trim().is_empty())
-        .map(|column| format!(" ORDER BY {}{direction}", quote_ident(column, dialect)));
+    // Every key is quoted and given its own direction, in the order the grid collected them: the
+    // first is the sort, the rest break its ties.
+    let keys: Vec<String> = sort
+        .iter()
+        .filter(|key| !key.column.trim().is_empty())
+        .map(|key| {
+            format!(
+                "{}{}",
+                quote_ident(&key.column, dialect),
+                if key.descending { " DESC" } else { " ASC" }
+            )
+        })
+        .collect();
+    let order = (!keys.is_empty()).then(|| format!(" ORDER BY {}", keys.join(", ")));
 
     Ok(match dialect {
         SqlDialect::Postgres => format!(
@@ -300,16 +309,27 @@ mod tests {
     /// has to produce legal SQL.
     #[test]
     fn tsql_paging_always_has_an_order_by() {
-        let sql = select_page(&node(), SqlDialect::TSql, "", None, false, 100, 50).unwrap();
+        let sql = select_page(&node(), SqlDialect::TSql, "", &[], 100, 50).unwrap();
         assert!(sql.contains("ORDER BY 1"), "{sql}");
         assert!(sql.contains("OFFSET 100 ROWS FETCH NEXT 50 ROWS ONLY"), "{sql}");
     }
 
+    /// Several keys keep their order and their own directions — the tie-breaker is the point.
+    #[test]
+    fn a_multi_column_sort_keeps_its_order() {
+        let sort = vec![
+            DbSortKey { column: "created_at".into(), descending: true },
+            DbSortKey { column: "name".into(), descending: false },
+        ];
+        let sql = select_page(&node(), SqlDialect::Postgres, "", &sort, 0, 50).unwrap();
+        assert!(sql.contains(r#"ORDER BY "created_at" DESC, "name" ASC"#), "{sql}");
+    }
+
     #[test]
     fn iris_pages_with_top_and_vid() {
-        let first = select_page(&node(), SqlDialect::Iris, "", None, false, 0, 50).unwrap();
+        let first = select_page(&node(), SqlDialect::Iris, "", &[], 0, 50).unwrap();
         assert!(first.starts_with("SELECT TOP 50"), "{first}");
-        let later = select_page(&node(), SqlDialect::Iris, "", None, false, 50, 50).unwrap();
+        let later = select_page(&node(), SqlDialect::Iris, "", &[], 50, 50).unwrap();
         assert!(later.contains("%VID"), "{later}");
         assert!(later.contains("TOP 100"), "{later}");
         assert!(later.contains("cf_vid > 50"), "{later}");

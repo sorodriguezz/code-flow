@@ -68,6 +68,15 @@ export function ReviewMemoriesSettings() {
   const [runs, setRuns] = useState<ReviewRunSummary[] | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ReviewRunDetail | null>(null);
+  /**
+   * Which repository's memory is on screen. `null` is all of them.
+   *
+   * The list is the workspace's, but memory never is: a run is only ever read back for the
+   * repository it was recorded against — so "which of these will actually be used on the PR I'm
+   * about to review?" is a question the manager has to be able to answer, and a workspace with
+   * four repositories in one flat list cannot.
+   */
+  const [repoFilter, setRepoFilter] = useState<string | null>(null);
 
   const reload = async (id: string) => setRuns(await listReviewRuns(id));
 
@@ -75,6 +84,7 @@ export function ReviewMemoriesSettings() {
     setRuns(null);
     setExpandedId(null);
     setDetail(null);
+    setRepoFilter(null);
     if (workspaceId) void reload(workspaceId);
   }, [workspaceId]);
 
@@ -96,6 +106,24 @@ export function ReviewMemoriesSettings() {
     }
     return [...byPr.values()];
   }, [runs]);
+
+  /** One entry per repository with saved memory, for the filter row. */
+  const repos = useMemo(() => {
+    const byProject = new Map<string, { projectId: string; projectName: string; runs: number }>();
+    for (const group of groups) {
+      const entry = byProject.get(group.projectId);
+      if (entry) entry.runs += group.runs.length;
+      else
+        byProject.set(group.projectId, {
+          projectId: group.projectId,
+          projectName: group.projectName,
+          runs: group.runs.length,
+        });
+    }
+    return [...byProject.values()].sort((a, b) => a.projectName.localeCompare(b.projectName));
+  }, [groups]);
+
+  const shown = repoFilter ? groups.filter((g) => g.projectId === repoFilter) : groups;
 
   if (!workspaceId) {
     return <p className="text-[13px] text-[var(--cf-text-muted)]">{t("settings.reviewSelectWorkspace")}</p>;
@@ -175,7 +203,30 @@ export function ReviewMemoriesSettings() {
         </div>
       </div>
 
-      {groups.map((group) => (
+      {/* Which repository each set of memories belongs to — and a way to see one repository at a
+          time. Only shown when there is more than one, since with a single repo the row would be
+          one button saying what the whole screen already says. */}
+      {repos.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1">
+          <FilterChip
+            label={t("settings.memoryAllRepos")}
+            count={runs.length}
+            active={repoFilter === null}
+            onClick={() => setRepoFilter(null)}
+          />
+          {repos.map((repo) => (
+            <FilterChip
+              key={repo.projectId}
+              label={repo.projectName}
+              count={repo.runs}
+              active={repoFilter === repo.projectId}
+              onClick={() => setRepoFilter(repo.projectId)}
+            />
+          ))}
+        </div>
+      )}
+
+      {shown.map((group) => (
         <div key={`${group.projectId}:${group.prId}`} className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
           {/* Project name moved onto its own muted line: inline after the title it collided with the
               PR subject, and both got clipped by the same truncate. */}
@@ -349,5 +400,33 @@ function RunFindings({ detail, onMarked }: { detail: ReviewRunDetail; onMarked: 
         );
       })}
     </div>
+  );
+}
+
+/** One repository in the filter row, with how much memory it holds. */
+function FilterChip({
+  label,
+  count,
+  active,
+  onClick,
+}: {
+  label: string;
+  count: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      aria-pressed={active}
+      className={`flex items-center gap-1 rounded-md border px-2 py-1 text-[11.5px] ${
+        active
+          ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+          : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+      }`}
+    >
+      <span className="max-w-[180px] truncate">{label}</span>
+      <span className="tabular-nums opacity-70">{count}</span>
+    </button>
   );
 }

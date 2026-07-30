@@ -58,21 +58,41 @@ pub fn create_workspace(conn: &Connection, name: &str, icon: &str, color: &str) 
 
 // ---------- review runs (durable review memory) ----------
 
+/// The `WHERE` every memory read shares: this project, this pull request — **and this repository**.
+///
+/// The repository clause is the one that isn't obvious. A project row points at a clone and can be
+/// re-linked to a different repository; without this, the new repository would inherit the old
+/// one's findings for a PR that merely happens to share its number. Runs written before the key
+/// existed carry an empty one and are still matched, since back then the project *was* the
+/// repository — dropping them would silently erase memory that is still correct.
+const MEMORY_SCOPE: &str = "project_id = ?1 AND pr_id = ?2 \
+     AND COALESCE(json_extract(meta, '$.repo_key'), '') IN ('', ?3)";
+
 /// How many runs this PR already has — used to number the next iteration.
-pub fn count_review_runs(conn: &Connection, project_id: &str, pr_id: i64) -> rusqlite::Result<i64> {
+pub fn count_review_runs(
+    conn: &Connection,
+    project_id: &str,
+    pr_id: i64,
+    repo_key: &str,
+) -> rusqlite::Result<i64> {
     conn.query_row(
-        "SELECT COUNT(*) FROM review_runs WHERE project_id = ?1 AND pr_id = ?2",
-        params![project_id, pr_id],
+        &format!("SELECT COUNT(*) FROM review_runs WHERE {MEMORY_SCOPE}"),
+        params![project_id, pr_id, repo_key],
         |row| row.get(0),
     )
 }
 
 /// The newest run's `findings` JSON for this PR, if any — read back on a re-review to reconcile
 /// against the previous run.
-pub fn latest_review_findings(conn: &Connection, project_id: &str, pr_id: i64) -> rusqlite::Result<Option<String>> {
+pub fn latest_review_findings(
+    conn: &Connection,
+    project_id: &str,
+    pr_id: i64,
+    repo_key: &str,
+) -> rusqlite::Result<Option<String>> {
     conn.query_row(
-        "SELECT findings FROM review_runs WHERE project_id = ?1 AND pr_id = ?2 ORDER BY created_at DESC LIMIT 1",
-        params![project_id, pr_id],
+        &format!("SELECT findings FROM review_runs WHERE {MEMORY_SCOPE} ORDER BY created_at DESC LIMIT 1"),
+        params![project_id, pr_id, repo_key],
         |row| row.get::<_, String>(0),
     )
     .optional()
@@ -80,11 +100,18 @@ pub fn latest_review_findings(conn: &Connection, project_id: &str, pr_id: i64) -
 
 /// The head commit SHA of this PR's most recent run (from its `meta` JSON), if any — used to
 /// detect "nothing changed since last review" and to diff which files changed since.
-pub fn latest_review_head(conn: &Connection, project_id: &str, pr_id: i64) -> rusqlite::Result<Option<String>> {
+pub fn latest_review_head(
+    conn: &Connection,
+    project_id: &str,
+    pr_id: i64,
+    repo_key: &str,
+) -> rusqlite::Result<Option<String>> {
     conn.query_row(
-        "SELECT json_extract(meta, '$.head_sha') FROM review_runs
-         WHERE project_id = ?1 AND pr_id = ?2 ORDER BY created_at DESC LIMIT 1",
-        params![project_id, pr_id],
+        &format!(
+            "SELECT json_extract(meta, '$.head_sha') FROM review_runs
+             WHERE {MEMORY_SCOPE} ORDER BY created_at DESC LIMIT 1"
+        ),
+        params![project_id, pr_id, repo_key],
         |row| row.get::<_, Option<String>>(0),
     )
     .optional()

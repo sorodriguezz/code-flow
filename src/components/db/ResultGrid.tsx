@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ExternalLink, Maximize2 } from "lucide-react";
+import { Checkbox } from "../common/Checkbox";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useT } from "../../state/languageStore";
 import type { DbColumn, DbForeignKey } from "../../types/database";
@@ -36,6 +37,8 @@ const ROW_HEIGHT = 26;
 const HEADER_HEIGHT = 40;
 /** Rows rendered above and below the viewport, so a fast scroll doesn't flash empty space. */
 const OVERSCAN = 12;
+/** Wide enough for five digits and, when the panel asks for one, a select-all box over them. */
+const GUTTER_WIDTH = 52;
 const MIN_COLUMN_WIDTH = 64;
 const DEFAULT_COLUMN_WIDTH = 160;
 /** Beyond this a cell is shown truncated with an expander — a 40KB JSON document in a 26px row is
@@ -65,10 +68,35 @@ export interface ResultGridProps {
   onRemoveInserted?: (row: number) => void;
   /** Right-clicking a row calls this; the caller decides what the menu holds. */
   onRowContextMenu?: (row: number, event: React.MouseEvent) => void;
-  /** Clicking a column header sorts by it, when set. */
-  onSort?: (column: string) => void;
-  sortColumn?: string | null;
-  sortDescending?: boolean;
+  /**
+   * Selected rows, by index into `rows`.
+   *
+   * The selection lives with the caller rather than here: what it is *for* — export these, delete
+   * these, read these one field per line — belongs to the panel around the grid, and a selection the
+   * grid owned privately would have to be mirrored out of it anyway.
+   */
+  selectedRows?: Set<number>;
+  /**
+   * A click on a row's number. Set this to make the gutter selectable.
+   *
+   * The modifiers are reported rather than resolved, because the anchor a shift-click extends from
+   * is part of the selection the caller owns. `range` is shift, `toggle` is ⌘/Ctrl — the two
+   * conventions every list on both platforms already uses.
+   */
+  onSelectRow?: (row: number, modifiers: { range: boolean; toggle: boolean }) => void;
+  /** The gutter's header box: every row, or none. */
+  onSelectAllRows?: (selected: boolean) => void;
+  /**
+   * Clicking a column header sorts by it, when set.
+   *
+   * `additive` is ⇧ (or ⌘/Ctrl): add this column to the sort instead of replacing it. The caller
+   * decides what a click *means* — the grid only reports which column and whether the modifier was
+   * down, because the cycle through ascending, descending and unsorted belongs to whoever holds
+   * the sort.
+   */
+  onSort?: (column: string, additive: boolean) => void;
+  /** The sort keys in order, so a column can show both its direction and its place in the sort. */
+  sort?: { column: string; descending: boolean }[];
   /** Marks primary-key columns, which the header shows and the editor relies on. */
   primaryKeys?: Set<string>;
   /** Columns that point at another table, keyed by column name. */
@@ -96,9 +124,11 @@ export function ResultGrid({
   onEditInserted,
   onRemoveInserted,
   onRowContextMenu,
+  selectedRows,
+  onSelectRow,
+  onSelectAllRows,
   onSort,
-  sortColumn,
-  sortDescending,
+  sort,
   primaryKeys,
   foreignKeys,
   onFollowForeignKey,
@@ -133,6 +163,8 @@ export function ResultGrid({
 
   const widthOf = (column: string) => widths[column] ?? DEFAULT_COLUMN_WIDTH;
   const totalRows = rows.length + insertedRows.length;
+  // Server rows only: an inserted row exists nowhere yet, so "select everything" can't include one.
+  const allSelected = rows.length > 0 && (selectedRows?.size ?? 0) >= rows.length;
   const first = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
   const last = Math.min(
     totalRows,
@@ -176,11 +208,24 @@ export function ResultGrid({
             className="sticky top-0 z-10 flex border-b border-[var(--cf-border)] bg-[var(--cf-surface)]"
             style={{ height: HEADER_HEIGHT }}
           >
+            {/* The corner over the row numbers: all or none, the way the gutter's own header
+                behaves in every grid that lets you select rows. */}
             <div
-              className="sticky left-0 z-10 shrink-0 border-r border-[var(--cf-border)] bg-[var(--cf-surface)]"
-              style={{ width: 48 }}
-            />
-            {columns.map((column, columnIndex) => (
+              className="sticky left-0 z-10 flex shrink-0 items-center justify-center border-r border-[var(--cf-border)] bg-[var(--cf-surface)]"
+              style={{ width: GUTTER_WIDTH }}
+            >
+              {onSelectAllRows && rows.length > 0 && (
+                <Checkbox
+                  checked={allSelected}
+                  indeterminate={!allSelected && (selectedRows?.size ?? 0) > 0}
+                  onChange={onSelectAllRows}
+                />
+              )}
+            </div>
+            {columns.map((column, columnIndex) => {
+              const sortIndex = sort?.findIndex((key) => key.column === column.name) ?? -1;
+              const sortKey = sortIndex >= 0 ? sort?.[sortIndex] : undefined;
+              return (
               <div
                 key={`${column.name}-${columnIndex}`}
                 style={{ width: widthOf(column.name) }}
@@ -188,9 +233,9 @@ export function ResultGrid({
               >
                 <button
                   type="button"
-                  onClick={() => onSort?.(column.name)}
+                  onClick={(e) => onSort?.(column.name, e.shiftKey || e.metaKey || e.ctrlKey)}
                   disabled={!onSort}
-                  title={column.type_name ? `${column.name} · ${column.type_name}` : column.name}
+                  title={onSort ? t("db.sortHint") : column.name}
                   className="flex min-w-0 items-center gap-1 text-left disabled:cursor-default"
                 >
                   <span className="min-w-0 flex-1 truncate text-[11px] font-semibold leading-none text-[var(--cf-text)]">
@@ -204,8 +249,18 @@ export function ResultGrid({
                       PK
                     </span>
                   )}
-                  {sortColumn === column.name &&
-                    (sortDescending ? <ArrowDown size={10} /> : <ArrowUp size={10} />)}
+                  {sortKey && (
+                    <span className="flex shrink-0 items-center text-[var(--cf-accent)]">
+                      {sortKey.descending ? <ArrowDown size={10} /> : <ArrowUp size={10} />}
+                      {/* Which key this is, when there is more than one — an arrow on three
+                          columns says nothing about which of them breaks the tie. */}
+                      {(sort?.length ?? 0) > 1 && (
+                        <span className="text-[8.5px] font-bold leading-none tabular-nums">
+                          {sortIndex + 1}
+                        </span>
+                      )}
+                    </span>
+                  )}
                 </button>
                 {/* The arrow rides beside the name, not over it: the header's job is still to sort.
                     Its tooltip names the destination, which is the only place the referenced table
@@ -238,13 +293,15 @@ export function ResultGrid({
                   }
                 />
               </div>
-            ))}
+              );
+            })}
           </div>
 
           <div style={{ height: totalRows * ROW_HEIGHT, position: "relative" }}>
             {visible.map((row) => {
               const inserted = row >= rows.length;
               const deleted = deletedRows?.has(row) ?? false;
+              const selected = !inserted && (selectedRows?.has(row) ?? false);
               return (
                 <div
                   key={row}
@@ -265,14 +322,21 @@ export function ResultGrid({
                       ? "bg-[var(--cf-success)]/[0.07]"
                       : deleted
                         ? "bg-[var(--cf-danger)]/[0.08]"
-                        : "hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
+                        : selected
+                          ? "bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)]"
+                          : "hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
                   }`}
                 >
                   {/* The row number, pinned: the anchor for "the third row" in any conversation
-                      about a result, and where insert/delete state is marked. */}
+                      about a result, where insert/delete state is marked — and, when the panel
+                      wants a selection, the handle you click to build one. */}
                   <div
-                    className="sticky left-0 z-[5] flex shrink-0 items-center justify-end gap-1 border-r border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 text-[10px] tabular-nums text-[var(--cf-text-muted)]"
-                    style={{ width: 48 }}
+                    className={`sticky left-0 z-[5] flex shrink-0 items-center justify-end gap-1 border-r border-[var(--cf-border)] px-1.5 text-[10px] tabular-nums ${
+                      selected
+                        ? "bg-[color-mix(in_oklab,var(--cf-accent)_22%,var(--cf-surface))] font-semibold text-[var(--cf-text)]"
+                        : "bg-[var(--cf-surface)] text-[var(--cf-text-muted)]"
+                    }`}
+                    style={{ width: GUTTER_WIDTH }}
                   >
                     {inserted && onRemoveInserted ? (
                       <button
@@ -283,7 +347,27 @@ export function ResultGrid({
                         ✕
                       </button>
                     ) : null}
-                    <span>{inserted ? "+" : row + 1}</span>
+                    {inserted || !onSelectRow ? (
+                      <span>{inserted ? "+" : row + 1}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        // Not a drag-select: a click, ⇧-click for a run and ⌘/Ctrl-click to pick
+                        // rows apart is the same grammar as every file list, and it survives the
+                        // windowing this grid does — a drag across rows that aren't rendered yet
+                        // would have nothing to hit.
+                        onClick={(e) =>
+                          onSelectRow(row, {
+                            range: e.shiftKey,
+                            toggle: e.metaKey || e.ctrlKey,
+                          })
+                        }
+                        title={t("db.selectRowHint")}
+                        className="w-full cursor-pointer text-right"
+                      >
+                        {row + 1}
+                      </button>
+                    )}
                   </div>
                   {columns.map((column, columnIndex) => {
                     const value = valueAt(row, columnIndex);

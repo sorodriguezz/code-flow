@@ -28,6 +28,8 @@ import {
   dbUpdateConsole,
 } from "../lib/tauri/dbCommands";
 import { getSetting, setSetting } from "../lib/tauri/commands";
+import { unguardedDelete } from "../lib/db/sqlGuards";
+import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import {
@@ -46,6 +48,7 @@ import {
   type DbQueryHistoryEntry,
   type DbRowEdit,
   type DbServerInfo,
+  type DbSortKey,
   type DbStatementResult,
 } from "../types/database";
 
@@ -119,8 +122,14 @@ export interface DbDataTab {
   /** What is typed in the filter box but not yet applied — so a half-written predicate doesn't run
    * on every keystroke. */
   filterDraft: string;
-  orderBy: string | null;
-  descending: boolean;
+  /**
+   * The sort, in the order the columns were added to it.
+   *
+   * A list rather than one column and a direction, because "newest first, then by name" is an
+   * ordinary thing to want out of a grid and expressing it one column at a time cannot say which
+   * of the two breaks the tie. Empty means the server's own order.
+   */
+  sort: DbSortKey[];
   loading: boolean;
   runId: string | null;
   result: DbStatementResult | null;
@@ -236,6 +245,8 @@ interface DbState {
   loadData: (tabId: string) => Promise<void>;
   setCell: (tabId: string, row: number, column: string, value: string | null) => void;
   toggleDeleteRow: (tabId: string, row: number) => void;
+  /** Stages (or un-stages) a set of rows for deletion in one go — what the grid's selection needs. */
+  setDeletedRows: (tabId: string, rows: number[], deleted: boolean) => void;
   addRow: (tabId: string) => void;
   setInsertedCell: (tabId: string, row: number, column: string, value: string | null) => void;
   removeInsertedRow: (tabId: string, row: number) => void;
@@ -250,7 +261,41 @@ interface DbState {
   refreshHistory: () => Promise<void>;
   deleteHistory: (id: string) => Promise<void>;
   clearHistory: () => Promise<void>;
+
+  /** Everything the workspace has sent to a server this session, newest last. See `DbSqlLogEntry`. */
+  sqlLog: DbSqlLogEntry[];
+  logSql: (entry: Omit<DbSqlLogEntry, "id" | "at">) => void;
+  clearSqlLog: () => void;
 }
+
+/**
+ * One statement the workspace ran, for the log panel.
+ *
+ * The point of it is the SQL nobody typed: opening a table, turning a page, sorting a column and
+ * applying an edit all send statements the user never sees, and "what did clicking that actually
+ * do?" has no answer without them. So the text logged is the statement the *server* was given —
+ * every entry here comes back from the backend rather than being re-generated on this side, which
+ * is the only way the log can't drift from what really ran.
+ *
+ * In memory only. It is a window onto this session's work, not an archive — the console's own runs
+ * are already kept in history, which is the thing that survives a restart.
+ */
+export interface DbSqlLogEntry {
+  id: string;
+  /** Epoch milliseconds. */
+  at: number;
+  connectionId: string;
+  sql: string;
+  /** What made it run: a grid, an edit batch, a console. */
+  source: "grid" | "edit" | "console";
+  durationMs: number | null;
+  rows: number | null;
+  error: string | null;
+}
+
+/** Beyond this the oldest entries are dropped: a session that pages through a big table all day
+ * should not turn the log into a memory leak. */
+const SQL_LOG_LIMIT = 300;
 
 /**
  * Guards against the four callers that can race a first load (the view mounting, StrictMode
@@ -285,6 +330,7 @@ export const useDbStore = create<DbState>((set, get) => ({
   tabs: [],
   activeTabId: null,
   section: "explorer",
+  sqlLog: [],
 
   init: async (workspaceId) => {
     set({ workspaceId, loading: true });
@@ -607,6 +653,16 @@ export const useDbStore = create<DbState>((set, get) => ({
     const statement = (sql ?? tab.body).trim();
     if (!statement) return;
 
+    // The one statement that is never a typo you can recover from. See `unguardedDelete`.
+    const kind = get().connections.find((c) => c.id === tab.connectionId)?.kind;
+    if (kind && engineInfo(kind).sql) {
+      const unguarded = unguardedDelete(statement);
+      if (unguarded) {
+        pushErrorToast(translate("db.deleteNeedsWhere", { statement: unguarded }));
+        return;
+      }
+    }
+
     const runId = newRunId();
     patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({
       ...current,
@@ -629,6 +685,16 @@ export const useDbStore = create<DbState>((set, get) => ({
           result.results.findIndex((entry) => entry.columns.length > 0),
         ),
       }));
+      for (const entry of result.results) {
+        get().logSql({
+          connectionId: tab.connectionId,
+          sql: entry.statement,
+          source: "console",
+          durationMs: entry.duration_ms,
+          rows: entry.columns.length > 0 ? entry.rows.length : entry.rows_affected,
+          error: entry.error,
+        });
+      }
       await recordHistory(get, tab, statement, result, Date.now() - started);
     } catch (e) {
       const message = String(e);
@@ -730,8 +796,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       limit: DEFAULT_PAGE_SIZE,
       filter,
       filterDraft: filter,
-      orderBy: null,
-      descending: false,
+      sort: [],
       loading: false,
       runId: null,
       result: null,
@@ -823,13 +888,22 @@ export const useDbStore = create<DbState>((set, get) => ({
           node: tab.node,
           offset: tab.offset,
           limit: tab.limit,
-          order_by: tab.orderBy,
-          descending: tab.descending,
+          sort: tab.sort,
           filter: tab.filter,
         },
         runId,
       );
       patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, result }));
+      // The statement the server was actually given — see `DbSqlLogEntry` for why it is logged
+      // rather than rebuilt here.
+      get().logSql({
+        connectionId: tab.connectionId,
+        sql: result.statement,
+        source: "grid",
+        durationMs: result.duration_ms,
+        rows: result.rows.length,
+        error: null,
+      });
 
       // The columns are what the primary key comes from, so the editor needs them before it can
       // build an `UPDATE`. Fetched once per tab, not per page.
@@ -847,6 +921,16 @@ export const useDbStore = create<DbState>((set, get) => ({
         .catch(() => {});
     } catch (e) {
       patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, error: String(e) }));
+      // A failed page is exactly what the log is for: the message alone rarely says which
+      // statement produced it, and the tab only keeps the last one.
+      get().logSql({
+        connectionId: tab.connectionId,
+        sql: "",
+        source: "grid",
+        durationMs: null,
+        rows: null,
+        error: String(e),
+      });
     } finally {
       patchTab<DbDataTab>(set, tabId, "data", (current) => ({
         ...current,
@@ -873,6 +957,18 @@ export const useDbStore = create<DbState>((set, get) => ({
         ? tab.deleted.filter((entry) => entry !== row)
         : [...tab.deleted, row],
     }));
+  },
+
+  setDeletedRows: (tabId, rows, deleted) => {
+    patchTab<DbDataTab>(set, tabId, "data", (tab) => {
+      const touched = new Set(rows);
+      return {
+        ...tab,
+        deleted: deleted
+          ? [...new Set([...tab.deleted, ...rows])]
+          : tab.deleted.filter((entry) => !touched.has(entry)),
+      };
+    });
   },
 
   addRow: (tabId) => {
@@ -919,6 +1015,18 @@ export const useDbStore = create<DbState>((set, get) => ({
 
     await guarded(async () => {
       const outcome = await dbApplyEdits(tab.connectionId, tab.node, edits);
+      // Logged whether or not the batch succeeded: a rejected `UPDATE` is the one you most want to
+      // read back, and the toast only carries the server's complaint, not the statement.
+      for (const sql of outcome.statements) {
+        get().logSql({
+          connectionId: tab.connectionId,
+          sql,
+          source: "edit",
+          durationMs: null,
+          rows: null,
+          error: outcome.error,
+        });
+      }
       if (outcome.error) {
         // Kept staged: the user is about to fix the value the server rejected, and clearing the
         // grid would make them re-type every change in the batch.
@@ -1008,6 +1116,17 @@ export const useDbStore = create<DbState>((set, get) => ({
     await guarded(() => dbClearHistory(workspaceId));
     set({ history: [] });
   },
+
+  logSql: (entry) => {
+    set((s) => ({
+      sqlLog: [
+        ...s.sqlLog.slice(Math.max(0, s.sqlLog.length - SQL_LOG_LIMIT + 1)),
+        { ...entry, id: newRunId(), at: Date.now() },
+      ],
+    }));
+  },
+
+  clearSqlLog: () => set({ sqlLog: [] }),
 }));
 
 // ---------------------------------------------------------------------------
@@ -1361,8 +1480,7 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
     limit: DEFAULT_PAGE_SIZE,
     filter: "",
     filterDraft: "",
-    orderBy: null,
-    descending: false,
+    sort: [],
     loading: false,
     runId: null,
     // Deliberately not loaded on restore: reopening the app must not fire a query per restored tab

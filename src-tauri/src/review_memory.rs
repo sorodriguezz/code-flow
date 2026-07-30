@@ -86,6 +86,16 @@ pub struct ReviewMeta {
     pub model: String,
     pub project_id: String,
     pub project_name: String,
+    /// Which repository this run actually reviewed — `github:host/owner/repo` or
+    /// `azure:org/project/repoId` (see `repo_key` in `ado_cmd`).
+    ///
+    /// The project id alone doesn't answer that question: a project is a row pointing at a clone,
+    /// and re-pointing it at another repository would otherwise hand the new one the old one's
+    /// memory — same project id, entirely different code. Empty on runs recorded before this was
+    /// tracked, which are read as "belongs to whatever project stored them", the rule that was
+    /// true when they were written.
+    #[serde(default)]
+    pub repo_key: String,
     pub workspace_id: String,
     pub timestamp: String,
     pub iter: usize,

@@ -297,6 +297,48 @@ body {
   }
 }
 
+/* The bar along the bottom of a running AI card (src/components/ai/AiRunLog.tsx). Indeterminate on
+   purpose: an agent run has no percentage, and a bar that pretended otherwise would be inventing
+   one. What it does carry is "still moving", which is the thing the eye checks when a review takes
+   two minutes. Transform-only, like every animation above it. */
+@keyframes cf-run-beam {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+
+.cf-run-track {
+  position: relative;
+  height: 2px;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--cf-accent) 12%, transparent);
+}
+
+.cf-run-beam {
+  position: absolute;
+  inset-block: 0;
+  width: 33%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--cf-accent) 85%, transparent),
+    transparent
+  );
+  animation: cf-run-beam 1.5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Still visibly "a run is open", without the travelling light. */
+  .cf-run-beam {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+
 /* Tailwind v4's preflight gives buttons `cursor: default`, which left most of the app's icon
    buttons looking like decoration. In `base` on purpose: any explicit `cursor-*` utility on an
    element still wins, since utilities are a later layer. */

@@ -376,3 +376,123 @@ function scopeLines(memory?: SummaryMemory | null): string[] {
   if (lenses) out.push(`**Lentes aplicadas:** ${lenses.join(" · ")}`);
   return out;
 }
+
+/** Which way a pull request was settled — the three decisions the panel's buttons take. */
+export type PrDecisionKind = "approve" | "request_changes" | "close";
+
+const DECISION_HEADING: Record<PrDecisionKind, string> = {
+  approve: "✅ **Aprobado**",
+  request_changes: "🔄 **Cambios solicitados**",
+  close: "🚫 **Cerrado sin fusionar**",
+};
+
+/**
+ * The note that goes on a pull request when it is settled: approved, sent back for changes, or
+ * closed.
+ *
+ * It exists because a decision on its own says nothing about *why*. An approval is a single word
+ * on the host, and six weeks later the only record of what was checked before it — and of the two
+ * findings that were fixed on the way, and the one that was accepted as-is — was a local database
+ * on one machine. So the decision publishes what it was based on, where it belongs: on the PR.
+ *
+ * Three groups, and each earns its place:
+ *
+ * - **Corregido** — findings this PR closed over its iterations (the reviewer's own memory), plus
+ *   anything fixed from CodeFlow during the session. This is the half no review text can tell you:
+ *   a clean re-review reads identically whether the PR never had a defect or had three that were
+ *   all fixed.
+ * - **Sin corregir** — what the last review still found. On an approval these are the things
+ *   *knowingly accepted*, which is exactly what a future reader needs and what nobody writes down.
+ * - **Alcance** — what was looked at and under which lenses, so the verdict is auditable rather
+ *   than a claim.
+ *
+ * It never invents a verdict of its own: the Quality Gate is computed from the findings, the
+ * resolved list comes from the stored run, and the decision is the one the human just took.
+ */
+export function formatDecisionComment(
+  decision: PrDecisionKind,
+  date: string,
+  parsed: ParsedAnalysis | null,
+  memory?: SummaryMemory | null,
+  /** Ids of findings fixed from CodeFlow this session ("Resolve with AI"), so they read as done
+   * even when no re-review has run since. */
+  fixedIds: string[] = [],
+): string {
+  const fixed = new Set(fixedIds);
+  const findings = parsed?.findings ?? [];
+  const open = findings.filter((f) => !fixed.has(f.id));
+  const fixedNow = findings.filter((f) => fixed.has(f.id));
+  const resolved = memory?.resolved ?? [];
+
+  const lines = [`### ${DECISION_HEADING[decision]} — ${date}`, ""];
+
+  if (!parsed) {
+    // No review to summarise. Said plainly rather than dressed up as a clean bill of health —
+    // "nothing found" and "nothing looked" are not the same sentence.
+    lines.push("_Decisión registrada sin una revisión automatizada de por medio._");
+    return lines.join("\n");
+  }
+
+  const passed = computeQualityGatePassed(open);
+  lines.push(`🛡️ **Quality Gate:** ${passed ? "✅ PASSED" : "❌ FAILED"}`);
+  if (parsed.grades) {
+    lines.push(
+      `🔵 Fiabilidad **${parsed.grades.reliability}** · 🔒 Seguridad **${parsed.grades.security}** · 🔧 Mantenibilidad **${parsed.grades.maintainability}**`,
+    );
+  }
+
+  const tally: string[] = [];
+  if (resolved.length + fixedNow.length > 0) tally.push(`✔️ ${resolved.length + fixedNow.length} corregido(s)`);
+  if (open.length > 0) tally.push(`🔸 ${open.length} sin corregir`);
+  lines.push("", `**Hallazgos:** ${tally.length > 0 ? tally.join(" · ") : "ninguno"}`);
+
+  if (resolved.length + fixedNow.length > 0) {
+    lines.push("", "**Corregido**", "", "| | ID | Hallazgo | Archivo |", "|---|---|---|---|");
+    for (const f of resolved) {
+      const loc = f.archivo ? `\`${f.archivo}${f.lineas ? `:${f.lineas}` : ""}\`` : "—";
+      lines.push(`| ${SEVERITY_DOT[severityOf(f.severity)]} | ${f.id} | ${f.categoria} | ${loc} |`);
+    }
+    for (const f of fixedNow) {
+      const loc = f.location ? `\`${locationLabel(f.location)}\`` : "—";
+      lines.push(`| ${SEVERITY_DOT[f.severity]} | ${f.id} | ${f.type} / ${f.category} | ${loc} |`);
+    }
+  }
+
+  if (open.length > 0) {
+    // The wording changes with the decision, because the same list means different things: on an
+    // approval it is what was accepted; on a request for changes it is what is being asked for.
+    lines.push(
+      "",
+      decision === "approve"
+        ? "**Sin corregir — aceptado a sabiendas**"
+        : decision === "close"
+          ? "**Sin corregir al cerrar**"
+          : "**Sin corregir — pendiente**",
+      "",
+      "| | ID | Hallazgo | Archivo | 🎯 |",
+      "|---|---|---|---|---|",
+    );
+    for (const f of open) {
+      const loc = f.location ? `\`${locationLabel(f.location)}\`` : "—";
+      lines.push(
+        `| ${SEVERITY_DOT[f.severity]} | ${f.id} | ${f.type} / ${f.category} | ${loc} | ${f.confidence ?? "—"} |`,
+      );
+    }
+  }
+
+  if (open.length === 0 && resolved.length + fixedNow.length === 0) {
+    lines.push("", parsed.summary.trim() || "✅ La revisión no encontró problemas en este cambio.");
+  }
+
+  lines.push(...scopeLines(memory));
+  if (memory?.engine) {
+    lines.push(
+      "",
+      "---",
+      `🤖 _Resumen publicado por CodeFlow al registrar la decisión · Revisor: **${memory.engine}${
+        memory.model ? ` (${memory.model})` : ""
+      }** · Decisión tomada por el humano._`,
+    );
+  }
+  return lines.join("\n");
+}

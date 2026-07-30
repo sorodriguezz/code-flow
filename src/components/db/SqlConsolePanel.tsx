@@ -11,6 +11,7 @@ import {
   Layers,
   Loader2,
   Play,
+  Rows3,
   Save,
   Square,
   Table2,
@@ -24,6 +25,7 @@ import { ResultGrid } from "./ResultGrid";
 import { ScopePicker } from "./ScopePicker";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
 import { nodeKey, useDbStore, type DbConsoleTab } from "../../state/dbStore";
+import { useDbModalStore } from "../../state/dbModalStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useToastStore } from "../../state/toastStore";
@@ -267,8 +269,13 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
   const t = useT();
   const store = useDbStore.getState();
+  const openModal = useDbModalStore((s) => s.openDbModal);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [jsonView, setJsonView] = useState(false);
+  /** The same gutter selection the data grid has, for the same two reasons: export a few rows, and
+   * read a wide one down the page. Read-only here — a console result has no row to delete. */
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const anchor = useRef<number | null>(null);
 
   // A Mongo result carries real documents; the JSON view is the useful one for those, so it opens
   // there rather than on a grid of flattened keys.
@@ -276,6 +283,31 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
     const active = tab.result?.results[tab.activeResult];
     setJsonView((active?.documents.length ?? 0) > 0);
   }, [tab.result, tab.activeResult]);
+
+  // New rows, new indexes — a selection made against the previous result means nothing here.
+  useEffect(() => {
+    setSelected(new Set());
+    anchor.current = null;
+  }, [tab.result, tab.activeResult]);
+
+  const selectRow = (row: number, mods: { range: boolean; toggle: boolean }) => {
+    setSelected((current) => {
+      if (mods.range && anchor.current !== null) {
+        const [from, to] = [anchor.current, row].sort((a, b) => a - b);
+        const next = new Set(mods.toggle ? current : []);
+        for (let index = from; index <= to; index += 1) next.add(index);
+        return next;
+      }
+      anchor.current = row;
+      if (mods.toggle) {
+        const next = new Set(current);
+        if (!next.delete(row)) next.add(row);
+        return next;
+      }
+      if (current.size === 1 && current.has(row)) return new Set();
+      return new Set([row]);
+    });
+  };
 
   if (tab.running) {
     return (
@@ -327,13 +359,26 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
     );
   }
 
+  const chosen = [...selected].sort((a, b) => a - b);
+  /** The result the export and the record view act on: the selection when there is one. */
+  const scoped =
+    chosen.length === 0
+      ? active
+      : {
+          ...active,
+          rows: chosen.map((index) => active.rows[index] ?? []),
+          documents: chosen
+            .map((index) => active.documents[index])
+            .filter((doc): doc is string => doc !== undefined),
+        };
+
   const exportItems: MenuItem[] = (
     ["csv", "tsv", "json", "sql", "markdown"] as ExportFormat[]
   ).map((format) => ({
     label: t("db.exportAs", { format: format.toUpperCase() }),
     icon: Download,
     onClick: async () => {
-      const contents = formatResult(active, format, "table");
+      const contents = formatResult(scoped, format, "table");
       const saved = await apiSaveFile(`result.${EXPORT_EXTENSIONS[format]}`, contents).catch(
         () => null,
       );
@@ -345,9 +390,20 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
   exportItems.unshift({
     label: t("db.copyAsCsv"),
     icon: Copy,
-    onClick: () => void navigator.clipboard.writeText(formatResult(active, "csv")),
+    onClick: () => void navigator.clipboard.writeText(formatResult(scoped, "csv")),
     separated: false,
   });
+
+  const openRecords = () => {
+    const indexes = chosen.length > 0 ? chosen : active.rows.map((_, index) => index);
+    if (indexes.length === 0) return;
+    openModal({
+      kind: "records",
+      title: t("db.queryResult"),
+      columns: active.columns,
+      records: indexes.map((index) => ({ index, values: active.rows[index] ?? [] })),
+    });
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -395,6 +451,11 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
             {t("db.truncated")}
           </span>
         )}
+        {chosen.length > 0 && (
+          <span className="rounded bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)] px-1.5 py-[1px] text-[10.5px] font-medium text-[var(--cf-text)]">
+            {t("db.rowsSelectedN", { n: String(chosen.length) })}
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-1">
           {active.documents.length > 0 && (
             <ToolbarButton
@@ -406,12 +467,23 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
             </ToolbarButton>
           )}
           <ToolbarButton
+            onClick={openRecords}
+            disabled={active.rows.length === 0}
+            title={chosen.length > 0 ? t("db.viewRecordsSelected") : t("db.viewRecordsAll")}
+          >
+            <Rows3 size={12} />
+          </ToolbarButton>
+          <ToolbarButton
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               setMenu({ x: rect.right - 180, y: rect.bottom + 2 });
             }}
             disabled={active.rows.length === 0}
-            title={t("db.export")}
+            title={
+              chosen.length > 0
+                ? t("db.exportSelectedN", { n: String(chosen.length) })
+                : t("db.export")
+            }
           >
             <Download size={12} />
           </ToolbarButton>
@@ -434,7 +506,16 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
         </pre>
       ) : (
         <div className="min-h-0 flex-1">
-          <ResultGrid columns={active.columns} rows={active.rows} />
+          <ResultGrid
+            columns={active.columns}
+            rows={active.rows}
+            selectedRows={selected}
+            onSelectRow={selectRow}
+            onSelectAllRows={(on) => {
+              anchor.current = null;
+              setSelected(on ? new Set(active.rows.map((_, index) => index)) : new Set());
+            }}
+          />
         </div>
       )}
 

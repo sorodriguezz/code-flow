@@ -11,6 +11,8 @@ import {
   Minus,
   Plug,
   Plus,
+  RefreshCw,
+  Search,
   Server,
   SlidersHorizontal,
   Trash2,
@@ -24,7 +26,7 @@ import { Select, type SelectItems } from "../common/Select";
 import { EngineGlyph } from "./dbChrome";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { parseSpec, redactUrl, useDbStore } from "../../state/dbStore";
-import { dbHasPassword } from "../../lib/tauri/dbCommands";
+import { dbHasPassword, dbSchemaCatalog } from "../../lib/tauri/dbCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import {
@@ -34,6 +36,7 @@ import {
   type DbConnectionConfig,
   type DbConnectionRow,
   type DbKind,
+  type DbSchemaGroup,
   type DbServerInfo,
   type DbSslMode,
 } from "../../types/database";
@@ -969,15 +972,27 @@ function startupScriptExample(kind: DbKind): string {
 /**
  * Which schemas the tree lists, and a name filter over what's inside them.
  *
- * The checkboxes are drawn from what the explorer has already loaded rather than from a fresh
- * introspection: this dialog must stay usable on a connection that is closed, behind a VPN or
- * simply wrong, and a tab that had to connect before it could show you anything would be useless in
- * exactly the case you opened it to fix. Anything not in that cache is still reachable — the box
- * below adds a name by hand, which is also how you pre-filter a connection you have never opened.
+ * A list of checkboxes with a select-all over it, because the number that matters is not two or
+ * three — a warehouse has a hundred schemas and the only workable way through them is "take them
+ * all, then untick the dozen I don't care about", or the reverse. So the header ticks and unticks
+ * everything at once, the search box narrows what "everything" means while it is typed, and the
+ * count says where you are without counting ticks.
  *
- * Nothing checked means everything shows. That is the same rule the backend applies, and it is the
- * one that makes the feature safe to discover: unchecking your way to an empty tree takes a
- * deliberate act, and re-checking nothing undoes it.
+ * **Where the names come from.** The explorer's cache first, so the tab is instant and works on a
+ * connection that is closed, behind a VPN or simply wrong — a tab that had to connect before it
+ * could show anything would be useless in exactly the case you opened it to fix. `Load` asks the
+ * server for the rest, and it has to be its own call (`dbSchemaCatalog`) rather than a tree
+ * expansion: expanding applies the filter being edited, so a schema unticked once would never come
+ * back. A name still missing can be typed — which is also how you pre-filter a connection you have
+ * never opened.
+ *
+ * **Nothing ticked means everything shows.** That is the rule the backend applies, and the one that
+ * makes the feature safe to discover: unticking your way to an empty tree takes a deliberate act,
+ * and unticking everything undoes it rather than hiding the server.
+ *
+ * The selection is a set of names, matched case-insensitively against every database — the same
+ * comparison the backend makes. It is not per-database, which is why a name known from more than
+ * one shows them all rather than pretending you picked one of them.
  */
 function SchemasTab({
   connectionId,
@@ -993,32 +1008,99 @@ function SchemasTab({
   const t = useT();
   const children = useDbStore((s) => s.children);
   const [typed, setTyped] = useState("");
+  const [query, setQuery] = useState("");
+  /** What `Load` last read from the server. Kept here, not in the store: it is this tab's material. */
+  const [catalog, setCatalog] = useState<DbSchemaGroup[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  /** Every schema the explorer has seen under this connection, plus the ones already chosen. */
+  // The tab is opened per connection, and a stale catalog would be a list of another server's
+  // schemas — worse than an empty one.
+  useEffect(() => {
+    setCatalog([]);
+    setLoadError(null);
+    setQuery("");
+  }, [connectionId]);
+
+  /** Every schema name in play, and which databases each was seen in. */
   const known = useMemo(() => {
-    const names = new Set(visible);
+    const seen = new Map<string, Set<string>>();
+    const note = (name: string, database: string | null) => {
+      const where = seen.get(name) ?? new Set<string>();
+      if (database) where.add(database);
+      seen.set(name, where);
+    };
+    // Chosen names first: one that no longer exists on the server must still be visible, or it
+    // would filter the tree from a row nobody can find to untick.
+    for (const name of visible) note(name, null);
     if (connectionId) {
       for (const [key, nodes] of Object.entries(children)) {
         if (!key.startsWith(`${connectionId}|`)) continue;
         for (const node of nodes) {
-          if (node.kind === "schema") names.add(node.name);
+          if (node.kind === "schema") note(node.name, node.database);
         }
       }
     }
-    return [...names].sort((a, b) => a.localeCompare(b));
-  }, [children, connectionId, visible]);
+    for (const group of catalog) {
+      for (const name of group.schemas) note(name, group.database);
+    }
+    return [...seen.entries()]
+      .map(([name, where]) => ({ name, databases: [...where].sort((a, b) => a.localeCompare(b)) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [children, connectionId, visible, catalog]);
+
+  /** Only worth naming the database on each row when there is more than one to tell apart. */
+  const manyDatabases = useMemo(
+    () => new Set(known.flatMap((entry) => entry.databases)).size > 1,
+    [known],
+  );
+
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return needle ? known.filter((entry) => entry.name.toLowerCase().includes(needle)) : known;
+  }, [known, query]);
+
+  const chosen = useMemo(() => new Set(visible.map((name) => name.toLowerCase())), [visible]);
+  const isChosen = (name: string) => chosen.has(name.toLowerCase());
 
   const toggle = (name: string) => {
     onChange({
-      visible_schemas: visible.includes(name)
-        ? visible.filter((entry) => entry !== name)
+      visible_schemas: isChosen(name)
+        ? visible.filter((entry) => entry.toLowerCase() !== name.toLowerCase())
         : [...visible, name],
     });
   };
 
+  /** The select-all, over whatever the search has left on screen. */
+  const setAll = (on: boolean) => {
+    const names = filtered.map((entry) => entry.name);
+    if (on) {
+      onChange({ visible_schemas: [...visible, ...names.filter((name) => !isChosen(name))] });
+      return;
+    }
+    const dropped = new Set(names.map((name) => name.toLowerCase()));
+    onChange({ visible_schemas: visible.filter((name) => !dropped.has(name.toLowerCase())) });
+  };
+
+  const shownChosen = filtered.filter((entry) => isChosen(entry.name)).length;
+  const allShownChosen = filtered.length > 0 && shownChosen === filtered.length;
+
+  const load = async () => {
+    if (!connectionId) return;
+    setLoading(true);
+    setLoadError(null);
+    try {
+      setCatalog(await dbSchemaCatalog(connectionId));
+    } catch (e) {
+      setLoadError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const add = () => {
     const name = typed.trim();
-    if (!name || visible.includes(name)) return;
+    if (!name || isChosen(name)) return;
     onChange({ visible_schemas: [...visible, name] });
     setTyped("");
   };
@@ -1042,20 +1124,86 @@ function SchemasTab({
           {visible.length === 0 ? t("db.allSchemasShown") : t("db.someSchemasShown")}
         </p>
 
-        {known.length === 0 ? (
-          <p className="rounded-md border border-dashed border-[var(--cf-border)] p-2.5 text-[11px] text-[var(--cf-text-muted)]">
-            {t("db.noSchemasKnown")}
-          </p>
-        ) : (
-          <div className="max-h-52 space-y-1 overflow-auto rounded-md border border-[var(--cf-border)] p-1.5">
-            {known.map((name) => (
-              <label key={name} className="flex cursor-pointer items-center gap-2">
-                <Checkbox checked={visible.includes(name)} onChange={() => toggle(name)} />
-                <span className="min-w-0 truncate text-[12px] text-[var(--cf-text)]">{name}</span>
-              </label>
-            ))}
+        <div className="overflow-hidden rounded-md border border-[var(--cf-border)]">
+          {/* The header is the select-all, sitting over the rows it governs the way the first row
+              of a table of checkboxes does. */}
+          <div className="flex items-center gap-2 border-b border-[var(--cf-border)] bg-black/[0.03] px-2 py-1.5 dark:bg-white/[0.04]">
+            <label className="flex min-w-0 cursor-pointer items-center gap-2">
+              <Checkbox
+                checked={allShownChosen}
+                indeterminate={!allShownChosen && shownChosen > 0}
+                onChange={setAll}
+                disabled={filtered.length === 0}
+              />
+              <span className="truncate text-[12px] text-[var(--cf-text)]">
+                {query.trim() ? t("db.allMatchingSchemas") : t("db.allSchemas")}
+              </span>
+            </label>
+            <span className="ml-auto shrink-0 tabular-nums text-[11px] text-[var(--cf-text-muted)]">
+              {t("db.schemasChosen", { chosen: visible.length, total: known.length })}
+            </span>
+            <div className="relative w-[132px] shrink-0">
+              <Search
+                size={11}
+                className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+              />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={t("db.filterSchemas")}
+                spellCheck={false}
+                aria-label={t("db.filterSchemas")}
+                className="w-full rounded border border-[var(--cf-border)] bg-transparent py-[3px] pl-6 pr-1.5 text-[11.5px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+              />
+            </div>
+            {/* Reading the full list costs a connection, so it is a button and not something the
+                tab does on open. Unsaved connections have nothing to connect with — the settings
+                are read from the row, not from this form. */}
+            <IconButton
+              onClick={() => void load()}
+              disabled={!connectionId || loading}
+              title={connectionId ? t("db.loadSchemas") : t("db.loadSchemasUnsaved")}
+            >
+              {loading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            </IconButton>
           </div>
-        )}
+
+          {filtered.length === 0 ? (
+            <p className="p-2.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+              {known.length > 0
+                ? t("db.noSchemasMatch", { query: query.trim() })
+                : connectionId
+                  ? t("db.noSchemasKnown")
+                  : t("db.loadSchemasUnsaved")}
+            </p>
+          ) : (
+            <div className="max-h-52 space-y-0.5 overflow-auto p-1.5">
+              {filtered.map((entry) => (
+                <label
+                  key={entry.name}
+                  className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+                >
+                  <Checkbox checked={isChosen(entry.name)} onChange={() => toggle(entry.name)} />
+                  <span className="min-w-0 truncate text-[12px] text-[var(--cf-text)]">
+                    {entry.name}
+                  </span>
+                  {manyDatabases && entry.databases.length > 0 && (
+                    <span className="ml-auto min-w-0 shrink truncate text-[10.5px] text-[var(--cf-text-muted)]">
+                      {entry.databases.join(", ")}
+                    </span>
+                  )}
+                </label>
+              ))}
+            </div>
+          )}
+
+          {loadError && (
+            <p className="flex items-start gap-1.5 border-t border-[var(--cf-border)] p-2 text-[11px] leading-snug text-[var(--cf-danger)]">
+              <XCircle size={11} className="mt-[2px] shrink-0" />
+              <span className="min-w-0 break-words">{loadError}</span>
+            </p>
+          )}
+        </div>
 
         <div className="mt-1.5 flex items-center gap-1.5">
           <input
@@ -1261,10 +1409,12 @@ function NumberInput({
 function IconButton({
   onClick,
   title,
+  disabled,
   children,
 }: {
   onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   title: string;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -1273,7 +1423,8 @@ function IconButton({
       onClick={onClick}
       title={title}
       aria-label={title}
-      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.06] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.1]"
+      disabled={disabled}
+      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.06] hover:text-[var(--cf-text)] disabled:pointer-events-none disabled:opacity-40 dark:hover:bg-white/[0.1]"
     >
       {children}
     </button>

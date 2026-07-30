@@ -331,6 +331,7 @@ pub fn run() {
             commands::db_cmd::db_disconnect,
             commands::db_cmd::db_connected,
             commands::db_cmd::db_children,
+            commands::db_cmd::db_schema_catalog,
             commands::db_cmd::db_execute,
             commands::db_cmd::db_explain,
             commands::db_cmd::db_table_data,

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { DbKind } from "../types/database";
+import type { DbColumn, DbKind } from "../types/database";
 
 /**
  * Which of the database workspace's modals is on screen.
@@ -22,6 +22,20 @@ export type DbModal =
   | { kind: "connections" }
   /** One cell's full value, for the ones a grid row can't show. */
   | { kind: "cell"; column: string; value: string | null; editable: boolean; onSave?: (value: string | null) => void }
+  /**
+   * Rows read down instead of across — one field per line.
+   *
+   * A grid is the wrong shape for a wide table: forty columns means reading one row is horizontal
+   * scrolling, and comparing two of them is impossible. This is the same rows turned on their side,
+   * which is how you actually read a record.
+   */
+  | {
+      kind: "records";
+      title: string;
+      columns: DbColumn[];
+      /** The chosen rows, each carrying its own number in the page it came from. */
+      records: { index: number; values: (string | null)[] }[];
+    }
   /** The statements a pending batch of edits would run, before it runs them. */
   | { kind: "preview"; title: string; statements: string[]; onConfirm: () => void };
 

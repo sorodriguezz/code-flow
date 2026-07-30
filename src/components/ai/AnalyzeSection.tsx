@@ -123,22 +123,23 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
           </button>
         </div>
 
-        {loading && (
-          <div className="space-y-3">
+        {/* The run card carries the orb, the state and the elapsed time itself — a second centred
+            "Working…" above it was the same sentence twice. Without a job id (the run hasn't been
+            registered yet) there is nothing to follow, so the orb stands alone for that instant. */}
+        {loading &&
+          (job ? (
+            <AiRunLog
+              runId={job.id}
+              running
+              expanded={logExpanded}
+              onToggle={() => setLogExpanded((v) => !v)}
+            />
+          ) : (
             <div className="flex flex-col items-center justify-center gap-3 py-6 text-center">
               <ThinkingOrb size="lg" />
               <p className="text-[13px] text-[var(--cf-text-muted)]">{t("ai.working")}</p>
             </div>
-            {job && (
-              <AiRunLog
-                runId={job.id}
-                running
-                expanded={logExpanded}
-                onToggle={() => setLogExpanded((v) => !v)}
-              />
-            )}
-          </div>
-        )}
+          ))}
 
         {cancelled && (
           <div className="flex flex-col items-center justify-center gap-2 py-10 text-center">

@@ -1,5 +1,15 @@
-import { useEffect, useState } from "react";
-import { Database, FileCode2, Plus, Settings2, Table2, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  ChevronUp,
+  Copy,
+  Database,
+  FileCode2,
+  Plus,
+  Rows3,
+  Settings2,
+  Table2,
+  X,
+} from "lucide-react";
 import { ApiModal, GhostButton } from "../api/ApiModal";
 import { EmptyState } from "../common/EmptyState";
 import { DbExplorer } from "./DbExplorer";
@@ -14,7 +24,7 @@ import { useDbModalStore } from "../../state/dbModalStore";
 import { useUiStore } from "../../state/uiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { translate, useT } from "../../state/languageStore";
-import { engineInfo } from "../../types/database";
+import { engineInfo, type DbColumn } from "../../types/database";
 
 /**
  * The database workspace's shell: explorer, tab strip, and whichever panel the active tab wants.
@@ -76,6 +86,7 @@ export function DatabaseView() {
               <DdlPanel tab={activeTab} />
             )}
           </div>
+          <SqlLogPanel />
         </div>
       </div>
 
@@ -89,6 +100,7 @@ export function DatabaseView() {
         />
       )}
       {modal?.kind === "cell" && <CellModal modal={modal} onClose={closeModal} />}
+      {modal?.kind === "records" && <RecordsModal modal={modal} onClose={closeModal} />}
       {modal?.kind === "preview" && <PreviewModal modal={modal} onClose={closeModal} />}
     </>
   );
@@ -130,6 +142,12 @@ function DbTabStrip() {
   const connections = useDbStore((s) => s.connections);
   const store = useDbStore.getState();
 
+  // Which connection a tab belongs to is only ambiguous when more than one is open — and then it
+  // is the most important thing on the tab, because `MotivoTransporte` on staging and the same
+  // table on production are the same six words. So the name rides along only when it disambiguates
+  // something; with a single connection it would be the same label repeated on every tab.
+  const manyConnections = new Set(tabs.map((tab) => tab.connectionId)).size > 1;
+
   return (
     <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--cf-border)] px-1.5 py-1">
       {tabs.map((tab) => {
@@ -144,6 +162,10 @@ function DbTabStrip() {
           <div
             key={tab.id}
             onClick={() => store.setActiveTab(tab.id)}
+            // Always in the tooltip, even when the strip has room to say it: hovering is how you
+            // check "which server am I about to run this on" without moving the mouse to the
+            // toolbar.
+            title={connection ? `${connection.name} · ${tab.name}` : tab.name}
             onAuxClick={(e) => {
               // Middle click closes, like every other tab strip in the app.
               if (e.button === 1) void closeTabSafely(tab);
@@ -157,6 +179,11 @@ function DbTabStrip() {
             {connection && engine && <EngineBadge kind={connection.kind} label={engine.label} />}
             <Icon size={12} className="shrink-0" />
             <span className="max-w-[180px] truncate">{tab.name}</span>
+            {manyConnections && connection && (
+              <span className="max-w-[120px] shrink truncate text-[10.5px] opacity-60">
+                {connection.name}
+              </span>
+            )}
             {dirty && (
               <span
                 title={t("db.unsaved")}
@@ -294,6 +321,199 @@ function CellModal({
         </pre>
       </div>
     </ApiModal>
+  );
+}
+
+/**
+ * Rows read down the page instead of across it.
+ *
+ * The grid is the right shape for scanning many rows of a few columns and the wrong one for reading
+ * a single row of forty — which is the case this exists for. Each record is a block of
+ * `column: value` lines, and several selected rows are stacked in the order they appear in the
+ * grid, so comparing two of them is scrolling rather than dragging a horizontal scrollbar twice.
+ *
+ * The row's own number is kept on each block: a record read here is worth much less if you can't
+ * find the row it came from back in the grid.
+ */
+function RecordsModal({
+  modal,
+  onClose,
+}: {
+  modal: {
+    title: string;
+    columns: DbColumn[];
+    records: { index: number; values: (string | null)[] }[];
+  };
+  onClose: () => void;
+}) {
+  const t = useT();
+  const copy = () => {
+    const text = modal.records
+      .map((record) =>
+        modal.columns
+          .map((column, index) => `${column.name}: ${record.values[index] ?? "NULL"}`)
+          .join("\n"),
+      )
+      .join("\n\n");
+    void navigator.clipboard.writeText(text);
+  };
+
+  return (
+    <ApiModal
+      icon={Rows3}
+      title={modal.title}
+      subtitle={t("db.recordsN", { n: String(modal.records.length) })}
+      width="max-w-2xl"
+      height="h-[78vh]"
+      onClose={onClose}
+      footer={
+        <div className="flex w-full items-center justify-end gap-2">
+          <GhostButton onClick={copy}>{t("db.copy")}</GhostButton>
+          <GhostButton onClick={onClose}>{t("common.close")}</GhostButton>
+        </div>
+      }
+    >
+      <div className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
+        {modal.records.map((record) => (
+          <div
+            key={record.index}
+            className="overflow-hidden rounded-md border border-[var(--cf-border)]"
+          >
+            <p className="border-b border-[var(--cf-border)] bg-black/[0.03] px-2 py-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
+              {t("db.rowN", { n: String(record.index + 1) })}
+            </p>
+            <dl className="divide-y divide-[var(--cf-border)]">
+              {modal.columns.map((column, index) => {
+                const value = record.values[index] ?? null;
+                return (
+                  <div key={column.name} className="grid grid-cols-[minmax(0,150px)_1fr] gap-2 px-2 py-1">
+                    <dt
+                      title={column.type_name ? `${column.name} · ${column.type_name}` : column.name}
+                      className="min-w-0 truncate text-[11.5px] text-[var(--cf-text-muted)]"
+                    >
+                      {column.name}
+                    </dt>
+                    {/* Wrapped, not truncated: the whole reason to be here is to read the value
+                        the grid could only show the first line of. */}
+                    <dd
+                      className={`min-w-0 whitespace-pre-wrap break-words font-mono text-[12px] ${
+                        value === null
+                          ? "italic text-[var(--cf-text-muted)]"
+                          : "text-[var(--cf-text)]"
+                      }`}
+                    >
+                      {value === null ? "NULL" : value}
+                    </dd>
+                  </div>
+                );
+              })}
+            </dl>
+          </div>
+        ))}
+      </div>
+    </ApiModal>
+  );
+}
+
+/**
+ * The statements the workspace ran, hidden until asked for.
+ *
+ * Everything in this view sends SQL nobody typed — opening a table, turning a page, sorting a
+ * column, applying an edit — and until now the only trace of it was the rows that came back. This
+ * is the answer to "what did that click actually run?", which is the question you ask when a grid
+ * shows something you didn't expect, and the thing you copy into a ticket when it shows something
+ * wrong.
+ *
+ * Collapsed to a single strip by default: it is a tool for the moment you doubt the UI, not
+ * something to spend screen on the rest of the time. What it shows comes back *from the server
+ * side of each call*, so it can't drift from what really ran.
+ */
+function SqlLogPanel() {
+  const t = useT();
+  const entries = useDbStore((s) => s.sqlLog);
+  const clear = useDbStore((s) => s.clearSqlLog);
+  const [open, setOpen] = useState(false);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Pinned to the newest line while it is open, the way a log pane behaves.
+  useEffect(() => {
+    if (!open) return;
+    const element = listRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [open, entries]);
+
+  return (
+    <div className="shrink-0 border-t border-[var(--cf-border)]">
+      <div className="flex items-center gap-2 px-2 py-1">
+        <button
+          type="button"
+          onClick={() => setOpen((current) => !current)}
+          aria-expanded={open}
+          className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        >
+          <ChevronUp
+            size={12}
+            className={`transition-transform ${open ? "rotate-180" : ""}`}
+          />
+          {t("db.sqlLog")}
+          <span className="tabular-nums opacity-70">({entries.length})</span>
+        </button>
+        {open && entries.length > 0 && (
+          <button
+            type="button"
+            onClick={clear}
+            className="ml-auto text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          >
+            {t("db.clear")}
+          </button>
+        )}
+      </div>
+      {open && (
+        <div ref={listRef} className="max-h-48 overflow-auto border-t border-[var(--cf-border)]">
+          {entries.length === 0 ? (
+            <p className="p-2 text-[11px] text-[var(--cf-text-muted)]">{t("db.sqlLogEmpty")}</p>
+          ) : (
+            entries.map((entry) => (
+              <div
+                key={entry.id}
+                className="flex items-start gap-2 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
+              >
+                <span className="shrink-0 pt-[1px] text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+                  {new Date(entry.at).toLocaleTimeString()}
+                </span>
+                <span className="shrink-0 pt-[1px] text-[9.5px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+                  {entry.source}
+                </span>
+                <span
+                  className={`min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[11.5px] ${
+                    entry.error ? "text-[var(--cf-danger)]" : "text-[var(--cf-text)]"
+                  }`}
+                >
+                  {entry.sql || t("db.sqlLogNoStatement")}
+                  {entry.error && `\n${entry.error}`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void navigator.clipboard.writeText(entry.sql)}
+                  title={t("db.copy")}
+                  className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                >
+                  <Copy size={11} />
+                </button>
+                <span className="shrink-0 whitespace-nowrap pt-[1px] text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+                  {[
+                    entry.durationMs === null ? null : `${entry.durationMs} ms`,
+                    entry.rows === null ? null : t("db.rowsN", { n: String(entry.rows) }),
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

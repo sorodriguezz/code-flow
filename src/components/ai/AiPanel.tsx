@@ -42,6 +42,7 @@ import {
   buildFixpack,
   formatFindingAsComment,
   formatSummaryComment,
+  formatDecisionComment,
   type SummaryMemory,
 } from "../../lib/parseAnalysis";
 import { Checkbox } from "../common/Checkbox";
@@ -63,10 +64,11 @@ import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
+import { usePrWatchStore, EMPTY_TRACKED, type TrackedPr } from "../../state/prWatchStore";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
-import { useResolutionsStore } from "../../state/resolutionsStore";
+import { useResolutionsStore, EMPTY_RESOLUTIONS } from "../../state/resolutionsStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -75,7 +77,6 @@ import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
-import { ThinkingOrb } from "../common/ThinkingOrb";
 import { ActivityModal } from "./ActivityModal";
 import { AiRunLog } from "./AiRunLog";
 import { CheckpointsModal } from "./CheckpointsModal";
@@ -109,71 +110,128 @@ function relativeTime(ts: number, t: (key: TranslationKey, vars?: Record<string,
 }
 
 /**
- * The link reviews opened this session, so one can be brought back.
+ * The pull requests still waiting on a decision — the way back into any of them.
  *
- * A PR reviewed from a link belongs to no project, so it's in no sidebar and no PR list: without
- * this list, the panel showing it was the only way to reach it, and closing that — or pressing
- * "New chat" — left its review, its comments and its approval stranded in memory with no route
- * back. Everything is still there; this is the door.
+ * It grew out of the link-sessions list, which solved half the problem: a PR reviewed from a link
+ * belongs to no project, so it appears in no sidebar and no list, and the panel showing it was the
+ * only handle on it — closing that stranded the whole review. But the other half is just as real
+ * and outlived any one session: a PR you reviewed on Friday, left undecided, and could only find
+ * again by remembering it existed.
  *
- * Rendered only when no link session is on screen, since the one on screen doesn't need a way
- * back to itself.
+ * So the list is now everything **you have opened here and not yet settled**, project PRs
+ * included, kept on disk per workspace (see `prWatchStore`). Entries leave it the moment they stop
+ * waiting: you approve, you close, or the host reports it merged. "Changes requested" stays —
+ * that PR is still yours to look at again.
+ *
+ * Each row says what it is waiting for: whether a review has run, and whether changes were already
+ * asked for. That is the whole question the list answers — "which of these have I not looked at?"
  */
-function LinkSessionsSection({ workspaceId }: { workspaceId: string | null }) {
+function PendingPrsSection({ workspaceId }: { workspaceId: string | null }) {
   const t = useT();
-  const allSessions = usePrStore((s) => s.linkPrHistory);
   const openLinkPr = usePrStore((s) => s.openLinkPr);
-  const forgetLinkPr = usePrStore((s) => s.forgetLinkPr);
+  const selectPr = usePrStore((s) => s.selectPr);
+  const tracked = usePrWatchStore((s) => (workspaceId ? s.byWorkspace[workspaceId] ?? EMPTY_TRACKED : EMPTY_TRACKED));
+  const load = usePrWatchStore((s) => s.load);
+  const untrack = usePrWatchStore((s) => s.untrack);
   const jobsByBucket = useJobsStore((s) => s.byProject);
+  const [collapsed, setCollapsed] = useState(false);
 
-  // Scoped to the workspace the review ran under, same as its Activity: a PR someone sent you
-  // while you were working on one workspace has no business showing up in another.
-  const sessions = useMemo(
-    () => (workspaceId ? allSessions.filter((s) => s.workspaceId === workspaceId) : []),
-    [allSessions, workspaceId],
-  );
+  useEffect(() => {
+    if (workspaceId) void load(workspaceId);
+  }, [workspaceId, load]);
+
   const workspaceJobs = workspaceId ? jobsByBucket[workspaceActivityKey(workspaceId)] ?? EMPTY_JOBS : EMPTY_JOBS;
 
-  if (sessions.length === 0) return null;
+  const open = (entry: TrackedPr) => {
+    useAnalyzeUiStore.getState().hide();
+    if (entry.kind === "link" && entry.url) {
+      openLinkPr({
+        url: entry.url,
+        pr: entry.pr,
+        repoLabel: entry.repoLabel,
+        cloneUrl: entry.cloneUrl ?? "",
+        workspaceId: entry.workspaceId,
+      });
+      return;
+    }
+    // A project PR is addressed *by the open project* — the panel builds its target from whichever
+    // repository is active — so reopening one that belongs to another project has to move there
+    // first, or the review would be pointed at the wrong repository. A project that no longer
+    // exists takes its entry with it: there is nothing left to point at.
+    const workspace = useWorkspaceStore.getState();
+    if (entry.projectId && entry.projectId !== workspace.activeProjectId) {
+      const exists = (workspace.projectsByWorkspace[entry.workspaceId] ?? []).some(
+        (project) => project.id === entry.projectId,
+      );
+      if (!exists) {
+        untrack(entry.workspaceId, entry.key);
+        return;
+      }
+      workspace.setActiveProject(entry.projectId);
+    }
+    // From the snapshot: the panel refreshes it from the host anyway, and waiting for the list to
+    // load would make the click do nothing for a second.
+    selectPr(entry.pr);
+  };
+
+  if (tracked.length === 0) return null;
 
   return (
     <div className="shrink-0 border-b border-[var(--cf-border)]">
-      <p className="flex items-center gap-1.5 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        <Link2 size={11} />
-        {t("prLink.sessionsTitle")}
-      </p>
-      <div className="px-1.5 pb-1.5">
-        {sessions.map((session) => {
-          const runs = workspaceJobs.filter((job) => jobPrUrl(job) === session.url).length;
-          return (
-            <div key={session.url} className="group flex items-center gap-1">
-              <button
-                onClick={() => {
-                  useAnalyzeUiStore.getState().hide();
-                  openLinkPr(session);
-                }}
-                className="min-w-0 flex-1 rounded-md px-1.5 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-              >
-                <span className="block truncate text-[12px] text-[var(--cf-text)]">
-                  #{session.pr.id} {session.pr.title}
-                </span>
-                <span className="block truncate text-[10px] text-[var(--cf-text-muted)]">
-                  {session.repoLabel}
-                  {runs > 0 && ` · ${t("prLink.sessionEntries", { n: runs })}`}
-                </span>
-              </button>
-              <button
-                onClick={() => forgetLinkPr(session.url)}
-                title={t("prLink.forgetSession")}
-                aria-label={t("prLink.forgetSession")}
-                className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] opacity-0 hover:bg-black/[0.05] hover:text-[var(--cf-text)] group-hover:opacity-100 dark:hover:bg-white/[0.08]"
-              >
-                <X size={11} />
-              </button>
-            </div>
-          );
-        })}
-      </div>
+      <button
+        onClick={() => setCollapsed((v) => !v)}
+        aria-expanded={!collapsed}
+        className="flex w-full items-center gap-1.5 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+      >
+        {collapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+        {t("pr.pendingTitle")}
+        <span className="tabular-nums opacity-70">({tracked.length})</span>
+      </button>
+      {!collapsed && (
+        <div className="max-h-52 overflow-auto px-1.5 pb-1.5">
+          {tracked.map((entry) => {
+            const runs = entry.url
+              ? workspaceJobs.filter((job) => jobPrUrl(job) === entry.url).length
+              : 0;
+            const marks = [
+              entry.repoLabel,
+              entry.decision === "changes_requested"
+                ? t("pr.pendingChangesRequested")
+                : entry.reviewed || runs > 0
+                  ? t("pr.pendingReviewed")
+                  : t("pr.pendingUnreviewed"),
+            ].filter(Boolean);
+            return (
+              <div key={entry.key} className="group flex items-center gap-1">
+                <button
+                  onClick={() => open(entry)}
+                  className="min-w-0 flex-1 rounded-md px-1.5 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                >
+                  <span className="flex items-center gap-1.5">
+                    {/* A link PR is the one with no repository here — worth marking, because it is
+                        also the one nothing else in the app can lead you back to. */}
+                    {entry.kind === "link" && <Link2 size={10} className="shrink-0 text-[var(--cf-text-muted)]" />}
+                    <span className="min-w-0 truncate text-[12px] text-[var(--cf-text)]">
+                      #{entry.prId} {entry.title}
+                    </span>
+                  </span>
+                  <span className="block truncate text-[10px] text-[var(--cf-text-muted)]">
+                    {marks.join(" · ")}
+                  </span>
+                </button>
+                <button
+                  onClick={() => workspaceId && untrack(workspaceId, entry.key)}
+                  title={t("pr.pendingDismiss")}
+                  aria-label={t("pr.pendingDismiss")}
+                  className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] opacity-0 hover:bg-black/[0.05] hover:text-[var(--cf-text)] group-hover:opacity-100 dark:hover:bg-white/[0.08]"
+                >
+                  <X size={11} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -375,6 +433,17 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   const posted = usePrStore((s) => s.posted);
   const actOnPr = usePrStore((s) => s.actOnPr);
   const prActionBusy = usePrStore((s) => s.prActionBusy);
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  // The open link session, when this PR *is* one: it carries the repository label and clone URL
+  // that a link PR has and a project PR doesn't need.
+  const openLinkSession = usePrStore((s) => s.linkPr);
+  const linkSession =
+    target.kind === "link" && openLinkSession?.url === target.url ? openLinkSession : null;
+  // What has been fixed from here since the review ran — the "Resolve with AI" outcomes, keyed the
+  // same way the finding cards key them. A link session has no project to file them under.
+  const resolutions = useResolutionsStore((s) =>
+    projectId ? (s.byProject[projectId] ?? EMPTY_RESOLUTIONS) : EMPTY_RESOLUTIONS,
+  );
   const jobs = useJobsStore((s) => s.byProject[bucket] ?? EMPTY_JOBS);
   // A workspace bucket holds the reviews of every repository reached by link, so the PR number
   // alone would happily match some other repo's "#42" — the URL is what identifies this one.
@@ -485,6 +554,49 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   }, [loadPrDecision, prKey]);
 
   const prClosed = pr.status === "merged" || pr.status === "closed";
+
+  // Kept on the "waiting on me" list for as long as it is waiting on me. Written on every look at
+  // the PR (so the snapshot stays current) and reconciled against what the host says, which is
+  // what takes an approved, merged or closed one off the list without anyone having to remember.
+  const watchWorkspaceId = target.kind === "link" ? target.workspaceId : activeWorkspaceId;
+  useEffect(() => {
+    if (!watchWorkspaceId) return;
+    const watch = usePrWatchStore.getState();
+    if (prClosed || decision === "approved") {
+      watch.untrack(watchWorkspaceId, prKey);
+      return;
+    }
+    watch.track({
+      key: prKey,
+      kind: target.kind,
+      projectId: target.kind === "project" ? target.projectId : undefined,
+      url: target.kind === "link" ? target.url : undefined,
+      cloneUrl: linkSession?.cloneUrl,
+      workspaceId: watchWorkspaceId,
+      prId: pr.id,
+      title: pr.title,
+      repoLabel: linkSession?.repoLabel ?? "",
+      pr,
+      decision: decision === "changes_requested" ? "changes_requested" : "none",
+      reviewed: Boolean(reviewText),
+      at: Date.now(),
+    });
+    // The snapshot only needs rewriting when one of the things it holds changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prKey, watchWorkspaceId, pr.status, pr.title, decision, prClosed, Boolean(reviewText)]);
+
+  /**
+   * Whether settling the PR also publishes the summary of what the review found, what was fixed
+   * and what was accepted anyway.
+   *
+   * On by default, because the decision is the moment that record is worth anything — and a
+   * checkbox rather than a rule, because the person approving is the one who knows whether this
+   * PR wants that comment. Only offered when there is a review to summarise: a "decision comment"
+   * with nothing in it would be noise on someone else's pull request.
+   */
+  const [commentOnDecision, setCommentOnDecision] = useState(true);
+  const willComment = commentOnDecision && Boolean(parsed) && Boolean(job);
+
   const doPrAction = async (action: "approve" | "request_changes" | "close") => {
     const confirmKey =
       action === "approve"
@@ -493,9 +605,28 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
           ? "pr.confirmRequestChanges"
           : "pr.confirmClose";
     // Request-changes and close are destructive-ish (they push a state the author sees), so they
-    // get the emphasized confirm; approve gets the plain one.
-    if (!(await confirmAction(t(confirmKey, { id: pr.id }), action !== "approve"))) return;
-    void actOnPr(target, pr.id, action);
+    // get the emphasized confirm; approve gets the plain one. When a comment rides along, the
+    // confirm says so — publishing to a PR is not something to discover afterwards.
+    const question = willComment
+      ? `${t(confirmKey, { id: pr.id })}\n\n${t("pr.decisionCommentNotice")}`
+      : t(confirmKey, { id: pr.id });
+    if (!(await confirmAction(question, action !== "approve"))) return;
+    const note =
+      willComment && job
+        ? {
+            runId: job.id,
+            body: formatDecisionComment(
+              action,
+              new Date().toISOString().slice(0, 10),
+              parsed,
+              runMemory,
+              // What was fixed from here since the review ran — those findings are corrected, not
+              // accepted, and the note would otherwise file them under the wrong heading.
+              findings.filter((f) => resolutions[`job:${job.id}:${f.id}`]).map((f) => f.id),
+            ),
+          }
+        : null;
+    void actOnPr(target, pr.id, action, note);
   };
 
   // Existing comment threads on the PR — e.g. from a human reviewer — refetched fresh every
@@ -619,19 +750,15 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
           </div>
         )}
 
+        {/* One card, not two: the run's state, what it is printing, how long it has been going and
+            the way to stop it all belong to the same thing. See `AiRunLog`. */}
         {loading && job && (
-          <div className="space-y-2">
-            <div className="flex items-center gap-3 rounded-lg border border-[var(--cf-border)] p-4 text-[12px] text-[var(--cf-text-muted)]">
-              <ThinkingOrb size="sm" />
-              {t("ai.working")}
-            </div>
-            <AiRunLog
-              runId={job.id}
-              running
-              expanded={logExpanded}
-              onToggle={() => setLogExpanded((v) => !v)}
-            />
-          </div>
+          <AiRunLog
+            runId={job.id}
+            running
+            expanded={logExpanded}
+            onToggle={() => setLogExpanded((v) => !v)}
+          />
         )}
 
         {job?.status === "cancelled" && (
@@ -724,33 +851,48 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
       <div className="@container shrink-0 space-y-2 border-t border-[var(--cf-border)] p-2.5">
         {(prClosed || decision !== "none") && <PrDecisionState status={pr.status} decision={decision} />}
         {!prClosed && decision !== "approved" && (
-          <div className="flex items-center gap-1.5">
-            <PrActionButton
-              tone="success"
-              icon={ThumbsUp}
-              label={t("pr.approve")}
-              busy={prActionBusy === "approve"}
-              disabled={prActionBusy !== null}
-              onClick={() => doPrAction("approve")}
-            />
-            <PrActionButton
-              tone="warning"
-              icon={ThumbsDown}
-              // Already asked for changes: asking again says nothing new. Approving stays open,
-              // because approving once the author has pushed the fixes is the point of the flow.
-              label={t("pr.requestChanges")}
-              busy={prActionBusy === "request_changes"}
-              disabled={prActionBusy !== null || decision === "changes_requested"}
-              onClick={() => doPrAction("request_changes")}
-            />
-            <PrActionButton
-              tone="danger"
-              icon={Ban}
-              label={t("pr.close")}
-              busy={prActionBusy === "close"}
-              disabled={prActionBusy !== null}
-              onClick={() => doPrAction("close")}
-            />
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <PrActionButton
+                tone="success"
+                icon={ThumbsUp}
+                label={t("pr.approve")}
+                busy={prActionBusy === "approve"}
+                disabled={prActionBusy !== null}
+                onClick={() => doPrAction("approve")}
+              />
+              <PrActionButton
+                tone="warning"
+                icon={ThumbsDown}
+                // Already asked for changes: asking again says nothing new. Approving stays open,
+                // because approving once the author has pushed the fixes is the point of the flow.
+                label={t("pr.requestChanges")}
+                busy={prActionBusy === "request_changes"}
+                disabled={prActionBusy !== null || decision === "changes_requested"}
+                onClick={() => doPrAction("request_changes")}
+              />
+              <PrActionButton
+                tone="danger"
+                icon={Ban}
+                label={t("pr.close")}
+                busy={prActionBusy === "close"}
+                disabled={prActionBusy !== null}
+                onClick={() => doPrAction("close")}
+              />
+            </div>
+            {/* Said before the decision rather than after it: whichever of the three buttons above
+                is pressed also leaves the review's verdict on the PR — what was found, what got
+                fixed, and what is being accepted anyway. Only offered when there is a review to
+                summarise; a decision note with nothing in it is noise on someone else's PR. */}
+            {parsed && job && (
+              <label
+                className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
+                title={t("pr.commentOnDecisionHint")}
+              >
+                <Checkbox checked={commentOnDecision} onChange={setCommentOnDecision} />
+                {t("pr.commentOnDecision")}
+              </label>
+            )}
           </div>
         )}
         {/* Everything below acts *on* the pull request — running a review of it, publishing to it.
@@ -1243,8 +1385,9 @@ export function AiPanel() {
   // user isn't stuck hunting for the little × on the PR card (which only closed the PR, it didn't
   // start a new chat) to get back to open-ended chat.
   //
-  // None of it is destructive: a selected PR is still in the sidebar, and a link session is
-  // parked in `linkPrHistory` for the list above Activity to bring back.
+  // None of it is destructive: a selected PR is still in the sidebar, and anything left undecided
+  // — link sessions included — is on the "waiting on you" list above Activity, which is where it
+  // stays until it is approved or closed.
   const startNewChat = () => {
     if (!project) return;
     usePrStore.getState().selectPr(null);
@@ -1325,13 +1468,13 @@ export function AiPanel() {
           // Still offer the way back into a parked link review — with no project open this used
           // to be a dead end, which is exactly where "New chat" landed the user.
           <>
-            <LinkSessionsSection workspaceId={activeWorkspaceId} />
+            <PendingPrsSection workspaceId={activeWorkspaceId} />
             <ActivitySection projectId={null} workspaceId={activeWorkspaceId} />
             <EmptyState icon={Sparkles} title={t("ai.noProject")} />
           </>
         ) : (
           <>
-            <LinkSessionsSection workspaceId={activeWorkspaceId} />
+            <PendingPrsSection workspaceId={activeWorkspaceId} />
             <ActivitySection projectId={project.id} workspaceId={activeWorkspaceId} />
             <div className="min-h-0 flex-1">
               {selectedPr ? (

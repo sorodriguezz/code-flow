@@ -430,8 +430,14 @@ impl MongoSession {
             "limit": request.limit as i64,
             "batchSize": request.limit as i64,
         };
-        if let Some(field) = request.order_by.as_deref().filter(|f| !f.is_empty()) {
-            command.insert("sort", doc! { field: if request.descending { -1 } else { 1 } });
+        // A sort document keeps its key order in BSON, so the keys the grid collected sort in the
+        // order it collected them — the same meaning the SQL engines give an `ORDER BY` list.
+        let mut sort = doc! {};
+        for key in request.sort.iter().filter(|key| !key.column.is_empty()) {
+            sort.insert(key.column.clone(), if key.descending { -1 } else { 1 });
+        }
+        if !sort.is_empty() {
+            command.insert("sort", sort);
         }
 
         let (documents, truncated) = self

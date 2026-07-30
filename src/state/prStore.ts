@@ -4,6 +4,8 @@ import { pushErrorToast, useToastStore } from "./toastStore";
 import { useJobsStore } from "./jobsStore";
 import { useChatStore } from "./chatStore";
 import { useLanguageStore } from "./languageStore";
+import { usePrWatchStore } from "./prWatchStore";
+import { useWorkspaceStore } from "./workspaceStore";
 import { translations } from "../lib/i18n/translations";
 import * as prTarget from "../lib/prTarget";
 import { targetKey, targetPrKey, type PrTarget } from "../lib/prTarget";
@@ -36,9 +38,20 @@ export type ReviewLevel = "basico" | "completo" | "ultra";
 
 /** Translates outside of React (this store isn't a component) using whatever language is
  * currently selected — same lookup `useT()` does, just without the hook. */
-function translate(key: keyof typeof translations.en): string {
+function translate(key: keyof typeof translations.en, params?: Record<string, string>): string {
   const language = useLanguageStore.getState().language;
-  return translations[language][key] ?? translations.en[key] ?? key;
+  const raw: string = translations[language][key] ?? translations.en[key] ?? key;
+  if (!params) return raw;
+  return Object.entries(params).reduce<string>(
+    (acc, [name, value]) => acc.split(`{${name}}`).join(value),
+    raw,
+  );
+}
+
+/** The workspace a target's watchlist entry belongs to: a link session carries its own, a project
+ * one belongs to whichever workspace is open — the same scope its Activity is filed under. */
+function watchWorkspace(target: PrTarget): string {
+  return target.kind === "link" ? target.workspaceId : useWorkspaceStore.getState().activeWorkspaceId ?? "";
 }
 
 interface PrState {
@@ -110,8 +123,18 @@ interface PrState {
    *
    * The PR stays on screen afterwards, in the state the host reports back — closing one used to
    * drop it out of the panel, which read as "it vanished" rather than "it's closed". The decision
-   * is filed in Activity and remembered here, so the action can't be taken twice. */
-  actOnPr: (target: PrTarget, prId: number, action: PrAction) => Promise<void>;
+   * is filed in Activity and remembered here, so the action can't be taken twice.
+   *
+   * `note` publishes a comment on the PR *after* the decision lands — the summary of what the
+   * review found, what was fixed and what was accepted anyway (see `formatDecisionComment`). It is
+   * posted second on purpose: a note explaining an approval that never happened would be worse
+   * than no note, and a note that fails to post must not undo an approval that did. */
+  actOnPr: (
+    target: PrTarget,
+    prId: number,
+    action: PrAction,
+    note?: { runId: string; body: string } | null,
+  ) => Promise<void>;
   /** Opens a PR on the project's linked host, then refreshes the list and selects the new PR.
    * Throws on failure so the caller (the modal) can keep itself open and surface the error. */
   createPr: (
@@ -249,7 +272,7 @@ export const usePrStore = create<PrState>((set, get) => ({
     }
   },
 
-  actOnPr: async (target, prId, action) => {
+  actOnPr: async (target, prId, action, note) => {
     const key = targetKey(target);
     set({ prActionBusy: action });
     try {
@@ -287,6 +310,21 @@ export const usePrStore = create<PrState>((set, get) => ({
       const toastKey =
         action === "approve" ? "pr.approved" : action === "request_changes" ? "pr.changesRequested" : "pr.closed";
       useToastStore.getState().pushToast(translate(toastKey), "success");
+      // A decision is exactly what takes a PR off the "still waiting on me" list — approving or
+      // closing settles it; asking for changes does not, so that one is only updated in place.
+      usePrWatchStore
+        .getState()
+        .reconcile(watchWorkspace(target), targetPrKey(target, prId), pr, decision);
+      // The record of *why*, on the PR itself. Its own try/catch: the decision is already on the
+      // host and cannot be taken back, so a comment that fails is a warning, not a failed action.
+      if (note) {
+        try {
+          await prTarget.postFindings(target, prId, note.runId, [], true, note.body);
+          useToastStore.getState().pushToast(translate("pr.decisionCommentPosted"), "success");
+        } catch (e) {
+          pushErrorToast(translate("pr.decisionCommentFailed", { error: String(e) }));
+        }
+      }
       if (target.kind === "project") {
         // Re-read the list so the sidebar's open/draft/merged/closed buckets settle too.
         await get().loadPullRequests(target.projectId);

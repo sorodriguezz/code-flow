@@ -10,6 +10,9 @@ import {
   Filter,
   Database,
   FileCode2,
+  FolderPlus,
+  Hash,
+  KeyRound,
   Loader2,
   Pencil,
   Play,
@@ -21,7 +24,9 @@ import {
   Settings2,
   Table2,
   Trash2,
+  Wand2,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { BetaBadge } from "../common/BetaBadge";
@@ -40,6 +45,9 @@ import { useDbModalStore } from "../../state/dbModalStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import type { TranslationKey } from "../../lib/i18n/translations";
+import { dbChildren } from "../../lib/tauri/dbCommands";
+import { createTemplate, sqlTemplate, type SqlTemplate } from "../../lib/db/sqlTemplates";
 import {
   engineInfo,
   type DbConnectionRow,
@@ -181,6 +189,8 @@ function NodeSubtree({
   const children = useDbStore((s) => s.children[key]);
   const error = useDbStore((s) => s.nodeErrors[key]);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /** The second menu: which statement to draft, once "Generate SQL" has been picked. */
+  const [generateMenu, setGenerateMenu] = useState<{ x: number; y: number } | null>(null);
   const Icon = nodeIcon(node.kind);
 
   const store = useDbStore.getState();
@@ -189,6 +199,26 @@ function NodeSubtree({
   const openData = () => {
     if (!isRelation) return;
     store.openData(connectionId, nodeRef, node.name);
+  };
+
+  /**
+   * Drops a generated statement into a new console.
+   *
+   * The columns come from the catalog, so this is async — and it is deliberately allowed to fail:
+   * a connection that can't be read still gets a draft, with a marker where the column list would
+   * have been, rather than nothing at all.
+   */
+  const generate = async (template: SqlTemplate) => {
+    const kind = useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind;
+    if (!kind) return;
+    const columnNode: DbNodeRef = { ...nodeRef, kind: "column_folder" };
+    const columns = await dbChildren(connectionId, columnNode).catch(() => [] as DbNode[]);
+    store.newConsole(
+      connectionId,
+      node.database ?? undefined,
+      node.schema ?? undefined,
+      sqlTemplate(template, node, kind, columns.map((column) => column.name)),
+    );
   };
 
   const menuItems: MenuItem[] = [];
@@ -210,6 +240,14 @@ function NodeSubtree({
           selectStarFor(connectionId, node),
         ),
     });
+    // Its own menu rather than eight more rows here: these are alternatives to each other and a
+    // question of their own ("which statement?"), and folding them into the actions above would
+    // bury "Open data" — the thing you actually came to do — under a wall of SQL verbs.
+    menuItems.push({
+      label: t("db.generateSql"),
+      icon: Wand2,
+      onClick: () => setGenerateMenu(menu),
+    });
   }
   if (node.kind === "database" || node.kind === "schema") {
     menuItems.push({
@@ -218,6 +256,40 @@ function NodeSubtree({
       onClick: () =>
         store.newConsole(connectionId, node.database ?? undefined, node.schema ?? undefined),
     });
+    // Creating, from the container you are pointing at. A draft in a console rather than a form:
+    // a table is columns, types, keys and defaults, and a dialog that asked for all of that would
+    // be a worse editor than the console next door — while the part that *is* worth automating,
+    // qualifying the name with the right schema in the right quoting style, is done here.
+    const engineKind = useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind;
+    if (engineKind) {
+      menuItems.push({
+        label: t("db.createTable"),
+        icon: Table2,
+        separated: true,
+        onClick: () =>
+          store.newConsole(
+            connectionId,
+            node.database ?? undefined,
+            node.schema ?? undefined,
+            createTemplate("table", engineKind, node.kind === "schema" ? node.name : null),
+          ),
+      });
+      // Only where a schema is a thing you can create: on Mongo it isn't, and under a schema the
+      // answer to "new schema" is its database, not this node.
+      if (node.kind === "database" && engineInfo(engineKind).sql) {
+        menuItems.push({
+          label: t("db.createSchema"),
+          icon: FolderPlus,
+          onClick: () =>
+            store.newConsole(
+              connectionId,
+              node.database ?? undefined,
+              undefined,
+              createTemplate("schema", engineKind, null),
+            ),
+        });
+      }
+    }
   }
   // Filtering from the tree, on the schema you are looking at — which is where you realise you
   // never want to see it again. The dialog's Schemas tab is the same list, for editing it as a set.
@@ -301,9 +373,44 @@ function NodeSubtree({
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
       )}
+      {generateMenu && (
+        <ContextMenu
+          x={generateMenu.x}
+          y={generateMenu.y}
+          heading={t("db.generateSql")}
+          items={GENERATED.map((entry) => ({
+            label: t(entry.label),
+            icon: entry.icon,
+            separated: entry.separated,
+            onClick: () => void generate(entry.template),
+          }))}
+          onClose={() => setGenerateMenu(null)}
+        />
+      )}
     </>
   );
 }
+
+/**
+ * The statements the generator offers, grouped the way SQL itself is talked about: the ones that
+ * read or change rows (DML), the one that defines the object (DDL), and the ones that say who may
+ * touch it (DCL).
+ */
+const GENERATED: {
+  template: SqlTemplate;
+  label: TranslationKey;
+  icon: LucideIcon;
+  separated?: boolean;
+}[] = [
+  { template: "select", label: "db.sql.select", icon: Search },
+  { template: "count", label: "db.sql.count", icon: Hash },
+  { template: "insert", label: "db.sql.insert", icon: Plus },
+  { template: "update", label: "db.sql.update", icon: Pencil },
+  { template: "delete", label: "db.sql.delete", icon: Trash2 },
+  { template: "create", label: "db.sql.create", icon: FileCode2, separated: true },
+  { template: "grant", label: "db.sql.grant", icon: KeyRound, separated: true },
+  { template: "revoke", label: "db.sql.revoke", icon: KeyRound },
+];
 
 /** `schema.table`, or just the name when there is no schema (Mongo). */
 function qualifiedName(node: DbNode): string {

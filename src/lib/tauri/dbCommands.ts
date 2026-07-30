@@ -11,6 +11,7 @@ import type {
   DbNodeRef,
   DbQueryHistoryEntry,
   DbRowEdit,
+  DbSchemaGroup,
   DbServerInfo,
   DbStatementResult,
   DbTableDataRequest,
@@ -116,6 +117,17 @@ export const dbConnected = () => invoke<string[]>("db_connected");
 
 export const dbChildren = (connectionId: string, node: DbNodeRef) =>
   invoke<DbNode[]>("db_children", { connectionId, node });
+
+/**
+ * Every schema the connection can reach, grouped by database.
+ *
+ * Unlike `dbChildren` this ignores the connection's own schema filter — it feeds the control that
+ * *sets* that filter, which would otherwise only ever be able to show you what you had already
+ * chosen. Reads the saved settings, so a connection edited but not applied is listed as it was last
+ * saved.
+ */
+export const dbSchemaCatalog = (connectionId: string) =>
+  invoke<DbSchemaGroup[]>("db_schema_catalog", { connectionId });
 
 /** `runId` is what `dbCancel` stops; generate a fresh one per run. */
 export const dbExecute = (

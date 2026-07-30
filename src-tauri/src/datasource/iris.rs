@@ -544,8 +544,7 @@ impl IrisSession {
             &request.node,
             DIALECT,
             &request.filter,
-            request.order_by.as_deref(),
-            request.descending,
+            &request.sort,
             request.offset,
             request.limit,
         )?;

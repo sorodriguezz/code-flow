@@ -1,20 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Copy,
   Download,
   Loader2,
   Plus,
+  Rows3,
   RefreshCw,
   RotateCcw,
   Save,
   Square,
   Trash2,
+  X,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
-import { Select } from "../common/Select";
 import { ResultGrid } from "./ResultGrid";
 import { nodeLabel } from "./SqlConsolePanel";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
@@ -37,12 +39,28 @@ import { engineInfo, type DbForeignKey } from "../../types/database";
 const PAGE_SIZES = [50, 100, 200, 500, 1000];
 
 /**
+ * What the floating menu is showing.
+ *
+ * `export` carries the rows it is about — an empty list meaning the whole page — so the format the
+ * user then picks can't apply to a different set than the item they opened it from named.
+ */
+type PanelMenu =
+  | { x: number; y: number; kind: "row"; row: number }
+  | { x: number; y: number; kind: "export"; rows: number[] }
+  | { x: number; y: number; kind: "pageSize" };
+
+/**
  * One relation's rows, editable.
  *
  * The editing model is the whole design: **nothing is written until Apply.** Typing stages a change,
  * the changed cell is tinted, the pending count sits on the Apply button, and Apply sends the batch —
  * showing every statement it generated first. A grid that saved on blur would make an accidental
  * keystroke on a production table indistinguishable from an intentional edit.
+ *
+ * A selection is the second half of that model: the row numbers down the left select rows the way a
+ * file list does, and what the selection is *for* — export these, stage these for deletion, read
+ * these one field per line — is what the bar above the grid offers. Deleting a selection stages it
+ * like every other edit; the Delete key does the same, and Apply is still what writes.
  *
  * The other thing worth knowing: **a table without a primary key is edited by matching every column
  * of the row.** That works, and it can match more than one row when the table holds exact
@@ -53,7 +71,17 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   const connection = useDbStore((s) => s.connections.find((c) => c.id === tab.connectionId));
   const openModal = useDbModalStore((s) => s.openDbModal);
   const store = useDbStore.getState();
-  const [menu, setMenu] = useState<{ x: number; y: number; row: number | null } | null>(null);
+  const [menu, setMenu] = useState<PanelMenu | null>(null);
+  /**
+   * Which rows the gutter has selected, by index into the page.
+   *
+   * Here rather than in the store because it is about *this* look at the data: it indexes the page
+   * on screen, so it cannot survive a reload, a sort or a page turn — and a persisted tab that
+   * reopened with rows 3, 4 and 9 "selected" would be pointing at rows nobody chose.
+   */
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  /** Where a ⇧-click measures its run from. */
+  const anchor = useRef<number | null>(null);
 
   const engine = connection ? engineInfo(connection.kind) : null;
   const staged = pendingCount(tab);
@@ -65,6 +93,12 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
     if (!tab.result && !tab.loading && !tab.error) void store.loadData(tab.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab.id]);
+
+  // New rows, new indexes. See the note on `selected`.
+  useEffect(() => {
+    setSelected(new Set());
+    anchor.current = null;
+  }, [tab.result]);
 
   const primaryKeys = useMemo(
     () =>
@@ -86,6 +120,136 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
 
   const changed = useMemo(() => new Set(Object.keys(tab.pending)), [tab.pending]);
   const deleted = useMemo(() => new Set(tab.deleted), [tab.deleted]);
+
+  /** The selection in page order, which is the order everything downstream should see it in. */
+  const selectedRows = useMemo(
+    () => [...selected].sort((a, b) => a - b),
+    [selected],
+  );
+
+  /**
+   * A click on a row number.
+   *
+   * Plain click picks one, ⇧ extends from the anchor, ⌘/Ctrl adds or removes one — and clicking the
+   * only selected row clears it, so there is a way back to "nothing selected" that isn't hunting for
+   * the header box.
+   */
+  const selectRow = (row: number, mods: { range: boolean; toggle: boolean }) => {
+    setSelected((current) => {
+      if (mods.range && anchor.current !== null) {
+        const [from, to] = [anchor.current, row].sort((a, b) => a - b);
+        const next = new Set(mods.toggle ? current : []);
+        for (let index = from; index <= to; index += 1) next.add(index);
+        return next;
+      }
+      anchor.current = row;
+      if (mods.toggle) {
+        const next = new Set(current);
+        if (!next.delete(row)) next.add(row);
+        return next;
+      }
+      if (current.size === 1 && current.has(row)) return new Set();
+      return new Set([row]);
+    });
+  };
+
+  const selectAll = (on: boolean) => {
+    anchor.current = null;
+    setSelected(on ? new Set((tab.result?.rows ?? []).map((_, index) => index)) : new Set());
+  };
+
+  /**
+   * A click on a column header: ascending → descending → unsorted, then round again.
+   *
+   * The third state is the one grids usually leave out, and it is the one you want most often — a
+   * sort you added to look at something once otherwise has to be undone by sorting by something
+   * else. ⇧ (or ⌘/Ctrl) adds the column to the sort instead of replacing it, so "newest first,
+   * then by name" is two clicks; the same cycle then applies to that column alone, and its third
+   * click drops it out of the sort and leaves the rest.
+   */
+  const cycleSort = (column: string, additive: boolean) => {
+    const current = tab.sort;
+    const index = current.findIndex((key) => key.column === column);
+    let next: typeof current;
+    if (index < 0) {
+      next = additive ? [...current, { column, descending: false }] : [{ column, descending: false }];
+    } else if (!current[index].descending) {
+      const flipped = { column, descending: true };
+      next = additive ? current.map((key, i) => (i === index ? flipped : key)) : [flipped];
+    } else {
+      next = additive ? current.filter((_, i) => i !== index) : [];
+    }
+    // Back to page one: the rows a sort brings to the top are the reason it was asked for, and
+    // staying on page nine of the old order would hide them.
+    store.updateData(tab.id, { sort: next, offset: 0 });
+    void store.loadData(tab.id);
+  };
+
+  /** Stages the selection for deletion — nothing is written until Apply, as everywhere else here. */
+  const deleteSelected = () => {
+    if (selectedRows.length === 0) return;
+    store.setDeletedRows(tab.id, selectedRows, true);
+  };
+
+  /** One field per line, for rows too wide to read across. Falls back to the whole page. */
+  const openRecords = (rows: number[]) => {
+    if (!tab.result) return;
+    const indexes = rows.length > 0 ? rows : tab.result.rows.map((_, index) => index);
+    if (indexes.length === 0) return;
+    openModal({
+      kind: "records",
+      title: nodeLabel(tab.node),
+      columns: tab.result.columns,
+      // The row's own number travels with it: a record read on its own is worth nothing if you
+      // can't find the row it came from back in the grid.
+      records: indexes.map((index) => ({
+        index,
+        values: tab.result?.rows[index] ?? [],
+      })),
+    });
+  };
+
+  /** Saves rows in a format. `rows` empty means the page. */
+  const exportRows = async (format: ExportFormat, rows: number[]) => {
+    if (!tab.result) return;
+    const picked =
+      rows.length > 0 ? rows.map((index) => tab.result?.rows[index] ?? []) : tab.result.rows;
+    // Mongo's own documents are picked the same way: exporting three selected documents as JSON
+    // has to keep their nesting, which the column/value flattening would throw away.
+    const documents =
+      rows.length > 0
+        ? rows.map((index) => tab.result?.documents[index]).filter((doc): doc is string => doc !== undefined)
+        : tab.result.documents;
+    const contents = formatResult(
+      { ...tab.result, rows: picked, documents },
+      format,
+      nodeLabel(tab.node),
+    );
+    const saved = await apiSaveFile(
+      `${tab.node.name ?? "rows"}.${EXPORT_EXTENSIONS[format]}`,
+      contents,
+    ).catch(() => null);
+    if (saved) useToastStore.getState().pushToast(t("db.exported", { path: saved }), "success");
+  };
+
+  // ⌫/Del stages the selection for deletion, the way it does in a file list — but only when the
+  // grid is what the keystroke was meant for: a cell editor, the WHERE box and any other input own
+  // their own backspace.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      if (selected.size === 0) return;
+      // A modal has the user's attention; a keystroke aimed at it must not reach the grid behind.
+      if (useDbModalStore.getState().modal !== null) return;
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || target?.isContentEditable) return;
+      e.preventDefault();
+      store.setDeletedRows(tab.id, [...selected].sort((a, b) => a - b), true);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selected, store, tab.id]);
 
   /** Reloading throws staged edits away (row indexes shift), so it asks first when there are any. */
   const reload = async () => {
@@ -111,49 +275,85 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   const page = Math.floor(tab.offset / tab.limit) + 1;
   const lastPage = tab.total === null ? null : Math.max(1, Math.ceil(tab.total / tab.limit));
 
-  const rowMenu = (row: number): MenuItem[] => {
-    const items: MenuItem[] = [
-      {
+  /**
+   * The row menu.
+   *
+   * Right-clicking inside the selection acts on the selection; right-clicking outside it acts on
+   * the row under the pointer, which is also what the click did to the selection a moment earlier.
+   * Anything else would delete rows the user was not pointing at.
+   */
+  const rowMenu = (row: number, x: number, y: number): MenuItem[] => {
+    const inSelection = selected.has(row);
+    const rows = inSelection ? selectedRows : [row];
+    const items: MenuItem[] = [];
+    if (inSelection && rows.length > 1) {
+      items.push({
+        label: t("db.deleteSelectedRows", { n: String(rows.length) }),
+        icon: Trash2,
+        danger: true,
+        onClick: () => store.setDeletedRows(tab.id, rows, true),
+      });
+    } else {
+      items.push({
         label: deleted.has(row) ? t("db.undoDelete") : t("db.deleteRow"),
         icon: Trash2,
         danger: !deleted.has(row),
         onClick: () => store.toggleDeleteRow(tab.id, row),
+      });
+    }
+    items.push({
+      label: rows.length > 1 ? t("db.viewRecordsN", { n: String(rows.length) }) : t("db.viewRecord"),
+      icon: Rows3,
+      onClick: () => openRecords(rows),
+    });
+    items.push({
+      label:
+        rows.length > 1 ? t("db.exportSelectedN", { n: String(rows.length) }) : t("db.exportRow"),
+      icon: Download,
+      // Opens the format list where this menu already is: the formats are a second question about
+      // the same rows, not a different menu somewhere else on screen.
+      onClick: () => setMenu({ x, y, kind: "export", rows }),
+    });
+    items.push({
+      label: rows.length > 1 ? t("db.copyRowsN", { n: String(rows.length) }) : t("db.copyRow"),
+      icon: Copy,
+      onClick: () => {
+        const text = rows
+          .map((index) =>
+            (tab.result?.rows[index] ?? [])
+              .map((value) => (value === null ? "NULL" : value))
+              .join("\t"),
+          )
+          .join("\n");
+        void navigator.clipboard.writeText(text);
       },
-      {
-        label: t("db.copyRow"),
-        icon: Copy,
-        onClick: () => {
-          const values = tab.result?.rows[row] ?? [];
-          void navigator.clipboard.writeText(
-            values.map((value) => (value === null ? "NULL" : value)).join("\t"),
-          );
-        },
-      },
-    ];
+    });
     return items;
   };
 
-  const exportItems: MenuItem[] = (["csv", "tsv", "json", "sql", "markdown"] as ExportFormat[]).map(
-    (format) => ({
+  const exportItems = (rows: number[]): MenuItem[] =>
+    (["csv", "tsv", "json", "sql", "markdown"] as ExportFormat[]).map((format) => ({
       label: t("db.exportAs", { format: format.toUpperCase() }),
       icon: Download,
-      onClick: async () => {
-        if (!tab.result) return;
-        const contents = formatResult(tab.result, format, nodeLabel(tab.node));
-        const saved = await apiSaveFile(
-          `${tab.node.name ?? "rows"}.${EXPORT_EXTENSIONS[format]}`,
-          contents,
-        ).catch(() => null);
-        if (saved) useToastStore.getState().pushToast(t("db.exported", { path: saved }), "success");
-      },
-    }),
-  );
+      onClick: () => void exportRows(format, rows),
+    }));
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
         {connection && <EngineBadge kind={connection.kind} label={engine?.label ?? ""} />}
+        {/* Which connection these rows came from, in words. The engine badge says *what kind* of
+            server it is, which is not the same question — two of the three connections in a
+            workspace are usually the same engine, and the one you must not confuse is production
+            with staging. The console has always said it; the grid used to leave it to the tab. */}
+        <span
+          className="max-w-[150px] shrink truncate text-[12px] text-[var(--cf-text-muted)]"
+          title={connection?.name ?? t("db.connectionGone")}
+        >
+          {connection?.name ?? t("db.connectionGone")}
+        </span>
+        <span className="text-[var(--cf-text-muted)]">/</span>
         <span className="max-w-[240px] truncate text-[12px] font-medium text-[var(--cf-text)]">
           {nodeLabel(tab.node)}
         </span>
@@ -202,12 +402,23 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
             <RotateCcw size={12} />
           </ToolbarButton>
           <ToolbarButton
+            onClick={() => openRecords(selectedRows)}
+            disabled={!tab.result || tab.result.rows.length === 0}
+            title={selectedRows.length > 0 ? t("db.viewRecordsSelected") : t("db.viewRecordsAll")}
+          >
+            <Rows3 size={12} />
+          </ToolbarButton>
+          <ToolbarButton
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
-              setMenu({ x: rect.right - 180, y: rect.bottom + 2, row: null });
+              setMenu({ x: rect.right - 180, y: rect.bottom + 2, kind: "export", rows: selectedRows });
             }}
             disabled={!tab.result || tab.result.rows.length === 0}
-            title={t("db.export")}
+            title={
+              selectedRows.length > 0
+                ? t("db.exportSelectedN", { n: String(selectedRows.length) })
+                : t("db.export")
+            }
           >
             <Download size={12} />
           </ToolbarButton>
@@ -228,6 +439,39 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           <AlertTriangle size={12} className="mt-[1px] shrink-0 text-[var(--cf-warning)]" />
           {t("db.noPrimaryKeyWarning")}
         </p>
+      )}
+
+      {/* What the selection can do, only while there is one — a bar of disabled buttons over every
+          grid would cost a row of screen to say "nothing is selected". */}
+      {selectedRows.length > 0 && (
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-accent)_10%,transparent)] px-2 py-1">
+          <span className="text-[11px] font-medium text-[var(--cf-text)]">
+            {t("db.rowsSelectedN", { n: String(selectedRows.length) })}
+          </span>
+          <ToolbarButton onClick={() => openRecords(selectedRows)} title={t("db.viewRecordsSelected")}>
+            <Rows3 size={12} />
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setMenu({ x: rect.left, y: rect.bottom + 2, kind: "export", rows: selectedRows });
+            }}
+            title={t("db.exportSelectedN", { n: String(selectedRows.length) })}
+          >
+            <Download size={12} />
+          </ToolbarButton>
+          <ToolbarButton onClick={deleteSelected} title={t("db.deleteSelectedHint")}>
+            <Trash2 size={12} className="text-[var(--cf-danger)]" />
+          </ToolbarButton>
+          <button
+            type="button"
+            onClick={() => selectAll(false)}
+            className="ml-auto flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          >
+            <X size={11} />
+            {t("db.clearSelection")}
+          </button>
+        </div>
       )}
 
       {/* Grid */}
@@ -252,16 +496,17 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               store.setInsertedCell(tab.id, row, column, value)
             }
             onRemoveInserted={(row) => store.removeInsertedRow(tab.id, row)}
-            onRowContextMenu={(row, event) =>
-              setMenu({ x: event.clientX, y: event.clientY, row })
-            }
-            onSort={(column) => {
-              const descending = tab.orderBy === column ? !tab.descending : false;
-              store.updateData(tab.id, { orderBy: column, descending, offset: 0 });
-              void store.loadData(tab.id);
+            onRowContextMenu={(row, event) => {
+              // Right-clicking outside the selection moves it, so the menu that opens is about the
+              // row under the pointer and not about rows somewhere else on screen.
+              if (!selected.has(row)) selectRow(row, { range: false, toggle: false });
+              setMenu({ x: event.clientX, y: event.clientY, kind: "row", row });
             }}
-            sortColumn={tab.orderBy}
-            sortDescending={tab.descending}
+            selectedRows={selected}
+            onSelectRow={selectRow}
+            onSelectAllRows={selectAll}
+            onSort={cycleSort}
+            sort={tab.sort}
             primaryKeys={primaryKeys}
             foreignKeys={foreignKeys}
             onFollowForeignKey={(key, value) => store.followForeignKey(tab, key, value)}
@@ -276,8 +521,12 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
         )}
       </div>
 
-      {/* Pager */}
-      <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)]">
+      {/* Pager.
+          One line that never wraps: every part of it is two or three characters, and the moment one
+          of them folds onto a second line ("1 /" over "1") the bar stops reading as a control and
+          starts reading as broken. So each piece is `whitespace-nowrap`, and the bar scrolls
+          sideways in a panel too narrow for all of it rather than reflowing. */}
+      <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-t border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)]">
         <ToolbarButton
           onClick={() => {
             store.updateData(tab.id, { offset: Math.max(0, tab.offset - tab.limit) });
@@ -288,7 +537,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
         >
           <ChevronLeft size={13} />
         </ToolbarButton>
-        <span className="tabular-nums">
+        <span className="shrink-0 whitespace-nowrap tabular-nums">
           {lastPage === null ? t("db.pageN", { n: String(page) }) : `${page} / ${lastPage}`}
         </span>
         <ToolbarButton
@@ -308,22 +557,23 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           <ChevronRight size={13} />
         </ToolbarButton>
 
-        <Select
-          size="sm"
-          className="w-[112px]"
-          ariaLabel={t("db.perPage", { n: formatCount(tab.limit) })}
-          value={String(tab.limit)}
-          onChange={(value) => {
-            store.updateData(tab.id, { limit: Number(value), offset: 0 });
-            void store.loadData(tab.id);
+        {/* The page size, as a number you click — not a dropdown wide enough to hold a sentence.
+            The choice is between five numbers and the current one is two or three digits, so the
+            control is sized for a number and the list opens where it stands. */}
+        <button
+          type="button"
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            setMenu({ x: rect.left, y: rect.bottom + 4, kind: "pageSize" });
           }}
-          options={PAGE_SIZES.map((size) => ({
-            value: String(size),
-            label: t("db.perPage", { n: formatCount(size) }),
-          }))}
-        />
+          title={t("db.perPage", { n: formatCount(tab.limit) })}
+          className="flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded border border-[var(--cf-border)] px-1.5 py-[1px] tabular-nums text-[var(--cf-text)] hover:border-[var(--cf-accent)]"
+        >
+          {formatCount(tab.limit)}
+          <ChevronDown size={11} className="text-[var(--cf-text-muted)]" />
+        </button>
 
-        <span className="ml-auto flex items-center gap-2 tabular-nums">
+        <span className="ml-auto flex shrink-0 items-center gap-2 whitespace-nowrap tabular-nums">
           {tab.result && <span>{formatDuration(tab.result.duration_ms)}</span>}
           <span>
             {tab.total === null
@@ -340,7 +590,20 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
         <ContextMenu
           x={menu.x}
           y={menu.y}
-          items={menu.row === null ? exportItems : rowMenu(menu.row)}
+          heading={menu.kind === "pageSize" ? t("db.rowsPerPage") : undefined}
+          items={
+            menu.kind === "row"
+              ? rowMenu(menu.row, menu.x, menu.y)
+              : menu.kind === "export"
+                ? exportItems(menu.rows)
+                : PAGE_SIZES.map((size) => ({
+                    label: t("db.perPage", { n: formatCount(size) }),
+                    onClick: () => {
+                      store.updateData(tab.id, { limit: size, offset: 0 });
+                      void store.loadData(tab.id);
+                    },
+                  }))
+          }
           onClose={() => setMenu(null)}
         />
       )}

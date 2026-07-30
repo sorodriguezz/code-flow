@@ -14,7 +14,7 @@ use tauri::State;
 use crate::datasource::{
     filter_children, scope_to_current_database, DbConnectionConfig, DbEditResult, DbExecContext,
     DbExecuteResult, DbForeignKey, DbNode, DbNodeKind, DbNodeRef, DbRegistry, DbRowEdit,
-    DbServerInfo, DbStatementResult, DbTableDataRequest, Session,
+    DbSchemaGroup, DbServerInfo, DbStatementResult, DbTableDataRequest, Session,
 };
 use crate::db::datasource_queries as queries;
 use crate::db::{models::*, Db};
@@ -296,6 +296,70 @@ pub async fn db_children(
         ));
     }
     Ok(filter_children(&config, &node, children))
+}
+
+/// Every schema this connection can reach, database by database — what the Schemas tab chooses from.
+///
+/// Its own command rather than a walk over [`db_children`], for the reason that decides it:
+/// `db_children` applies the connection's `visible_schemas`, so asking it would return only the
+/// schemas already chosen and a schema unchecked once could never be found again. A chooser needs
+/// the unfiltered set; that is what makes it a chooser and not a list of what you already picked.
+///
+/// `show_all_databases` is still honoured. It says which databases are this connection's business at
+/// all, and a server with fifty of them shouldn't open fifty sessions because a dialog was opened.
+///
+/// A database that can't be read — no permission is the usual one — is skipped rather than failing
+/// the call: one unreadable database shouldn't cost the other nine. The error only surfaces when
+/// nothing at all could be read, where an empty list would read as "this server has no schemas".
+#[tauri::command]
+pub async fn db_schema_catalog(
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+) -> Result<Vec<DbSchemaGroup>, String> {
+    let config = resolve_config(&db, &connection_id)?;
+    let session = registry.session(&config, None).await?;
+    let root = DbNodeRef {
+        kind: DbNodeKind::Root,
+        database: None,
+        schema: None,
+        name: None,
+    };
+    let mut databases = session.children(&root).await?;
+    if !config.show_all_databases {
+        databases = scope_to_current_database(databases, &session.info().database);
+    }
+
+    let mut groups: Vec<DbSchemaGroup> = Vec::new();
+    let mut failure: Option<String> = None;
+    for database in databases {
+        let node = DbNodeRef {
+            kind: DbNodeKind::Database,
+            database: database.database.clone(),
+            schema: None,
+            name: None,
+        };
+        let children = match registry.session(&config, node.database.as_deref()).await {
+            Ok(session) => session.children(&node).await,
+            Err(e) => Err(e),
+        };
+        match children {
+            Ok(nodes) => groups.push(DbSchemaGroup {
+                database: database.name,
+                schemas: nodes
+                    .into_iter()
+                    .filter(|child| child.kind == DbNodeKind::Schema)
+                    .map(|child| child.name)
+                    .collect(),
+            }),
+            Err(e) => failure = failure.or(Some(e)),
+        }
+    }
+
+    match failure {
+        Some(e) if groups.is_empty() => Err(e),
+        _ => Ok(groups),
+    }
 }
 
 #[tauri::command]

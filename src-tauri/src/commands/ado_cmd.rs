@@ -38,6 +38,22 @@ fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
     Err("This project isn't linked to a pull-request host yet".to_string())
 }
 
+/// A stable name for the repository a review ran against, written into every run's memory.
+///
+/// Review memory is only ever allowed to be read back for the *same* repository — see `repo_key`
+/// on `ReviewMeta`. Lower-cased because neither host treats these names case-sensitively, and a
+/// project re-linked with different capitalisation is the same repository.
+fn repo_key(link: &LinkedRepo) -> String {
+    match link {
+        LinkedRepo::GitHub { host, owner, repo } => {
+            format!("github:{host}/{owner}/{repo}").to_lowercase()
+        }
+        LinkedRepo::Azure { org, project, repo_id } => {
+            format!("azure:{org}/{project}/{repo_id}").to_lowercase()
+        }
+    }
+}
+
 fn github_token(host: &str) -> Result<String, String> {
     secrets::get_secret(&secrets::github_token_key(host))?
         .ok_or_else(|| format!("No GitHub token saved for \"{host}\" — connect it in Settings first"))
@@ -1199,6 +1215,9 @@ pub async fn review_pull_request(
 ) -> Result<String, String> {
     let project = load_project(&db, &project_id)?;
     let link = linked_repo(&project)?;
+    // Every memory read and write below is scoped to this repository, so a project re-linked
+    // elsewhere starts with a clean slate instead of inheriting findings about other code.
+    let repo = repo_key(&link);
     let workspace_id = project.workspace_id.clone();
 
     let (contexts, mcps, skills, config, review_template) = {
@@ -1262,7 +1281,7 @@ pub async fn review_pull_request(
     let head_sha = git::diff::resolve_sha(&project.local_path, &head_ref).unwrap_or_default();
     let prev_head = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::latest_review_head(&conn, &project_id, pr_id).ok().flatten()
+        queries::latest_review_head(&conn, &project_id, pr_id, &repo).ok().flatten()
     };
     if let Some(prev) = &prev_head {
         if !head_sha.is_empty() && prev == &head_sha {
@@ -1304,7 +1323,7 @@ pub async fn review_pull_request(
     // costs context, and context is not worth failing a review the user is waiting on.
     let remembered: Vec<crate::review_memory::MemoryFinding> = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::latest_review_findings(&conn, &project_id, pr_id)
+        queries::latest_review_findings(&conn, &project_id, pr_id, &repo)
             .ok()
             .flatten()
             .and_then(|json| serde_json::from_str(&json).ok())
@@ -1362,8 +1381,8 @@ pub async fn review_pull_request(
     let result = match result {
         Ok(text) => {
             let text = persist_review_run(
-                &conn, &job_id, &project, &workspace_id, &pr, &level, config.engine.label(), &config.model,
-                &diff_text, &head_sha, scope, changed_files.as_deref(), text,
+                &conn, &job_id, &project, &repo, &workspace_id, &pr, &level, config.engine.label(),
+                &config.model, &diff_text, &head_sha, scope, changed_files.as_deref(), text,
             );
             let _ = queries::add_job_history(
                 &conn, &job_id, &project_id, "pr-review", &label, "done", Some(&text), None, &history_meta,
@@ -1499,6 +1518,9 @@ fn persist_review_run(
     conn: &rusqlite::Connection,
     job_id: &str,
     project: &Project,
+    // The repository this run reviewed (see `repo_key`) — both the scope its memory is read back
+    // under and what gets stored, so the two can never disagree.
+    repo: &str,
     workspace_id: &str,
     pr: &ado::PullRequestSummary,
     level: &str,
@@ -1512,13 +1534,13 @@ fn persist_review_run(
 ) -> String {
     use crate::review_memory as mem;
 
-    let prior = queries::count_review_runs(conn, &project.id, pr.id).unwrap_or(0) as usize;
+    let prior = queries::count_review_runs(conn, &project.id, pr.id, repo).unwrap_or(0) as usize;
     let parsed = mem::parse_findings(&text);
 
     // Reconcile against the previous run's findings when there is one; otherwise it's the first
     // run and the parsed findings are the whole set (introduced this iteration).
     let (findings, delta) = if prior > 0 {
-        let prev: Vec<mem::MemoryFinding> = queries::latest_review_findings(conn, &project.id, pr.id)
+        let prev: Vec<mem::MemoryFinding> = queries::latest_review_findings(conn, &project.id, pr.id, repo)
             .ok()
             .flatten()
             .and_then(|json| serde_json::from_str(&json).ok())
@@ -1558,6 +1580,7 @@ fn persist_review_run(
         model: model.to_string(),
         project_id: project.id.clone(),
         project_name: project.name.clone(),
+        repo_key: repo.to_string(),
         workspace_id: workspace_id.to_string(),
         timestamp: chrono::Local::now().to_rfc3339(),
         iter,

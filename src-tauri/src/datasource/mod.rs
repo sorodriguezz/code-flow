@@ -377,6 +377,17 @@ pub struct DbServerInfo {
     pub notes: Vec<String>,
 }
 
+/// One database's schemas, as the connection dialog's chooser reads them.
+///
+/// Grouped by database rather than returned as one flat list because the same schema name means a
+/// different thing in each — and a chooser that showed `public` once, with no idea which of six
+/// databases it came from, would be asking the user to guess.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbSchemaGroup {
+    pub database: String,
+    pub schemas: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // The explorer tree
 // ---------------------------------------------------------------------------
@@ -559,13 +570,23 @@ impl DbExecContext {
     }
 }
 
+/// One column of a sort, and which way.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbSortKey {
+    pub column: String,
+    pub descending: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbTableDataRequest {
     pub node: DbNodeRef,
     pub offset: u32,
     pub limit: u32,
-    pub order_by: Option<String>,
-    pub descending: bool,
+    /// The sort keys in the order the user added them; empty for the server's own order. A list
+    /// rather than one column, because a grid sorted by date *then* name is an ordinary request and
+    /// one column cannot say which of the two breaks the tie.
+    #[serde(default)]
+    pub sort: Vec<DbSortKey>,
     /// A `WHERE` fragment (SQL) or a filter document (Mongo), exactly as typed. Interpolating it
     /// is the point — this is a database client, and the user is entitled to write predicates.
     #[serde(default)]

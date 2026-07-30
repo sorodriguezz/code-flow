@@ -122,6 +122,12 @@ export interface DbServerInfo {
   notes: string[];
 }
 
+/** One database's schemas, as `dbSchemaCatalog` reads them for the connection dialog's chooser. */
+export interface DbSchemaGroup {
+  database: string;
+  schemas: string[];
+}
+
 /**
  * What a node in the explorer is. The `*_folder` kinds are the grouping rows ("Tables", "Columns")
  * that carry no server object of their own.
@@ -185,12 +191,18 @@ export interface DbExecContext {
   max_rows: number;
 }
 
+/** One column of a sort, and which way. */
+export interface DbSortKey {
+  column: string;
+  descending: boolean;
+}
+
 export interface DbTableDataRequest {
   node: DbNodeRef;
   offset: number;
   limit: number;
-  order_by: string | null;
-  descending: boolean;
+  /** The sort keys in order; empty for the server's own. */
+  sort: DbSortKey[];
   /** A `WHERE` fragment (SQL) or a filter document (Mongo), exactly as typed. */
   filter: string;
 }
