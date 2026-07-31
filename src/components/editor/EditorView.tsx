@@ -249,15 +249,18 @@ export function EditorView() {
     [patchTab],
   );
 
-  /** Closes every tab in one group, asking once for the whole set rather than once per file —
+  /** Closes a group's unpinned tabs, asking once for the whole set rather than once per file —
    * the same bargain `closeGroup` strikes, and for the same reason: a queue of modals is not a
    * question, it's an obstacle. */
   const closeAllTabs = useCallback(async (groupId: string) => {
     const group = groupsRef.current.find((g) => g.id === groupId);
-    if (!group || group.paths.length === 0) return;
+    // Pinned tabs sit out the sweep (see `closeAllInGroups`), so a strip of nothing but pinned tabs
+    // has nothing to close — and nothing to confirm.
+    const closing = group?.paths.filter((p) => !group.pinned.includes(p)) ?? [];
+    if (closing.length === 0) return;
     // Only files this group is the last to show can lose anything — the rest survive in another
     // split with their edits intact.
-    const unsaved = group.paths.filter(
+    const unsaved = closing.filter(
       (p) =>
         groupsRef.current.filter((g) => g.paths.includes(p)).length <= 1 &&
         tabsRef.current.some((tab) => tab.path === p && tab.content !== tab.originalContent),

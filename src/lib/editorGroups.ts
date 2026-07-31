@@ -137,16 +137,24 @@ export function closeTabInGroups(groups: EditorGroup[], groupId: string, path: s
 }
 
 /**
- * Empties one group. The group itself folds away with its tabs — unless it's the last one, which
- * stays as the empty editor, the same bargain `closeTabInGroups` makes when you close the final tab.
+ * Sweeps one group's tabs, keeping the pinned ones. Pinning is the gesture for "keep this in
+ * reach", so a sweep that took pinned tabs with it would leave the pin meaning nothing.
  *
- * Pinned tabs go too. Pinning keeps a tab in reach and out of the way of the preview slot; it isn't
- * a lock, and "close all" that leaves tabs open would be answering a different question.
+ * A group left with no pinned tab folds away — unless it's the last one, which stays as the empty
+ * editor, the same bargain `closeTabInGroups` makes when you close the final tab.
  */
 export function closeAllInGroups(groups: EditorGroup[], groupId: string): EditorGroup[] {
-  const emptied = groups.map((group) =>
-    group.id === groupId ? { ...group, paths: [], pinned: [], activePath: null } : group,
-  );
+  const emptied = groups.map((group) => {
+    if (group.id !== groupId) return group;
+    const paths = group.paths.filter((p) => group.pinned.includes(p));
+    return {
+      ...group,
+      paths,
+      // The survivors all sit left of whatever was active, since pinned tabs hold the head slots —
+      // so the adjacent tab to land on is the last of them.
+      activePath: paths.includes(group.activePath ?? "") ? group.activePath : neighbourOf(paths, paths.length),
+    };
+  });
   return emptied.length > 1 ? emptied.filter((group) => group.paths.length > 0) : emptied;
 }
 

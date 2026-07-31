@@ -34,6 +34,11 @@ thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "5"
+# Windows answers `canonicalize` with a verbatim path (`\\?\C:\…`), and Rust reads that form
+# happily enough that it travels the whole app unnoticed — until it reaches a consumer that isn't
+# Rust. See `paths::set_resource_dir`. This is the crate tauri itself uses to undo that prefix, and
+# it is already in the tree as a dependency of tauri's.
+dunce = "1"
 portable-pty = "0.8"
 notify = "6"
 open = "5"

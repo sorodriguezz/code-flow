@@ -9,8 +9,31 @@ use std::sync::OnceLock;
 /// and threading an `AppHandle` down to them just to find a directory would undo that.
 static RESOURCE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// Records that directory in its plain form — never Windows' verbatim `\\?\C:\…`.
+///
+/// Tauri resolves its resource directory from a *canonicalized* `current_exe`, and on Windows
+/// `std::fs::canonicalize` always answers with the verbatim prefix. Rust reads that form happily,
+/// and so does `CreateProcess`, so it survives every hop inside the app — and then breaks the one
+/// consumer that isn't Rust. The JVM in [`crate::datasource::jvm`] parses a leading `\\` as a UNC
+/// share, so `\\?\C:\…\iris-bridge.jar` on its classpath names a server called `?`: it opens
+/// neither jar, silently drops both entries, and dies with `Could not find or load main class`,
+/// which reaches the user as "the bridge stopped running" and names nothing anyone can fix.
+///
+/// Undone here rather than at that call site because the fault is in the path and not in the JVM:
+/// the next resource handed to any program that isn't Rust would hit the same wall.
 pub fn set_resource_dir(dir: PathBuf) {
-    let _ = RESOURCE_DIR.set(dir);
+    let _ = RESOURCE_DIR.set(plain(&dir));
+}
+
+/// See [`set_resource_dir`]. Nothing at all off Windows, and on it nothing to a path that was
+/// already plain.
+///
+/// `dunce` rather than stripping `\\?\` by hand because the prefix is not always removable: a
+/// device path has no plain spelling and must be left alone, and `\\?\UNC\server\share` has one
+/// that isn't a prefix strip (`\\server\share`). Getting either wrong would trade this bug for a
+/// resource directory that names nothing.
+fn plain(dir: &Path) -> PathBuf {
+    dunce::simplified(dir).to_path_buf()
 }
 
 /// `None` outside a packaged app — a `cargo test` has no Tauri runtime to have set it. Callers
@@ -71,4 +94,33 @@ pub fn ensure_dirs() -> std::io::Result<()> {
 /// nothing has touched the directory yet, and deletes it then.
 pub fn reset_marker_path() -> PathBuf {
     base_dir().join(".reset-pending")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact directory Tauri hands back from a packaged Windows install, and the exact reason
+    /// IRIS could not connect from one: the prefix rode along into every jar on the JVM's
+    /// classpath, which cannot carry it.
+    #[test]
+    #[cfg(windows)]
+    fn a_verbatim_resource_dir_is_recorded_plainly() {
+        let recorded = plain(Path::new(r"\\?\C:\Users\someone\AppData\Local\CodeFlow"));
+        assert_eq!(
+            recorded,
+            Path::new(r"C:\Users\someone\AppData\Local\CodeFlow")
+        );
+        // What the IRIS driver actually builds from it, which is where the prefix did its damage.
+        let jar = recorded.join("iris").join("iris-bridge.jar");
+        assert!(!jar.to_string_lossy().starts_with(r"\\?\"), "{}", jar.display());
+    }
+
+    /// A path that never had the prefix is handed back untouched — every macOS and Linux resource
+    /// directory, and a Windows one that already arrived plain.
+    #[test]
+    fn a_plain_path_is_left_alone() {
+        let untouched = base_dir().join("resources");
+        assert_eq!(plain(&untouched), untouched);
+    }
 }
