@@ -1,5 +1,19 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { AlertOctagon, AlertTriangle, Check, ChevronDown, ChevronRight, Info, Loader2, MapPin, Wand2, X } from "lucide-react";
+import {
+  AlertOctagon,
+  AlertTriangle,
+  Ban,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  EyeOff,
+  Info,
+  Loader2,
+  MapPin,
+  Undo2,
+  Wand2,
+  X,
+} from "lucide-react";
 import {
   computeQualityGatePassed,
   formatFindingAsFixPrompt,
@@ -11,6 +25,7 @@ import { renderInlineMarkdown } from "../../lib/markdown";
 import { resolveFindingWithAi } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { AiRunLog } from "./AiRunLog";
+import { Checkbox } from "../common/Checkbox";
 import { useRepoStore } from "../../state/repoStore";
 import { useResolutionsStore, resolutionRunKey, type RunningResolution } from "../../state/resolutionsStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -216,6 +231,173 @@ export function ResolveWithAiButton({
   );
 }
 
+/**
+ * A human ruling on one finding, read back from the run's durable memory.
+ *
+ * The card renders findings parsed out of the review markdown, which knows nothing about what was
+ * later decided about them — so the verdict travels alongside rather than inside the finding.
+ */
+export interface FindingMark {
+  /** `abierto` · `posteado` · `resuelto` · `falso_positivo` · `ignorado`. */
+  estado: string;
+  motivo?: string | null;
+  /** Whether the finding was published to the PR — only then is there a thread to close. */
+  posted: boolean;
+}
+
+export function isDiscarded(mark?: FindingMark | null): boolean {
+  return mark?.estado === "falso_positivo" || mark?.estado === "ignorado";
+}
+
+/** What a discard does beyond the local mark, chosen per finding rather than globally: promoting
+ * the ruling to every future review of the repository, and saying so on the pull request. */
+export interface DiscardOptions {
+  motivo: string;
+  scopeRepo: boolean;
+  notifyHost: boolean;
+}
+
+/**
+ * "This isn't a real defect" — the control that was previously only reachable from the settings
+ * screen, put where the finding is actually read.
+ *
+ * The reason field is the part that earns its keep: it is what the next review is told (so the
+ * model stops re-deriving the same rejected finding), what the pull request is told when the
+ * thread is closed, and what makes a repository-wide rule reviewable months later. It stays
+ * optional, because forcing prose is how you get "n/a".
+ */
+function DiscardControls({
+  mark,
+  onDiscard,
+  busy,
+}: {
+  mark?: FindingMark | null;
+  onDiscard: (estado: string, opts: DiscardOptions) => void;
+  busy: boolean;
+}) {
+  const t = useT();
+  // Which rejection is being composed, if any — `null` is the resting state (just the two buttons).
+  const [drafting, setDrafting] = useState<"falso_positivo" | "ignorado" | null>(null);
+  const [motivo, setMotivo] = useState("");
+  const [scopeRepo, setScopeRepo] = useState(false);
+  // Defaults to on when the finding is on the PR: a rejection the author never sees leaves them
+  // looking at a comment nobody intends to act on.
+  const [notifyHost, setNotifyHost] = useState(true);
+
+  if (isDiscarded(mark)) {
+    const falso = mark?.estado === "falso_positivo";
+    return (
+      <div className="rounded-md border border-[var(--cf-border)] bg-black/[0.02] px-2.5 py-1.5 dark:bg-white/[0.03]">
+        <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          {falso ? <Ban size={11} /> : <EyeOff size={11} />}
+          {t(falso ? "finding.discardedFalse" : "finding.discardedIgnored")}
+        </span>
+        {mark?.motivo && <p className="mt-0.5 text-[12px] leading-relaxed text-[var(--cf-text)]">{mark.motivo}</p>}
+        <button
+          onClick={() => onDiscard("abierto", { motivo: "", scopeRepo: false, notifyHost: false })}
+          disabled={busy}
+          className="mt-1 flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline disabled:opacity-50"
+        >
+          {busy ? <Loader2 size={10} className="animate-spin" /> : <Undo2 size={10} />}
+          {t("finding.undoDiscard")}
+        </button>
+      </div>
+    );
+  }
+
+  if (drafting === null) {
+    return (
+      <div className="flex flex-wrap items-center gap-2">
+        <DiscardButton icon={Ban} label={t("finding.markFalsePositive")} onClick={() => setDrafting("falso_positivo")} />
+        <DiscardButton icon={EyeOff} label={t("finding.markIgnored")} onClick={() => setDrafting("ignorado")} />
+      </div>
+    );
+  }
+
+  const close = () => {
+    setDrafting(null);
+    setMotivo("");
+    setScopeRepo(false);
+    setNotifyHost(true);
+  };
+
+  return (
+    <div className="space-y-2 rounded-md border border-[var(--cf-border)] bg-black/[0.02] px-2.5 py-2 dark:bg-white/[0.03]">
+      <p className="text-[11px] font-medium text-[var(--cf-text)]">
+        {t(drafting === "falso_positivo" ? "finding.markFalsePositive" : "finding.markIgnored")}
+      </p>
+      <textarea
+        value={motivo}
+        onChange={(e) => setMotivo(e.target.value)}
+        rows={2}
+        autoFocus
+        placeholder={t("finding.discardReasonPlaceholder")}
+        className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+      />
+      {/* "Ignore" is a call about this pull request ("not now"), so it never becomes a standing
+          rule about the code — only a false positive does. */}
+      {drafting === "falso_positivo" && (
+        <label className="flex items-start gap-1.5 text-[11px] text-[var(--cf-text-muted)]" title={t("finding.discardScopeRepoHint")}>
+          <span className="mt-0.5">
+            <Checkbox checked={scopeRepo} onChange={setScopeRepo} />
+          </span>
+          {t("finding.discardScopeRepo")}
+        </label>
+      )}
+      {mark?.posted && (
+        <label className="flex items-start gap-1.5 text-[11px] text-[var(--cf-text-muted)]" title={t("finding.discardNotifyHostHint")}>
+          <span className="mt-0.5">
+            <Checkbox checked={notifyHost} onChange={setNotifyHost} />
+          </span>
+          {t("finding.discardNotifyHost")}
+        </label>
+      )}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => {
+            onDiscard(drafting, { motivo: motivo.trim(), scopeRepo, notifyHost });
+            close();
+          }}
+          disabled={busy}
+          className="rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+        >
+          {t("finding.discardConfirm")}
+        </button>
+        <button onClick={close} className="text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">
+          {t("common.cancel")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DiscardButton({ icon: Icon, label, onClick }: { icon: typeof Ban; label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+    >
+      <Icon size={11} />
+      {label}
+    </button>
+  );
+}
+
+/** Header pill for a finding a human has ruled out — the collapsed counterpart of the reason shown
+ * inside the card, so a scan down the list shows what is still standing. */
+export function DiscardedChip({ estado }: { estado: string }) {
+  const t = useT();
+  const falso = estado === "falso_positivo";
+  return (
+    <span
+      title={t(falso ? "finding.discardedFalse" : "finding.discardedIgnored")}
+      className="flex shrink-0 items-center gap-0.5 rounded-full bg-black/[0.06] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-text-muted)] dark:bg-white/[0.09]"
+    >
+      {falso ? <Ban size={10} /> : <EyeOff size={10} />}
+    </span>
+  );
+}
+
 /** Small green "resolved" pill shown in a collapsed finding/comment header so the user can see at
  * a glance which items have already been handled without expanding each one. */
 export function ResolvedChip() {
@@ -291,6 +473,9 @@ export function FindingCard({
   projectId,
   prSourceBranch,
   resolutionKey,
+  mark,
+  onDiscard,
+  discarding = false,
 }: {
   finding: AnalysisFinding;
   defaultOpen: boolean;
@@ -303,6 +488,13 @@ export function FindingCard({
   /** Stable id under which this finding's "resolve with AI" outcome is persisted (see
    * [`useResolveWithAi`]). Omit to keep the outcome session-only. */
   resolutionKey?: string;
+  /** The human ruling already on record for this finding, from the run's memory. */
+  mark?: FindingMark | null;
+  /** Omit where there is nothing to record a ruling in — a pre-commit analysis, or a PR reviewed
+   * from a link with no project to keep memory for. The controls are then not offered at all,
+   * rather than offered and silently doing nothing. */
+  onDiscard?: (estado: string, opts: DiscardOptions) => void;
+  discarding?: boolean;
 }) {
   const t = useT();
   const [open, setOpen] = useState(defaultOpen);
@@ -312,13 +504,16 @@ export function FindingCard({
     prSourceBranch,
     resolutionKey,
   );
+  const discarded = isDiscarded(mark);
 
   return (
-    <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
+    // Dimmed rather than hidden: a rejected finding is still part of what the review said, and
+    // hiding it would make the ruling impossible to revisit from the list it was made in.
+    <div className={`overflow-hidden rounded-lg border border-[var(--cf-border)] ${discarded ? "opacity-55" : ""}`}>
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"
-        style={{ borderLeft: `3px solid ${color}` }}
+        style={{ borderLeft: `3px solid ${discarded ? "var(--cf-border)" : color}` }}
       >
         <Icon size={14} className="mt-0.5 shrink-0" style={{ color }} />
         <div className="min-w-0 flex-1">
@@ -341,6 +536,7 @@ export function FindingCard({
             </p>
           )}
         </div>
+        {discarded && <DiscardedChip estado={mark?.estado ?? ""} />}
         {resolution && <ResolvedChip />}
         {finding.confidence !== null && (
           <span
@@ -377,7 +573,10 @@ export function FindingCard({
             </pre>
           )}
 
-          {projectId && (
+          {/* Fixing it and rejecting it are the two answers to a finding, so they sit together —
+              except once rejected, where offering to fix what was just called a non-defect would
+              be the panel arguing with itself. */}
+          {projectId && !discarded && (
             <ResolveWithAiButton
               resolving={resolving}
               resolution={resolution}
@@ -387,6 +586,7 @@ export function FindingCard({
               onClear={clearResolution}
             />
           )}
+          {onDiscard && <DiscardControls mark={mark} onDiscard={onDiscard} busy={discarding} />}
         </div>
       )}
     </div>

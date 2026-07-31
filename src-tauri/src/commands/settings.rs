@@ -86,6 +86,57 @@ pub fn mark_review_finding(
     queries::set_review_run_findings(&conn, &run_id, &json).map_err(|e| e.to_string())
 }
 
+// ---------- known false positives (repository-scoped suppression rules) ----------
+
+/// Where a workspace's suppression rules live. One row per workspace rather than one per
+/// repository: the settings screen lists them all together, and a rule already carries the
+/// `repo_key` it applies to, so splitting the storage would only make that read a fan-out.
+fn suppressions_key(workspace_id: &str) -> String {
+    format!("fp_suppressions:{workspace_id}")
+}
+
+/// A workspace's suppression rules, newest first. A corrupt or absent blob reads as "no rules" —
+/// these silence findings, so failing open (reporting everything) is the safe direction.
+pub fn load_fp_suppressions(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+) -> Vec<crate::review_memory::FpSuppression> {
+    queries::get_setting(conn, &suppressions_key(workspace_id))
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_fp_suppressions(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    rules: &[crate::review_memory::FpSuppression],
+) -> Result<(), String> {
+    let json = serde_json::to_string(rules).map_err(|e| e.to_string())?;
+    queries::set_setting(conn, &suppressions_key(workspace_id), &json).map_err(|e| e.to_string())
+}
+
+/// Every standing false positive in the workspace — what the settings screen lists and what a
+/// review of any of its repositories is filtered from.
+#[tauri::command]
+pub fn list_fp_suppressions(
+    db: State<Db>,
+    workspace_id: String,
+) -> Result<Vec<crate::review_memory::FpSuppression>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    Ok(load_fp_suppressions(&conn, &workspace_id))
+}
+
+/// Drops one rule, so the finding it denied is reported again from the next review on.
+#[tauri::command]
+pub fn remove_fp_suppression(db: State<Db>, workspace_id: String, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let mut rules = load_fp_suppressions(&conn, &workspace_id);
+    rules.retain(|r| r.id != id);
+    save_fp_suppressions(&conn, &workspace_id, &rules)
+}
+
 #[tauri::command]
 pub fn delete_review_run(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;

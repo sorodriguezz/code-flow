@@ -355,6 +355,130 @@ pub fn reconcile(
     (merged, ReviewDelta { iter_previa: prev_iter, iter_actual, nuevos, persisten, resueltos })
 }
 
+/// A false positive the human has already ruled on, kept at the **repository** level instead of
+/// inside one pull request's memory.
+///
+/// That scope is the whole point. A PR's memory only reaches its own pull request: mark a finding
+/// `falso_positivo` there and the next PR touching the same code re-derives it from scratch, so the
+/// same argument gets had again on every branch. These rules are read into *every* review of the
+/// repository, which is what turns one judgement into a standing one.
+///
+/// Matching is deliberately coarse — a category, optionally narrowed to one file — because a rule
+/// describes a *class* of finding rather than a line: the defect it denies drifts across lines and
+/// re-appears in files the rule was never written against. It shares [`finding_identity`] with
+/// reconciliation so a rule and a finding agree on what "the same thing" means.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FpSuppression {
+    pub id: String,
+    /// Which repository this rule belongs to (the `repo_key` — `github:host/owner/repo` or
+    /// `azure:org/project/repoId`). Every rule in a workspace lives in one list and is filtered by
+    /// this, so two repositories in the same workspace never silence each other's findings.
+    pub repo_key: String,
+    pub categoria: String,
+    /// The file the rule is scoped to, or `None` for "this category, anywhere in the repository".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archivo: Option<String>,
+    /// Why it isn't a real defect here. Carried into the prompt rather than kept as a private note:
+    /// a bare "don't report this" teaches the model nothing, while the reason lets it tell a
+    /// genuinely different finding from the one that was already dismissed.
+    pub motivo: String,
+    /// The pull request the rule came from, so a rule that turns out to be wrong can be traced back
+    /// to the review that produced it.
+    #[serde(default)]
+    pub pr_id: i64,
+    pub created_at: String,
+}
+
+impl FpSuppression {
+    /// True when `f` is what this rule denies: same category, and — for a file-scoped rule — the
+    /// same file. Suffix-tolerant on the path for the same reason [`file_in_changed`] is.
+    pub fn matches(&self, categoria: &str, archivo: Option<&str>) -> bool {
+        if !self.categoria.eq_ignore_ascii_case(categoria.trim()) {
+            return false;
+        }
+        match (&self.archivo, archivo) {
+            (None, _) => true,
+            (Some(rule_file), Some(f)) => {
+                let norm = |s: &str| s.trim().trim_start_matches('/').to_lowercase();
+                let (a, b) = (norm(rule_file), norm(f));
+                a == b || a.ends_with(&b) || b.ends_with(&a)
+            }
+            (Some(_), None) => false,
+        }
+    }
+}
+
+/// The repository's standing false positives, rendered as one review-prompt context.
+///
+/// Stated as rules with reasons rather than a blocklist: the model is asked to weigh whether what
+/// it found is the same thing, and to say so when it believes a rule no longer holds. A rule that
+/// can never be contradicted would quietly hide a real regression the day the code around it
+/// changes — the reason is what lets the model tell those two cases apart.
+///
+/// Returns `None` when the repository has no rules, so a first review's prompt stays clean.
+pub fn suppressions_block(rules: &[FpSuppression]) -> Option<String> {
+    if rules.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "\nEn revisiones anteriores de ESTE repositorio, una persona revisora ya descartó los \
+         siguientes patrones como falsos positivos. NO los vuelvas a reportar como hallazgo.\n\n\
+         Si crees que en este diff el caso es REALMENTE distinto (el motivo del descarte ya no \
+         aplica), puedes reportarlo, pero explica en 💭 Por qué en qué se diferencia del descarte \
+         previo.\n\n",
+    );
+    for r in rules {
+        let scope = match &r.archivo {
+            Some(file) => format!("`{file}`"),
+            None => "todo el repositorio".to_string(),
+        };
+        out.push_str(&format!("- Categoría `{}` en {} — {}\n", r.categoria, scope, r.motivo));
+    }
+    Some(out)
+}
+
+/// What this pull request already settled: the findings a human marked `falso_positivo` or
+/// `ignorado` in an earlier iteration of the same PR.
+///
+/// Without this the model never learns of the ruling. Reconciliation re-applies the mark after the
+/// fact, so a dismissed finding stays out of the active set — but it is re-derived, re-written and
+/// re-paid for on every single run, and the reviewer looks like it isn't listening. Handing it back
+/// with the reason closes that loop at the source.
+///
+/// Kept separate from the PR's open conversation ([`pending_comments_block`]'s job) because the two
+/// ask opposite things of the model: one is "answer these", this one is "don't raise these".
+///
+/// Returns `None` when nothing has been discarded.
+pub fn discarded_block(findings: &[MemoryFinding]) -> Option<String> {
+    let discarded: Vec<&MemoryFinding> = findings
+        .iter()
+        .filter(|f| matches!(f.estado.as_str(), "falso_positivo" | "ignorado"))
+        .collect();
+    if discarded.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "\nEn iteraciones anteriores de este PR, una persona revisora descartó los siguientes \
+         hallazgos. NO los vuelvas a reportar.\n\n",
+    );
+    for f in discarded {
+        let etiqueta = if f.estado == "falso_positivo" { "falso positivo" } else { "ignorado" };
+        let loc = match &f.archivo {
+            Some(file) => format!(" · `{file}`"),
+            None => String::new(),
+        };
+        let motivo = match &f.motivo_descarte {
+            Some(m) if !m.trim().is_empty() => format!(" — {m}"),
+            _ => String::new(),
+        };
+        out.push_str(&format!(
+            "- **{}** · categoría `{}`{} · {}{}\n",
+            f.id, f.categoria, loc, etiqueta, motivo
+        ));
+    }
+    Some(out)
+}
+
 /// The cumulative "resolved / discarded findings" traceability appended to a re-review's body —
 /// every finding resolved or human-discarded over the PR's life, with the iteration it entered and
 /// (for resolved) left. Returns `None` when there's nothing to show, so first reviews stay clean.
@@ -403,4 +527,114 @@ pub fn delta_banner(delta: &ReviewDelta) -> String {
         "🔁 Re-revisión (iter {} → {}): {} nuevos · {} persisten · {} resueltos\n\n",
         delta.iter_previa, delta.iter_actual, delta.nuevos, delta.persisten, delta.resueltos,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rule(categoria: &str, archivo: Option<&str>) -> FpSuppression {
+        FpSuppression {
+            id: "r1".into(),
+            repo_key: "github:github.com/acme/app".into(),
+            categoria: categoria.into(),
+            archivo: archivo.map(str::to_string),
+            motivo: "el padre remonta por key={id}".into(),
+            pr_id: 42,
+            created_at: "2026-07-31T00:00:00Z".into(),
+        }
+    }
+
+    fn finding(id: &str, estado: &str, categoria: &str) -> MemoryFinding {
+        MemoryFinding {
+            id: id.into(),
+            severity: "critical".into(),
+            tipo: "BUG".into(),
+            categoria: categoria.into(),
+            subtitulo: "algo".into(),
+            archivo: Some("src/app/Seguimiento.tsx".into()),
+            lineas: Some("50".into()),
+            confianza: Some(60),
+            estado: estado.into(),
+            thread_id: None,
+            introducido_en_iter: 1,
+            resuelto_en_iter: None,
+            motivo_descarte: Some("no aplica aquí".into()),
+            delta: None,
+        }
+    }
+
+    #[test]
+    fn matches_is_case_insensitive_on_category() {
+        assert!(rule("Stale-Ref", None).matches("stale-ref", Some("a.ts")));
+    }
+
+    #[test]
+    fn a_different_category_never_matches() {
+        assert!(!rule("stale-ref", None).matches("n-plus-one", Some("a.ts")));
+    }
+
+    /// The dangerous direction: a rule written for one file must not silence the same category
+    /// somewhere else in the repository.
+    #[test]
+    fn file_scoped_rule_does_not_match_another_file() {
+        let r = rule("stale-ref", Some("src/app/Seguimiento.tsx"));
+        assert!(!r.matches("stale-ref", Some("src/app/Otro.tsx")));
+    }
+
+    #[test]
+    fn file_scoped_rule_tolerates_path_prefix_differences() {
+        let r = rule("stale-ref", Some("src/app/Seguimiento.tsx"));
+        assert!(r.matches("stale-ref", Some("/src/app/Seguimiento.tsx")));
+        assert!(r.matches("stale-ref", Some("app/Seguimiento.tsx")));
+    }
+
+    #[test]
+    fn repo_wide_rule_matches_any_file_including_none() {
+        let r = rule("stale-ref", None);
+        assert!(r.matches("stale-ref", Some("anything.ts")));
+        assert!(r.matches("stale-ref", None));
+    }
+
+    /// A rule about a specific file can't be applied to a finding that reported no location —
+    /// there is nothing to compare, and guessing would silence the wrong thing.
+    #[test]
+    fn file_scoped_rule_does_not_match_a_locationless_finding() {
+        assert!(!rule("stale-ref", Some("a.ts")).matches("stale-ref", None));
+    }
+
+    #[test]
+    fn blocks_are_absent_when_there_is_nothing_to_say() {
+        assert!(suppressions_block(&[]).is_none());
+        assert!(discarded_block(&[]).is_none());
+        // Open and resolved findings are not rejections — they belong to other sections.
+        let live = vec![finding("F-001", "abierto", "stale-ref"), finding("F-002", "resuelto", "n-plus-one")];
+        assert!(discarded_block(&live).is_none());
+    }
+
+    #[test]
+    fn discarded_block_lists_rejections_with_their_reason() {
+        let findings = vec![
+            finding("F-001", "falso_positivo", "stale-ref"),
+            finding("F-002", "abierto", "n-plus-one"),
+            finding("F-003", "ignorado", "naming"),
+        ];
+        let block = discarded_block(&findings).expect("rejections produce a block");
+        assert!(block.contains("F-001"));
+        assert!(block.contains("falso positivo"));
+        assert!(block.contains("no aplica aquí"));
+        assert!(block.contains("F-003"));
+        assert!(block.contains("ignorado"));
+        // The one still open must not be told to the model as already settled.
+        assert!(!block.contains("F-002"));
+    }
+
+    #[test]
+    fn suppressions_block_carries_scope_and_reason() {
+        let rules = vec![rule("stale-ref", Some("src/app/Seguimiento.tsx")), rule("n-plus-one", None)];
+        let block = suppressions_block(&rules).expect("rules produce a block");
+        assert!(block.contains("src/app/Seguimiento.tsx"));
+        assert!(block.contains("todo el repositorio"));
+        assert!(block.contains("el padre remonta por key={id}"));
+    }
 }

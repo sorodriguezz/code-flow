@@ -25,7 +25,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
-import { getReviewRun } from "../../lib/tauri/commands";
+import { discardPrFinding, getReviewRun } from "../../lib/tauri/commands";
 import { parseClaudeError } from "../../lib/claudeError";
 import {
   listCommentThreads,
@@ -46,7 +46,15 @@ import {
   type SummaryMemory,
 } from "../../lib/parseAnalysis";
 import { Checkbox } from "../common/Checkbox";
-import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
+import {
+  FindingCard,
+  QualityGateBadges,
+  SeverityCountBadges,
+  SHORT_SUMMARY_MAX,
+  isDiscarded,
+  type DiscardOptions,
+  type FindingMark,
+} from "./FindingCard";
 import { PrCommentCard, PrCommentsSkeleton } from "./PrCommentCard";
 import {
   mergeActivityEntries,
@@ -494,39 +502,108 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   // PR never had a defect or had three that were all corrected. Only project-backed reviews keep
   // memory (a link session has no run to save), so it stays null for those.
   const [runMemory, setRunMemory] = useState<SummaryMemory | null>(null);
+  const runId = job?.status === "done" ? job.id : null;
+  // Same monotonic-token guard the comment threads use: this is awaited both from an effect (which
+  // re-fires on every PR switch) and from a discard, so without it a slow read of the PR just left
+  // can land after the new one and put another pull request's rulings on these cards.
+  const memoryReqRef = useRef(0);
+  const loadRunMemory = useCallback(async () => {
+    const token = ++memoryReqRef.current;
+    if (!runId || linkOnly) {
+      setRunMemory(null);
+      return;
+    }
+    try {
+      const run = await getReviewRun(runId);
+      if (!run || memoryReqRef.current !== token) return;
+      const saved: SavedFinding[] = safeJson<SavedFinding[]>(run.findings) ?? [];
+      const meta = safeJson<Record<string, unknown>>(run.meta) ?? {};
+      setRunMemory({
+        all: saved,
+        resolved: saved.filter((f) => f.estado === "resuelto"),
+        discarded: saved.filter((f) => f.estado === "falso_positivo" || f.estado === "ignorado"),
+        iter: run.iter,
+        level: run.level,
+        engine: typeof meta.engine === "string" ? meta.engine : "",
+        model: typeof meta.model === "string" ? meta.model : "",
+        files: typeof meta.files === "number" ? meta.files : 0,
+        additions: typeof meta.additions === "number" ? meta.additions : 0,
+        deletions: typeof meta.deletions === "number" ? meta.deletions : 0,
+      });
+    } catch {
+      // The summary simply loses its "already fixed" half — never a reason to break the panel.
+    }
+  }, [runId, linkOnly]);
   useEffect(() => {
     setRunMemory(null);
-    if (!job || job.status !== "done" || linkOnly) return;
-    let live = true;
-    void getReviewRun(job.id)
-      .then((run) => {
-        if (!live || !run) return;
-        const saved: SavedFinding[] = safeJson<SavedFinding[]>(run.findings) ?? [];
-        const meta = safeJson<Record<string, unknown>>(run.meta) ?? {};
-        setRunMemory({
-          resolved: saved.filter((f) => f.estado === "resuelto"),
-          iter: run.iter,
-          level: run.level,
-          engine: typeof meta.engine === "string" ? meta.engine : "",
-          model: typeof meta.model === "string" ? meta.model : "",
-          files: typeof meta.files === "number" ? meta.files : 0,
-          additions: typeof meta.additions === "number" ? meta.additions : 0,
-          deletions: typeof meta.deletions === "number" ? meta.deletions : 0,
-        });
-      })
-      .catch(() => {
-        // The summary simply loses its "already fixed" half — never a reason to break the panel.
+    void loadRunMemory();
+  }, [loadRunMemory]);
+
+  // What a human has already ruled about each finding. The cards render findings parsed out of the
+  // review markdown, which predates every one of those rulings — so the verdict is looked up
+  // alongside, by the stable `F-NNN` id both halves agree on.
+  const marks = useMemo(() => {
+    const map = new Map<string, FindingMark>();
+    for (const f of runMemory?.all ?? []) {
+      map.set(f.id, { estado: f.estado, motivo: f.motivo_descarte, posted: f.thread_id != null });
+    }
+    return map;
+  }, [runMemory]);
+  /** The findings that still stand: what the Quality Gate judges, what gets published, and what the
+   * summary counts. Rejected ones stay in the list below (dimmed, undoable) but stop counting —
+   * a false positive that still fails the gate is a false positive nobody actually dismissed. */
+  const activeFindings = useMemo(
+    () => findings.filter((f) => !isDiscarded(marks.get(f.id))),
+    [findings, marks],
+  );
+  /** `parsed` narrowed to those, so the gate, the tally and the tables in a published comment can't
+   * disagree with what the panel shows. */
+  const activeParsed = useMemo(
+    () => (parsed ? { ...parsed, findings: activeFindings } : null),
+    [parsed, activeFindings],
+  );
+
+  const [discardingId, setDiscardingId] = useState<string | null>(null);
+  const discardFinding = async (findingId: string, estado: string, opts: DiscardOptions) => {
+    if (!job || !projectId) return;
+    setDiscardingId(findingId);
+    try {
+      const outcome = await discardPrFinding(
+        projectId,
+        pr.id,
+        job.id,
+        findingId,
+        estado,
+        opts.motivo || undefined,
+        opts.scopeRepo,
+        opts.notifyHost,
+      );
+      // Publishing something just called a non-defect is exactly what the mark is meant to prevent,
+      // so the selection follows the ruling instead of waiting to be corrected by hand.
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (estado === "abierto") next.add(findingId);
+        else next.delete(findingId);
+        return next;
       });
-    return () => {
-      live = false;
-    };
-  }, [job?.id, job?.status, linkOnly]);
+      // The host half is best-effort by design: the mark is already durable, so a refused reply is
+      // a warning about the pull request, not a failed action.
+      if (outcome.host_error) pushErrorToast(t("finding.discardHostFailed", { error: outcome.host_error }));
+      else if (outcome.rule_added) useToastStore.getState().pushToast(t("finding.discardRuleAdded"), "success");
+      else if (outcome.host_notified) useToastStore.getState().pushToast(t("finding.discardHostNotified"), "success");
+      await loadRunMemory();
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setDiscardingId(null);
+    }
+  };
 
   const [fixpackCopied, copyFixpack] = useCopy();
   const runReview = () => reviewPr(target, pr.id);
   const publish = async () => {
-    if (!parsed || !job) return;
-    const chosen = findings.filter((f) => selectedIds.has(f.id));
+    if (!activeParsed || !job) return;
+    const chosen = activeFindings.filter((f) => selectedIds.has(f.id));
     if (chosen.length === 0 && !postSummary) return;
     // Publishing only the summary is its own sentence: "post 0 comment(s)" describes nothing.
     const confirmKey =
@@ -546,9 +623,18 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
     // memory says this PR already closed, which is the whole point of publishing a summary on a
     // re-review that found nothing left.
     const summary = postSummary
-      ? formatSummaryComment(parsed, new Date().toISOString().slice(0, 10), chosen, runMemory)
+      ? formatSummaryComment(activeParsed, new Date().toISOString().slice(0, 10), chosen, runMemory)
       : null;
-    void postReview(target, pr.id, job.id, items, postSummary, summary);
+    try {
+      await postReview(target, pr.id, job.id, items, postSummary, summary);
+    } catch {
+      // Already surfaced as a toast by the store; nothing to reload if nothing was posted.
+      return;
+    }
+    // Posting is what gives each finding its thread id, and the thread is what a later "false
+    // positive" replies on. Without this the option to answer on the PR only appears after the
+    // panel is reopened — exactly when the finding is freshest is when it would be missing.
+    await loadRunMemory();
   };
 
   // A decision already on the record (here or on the website) retires the button that would take
@@ -627,11 +713,11 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
             body: formatDecisionComment(
               action,
               new Date().toISOString().slice(0, 10),
-              parsed,
+              activeParsed,
               runMemory,
               // What was fixed from here since the review ran — those findings are corrected, not
               // accepted, and the note would otherwise file them under the wrong heading.
-              findings.filter((f) => resolutions[`job:${job.id}:${f.id}`]).map((f) => f.id),
+              activeFindings.filter((f) => resolutions[`job:${job.id}:${f.id}`]).map((f) => f.id),
             ),
           }
         : null;
@@ -710,7 +796,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
             </a>
             {!loading && !error && parsed && (
               <div className="mt-1.5">
-                <QualityGateBadges grades={parsed.grades} findings={findings} />
+                <QualityGateBadges grades={parsed.grades} findings={activeFindings} />
               </div>
             )}
           </div>
@@ -823,27 +909,45 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
               <div className="mb-2 flex items-center justify-between gap-2 border-t border-[var(--cf-border)] pt-3">
                 <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
                   <Sparkles size={11} className="text-[var(--cf-accent)]" />
-                  {t("pr.findingsHeader", { n: findings.length })}
+                  {t("pr.findingsHeader", { n: activeFindings.length })}
                 </p>
-                <SeverityCountBadges findings={findings} />
+                <SeverityCountBadges findings={activeFindings} />
               </div>
               <div className="space-y-2">
-                {findings.map((finding) => (
-                  <div key={finding.id} className="flex items-start gap-2">
-                    <span className="mt-2 shrink-0" title={t("pr.selectToPost")}>
-                      <Checkbox checked={selectedIds.has(finding.id)} onChange={() => toggleSelected(finding.id)} />
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <FindingCard
-                        finding={finding}
-                        defaultOpen={false}
-                        projectId={projectId}
-                        prSourceBranch={pr.source_branch}
-                        resolutionKey={job ? `job:${job.id}:${finding.id}` : undefined}
-                      />
+                {findings.map((finding) => {
+                  const mark = marks.get(finding.id) ?? null;
+                  return (
+                    <div key={finding.id} className="flex items-start gap-2">
+                      {/* A rejected finding has nothing left to publish, so its checkbox goes —
+                          leaving a live, unticked box would read as "you could still post this". */}
+                      <span className="mt-2 shrink-0" title={t("pr.selectToPost")}>
+                        {isDiscarded(mark) ? (
+                          <span className="block h-3.5 w-3.5" />
+                        ) : (
+                          <Checkbox checked={selectedIds.has(finding.id)} onChange={() => toggleSelected(finding.id)} />
+                        )}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <FindingCard
+                          finding={finding}
+                          defaultOpen={false}
+                          projectId={projectId}
+                          prSourceBranch={pr.source_branch}
+                          resolutionKey={job ? `job:${job.id}:${finding.id}` : undefined}
+                          mark={mark}
+                          // Only a project-backed review has a run to record the ruling in; a link
+                          // session would take the click and forget it.
+                          onDiscard={
+                            projectId && job && !linkOnly
+                              ? (estado, opts) => void discardFinding(finding.id, estado, opts)
+                              : undefined
+                          }
+                          discarding={discardingId === finding.id}
+                        />
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -916,7 +1020,9 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
               {projectId && <ChatAgentPicker projectId={projectId} />}
               {reviewText && !loading && findings.length > 0 && (
                 <button
-                  onClick={() => parsed && copyFixpack(buildFixpack(parsed, pr.id))}
+                  // Built from what stands: a fix-pack is a work order for another agent, and
+                  // handing it a finding a human just rejected would have it "fix" a non-defect.
+                  onClick={() => activeParsed && copyFixpack(buildFixpack(activeParsed, pr.id))}
                   title={t("pr.fixpackHint")}
                   className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                 >

@@ -11,6 +11,8 @@ import type {
   FileDiffInfo,
   FileEntry,
   GitIdentity,
+  DiscardOutcome,
+  FpSuppression,
   JobHistoryEntry,
   MergeOutcome,
   NewProject,
@@ -326,6 +328,44 @@ export const getReviewRun = (id: string) => invoke<ReviewRunDetail | null>("get_
 /** `estado` is "falso_positivo" | "ignorado" to mark, or "abierto" to clear the mark. */
 export const markReviewFinding = (runId: string, findingId: string, estado: string, motivo?: string) =>
   invoke<void>("mark_review_finding", { runId, findingId, estado, motivo: motivo ?? null });
+
+/**
+ * Rejects one finding of a saved review — the panel's "false positive" action, as opposed to
+ * [`markReviewFinding`], which only writes the local mark.
+ *
+ * `estado` is "falso_positivo" | "ignorado" to reject, or "abierto" to undo. `scopeRepo` promotes
+ * the judgement to a standing rule for the whole repository; `notifyHost` replies with the reason
+ * on the finding's PR thread and closes it as *won't fix* (no-op when the finding was never
+ * published). Neither optional effect can fail the mark itself.
+ */
+export const discardPrFinding = (
+  projectId: string,
+  prId: number,
+  runId: string,
+  findingId: string,
+  estado: string,
+  motivo: string | undefined,
+  scopeRepo: boolean,
+  notifyHost: boolean,
+) =>
+  invoke<DiscardOutcome>("discard_pr_finding", {
+    projectId,
+    prId,
+    runId,
+    findingId,
+    estado,
+    motivo: motivo ?? null,
+    scopeRepo,
+    notifyHost,
+  });
+
+/** Every standing false-positive rule in the workspace, across its repositories. */
+export const listFpSuppressions = (workspaceId: string) =>
+  invoke<FpSuppression[]>("list_fp_suppressions", { workspaceId });
+
+/** Drops one rule — the finding it denied is reported again from the next review on. */
+export const removeFpSuppression = (workspaceId: string, id: string) =>
+  invoke<void>("remove_fp_suppression", { workspaceId, id });
 
 export const deleteReviewRun = (id: string) => invoke<void>("delete_review_run", { id });
 

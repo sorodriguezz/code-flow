@@ -1200,6 +1200,164 @@ pub async fn resolve_pr_comment_thread(
     }
 }
 
+/// Azure DevOps' thread status for "this is not going to be fixed" — the honest close for a
+/// finding a human rejected. Distinct from [`THREAD_FIXED`] on purpose: closing a false positive as
+/// *fixed* would put a lie on the record, and Azure surfaces the two differently.
+const THREAD_WONT_FIX: i32 = 3;
+
+/// What discarding a finding actually managed to do. The local mark is the part that must always
+/// hold, so a host that refuses the reply comes back as a warning here rather than as an error that
+/// throws the mark away with it.
+#[derive(Debug, Serialize)]
+pub struct DiscardOutcome {
+    /// True when the finding's thread on the PR was replied to and closed.
+    pub host_notified: bool,
+    /// Why the host wasn't updated, when it wasn't. The mark still stands.
+    pub host_error: Option<String>,
+    /// True when a standing repository-level rule was written.
+    pub rule_added: bool,
+}
+
+/// Rejects one finding of a saved review — the action behind "this is a false positive".
+///
+/// Three effects, each optional and each independently useful:
+///
+/// 1. **The mark**, always. The finding turns `falso_positivo` / `ignorado` in the run's memory,
+///    which drops it out of the active set (and so out of the Quality Gate), carries it forward
+///    through every later re-review of this PR, and hands it back to the model as "don't raise
+///    this" (see `review_memory::discarded_block`). Passing `abierto` undoes all of that.
+/// 2. **The reply on the host** (`notify_host`), when the finding was published and has a thread:
+///    the reason is posted to that thread and the thread is closed as *won't fix*. Without it the
+///    rejection only exists on one machine, and the PR keeps showing an open comment nobody intends
+///    to act on — which is the state the author is actually looking at.
+/// 3. **The standing rule** (`scope_repo`): the same judgement, promoted to the whole repository,
+///    so the next PR doesn't re-derive it. See [`crate::review_memory::FpSuppression`].
+///
+/// Ordering is deliberate: the local mark is written and committed first, then the host is called.
+/// The reverse would let a mid-flight failure leave a "won't fix" reply on a PR for a finding this
+/// app still believes is open.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn discard_pr_finding(
+    db: State<'_, Db>,
+    project_id: String,
+    pr_id: i64,
+    run_id: String,
+    finding_id: String,
+    estado: String,
+    motivo: Option<String>,
+    scope_repo: bool,
+    notify_host: bool,
+) -> Result<DiscardOutcome, String> {
+    let project = load_project(&db, &project_id)?;
+    let link = linked_repo(&project)?;
+    let repo = repo_key(&link);
+    let motivo = motivo.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    let discarding = matches!(estado.as_str(), "falso_positivo" | "ignorado");
+
+    // Everything touching the database happens inside this scope: the guard cannot be held across
+    // the host `.await` below, and the mark must be durable before the PR is told about it.
+    let (thread_id, rule_added) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let run = queries::get_review_run(&conn, &run_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Review run not found".to_string())?;
+        let mut findings: Vec<crate::review_memory::MemoryFinding> =
+            serde_json::from_str(&run.findings).map_err(|e| e.to_string())?;
+        let f = findings
+            .iter_mut()
+            .find(|f| f.id == finding_id)
+            .ok_or_else(|| "Finding not found in this run".to_string())?;
+
+        if discarding {
+            f.estado = estado.clone();
+            f.motivo_descarte = motivo.clone();
+        } else {
+            // Un-mark: back to open, or posted when the finding still owns a thread.
+            f.estado = if f.thread_id.is_some() { "posteado".to_string() } else { "abierto".to_string() };
+            f.motivo_descarte = None;
+        }
+        let (thread_id, categoria, archivo) = (f.thread_id, f.categoria.clone(), f.archivo.clone());
+
+        let json = serde_json::to_string(&findings).map_err(|e| e.to_string())?;
+        queries::set_review_run_findings(&conn, &run_id, &json).map_err(|e| e.to_string())?;
+
+        // A repository rule only makes sense for a rejection, and only for a false positive:
+        // "ignorado" says *not now*, which is a call about this pull request, not about the code.
+        let rule_added = if scope_repo && estado == "falso_positivo" {
+            let mut rules = crate::commands::settings::load_fp_suppressions(&conn, &project.workspace_id);
+            // Re-marking the same finding must not stack duplicate rules onto every review's prompt.
+            let already = rules
+                .iter()
+                .any(|r| r.repo_key == repo && r.matches(&categoria, archivo.as_deref()));
+            if already {
+                false
+            } else {
+                rules.insert(
+                    0,
+                    crate::review_memory::FpSuppression {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        repo_key: repo.clone(),
+                        categoria,
+                        archivo,
+                        motivo: motivo.clone().unwrap_or_else(|| "Descartado por la persona revisora".to_string()),
+                        pr_id,
+                        created_at: chrono::Utc::now().to_rfc3339(),
+                    },
+                );
+                crate::commands::settings::save_fp_suppressions(&conn, &project.workspace_id, &rules)?;
+                true
+            }
+        } else {
+            false
+        };
+
+        (thread_id, rule_added)
+    };
+
+    let mut outcome = DiscardOutcome { host_notified: false, host_error: None, rule_added };
+
+    let Some(thread_id) = thread_id.filter(|_| notify_host && discarding) else {
+        return Ok(outcome);
+    };
+
+    let etiqueta = if estado == "falso_positivo" { "Falso positivo" } else { "Ignorado" };
+    let cuerpo = match &motivo {
+        Some(m) => format!(
+            "🚫 **{etiqueta}** — descartado por la persona revisora.\n\n> {m}\n\n_Marcado desde CodeFlow. \
+             Este hallazgo no se volverá a reportar en las próximas revisiones._"
+        ),
+        None => format!(
+            "🚫 **{etiqueta}** — descartado por la persona revisora.\n\n_Marcado desde CodeFlow. \
+             Este hallazgo no se volverá a reportar en las próximas revisiones._"
+        ),
+    };
+
+    // Reply first, close second: a closed thread with no explanation on it is worse for the author
+    // than an open one, so the sentence has to land before the conversation is shut.
+    let host = async {
+        match &link {
+            LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+                let pat = pat_for_org(org)?;
+                ado::reply_pr_thread(org, ado_project, repo_id, pr_id, thread_id, &cuerpo, &pat).await?;
+                ado::set_pr_thread_status(org, ado_project, repo_id, pr_id, thread_id, THREAD_WONT_FIX, &pat).await
+            }
+            LinkedRepo::GitHub { host, owner, repo } => {
+                let token = github_token(host)?;
+                github::reply_pr_review_comment(host, owner, repo, pr_id, thread_id, &cuerpo, &token).await?;
+                github::resolve_review_thread_for_comment(host, owner, repo, pr_id, thread_id, &token).await
+            }
+        }
+    }
+    .await;
+
+    match host {
+        Ok(()) => outcome.host_notified = true,
+        Err(e) => outcome.host_error = Some(e),
+    }
+    Ok(outcome)
+}
+
 #[tauri::command]
 pub async fn review_pull_request(
     app: AppHandle,
@@ -1321,13 +1479,22 @@ pub async fn review_pull_request(
     //
     // Both halves are best-effort. Losing the reviewer's own memory or the host's thread list
     // costs context, and context is not worth failing a review the user is waiting on.
-    let remembered: Vec<crate::review_memory::MemoryFinding> = {
+    let (remembered, repo_rules) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::latest_review_findings(&conn, &project_id, pr_id, &repo)
-            .ok()
-            .flatten()
-            .and_then(|json| serde_json::from_str(&json).ok())
-            .unwrap_or_default()
+        let remembered: Vec<crate::review_memory::MemoryFinding> =
+            queries::latest_review_findings(&conn, &project_id, pr_id, &repo)
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+        // Standing rules are the workspace's, filtered to this repository — a judgement made on one
+        // repo must not silence a finding on another that happens to share a category name.
+        let repo_rules: Vec<crate::review_memory::FpSuppression> =
+            crate::commands::settings::load_fp_suppressions(&conn, &workspace_id)
+                .into_iter()
+                .filter(|r| r.repo_key == repo)
+                .collect();
+        (remembered, repo_rules)
     };
     let open_threads = match &link {
         LinkedRepo::Azure { org, project: ado_project, repo_id } => match pat_for_org(org) {
@@ -1341,6 +1508,18 @@ pub async fn review_pull_request(
     };
     if let Some(block) = pending_comments_block(&remembered, &open_threads) {
         enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
+    }
+    // Two "do not raise this" blocks, deliberately not folded into the one above: that block asks
+    // the model to *answer* what is still open, and these ask it to stay off ground a human already
+    // ruled on. One list carrying both meanings is a list the model has to guess its way through.
+    //
+    // Without them a dismissed finding is re-derived on every run — reconciliation re-applies the
+    // mark afterwards, so the user never sees it, but it is re-analysed and re-paid for each time.
+    if let Some(block) = crate::review_memory::discarded_block(&remembered) {
+        enabled_contexts.push(("Hallazgos ya descartados en este PR".to_string(), block));
+    }
+    if let Some(block) = crate::review_memory::suppressions_block(&repo_rules) {
+        enabled_contexts.push(("Falsos positivos conocidos de este repositorio".to_string(), block));
     }
 
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;

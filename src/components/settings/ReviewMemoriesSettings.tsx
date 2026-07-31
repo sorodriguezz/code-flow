@@ -10,6 +10,7 @@ import {
   Eye,
   EyeOff,
   MessageSquare,
+  ShieldOff,
   Trash2,
   type LucideIcon,
 } from "lucide-react";
@@ -18,9 +19,11 @@ import {
   deleteReviewRunsForPr,
   exportReviewRuns,
   getReviewRun,
+  listFpSuppressions,
   listReviewRuns,
   markReviewFinding,
   purgeWorkspaceReviewRuns,
+  removeFpSuppression,
 } from "../../lib/tauri/commands";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -28,7 +31,7 @@ import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { renderMarkdown } from "../../lib/markdown";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import type { ReviewRunDetail, ReviewRunSummary, SavedFinding } from "../../types/domain";
+import type { FpSuppression, ReviewRunDetail, ReviewRunSummary, SavedFinding } from "../../types/domain";
 import { Skeleton } from "../common/Skeleton";
 import { EmptyState } from "../common/EmptyState";
 
@@ -41,6 +44,88 @@ const ESTADOS: Record<string, { icon: LucideIcon; color: string; labelKey: Trans
   falso_positivo: { icon: Ban, color: "text-[var(--cf-text-muted)]", labelKey: "settings.memoryEstadoFalse" },
   ignorado: { icon: EyeOff, color: "text-[var(--cf-text-muted)]", labelKey: "settings.memoryEstadoIgnored" },
 };
+
+/** A `repo_key` (`github:host/owner/repo`, `azure:org/project/repoId`) as something a human reads.
+ * The provider prefix is dropped and, for GitHub, the host too — what identifies the repository in
+ * a list of a workspace's own repositories is the last part of the path. */
+function repoLabel(repoKey: string): string {
+  const withoutProvider = repoKey.replace(/^(github|azure):/, "");
+  const parts = withoutProvider.split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || withoutProvider;
+}
+
+/**
+ * The workspace's standing false positives — the rules that keep a finding a human already
+ * rejected from being re-derived on every new pull request.
+ *
+ * They live here rather than with a PR's runs because that is their scope: a run's marks belong to
+ * one pull request and die with it, while these are read into every review of the repository they
+ * name. Which also makes this the only place they can be taken back, so the section renders even
+ * when the memory is empty.
+ */
+function FpSuppressionsSection({ workspaceId }: { workspaceId: string }) {
+  const t = useT();
+  const [rules, setRules] = useState<FpSuppression[] | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    void listFpSuppressions(workspaceId)
+      .then((r) => live && setRules(r))
+      .catch(() => live && setRules([]));
+    return () => {
+      live = false;
+    };
+  }, [workspaceId]);
+
+  const remove = async (rule: FpSuppression) => {
+    if (!(await confirmAction(t("settings.fpRuleRemoveConfirm", { category: rule.categoria })))) return;
+    await removeFpSuppression(workspaceId, rule.id);
+    setRules(await listFpSuppressions(workspaceId));
+  };
+
+  // Nothing configured yet: the empty state would be a paragraph explaining a feature that is
+  // reached from the review panel, not from here.
+  if (!rules || rules.length === 0) return null;
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
+      <div className="border-b border-[var(--cf-border)] bg-black/[0.02] px-3 py-2 dark:bg-white/[0.03]">
+        <p className="flex items-center gap-1.5 text-[12.5px] font-medium">
+          <ShieldOff size={12} className="text-[var(--cf-text-muted)]" />
+          {t("settings.fpRulesTitle", { n: rules.length })}
+        </p>
+        <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">{t("settings.fpRulesHint")}</p>
+      </div>
+      <div className="divide-y divide-[var(--cf-border)]">
+        {rules.map((rule) => (
+          <div key={rule.id} className="flex items-start gap-2 px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[12px]">
+                <span className="font-mono">{rule.categoria}</span>
+                <span className="text-[var(--cf-text-muted)]">
+                  {" · "}
+                  {rule.archivo ?? t("settings.fpRuleWholeRepo")}
+                </span>
+              </p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">{rule.motivo}</p>
+              <p className="mt-0.5 truncate text-[10px] text-[var(--cf-text-muted)]">
+                {repoLabel(rule.repo_key)}
+                {rule.pr_id > 0 ? ` · PR #${rule.pr_id}` : ""}
+              </p>
+            </div>
+            <button
+              onClick={() => void remove(rule)}
+              title={t("settings.fpRuleRemove")}
+              className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 /** Shared styling for the two header actions (export / purge) and the per-PR delete. */
 const HEADER_BUTTON =
@@ -180,12 +265,20 @@ export function ReviewMemoriesSettings() {
     }
   };
 
+  // The rules are shown even with no saved runs: purging the memory doesn't (and shouldn't) drop
+  // them, and a rule you can't see is a rule you can't take back.
   if (runs.length === 0) {
-    return <EmptyState icon={Database} title={t("settings.memoryEmpty")} subtitle={t("settings.memoryEmptyHint")} />;
+    return (
+      <div className="space-y-3">
+        <FpSuppressionsSection workspaceId={workspaceId} />
+        <EmptyState icon={Database} title={t("settings.memoryEmpty")} subtitle={t("settings.memoryEmptyHint")} />
+      </div>
+    );
   }
 
   return (
     <div className="space-y-3">
+      <FpSuppressionsSection workspaceId={workspaceId} />
       {/* Actions are real bordered buttons pinned to the top of the row: as bare icon+label pairs
           centred against a two-line paragraph they wrapped ("Exportar / todo") and read as loose
           floating icons rather than controls. */}

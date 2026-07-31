@@ -192,6 +192,29 @@ export interface SavedFinding {
   delta?: string | null;
 }
 
+/** A standing "this is a known false positive" rule for one repository (mirrors the Rust
+ * `FpSuppression`). Unlike a finding's `falso_positivo` mark — which only reaches its own pull
+ * request — these are read into every review of the repository they name. */
+export interface FpSuppression {
+  id: string;
+  /** `github:host/owner/repo` or `azure:org/project/repoId`. */
+  repo_key: string;
+  categoria: string;
+  /** The file the rule is scoped to, or null for "this category, anywhere in the repo". */
+  archivo?: string | null;
+  motivo: string;
+  pr_id: number;
+  created_at: string;
+}
+
+/** What discarding a finding achieved. The local mark always holds; `host_error` means the PR
+ * thread couldn't be updated, which is a warning rather than a failure. */
+export interface DiscardOutcome {
+  host_notified: boolean;
+  host_error: string | null;
+  rule_added: boolean;
+}
+
 /** Full content of one saved review run, for the in-app viewer / export. */
 export interface ReviewRunDetail {
   id: string;

@@ -1213,6 +1213,12 @@ export const translations = {
     "settings.memoryMarkIgnored": "Ignore",
     "settings.memoryMarkFalse": "False positive",
     "settings.memoryUnmark": "Clear mark",
+    "settings.fpRulesTitle": "Known false positives ({n})",
+    "settings.fpRulesHint":
+      "Findings rejected once and not reported again in any review of that repository. Added from a finding's “False positive” action.",
+    "settings.fpRuleWholeRepo": "whole repository",
+    "settings.fpRuleRemove": "Remove rule",
+    "settings.fpRuleRemoveConfirm": 'Remove the rule for "{category}"? It will be reported again from the next review on.',
 
     "settings.contextTitle": "PR review context",
     "settings.contextTitleForProject": "PR review context — {name}",
@@ -1352,6 +1358,22 @@ export const translations = {
     "finding.dirtyBranchSwitch": "You have uncommitted changes — commit or stash them before switching to the PR's branch to apply this fix.",
     "finding.confirmBranchSwitch": 'Switch to branch "{branch}" to apply this fix?',
     "finding.branchSwitchFailed": "Couldn't switch to the PR's branch: {error}",
+    "finding.markFalsePositive": "False positive",
+    "finding.markIgnored": "Ignore",
+    "finding.discardReasonPlaceholder": "Why isn't it a real defect here? (optional — it's what the next review is told)",
+    "finding.discardScopeRepo": "Apply to the whole repository",
+    "finding.discardScopeRepoHint":
+      "Every future review of this repository is told not to report this category again, not just this PR.",
+    "finding.discardNotifyHost": "Reply and close its thread on the PR",
+    "finding.discardNotifyHostHint":
+      "Posts the reason on the comment this finding opened and closes it as won't fix, so the author isn't left with a comment nobody intends to act on.",
+    "finding.discardConfirm": "Discard",
+    "finding.discardedFalse": "False positive",
+    "finding.discardedIgnored": "Ignored",
+    "finding.undoDiscard": "Undo",
+    "finding.discardHostNotified": "Replied on the PR and closed the thread.",
+    "finding.discardHostFailed": "Marked locally, but the PR thread couldn't be updated: {error}",
+    "finding.discardRuleAdded": "Marked. This repository won't report it again.",
 
     "conflicts.title": "Merge in progress — conflicts to resolve",
     "conflicts.keepOurs": "Keep ours",
@@ -3218,6 +3240,12 @@ export const translations = {
     "settings.memoryMarkIgnored": "Ignorar",
     "settings.memoryMarkFalse": "Falso positivo",
     "settings.memoryUnmark": "Quitar marca",
+    "settings.fpRulesTitle": "Falsos positivos conocidos ({n})",
+    "settings.fpRulesHint":
+      "Hallazgos descartados una vez y que no se vuelven a reportar en ninguna revisión de ese repositorio. Se agregan desde la acción «Falso positivo» de un hallazgo.",
+    "settings.fpRuleWholeRepo": "todo el repositorio",
+    "settings.fpRuleRemove": "Eliminar regla",
+    "settings.fpRuleRemoveConfirm": '¿Eliminar la regla de "{category}"? Se volverá a reportar desde la próxima revisión.',
 
     "settings.contextTitleForProject": "Contexto de revisión de PR — {name}",
     "settings.contextSelectWorkspace": "Selecciona un workspace para configurar sus reglas de revisión.",
@@ -3357,6 +3385,22 @@ export const translations = {
     "finding.dirtyBranchSwitch": "Tienes cambios sin commitear — comitéalos o guárdalos (stash) antes de cambiar a la rama del PR para aplicar este fix.",
     "finding.confirmBranchSwitch": '¿Cambiar a la rama "{branch}" para aplicar este fix?',
     "finding.branchSwitchFailed": "No se pudo cambiar a la rama del PR: {error}",
+    "finding.markFalsePositive": "Falso positivo",
+    "finding.markIgnored": "Ignorar",
+    "finding.discardReasonPlaceholder": "¿Por qué no es un defecto real aquí? (opcional — es lo que se le dice a la próxima revisión)",
+    "finding.discardScopeRepo": "Aplicar a todo el repositorio",
+    "finding.discardScopeRepoHint":
+      "A todas las revisiones futuras de este repositorio se les dirá que no vuelvan a reportar esta categoría, no solo a este PR.",
+    "finding.discardNotifyHost": "Responder y cerrar su hilo en el PR",
+    "finding.discardNotifyHostHint":
+      "Publica el motivo en el comentario que abrió este hallazgo y lo cierra como «no se va a corregir», para no dejarle a quien escribió el PR un comentario que nadie piensa atender.",
+    "finding.discardConfirm": "Descartar",
+    "finding.discardedFalse": "Falso positivo",
+    "finding.discardedIgnored": "Ignorado",
+    "finding.undoDiscard": "Deshacer",
+    "finding.discardHostNotified": "Se respondió en el PR y se cerró el hilo.",
+    "finding.discardHostFailed": "Marcado localmente, pero no se pudo actualizar el hilo del PR: {error}",
+    "finding.discardRuleAdded": "Marcado. Este repositorio no lo volverá a reportar.",
 
     "conflicts.title": "Merge en curso — conflictos por resolver",
     "conflicts.keepOurs": "Mantener lo nuestro",

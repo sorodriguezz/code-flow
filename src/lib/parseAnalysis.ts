@@ -250,8 +250,15 @@ export function buildFixpack(parsed: ParsedAnalysis, prId: number): string {
  * rather than anything the model reports about itself.
  */
 export interface SummaryMemory {
+  /** Every finding the run's memory holds, whatever its state — what the panel reads each card's
+   * human ruling out of. */
+  all: SavedFinding[];
   /** Findings the memory holds as `resuelto` — reported in an earlier iteration, gone in this one. */
   resolved: SavedFinding[];
+  /** Findings a human rejected: `falso_positivo` (not a defect) or `ignorado` (not now). Published
+   * alongside the rest because a review that quietly drops what it got wrong is a review whose
+   * numbers nobody can check. */
+  discarded: SavedFinding[];
   /** Which run of this PR this is (1 = first review). */
   iter: number;
   /** `basico` · `completo` · `ultra`. */
@@ -309,8 +316,9 @@ export function formatSummaryComment(
     .filter(({ n }) => n > 0)
     .map(({ sev, n }) => `${n} ${SEVERITY_LABEL_ES[sev]}`);
 
-  if (posted.length === 0 && resolved.length === 0) {
-    // Nothing open and nothing on the record: the review's own prose is the whole summary.
+  // Nothing open and nothing on the record. Rejections still count as "on the record": a review
+  // whose every finding was thrown out must say so, not report a clean bill of health.
+  if (posted.length === 0 && resolved.length === 0 && (memory?.discarded.length ?? 0) === 0) {
     lines.push(
       parsed.findings.length > 0
         ? `La revisión encontró ${parsed.findings.length} hallazgo(s), ninguno de los cuales se publicó como comentario.`
@@ -326,25 +334,32 @@ export function formatSummaryComment(
     tally.push(`📌 ${posted.length}${outOf} publicado(s) (${counts.join(" · ")})`);
   }
   if (resolved.length > 0) tally.push(`✔️ ${resolved.length} resuelto(s)`);
+  if ((memory?.discarded.length ?? 0) > 0) tally.push(`🚫 ${memory?.discarded.length} descartado(s)`);
   lines.push(`**Hallazgos:** ${tally.join(" · ")}`, "");
 
-  lines.push("| | ID | Hallazgo | Archivo | 🎯 | Estado |", "|---|---|---|---|---|---|");
-  for (const f of posted) {
-    const loc = f.location ? `\`${locationLabel(f.location)}\`` : "—";
-    lines.push(
-      `| ${SEVERITY_DOT[f.severity]} | ${f.id} | ${f.type} / ${f.category} | ${loc} | ${f.confidence ?? "—"} | 🔸 Abierto |`,
-    );
-  }
-  // Struck through, because the row is history rather than a request: the reader should see at a
-  // glance which lines still need something from them.
-  for (const f of resolved) {
-    const loc = f.archivo ? `~~\`${f.archivo}${f.lineas ? `:${f.lineas}` : ""}\`~~` : "—";
-    const dot = SEVERITY_DOT[severityOf(f.severity)];
-    lines.push(
-      `| ${dot} | ~~${f.id}~~ | ~~${f.categoria}~~ | ${loc} | ${f.confianza != null ? `~~${f.confianza}~~` : "—"} | ✔️ Resuelto |`,
-    );
+  // Only when there is a row for it. A review whose every finding was rejected reaches here with
+  // nothing to put in this table — and an empty table with a header is a formatting bug on someone
+  // else's pull request. The rejections have their own table below.
+  if (posted.length + resolved.length > 0) {
+    lines.push("| | ID | Hallazgo | Archivo | 🎯 | Estado |", "|---|---|---|---|---|---|");
+    for (const f of posted) {
+      const loc = f.location ? `\`${locationLabel(f.location)}\`` : "—";
+      lines.push(
+        `| ${SEVERITY_DOT[f.severity]} | ${f.id} | ${f.type} / ${f.category} | ${loc} | ${f.confidence ?? "—"} | 🔸 Abierto |`,
+      );
+    }
+    // Struck through, because the row is history rather than a request: the reader should see at a
+    // glance which lines still need something from them.
+    for (const f of resolved) {
+      const loc = f.archivo ? `~~\`${f.archivo}${f.lineas ? `:${f.lineas}` : ""}\`~~` : "—";
+      const dot = SEVERITY_DOT[severityOf(f.severity)];
+      lines.push(
+        `| ${dot} | ~~${f.id}~~ | ~~${f.categoria}~~ | ${loc} | ${f.confianza != null ? `~~${f.confianza}~~` : "—"} | ✔️ Resuelto |`,
+      );
+    }
   }
 
+  lines.push(...discardedLines(memory));
   lines.push(...scopeLines(memory));
   if (parsed.summary.trim()) lines.push("", parsed.summary.trim());
   if (memory?.engine) {
@@ -357,6 +372,31 @@ export function formatSummaryComment(
     );
   }
   return lines.join("\n");
+}
+
+/**
+ * What the reviewer got wrong, published next to what it got right.
+ *
+ * A reviewer that silently deletes its rejected findings looks perfect and can't be audited: the
+ * author has no way to see that three of the six comments were wrong, and nobody can tell whether
+ * the confidence threshold is set anywhere near right. Printing them — with the reason, and with
+ * `falso positivo` kept distinct from `ignorado`, since one says *not a defect* and the other says
+ * *not now* — is what makes the numbers above mean something.
+ *
+ * Empty when nothing was rejected, so an ordinary review reads exactly as it did before.
+ */
+function discardedLines(memory?: SummaryMemory | null): string[] {
+  const discarded = memory?.discarded ?? [];
+  if (discarded.length === 0) return [];
+  const out = ["", "**Descartados por la persona revisora**", "", "| ID | Hallazgo | Archivo | Motivo |", "|---|---|---|---|"];
+  for (const f of discarded) {
+    const loc = f.archivo ? `\`${f.archivo}${f.lineas ? `:${f.lineas}` : ""}\`` : "—";
+    const etiqueta = f.estado === "falso_positivo" ? "🚫 Falso positivo" : "🔕 Ignorado";
+    // Newlines in a free-text reason would break the table row it sits in.
+    const motivo = (f.motivo_descarte ?? "").replace(/\s*\n\s*/g, " ").trim() || "—";
+    out.push(`| ~~${f.id}~~ | ${f.categoria} | ${loc} | ${etiqueta} — ${motivo} |`);
+  }
+  return out;
 }
 
 /** What the run actually looked at, and under which lenses — the two lines that turn a verdict
@@ -441,9 +481,11 @@ export function formatDecisionComment(
     );
   }
 
+  const discarded = memory?.discarded ?? [];
   const tally: string[] = [];
   if (resolved.length + fixedNow.length > 0) tally.push(`✔️ ${resolved.length + fixedNow.length} corregido(s)`);
   if (open.length > 0) tally.push(`🔸 ${open.length} sin corregir`);
+  if (discarded.length > 0) tally.push(`🚫 ${discarded.length} descartado(s)`);
   lines.push("", `**Hallazgos:** ${tally.length > 0 ? tally.join(" · ") : "ninguno"}`);
 
   if (resolved.length + fixedNow.length > 0) {
@@ -480,10 +522,11 @@ export function formatDecisionComment(
     }
   }
 
-  if (open.length === 0 && resolved.length + fixedNow.length === 0) {
+  if (open.length === 0 && resolved.length + fixedNow.length === 0 && discarded.length === 0) {
     lines.push("", parsed.summary.trim() || "✅ La revisión no encontró problemas en este cambio.");
   }
 
+  lines.push(...discardedLines(memory));
   lines.push(...scopeLines(memory));
   if (memory?.engine) {
     lines.push(
