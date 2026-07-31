@@ -392,30 +392,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           {nodeLabel(tab.node)}
         </span>
 
-        <span className="mx-0.5 h-4 w-px bg-[var(--cf-border)]" />
-
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            // Applied on submit, not per keystroke: a half-written predicate would otherwise run —
-            // and fail — on every character.
-            store.updateData(tab.id, { filter: tab.filterDraft, offset: 0 });
-            void store.loadData(tab.id);
-          }}
-          className="flex min-w-[180px] flex-1 items-center gap-1"
-        >
-          <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {engine?.sql ? "WHERE" : t("db.filter")}
-          </span>
-          <input
-            value={tab.filterDraft}
-            onChange={(e) => store.updateData(tab.id, { filterDraft: e.target.value })}
-            placeholder={engine?.sql ? t("db.wherePlaceholder") : t("db.filterPlaceholder")}
-            className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-[3px] font-mono text-[12px] text-[var(--cf-text)] outline-none placeholder:font-sans focus:border-[var(--cf-accent)]"
-          />
-        </form>
-
-        <div className="flex items-center gap-1">
+        <div className="ml-auto flex items-center gap-1">
           {tab.loading ? (
             <ToolbarButton onClick={() => void store.cancelRun(tab.id)} title={t("db.cancel")}>
               <Square size={12} className="text-[var(--cf-danger)]" />
