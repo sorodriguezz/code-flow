@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import { ClipboardCopy, Pin, PinOff, SplitSquareHorizontal, X } from "lucide-react";
+import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { fileIconFor } from "../../lib/fileIcon";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRowHoverStore } from "../../state/rowHoverStore";
@@ -13,6 +14,19 @@ export interface EditorTabItem {
   /** Ephemeral tab (single click in the tree): shown in italics and reused by the next
    * single-click open instead of piling up a tab per file you merely peeked at. */
   preview: boolean;
+  /** Kept at the head of the strip, out of the way of everything that opens and closes around it.
+   * The opposite end of the same scale as `preview`, and never both: pinning a peeked file makes
+   * it permanent. */
+  pinned: boolean;
+}
+
+/** The right-click actions, as one prop rather than four — the strip only forwards them, and this
+ * component's parents already carry a long list of callbacks each. */
+export interface TabMenuActions {
+  togglePinned: (path: string) => void;
+  closeAll: () => void;
+  copyPath: (path: string) => void;
+  splitRight: (path: string) => void;
 }
 
 function baseName(path: string): string {
@@ -82,6 +96,7 @@ export function EditorTabs({
   onClose,
   onPin,
   onDropTab,
+  menu,
   actions,
 }: {
   groupId: string;
@@ -89,13 +104,17 @@ export function EditorTabs({
   activePath: string | null;
   onSelect: (path: string) => void;
   onClose: (path: string) => void;
+  /** Promotes a preview tab to a permanent one — VS Code's "keep open", not the pin in `menu`. */
   onPin: (path: string) => void;
   /** `targetIndex` is an insertion point in the *target* group's tab order. The parent decides
    * whether that's a reorder or a move between splits. */
   onDropTab: (payload: TabDrag, targetGroupId: string, targetIndex: number) => void;
+  menu: TabMenuActions;
   actions?: ReactNode;
 }) {
   const t = useT();
+  /** The tab the context menu was opened on, with the point to draw it at. */
+  const [tabMenu, setTabMenu] = useState<{ x: number; y: number; tab: EditorTabItem } | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
   const tabRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const ghostRef = useRef<HTMLDivElement | null>(null);
@@ -173,6 +192,17 @@ export function EditorTabs({
 
   const dropBar = <div className="my-1 w-0.5 shrink-0 rounded-full bg-[var(--cf-accent)]" />;
 
+  const menuItems = (tab: EditorTabItem): MenuItem[] => [
+    {
+      label: tab.pinned ? t("editor.unpinTab") : t("editor.pinTab"),
+      icon: tab.pinned ? PinOff : Pin,
+      onClick: () => menu.togglePinned(tab.path),
+    },
+    { label: t("editor.copyPath"), icon: ClipboardCopy, onClick: () => menu.copyPath(tab.path) },
+    { label: t("editor.splitRight"), icon: SplitSquareHorizontal, onClick: () => menu.splitRight(tab.path) },
+    { label: t("editor.closeAllTabs"), icon: X, separated: true, onClick: menu.closeAll },
+  ];
+
   return (
     <div className="flex shrink-0 items-stretch border-b border-[var(--cf-border)] bg-[var(--cf-bg)]">
       <div
@@ -203,8 +233,13 @@ export function EditorTabs({
                 onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
                 // Kills the browser's own press-and-sweep text selection without costing the
                 // `click`/`dblclick` that follow — preventing it on `pointerdown` instead would
-                // suppress those compatibility events too.
-                onMouseDown={(e) => e.preventDefault()}
+                // suppress those compatibility events too. Left button only: the right one has a
+                // `contextmenu` to raise, and nothing to select by sweeping.
+                onMouseDown={(e) => e.button === 0 && e.preventDefault()}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setTabMenu({ x: e.clientX, y: e.clientY, tab });
+                }}
                 onClick={() => {
                   // Swallows the click the browser fires after a drag's `pointerup`.
                   if (suppressClickRef.current) {
@@ -236,11 +271,14 @@ export function EditorTabs({
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();
-                    onClose(tab.path);
+                    // A pinned tab's slot is the pin itself, so the one click it takes to put a
+                    // tab back in the churn is the same click that took it out.
+                    if (tab.pinned) menu.togglePinned(tab.path);
+                    else onClose(tab.path);
                   }}
-                  title={t("editor.closeTab")}
+                  title={tab.pinned ? t("editor.unpinTab") : t("editor.closeTab")}
                   className={`ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded hover:bg-black/[0.06] dark:hover:bg-white/[0.08] ${
-                    active ? "" : "opacity-0 group-hover:opacity-100"
+                    active || tab.pinned ? "" : "opacity-0 group-hover:opacity-100"
                   }`}
                 >
                   {/* The dirty dot lives in the close button's slot, like VS Code: it turns into
@@ -248,8 +286,14 @@ export function EditorTabs({
                   {tab.dirty ? (
                     <>
                       <span className="h-2 w-2 rounded-full bg-[var(--cf-text)] group-hover:hidden" />
-                      <X size={12} className="hidden group-hover:block" />
+                      {tab.pinned ? (
+                        <PinOff size={11} className="hidden group-hover:block" />
+                      ) : (
+                        <X size={12} className="hidden group-hover:block" />
+                      )}
                     </>
+                  ) : tab.pinned ? (
+                    <Pin size={11} className="fill-current" />
                   ) : (
                     <X size={12} />
                   )}
@@ -263,6 +307,15 @@ export function EditorTabs({
       </div>
       {actions && (
         <div className="flex shrink-0 items-center gap-2 border-l border-[var(--cf-border)] px-2">{actions}</div>
+      )}
+
+      {tabMenu && (
+        <ContextMenu
+          x={tabMenu.x}
+          y={tabMenu.y}
+          items={menuItems(tabMenu.tab)}
+          onClose={() => setTabMenu(null)}
+        />
       )}
 
       {/* Portalled to `body` so nothing's `overflow` can clip it, and `pointer-events-none` so it

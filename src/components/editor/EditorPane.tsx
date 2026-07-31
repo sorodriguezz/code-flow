@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { DbmlDiagram } from "./DbmlDiagram";
-import { EditorTabs, type EditorTabItem } from "./EditorTabs";
+import { EditorTabs, type EditorTabItem, type TabMenuActions } from "./EditorTabs";
 import { InlineEditWidget } from "./InlineEditWidget";
 import type { CodeSnapTarget } from "./CodeSnapModal";
 import { modelPathFor } from "../../lib/editorModel";
@@ -129,6 +129,7 @@ export function EditorPane({
   groupId,
   project,
   tabs,
+  pinnedPaths,
   activePath,
   focused,
   monacoTheme,
@@ -150,10 +151,14 @@ export function EditorPane({
   registerBookmarkToggle,
   onSplit,
   onCloseGroup,
+  tabMenu,
 }: {
   groupId: string;
   project: Project;
   tabs: OpenTab[];
+  /** Which of them are pinned *here*. Comes from the group rather than from the tab, since the
+   * registry entries above are shared by every pane showing the same file. */
+  pinnedPaths: string[];
   activePath: string | null;
   /** The group with focus — drives the highlight and which pane app-level shortcuts act on. */
   focused: boolean;
@@ -184,6 +189,8 @@ export function EditorPane({
   onSplit: (() => void) | null;
   /** `null` for the only group; a group you can't close is one without a close button. */
   onCloseGroup: (() => void) | null;
+  /** The tab strip's right-click actions, passed straight through. */
+  tabMenu: TabMenuActions;
 }) {
   const t = useT();
   const shortcutHint = useShortcutHint();
@@ -568,8 +575,9 @@ export function EditorPane({
         path: tab.path,
         dirty: tab.content !== tab.originalContent,
         preview: tab.preview,
+        pinned: pinnedPaths.includes(tab.path),
       })),
-    [tabs],
+    [tabs, pinnedPaths],
   );
 
   // Deliberately not rendered until the file's text has arrived: Monaco would otherwise
@@ -635,6 +643,7 @@ export function EditorPane({
             onClose={onClose}
             onPin={onPin}
             onDropTab={onDropTab}
+            menu={tabMenu}
             actions={
               <>
                 {previewKind && (

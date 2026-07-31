@@ -12,12 +12,14 @@ import { EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./E
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
 import { setDefinitionContext } from "../../lib/goToDefinition";
 import {
+  closeAllInGroups,
   closeGroupInGroups,
   closeTabInGroups,
   moveTabInGroups,
   newGroup,
   openInGroups,
   splitGroups,
+  togglePinInGroups,
   type EditorGroup,
 } from "../../lib/editorGroups";
 import { readFileText, writeFileText } from "../../lib/tauri/commands";
@@ -33,6 +35,7 @@ import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useEditorCommandStore } from "../../state/editorCommandStore";
 import type { TabDrag } from "../../state/tabDragStore";
 import { confirmAction } from "../../state/confirmStore";
+import { pushErrorToast } from "../../state/toastStore";
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
@@ -229,12 +232,57 @@ export function EditorView() {
 
   /** Splits a group's current file into a new group to its right and focuses it — see
    * `splitGroups` for why only the active file crosses over. */
-  const splitGroup = useCallback((groupId?: string) => {
-    const outcome = splitGroups(groupsRef.current, groupId ?? activeGroupIdRef.current);
+  const splitGroup = useCallback((groupId?: string, path?: string) => {
+    const outcome = splitGroups(groupsRef.current, groupId ?? activeGroupIdRef.current, path);
     if (!outcome) return;
     setGroups(outcome.groups);
     setActiveGroupId(outcome.focusId);
   }, []);
+
+  /** Pinning is what makes a peeked file stay: it also promotes the preview tab, so the pinned
+   * tab isn't the one the next single-click in the tree recycles. */
+  const togglePinned = useCallback(
+    (groupId: string, path: string) => {
+      setGroups((prev) => togglePinInGroups(prev, groupId, path));
+      patchTab(path, { preview: false });
+    },
+    [patchTab],
+  );
+
+  /** Closes every tab in one group, asking once for the whole set rather than once per file —
+   * the same bargain `closeGroup` strikes, and for the same reason: a queue of modals is not a
+   * question, it's an obstacle. */
+  const closeAllTabs = useCallback(async (groupId: string) => {
+    const group = groupsRef.current.find((g) => g.id === groupId);
+    if (!group || group.paths.length === 0) return;
+    // Only files this group is the last to show can lose anything — the rest survive in another
+    // split with their edits intact.
+    const unsaved = group.paths.filter(
+      (p) =>
+        groupsRef.current.filter((g) => g.paths.includes(p)).length <= 1 &&
+        tabsRef.current.some((tab) => tab.path === p && tab.content !== tab.originalContent),
+    );
+    if (unsaved.length > 0) {
+      const ok = await confirmAction(tRef.current("editor.closeAllDirtyConfirm", { n: unsaved.length }), true);
+      if (!ok) return;
+    }
+    // Re-read after the (awaited) confirm, exactly as `closeTab` does.
+    const next = closeAllInGroups(groupsRef.current, groupId);
+    setGroups(next);
+    if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
+    setTabs((prev) => prev.filter((tab) => next.some((g) => g.paths.includes(tab.path))));
+  }, []);
+
+  /** The absolute path, built the same way the file tree's own "Copy Path" builds it — the point
+   * of copying one is to paste it outside this app, and two menus that disagree about what a path
+   * looks like is one of them being wrong. */
+  const copyPath = useCallback(
+    (path: string) => {
+      if (!project) return;
+      void navigator.clipboard.writeText(`${project.local_path}/${path}`).catch((e) => pushErrorToast(String(e)));
+    },
+    [project],
+  );
 
   const closeGroup = useCallback(async (groupId: string) => {
     const outcome = closeGroupInGroups(groupsRef.current, groupId);
@@ -555,6 +603,7 @@ export function EditorView() {
       project={project}
       // Registry lookup per path: tab order belongs to the group, file state is shared.
       tabs={group.paths.flatMap((p) => tabs.find((tab) => tab.path === p) ?? [])}
+      pinnedPaths={group.pinned}
       activePath={group.activePath}
       focused={group.id === activeGroupId}
       monacoTheme={monacoTheme}
@@ -579,6 +628,14 @@ export function EditorView() {
       // rather than whichever one happens to hold focus.
       onSplit={group.activePath ? () => splitGroup(group.id) : null}
       onCloseGroup={groups.length > 1 ? () => closeGroup(group.id) : null}
+      // Right-clicking a tab acts on *that* tab and *this* group, which is why these close over
+      // the group rather than reading whichever one happens to have focus.
+      tabMenu={{
+        togglePinned: (path) => togglePinned(group.id, path),
+        closeAll: () => void closeAllTabs(group.id),
+        copyPath,
+        splitRight: (path) => splitGroup(group.id, path),
+      }}
     />
   );
 

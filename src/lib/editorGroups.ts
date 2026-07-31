@@ -13,15 +13,31 @@
  */
 export interface EditorGroup {
   id: string;
-  /** Open paths, in tab order. */
+  /** Open paths, in tab order. Pinned ones are always the head of it — see `pinned`. */
   paths: string[];
   activePath: string | null;
+  /**
+   * Paths pinned in *this* group, as a set. Pinning is a property of the tab, not of the file:
+   * the same file open in two splits can be pinned in one and not the other, which is why this
+   * lives here rather than beside the file's text in the registry.
+   *
+   * The invariant every function below maintains: **the pinned paths occupy the first
+   * `pinned.length` slots of `paths`**. "Pinned" is only worth anything if the tab stays where
+   * you can find it, so it is an ordering rule and not just a flag — a drag that would leave a
+   * pinned tab after an unpinned one is clamped back to the boundary rather than refused.
+   */
+  pinned: string[];
 }
 
 let counter = 0;
 export function newGroup(paths: string[] = [], activePath: string | null = null): EditorGroup {
   counter += 1;
-  return { id: `group-${counter}`, paths, activePath };
+  return { id: `group-${counter}`, paths, activePath, pinned: [] };
+}
+
+/** Where the pinned run ends in `paths` — the only insertion point both regions agree on. */
+function boundaryIn(paths: string[], pinned: string[]): number {
+  return paths.filter((p) => pinned.includes(p)).length;
 }
 
 /** The tab to fall back to once the one at `index` is gone: whatever slid into its slot, then its
@@ -84,11 +100,16 @@ export function openInGroups(
 export function splitGroups(
   groups: EditorGroup[],
   groupId: string,
+  /** Which file crosses over. Defaults to the group's active one — the toolbar button and the
+   * shortcut mean "this file", while the tab menu means the tab it was opened on, which needn't
+   * be the one on top. */
+  path?: string,
 ): { groups: EditorGroup[]; focusId: string } | null {
   const index = groups.findIndex((g) => g.id === groupId);
   const source = groups[index];
-  if (!source?.activePath) return null;
-  const created = newGroup([source.activePath], source.activePath);
+  const moving = path ?? source?.activePath;
+  if (!source || !moving || !source.paths.includes(moving)) return null;
+  const created = newGroup([moving], moving);
   const next = [...groups];
   next.splice(index + 1, 0, created);
   return { groups: next, focusId: created.id };
@@ -108,10 +129,44 @@ export function closeTabInGroups(groups: EditorGroup[], groupId: string, path: s
     return {
       ...group,
       paths,
+      pinned: group.pinned.filter((p) => p !== path),
       activePath: group.activePath === path ? neighbourOf(paths, index) : group.activePath,
     };
   });
   return updated.length > 1 ? updated.filter((group) => group.paths.length > 0) : updated;
+}
+
+/**
+ * Empties one group. The group itself folds away with its tabs — unless it's the last one, which
+ * stays as the empty editor, the same bargain `closeTabInGroups` makes when you close the final tab.
+ *
+ * Pinned tabs go too. Pinning keeps a tab in reach and out of the way of the preview slot; it isn't
+ * a lock, and "close all" that leaves tabs open would be answering a different question.
+ */
+export function closeAllInGroups(groups: EditorGroup[], groupId: string): EditorGroup[] {
+  const emptied = groups.map((group) =>
+    group.id === groupId ? { ...group, paths: [], pinned: [], activePath: null } : group,
+  );
+  return emptied.length > 1 ? emptied.filter((group) => group.paths.length > 0) : emptied;
+}
+
+/**
+ * Pins or unpins one tab, moving it to the pinned/unpinned boundary so the invariant on
+ * `EditorGroup.pinned` holds. Either direction is the shortest trip: pinning parks the tab at the
+ * end of the pinned run rather than at the very front, so pinning three files in a row keeps them
+ * in the order they were pinned.
+ */
+export function togglePinInGroups(groups: EditorGroup[], groupId: string, path: string): EditorGroup[] {
+  return groups.map((group) => {
+    if (group.id !== groupId || !group.paths.includes(path)) return group;
+    const pinned = group.pinned.includes(path)
+      ? group.pinned.filter((p) => p !== path)
+      : [...group.pinned, path];
+    const rest = group.paths.filter((p) => p !== path);
+    const paths = [...rest];
+    paths.splice(boundaryIn(rest, pinned), 0, path);
+    return { ...group, paths, pinned };
+  });
 }
 
 function clamp(value: number, low: number, high: number): number {
@@ -143,9 +198,18 @@ export function moveTabInGroups(
   if (from.id === to.id) {
     const current = from.paths.indexOf(source.path);
     const without = from.paths.filter((p) => p !== source.path);
+    // A tab can be reordered freely, but only within its own half of the strip: dropping a pinned
+    // tab past the boundary lands it at the boundary instead of unpinning it, because a drag is a
+    // reorder and pinning is a separate decision made from the menu.
+    const boundary = boundaryIn(without, from.pinned);
+    const pinnedHere = from.pinned.includes(source.path);
     // The insertion point was measured against the strip *including* the dragged tab, so every
     // slot to its right shifts left once it's pulled out.
-    const insertAt = clamp(targetIndex > current ? targetIndex - 1 : targetIndex, 0, without.length);
+    const insertAt = clamp(
+      targetIndex > current ? targetIndex - 1 : targetIndex,
+      pinnedHere ? 0 : boundary,
+      pinnedHere ? boundary : without.length,
+    );
     if (insertAt === current) return { groups, focusId: from.id };
     const paths = [...without];
     paths.splice(insertAt, 0, source.path);
@@ -161,7 +225,15 @@ export function moveTabInGroups(
   // and the file stops being open twice.
   const existing = to.paths.indexOf(source.path);
   const toPaths = existing >= 0 ? to.paths.filter((p) => p !== source.path) : [...to.paths];
-  const insertAt = clamp(existing >= 0 && targetIndex > existing ? targetIndex - 1 : targetIndex, 0, toPaths.length);
+  // Pinning doesn't travel: a tab dragged into another split arrives unpinned there, so it lands
+  // in the unpinned region — unless that group had it pinned already, which the reposition keeps.
+  const boundary = boundaryIn(toPaths, to.pinned);
+  const pinnedThere = to.pinned.includes(source.path);
+  const insertAt = clamp(
+    existing >= 0 && targetIndex > existing ? targetIndex - 1 : targetIndex,
+    pinnedThere ? 0 : boundary,
+    pinnedThere ? boundary : toPaths.length,
+  );
   toPaths.splice(insertAt, 0, source.path);
 
   const next = groups.map((group) => {
@@ -169,6 +241,7 @@ export function moveTabInGroups(
       return {
         ...group,
         paths: fromPaths,
+        pinned: group.pinned.filter((p) => p !== source.path),
         activePath: group.activePath === source.path ? neighbourOf(fromPaths, fromIndex) : group.activePath,
       };
     }

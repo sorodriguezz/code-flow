@@ -68,8 +68,10 @@ const ROW_ACTION_CLASS =
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 440;
 
-const PR_SECTIONS: { key: string; labelKey: TranslationKey }[] = [
-  { key: "open", labelKey: "sidebar.openPRs" },
+/** `defaultOpen` is the open one and only the open one: it's the group with work still in it, and
+ * the reason the others fold is that merged and closed grow without bound (see `openGroups`). */
+const PR_SECTIONS: { key: string; labelKey: TranslationKey; defaultOpen?: boolean }[] = [
+  { key: "open", labelKey: "sidebar.openPRs", defaultOpen: true },
   { key: "draft", labelKey: "sidebar.draftPRs" },
   { key: "merged", labelKey: "sidebar.merged" },
   { key: "closed", labelKey: "sidebar.closed" },
@@ -546,12 +548,15 @@ function PullRequestsSection({ project }: { project: Project }) {
   const [hosting, setHosting] = useState<HostingState | undefined>(undefined);
   const [showConnect, setShowConnect] = useState<false | VcsProvider>(false);
   const [showCreatePr, setShowCreatePr] = useState(false);
-  /** Which status groups are unfolded. Empty — everything collapsed — is the default on purpose:
-   * a repository with a long history has dozens of merged and closed PRs, and listing them all
-   * pushed the sections below Pull Requests off the sidebar entirely. The count stays in each
-   * header, so a folded group still answers "how many", which is the question most of the time. */
+  /** Which status groups the user has folded or unfolded. Only the ones they've touched are in
+   * here; the rest fall back to `PR_SECTIONS`, where merged and closed start folded on purpose —
+   * a repository with a long history has dozens of them, and listing them all pushed the sections
+   * below Pull Requests off the sidebar entirely. The count stays in each header, so a folded
+   * group still answers "how many", which is the question most of the time. */
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
-  const toggleGroup = (key: string) => setOpenGroups((g) => ({ ...g, [key]: !g[key] }));
+  /** Takes what the group is *showing* rather than reading the record: a group that is open by
+   * default has no entry to negate, so `!openGroups[key]` would re-open it on the first click. */
+  const toggleGroup = (key: string, open: boolean) => setOpenGroups((g) => ({ ...g, [key]: !open }));
 
   const initiallyLinked = Boolean(
     (project.ado_org && project.ado_project && project.ado_repo_id) ||
@@ -645,7 +650,7 @@ function PullRequestsSection({ project }: { project: Project }) {
 
   if (hosting === undefined || linkState.status === "checking") {
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
+      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} defaultOpen>
         <SkeletonRows count={2} className="p-0" />
       </CollapsibleSection>
     );
@@ -654,7 +659,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   if (linkState.status === "needsToken") {
     const provider = linkState.provider;
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
+      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} defaultOpen>
         <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">
           {provider === "github"
             ? t("sidebar.needsGithubToken")
@@ -669,7 +674,7 @@ function PullRequestsSection({ project }: { project: Project }) {
 
   if (linkState.status === "notDetected" && hosting.ado.length === 0 && hosting.github.length === 0) {
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
+      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} defaultOpen>
         <div className="space-y-0.5">
           {PR_SECTIONS.map((section) => (
             <div
@@ -688,7 +693,7 @@ function PullRequestsSection({ project }: { project: Project }) {
 
   if (linkState.status === "notDetected") {
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")}>
+      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} defaultOpen>
         {hosting.github.length > 0 && (
           <button
             onClick={() => setShowConnect("github")}
@@ -731,6 +736,10 @@ function PullRequestsSection({ project }: { project: Project }) {
     <CollapsibleSection
       icon={GitPullRequest}
       title={t("sidebar.pullRequests")}
+      // Open on arrival, along with the "open" group inside it — the pull requests waiting on you
+      // are the reason to look at a repository's sidebar, and they were two clicks down. The
+      // other status groups stay folded, which is what keeps this from filling the panel.
+      defaultOpen
       action={({ expand }) => (
         <div className="flex items-center gap-1.5">
           <button
@@ -779,14 +788,14 @@ function PullRequestsSection({ project }: { project: Project }) {
           {PR_SECTIONS.map((section) => {
             const items = prs.filter((pr) => pr.status === section.key);
             const Icon = PR_STATUS_ICON[section.key] ?? GitPullRequest;
-            const open = openGroups[section.key] ?? false;
+            const open = openGroups[section.key] ?? section.defaultOpen ?? false;
             return (
               <div key={section.key}>
                 {/* The chevron sits on the trailing edge rather than beside the label: these are
                     groups *within* an already-collapsible section, and a second column of chevrons
                     down the left would read as one nesting level deeper than it is. */}
                 <button
-                  onClick={() => toggleGroup(section.key)}
+                  onClick={() => toggleGroup(section.key, open)}
                   aria-expanded={open}
                   className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
                 >

@@ -70,7 +70,10 @@ function WindowsControls() {
       </button>
       <button
         aria-label={maximized ? "Restore" : "Maximize"}
-        onClick={() => void toggleMaximize()}
+        // Rejections are logged rather than dropped: every window command here is gated by the
+        // capability file, and a missing one fails as a rejected promise with nothing on screen
+        // to show for it — which is exactly how this button shipped doing nothing at all.
+        onClick={() => void toggleMaximize().catch((e) => console.error("toggleMaximize", e))}
         className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-black/10"
       >
         {maximized ? <Copy size={11} className="-scale-x-100" /> : <Square size={12} />}
