@@ -4,6 +4,7 @@ import {
   Briefcase,
   Check,
   ChevronDown,
+  ChevronRight,
   CircleDot,
   Cloud,
   Code2,
@@ -545,6 +546,12 @@ function PullRequestsSection({ project }: { project: Project }) {
   const [hosting, setHosting] = useState<HostingState | undefined>(undefined);
   const [showConnect, setShowConnect] = useState<false | VcsProvider>(false);
   const [showCreatePr, setShowCreatePr] = useState(false);
+  /** Which status groups are unfolded. Empty — everything collapsed — is the default on purpose:
+   * a repository with a long history has dozens of merged and closed PRs, and listing them all
+   * pushed the sections below Pull Requests off the sidebar entirely. The count stays in each
+   * header, so a folded group still answers "how many", which is the question most of the time. */
+  const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
+  const toggleGroup = (key: string) => setOpenGroups((g) => ({ ...g, [key]: !g[key] }));
 
   const initiallyLinked = Boolean(
     (project.ado_org && project.ado_project && project.ado_repo_id) ||
@@ -772,34 +779,53 @@ function PullRequestsSection({ project }: { project: Project }) {
           {PR_SECTIONS.map((section) => {
             const items = prs.filter((pr) => pr.status === section.key);
             const Icon = PR_STATUS_ICON[section.key] ?? GitPullRequest;
+            const open = openGroups[section.key] ?? false;
             return (
               <div key={section.key}>
-                <p className="px-1.5 text-[11px] font-medium text-[var(--cf-text-muted)]">
-                  {t(section.labelKey)} ({items.length})
-                </p>
-                <div className="space-y-0.5">
-                  {items.map((pr) => (
-                    <button
-                      key={pr.id}
-                      onClick={() => {
-                        useAnalyzeUiStore.getState().hide();
-                        selectPr(pr);
-                        openAiPanel();
-                      }}
-                      className={`flex w-full items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[12px] ${
-                        selectedPr?.id === pr.id
-                          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                          : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                      }`}
-                    >
-                      <Icon size={11} className="shrink-0" />
-                      <span className="min-w-0 flex-1 truncate">{pr.title}</span>
-                    </button>
-                  ))}
-                  {items.length === 0 && !loading && (
-                    <p className="px-1.5 text-[11px] text-[var(--cf-text-muted)]">{t("sidebar.noPRsInSection")}</p>
+                {/* The chevron sits on the trailing edge rather than beside the label: these are
+                    groups *within* an already-collapsible section, and a second column of chevrons
+                    down the left would read as one nesting level deeper than it is. */}
+                <button
+                  onClick={() => toggleGroup(section.key)}
+                  aria-expanded={open}
+                  className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-0.5 text-left text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {t(section.labelKey)} ({items.length})
+                  </span>
+                  {open ? (
+                    <ChevronDown size={11} className="shrink-0" />
+                  ) : (
+                    <ChevronRight size={11} className="shrink-0" />
                   )}
-                </div>
+                </button>
+                {/* Unmounted rather than hidden while folded — a repo with hundreds of closed PRs
+                    would otherwise still build every row just to keep it off screen. */}
+                {open && (
+                  <div className="space-y-0.5">
+                    {items.map((pr) => (
+                      <button
+                        key={pr.id}
+                        onClick={() => {
+                          useAnalyzeUiStore.getState().hide();
+                          selectPr(pr);
+                          openAiPanel();
+                        }}
+                        className={`flex w-full items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[12px] ${
+                          selectedPr?.id === pr.id
+                            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                            : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                        }`}
+                      >
+                        <Icon size={11} className="shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">{pr.title}</span>
+                      </button>
+                    ))}
+                    {items.length === 0 && !loading && (
+                      <p className="px-1.5 text-[11px] text-[var(--cf-text-muted)]">{t("sidebar.noPRsInSection")}</p>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
