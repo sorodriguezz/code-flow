@@ -1399,17 +1399,87 @@ pub fn split_statements(sql: &str, dialect: Option<SqlDialect>) -> Vec<String> {
 /// same conditions, so an unreachable host reads the same whether it was an HTTP request or a
 /// database connection.
 pub fn describe_db_error(config: &DbConnectionConfig, context: &str, raw: &str) -> String {
-    let host = config.host.clone();
-    let port = Some(config.effective_port());
-    match crate::api::explain_cause(&host, port, raw) {
+    describe_db_error_at(&config.host, config.effective_port(), context, raw)
+}
+
+/// The same, for the drivers that can dial somewhere other than `config.host`.
+///
+/// A connection URL overrides the fields, so on the URL tab `config.host` is whatever the fields
+/// happen to still hold — often the `localhost` they were born with. Naming that host in the error
+/// is worse than saying nothing: it sends the user to correct a field that had no part in the
+/// failure, and hides the one thing that would explain it, which is where the driver really went.
+pub fn describe_db_error_at(host: &str, port: u16, context: &str, raw: &str) -> String {
+    if let Some(explained) = explain_tls(host, raw) {
+        return format!("{context} — {explained}");
+    }
+    match crate::api::explain_cause(host, Some(port), raw) {
         Some(explained) => format!("{context} — {explained}"),
         None => format!("{context}: {raw}"),
     }
 }
 
+/// TLS, phrased for a connection rather than for a request.
+///
+/// The shared `explain_cause` ends its TLS branch by offering the API client's "verify SSL" switch,
+/// which lives in a request's Settings tab and has no counterpart here — a connection's TLS is a
+/// mode on the SSH/SSL tab. Worse, for the commonest case the advice is also wrong in substance:
+/// `UnknownIssuer` against a hosted Postgres usually means the provider signs with its own private
+/// root (Supabase, Aiven and Yugabyte all do), and the fix is to trust that root, not to stop
+/// checking. Turning verification off is offered second and named for what it costs.
+fn explain_tls(host: &str, raw: &str) -> Option<String> {
+    let lower = raw.to_ascii_lowercase();
+    if !["certificate", "tls", "ssl", "handshake"].iter().any(|n| lower.contains(n)) {
+        return None;
+    }
+    let host = if host.is_empty() { "that host" } else { host };
+    if lower.contains("unknownissuer") {
+        return Some(format!(
+            "\"{host}\" presented a certificate signed by a private authority, so it can't be \
+             checked against the system's roots. On the SSH/SSL tab, point CA certificate at that \
+             provider's root — Supabase publishes one under the project's Database settings — or \
+             set SSL to Require, which still encrypts the connection but stops verifying who is on \
+             the other end of it."
+        ));
+    }
+    Some(format!(
+        "the TLS connection to \"{host}\" was rejected: {raw}. How much of the certificate is \
+         checked is the SSH/SSL tab's SSL setting."
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A private root is the normal shape of a hosted Postgres, so the advice has to lead with
+    /// trusting it — and has to name a tab this dialog actually has.
+    #[test]
+    fn a_private_certificate_authority_is_explained_for_this_dialog() {
+        let described = describe_db_error_at(
+            "db.example.com",
+            5432,
+            "Connecting to db.example.com:5432",
+            "error performing TLS handshake: invalid peer certificate: UnknownIssuer",
+        );
+        assert!(described.contains("SSH/SSL"), "{described}");
+        assert!(!described.contains("Settings tab"), "{described}");
+        // The CA comes first; switching verification off is the fallback.
+        let ca = described.find("CA certificate").expect("the CA route is offered");
+        let require = described.find("Require").expect("Require is offered too");
+        assert!(ca < require, "{described}");
+    }
+
+    /// Everything that isn't TLS still reads the way the API client's transports phrase it.
+    #[test]
+    fn a_refused_connection_is_left_to_the_shared_wording() {
+        let described = describe_db_error_at(
+            "db.example.com",
+            5432,
+            "Connecting to db.example.com:5432",
+            "Connection refused (os error 61)",
+        );
+        assert!(described.contains("nothing is accepting connections"), "{described}");
+    }
 
     #[test]
     fn statements_split_on_semicolons_outside_literals() {

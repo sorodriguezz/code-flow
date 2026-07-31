@@ -16,7 +16,7 @@ use tokio_postgres::{AsyncMessage, Client, SimpleQueryMessage};
 
 use super::sqlgen::{self, quote_ident, quote_literal};
 use super::{
-    describe_db_error, read_only_guard, read_only_refusal, split_statements, DbColumn,
+    describe_db_error_at, read_only_guard, read_only_refusal, split_statements, DbColumn,
     DbColumnInfo, DbConnectionConfig, DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult,
     DbExecContext, DbExecuteResult, DbForeignKey, DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit,
     DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest, SqlDialect,
@@ -53,7 +53,15 @@ impl PgSession {
 
         let alive = Arc::new(AtomicBool::new(true));
         let notices: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let label = format!("Connecting to {}", config.endpoint());
+        // Read back off `pg` rather than off the form, because a URL has already overridden the
+        // fields by this point and only `pg` knows where the driver is actually about to dial.
+        let (target_host, target_port) = pg_target(&pg, &config);
+        if let Some(message) = stray_at_sign(&config, &target_host) {
+            return Err(message);
+        }
+        let label = format!("Connecting to {target_host}:{target_port}");
+        let describe =
+            |raw: String| describe_db_error_at(&target_host, target_port, &label, &raw);
 
         // Supabase and every other hosted Postgres require TLS; a container on localhost usually
         // has none at all. `Prefer` (tokio-postgres's default when a URL says nothing) is treated
@@ -65,14 +73,14 @@ impl PgSession {
             let (client, connection) = pg
                 .connect(tls)
                 .await
-                .map_err(|e| describe_db_error(&config, &label, &e.to_string()))?;
+                .map_err(|e| describe(pg_connect_error(e)))?;
             spawn_driver(connection, alive.clone(), notices.clone());
             client
         } else {
             let (client, connection) = pg
                 .connect(tokio_postgres::NoTls)
                 .await
-                .map_err(|e| describe_db_error(&config, &label, &e.to_string()))?;
+                .map_err(|e| describe(pg_connect_error(e)))?;
             spawn_driver(connection, alive.clone(), notices.clone());
             client
         };
@@ -988,6 +996,104 @@ fn pg_error(error: tokio_postgres::Error) -> String {
     message
 }
 
+/// Where the driver is really going to dial, taken from the config `pg_config` produced rather
+/// than from the form.
+///
+/// On the URL tab the two differ: the URL wins in `pg_config`, so the fields keep whatever they
+/// held — often the `localhost` they were born with — and an error phrased around that host names
+/// something with no part in the failure. Only `pg` knows where the connection is really going.
+fn pg_target(pg: &tokio_postgres::Config, config: &DbConnectionConfig) -> (String, u16) {
+    let host = pg
+        .get_hosts()
+        .first()
+        .map(|host| match host {
+            tokio_postgres::config::Host::Tcp(host) => host.clone(),
+            #[cfg(unix)]
+            tokio_postgres::config::Host::Unix(path) => path.display().to_string(),
+        })
+        .unwrap_or_else(|| config.host.clone());
+    let port = pg.get_ports().first().copied().unwrap_or_else(|| config.effective_port());
+    (host, port)
+}
+
+/// Percent-encodes the `@`s a password brought with it, so a URL can be pasted as the provider
+/// wrote it instead of being edited by hand first.
+///
+/// `tokio_postgres` splits the credentials at the *first* `@`, which leaves a password containing
+/// one glued to the front of the hostname. The WHATWG URL parser every browser uses splits at the
+/// *last* `@` in the authority instead, and it is right to: a hostname cannot contain `@`, so the
+/// last one is the only candidate for the separator and every earlier one belongs to the password.
+/// This app was already of two minds about it — the frontend derives a connection's name through
+/// `new URL()` and got the host right while the driver was dialling a mangled one — so the fix is
+/// to read the URL the way the rest of the app already does before handing it over.
+///
+/// Only `@` is touched, and only inside the credentials. A password that already spells one `%40`
+/// keeps it (re-encoding the `%` would be the same bug in the other direction), and a `?options=`
+/// holding an `@` is past the authority and never seen here.
+fn normalize_url_credentials(url: &str) -> std::borrow::Cow<'_, str> {
+    let Some(scheme) = ["postgres://", "postgresql://"].iter().find(|p| url.starts_with(**p))
+    else {
+        // Not a URL at all — `Config` also takes libpq's `host=… user=…` form, which has no
+        // authority to reinterpret.
+        return std::borrow::Cow::Borrowed(url);
+    };
+    let rest = &url[scheme.len()..];
+    // The authority ends where the path or query begins, and a host can contain neither.
+    let authority_end = rest.find(['/', '?']).unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].rfind('@') else {
+        return std::borrow::Cow::Borrowed(url);
+    };
+    let credentials = &rest[..at];
+    if !credentials.contains('@') {
+        return std::borrow::Cow::Borrowed(url);
+    }
+    std::borrow::Cow::Owned(format!(
+        "{scheme}{}{}",
+        credentials.replace('@', "%40"),
+        &rest[at..]
+    ))
+}
+
+/// The backstop for a mangled host, once `normalize_url_credentials` has done what it can.
+///
+/// A hostname cannot contain `@`, so one that does is always a credential the parser cut in the
+/// wrong place. `@` on its own is handled upstream now; what still reaches here is a password
+/// holding a `/` *and* an `@` — the `/` ends the authority before the normalizer can see either
+/// `@`, and the driver then splits at the first one anyway. Left alone it surfaces as "couldn't
+/// resolve s@host", which is accurate and still a puzzle. Checked before connecting: no retry helps.
+fn stray_at_sign(config: &DbConnectionConfig, target_host: &str) -> Option<String> {
+    if config.url.trim().is_empty() || !target_host.contains('@') {
+        return None;
+    }
+    let host = target_host.rsplit('@').next().unwrap_or(target_host);
+    Some(format!(
+        "The password in the connection URL contains a character that ended the host early, so \
+         part of it was read as the host: this would look up \"{target_host}\" rather than \
+         \"{host}\". Percent-encode it (`/` is `%2F`), or leave the password out of the URL and \
+         type it in the password field, where it goes to the system keychain instead of the app's \
+         database."
+    ))
+}
+
+/// The same, for the one error the user reads before anything works at all.
+///
+/// `tokio_postgres::Error`'s own `Display` is a single deliberately terse phrase — `db error`,
+/// `error connecting to server`, `error performing TLS handshake` — with everything that
+/// identifies the failure hanging off `source()`, or off `as_db_error()` when the server answered
+/// the startup packet with an `ErrorResponse`. Stringifying the error directly is what turns a
+/// wrong password into a dialog that says only "db error", so the connect path reconstructs the
+/// cause and keeps the SQLSTATE with it: `28P01` (the password was rejected) and `XX000`
+/// (Supabase's pooler answering "Tenant or user not found", which really means the username is
+/// missing its project ref, or the project is paused) read alike in prose and want different fixes.
+fn pg_connect_error(error: tokio_postgres::Error) -> String {
+    let code = error.as_db_error().map(|db| db.code().code().to_string());
+    let message = pg_error(error);
+    match code {
+        Some(code) => format!("{message} (SQLSTATE {code})"),
+        None => message,
+    }
+}
+
 fn pg_config(
     config: &DbConnectionConfig,
     database: Option<&str>,
@@ -1008,9 +1114,7 @@ fn pg_config(
     } else {
         // A pasted URI wins outright: it is what the provider handed the user, and re-deriving it
         // from six fields is where a `?sslmode=` or a percent-encoded password gets lost.
-        config
-            .url
-            .trim()
+        normalize_url_credentials(config.url.trim())
             .parse::<tokio_postgres::Config>()
             .map_err(|e| format!("That connection URL couldn't be parsed: {e}"))?
     };
@@ -1293,5 +1397,82 @@ mod tests {
         config.ssl_ca_file = "/nowhere/ca.pem".into();
         let refused = tls_connector(&config).err().expect("a missing CA file is refused");
         assert!(refused.contains("/nowhere/ca.pem"), "{refused}");
+    }
+
+    /// The fields keep their `localhost` while a URL is set, and naming it in the failure was how
+    /// a connection to Supabase reported that it couldn't resolve "localhost".
+    #[test]
+    fn the_url_names_the_host_the_error_reports() {
+        let mut config = config();
+        config.url = "postgresql://user:secret@db.example.com:6543/postgres".into();
+        let pg = pg_config(&config, None).expect("the URL parses");
+        assert_eq!(pg_target(&pg, &config), ("db.example.com".to_string(), 6543));
+    }
+
+    /// The whole point of the normalizer: a password with an `@` is pasted as it was given, and
+    /// still reaches the server as itself.
+    #[test]
+    fn a_password_holding_an_at_sign_needs_no_hand_editing() {
+        let mut config = config();
+        // A password ending in `@`, so the URL reads `…:pass@@db.example.com`.
+        config.url = "postgresql://user:pass@@db.example.com:5432/postgres".into();
+        let pg = pg_config(&config, None).expect("the URL parses");
+
+        assert_eq!(pg_target(&pg, &config), ("db.example.com".to_string(), 5432));
+        assert_eq!(pg.get_password(), Some(&b"pass@"[..]));
+        assert_eq!(pg.get_user(), Some("user"));
+    }
+
+    /// Encoding the `@` by hand has to keep working, and must not be encoded a second time.
+    #[test]
+    fn an_already_encoded_password_is_left_alone() {
+        let url = "postgresql://user:pass%40@db.example.com:5432/postgres";
+        assert!(matches!(normalize_url_credentials(url), std::borrow::Cow::Borrowed(_)));
+
+        let mut config = config();
+        config.url = url.into();
+        let pg = pg_config(&config, None).expect("the URL parses");
+        assert_eq!(pg.get_password(), Some(&b"pass@"[..]));
+    }
+
+    /// The rewrite is confined to the authority: an `@` past it is somebody else's data.
+    #[test]
+    fn an_at_sign_outside_the_authority_is_not_touched() {
+        for url in [
+            "postgresql://user:pass@db.example.com/postgres?application_name=a@b",
+            "postgresql://db.example.com:5432/postgres",
+            "host=db.example.com user=someone@example.com",
+        ] {
+            assert!(
+                matches!(normalize_url_credentials(url), std::borrow::Cow::Borrowed(_)),
+                "{url}"
+            );
+        }
+    }
+
+    /// What the normalizer cannot reach: a `/` in the password ends the authority before the `@`,
+    /// so the host still comes out mangled and the backstop has to say so.
+    #[test]
+    fn a_host_that_still_comes_out_mangled_is_named() {
+        let fields = config();
+        assert!(stray_at_sign(&fields, "localhost").is_none());
+
+        let mut config = config();
+        // `/` cuts the authority before the `@`s, so the normalizer sees no separator to move.
+        config.url = "postgresql://user:pa/s@s@db.example.com/postgres".into();
+        let pg = pg_config(&config, None).expect("the URL still parses");
+        let (host, _) = pg_target(&pg, &config);
+        assert_eq!(host, "s@db.example.com");
+
+        let named = stray_at_sign(&config, &host).expect("the mangled host is named outright");
+        assert!(named.contains("db.example.com"), "{named}");
+    }
+
+    /// With no URL there is nothing to read back, and the fields are the answer.
+    #[test]
+    fn without_a_url_the_target_is_the_fields() {
+        let config = config();
+        let pg = pg_config(&config, None).expect("the fields are enough");
+        assert_eq!(pg_target(&pg, &config), ("localhost".to_string(), 5432));
     }
 }

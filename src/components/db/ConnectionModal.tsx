@@ -500,7 +500,9 @@ export function ConnectionModal({
             />
           </div>
         ) : (
-          <div className="flex min-h-0 flex-1 flex-col">
+          // `min-w-0` for the same reason the panel needs it: the pane holds the pasted URL and the
+          // target line, and without it their width becomes the pane's floor.
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             {/* Name and engine sit above the tabs: both are true of the connection whichever tab is
                 open, and burying the engine in one of them would hide what the other one means. */}
             <div className="shrink-0 border-b border-[var(--cf-border)] px-4 py-3">
@@ -648,6 +650,7 @@ export function ConnectionModal({
                           { value: "entra_cli", label: t("db.authEntraCli") },
                           { value: "entra_service_principal", label: t("db.authEntraApp") },
                         ]}
+                        size="field"
                       />
                     </Row>
                   )}
@@ -832,7 +835,7 @@ export function ConnectionModal({
                         value={config.ssl}
                         options={sslOptions}
                         onChange={(ssl) => patch({ ssl: ssl as DbSslMode })}
-                        size="md"
+                        size="field"
                       />
                     </Row>
                   </div>
@@ -1406,7 +1409,7 @@ function EnginePicker({
       value={active}
       options={options}
       onChange={(kind) => onSelect(kind as DbKind)}
-      size="md"
+      size="field"
       ariaLabel={t("db.engine")}
     />
   );

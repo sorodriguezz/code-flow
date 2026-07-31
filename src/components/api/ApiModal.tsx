@@ -94,8 +94,13 @@ export function ApiModal({
         if (pressedBackdrop.current && e.target === e.currentTarget) onClose();
       }}
     >
+      {/* `min-w-0` is what makes `width` bind. As a flex item the panel's `min-width` would
+          otherwise be `auto`, and an automatic minimum size outranks `max-width` — so one long
+          unbreakable string inside (a pasted connection URL, a file path) widens the panel past its
+          cap, and because the backdrop centers it the overflow is split between both edges: the
+          left of the panel ends up off-screen instead of merely scrolling. */}
       <div
-        className={`flex max-h-[80vh] w-full flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${width} ${height ?? ""}`}
+        className={`flex max-h-[80vh] w-full min-w-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${width} ${height ?? ""}`}
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-4 py-2.5">
           <Icon size={14} className="shrink-0 text-[var(--cf-accent)]" />

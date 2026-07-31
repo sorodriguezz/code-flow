@@ -55,6 +55,13 @@ function flatten(items: SelectItems): SelectOption[] {
 const SIZE = {
   sm: "px-1.5 py-0.5 text-[12px]",
   md: "px-2.5 py-1.5 text-[13px]",
+  /**
+   * `md`'s metrics rebuilt on the 12px text every form `<input>` in the app uses. The page's
+   * line-height is unitless, so a 13px trigger next to a 12px input is 1.5px taller and their
+   * bottom edges visibly miss each other — this is the size to reach for whenever a select shares
+   * a row, or a stack of rows, with text fields.
+   */
+  field: "px-2 py-1.5 text-[12px]",
 } as const;
 
 /**
