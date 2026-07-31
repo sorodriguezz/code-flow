@@ -39,6 +39,19 @@ export interface AiOutputEvent {
 export const onAiOutput = (handler: (event: AiOutputEvent) => void) =>
   listen<AiOutputEvent>("ai:output", (e) => handler(e.payload));
 
+export interface AiEngineEvent {
+  run_id: string;
+  /** Display name of the engine — "Claude", "Codex", "Ollama"… */
+  engine: string;
+  /** Model id forced for this run; empty when the CLI is picking its own default. */
+  model: string;
+}
+
+/** Which engine and model a run is using, announced as it starts — so "working…" can say what is
+ * doing the work rather than leaving the user to guess from the settings screen. */
+export const onAiEngine = (handler: (event: AiEngineEvent) => void) =>
+  listen<AiEngineEvent>("ai:engine", (e) => handler(e.payload));
+
 export interface DebugPausedEvent {
   /** `breakpoint`, `step`, `exception`… */
   reason: string;

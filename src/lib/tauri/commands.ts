@@ -31,6 +31,7 @@ import type {
   ShellProfile,
   StashInfo,
   TerminalOpened,
+  ThreadCloseOutcome,
   ReviewRunDetail,
   ReviewRunSummary,
   Workspace,
@@ -608,9 +609,22 @@ export const resolvePrLink = (url: string) => invoke<PrLinkResolution>("resolve_
 export const listPrCommentThreads = (projectId: string, prId: number) =>
   invoke<PrCommentThread[]>("list_pr_comment_threads", { projectId, prId });
 
-/** Closes one comment thread on the host — Azure's "fixed", GitHub's resolved review thread. */
-export const resolvePrCommentThread = (projectId: string, prId: number, threadId: number) =>
-  invoke<void>("resolve_pr_comment_thread", { projectId, prId, threadId });
+/** Closes one comment thread on the host — Azure's "fixed", GitHub's resolved review thread —
+ * leaving `body` on it first when given. `wontFix` closes it as *won't fix* instead of *fixed*
+ * (Azure distinguishes the two; GitHub has one resolved state), which is what an answered-but-not-
+ * applied comment actually is. */
+export const resolvePrCommentThread = (
+  projectId: string,
+  prId: number,
+  threadId: number,
+  body: string | null,
+  wontFix: boolean,
+) => invoke<ThreadCloseOutcome>("resolve_pr_comment_thread", { projectId, prId, threadId, body, wontFix });
+
+/** Drafts a reply to a PR comment thread with AI. `conversation` is the thread as text and `note`
+ * the gist the reply should carry; returns prose for the user to edit — nothing is posted. */
+export const draftPrCommentReply = (conversation: string, note: string | null, runId: string) =>
+  invoke<string>("draft_pr_comment_reply", { conversation, note, runId });
 
 export const reviewPullRequest = (
   projectId: string,
@@ -904,9 +918,10 @@ export const prLinkPullRequest = (url: string) =>
 export const prLinkCommentThreads = (url: string) =>
   invoke<PrCommentThread[]>("pr_link_comment_threads", { url });
 
-/** Closes one comment thread of the PR behind a link. */
-export const prLinkResolveCommentThread = (url: string, threadId: number) =>
-  invoke<void>("pr_link_resolve_comment_thread", { url, threadId });
+/** Replies to and closes one comment thread of the PR behind a link — see
+ * {@link resolvePrCommentThread}, which this mirrors for a review with no clone. */
+export const prLinkResolveCommentThread = (url: string, threadId: number, body: string | null, wontFix: boolean) =>
+  invoke<ThreadCloseOutcome>("pr_link_resolve_comment_thread", { url, threadId, body, wontFix });
 
 /** What the signed-in user has already decided on the PR behind a link. */
 export const prLinkDecision = (url: string) => invoke<PrDecision>("pr_link_decision", { url });

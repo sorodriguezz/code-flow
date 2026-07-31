@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Square } from "lucide-react";
+import { ChevronDown, ChevronRight, Cpu, Square } from "lucide-react";
 import { useAiRunStore, type AiRunLine } from "../../state/aiRunStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { useT } from "../../state/languageStore";
@@ -121,9 +121,15 @@ export function AiRunLog({
 
         <button onClick={onToggle} className="min-w-0 flex-1 text-left">
           <span className="flex items-center gap-1.5">
-            <span className="truncate text-[12px] font-medium text-[var(--cf-text)]">
+            <span className="shrink-0 text-[12px] font-medium text-[var(--cf-text)]">
               {label ?? (cancelling ? t("ai.stopping") : t("ai.working"))}
             </span>
+            {/* "Working…" on its own never said *what* is working, and the answer isn't derivable
+                from the panel: the provider and model come from per-task routing, so the run in
+                front of you can be on a different engine than the one Settings shows first. It
+                shrinks before the headline does — the state matters more than the name — and a run
+                whose engine hasn't been announced yet simply doesn't render it. */}
+            <RunEngineChip runId={runId} />
             {chevron}
           </span>
           {/* Under the state it belongs to: how long it has been going, how many steps it has
@@ -164,6 +170,36 @@ export function AiRunLog({
 
       {body}
     </div>
+  );
+}
+
+/**
+ * The engine and model behind a running turn, as a quiet chip: `Claude · opus-4.5`.
+ *
+ * Reads the run's own announcement rather than the settings: which provider and model a task gets
+ * is decided by per-task routing, so the answer belongs to the run, not to the screen showing it.
+ * Renders nothing until the backend has said (a run has no engine for its first instant) and
+ * nothing at all for a stored trace with no live run.
+ *
+ * The model id is shown as the CLI takes it, only stripped of a provider prefix (`anthropic/…`,
+ * `openai/…`) that repeats what the engine name already said. An empty model means nothing was
+ * forced and the CLI is picking its own default — the chip then names the engine alone, because
+ * printing a model this app didn't choose would be a guess presented as fact.
+ */
+export function RunEngineChip({ runId }: { runId?: string }) {
+  const t = useT();
+  const engine = useAiRunStore((s) => (runId ? (s.engineByRun[runId] ?? null) : null));
+  if (!engine) return null;
+  const { engine: name, model } = engine;
+  const short = model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
+  return (
+    <span
+      title={model ? `${name} · ${model}` : t("ai.engineDefaultModel", { engine: name })}
+      className="flex min-w-0 shrink items-center gap-1 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-medium text-[var(--cf-text-muted)] dark:bg-white/[0.08]"
+    >
+      <Cpu size={9} className="shrink-0" />
+      <span className="truncate">{short ? `${name} · ${short}` : name}</span>
+    </span>
   );
 }
 

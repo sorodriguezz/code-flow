@@ -206,6 +206,31 @@ pub async fn generate_commit_message(
     .await
 }
 
+/// Drafts a reply to a pull-request comment thread — the "write it with AI" half of answering a
+/// reviewer, next to writing it by hand.
+///
+/// `conversation` is the thread as the panel already renders it (author: text, one per line) and
+/// `note` is the gist the user wants the reply to carry ("no aplica, es intencional"). Routed to
+/// the Chat task rather than Fix: this only produces prose for a textarea the user then edits, so
+/// it needs no tools, no working copy, and can run on a local model.
+#[tauri::command]
+pub async fn draft_pr_comment_reply(
+    app: AppHandle,
+    db: State<'_, Db>,
+    conversation: String,
+    note: Option<String>,
+    run_id: Option<String>,
+) -> Result<String, String> {
+    let config = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        load_ai_config(&conn, AiTask::Chat)?
+    };
+    ai_runs::scoped(app, run_id, async {
+        ai::draft_comment_reply(&*config.engine, &config.binary, &config.model, &conversation, note.as_deref()).await
+    })
+    .await
+}
+
 /// Stops a run started with the given id. `false` means it had already finished (or never
 /// started) — the frontend treats that as "nothing to do" rather than an error, since the race
 /// between clicking stop and the reply arriving is perfectly normal.

@@ -895,8 +895,13 @@ function ProjectRow({ project }: { project: Project }) {
 
   return (
     <div>
+      {/* The click target is the whole row, not just its label. The row is a strip of controls, so
+          selecting the project lives on the container rather than on the name alone — which left
+          the padding around the text, and the gaps between the chips, hovering as if clickable and
+          doing nothing. Every control inside stops propagation, so each still means only itself. */}
       <div
-        className={`group relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${
+        onClick={select}
+        className={`group relative flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${
           isActive
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
             : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
@@ -920,8 +925,17 @@ function ProjectRow({ project }: { project: Project }) {
         >
           {revealing ? <Loader2 size={12} className="animate-spin" /> : <Folder size={12} />}
         </button>
-        <button onClick={select} className="flex flex-1 min-w-0 items-center gap-2 text-left">
-          <span className="flex-1 min-w-0 truncate font-medium">{project.name}</span>
+        {/* Kept as a button so the row is still reachable and activatable from the keyboard — the
+            container's handler covers the pointer, this covers focus. `stopPropagation` so a click
+            landing on the name selects once rather than twice. */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            select();
+          }}
+          className="flex min-w-0 flex-1 items-center gap-2 self-stretch text-left"
+        >
+          <span className="min-w-0 flex-1 truncate font-medium">{project.name}</span>
         </button>
         {/* Both row actions wear the same square as the "clone" and "add repository" chips above
             the list — `h-5 w-5`, rounded, with a hover fill — so a control that only appears on

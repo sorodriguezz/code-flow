@@ -6,6 +6,7 @@ import type {
   PrDecision,
   PrCommentThread,
   PullRequestSummary,
+  ThreadCloseOutcome,
   WorkspaceActivityEntry,
 } from "../types/domain";
 
@@ -79,12 +80,18 @@ export function listCommentThreads(target: PrTarget, prId: number): Promise<PrCo
     : api.prLinkCommentThreads(target.url);
 }
 
-/** Closes one of the PR's comment threads on the host. Needs no working copy either way — it's a
- * host call, so a link session resolves a conversation exactly like a project does. */
-export function resolveCommentThread(target: PrTarget, prId: number, threadId: number): Promise<void> {
+/** Closes one of the PR's comment threads on the host, optionally replying on it first. Needs no
+ * working copy either way — it's a host call, so a link session answers and closes a conversation
+ * exactly like a project does. */
+export function resolveCommentThread(
+  target: PrTarget,
+  prId: number,
+  threadId: number,
+  reply: { body: string | null; wontFix: boolean },
+): Promise<ThreadCloseOutcome> {
   return target.kind === "project"
-    ? api.resolvePrCommentThread(target.projectId, prId, threadId)
-    : api.prLinkResolveCommentThread(target.url, threadId);
+    ? api.resolvePrCommentThread(target.projectId, prId, threadId, reply.body, reply.wontFix)
+    : api.prLinkResolveCommentThread(target.url, threadId, reply.body, reply.wontFix);
 }
 
 export function reviewDecision(target: PrTarget, prId: number): Promise<PrDecision> {

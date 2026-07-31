@@ -786,7 +786,8 @@ pub async fn review_pr_from_link(
             ado::list_pr_comment_threads(org, project, repo, *number, &credential).await.unwrap_or_default()
         }
     };
-    if let Some(block) = pending_comments_block(&[], &open_threads) {
+    // A link session keeps no memory, so there is no "last run" to mark comments as newer than.
+    if let Some(block) = pending_comments_block(&[], &open_threads, None) {
         enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
     }
 
@@ -868,20 +869,29 @@ pub async fn pr_link_comment_threads(db: State<'_, Db>, url: String) -> Result<V
     }
 }
 
-/// Closing a conversation on the host, addressed by link — the repo-less twin of
-/// [`resolve_pr_comment_thread`]. Resolving a thread is a host call, so a review with no clone can
-/// do it too.
+/// Replying to and closing a conversation on the host, addressed by link — the repo-less twin of
+/// [`resolve_pr_comment_thread`]. Both are host calls, so a review with no clone answers and closes
+/// a conversation exactly like a project-backed one does.
 #[tauri::command]
-pub async fn pr_link_resolve_comment_thread(db: State<'_, Db>, url: String, thread_id: i64) -> Result<(), String> {
+pub async fn pr_link_resolve_comment_thread(
+    db: State<'_, Db>,
+    url: String,
+    thread_id: i64,
+    body: Option<String>,
+    wont_fix: bool,
+) -> Result<ThreadCloseOutcome, String> {
     let (target, credential) = link_credentials(&db, &url)?;
-    match &target {
-        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
-            github::resolve_review_thread_for_comment(host, owner, repo, *number, thread_id, &credential).await
-        }
-        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
-            ado::set_pr_thread_status(org, project, repo, *number, thread_id, THREAD_FIXED, &credential).await
-        }
-    }
+    let (host, pr_id) = match &target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => (
+            ThreadHost::GitHub { host, owner, repo, token: &credential },
+            *number,
+        ),
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => (
+            ThreadHost::Azure { org, project, repo, pat: &credential },
+            *number,
+        ),
+    };
+    reply_and_close_thread(host, pr_id, thread_id, body.as_deref(), wont_fix).await
 }
 
 /// What the signed-in user has already decided on the PR behind a link — the repo-less twin of
@@ -1167,35 +1177,125 @@ pub async fn list_pr_comment_threads(
     }
 }
 
-/// Azure DevOps' thread status for "this was fixed" — what its own **Resolve** button sets. The
-/// other statuses (won't fix, by design) are judgements CodeFlow has no business making on the
-/// reviewer's behalf, so resolving from here always means this one.
+/// Azure DevOps' thread status for "this was fixed" — what its own **Resolve** button sets.
 const THREAD_FIXED: i32 = 2;
 
-/// Marks one comment thread as resolved on the host: Azure's `fixed`, GitHub's
-/// `resolveReviewThread`. The counterpart of "resolve with AI" — once the fix is applied, the
-/// conversation it came from can be closed without leaving the app.
+/// One host's coordinates for acting on a single comment thread, with the credential already
+/// resolved. Exists so [`reply_and_close_thread`] is written once and both callers — the
+/// project-backed command and its link-only twin, which reach their credentials by different
+/// routes — share the same behaviour instead of two drifting copies.
+enum ThreadHost<'a> {
+    Azure { org: &'a str, project: &'a str, repo: &'a str, pat: &'a str },
+    GitHub { host: &'a str, owner: &'a str, repo: &'a str, token: &'a str },
+}
+
+/// What closing a conversation from CodeFlow actually managed to do.
+///
+/// Reply and close are two host calls, and they fail independently: GitHub can take a reply on a
+/// conversation-level comment it then refuses to resolve (only review threads can be resolved).
+/// Reporting a half-done close as an error would hide the half that worked — the reply the author
+/// is now looking at — so the outcome says which parts landed and the UI decides what to show.
+#[derive(Debug, Serialize)]
+pub struct ThreadCloseOutcome {
+    /// True when a comment was written to the thread. False when none was asked for.
+    pub replied: bool,
+    /// True when the conversation was closed on the host.
+    pub resolved: bool,
+    /// Why closing didn't happen, when it didn't. Any reply already posted still stands.
+    pub error: Option<String>,
+}
+
+/// Replies to a comment thread and then closes it on the host.
+///
+/// Ordering is the same as the finding-discard path's, and for the same reason: the sentence has to
+/// land before the conversation is shut, since a thread closed with no explanation on it is worse
+/// for the author than an open one.
+///
+/// `wont_fix` is what makes this honest on Azure, which distinguishes the two closes: a review
+/// comment the team decided *not* to act on is closed as "won't fix", not as "fixed". GitHub has a
+/// single resolved state, so the flag only shapes the reply there.
+///
+/// Both halves are best-effort in different ways. A failed reply aborts (there is no point closing
+/// a conversation whose explanation never arrived); a failed close comes back in the outcome, with
+/// the reply left standing.
+async fn reply_and_close_thread(
+    host: ThreadHost<'_>,
+    pr_id: i64,
+    thread_id: i64,
+    body: Option<&str>,
+    wont_fix: bool,
+) -> Result<ThreadCloseOutcome, String> {
+    let body = body.map(str::trim).filter(|b| !b.is_empty());
+    let mut replied = false;
+
+    if let Some(text) = body {
+        match &host {
+            ThreadHost::Azure { org, project, repo, pat } => {
+                ado::reply_pr_thread(org, project, repo, pr_id, thread_id, text, pat).await?;
+            }
+            ThreadHost::GitHub { host, owner, repo, token } => {
+                // The reply endpoint only addresses inline review comments. A conversation-level
+                // comment (which this app also lists as a thread) has no reply chain to join, so
+                // rather than dropping the user's words the reply becomes a new PR comment.
+                if github::reply_pr_review_comment(host, owner, repo, pr_id, thread_id, text, token)
+                    .await
+                    .is_err()
+                {
+                    github::post_pr_comment(host, owner, repo, pr_id, text, token).await?;
+                }
+            }
+        }
+        replied = true;
+    }
+
+    let closed = match &host {
+        ThreadHost::Azure { org, project, repo, pat } => {
+            let status = if wont_fix { THREAD_WONT_FIX } else { THREAD_FIXED };
+            ado::set_pr_thread_status(org, project, repo, pr_id, thread_id, status, pat).await
+        }
+        ThreadHost::GitHub { host, owner, repo, token } => {
+            github::resolve_review_thread_for_comment(host, owner, repo, pr_id, thread_id, token).await
+        }
+    };
+
+    Ok(match closed {
+        Ok(()) => ThreadCloseOutcome { replied, resolved: true, error: None },
+        Err(e) => ThreadCloseOutcome { replied, resolved: false, error: Some(e) },
+    })
+}
+
+/// Closes one comment thread on the host — Azure's `fixed`/`won't fix`, GitHub's
+/// `resolveReviewThread` — optionally leaving a reply on it first.
+///
+/// The reply is the point: a reviewer's comment is often closed *without* the change being made
+/// ("this is intentional", "handled in another PR"), and closing it silently leaves the author
+/// looking at a conversation that ended with no answer. So the comment travels with the close, and
+/// `wont_fix` keeps the record straight about which of the two happened.
 ///
 /// `thread_id` is the id [`list_pr_comment_threads`] reported, which is a real thread on Azure and
 /// the root comment of a review thread on GitHub (the shape each host's API addresses). GitHub's
 /// conversation-level comments belong to no review thread and cannot be resolved at all — that
-/// surfaces as an error from the GraphQL lookup rather than silently doing nothing.
+/// comes back as `resolved: false` with the reason, rather than silently doing nothing.
 #[tauri::command]
 pub async fn resolve_pr_comment_thread(
     db: State<'_, Db>,
     project_id: String,
     pr_id: i64,
     thread_id: i64,
-) -> Result<(), String> {
+    body: Option<String>,
+    wont_fix: bool,
+) -> Result<ThreadCloseOutcome, String> {
     let project = load_project(&db, &project_id)?;
     match linked_repo(&project)? {
         LinkedRepo::Azure { org, project: ado_project, repo_id } => {
             let pat = pat_for_org(&org)?;
-            ado::set_pr_thread_status(&org, &ado_project, &repo_id, pr_id, thread_id, THREAD_FIXED, &pat).await
+            let host = ThreadHost::Azure { org: &org, project: &ado_project, repo: &repo_id, pat: &pat };
+            reply_and_close_thread(host, pr_id, thread_id, body.as_deref(), wont_fix).await
         }
         LinkedRepo::GitHub { host, owner, repo } => {
             let token = github_token(&host)?;
-            github::resolve_review_thread_for_comment(&host, &owner, &repo, pr_id, thread_id, &token).await
+            let target = ThreadHost::GitHub { host: &host, owner: &owner, repo: &repo, token: &token };
+            reply_and_close_thread(target, pr_id, thread_id, body.as_deref(), wont_fix).await
         }
     }
 }
@@ -1433,22 +1533,73 @@ pub async fn review_pull_request(
         LinkedRepo::Azure { .. } => pr.source_branch.clone(),
     };
 
-    // The head commit this review will run against. On a re-review, if it matches the last run's
-    // head, nothing changed — skip the whole (costly) analysis. Otherwise remember which files
-    // changed since, so untouched-file findings auto-persist during reconciliation.
+    // The head commit this review will run against, when this PR was last reviewed, and what that
+    // run remembered — together they decide whether there is anything new to look at at all.
+    //
+    // The memory is read here rather than further down (where it is used to build the prompt)
+    // because the *ids of the threads this app opened* are part of the skip decision: CodeFlow's own
+    // published findings are comments on the PR too, and they must not read as somebody answering.
     let head_sha = git::diff::resolve_sha(&project.local_path, &head_ref).unwrap_or_default();
-    let prev_head = {
+    let (prev_head, last_run_at, remembered, repo_rules) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::latest_review_head(&conn, &project_id, pr_id, &repo).ok().flatten()
+        let remembered: Vec<crate::review_memory::MemoryFinding> =
+            queries::latest_review_findings(&conn, &project_id, pr_id, &repo)
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str(&json).ok())
+                .unwrap_or_default();
+        // Standing rules are the workspace's, filtered to this repository — a judgement made on one
+        // repo must not silence a finding on another that happens to share a category name.
+        let repo_rules: Vec<crate::review_memory::FpSuppression> =
+            crate::commands::settings::load_fp_suppressions(&conn, &workspace_id)
+                .into_iter()
+                .filter(|r| r.repo_key == repo)
+                .collect();
+        (
+            queries::latest_review_head(&conn, &project_id, pr_id, &repo).ok().flatten(),
+            queries::latest_review_run_at(&conn, &project_id, pr_id, &repo).ok().flatten(),
+            remembered,
+            repo_rules,
+        )
     };
+
+    // The conversation on the pull request, read before the skip check because it is half of that
+    // decision: a comment written after the last run is new input the review hasn't answered yet,
+    // even when not a line of code moved. Best-effort — losing the thread list costs context, and
+    // context is not worth failing a review the user is waiting on.
+    //
+    // The signed-in user's own name comes along for the same reason the thread ids do: publishing a
+    // review, closing a thread and recording a decision all write to this pull request as them.
+    let (open_threads, me) = match &link {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => match pat_for_org(org) {
+            Ok(pat) => (
+                ado::list_pr_comment_threads(org, ado_project, repo_id, pr_id, &pat).await.unwrap_or_default(),
+                ado::authenticated_user_name(org, &pat).await.ok(),
+            ),
+            Err(_) => (Vec::new(), None),
+        },
+        LinkedRepo::GitHub { host, owner, repo } => match github_token(host) {
+            Ok(token) => (
+                github::list_pr_comment_threads(host, owner, repo, pr_id, &token).await.unwrap_or_default(),
+                github::get_authenticated_user(host, &token).await.ok(),
+            ),
+            Err(_) => (Vec::new(), None),
+        },
+    };
+    let ours: std::collections::HashSet<i64> = remembered.iter().filter_map(|f| f.thread_id).collect();
+    let new_comments = comments_since(&open_threads, last_run_at.as_deref(), &ours, me.as_deref());
+
+    // Same head *and* nothing new said on the PR — skip the whole (costly) analysis.
     if let Some(prev) = &prev_head {
-        if !head_sha.is_empty() && prev == &head_sha {
+        if !head_sha.is_empty() && prev == &head_sha && new_comments == 0 {
             let short = &head_sha[..head_sha.len().min(8)];
             return Ok(format!(
                 "🔁 Sin cambios desde la última revisión (mismo commit `{short}`). No se volvió a analizar."
             ));
         }
     }
+    // Otherwise remember which files changed since the last run, so untouched-file findings
+    // auto-persist during reconciliation.
     let changed_files = match &prev_head {
         Some(prev) if !prev.is_empty() => git::diff::changed_files_between(&project.local_path, prev, &head_ref).ok(),
         _ => None,
@@ -1472,41 +1623,12 @@ pub async fn review_pull_request(
         enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
     }
 
-    // What the conversation on the PR still has open — the findings this app published and that
-    // the last run left active, plus whatever else the host still shows unresolved. A re-review
-    // without them only re-derives defects from the diff, and says nothing about the question the
-    // second run is actually asked: were the comments already left on this PR addressed?
-    //
-    // Both halves are best-effort. Losing the reviewer's own memory or the host's thread list
-    // costs context, and context is not worth failing a review the user is waiting on.
-    let (remembered, repo_rules) = {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let remembered: Vec<crate::review_memory::MemoryFinding> =
-            queries::latest_review_findings(&conn, &project_id, pr_id, &repo)
-                .ok()
-                .flatten()
-                .and_then(|json| serde_json::from_str(&json).ok())
-                .unwrap_or_default();
-        // Standing rules are the workspace's, filtered to this repository — a judgement made on one
-        // repo must not silence a finding on another that happens to share a category name.
-        let repo_rules: Vec<crate::review_memory::FpSuppression> =
-            crate::commands::settings::load_fp_suppressions(&conn, &workspace_id)
-                .into_iter()
-                .filter(|r| r.repo_key == repo)
-                .collect();
-        (remembered, repo_rules)
-    };
-    let open_threads = match &link {
-        LinkedRepo::Azure { org, project: ado_project, repo_id } => match pat_for_org(org) {
-            Ok(pat) => ado::list_pr_comment_threads(org, ado_project, repo_id, pr_id, &pat).await.unwrap_or_default(),
-            Err(_) => Vec::new(),
-        },
-        LinkedRepo::GitHub { host, owner, repo } => match github_token(host) {
-            Ok(token) => github::list_pr_comment_threads(host, owner, repo, pr_id, &token).await.unwrap_or_default(),
-            Err(_) => Vec::new(),
-        },
-    };
-    if let Some(block) = pending_comments_block(&remembered, &open_threads) {
+    // What the conversation on the PR still has open — the findings this app published and that the
+    // last run left active (from the memory read above), plus whatever else the host still shows
+    // unresolved. A re-review without them only re-derives defects from the diff, and says nothing
+    // about the question the second run is actually asked: were the comments already left on this
+    // PR addressed?
+    if let Some(block) = pending_comments_block(&remembered, &open_threads, last_run_at.as_deref()) {
         enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
     }
     // Two "do not raise this" blocks, deliberately not folded into the one above: that block asks
@@ -1606,6 +1728,53 @@ const COMMENT_EXCERPT: usize = 500;
 /// tail adds noise rather than context, and the truncation is stated in the block itself.
 const MAX_THREADS: usize = 20;
 
+/// Whether a comment was published after `since` (both RFC 3339). Parsed rather than compared as
+/// strings: the hosts and this app's own clock write the offset differently (`Z` vs `+00:00`), and
+/// lexicographic order across those two spellings is wrong.
+///
+/// Unparseable input counts as *not* newer. A timestamp nothing can read is not evidence that
+/// something happened, and the failure mode of guessing "newer" is re-running every review forever.
+fn is_newer_than(published: &str, since: &str) -> bool {
+    match (
+        chrono::DateTime::parse_from_rfc3339(published),
+        chrono::DateTime::parse_from_rfc3339(since),
+    ) {
+        (Ok(a), Ok(b)) => a > b,
+        _ => false,
+    }
+}
+
+/// How many comments *somebody else* wrote on this pull request after the last review ran.
+///
+/// This is what makes a second review answer a reviewer who wrote something without pushing a
+/// commit: without it, "same head commit" alone would skip the run and the comment would never
+/// reach the model. `since` of `None` (never reviewed) means nothing to be newer than.
+///
+/// Two exclusions, and both are what keep the count from counting *this app's own voice* back at
+/// itself — publishing a review, replying to close a thread and commenting a decision all land on
+/// the pull request seconds after a run, and each would otherwise read as "new input" and re-run a
+/// review nobody asked for:
+///
+/// - `ours` — threads CodeFlow opened for its own findings (from the run's memory).
+/// - `me` — the signed-in user, by the name their comments carry. Covers everything the previous
+///   rule can't address by id: the summary comment, the decision note, a reply the user typed
+///   themselves. `None` when the host wouldn't say who we are, which only costs precision.
+fn comments_since(
+    threads: &[ado::PrCommentThread],
+    since: Option<&str>,
+    ours: &std::collections::HashSet<i64>,
+    me: Option<&str>,
+) -> usize {
+    let Some(since) = since else { return 0 };
+    threads
+        .iter()
+        .filter(|t| !ours.contains(&t.id))
+        .flat_map(|t| t.comments.iter())
+        .filter(|c| !me.is_some_and(|me| c.author.eq_ignore_ascii_case(me)))
+        .filter(|c| is_newer_than(&c.published_date, since))
+        .count()
+}
+
 /// The still-open conversation on a pull request, rendered as one context block for the review
 /// prompt.
 ///
@@ -1622,6 +1791,9 @@ const MAX_THREADS: usize = 20;
 fn pending_comments_block(
     remembered: &[crate::review_memory::MemoryFinding],
     threads: &[ado::PrCommentThread],
+    // When this PR was last reviewed, so anything written since can be marked as such. `None` on a
+    // first review, where nothing is new because nothing came before.
+    since: Option<&str>,
 ) -> Option<String> {
     let published: Vec<&crate::review_memory::MemoryFinding> = remembered
         .iter()
@@ -1665,7 +1837,9 @@ fn pending_comments_block(
     if !others.is_empty() {
         out.push_str(
             "\n## Otros comentarios abiertos en el PR\n\
-             Son de personas revisoras. Indica en el resumen si el cambio actual los atiende.\n\n",
+             Son de personas revisoras. Indica en el resumen si el cambio actual los atiende. Los \
+             marcados como 🆕 se escribieron DESPUÉS de la última revisión: trátalos como entrada \
+             nueva y respóndelos uno por uno en el resumen, aunque el código no haya cambiado.\n\n",
         );
         for thread in others.iter().take(MAX_THREADS) {
             let loc = match (&thread.file_path, thread.start_line) {
@@ -1677,7 +1851,11 @@ fn pending_comments_block(
             for c in &thread.comments {
                 let text: String = c.content.chars().take(COMMENT_EXCERPT).collect();
                 let ellipsis = if c.content.chars().count() > COMMENT_EXCERPT { "…" } else { "" };
-                out.push_str(&format!("  - {}: {}{}\n", c.author, text.replace('\n', " "), ellipsis));
+                let nuevo = match since {
+                    Some(s) if is_newer_than(&c.published_date, s) => "🆕 ",
+                    _ => "",
+                };
+                out.push_str(&format!("  - {}{}: {}{}\n", nuevo, c.author, text.replace('\n', " "), ellipsis));
             }
         }
         if others.len() > MAX_THREADS {
@@ -2059,4 +2237,79 @@ pub async fn act_on_pull_request(
     };
 
     Ok(PrActionOutcome { pr, activity })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread(id: i64, comments: &[(&str, &str)]) -> ado::PrCommentThread {
+        ado::PrCommentThread {
+            id,
+            file_path: None,
+            start_line: None,
+            end_line: None,
+            comments: comments
+                .iter()
+                .map(|(author, published)| ado::PrThreadComment {
+                    author: (*author).to_string(),
+                    content: "…".to_string(),
+                    published_date: (*published).to_string(),
+                })
+                .collect(),
+        }
+    }
+
+    fn ids(ids: &[i64]) -> std::collections::HashSet<i64> {
+        ids.iter().copied().collect()
+    }
+
+    /// The whole point of the count: a reviewer wrote something and no code moved. Without this the
+    /// "same head commit" check would skip the run and the comment would never reach the model.
+    #[test]
+    fn a_reviewer_commenting_after_the_last_run_counts_as_new_input() {
+        let threads = [thread(1, &[("Ana", "2026-07-31T12:00:00Z")])];
+        assert_eq!(comments_since(&threads, Some("2026-07-31T10:00:00+00:00"), &ids(&[]), None), 1);
+    }
+
+    /// Both spellings of UTC appear in practice — the hosts write `Z`, this app's own clock writes
+    /// `+00:00` — and comparing them as strings gets the order wrong.
+    #[test]
+    fn timestamps_are_compared_as_instants_not_as_text() {
+        let threads = [thread(1, &[("Ana", "2026-07-31T09:00:00Z")])];
+        assert_eq!(comments_since(&threads, Some("2026-07-31T10:00:00+00:00"), &ids(&[]), None), 0);
+    }
+
+    /// CodeFlow publishes its own findings as threads on the pull request, seconds after the run
+    /// that produced them. Counting those would make every re-review re-analyse a diff nobody
+    /// touched.
+    #[test]
+    fn this_apps_own_finding_threads_are_not_somebody_answering() {
+        let threads = [thread(7, &[("Sebastián", "2026-07-31T12:00:00Z")])];
+        assert_eq!(comments_since(&threads, Some("2026-07-31T10:00:00Z"), &ids(&[7]), None), 0);
+    }
+
+    /// The summary comment and the decision note are written as the signed-in user and belong to no
+    /// finding thread — the author is the only thing that tells them apart from a reviewer's words.
+    #[test]
+    fn the_signed_in_users_own_comments_are_not_new_input() {
+        let threads = [thread(9, &[("Sebastián", "2026-07-31T12:00:00Z"), ("Ana", "2026-07-31T12:30:00Z")])];
+        assert_eq!(comments_since(&threads, Some("2026-07-31T10:00:00Z"), &ids(&[]), Some("sebastián")), 1);
+    }
+
+    /// A pull request never reviewed here has nothing to be newer than — every comment on it is
+    /// simply part of the first review's context.
+    #[test]
+    fn nothing_is_new_when_there_is_no_previous_run() {
+        let threads = [thread(1, &[("Ana", "2026-07-31T12:00:00Z")])];
+        assert_eq!(comments_since(&threads, None, &ids(&[]), None), 0);
+    }
+
+    /// A timestamp nothing can parse is not evidence that something happened: guessing "newer"
+    /// would re-run the review on every click, forever.
+    #[test]
+    fn an_unreadable_timestamp_does_not_trigger_a_review() {
+        let threads = [thread(1, &[("Ana", "ayer por la tarde")])];
+        assert_eq!(comments_since(&threads, Some("2026-07-31T10:00:00Z"), &ids(&[]), None), 0);
+    }
 }

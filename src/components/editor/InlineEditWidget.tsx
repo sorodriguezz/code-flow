@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Loader2, Sparkles, X } from "lucide-react";
 import { inlineEditWithAi } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
+import { RunEngineChip } from "../ai/AiRunLog";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 
@@ -29,6 +30,10 @@ export function InlineEditWidget({
   const [instruction, setInstruction] = useState("");
   const [running, setRunning] = useState(false);
   const runIdRef = useRef<string | null>(null);
+  // The same id as the ref, kept in state so the "working" line can name the engine and model the
+  // run reported. This edit is the one most likely to be routed somewhere unexpected — it's the
+  // task that can run on a fast local model — so which one answered is worth saying.
+  const [runId, setRunId] = useState<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -43,6 +48,7 @@ export function InlineEditWidget({
     if (!text || running) return;
     const runId = newRunId("inline");
     runIdRef.current = runId;
+    setRunId(runId);
     useAiRunStore.getState().start(runId);
     setRunning(true);
     try {
@@ -105,8 +111,9 @@ export function InlineEditWidget({
       </div>
       {running && (
         <div className="flex items-center gap-1.5 border-t border-[var(--cf-border)] px-2.5 py-1 text-[11px] text-[var(--cf-text-muted)]">
-          <Loader2 size={11} className="animate-spin" />
-          {t("ai.working")}
+          <Loader2 size={11} className="shrink-0 animate-spin" />
+          <span className="shrink-0">{t("ai.working")}</span>
+          <RunEngineChip runId={runId ?? undefined} />
         </div>
       )}
     </div>

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { cancelAiRun } from "../lib/tauri/commands";
-import { onAiOutput, type AiOutputEvent } from "../lib/tauri/events";
+import { onAiEngine, onAiOutput, type AiEngineEvent, type AiOutputEvent } from "../lib/tauri/events";
 import { formatAgentLogLine } from "../lib/agentLog";
 
 /** Only the tail is kept: a long agent run emits thousands of lines and nobody scrolls back
@@ -12,10 +12,20 @@ export interface AiRunLine {
   text: string;
 }
 
+/** What is doing the work on a run: the engine's display name and, when one was forced, the model
+ * id. An empty `model` means the CLI is choosing for itself — shown as the engine alone rather than
+ * as an invented model name. */
+export interface AiRunEngine {
+  engine: string;
+  model: string;
+}
+
 interface AiRunState {
   /** Live output per run id. Entries survive the run ending so a finished job can still show
    * what it printed; they're cleared when the same id starts again, or explicitly. */
   linesByRun: Record<string, AiRunLine[]>;
+  /** Engine + model per run id, as announced by the backend when the run starts. */
+  engineByRun: Record<string, AiRunEngine>;
   /** Runs the UI believes are in flight — set on start, cleared on finish. */
   active: Record<string, boolean>;
   /** Ids the user asked to stop, so the UI can show "stopping…" until the process actually dies
@@ -35,6 +45,7 @@ let unlisten: (() => void) | null = null;
 
 export const useAiRunStore = create<AiRunState>((set, get) => ({
   linesByRun: {},
+  engineByRun: {},
   active: {},
   cancelling: {},
 
@@ -61,17 +72,29 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
     }).then((off) => {
       unlisten = off;
     });
+    // Announced once per run, before its first line: which engine and model are doing the work.
+    void onAiEngine((event: AiEngineEvent) => {
+      set((s) => ({
+        engineByRun: { ...s.engineByRun, [event.run_id]: { engine: event.engine, model: event.model } },
+      }));
+    });
   },
 
   start: (runId) => {
     // Subscribing here (rather than leaving it to whatever renders the log) guarantees the
     // listener is attached before the process can print its first line.
     get().init();
-    set((s) => ({
-      linesByRun: { ...s.linesByRun, [runId]: [] },
-      active: { ...s.active, [runId]: true },
-      cancelling: { ...s.cancelling, [runId]: false },
-    }));
+    set((s) => {
+      // The engine is dropped along with the lines: routing can have changed since, and a stale
+      // name on a fresh run is worse than no name at all. The backend re-announces immediately.
+      const { [runId]: _previousEngine, ...engineByRun } = s.engineByRun;
+      return {
+        linesByRun: { ...s.linesByRun, [runId]: [] },
+        engineByRun,
+        active: { ...s.active, [runId]: true },
+        cancelling: { ...s.cancelling, [runId]: false },
+      };
+    });
   },
 
   finish: (runId) =>

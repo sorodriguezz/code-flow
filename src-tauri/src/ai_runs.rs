@@ -61,6 +61,21 @@ struct AiOutputEvent {
     line: String,
 }
 
+/// Which engine and model a run is actually about to use, announced the moment it starts.
+///
+/// The UI can't work this out on its own: the provider and model are resolved per *task* (review,
+/// fix, chat…) from routing overrides the panel showing the run doesn't read, and "working…" with
+/// no name on it is the one question every user asks of a run that is taking a while.
+#[derive(Clone, Serialize)]
+struct AiEngineEvent {
+    run_id: String,
+    /// The engine's display name — "Claude", "Codex", "Ollama"…
+    engine: String,
+    /// The model id this run forces. Empty when nothing was configured and the CLI picks its own
+    /// default, which is a real state and shows as the engine alone rather than as a guess.
+    model: String,
+}
+
 type Registry = Mutex<HashMap<String, watch::Sender<bool>>>;
 
 fn registry() -> &'static Registry {
@@ -138,6 +153,15 @@ pub async fn cancelled(rx: &mut Option<watch::Receiver<bool>>) {
         },
         None => std::future::pending().await,
     }
+}
+
+/// Announces the engine and model a run is starting with. Fire-and-forget, like every other event
+/// here: a run whose banner never arrives still runs, it just shows as "working…" with no name.
+pub fn emit_engine(ctx: &RunCtx, engine: &str, model: &str) {
+    let _ = ctx.app.emit(
+        "ai:engine",
+        AiEngineEvent { run_id: ctx.run_id.clone(), engine: engine.to_string(), model: model.to_string() },
+    );
 }
 
 /// Pushes one line of a run's output to the frontend. Blank lines are dropped — the CLIs pad

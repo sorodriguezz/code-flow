@@ -118,6 +118,25 @@ pub fn latest_review_head(
     .map(|opt| opt.flatten().filter(|s| !s.is_empty()))
 }
 
+/// When this PR was last reviewed (RFC 3339, UTC), if ever.
+///
+/// Used to tell a re-review what has happened *on the pull request* since — a comment written after
+/// this instant is one the last run never saw, and so a reason to review again even when the code
+/// hasn't moved.
+pub fn latest_review_run_at(
+    conn: &Connection,
+    project_id: &str,
+    pr_id: i64,
+    repo_key: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        &format!("SELECT created_at FROM review_runs WHERE {MEMORY_SCOPE} ORDER BY created_at DESC LIMIT 1"),
+        params![project_id, pr_id, repo_key],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+}
+
 /// Records one completed review run. `id` reuses the job id so the run and its `job_history` row
 /// share identity. `meta`/`findings` are JSON blobs authored by the caller.
 #[allow(clippy::too_many_arguments)]

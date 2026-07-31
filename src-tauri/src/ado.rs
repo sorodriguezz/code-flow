@@ -731,16 +731,37 @@ struct ConnectionData {
 #[derive(Deserialize)]
 struct RawConnectionUser {
     id: String,
+    /// How this user is named on the comments they write. Optional because the field an account
+    /// answers with varies (a custom display name overrides the provider's), and nothing here is
+    /// worth failing a call over.
+    #[serde(rename = "providerDisplayName", default)]
+    provider_display_name: Option<String>,
+    #[serde(rename = "customDisplayName", default)]
+    custom_display_name: Option<String>,
 }
 
 /// The signed-in user's Azure DevOps id (a GUID), needed to cast a reviewer vote — Azure votes
 /// are keyed by reviewer id, not inferred from the token like GitHub's reviews are. Read from the
 /// org-scoped `connectionData` endpoint.
 async fn authenticated_user_id(org: &str, pat: &str) -> Result<String, String> {
+    Ok(connection_data(org, pat).await?.authenticated_user.id)
+}
+
+/// The signed-in user as their comments name them — the counterpart of GitHub's login, and what
+/// lets a caller tell "someone commented on this PR" apart from "this app commented on it for me".
+/// Prefers the custom display name, since that is the one Azure shows when it is set.
+pub async fn authenticated_user_name(org: &str, pat: &str) -> Result<String, String> {
+    let user = connection_data(org, pat).await?.authenticated_user;
+    user.custom_display_name
+        .or(user.provider_display_name)
+        .filter(|name| !name.trim().is_empty())
+        .ok_or_else(|| "Azure DevOps didn't report a display name for this account".to_string())
+}
+
+async fn connection_data(org: &str, pat: &str) -> Result<ConnectionData, String> {
     let org = encode_segment(&normalize_org(org));
     let url = format!("https://dev.azure.com/{org}/_apis/connectionData?api-version={PREVIEW_API_VERSION}");
-    let data: ConnectionData = get_json(&url, pat).await?;
-    Ok(data.authenticated_user.id)
+    get_json(&url, pat).await
 }
 
 /// Casts the current user's review vote on a PR. Azure's reviewer vote: `10` = approve,

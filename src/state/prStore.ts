@@ -119,6 +119,13 @@ interface PrState {
   /** Fetches (and caches) that decision — called when a PR is opened. Silent on failure: not
    * knowing the decision must never block reviewing the PR. */
   loadPrDecision: (target: PrTarget, prId: number) => Promise<void>;
+  /** Re-reads the pull request itself from its host and writes it everywhere it is held (the open
+   * panel, the parked link sessions, the project's list), so what the panel shows is what the host
+   * currently says — a reset vote, a new head commit, a title edited on the website.
+   *
+   * Silent on failure, like `loadPrDecision`: an unreachable host leaves the panel showing what it
+   * already had, which is the last thing known to be true. */
+  refreshPr: (target: PrTarget, prId: number) => Promise<void>;
   /** Approve / request changes / close the PR on its host (GitHub or Azure DevOps).
    *
    * The PR stays on screen afterwards, in the state the host reports back — closing one used to
@@ -269,6 +276,34 @@ export const usePrStore = create<PrState>((set, get) => ({
       set((s) => ({ decisionByPr: { ...s.decisionByPr, [targetPrKey(target, prId)]: decision } }));
     } catch {
       // The host wouldn't say — leave it unknown, which just means the buttons stay offered.
+    }
+  },
+
+  refreshPr: async (target, prId) => {
+    try {
+      const pr = await prTarget.refreshPr(target, prId);
+      if (!pr) return;
+      // Written to every copy of this PR the store holds, for the same reason `actOnPr` does it:
+      // the panel, the parked link session and the project's list are three views of one pull
+      // request, and one of them being stale is how a refreshed panel goes back to looking old the
+      // moment the user leaves and returns.
+      set((s) => ({
+        selectedPr: s.selectedPr?.id === prId ? pr : s.selectedPr,
+        linkPr: s.linkPr && s.linkPr.pr.id === prId ? { ...s.linkPr, pr } : s.linkPr,
+        linkPrHistory:
+          target.kind === "link"
+            ? s.linkPrHistory.map((e) => (e.url === target.url ? { ...e, pr } : e))
+            : s.linkPrHistory,
+        prsByProject:
+          target.kind === "project"
+            ? {
+                ...s.prsByProject,
+                [target.projectId]: (s.prsByProject[target.projectId] ?? []).map((p) => (p.id === prId ? pr : p)),
+              }
+            : s.prsByProject,
+      }));
+    } catch {
+      // Offline or a host hiccup: keep showing the last state known to be true.
     }
   },
 

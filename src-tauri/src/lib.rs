@@ -232,6 +232,7 @@ pub fn run() {
             commands::secrets_cmd::get_api_backup_passphrase,
             commands::secrets_cmd::delete_api_backup_passphrase,
             commands::claude_cmd::generate_commit_message,
+            commands::claude_cmd::draft_pr_comment_reply,
             commands::claude_cmd::list_ai_models,
             commands::claude_cmd::check_ai_provider,
             commands::ado_cmd::open_external_url,

@@ -673,6 +673,14 @@ async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Resu
     let ctx = ai_runs::current();
     let mut cancel = ctx.as_ref().and_then(|c| ai_runs::subscribe(&c.run_id));
 
+    // Said before anything is spawned, so a run that then takes two minutes has carried the name of
+    // what is taking them from its first second. This is the one place every engine passes through,
+    // which is what keeps the answer honest — it is the invocation itself, not what a settings
+    // screen elsewhere believes is configured.
+    if let Some(ctx) = &ctx {
+        ai_runs::emit_engine(ctx, engine.label(), inv.model);
+    }
+
     // HTTP engines don't spawn a process — `binary` is the base URL. Everything below (binary
     // resolution, PATH, stdin piping) is subprocess-only, so hand off before any of it. They get
     // no live output (a single request answers all at once) but they do get cancellation, by
@@ -969,6 +977,57 @@ pub async fn generate_commit_message(
     inv.model = model;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
+}
+
+/// How much of a conversation is worth sending to draft a reply to it. Comment threads are prose,
+/// not diffs — anything past this is a thread that has already said what it means several times.
+const MAX_THREAD_CHARS: usize = 12_000;
+
+/// The instructions behind "draft this reply with AI" on a pull-request comment.
+///
+/// Deliberately not a stored, user-editable template like the review/commit ones: what it produces
+/// is a first draft the user reads and edits in a textarea before anything is posted, so the place
+/// to shape the wording is the draft itself, not a settings screen.
+const DRAFT_REPLY_PROMPT: &str = "Eres la persona que está respondiendo un comentario de revisión \
+    en un pull request. Redacta ÚNICAMENTE el texto del comentario de respuesta.\n\n\
+    Reglas:\n\
+    - Escribe en el mismo idioma en que está la conversación.\n\
+    - Primera persona, tono profesional y directo, sin saludos ni despedidas.\n\
+    - Responde al punto concreto que se planteó. Si la INTENCIÓN indica que el cambio no se va a \
+      aplicar, explica el motivo con claridad y sin excusas vagas.\n\
+    - Breve: 1 a 3 frases. Markdown simple si ayuda (`código` en línea), nada de encabezados.\n\
+    - No inventes hechos sobre el código que no estén en la conversación o en la intención.\n\
+    - No agregues firmas, ni prefijos tipo \"Respuesta:\", ni comillas alrededor del texto.";
+
+/// Drafts a reply to one pull-request comment thread: the conversation so far plus, optionally, the
+/// gist of what the user wants to say ("no aplica, es intencional"). Text only — nothing is posted
+/// here, and nothing on disk is touched; the caller shows the draft for editing first.
+pub async fn draft_comment_reply(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    conversation: &str,
+    note: Option<&str>,
+) -> Result<String, String> {
+    if conversation.trim().is_empty() {
+        return Err("No hay conversación que responder".to_string());
+    }
+
+    let truncated: String = conversation.chars().take(MAX_THREAD_CHARS).collect();
+    let mut stdin_payload = format!("CONVERSACIÓN EN EL PULL REQUEST:\n{truncated}\n\n");
+    match note.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => stdin_payload.push_str(&format!("INTENCIÓN DE LA RESPUESTA:\n{n}\n")),
+        None => stdin_payload.push_str(
+            "INTENCIÓN DE LA RESPUESTA:\n(no se indicó; deduce del hilo la respuesta más razonable)\n",
+        ),
+    }
+
+    let mut inv = AiInvocation::new(DRAFT_REPLY_PROMPT, &stdin_payload);
+    inv.model = model;
+    let run = run(engine, binary, inv).await?;
+    // Some engines wrap prose in a fence when asked for "only the text" — the fence is never part
+    // of the comment the user meant to leave.
+    Ok(strip_code_fence(&run.text))
 }
 
 /// Drafts a pull-request description from the diff between two branches, with the active engine.

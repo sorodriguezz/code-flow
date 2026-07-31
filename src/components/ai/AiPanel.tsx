@@ -751,16 +751,54 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
     void loadThreads();
   }, [loadThreads]);
 
-  /** Closes a conversation on the host and drops it from the list — the host's own listing
-   * already excludes resolved threads, so keeping the card around would just be a row that
-   * reappears as gone on the next refresh. */
-  const resolveThread = async (threadId: number) => {
+  /** Answers a conversation on the host and closes it, then drops it from the list — the host's own
+   * listing already excludes resolved threads, so keeping the card around would just be a row that
+   * reappears as gone on the next refresh.
+   *
+   * Returns what each half managed to do, `null` when the call itself failed. Reply and close are
+   * separate host calls: GitHub takes a reply on a conversation-level comment it then refuses to
+   * resolve (only review threads can be resolved), and in that case the card has to stay — knowing
+   * the reply is already on the pull request, so a retry doesn't write it twice. */
+  const resolveThread = async (threadId: number, reply: { body: string | null; wontFix: boolean }) => {
     try {
-      await resolveCommentThread(target, pr.id, threadId);
-      setOpenThreads((threads) => threads.filter((thread) => thread.id !== threadId));
-      useToastStore.getState().pushToast(t("pr.threadResolved"), "success");
+      const outcome = await resolveCommentThread(target, pr.id, threadId, reply);
+      if (outcome.resolved) {
+        setOpenThreads((threads) => threads.filter((thread) => thread.id !== threadId));
+        useToastStore.getState().pushToast(t(outcome.replied ? "pr.threadRepliedAndResolved" : "pr.threadResolved"), "success");
+      } else {
+        pushErrorToast(
+          outcome.replied
+            ? t("pr.threadRepliedNotResolved", { error: outcome.error ?? "" })
+            : outcome.error ?? t("pr.threadNotResolved"),
+        );
+      }
+      return outcome;
     } catch (e) {
       pushErrorToast(String(e));
+      return null;
+    }
+  };
+
+  /**
+   * Everything this panel reads from the host, re-read at once: the pull request itself (state,
+   * title, head), the decision the signed-in user has on record, and the open conversation.
+   *
+   * The three are fetched together rather than behind three buttons because they are one question —
+   * "what does the PR look like right now" — and they go stale together. Notably the decision: a
+   * vote reset on the website used to keep the panel showing the buttons as spent until the PR was
+   * closed and reopened.
+   *
+   * Failures are each side's own business (all three are silent or toast on their own), so this
+   * only tracks that a refresh is in flight, to keep the button honest.
+   */
+  const refreshPr = usePrStore((s) => s.refreshPr);
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshAll = async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([refreshPr(target, pr.id), loadPrDecision(target, pr.id), loadThreads()]);
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -800,13 +838,27 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
               </div>
             )}
           </div>
-          <button
-            onClick={() => (linkOnly ? closeLinkPr() : selectPr(null))}
-            title={t("chat.backToChat")}
-            className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-          >
-            <X size={14} />
-          </button>
+          <div className="flex shrink-0 items-center gap-1">
+            {/* The pull request goes on living outside this panel: a vote is reset on the website,
+                a commit is pushed, someone comments. Until now the panel only read all of that when
+                it was opened, so the way to see it was to close the PR and open it again. This is
+                that, without the round trip. */}
+            <button
+              onClick={() => void refreshAll()}
+              disabled={refreshing}
+              title={t("pr.refreshAllHint")}
+              className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:opacity-50 dark:hover:bg-white/[0.08]"
+            >
+              <RefreshCw size={13} className={refreshing ? "animate-spin" : undefined} />
+            </button>
+            <button
+              onClick={() => (linkOnly ? closeLinkPr() : selectPr(null))}
+              title={t("chat.backToChat")}
+              className="text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            >
+              <X size={14} />
+            </button>
+          </div>
         </div>
 
         {/* Says which repository this PR belongs to — no project in the sidebar is naming it —
@@ -839,7 +891,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
                 projectId={projectId}
                 prSourceBranch={pr.source_branch}
                 resolutionKey={`pr:${pr.id}:thread:${thread.id}`}
-                onResolveThread={() => resolveThread(thread.id)}
+                onResolveThread={(reply) => resolveThread(thread.id, reply)}
               />
             ))}
           </div>
@@ -958,90 +1010,33 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
         )}
       </div>
 
-      {/* Footer laid out as stacked rows (PR decision → review options → primary actions) instead of
-          one packed strip: the panel can be as narrow as PANEL_MIN, and cramming the level selector,
-          the toggles and both call-to-actions into a single line wrapped their labels onto two lines,
-          which rendered as oversized buttons. Every label here stays one line and truncates. */}
-      <div className="@container shrink-0 space-y-2 border-t border-[var(--cf-border)] p-2.5">
+      {/* Footer laid out as two labelled blocks — *reviewing* the PR, then *deciding* it — instead
+          of one stack of rows. They were already separate jobs (one runs an agent and publishes
+          what it found, the other records a verdict on the host), but read as a single pile of
+          controls where the level selector, two checkboxes and five buttons all looked equally
+          related. Each block now reads action-row first, then the toggles that modify it.
+
+          Order is the order of the work: you review, you publish, and only then do you decide.
+
+          Rows stay stacked rather than packed into one strip because the panel can be as narrow as
+          PANEL_MIN, where a single line wrapped labels onto two and rendered oversized buttons.
+          Every label here stays on one line and truncates. */}
+      <div className="@container shrink-0 space-y-2.5 border-t border-[var(--cf-border)] p-2.5">
         {(prClosed || decision !== "none") && <PrDecisionState status={pr.status} decision={decision} />}
-        {!prClosed && decision !== "approved" && (
-          <div className="space-y-1.5">
-            <div className="flex items-center gap-1.5">
-              <PrActionButton
-                tone="success"
-                icon={ThumbsUp}
-                label={t("pr.approve")}
-                busy={prActionBusy === "approve"}
-                disabled={prActionBusy !== null}
-                onClick={() => doPrAction("approve")}
-              />
-              <PrActionButton
-                tone="warning"
-                icon={ThumbsDown}
-                // Already asked for changes: asking again says nothing new. Approving stays open,
-                // because approving once the author has pushed the fixes is the point of the flow.
-                label={t("pr.requestChanges")}
-                busy={prActionBusy === "request_changes"}
-                disabled={prActionBusy !== null || decision === "changes_requested"}
-                onClick={() => doPrAction("request_changes")}
-              />
-              <PrActionButton
-                tone="danger"
-                icon={Ban}
-                label={t("pr.close")}
-                busy={prActionBusy === "close"}
-                disabled={prActionBusy !== null}
-                onClick={() => doPrAction("close")}
-              />
-            </div>
-            {/* Said before the decision rather than after it: whichever of the three buttons above
-                is pressed also leaves the review's verdict on the PR — what was found, what got
-                fixed, and what is being accepted anyway. Only offered when there is a review to
-                summarise; a decision note with nothing in it is noise on someone else's PR. */}
-            {parsed && job && (
-              <label
-                className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
-                title={t("pr.commentOnDecisionHint")}
-              >
-                <Checkbox checked={commentOnDecision} onChange={setCommentOnDecision} />
-                {t("pr.commentOnDecision")}
-              </label>
-            )}
-          </div>
-        )}
-        {/* Everything below acts *on* the pull request — running a review of it, publishing to it.
-            A merged or closed PR is settled, so none of it is offered: the state chip above is the
-            whole footer. Its findings stay readable above, they just have nowhere left to go. */}
+        {/* Everything in this block acts *on* the pull request — running a review of it, publishing
+            to it. A merged or closed PR is settled, so none of it is offered: the state chip above
+            is the whole footer. Its findings stay readable above, they just have nowhere left to
+            go. */}
         {!prClosed && (
-          <>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+          <section className="space-y-1.5">
+            <FooterSectionLabel text={t("pr.sectionReview")} />
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+              {/* Named, because "Básico · Completo · Ultra" on its own says nothing about what the
+                  three words select. */}
+              <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{t("pr.levelLabel")}</span>
               <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={loading} />
               {/* Agents are picked per project; a link session has none to pick for. */}
               {projectId && <ChatAgentPicker projectId={projectId} />}
-              {reviewText && !loading && findings.length > 0 && (
-                <button
-                  // Built from what stands: a fix-pack is a work order for another agent, and
-                  // handing it a finding a human just rejected would have it "fix" a non-defect.
-                  onClick={() => activeParsed && copyFixpack(buildFixpack(activeParsed, pr.id))}
-                  title={t("pr.fixpackHint")}
-                  className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-                >
-                  {fixpackCopied ? <Check size={11} /> : <Copy size={11} />}
-                  {t("pr.fixpack")}
-                </button>
-              )}
-              {/* Offered for a clean run too, not just one with findings: a re-review that finds
-                  nothing left is exactly when the summary — what was covered, what got fixed — is
-                  the only thing worth publishing. */}
-              {reviewText && !loading && (
-                <label
-                  className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
-                  title={t("pr.postSummaryHint")}
-                >
-                  <Checkbox checked={postSummary} onChange={setPostSummary} />
-                  {t("pr.postSummary")}
-                </label>
-              )}
             </div>
             <div className="flex items-center gap-1.5">
               {reviewText && !loading && (
@@ -1073,10 +1068,93 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
                 <span className="truncate">{reviewLabel}</span>
               </button>
             </div>
-          </>
+            {/* Under the buttons they qualify: what publishing also carries, and the one thing here
+                that leaves the app rather than acting on the PR. Both only exist once a review has
+                actually produced something. */}
+            {reviewText && !loading && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                {/* Offered for a clean run too, not just one with findings: a re-review that finds
+                    nothing left is exactly when the summary — what was covered, what got fixed — is
+                    the only thing worth publishing. */}
+                <label
+                  className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
+                  title={t("pr.postSummaryHint")}
+                >
+                  <Checkbox checked={postSummary} onChange={setPostSummary} />
+                  {t("pr.postSummary")}
+                </label>
+                {findings.length > 0 && (
+                  <button
+                    // Built from what stands: a fix-pack is a work order for another agent, and
+                    // handing it a finding a human just rejected would have it "fix" a non-defect.
+                    onClick={() => activeParsed && copyFixpack(buildFixpack(activeParsed, pr.id))}
+                    title={t("pr.fixpackHint")}
+                    className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                  >
+                    {fixpackCopied ? <Check size={11} /> : <Copy size={11} />}
+                    {t("pr.fixpack")}
+                  </button>
+                )}
+              </div>
+            )}
+          </section>
+        )}
+        {!prClosed && decision !== "approved" && (
+          <section className="space-y-1.5 border-t border-[var(--cf-border)] pt-2.5">
+            <FooterSectionLabel text={t("pr.sectionDecision")} />
+            <div className="flex items-center gap-1.5">
+              <PrActionButton
+                tone="success"
+                icon={ThumbsUp}
+                label={t("pr.approve")}
+                busy={prActionBusy === "approve"}
+                disabled={prActionBusy !== null}
+                onClick={() => doPrAction("approve")}
+              />
+              <PrActionButton
+                tone="warning"
+                icon={ThumbsDown}
+                // Already asked for changes: asking again says nothing new. Approving stays open,
+                // because approving once the author has pushed the fixes is the point of the flow.
+                label={t("pr.requestChanges")}
+                busy={prActionBusy === "request_changes"}
+                disabled={prActionBusy !== null || decision === "changes_requested"}
+                onClick={() => doPrAction("request_changes")}
+              />
+              <PrActionButton
+                tone="danger"
+                icon={Ban}
+                label={t("pr.close")}
+                busy={prActionBusy === "close"}
+                disabled={prActionBusy !== null}
+                onClick={() => doPrAction("close")}
+              />
+            </div>
+            {/* Whichever of the three buttons above is pressed also leaves the review's verdict on
+                the PR — what was found, what got fixed, and what is being accepted anyway. Only
+                offered when there is a review to summarise; a decision note with nothing in it is
+                noise on someone else's PR. */}
+            {parsed && job && (
+              <label
+                className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]"
+                title={t("pr.commentOnDecisionHint")}
+              >
+                <Checkbox checked={commentOnDecision} onChange={setCommentOnDecision} />
+                {t("pr.commentOnDecision")}
+              </label>
+            )}
+          </section>
         )}
       </div>
     </div>
+  );
+}
+
+/** Names one block of the footer. Same treatment as the "open comments" heading in the panel body,
+ * so the two read as the same kind of divider rather than two different ideas of a section. */
+function FooterSectionLabel({ text }: { text: string }) {
+  return (
+    <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{text}</p>
   );
 }
 

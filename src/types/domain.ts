@@ -215,6 +215,16 @@ export interface DiscardOutcome {
   rule_added: boolean;
 }
 
+/** What closing a PR comment thread managed to do. Reply and close are two host calls and fail
+ * independently, so a thread that took the reply but refused to close comes back as
+ * `replied: true, resolved: false` with the reason — the card stays open and says so, rather than
+ * disappearing on a close that never happened. */
+export interface ThreadCloseOutcome {
+  replied: boolean;
+  resolved: boolean;
+  error: string | null;
+}
+
 /** Full content of one saved review run, for the in-app viewer / export. */
 export interface ReviewRunDetail {
   id: string;
