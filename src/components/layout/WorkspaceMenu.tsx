@@ -215,12 +215,13 @@ export function WorkspaceMenu() {
   }, [open, activeIndex]);
 
   const openMenu = () => {
-    const current = TOOLS.findIndex(
-      (tool) => tool.id === activeView && (tool.workspace ?? apiWorkspace) === apiWorkspace,
-    );
-    // -1 when there is nothing to land on, so the trigger doesn't point
-    // `aria-activedescendant` at a row that was never rendered.
-    setActiveIndex(TOOLS.length === 0 ? -1 : Math.max(current, 0));
+    // Opens with no cursor at all. `activeIndex` is the *keyboard* cursor and nothing else — which
+    // row you are on is already drawn by `isActive`, with its own accent rail and `aria-current`,
+    // so seeding this with the current view bought nothing and seeding it with 0 was worse: from a
+    // view that isn't one of these tools (the editor, the graph) `Math.max(-1, 0)` landed on the
+    // first row, and the menu opened with something looking hovered under a pointer that had never
+    // been near it. The first arrow key picks an end — see `step`.
+    setActiveIndex(-1);
     setOpen(true);
   };
 
@@ -235,7 +236,11 @@ export function WorkspaceMenu() {
 
   const step = (dir: 1 | -1) => {
     if (TOOLS.length === 0) return;
-    setActiveIndex((i) => (i + dir + TOOLS.length) % TOOLS.length);
+    setActiveIndex((i) =>
+      // From "no cursor", down enters at the top and up enters at the bottom, rather than both
+      // wrapping onto the first row.
+      i < 0 ? (dir === 1 ? 0 : TOOLS.length - 1) : (i + dir + TOOLS.length) % TOOLS.length,
+    );
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
@@ -363,7 +368,14 @@ export function WorkspaceMenu() {
                 </span>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+              {/* Clearing on the way *out of the list* rather than per row: between two rows the
+                  leave and the enter both fire, and resetting on each one would blink the highlight
+                  off and on again as the pointer crosses the gap. Out here it only fires when the
+                  pointer has actually left, which is what stops a row staying lit under nothing. */}
+              <div
+                onMouseLeave={() => setActiveIndex(-1)}
+                className="min-h-0 flex-1 overflow-y-auto p-1.5"
+              >
                 {TOOLS.length === 0 ? (
                   <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">
                     {t("tabbar.workspaceToolsEmpty")}

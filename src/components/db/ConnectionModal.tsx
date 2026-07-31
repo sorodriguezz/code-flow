@@ -1423,7 +1423,18 @@ function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
     { id: "url", label: t("db.mode.url"), icon: Link2 },
   ];
   return (
-    <div className="inline-flex gap-0.5 rounded-lg bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
+    // A segmented control is a recessed track with a raised thumb, and it only reads that way if
+    // the thumb is lighter than what surrounds it. This one painted the thumb `--cf-surface` — the
+    // dialog's *own* background — over a track lightened with `white/6%`. On the light theme that
+    // happens to work, because there the panel is the lightest surface there is. On the dark theme
+    // it inverts: the selected half comes out the same colour as the dialog behind it, sunk into a
+    // lighter track, so the option you had *not* picked was the one that looked picked.
+    //
+    // Both halves are now relative to the panel instead of to one theme: the track goes darker than
+    // it (`black/…` in both), the thumb goes to `--cf-surface-raised`, which is a step above the
+    // panel in either theme. The hairline is what carries the edge on dark, where a drop shadow
+    // over a dark track is invisible.
+    <div className="inline-flex gap-0.5 rounded-lg bg-black/[0.05] p-[3px] dark:bg-black/25">
       {entries.map((entry) => {
         const Icon = entry.icon;
         return (
@@ -1432,13 +1443,13 @@ function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
             type="button"
             onClick={() => onChange(entry.id)}
             aria-pressed={mode === entry.id}
-            className={`relative flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+            className={`flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
               mode === entry.id
-                ? "bg-[var(--cf-surface)] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
+                ? "bg-[var(--cf-surface-raised)] text-[var(--cf-text)] shadow-sm ring-1 ring-inset ring-[var(--cf-border)]"
                 : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
             }`}
           >
-            <Icon size={11} />
+            <Icon size={11} className="opacity-70" />
             {entry.label}
           </button>
         );

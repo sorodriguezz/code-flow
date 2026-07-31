@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink, Maximize2 } from "lucide-react";
 import {
-  CELL_PREVIEW_LIMIT,
   CellEditor,
   MIN_COLUMN_WIDTH,
   preview,
@@ -116,9 +115,12 @@ export function RecordGrid({
   const leadingGap = first * recordWidth;
 
   return (
+    // `isolate` for the same reason as in the row view: the pinned field column and the record
+    // headers are layered against each other, and that ordering has no business outranking the
+    // chrome around the panel.
     <div
       ref={scrollRef}
-      className="h-full min-h-0 overflow-auto"
+      className="isolate h-full min-h-0 overflow-auto"
       onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
       onPointerMove={sweep.move}
       onPointerUp={sweep.end}
@@ -268,7 +270,9 @@ export function RecordGrid({
                       >
                         {value === null ? "NULL" : preview(value)}
                       </span>
-                      {value !== null && value.length > CELL_PREVIEW_LIMIT && (
+                      {/* Offered on every value, for the reason spelled out in `ResultGrid`: the
+                          column's width decides what is readable, not the value's length. */}
+                      {value !== null && (
                         <button
                           onClick={() =>
                             openModal({

@@ -56,6 +56,7 @@ import {
   entryVisual,
   entryRunCount,
   entryIsGlobal,
+  entryIsRunning,
   findActiveEntryKey,
   jobPrUrl,
   type ActivityEntry,
@@ -66,7 +67,7 @@ import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
 import { usePrWatchStore, EMPTY_TRACKED, type TrackedPr } from "../../state/prWatchStore";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
-import { useChatStore, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
+import { useChatStore, liveSessionsOf, EMPTY_CHAT, type ChatMessage } from "../../state/chatStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { useResolutionsStore, EMPTY_RESOLUTIONS } from "../../state/resolutionsStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
@@ -265,7 +266,8 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
   const chatLoaded = useChatHistoryStore((s) => (projectId ? s.loaded[projectId] : true));
   const loadChatHistory = useChatHistoryStore((s) => s.load);
   const loadResolutions = useResolutionsStore((s) => s.load);
-  const activeSessionId = useChatStore((s) => (projectId ? s.byProject[projectId]?.conversationId : null) ?? null);
+  const activeSessionId = useChatStore((s) => (projectId ? s.activeByProject[projectId] : null) ?? null);
+  const byConversation = useChatStore((s) => s.byConversation);
   const switchTo = useChatStore((s) => s.switchTo);
   const [collapsed, setCollapsed] = useState(true);
   const [showModal, setShowModal] = useState(false);
@@ -287,7 +289,11 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
     () => (workspaceJobs.length === 0 ? projectJobs : [...projectJobs, ...workspaceJobs]),
     [projectJobs, workspaceJobs],
   );
-  const entries = useMemo(() => mergeActivityEntries(jobs, conversations), [jobs, conversations]);
+  const liveChats = useMemo(() => liveSessionsOf(byConversation, projectId), [byConversation, projectId]);
+  const entries = useMemo(
+    () => mergeActivityEntries(jobs, conversations, liveChats),
+    [jobs, conversations, liveChats],
+  );
   if (entries.length === 0) return null;
 
   const activeEntryKey = findActiveEntryKey(entries, {
@@ -301,7 +307,10 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
     activeSessionId,
   });
 
-  const runningCount = jobs.filter((j) => j.status === "running").length;
+  // Counted over entries rather than over jobs, so a chat waiting on an answer is included — it's
+  // a background run like any other, and the badge is what tells the user it's still alive after
+  // they've navigated away from it.
+  const runningCount = entries.filter(entryIsRunning).length;
   const topFive = entries.slice(0, 5);
 
   const openEntry = (entry: ActivityEntry) => {
@@ -756,6 +765,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
           <AiRunLog
             runId={job.id}
             running
+            startedAt={job.createdAt}
             expanded={logExpanded}
             onToggle={() => setLogExpanded((v) => !v)}
           />
@@ -1088,7 +1098,18 @@ function useCopy(): [boolean, (text: string) => void] {
   return [copied, copy];
 }
 
-const formatResponseTime = (ms: number) => (ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`);
+/** How long a turn took, in the largest unit that still reads as a duration. Past a minute the
+ * seconds count stops being one — an agentic turn can run for ten of them, and "616.7s" makes the
+ * reader do the division. Mirrors `formatElapsed` in `AiRunLog`, so the timer that ran during the
+ * turn and the stamp left behind afterwards agree on how to spell the same span. */
+const formatResponseTime = (ms: number) => {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const total = Math.round(ms / 1000);
+  if (total < 60) return `${(ms / 1000).toFixed(1)}s`;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  if (total < 3600) return `${Math.floor(total / 60)}:${pad(total % 60)}`;
+  return `${Math.floor(total / 3600)}:${pad(Math.floor((total % 3600) / 60))}:${pad(total % 60)}`;
+};
 
 /** The app's own language decides how timestamps read, not the OS locale — otherwise a chat in a
  * Spanish UI would print English dates. */
@@ -1234,9 +1255,10 @@ function ChatBubble({ message }: { message: ChatMessage }) {
 function ChatSection({ projectId }: { projectId: string }) {
   const t = useT();
   const locale = useLocale();
-  const chat = useChatStore((s) => s.byProject[projectId] ?? EMPTY_CHAT);
+  const activeId = useChatStore((s) => s.activeByProject[projectId] ?? null);
+  const chat = useChatStore((s) => (activeId ? s.byConversation[activeId] : undefined) ?? EMPTY_CHAT);
   const send = useChatStore((s) => s.send);
-  const clearChat = useChatStore((s) => s.clear);
+  const discardChat = useChatStore((s) => s.discard);
   const conversations = useChatHistoryStore((s) => s.byProject[projectId] ?? EMPTY_CONVERSATIONS);
   const chatLoaded = useChatHistoryStore((s) => s.loaded[projectId] ?? false);
   const [input, setInput] = useState("");
@@ -1251,18 +1273,20 @@ function ChatSection({ projectId }: { projectId: string }) {
   }, [chat.messages.length, chat.sending]);
 
   // Self-heal a chat whose conversation was deleted from history: once the persisted list is
-  // loaded and this chat's conversation is no longer in it, it's gone — reset the panel so a
-  // deleted chat can't keep showing (or get re-created on the next message). Keyed on
-  // `conversations` (not on `chat`) so it evaluates against the freshest list and never races a
-  // just-arrived reply whose conversation hasn't been reloaded into the list yet.
+  // loaded and this chat's conversation is no longer in it, it's gone — drop it so a deleted chat
+  // can't keep showing (or get re-created on the next message). Keyed on `conversations` (not on
+  // `chat`) so it evaluates against the freshest list and never races a just-arrived reply whose
+  // conversation hasn't been reloaded into the list yet.
+  //
+  // Only a *persisted* conversation is reconciled: one whose first turn is still running, or was
+  // stopped, has no row on disk by design and would otherwise be deleted out from under the user.
   useEffect(() => {
-    if (!chatLoaded) return;
-    const current = useChatStore.getState().byProject[projectId];
-    if (!current || current.sending || current.messages.length === 0) return;
-    if (!current.conversationId) return;
-    const stillExists = conversations.some((c) => c.session_id === current.conversationId);
-    if (!stillExists) clearChat(projectId);
-  }, [conversations, chatLoaded, clearChat, projectId]);
+    if (!chatLoaded || !activeId) return;
+    const current = useChatStore.getState().byConversation[activeId];
+    if (!current || current.sending || !current.persisted || current.messages.length === 0) return;
+    const stillExists = conversations.some((c) => c.session_id === activeId);
+    if (!stillExists) discardChat(activeId);
+  }, [conversations, chatLoaded, discardChat, activeId]);
 
   const submit = () => {
     if (!input.trim() || chat.sending) return;
@@ -1312,6 +1336,7 @@ function ChatSection({ projectId }: { projectId: string }) {
               <AiRunLog
                 runId={chat.runId}
                 running
+                startedAt={chat.runStartedAt}
                 expanded={logExpanded}
                 onToggle={() => setLogExpanded((v) => !v)}
               />
@@ -1385,9 +1410,10 @@ export function AiPanel() {
   // user isn't stuck hunting for the little × on the PR card (which only closed the PR, it didn't
   // start a new chat) to get back to open-ended chat.
   //
-  // None of it is destructive: a selected PR is still in the sidebar, and anything left undecided
-  // — link sessions included — is on the "waiting on you" list above Activity, which is where it
-  // stays until it is approved or closed.
+  // None of it is destructive: a selected PR is still in the sidebar, anything left undecided
+  // — link sessions included — is on the "waiting on you" list above Activity, and a chat that was
+  // mid-answer keeps answering in the background. `clear` only detaches the view; the conversation
+  // stays in Activity with its spinner and is one click away.
   const startNewChat = () => {
     if (!project) return;
     usePrStore.getState().selectPr(null);
@@ -1397,13 +1423,23 @@ export function AiPanel() {
   };
 
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
+  /**
+   * The easing that opens and closes this panel has to be off while it is being dragged.
+   *
+   * `animate` treats every width it is handed as a target to ease toward, and a drag hands it a new
+   * one on every pointer move — so the edge eased for 180ms toward a width the pointer had already
+   * left, and the panel swam after the cursor instead of tracking it. Zero duration while dragging
+   * makes the width land in the same frame the pointer moved; the transition is back for the open
+   * and close, which is the only place it was ever meant to apply.
+   */
+  const [resizing, setResizing] = useState(false);
 
   return (
     <motion.div
       initial={{ width: 0, opacity: 0 }}
       animate={{ width, opacity: 1 }}
       exit={{ width: 0, opacity: 0 }}
-      transition={{ duration: 0.18, ease: "easeOut" }}
+      transition={resizing ? { duration: 0 } : { duration: 0.18, ease: "easeOut" }}
       className="flex shrink-0 overflow-hidden"
     >
       <ResizeHandle
@@ -1414,10 +1450,13 @@ export function AiPanel() {
         invert
         onChange={(w) => setSize("aiPanelWidth", w)}
         onCommit={(w) => commitSize("aiPanelWidth", w)}
+        onDragChange={setResizing}
       />
       <aside
         style={{ width }}
-        className="flex shrink-0 flex-col overflow-hidden border-l border-[var(--cf-border)] bg-[var(--cf-surface)]"
+        // No `border-l`: the handle to its left is already the seam, and the border was a second
+        // line beside it — see the note in `TerminalDock`.
+        className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
       >
         <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3">
           <Sparkles size={13} className="text-[var(--cf-accent)]" />

@@ -72,7 +72,7 @@ export function PrCommentCard({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const { resolving, resolution, resolve, clearResolution, runId } = useResolveWithAi(
+  const { resolving, resolution, resolve, clearResolution, runId, runStartedAt } = useResolveWithAi(
     projectId,
     prSourceBranch,
     resolutionKey,
@@ -139,6 +139,7 @@ export function PrCommentCard({
             resolving={resolving}
             resolution={resolution}
             runId={runId}
+            runStartedAt={runStartedAt}
             onClick={() => void resolve(buildFixPrompt(thread))}
             onClear={clearResolution}
             trailing={

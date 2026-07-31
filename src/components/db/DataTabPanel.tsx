@@ -31,6 +31,7 @@ import {
   type DbDataTab,
 } from "../../state/dbStore";
 import { useDbModalStore } from "../../state/dbModalStore";
+import { useDbCommandStore } from "../../state/dbCommandStore";
 import { useToastStore } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -74,6 +75,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
   const openModal = useDbModalStore((s) => s.openDbModal);
   const store = useDbStore.getState();
   const [menu, setMenu] = useState<PanelMenu | null>(null);
+  const filterRef = useRef<HTMLInputElement>(null);
   /**
    * Which rows the gutter has selected, by index into the page.
    *
@@ -306,6 +308,23 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
     });
   };
 
+  // The keyboard routes to the three things this panel's toolbar and pager do. Every request is
+  // consumed, handled or not: leaving one pending would replay it the moment another tab mounts.
+  const request = useDbCommandStore((s) => s.request);
+  useEffect(() => {
+    if (!request) return;
+    useDbCommandStore.getState().consume();
+    if (request.command === "refresh") void reload();
+    else if (request.command === "apply") apply();
+    else if (request.command === "filter") {
+      filterRef.current?.focus();
+      filterRef.current?.select();
+    }
+    // `reload` and `apply` close over the tab, and re-running on every render would consume the
+    // request twice; the nonce is what makes a repeated command a new one.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request?.nonce]);
+
   const page = Math.floor(tab.offset / tab.limit) + 1;
   const lastPage = tab.total === null ? null : Math.max(1, Math.ceil(tab.total / tab.limit));
 
@@ -455,8 +474,8 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
         </p>
       )}
 
-      {/* Grid */}
-      <div className="relative min-h-0 flex-1">
+      {/* Grid. Isolated so the selection bar below floats over the grid and nothing else. */}
+      <div className="relative isolate min-h-0 flex-1">
         {tab.error ? (
           <div className="p-3">
             <p className="flex items-start gap-2 rounded-md border border-[var(--cf-danger)]/40 bg-[var(--cf-danger)]/[0.06] p-2 font-mono text-[12px] text-[var(--cf-danger)]">
@@ -612,6 +631,35 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           {formatCount(tab.limit)}
           <ChevronDown size={11} className="text-[var(--cf-text-muted)]" />
         </button>
+
+        <span className="mx-0.5 h-3.5 w-px shrink-0 bg-[var(--cf-border)]" />
+
+        {/* The filter sits down here rather than in the toolbar above. It belongs with the pager:
+            both narrow the same result set, and a predicate typed above the grid competed for the
+            eye with the connection and table it was already showing. It also costs no height here —
+            the pager's middle was empty — and it is the one control on this bar that should take
+            whatever width is left over, so it grows while everything else stays its own size. */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            // Applied on submit, not per keystroke: a half-written predicate would otherwise run —
+            // and fail — on every character.
+            store.updateData(tab.id, { filter: tab.filterDraft, offset: 0 });
+            void store.loadData(tab.id);
+          }}
+          className="flex min-w-[140px] flex-1 items-center gap-1"
+        >
+          <span className="shrink-0 text-[10px] uppercase tracking-wide">
+            {engine?.sql ? "WHERE" : t("db.filter")}
+          </span>
+          <input
+            ref={filterRef}
+            value={tab.filterDraft}
+            onChange={(e) => store.updateData(tab.id, { filterDraft: e.target.value })}
+            placeholder={engine?.sql ? t("db.wherePlaceholder") : t("db.filterPlaceholder")}
+            className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-[2px] font-mono text-[12px] text-[var(--cf-text)] outline-none placeholder:font-sans focus:border-[var(--cf-accent)]"
+          />
+        </form>
 
         <span className="ml-auto flex shrink-0 items-center gap-2 whitespace-nowrap tabular-nums">
           {tab.result && <span>{formatDuration(tab.result.duration_ms)}</span>}

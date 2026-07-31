@@ -88,11 +88,14 @@ function TreeRow({
   onContextMenu,
   leading,
   color,
+  title,
 }: {
   depth: number;
   icon: React.ReactNode;
   name: string;
   detail?: string;
+  /** Hover text for the whole row, for what is worth keeping but not worth a line of its own. */
+  title?: string;
   expandable: boolean;
   expanded: boolean;
   loading?: boolean;
@@ -107,6 +110,7 @@ function TreeRow({
     <div
       role="treeitem"
       aria-expanded={expandable ? expanded : undefined}
+      title={title}
       tabIndex={0}
       onClick={onToggle}
       onDoubleClick={onOpen}
@@ -195,11 +199,17 @@ function NodeSubtree({
 
   const store = useDbStore.getState();
   const isRelation = node.kind === "table" || node.kind === "view" || node.kind === "collection";
+  // Objects that are nothing but their definition. A routine has no rows and a sequence has one
+  // number, so "open" can't mean the data grid for them — which is why they used to mean nothing at
+  // all: no double-click, no menu, a name in the tree you could only look at.
+  const isDefinition = node.kind === "routine" || node.kind === "sequence";
 
   const openData = () => {
     if (!isRelation) return;
     store.openData(connectionId, nodeRef, node.name);
   };
+
+  const showDdl = () => void store.openDdl(connectionId, nodeRef, node.name);
 
   /**
    * Drops a generated statement into a new console.
@@ -224,11 +234,7 @@ function NodeSubtree({
   const menuItems: MenuItem[] = [];
   if (isRelation) {
     menuItems.push({ label: t("db.openData"), icon: Table2, onClick: openData });
-    menuItems.push({
-      label: t("db.showDdl"),
-      icon: FileCode2,
-      onClick: () => void store.openDdl(connectionId, nodeRef, node.name),
-    });
+    menuItems.push({ label: t("db.showDdl"), icon: FileCode2, onClick: showDdl });
     menuItems.push({
       label: t("db.selectRows"),
       icon: Play,
@@ -248,6 +254,9 @@ function NodeSubtree({
       icon: Wand2,
       onClick: () => setGenerateMenu(menu),
     });
+  }
+  if (isDefinition) {
+    menuItems.push({ label: t("db.showDdl"), icon: FileCode2, onClick: showDdl });
   }
   if (node.kind === "database" || node.kind === "schema") {
     menuItems.push({
@@ -351,8 +360,9 @@ function NodeSubtree({
         onToggle={() => {
           if (node.has_children) void store.toggleNode(connectionId, nodeRef, key);
           else if (isRelation) openData();
+          else if (isDefinition) showDdl();
         }}
-        onOpen={isRelation ? openData : undefined}
+        onOpen={isRelation ? openData : isDefinition ? showDdl : undefined}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
@@ -541,6 +551,11 @@ function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: 
         icon={<Database size={12} />}
         name={row.name}
         detail={undefined}
+        // Where it points, on hover rather than on a line of its own. A connection URL is long
+        // enough to wrap the sidebar and repeat under every connection, which crowded out the names
+        // — the thing you actually read the tree for. The row's own colour dot already says whether
+        // it is open, and the connection dialog says the rest in full.
+        title={describeConnection(row)}
         expandable
         expanded={expanded}
         loading={loading}
@@ -553,11 +568,6 @@ function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: 
         }}
         leading={<ConnectionDot kind={row.kind} connected={connected} />}
       />
-      {/* Where it points, always visible: the difference between staging and production is a
-          hostname, and it should never take a hover to see which one is open. */}
-      <p className="truncate pb-0.5 pl-[38px] pr-2 text-[11px] text-[var(--cf-text-muted)]">
-        {describeConnection(row)}
-      </p>
       {/* Saved consoles sit above the server's own tree: they are this workspace's work, and the
           reason to open a connection more often than the schema is. */}
       {expanded &&

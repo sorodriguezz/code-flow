@@ -4,12 +4,26 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronsDownUp,
+  ClipboardCopy,
   FilePlus,
   Folder,
+  FolderOpen,
   FolderPlus,
+  PenLine,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
-import { createDir, createFile, listDir, movePath } from "../../lib/tauri/commands";
+import {
+  createDir,
+  createFile,
+  deletePath,
+  listDir,
+  movePath,
+  renamePath,
+  revealInFileManager,
+} from "../../lib/tauri/commands";
+import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { confirmAction } from "../../state/confirmStore";
 import { SkeletonRows } from "../common/Skeleton";
 import type { FileEntry } from "../../types/domain";
 import { fileStatusColor, fileStatusLabelKey } from "../../lib/fileStatus";
@@ -28,6 +42,10 @@ function parentDir(path: string): string {
 }
 
 type DraftKind = "file" | "dir";
+
+/** The explorer actions a keybinding can ask for. They all act on the focused row, which is why
+ * they live here rather than in the shortcut registry: the registry has no view of the tree. */
+export type ExplorerCommand = "newFile" | "newFolder" | "rename" | "delete";
 
 /** An in-progress "new file"/"new folder" entry: the inline input VS Code shows inside the
  * target directory, rather than a modal. */
@@ -57,20 +75,42 @@ function ToolbarButton({
   );
 }
 
+/**
+ * The inline name input, used for all three of "new file", "new folder" and "rename" — they are
+ * the same gesture (type a name into the tree, Enter to commit, Escape to abandon) and differ only
+ * in what they are seeded with and what the Enter does.
+ */
 function DraftRow({
   kind,
   depth,
+  initial = "",
   onSubmit,
   onCancel,
 }: {
   kind: DraftKind;
   depth: number;
+  /** Pre-filled name. Set when renaming; empty when creating. */
+  initial?: string;
   onSubmit: (name: string) => void;
   onCancel: () => void;
 }) {
   const t = useT();
-  const [name, setName] = useState("");
+  const [name, setName] = useState(initial);
+  const inputRef = useRef<HTMLInputElement>(null);
   const { Icon: FileIcon, color } = fileIconFor(name || "file.txt");
+
+  // Renaming opens with the *stem* selected rather than the whole name: the extension is almost
+  // never the part being changed, and having to un-select it before typing is the difference
+  // between a rename and a retype. Only on mount — re-selecting on every keystroke would fight
+  // the caret.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el || !initial) return;
+    const dot = initial.lastIndexOf(".");
+    if (kind === "file" && dot > 0) el.setSelectionRange(0, dot);
+    else el.select();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div
@@ -84,6 +124,7 @@ function DraftRow({
         <FileIcon size={13} className="shrink-0" style={{ color }} />
       )}
       <input
+        ref={inputRef}
         autoFocus
         value={name}
         placeholder={t(kind === "dir" ? "editor.newFolderPlaceholder" : "editor.newFilePlaceholder")}
@@ -114,11 +155,15 @@ function TreeNode({
   expanded,
   childrenByDir,
   draft,
+  renaming,
   onToggleDir,
   onSelectFile,
   onOpenFile,
   onSubmitDraft,
   onCancelDraft,
+  onSubmitRename,
+  onCancelRename,
+  onContextMenu,
   onBeginDrag,
   suppressClick,
   changedPaths,
@@ -133,11 +178,16 @@ function TreeNode({
   /** Cached `listDir` results, keyed by directory ("" = repo root). */
   childrenByDir: Map<string, FileEntry[]>;
   draft: Draft | null;
+  /** The path being renamed in place, if it's this one. */
+  renaming: string | null;
   onToggleDir: (path: string) => void;
   onSelectFile: (path: string) => void;
   onOpenFile?: (path: string) => void;
   onSubmitDraft: (name: string) => void;
   onCancelDraft: () => void;
+  onSubmitRename: (name: string) => void;
+  onCancelRename: () => void;
+  onContextMenu: (e: React.MouseEvent, entry: FileEntry) => void;
   /** Arms a possible move — the row only becomes a drag once the pointer travels far enough. */
   onBeginDrag: (e: React.PointerEvent<HTMLElement>, entry: FileEntry) => void;
   /** True once, right after a drag, so the trailing click doesn't also select the row. */
@@ -169,6 +219,20 @@ function TreeNode({
   const { Icon: FileIcon, color: iconColor } = fileIconFor(entry.path);
   const draftHere = draft && draft.parent === entry.path ? draft : null;
 
+  // Renaming replaces the row rather than floating over it, so the name stays where the eye
+  // already is and the tree doesn't reflow around a dialog.
+  if (renaming === entry.path) {
+    return (
+      <DraftRow
+        kind={entry.is_dir ? "dir" : "file"}
+        depth={depth}
+        initial={entry.name}
+        onSubmit={onSubmitRename}
+        onCancel={onCancelRename}
+      />
+    );
+  }
+
   return (
     <div>
       <button
@@ -180,6 +244,7 @@ function TreeNode({
         // See the same call in `EditorTabs`: stops the press from starting a text selection,
         // while leaving click and double-click intact.
         onMouseDown={(e) => e.preventDefault()}
+        onContextMenu={(e) => onContextMenu(e, entry)}
         onClick={() => {
           // A drag ends with a click on the row it started from; the tree must not also treat
           // that as a selection.
@@ -250,11 +315,15 @@ function TreeNode({
               expanded={expanded}
               childrenByDir={childrenByDir}
               draft={draft}
+              renaming={renaming}
               onToggleDir={onToggleDir}
               onSelectFile={onSelectFile}
               onOpenFile={onOpenFile}
               onSubmitDraft={onSubmitDraft}
               onCancelDraft={onCancelDraft}
+              onSubmitRename={onSubmitRename}
+              onCancelRename={onCancelRename}
+              onContextMenu={onContextMenu}
               onBeginDrag={onBeginDrag}
               suppressClick={suppressClick}
               changedPaths={changedPaths}
@@ -277,6 +346,8 @@ export function FileTree({
   onSelectFile,
   onOpenFile,
   onPathMoved,
+  onPathRemoved,
+  command,
   changedPaths,
 }: {
   repoPath: string;
@@ -288,6 +359,12 @@ export function FileTree({
   /** A file or folder was moved by dragging. The editor uses this to re-point any tab that was
    * showing it, instead of leaving a tab aimed at a path that no longer exists. */
   onPathMoved?: (from: string, to: string) => void;
+  /** A file or folder is gone from disk. The editor closes any tab that was showing it, rather
+   * than leaving one aimed at a path that will fail the next time it's read. */
+  onPathRemoved?: (path: string) => void;
+  /** A keybinding asking for one of the explorer's actions, forwarded by `EditorView`. The nonce
+   * is what lets the same key fire twice in a row — see `editorCommandStore`. */
+  command?: { command: ExplorerCommand; nonce: number } | null;
   changedPaths: Map<string, string>;
 }) {
   const t = useT();
@@ -298,7 +375,14 @@ export function FileTree({
   // The clicked row, which is what decides where a new file/folder lands, mirroring VS Code:
   // inside the clicked directory, or alongside the clicked file, or at the root.
   const [focus, setFocus] = useState<{ path: string; isDir: boolean }>({ path: "", isDir: true });
+  /** `t` behind a ref, so the callbacks that only *read* a string when they run don't have to
+   * re-create on every language render. */
+  const tRef = useRef(t);
+  tRef.current = t;
   const [draft, setDraft] = useState<Draft | null>(null);
+  /** The repo-relative path whose row is currently an input, if any. */
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; entry: FileEntry | null } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const childrenRef = useRef(childrenByDir);
   // Listings are async, so a switch to another project can land while one is in flight —
@@ -325,6 +409,8 @@ export function FileTree({
     setExpanded(new Set());
     setFocus({ path: "", isDir: true });
     setDraft(null);
+    setRenaming(null);
+    setMenu(null);
     void listDir(repoPath).then((entries) => {
       if (!cancelled) setChildrenByDir(new Map([["", entries]]));
     });
@@ -421,6 +507,144 @@ export function FileTree({
   );
 
   const cancelDraft = useCallback(() => setDraft(null), []);
+
+  /** Renaming the focused row. A folder can be renamed too; only the repo root can't. */
+  const startRename = useCallback(() => {
+    if (!focus.path) return;
+    setDraft(null);
+    setRenaming(focus.path);
+  }, [focus.path]);
+
+  const submitRename = useCallback(
+    async (name: string) => {
+      const from = renaming;
+      if (!from) return;
+      const trimmed = name.trim();
+      if (!trimmed || trimmed === from.split("/").pop()) {
+        setRenaming(null);
+        return;
+      }
+      try {
+        const to = await renamePath(repoPath, from, trimmed);
+        setRenaming(null);
+        await loadDir(parentDir(from));
+        void useRepoStore.getState().refreshStatus();
+        // A renamed folder takes every open file under it with it, which is why the editor is told
+        // the prefix rather than each path — see `handlePathMoved`.
+        onPathMoved?.(from, to);
+        setFocus({ path: to, isDir: expanded.has(from) || childrenRef.current.has(from) });
+      } catch (e) {
+        // Left open on failure, the same as a new-file name that collided: the name is right there
+        // to be corrected.
+        pushErrorToast(String(e));
+      }
+    },
+    [renaming, repoPath, loadDir, onPathMoved, expanded],
+  );
+
+  const cancelRename = useCallback(() => setRenaming(null), []);
+
+  /**
+   * Deleting the focused row.
+   *
+   * Confirmed first and then sent to the OS trash rather than unlinked — see `fsops::delete_path`.
+   * The confirm names what is going and says where it goes, because "Delete" on a folder in a tree
+   * is one click away from being the wrong folder.
+   */
+  const deleteFocused = useCallback(async () => {
+    const target = focus.path;
+    if (!target) return;
+    const name = target.split("/").pop() ?? target;
+    if (!(await confirmAction(tRef.current("editor.deleteConfirm", { name })))) return;
+    try {
+      await deletePath(repoPath, target);
+    } catch (e) {
+      pushErrorToast(String(e));
+      return;
+    }
+    const parent = parentDir(target);
+    setFocus({ path: parent, isDir: true });
+    setExpanded((prev) => {
+      // A deleted folder leaves its own key and its descendants' behind in the expanded set,
+      // which would re-list paths that no longer exist on the next refresh.
+      const next = new Set([...prev].filter((p) => p !== target && !p.startsWith(`${target}/`)));
+      return next;
+    });
+    await loadDir(parent);
+    void useRepoStore.getState().refreshStatus();
+    onPathRemoved?.(target);
+  }, [focus.path, repoPath, loadDir, onPathRemoved]);
+
+  // The menu is built once per open and its items are closures; reading the actions through refs
+  // keeps a click on "Delete" running against the *current* focus rather than whatever it was when
+  // the menu was assembled.
+  const startDraftRef = useRef(startDraft);
+  startDraftRef.current = startDraft;
+  const deleteFocusedRef = useRef(deleteFocused);
+  deleteFocusedRef.current = deleteFocused;
+
+  const copyToClipboard = useCallback((text: string) => {
+    void navigator.clipboard.writeText(text).catch((e) => pushErrorToast(String(e)));
+  }, []);
+
+  /** Opens the containing folder in Finder/Explorer. For a file that means its parent: the OS
+   * "open" of a *file* launches whatever app owns it, which is a different action entirely. */
+  const revealInOs = useCallback(
+    (entry: FileEntry | null) => {
+      const rel = entry ? (entry.is_dir ? entry.path : parentDir(entry.path)) : "";
+      void revealInFileManager(rel ? `${repoPath}/${rel}` : repoPath).catch((e) =>
+        pushErrorToast(String(e)),
+      );
+    },
+    [repoPath],
+  );
+
+  const openMenu = useCallback((e: React.MouseEvent, entry: FileEntry | null) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Right-clicking *is* a selection: every item in the menu acts on the focused row, so the row
+    // under the pointer has to become that row before the menu opens.
+    setFocus(entry ? { path: entry.path, isDir: entry.is_dir } : { path: "", isDir: true });
+    setMenu({ x: e.clientX, y: e.clientY, entry });
+  }, []);
+
+  const menuItems = useCallback(
+    (entry: FileEntry | null): MenuItem[] => {
+      const items: MenuItem[] = [
+        { label: t("editor.newFile"), icon: FilePlus, onClick: () => startDraftRef.current("file") },
+        { label: t("editor.newFolder"), icon: FolderPlus, onClick: () => startDraftRef.current("dir") },
+      ];
+      if (entry) {
+        items.push(
+          { label: t("editor.rename"), icon: PenLine, separated: true, onClick: () => setRenaming(entry.path) },
+          {
+            label: t("editor.delete"),
+            icon: Trash2,
+            danger: true,
+            onClick: () => void deleteFocusedRef.current(),
+          },
+        );
+      }
+      items.push({
+        label: t("sidebar.revealInFileManager"),
+        icon: FolderOpen,
+        separated: true,
+        onClick: () => revealInOs(entry),
+      });
+      if (entry) {
+        items.push(
+          {
+            label: t("editor.copyPath"),
+            icon: ClipboardCopy,
+            onClick: () => copyToClipboard(`${repoPath}/${entry.path}`),
+          },
+          { label: t("editor.copyRelativePath"), icon: ClipboardCopy, onClick: () => copyToClipboard(entry.path) },
+        );
+      }
+      return items;
+    },
+    [t, revealInOs, copyToClipboard, repoPath],
+  );
 
   const handleSelectFile = useCallback(
     (path: string) => {
@@ -523,6 +747,36 @@ export function FileTree({
     return true;
   }, []);
 
+  /**
+   * Keybindings, arriving as requests from `EditorView`.
+   *
+   * Deliberately the same four actions the context menu offers and no more: a shortcut for
+   * "copy relative path" is a shortcut nobody remembers, while new/rename/delete are the ones you
+   * reach for mid-flow with a hand already on the keyboard.
+   */
+  const startRenameRef = useRef(startRename);
+  startRenameRef.current = startRename;
+
+  const commandNonce = useRef(-1);
+  useEffect(() => {
+    if (!command || command.nonce === commandNonce.current) return;
+    commandNonce.current = command.nonce;
+    switch (command.command) {
+      case "newFile":
+        startDraftRef.current("file");
+        break;
+      case "newFolder":
+        startDraftRef.current("dir");
+        break;
+      case "rename":
+        startRenameRef.current();
+        break;
+      case "delete":
+        void deleteFocusedRef.current();
+        break;
+    }
+  }, [command]);
+
   const rootEntries = childrenByDir.get("") ?? null;
 
   return (
@@ -551,6 +805,11 @@ export function FileTree({
         onClick={(e) => {
           if (e.target === e.currentTarget) setFocus({ path: "", isDir: true });
         }}
+        // Right-clicking the empty space below the tree is the root's menu — the only way to reach
+        // "new file at the top level" once a folder deep in the tree has the focus.
+        onContextMenu={(e) => {
+          if (e.target === e.currentTarget) openMenu(e, null);
+        }}
         // Dropping on that same empty space moves to the repo root.
         className={`min-h-0 flex-1 overflow-auto py-1 ${
           treeOverDir === "" ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
@@ -573,11 +832,15 @@ export function FileTree({
                 expanded={expanded}
                 childrenByDir={childrenByDir}
                 draft={draft}
+                renaming={renaming}
                 onToggleDir={toggleDir}
                 onSelectFile={handleSelectFile}
                 onOpenFile={onOpenFile}
                 onSubmitDraft={submitDraft}
                 onCancelDraft={cancelDraft}
+                onSubmitRename={submitRename}
+                onCancelRename={cancelRename}
+                onContextMenu={openMenu}
                 onBeginDrag={beginDrag}
                 suppressClick={takeSuppressedClick}
                 changedPaths={changedPaths}
@@ -601,6 +864,10 @@ export function FileTree({
           </div>,
           document.body,
         )}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.entry)} onClose={() => setMenu(null)} />
+      )}
     </div>
   );
 }

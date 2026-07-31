@@ -10,23 +10,50 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { Job } from "../state/jobsStore";
+import type { ChatSession } from "../state/chatStore";
 import type { ChatConversationSummary } from "../types/domain";
 
 /** One row in the unified "Activity" list — one *activity*: a chat conversation, or a background
  * job that may collapse several runs of the same thing (`runs`, newest first; `job` is the
  * representative latest run). See [`mergeActivityEntries`]. Because a row owns *all* its runs,
- * deleting it can remove the whole thing + history in one go, not one run at a time. */
+ * deleting it can remove the whole thing + history in one go, not one run at a time.
+ *
+ * A chat row carries its `live` session when it has one — the in-memory conversation, which is
+ * the only thing that knows a turn is currently in flight. The backend writes a conversation's
+ * row when a turn *lands*, so without this a chat mid-answer had nothing in Activity at all. */
 export type ActivityEntry =
   | { type: "job"; job: Job; runs: Job[] }
-  | { type: "chat"; conv: ChatConversationSummary };
+  | { type: "chat"; conv: ChatConversationSummary; live: ChatSession | null };
+
+/** Turns a conversation that exists only in memory into a row Activity can render, so a chat is
+ * listed from its first question rather than from its first answer. */
+function summaryOfLive(session: ChatSession): ChatConversationSummary {
+  return {
+    session_id: session.conversationId,
+    project_id: session.projectId,
+    title: session.title,
+    created_at: new Date(session.createdAt).toISOString(),
+    updated_at: new Date(session.updatedAt).toISOString(),
+    turn_count: session.messages.filter((m) => m.role === "user").length,
+  };
+}
 
 /** Collapses everything that happened to the *same thing* into one row: a PR's reviews **and** the
  * decisions taken on it (approve / request changes / close) become one "#3 Tests" row, and every
  * `analyze-changes` run of the project becomes one "pre-commit" row — instead of N rows that read
  * as a bug. The row carries all of them (newest first) so the trash wipes the whole history at
  * once; the representative `job` is the newest, which is why a closed PR's row reads "#3 Tests ·
- * Closed". Chats are one activity each already. */
-export function mergeActivityEntries(jobs: Job[], conversations: ChatConversationSummary[]): ActivityEntry[] {
+ * Closed". Chats are one activity each already.
+ *
+ * `liveChats` are the conversations still in memory this session. One that also has a persisted
+ * row is attached to it (same activity, seen from two sides — the row supplies the title the user
+ * may have renamed, the session supplies whether it is running); one with no row yet gets a
+ * synthesized summary so it is listed from the moment its first question is asked. */
+export function mergeActivityEntries(
+  jobs: Job[],
+  conversations: ChatConversationSummary[],
+  liveChats: ChatSession[] = [],
+): ActivityEntry[] {
   const prRuns = new Map<string | number, Job[]>();
   const analyzeRuns: Job[] = [];
   const standalone: Job[] = [];
@@ -58,10 +85,20 @@ export function mergeActivityEntries(jobs: Job[], conversations: ChatConversatio
     jobEntries.push({ type: "job", job: sorted[0], runs: sorted });
   }
 
-  const entries: ActivityEntry[] = [
-    ...jobEntries,
-    ...conversations.map((conv): ActivityEntry => ({ type: "chat", conv })),
-  ];
+  const liveById = new Map(liveChats.map((s) => [s.conversationId, s]));
+  const chatEntries: ActivityEntry[] = conversations.map((conv): ActivityEntry => {
+    const live = liveById.get(conv.session_id) ?? null;
+    liveById.delete(conv.session_id);
+    return { type: "chat", conv, live };
+  });
+  // Whatever is left has no row on disk yet: a conversation whose first turn is still running, or
+  // one the user stopped. An empty one (opened but never asked anything) isn't an activity.
+  for (const session of liveById.values()) {
+    if (session.messages.length === 0) continue;
+    chatEntries.push({ type: "chat", conv: summaryOfLive(session), live: session });
+  }
+
+  const entries: ActivityEntry[] = [...jobEntries, ...chatEntries];
   return entries.sort((a, b) => entryTimestamp(b) - entryTimestamp(a));
 }
 
@@ -89,7 +126,16 @@ export function entryRunCount(entry: ActivityEntry): number {
 }
 
 export function entryTimestamp(entry: ActivityEntry): number {
-  return entry.type === "job" ? entry.job.createdAt : new Date(entry.conv.updated_at).getTime();
+  if (entry.type === "job") return entry.job.createdAt;
+  // The live session is ahead of the persisted row while a turn is in flight — the row is only
+  // rewritten once the answer lands, and a chat you just asked something belongs at the top now.
+  return entry.live ? entry.live.updatedAt : new Date(entry.conv.updated_at).getTime();
+}
+
+/** Whether this activity is working right now — a job mid-run or a chat mid-answer. What the
+ * "running" badge counts, and what makes leaving the row safe to do. */
+export function entryIsRunning(entry: ActivityEntry): boolean {
+  return entry.type === "job" ? entry.job.status === "running" : (entry.live?.sending ?? false);
 }
 
 export function entryKey(entry: ActivityEntry): string {
@@ -107,7 +153,11 @@ export function entryTitle(entry: ActivityEntry): string {
  * checkmark, indistinguishable from each other in the list. */
 export function entryVisual(entry: ActivityEntry): { icon: LucideIcon; color: string; spinning: boolean } {
   if (entry.type === "chat") {
-    return { icon: MessageSquare, color: "var(--cf-text-muted)", spinning: false };
+    // A chat mid-answer gets the same spinner a running job does — it's the one signal that says
+    // "this is still going, you can leave it and come back".
+    return entry.live?.sending
+      ? { icon: Loader2, color: "var(--cf-accent)", spinning: true }
+      : { icon: MessageSquare, color: "var(--cf-text-muted)", spinning: false };
   }
   const { job } = entry;
   if (job.status === "running") return { icon: Loader2, color: "var(--cf-accent)", spinning: true };

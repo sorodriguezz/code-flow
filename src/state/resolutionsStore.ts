@@ -13,12 +13,34 @@ export interface ResolutionRecord {
 
 type ProjectResolutions = Record<string, ResolutionRecord>;
 
+/** A fix that is being applied right now. Deliberately *not* persisted: the CLI dies with the app,
+ * so a record of it on disk would come back as a spinner that never stops. */
+export interface RunningResolution {
+  runId: string;
+  startedAt: number;
+}
+
+/** Identity of an in-flight fix — the same `projectId` + `resolutionKey` pair its result is filed
+ * under, so the card finds its own run again after being unmounted and remounted. */
+export function resolutionRunKey(projectId: string, key: string): string {
+  return `${projectId}::${key}`;
+}
+
 interface ResolutionsState {
   /** `byProject[projectId][resolutionKey]` — the key is a stable, caller-chosen id for the
    * finding/comment (see the `resolutionKey` props threaded through `FindingCard` /
    * `PrCommentCard`), so the same finding maps to the same record across reloads. */
   byProject: Record<string, ProjectResolutions>;
   loaded: Record<string, boolean>;
+  /** Fixes currently being applied, keyed by [`resolutionRunKey`].
+   *
+   * This lives here rather than in the card because a fix writes to the working tree and takes as
+   * long as it takes: held in component state, leaving the PR (or the panel) made the card forget
+   * it was running, so it came back looking idle — no spinner, no stop button — while the model
+   * was still editing files. */
+  running: Record<string, RunningResolution>;
+  startRun: (runKey: string, run: RunningResolution) => void;
+  finishRun: (runKey: string) => void;
   /** Hydrates a project's saved resolutions from the settings KV store. Runs once per project per
    * session; in-memory records (a resolution just made this session) win over the disk copy. */
   load: (projectId: string) => Promise<void>;
@@ -41,6 +63,16 @@ function persist(projectId: string, map: ProjectResolutions) {
 export const useResolutionsStore = create<ResolutionsState>((set, get) => ({
   byProject: {},
   loaded: {},
+  running: {},
+
+  startRun: (runKey, run) => set((s) => ({ running: { ...s.running, [runKey]: run } })),
+
+  finishRun: (runKey) =>
+    set((s) => {
+      if (!s.running[runKey]) return s;
+      const { [runKey]: _done, ...rest } = s.running;
+      return { running: rest };
+    }),
 
   load: async (projectId) => {
     if (get().loaded[projectId]) return;

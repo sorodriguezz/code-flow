@@ -21,7 +21,13 @@ export type EditorCommand =
   | "debug"
   | "bookmarkToggle"
   | "splitRight"
-  | "codeSnap";
+  | "codeSnap"
+  // The explorer's own four. They act on whichever row the tree has focused, so `EditorView` does
+  // nothing with them but show the explorer and hand them down to `FileTree`.
+  | "newFile"
+  | "newFolder"
+  | "renamePath"
+  | "deletePath";
 
 /**
  * Commands worth switching to the Editor for.
@@ -38,6 +44,11 @@ const REVEALS_EDITOR = new Set<EditorCommand>([
   "anchors",
   "bookmarks",
   "debug",
+  // Creating a file is a way of going to the editor in exactly the way opening a panel is. Rename
+  // and delete are not: they act on the explorer's focused row, and firing them from the graph
+  // would be a destructive action aimed at a row nobody is looking at.
+  "newFile",
+  "newFolder",
 ]);
 
 interface EditorCommandState {

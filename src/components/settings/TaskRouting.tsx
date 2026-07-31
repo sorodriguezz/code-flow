@@ -109,7 +109,8 @@ export function TaskRouting() {
     <div className="space-y-3.5">
       {AI_TASKS.map((task) => {
         const provider = effectiveProvider(task.key);
-        const inherited = !taskProviders[task.key]?.trim();
+        const selected = taskProviders[task.key]?.trim() ?? "";
+        const inherited = !selected;
         // A task that needs tool use can't run on a local model — including when it inherits a
         // default that happens to be one, which the row has to call out rather than silently fail.
         const broken = task.agenticOnly && !isAgenticProvider(provider);
@@ -127,20 +128,31 @@ export function TaskRouting() {
                 <Select
                   size="sm"
                   ariaLabel={t("settings.taskProviderLabel")}
-                  value={taskProviders[task.key]?.trim() ?? ""}
+                  value={selected}
                   onChange={(v) => void setTaskProvider(task.key, v)}
                   options={[
                     { value: "", label: t("settings.taskInherit", { provider: providerLabel(defaultProvider) }) },
-                    // Providers that aren't installed stay listed but disabled — so it's clear they
-                    // exist and what's missing, rather than silently vanishing from the list.
+                    // Only what can actually run the task. This list used to keep every provider and
+                    // grey out the ones that aren't installed, which made it half menu and half
+                    // catalogue: "what is available to install" is the Providers tab's job, and it
+                    // says so there with the reason and the fix. Here they were rows you could
+                    // neither pick nor act on, between the ones you could.
+                    //
+                    // The exception is a provider this task is *already* set to. Dropping that one
+                    // would leave the select showing a value it doesn't list — the row would read as
+                    // inheriting when it isn't — so a broken assignment stays visible, and stays
+                    // labelled with why, until it's changed.
+                    //
+                    // A provider that hasn't been probed yet is `undefined` rather than `false`, so
+                    // nothing disappears while the statuses are still coming in.
                     ...AI_PROVIDERS.filter((p) => p.available)
                       .filter((p) => !task.agenticOnly || isAgenticProvider(p.id))
+                      .filter((p) => statuses[p.id]?.available !== false || p.id === selected)
                       .map((p) => {
                         const missing = statuses[p.id]?.available === false;
                         return {
                           value: p.id,
                           label: missing ? `${providerLabel(p.id)} — ${t("settings.providerMissing")}` : providerLabel(p.id),
-                          disabled: missing,
                         };
                       }),
                   ]}

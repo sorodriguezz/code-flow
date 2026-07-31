@@ -14,6 +14,7 @@ mod codex;
 mod gdrive;
 mod gemini;
 mod git;
+mod grok;
 mod github;
 mod ollama;
 mod openai;
@@ -281,6 +282,8 @@ pub fn run() {
             commands::fs_cmd::move_path,
             commands::fs_cmd::create_dir,
             commands::fs_cmd::create_file,
+            commands::fs_cmd::rename_path,
+            commands::fs_cmd::delete_path,
             commands::fs_cmd::open_in_default_app,
             commands::fs_cmd::reveal_in_file_manager,
             commands::fs_cmd::open_in_vscode,

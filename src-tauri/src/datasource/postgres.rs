@@ -772,6 +772,8 @@ impl PgSession {
         // are filled in from the catalog — the same walk the explorer does.
         if let Ok(columns) = self.columns(&request.node).await {
             annotate_types(&mut result, &columns);
+            // Needs the types, so it goes after the annotation — never before it.
+            spell_out_booleans(&mut result);
         }
         Ok(result)
     }
@@ -853,6 +855,61 @@ impl PgSession {
                 .await
                 .map(|v| v.unwrap_or_default())
             }
+            // Without an arm of its own a sequence fell through to the table branch, which asked
+            // for columns it doesn't have and produced an empty `CREATE TABLE`. Everything that
+            // defines one is in `pg_sequence`, plus the column it was created for — which for the
+            // `*_id_seq` that fill this folder is the only thing that tells them apart.
+            DbNodeKind::Sequence => {
+                let rows = self
+                    .text_rows(&format!(
+                        "SELECT format_type(q.seqtypid, NULL), q.seqstart::text, \
+                                q.seqincrement::text, q.seqmin::text, q.seqmax::text, \
+                                q.seqcache::text, q.seqcycle::text, COALESCE(owner.owned_by, '') \
+                         FROM pg_sequence q \
+                         JOIN pg_class c ON c.oid = q.seqrelid \
+                         JOIN pg_namespace n ON n.oid = c.relnamespace \
+                         LEFT JOIN LATERAL ( \
+                           SELECT format('%I.%I', t.relname, a.attname) AS owned_by \
+                           FROM pg_depend d \
+                           JOIN pg_class t ON t.oid = d.refobjid \
+                           JOIN pg_attribute a \
+                             ON a.attrelid = d.refobjid AND a.attnum = d.refobjsubid \
+                           WHERE d.objid = c.oid AND d.classid = 'pg_class'::regclass \
+                             AND d.refclassid = 'pg_class'::regclass AND d.deptype = 'a' \
+                           LIMIT 1 \
+                         ) owner ON true \
+                         WHERE n.nspname = {} AND c.relname = {}",
+                        quote_literal(Some(schema))?,
+                        quote_literal(Some(name))?
+                    ))
+                    .await?;
+                let row = rows
+                    .first()
+                    .ok_or_else(|| format!("{schema}.{name} is not a sequence any more."))?;
+                let qualified =
+                    format!("{}.{}", quote_ident(schema, DIALECT), quote_ident(name, DIALECT));
+                let mut ddl = format!(
+                    "CREATE SEQUENCE {qualified}\n    AS {}\n    START WITH {}\n    \
+                     INCREMENT BY {}\n    MINVALUE {}\n    MAXVALUE {}\n    CACHE {}\n    {};",
+                    cell(row, 0),
+                    cell(row, 1),
+                    cell(row, 2),
+                    cell(row, 3),
+                    cell(row, 4),
+                    cell(row, 5),
+                    // `boolean::text` is `true`/`false`, not the `t`/`f` the wire's text format
+                    // would have given had the cast not already made it a string.
+                    if cell(row, 6) == "true" { "CYCLE" } else { "NO CYCLE" },
+                );
+                let owner = cell(row, 7);
+                if !owner.is_empty() {
+                    ddl.push_str(&format!(
+                        "\n\nALTER SEQUENCE {qualified} OWNED BY {}.{owner};",
+                        quote_ident(schema, DIALECT)
+                    ));
+                }
+                Ok(ddl)
+            }
             _ => {
                 let columns = self.columns(node).await?;
                 let mut ddl = sqlgen::create_table_ddl(
@@ -910,6 +967,39 @@ pub(super) fn annotate_types(result: &mut DbStatementResult, columns: &[DbNode])
         if let Some(node) = columns.iter().find(|c| c.name == column.name) {
             if let Some(info) = &node.column {
                 column.type_name = info.data_type.clone();
+            }
+        }
+    }
+}
+
+/// Rewrites Postgres' `t` / `f` into `true` / `false` in boolean columns.
+///
+/// The wire's text format for a boolean is a single letter — it is what `psql` prints, and this
+/// file otherwise shows the server's own rendering verbatim (see the module note). In a grid that
+/// already labels the column `boolean`, though, a lone `t` reads as a truncated string rather than
+/// as a value, so this is the one place the rendering is worth improving on.
+///
+/// Only ever applied to a column the catalog says is boolean, so a `text` or `char(1)` that really
+/// does hold `"t"` is left exactly as it came back. Both spellings are valid boolean input to
+/// Postgres, so an edit staged from the grid still applies unchanged.
+fn spell_out_booleans(result: &mut DbStatementResult) {
+    let boolean_columns: Vec<usize> = result
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.type_name.eq_ignore_ascii_case("boolean"))
+        .map(|(i, _)| i)
+        .collect();
+    if boolean_columns.is_empty() {
+        return;
+    }
+    for row in result.rows.iter_mut() {
+        for &index in &boolean_columns {
+            let Some(Some(value)) = row.get_mut(index) else { continue };
+            match value.as_str() {
+                "t" => *value = "true".to_string(),
+                "f" => *value = "false".to_string(),
+                _ => {}
             }
         }
     }

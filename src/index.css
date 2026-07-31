@@ -82,6 +82,26 @@ body {
   user-select: none;
 }
 
+/* Scrollbars: a hairline to read, a full-width target to grab.
+
+   The two are different jobs and used to be settled with one number. A bar wide enough to catch
+   without aiming is, at rest, a permanent grey stripe down the edge of every pane in the window —
+   and a scrollbar's resting job is only to say *where in the document you are*, which a couple of
+   pixels answers as well as ten.
+
+   So the gutter stays 10px and never moves — no reflow, nothing shifting under the pointer — and
+   what changes is how much of the thumb is painted: the border is transparent and the background
+   is clipped to the content box, so the border width *is* the padding around a visible core. The
+   whole 10px still belongs to the thumb for hit-testing, which is why a 2px bar is grabbable at
+   all. Three weights, in the order the pointer meets them:
+
+     rest        border 4px → 2px visible   a mark, not a control
+     scrolling   border 3px → 4px visible   the wheel is turning; halfway, enough to follow
+     hover       border 2px → 6px visible   you are going for it, so it comes to meet you
+
+   `[data-cf-scrolling]` is stamped on the scrolling element by `scrollFeedback` and cleared once
+   it settles. Hover is last so it wins the tie when you drag the thumb — dragging scrolls, and the
+   bar thinning under your own cursor would be the one moment it must not. */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -89,7 +109,17 @@ body {
 
 ::-webkit-scrollbar-thumb {
   background: var(--cf-border);
+  background-clip: content-box;
+  border: 4px solid transparent;
   border-radius: 999px;
+}
+
+[data-cf-scrolling]::-webkit-scrollbar-thumb {
+  border-width: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  border-width: 2px;
 }
 
 ::-webkit-scrollbar-track {
@@ -517,11 +547,18 @@ body.cf-dragging * {
   height: 3px;
 }
 
+/* Opted out of the app-wide inset thumb: with only three pixels of gutter there is nothing left
+   to inset — a 4px border would leave an empty content box and the bar would never draw at all.
+   Here the whole track *is* the hairline, so it fills edge to edge and hides by going transparent
+   instead of by going thin. */
 .cf-tab-strip::-webkit-scrollbar-thumb {
   background: transparent;
+  background-clip: border-box;
+  border: 0;
 }
 
-.cf-tab-strip:hover::-webkit-scrollbar-thumb {
+.cf-tab-strip:hover::-webkit-scrollbar-thumb,
+.cf-tab-strip[data-cf-scrolling]::-webkit-scrollbar-thumb {
   background: var(--cf-border);
 }
 

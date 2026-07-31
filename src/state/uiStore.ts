@@ -1,6 +1,9 @@
 import { create } from "zustand";
 import type { VcsProvider } from "../types/domain";
 import type { ApiSettingsTab } from "./apiModalStore";
+// Type-only, so this does not close the loop with `lib/shortcuts`, which imports this store to run
+// its commands. Erased at compile time; there is no runtime cycle.
+import type { ShortcutGroup } from "../lib/shortcuts";
 
 /** `api` is the odd one out: it's the built-in API client, which is app-global rather than
  * scoped to a repo, so it renders whether or not a project is open (see `App.tsx`). */
@@ -59,6 +62,15 @@ interface UiState {
   commandPaletteOpen: boolean;
   commandPaletteScope: PaletteScope;
   shortcutsModalOpen: boolean;
+  /**
+   * Which groups the cheat sheet should list, or `null` for all of them.
+   *
+   * Opened with ⌘⌥K it is the whole keyboard — every group, which is what a cheat sheet asked for
+   * from nowhere in particular should be. Opened from a button that belongs to one screen it is a
+   * question about *that* screen, and answering it with six sections means scrolling past five to
+   * reach the one you asked about.
+   */
+  shortcutsModalGroups: ShortcutGroup[] | null;
   /** Branch picking has its own modal (it checks out, rather than just navigating), so it gets
    * its own flag instead of a palette scope. */
   branchSwitcherOpen: boolean;
@@ -96,7 +108,8 @@ interface UiState {
    * one instead, so ⌘O → ⌘⇧O doesn't require closing it in between. */
   toggleCommandPalette: (scope?: PaletteScope) => void;
   closeCommandPalette: () => void;
-  toggleShortcutsModal: () => void;
+  /** `groups` narrows the sheet to those sections; omitted, it shows the whole keyboard. */
+  toggleShortcutsModal: (groups?: ShortcutGroup[]) => void;
   closeShortcutsModal: () => void;
   toggleBranchSwitcher: () => void;
   closeBranchSwitcher: () => void;
@@ -119,6 +132,7 @@ export const useUiStore = create<UiState>((set) => ({
   commandPaletteOpen: false,
   commandPaletteScope: "all",
   shortcutsModalOpen: false,
+  shortcutsModalGroups: null,
   branchSwitcherOpen: false,
   prLinkModalOpen: false,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
@@ -153,8 +167,14 @@ export const useUiStore = create<UiState>((set) => ({
       commandPaletteScope: scope,
     })),
   closeCommandPalette: () => set({ commandPaletteOpen: false }),
-  toggleShortcutsModal: () => set((s) => ({ shortcutsModalOpen: !s.shortcutsModalOpen })),
-  closeShortcutsModal: () => set({ shortcutsModalOpen: false }),
+  // The scope is set on the way *open*, so reopening from a different button re-scopes rather than
+  // inheriting where it was last opened from.
+  toggleShortcutsModal: (groups) =>
+    set((s) => ({
+      shortcutsModalOpen: !s.shortcutsModalOpen,
+      shortcutsModalGroups: s.shortcutsModalOpen ? null : (groups ?? null),
+    })),
+  closeShortcutsModal: () => set({ shortcutsModalOpen: false, shortcutsModalGroups: null }),
   toggleBranchSwitcher: () => set((s) => ({ branchSwitcherOpen: !s.branchSwitcherOpen })),
   closeBranchSwitcher: () => set({ branchSwitcherOpen: false }),
   openPrLinkModal: () => set({ prLinkModalOpen: true }),

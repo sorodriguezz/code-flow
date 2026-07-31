@@ -1,4 +1,4 @@
-import { memo, useMemo } from "react";
+import { memo, useLayoutEffect, useMemo, useRef } from "react";
 import { computeGraphLayout, laneColor } from "../../lib/graphLayout";
 import { useRepoStore } from "../../state/repoStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -55,6 +55,47 @@ const CommitTable = memo(function CommitTable() {
   // when knowing where you are matters most.
   const headCommitId = status?.head_oid ?? null;
 
+  const svgWidth = layout.laneCount * LANE_WIDTH + 12;
+  const svgHeight = layout.rows.length * ROW_HEIGHT;
+  // Four fixed text columns (message is the fifth and takes the slack), and five `gap-2` seams:
+  // one between each pair of the six children, the last of them before the lane graph.
+  const fixedColumnsWidth = colHash + colDate + colAuthor + colRefs + COLUMN_GAP * 5;
+
+  /**
+   * Message takes whatever the other five columns and the lane graph don't.
+   *
+   * A single-lane repository needs about 28px of graph, and the table used to end at the sum of its
+   * fixed columns and leave the rest of the panel as background — four hundred pixels of nothing to
+   * the right of one line of dots, while every message was cut off with an ellipsis. The one column
+   * with something to do with more room is the message, so it gets the slack.
+   *
+   * Published as a CSS variable rather than held in state. This table is memoized precisely so that
+   * dragging the diff panel beside it doesn't re-render several hundred rows on every pointermove
+   * tick, and re-rendering just to announce a width would hand that back; `calc` reads it instead.
+   *
+   * Declared up here, above the empty-state returns, because it is a hook: below them it ran on a
+   * repository with commits and not on one without, which is a different number of hooks per render
+   * and the one thing React cannot survive.
+   */
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const publish = (available: number) => {
+      // `- 24` for the rows' own `px-3`. Floored, so the content can equal the viewport but never
+      // exceed it by a fraction and summon a scrollbar that would change the width again.
+      const slack = Math.max(
+        0,
+        Math.floor(available - 24 - fixedColumnsWidth - svgWidth - colMessage),
+      );
+      el.style.setProperty("--cf-graph-msg", `${colMessage + slack}px`);
+    };
+    publish(el.clientWidth);
+    const observer = new ResizeObserver(([entry]) => publish(entry.contentRect.width));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [fixedColumnsWidth, svgWidth, colMessage]);
+
   if (commits.length === 0 && commitsLoading) {
     return <SkeletonRows count={12} className="cf-fade-in" />;
   }
@@ -71,52 +112,61 @@ const CommitTable = memo(function CommitTable() {
     { key: "graphColHash" as const, width: colHash, label: t("graph.colCommit") },
     { key: "graphColDate" as const, width: colDate, label: t("graph.colDate") },
     { key: "graphColAuthor" as const, width: colAuthor, label: t("graph.colAuthor") },
-    { key: "graphColMessage" as const, width: colMessage, label: t("graph.colMessage") },
+    // The one that takes up the slack, and so the one with no handle of its own — see below.
+    { key: "graphColMessage" as const, width: colMessage, label: t("graph.colMessage"), fills: true },
     { key: "graphColRefs" as const, width: colRefs, label: t("graph.colRefs") },
   ];
-  const textColumnsWidth = columns.reduce((sum, c) => sum + c.width, 0) + COLUMN_GAP * columns.length;
 
-  const svgWidth = layout.laneCount * LANE_WIDTH + 12;
-  const svgHeight = layout.rows.length * ROW_HEIGHT;
-  // Coordinates local to the graph SVG itself, which is offset by textColumnsWidth via `left`.
+  // Coordinates local to the graph SVG itself, which is offset past the text columns via `left`.
   const laneX = (lane: number) => lane * LANE_WIDTH + LANE_WIDTH / 2;
   const rowY = (row: number) => row * ROW_HEIGHT + ROW_HEIGHT / 2;
-  const totalWidth = textColumnsWidth + svgWidth;
+
+  /** The fallback keeps the first paint honest, before the observer has run once. */
+  const messageWidth = `var(--cf-graph-msg, ${colMessage}px)`;
+  const textColumnsWidth = `calc(${fixedColumnsWidth}px + ${messageWidth})`;
+  const totalWidth = `calc(${fixedColumnsWidth + svgWidth + 24}px + ${messageWidth})`;
 
   return (
-    <div className="flex-1 overflow-auto">
+    <div ref={scrollRef} className="flex-1 overflow-auto">
       <div
         className="sticky top-0 z-10 flex h-6 min-w-full items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[10px]"
-        style={{ width: totalWidth + 24, willChange: "transform", contain: "paint" }}
+        style={{ width: totalWidth, willChange: "transform", contain: "paint" }}
       >
         {columns.map((col) => (
-          <div key={col.key} style={{ width: col.width }} className="flex shrink-0 items-center">
+          <div
+            key={col.key}
+            style={{ width: col.fills ? messageWidth : col.width }}
+            className="flex shrink-0 items-center"
+          >
             <span className="min-w-0 flex-1 truncate text-center text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {col.label}
             </span>
-            {/* `quiet`: these divide columns of a table, not panes of a layout. The default seam
-                and grip are sized for the side of a panel, and in a 24px header they came out as
-                four full-height bars heavier than the labels they sat between. */}
-            <ResizeHandle
-              quiet
-              axis="x"
-              value={col.width}
-              min={COL_MIN}
-              max={COL_MAX}
-              onChange={(w) => setSize(col.key, w)}
-              onCommit={(w) => commitSize(col.key, w)}
-            />
+            {/* No handle on the column that fills: dragging it would change a base width that the
+                slack immediately gives back, so the grip would move and nothing else would. Its
+                width is set by the other four — widen Author and Message narrows to match.
+
+                `quiet` on the rest: these divide columns of a table, not panes of a layout. The
+                default seam and grip are sized for the side of a panel, and in a 24px header they
+                came out as full-height bars heavier than the labels they sat between. */}
+            {!col.fills && (
+              <ResizeHandle
+                quiet
+                axis="x"
+                value={col.width}
+                min={COL_MIN}
+                max={COL_MAX}
+                onChange={(w) => setSize(col.key, w)}
+                onCommit={(w) => commitSize(col.key, w)}
+              />
+            )}
           </div>
         ))}
-        {/* GRAFO has no fixed width — `flex-1` lets it absorb whatever space is left so the column
-            always fills to the panel's right edge (with `min-w-full` above keeping the whole header
-            at least as wide as the panel), instead of ending at content width and looking cut off. */}
         <span className="flex-1 text-center text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("graph.colGraph")}
         </span>
       </div>
 
-      <div className="relative min-w-full" style={{ width: totalWidth + 24, minHeight: svgHeight }}>
+      <div className="relative min-w-full" style={{ width: totalWidth, minHeight: svgHeight }}>
         <svg
           width={svgWidth}
           height={svgHeight}
@@ -160,10 +210,17 @@ const CommitTable = memo(function CommitTable() {
                   isSelected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                 }`}
               >
+                {/* The hit area is the row, not the text. It used to be exactly `textColumnsWidth`
+                    wide and only as tall as its own content, so the highlight said "this whole
+                    strip is one commit" while the click target was the words alone — aiming a few
+                    pixels below a line, or to the right of the last column, hit nothing. `h-full`
+                    claims the row's height; `flex-1` over a `minWidth` claims whatever the columns
+                    don't use, without letting them be squeezed when the graph is wider than the
+                    pane and the row is already at its minimum. */}
                 <button
                   onClick={() => selectCommit(isSelected ? null : r.commit.id)}
-                  style={{ width: textColumnsWidth }}
-                  className="flex shrink-0 items-center gap-2 text-left"
+                  style={{ minWidth: textColumnsWidth }}
+                  className="flex h-full flex-1 items-center gap-2 text-left"
                 >
                   <span style={{ width: colHash }} className="shrink-0 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
                     {r.commit.short_id}
@@ -178,7 +235,7 @@ const CommitTable = memo(function CommitTable() {
                   <span style={{ width: colAuthor }} className="shrink-0 truncate text-[var(--cf-text-muted)]">
                     {r.commit.author_name}
                   </span>
-                  <span style={{ width: colMessage }} className="shrink-0 truncate text-[var(--cf-text)]">
+                  <span style={{ width: messageWidth }} className="shrink-0 truncate text-[var(--cf-text)]">
                     {r.commit.summary}
                   </span>
                   <span style={{ width: colRefs }} className="flex shrink-0 gap-1 overflow-hidden">
@@ -232,8 +289,8 @@ export function GraphView() {
   const selectedCommit = commits.find((c) => c.id === selectedCommitId) ?? null;
 
   return (
-    <div className="flex h-full min-h-0 gap-1.5 p-2">
-      <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
+    <div className="flex h-full min-h-0">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)]">
         <CommitTable />
       </div>
 
@@ -250,7 +307,7 @@ export function GraphView() {
           />
           <div
             style={{ width: diffWidth }}
-            className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+            className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
           >
             <div className="flex items-center justify-between border-b border-[var(--cf-border)] px-3 py-1.5">
               <span className="truncate text-[12px] font-medium text-[var(--cf-text-muted)]">

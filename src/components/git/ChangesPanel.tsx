@@ -386,13 +386,13 @@ export function ChangesPanel() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       {merging && <ConflictsBanner />}
-      <div className="relative flex min-h-0 flex-1 gap-1.5 p-2">
+      <div className="relative flex min-h-0 flex-1">
       {/* Fixed-width only while it has a neighbour. With no file selected there is no diff pane to
           share the row with, so the list takes the whole width rather than leaving a placeholder
           where the diff would have been. */}
       <div
         style={selected ? { width: listWidth } : undefined}
-        className={`flex flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${
+        className={`flex flex-col overflow-hidden bg-[var(--cf-surface)] ${
           selected ? "shrink-0" : "min-w-0 flex-1"
         }`}
       >
@@ -598,7 +598,7 @@ export function ChangesPanel() {
             onCommit={(w) => commitSize("changesListWidth", w)}
           />
 
-          <div className="min-h-0 flex-1 overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]">
+          <div className="min-h-0 flex-1 overflow-hidden bg-[var(--cf-surface)]">
             <DiffView files={selectedDiff} onClose={clearSelection} />
           </div>
         </>

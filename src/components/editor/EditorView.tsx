@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import { Bookmark, Bug, FileCode, FileSearch, Files, Keyboard, Search, Tags } from "lucide-react";
-import { FileTree } from "./FileTree";
+import { FileTree, type ExplorerCommand } from "./FileTree";
 import { FilePalette } from "./FilePalette";
 import { SearchPanel } from "./SearchPanel";
 import { AnchorsPanel } from "./AnchorsPanel";
@@ -42,8 +42,8 @@ import { useShortcutHint } from "../../lib/useShortcutHint";
 const TREE_MIN = 200;
 const TREE_MAX = 480;
 const GROUP_MAX = 2000;
-/** Matches the `w-1.5` on `ResizeHandle`, which the even-split maths has to account for. */
-const HANDLE_WIDTH = 6;
+/** Matches the `w-px` on `ResizeHandle`, which the even-split maths has to account for. */
+const HANDLE_WIDTH = 1;
 /**
  * Hard floor on a group's width — the bug this fixes was worth the constant.
  *
@@ -105,6 +105,12 @@ export function EditorView() {
    * pane the user is working in, not every pane that happens to have the file open. */
   const [reveal, setReveal] = useState<{ groupId: string; request: RevealRequest } | null>(null);
   const revealNonce = useRef(0);
+  /** A keybinding aimed at the explorer, on its way down to `FileTree` — same shape and same
+   * reason as `reveal` above: the tree owns the focused row, so the request has to reach it. */
+  const [explorerCommand, setExplorerCommand] = useState<{
+    command: ExplorerCommand;
+    nonce: number;
+  } | null>(null);
   /** Width of every group but the last, which flexes. Session-only: a split is a transient
    * arrangement, not a setting. */
   const [groupWidths, setGroupWidths] = useState<number[]>([]);
@@ -437,6 +443,23 @@ export function EditorView() {
       case "splitRight":
         splitGroup();
         break;
+      // The explorer's own commands: show the tree, then hand the request straight down. Nothing
+      // up here knows which row is focused, and nothing up here should.
+      case "newFile":
+      case "newFolder":
+      case "renamePath":
+      case "deletePath":
+        setSidePanel("files");
+        setExplorerCommand({
+          command:
+            editorCommand.command === "renamePath"
+              ? "rename"
+              : editorCommand.command === "deletePath"
+                ? "delete"
+                : editorCommand.command,
+          nonce: editorCommand.nonce,
+        });
+        break;
       case "codeSnap":
         captureRef.current?.();
         break;
@@ -465,6 +488,26 @@ export function EditorView() {
    * tab (and its unsaved edits) instead of leaving one aimed at a path that no longer exists.
    * Moving a *folder* re-points everything under it. The old Monaco model is left behind and
    * swept by the disposal effect, since the path — and therefore the model URI — changed. */
+  /** A path is gone from disk. Any tab showing it — or, for a folder, anything under it — closes
+   * without asking: there is nothing left to save it back to. */
+  const handlePathRemoved = useCallback((removed: string) => {
+    const gone = (p: string) => p === removed || p.startsWith(`${removed}/`);
+    const affected = tabsRef.current.map((tab) => tab.path).filter(gone);
+    if (affected.length === 0) return;
+    let next = groupsRef.current;
+    for (const path of affected) {
+      // A file open in two splits has to be closed in each of them.
+      for (;;) {
+        const holder = next.find((g) => g.paths.includes(path));
+        if (!holder) break;
+        next = closeTabInGroups(next, holder.id, path);
+      }
+    }
+    setGroups(next);
+    if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
+    setTabs((prev) => prev.filter((tab) => !gone(tab.path)));
+  }, []);
+
   const handlePathMoved = useCallback((from: string, to: string) => {
     const remap = (p: string) => (p === from ? to : p.startsWith(`${from}/`) ? `${to}${p.slice(from.length)}` : p);
     setTabs((prev) => prev.map((tab) => ({ ...tab, path: remap(tab.path) })));
@@ -543,10 +586,10 @@ export function EditorView() {
     // No header strip: the project and branch it used to repeat are already in the status bar,
     // and the row it occupied is worth more as editor.
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex min-h-0 flex-1 gap-1.5 p-2">
+      <div className="flex min-h-0 flex-1">
         {/* Activity rail: the panel toggles up top, one-shot actions pinned to the bottom the
             way an editor keeps its settings gear there. */}
-        <div className="flex w-9 shrink-0 flex-col items-center gap-1 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] py-1.5 shadow-[var(--cf-shadow)]">
+        <div className="flex w-9 shrink-0 flex-col items-center gap-1 bg-[var(--cf-surface)] py-1.5">
           {/* The chord in each tooltip comes from the binding registry, not from a string next to
               the label: two of these used to carry a hand-written "(Ctrl+Shift+F)" that said Ctrl
               on a Mac and went stale the moment anyone rebound it, and the other three said
@@ -595,7 +638,9 @@ export function EditorView() {
             <FileSearch size={15} />
           </button>
           <button
-            onClick={() => useUiStore.getState().toggleShortcutsModal()}
+            // Scoped: this button lives in the editor's own rail, so it answers for the editor.
+            // The whole sheet is still a ⌘⌥K away.
+            onClick={() => useUiStore.getState().toggleShortcutsModal(["editor"])}
             title={shortcutHint("app.shortcuts", t("shortcuts.title"))}
             aria-label={t("shortcuts.title")}
             className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
@@ -607,7 +652,7 @@ export function EditorView() {
           style={{ width: treeWidth }}
           // The tree owns its own scroll area now (below its toolbar), so this wrapper only
           // clips — scrolling it too would carry the toolbar out of view.
-          className="flex shrink-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+          className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
         >
           {/* Explorer, find-in-project, anchors or the debugger — same column VS Code uses for
               all of them, since each wants the width more than a file tree does. */}
@@ -640,6 +685,8 @@ export function EditorView() {
               onSelectFile={(path) => void openFile(path)}
               onOpenFile={(path) => void openFile(path, { pin: true })}
               onPathMoved={handlePathMoved}
+              onPathRemoved={handlePathRemoved}
+              command={explorerCommand}
               changedPaths={changedPaths}
             />
           )}

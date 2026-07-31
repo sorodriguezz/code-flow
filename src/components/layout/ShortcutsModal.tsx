@@ -6,7 +6,16 @@ import { useShortcutsStore, bindingFor } from "../../state/shortcutsStore";
 import { SHORTCUT_COMMANDS, SHORTCUT_GROUP_LABELS, EDITOR_RESERVED, type ShortcutGroup } from "../../lib/shortcuts";
 import { chordKeycaps } from "../../lib/keys";
 
-const GROUP_ORDER: ShortcutGroup[] = ["general", "panels", "views", "editor", "navigation", "workspace", "git"];
+const GROUP_ORDER: ShortcutGroup[] = [
+  "general",
+  "panels",
+  "views",
+  "editor",
+  "database",
+  "navigation",
+  "workspace",
+  "git",
+];
 
 export function Keycap({ children }: { children: string }) {
   return (
@@ -36,11 +45,19 @@ function Row({ label, chord }: { label: string; chord: string | null }) {
  * The cheat sheet. App actions are read live from the user's bindings, so it always reflects what
  * the keyboard actually does; the editor group below is fixed because half of it comes from
  * Monaco itself rather than from this app — which is exactly why it's worth writing down.
+ *
+ * `shortcutsModalGroups` narrows it. Opened from the editor's own keyboard button the question is
+ * "what can I press *here*", and the answer is one section — not six with the one you asked about
+ * fourth. Unscoped (⌘⌥K, the command palette) it still lists everything.
  */
 export function ShortcutsModal({ onClose }: { onClose: () => void }) {
   const t = useT();
   const overrides = useShortcutsStore((s) => s.overrides);
   const openSettings = useUiStore((s) => s.openSettings);
+  const scope = useUiStore((s) => s.shortcutsModalGroups);
+  const groups = scope ?? GROUP_ORDER;
+  // Monaco's own bindings belong to the editor group, so they follow it in or out of scope.
+  const showBuiltIns = groups.includes("editor");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -73,7 +90,7 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
-          {GROUP_ORDER.map((group) => {
+          {GROUP_ORDER.filter((group) => groups.includes(group)).map((group) => {
             const commands = SHORTCUT_COMMANDS.filter((c) => c.group === group);
             if (commands.length === 0) return null;
             return (
@@ -94,6 +111,7 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
             );
           })}
 
+          {showBuiltIns && (
           <div>
             <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("shortcuts.groupEditorBuiltIn")}
@@ -105,6 +123,7 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
               ))}
             </div>
           </div>
+          )}
         </div>
       </div>
     </div>

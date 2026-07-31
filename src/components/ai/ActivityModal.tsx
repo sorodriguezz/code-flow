@@ -3,7 +3,7 @@ import { Globe, Pencil, Search, Trash2, X } from "lucide-react";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
 import { usePrStore } from "../../state/prStore";
-import { useChatStore } from "../../state/chatStore";
+import { useChatStore, liveSessionsOf } from "../../state/chatStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -12,6 +12,7 @@ import {
   mergeActivityEntries,
   entryKey,
   entryTitle,
+  entryTimestamp,
   entryVisual,
   entryRunCount,
   entryIsGlobal,
@@ -46,7 +47,9 @@ export function ActivityModal({
   const selectPr = usePrStore((s) => s.selectPr);
   const analyzeOpen = useAnalyzeUiStore((s) => s.open);
   const analyzeJobId = useAnalyzeUiStore((s) => s.selectedJobId);
-  const activeSessionId = useChatStore((s) => (projectId ? s.byProject[projectId]?.conversationId : null) ?? null);
+  const activeSessionId = useChatStore((s) => (projectId ? s.activeByProject[projectId] : null) ?? null);
+  const byConversation = useChatStore((s) => s.byConversation);
+  const discardChat = useChatStore((s) => s.discard);
   const switchTo = useChatStore((s) => s.switchTo);
   const [query, setQuery] = useState("");
   const [renamingKey, setRenamingKey] = useState<string | null>(null);
@@ -56,7 +59,11 @@ export function ActivityModal({
     () => (workspaceJobs.length === 0 ? projectJobs : [...projectJobs, ...workspaceJobs]),
     [projectJobs, workspaceJobs],
   );
-  const entries = useMemo(() => mergeActivityEntries(jobs, conversations), [jobs, conversations]);
+  const liveChats = useMemo(() => liveSessionsOf(byConversation, projectId), [byConversation, projectId]);
+  const entries = useMemo(
+    () => mergeActivityEntries(jobs, conversations, liveChats),
+    [jobs, conversations, liveChats],
+  );
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return entries;
@@ -112,10 +119,14 @@ export function ActivityModal({
     // single click deleting the whole thing isn't a surprise.
     const message = runs > 1 ? t("ai.confirmDeleteWithHistory", { n: runs }) : t("chatHistory.confirmDelete");
     if (!(await confirmAction(message))) return;
-    // Deleting a chat updates the persisted conversation list; the chat panel reconciles against
-    // that list and resets itself if the open conversation no longer exists (see AiPanel
-    // ChatSection) — which also covers a chat that spans several session ids.
-    if (entry.type === "chat") await removeConversation(bucket, entry.conv.session_id);
+    // A chat goes from both places at once: the persisted list (which is what survives a restart)
+    // and this session's memory. Dropping only the row would leave a live conversation sitting in
+    // Activity with nothing behind it — and a still-running one would file its answer into a
+    // conversation the user just deleted.
+    if (entry.type === "chat") {
+      discardChat(entry.conv.session_id);
+      await removeConversation(bucket, entry.conv.session_id);
+    }
     // A job row owns every run of that activity — remove them all so the whole history goes, not
     // just the latest run (which would leave the row behind with one fewer run each click).
     else await Promise.all(entry.runs.map((j) => removeJob(j.projectId, j.id)));
@@ -213,9 +224,7 @@ export function ActivityModal({
                             )}
                           </div>
                           <p className="mt-0.5 text-[10px] text-[var(--cf-text-muted)]">
-                            {new Date(
-                              entry.type === "job" ? entry.job.createdAt : entry.conv.updated_at,
-                            ).toLocaleString()}
+                            {new Date(entryTimestamp(entry)).toLocaleString()}
                           </p>
                         </div>
                       </button>

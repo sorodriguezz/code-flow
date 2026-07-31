@@ -1,10 +1,12 @@
+import { useEffect } from "react";
 import Editor from "@monaco-editor/react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
-import { Copy, FileCode2, Loader2, RefreshCw } from "lucide-react";
+import { Copy, FileCode2, Loader2, Pencil, RefreshCw } from "lucide-react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { ToolbarButton } from "./dbChrome";
 import { nodeLabel } from "./SqlConsolePanel";
 import { useDbStore, type DbDdlTab } from "../../state/dbStore";
+import { useDbCommandStore } from "../../state/dbCommandStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
@@ -40,6 +42,28 @@ export function DdlPanel({ tab }: { tab: DbDdlTab }) {
   const store = useDbStore.getState();
   const isSql = connection ? engineInfo(connection.kind).sql : true;
 
+  /**
+   * Whether this definition is a statement you can run to change the object.
+   *
+   * Only where the DDL above is the server's own `CREATE OR REPLACE` — a routine's and a view's.
+   * Running those again is how you redefine them, so handing the text to a console is a real edit
+   * path and not a trick. A table's is reconstructed and lossy, and a sequence's `CREATE SEQUENCE`
+   * names one that already exists; offering "edit" on either would produce a statement that fails
+   * at best and drops a check constraint nobody noticed at worst. Those still change through SQL
+   * you write, which is the honest amount of ceremony for an `ALTER`.
+   */
+  const replaceable = isSql && (tab.node.kind === "routine" || tab.node.kind === "view");
+
+  // Refresh is the only one of the workspace's commands this panel has an answer for; the rest
+  // belong to a grid. It still consumes every request, so none is left pending for the next tab.
+  const request = useDbCommandStore((s) => s.request);
+  useEffect(() => {
+    if (!request) return;
+    useDbCommandStore.getState().consume();
+    if (request.command === "refresh") void store.openDdl(tab.connectionId, tab.node, tab.name);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request?.nonce]);
+
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
@@ -51,6 +75,22 @@ export function DdlPanel({ tab }: { tab: DbDdlTab }) {
           {t("db.ddlReconstructed")}
         </span>
         <div className="ml-auto flex items-center gap-1">
+          {replaceable && (
+            <ToolbarButton
+              onClick={() =>
+                store.newConsole(
+                  tab.connectionId,
+                  tab.node.database ?? undefined,
+                  tab.node.schema ?? undefined,
+                  tab.text,
+                )
+              }
+              disabled={!tab.text}
+              title={t("db.editDefinition")}
+            >
+              <Pencil size={12} />
+            </ToolbarButton>
+          )}
           <ToolbarButton
             onClick={() => {
               void navigator.clipboard.writeText(tab.text);

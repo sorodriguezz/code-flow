@@ -36,26 +36,36 @@ export function ClaudeSettings() {
   const [tab, setTab] = useState<AiTab>("providers");
   const active = TABS.find((entry) => entry.id === tab) ?? TABS[0];
 
-  // The three panes are nowhere near the same height — arriving at a short one while the settings
-  // column was scrolled down through the long provider list left it starting somewhere in the
-  // middle. Same fix, and same reason for the layout effect, as `ApiSettingsBody`: land at the top
-  // before the frame is painted rather than as a visible correction after it.
-  const bodyRef = useRef<HTMLDivElement>(null);
+  // The three panes are nowhere near the same height — arriving at a short one while scrolled down
+  // through the long provider list left it starting somewhere in the middle. Same fix, and same
+  // reason for the layout effect, as `ApiSettingsBody`: land at the top before the frame is painted
+  // rather than as a visible correction after it. It scrolls the *pane* now, which is the element
+  // that moves — see the layout note below.
+  const paneRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
-    bodyRef.current?.closest("[data-settings-scroll]")?.scrollTo({ top: 0 });
+    paneRef.current?.scrollTo({ top: 0 });
   }, [tab]);
 
   return (
-    <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.aiSectionTitle")}</h3>
-      <p className="mb-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.aiSectionHint")}</p>
+    // A fixed frame with one moving part. The heading and the rail used to ride the settings
+    // column's own scrollbar: the rail was `sticky top-0`, so it travelled up with the title until
+    // it hit the top and only then pinned — which reads as the menu sliding away and snapping back,
+    // and the title left for good. Now the section fills the height it is given (`h-full` from
+    // `SELF_SCROLLING_SECTIONS`), the heading and rail are fixed rows in it, and the pane beside
+    // them is the only thing that scrolls.
+    <section className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0">
+        <h3 className="mb-1 text-sm font-semibold">{t("settings.aiSectionTitle")}</h3>
+        <p className="mb-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.aiSectionHint")}</p>
+      </div>
 
-      <div ref={bodyRef} className="flex gap-4">
+      <div className="flex min-h-0 flex-1 gap-4">
         {/* `layoutRoot` on a `motion.nav`, for the reason spelled out in `ApiSettingsBody`: the
-            rail is sticky, so the pill's before/after rects would otherwise be measured against a
-            scroll position the arriving pane has just changed, and the slide would land as a jump.
-            Measuring against the rail — which never moves — keeps it a slide. */}
-        <motion.nav layoutRoot className="sticky top-0 w-[168px] shrink-0 self-start">
+            pill's before/after rects would otherwise be measured against a scroll position the
+            arriving pane has just changed, and the slide would land as a jump. Measuring against
+            the rail — which never moves — keeps it a slide. It no longer needs `sticky`: it is
+            outside the scrolling element now, so it cannot move in the first place. */}
+        <motion.nav layoutRoot className="w-[168px] shrink-0 self-start">
           {TABS.map(({ id, labelKey, icon: Icon }) => (
             <button
               key={id}
@@ -82,7 +92,9 @@ export function ClaudeSettings() {
           ))}
         </motion.nav>
 
-        <div className="min-w-0 flex-1">
+        {/* The one moving part. `pb-6` because the pane now ends where the dialog does, and a last
+            row flush against that edge reads as cut off rather than as the end of the list. */}
+        <div ref={paneRef} className="min-w-0 flex-1 overflow-y-auto pb-6">
           <div className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4">
             {/* The rail names the pane, so there's no heading repeated here — but the hint says
                 something the label can't (what "inherit" falls back to, that a prompt is shared

@@ -26,8 +26,15 @@ import type { DbKind, DbNodeKind } from "../../types/database";
  * same object reads as two different things.
  */
 
-export const CARD =
-  "rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]";
+/**
+ * A panel's surface, and nothing else.
+ *
+ * It used to be a rounded, bordered, shadowed card floating on the ambient background, with a gap
+ * around it. Flush is the layout now: no padding, no gaps, no radius — so a border here would land
+ * against the `ResizeHandle`'s seam and draw a second line beside it, and a shadow has nowhere to
+ * fall. The only structure between panels is that 1px seam.
+ */
+export const CARD = "bg-[var(--cf-surface)]";
 
 /** Icons follow the *shape* of the thing, not the engine: a Mongo collection and a SQL table are
  * both "rows of records", so both get the table icon. What differs between engines is the label. */

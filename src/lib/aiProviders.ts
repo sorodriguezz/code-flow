@@ -1,4 +1,4 @@
-import { Bot, Cpu, Gem, HardDrive, Sparkles, SquareTerminal, type LucideIcon } from "lucide-react";
+import { Bot, Cpu, Gem, HardDrive, Sparkles, SquareTerminal, Zap, type LucideIcon } from "lucide-react";
 import type { TranslationKey } from "./i18n/translations";
 
 export interface AiProviderOption {
@@ -77,6 +77,22 @@ export const AI_PROVIDERS: AiProviderOption[] = [
       url: "https://developers.openai.com/codex/",
       command: "winget install OpenAI.Codex",
       postCommand: "codex login",
+    },
+  },
+  // xAI's Grok Build CLI, driven headlessly (`grok -p` / `--prompt-file`, `--output-format json`)
+  // against a `grok login` session. It is the only engine here that gives a headless caller a real
+  // conversation id back, so chat resumes the exact conversation rather than "the last one". See
+  // `grok.rs` — every flag there was verified against the binary.
+  {
+    id: "grok",
+    label: "Grok",
+    icon: Zap,
+    available: true,
+    defaultBinary: "grok",
+    setup: {
+      url: "https://x.ai/cli",
+      command: "curl -fsSL https://x.ai/cli/install.sh | bash",
+      postCommand: "grok login",
     },
   },
   // opencode is provider-agnostic: it drives whatever model providers the user configured inside
@@ -165,6 +181,10 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
     { id: "gpt-5.5", label: "GPT-5.5" },
   ],
+  // Fallback only — the real list comes from `grok models`, which reports what the signed-in
+  // account can actually reach. Which ids those are depends on the plan, so this is deliberately
+  // just the one every account has.
+  grok: [{ id: "grok-4.5", label: "Grok 4.5" }],
   // opencode addresses models as `provider/model`, and which are available depends entirely on the
   // providers configured inside it — so these are just format examples, including one of each of
   // its own services (Zen pay-as-you-go vs Go subscription). The live list from `opencode models`

@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { DiffEditor } from "@monaco-editor/react";
 import { Columns2, FileDiff, Rows3, X } from "lucide-react";
 import type { FileDiffInfo } from "../../types/domain";
@@ -40,31 +40,94 @@ const MIN_SPLIT_HEIGHT = 120;
 const MAX_SPLIT_HEIGHT = 640;
 const SPLIT_LINE_HEIGHT = 19;
 
-function SplitFileDiff({ file }: { file: FileDiffInfo }) {
+/** How far outside the viewport an editor starts loading. A screenful of lead time, so scrolling
+ * at a normal pace always lands on one that is already up rather than on a placeholder. */
+const PRELOAD_MARGIN = "800px";
+
+/** The height a file's pane will take, computed from the hunks alone — no strings built, no editor
+ * mounted. This is what lets the list reserve its full scroll height before any of it has loaded,
+ * so the scrollbar doesn't grow under the pointer and the change map's marks stay where they are. */
+function splitHeightOf(file: FileDiffInfo): number {
+  let original = 0;
+  let modified = 0;
+  for (const hunk of file.hunks) {
+    for (const line of hunk.lines) {
+      if (line.origin === "-") original += 1;
+      else if (line.origin === "+") modified += 1;
+      else {
+        original += 1;
+        modified += 1;
+      }
+    }
+  }
+  const lines = Math.max(original, modified);
+  return Math.min(MAX_SPLIT_HEIGHT, Math.max(MIN_SPLIT_HEIGHT, lines * SPLIT_LINE_HEIGHT + 24));
+}
+
+/**
+ * One file's side-by-side pane, mounted only once it is near the viewport.
+ *
+ * Every file used to get its own `DiffEditor` the moment split mode opened, all of them at once.
+ * Each one is two Monaco models, a diff computed in a worker, a tokenizer pass over the whole file
+ * and — with `automaticLayout` — its own resize observer. On a commit that touches a lockfile that
+ * is tens of thousands of lines through a JSON tokenizer *before the first frame*, which is why the
+ * view arrived already stuck: the work was not slow to scroll, it was all being done up front for
+ * panes that were nowhere near the screen.
+ *
+ * Reconstructing the two sides is deferred with it. That is where the big strings get built, and
+ * building them for a file nobody has scrolled to is the same waste one step earlier.
+ */
+function SplitFileDiff({ file, height }: { file: FileDiffInfo; height: number }) {
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
-  const { original, modified } = useMemo(() => reconstructSides(file), [file]);
+  const holderRef = useRef<HTMLDivElement>(null);
+  const [live, setLive] = useState(false);
   const path = file.new_path ?? file.old_path ?? "";
-  const lineCount = Math.max(original.split("\n").length, modified.split("\n").length);
-  const height = Math.min(MAX_SPLIT_HEIGHT, Math.max(MIN_SPLIT_HEIGHT, lineCount * SPLIT_LINE_HEIGHT + 24));
+
+  useEffect(() => {
+    // Once up it stays up: tearing an editor down on scroll-out only to rebuild it on the way back
+    // trades a one-off cost for a repeating one, and scrolling a diff is mostly back and forth.
+    if (live) return;
+    const el = holderRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => entries.some((e) => e.isIntersecting) && setLive(true),
+      { rootMargin: PRELOAD_MARGIN },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [live]);
+
+  const sides = useMemo(() => (live ? reconstructSides(file) : null), [live, file]);
 
   return (
-    <DiffEditor
-      height={height}
-      language={languageForPath(path)}
-      original={original}
-      modified={modified}
-      theme={monacoTheme}
-      options={{
-        readOnly: true,
-        fontSize: 13,
-        renderSideBySide: true,
-        // Monaco silently collapses side-by-side into a unified-looking layout below ~900px
-        // wide (e.g. inside a modal) unless told not to — the whole point of this toggle is
-        // an actual two-pane view, so never let it fall back on its own.
-        useInlineViewWhenSpaceIsLimited: false,
-        automaticLayout: true,
-      }}
-    />
+    <div ref={holderRef} style={{ height }}>
+      {sides ? (
+        <DiffEditor
+          height="100%"
+          language={languageForPath(path)}
+          original={sides.original}
+          modified={sides.modified}
+          theme={monacoTheme}
+          options={{
+            readOnly: true,
+            fontSize: 13,
+            renderSideBySide: true,
+            // Monaco silently collapses side-by-side into a unified-looking layout below ~900px
+            // wide (e.g. inside a modal) unless told not to — the whole point of this toggle is
+            // an actual two-pane view, so never let it fall back on its own.
+            useInlineViewWhenSpaceIsLimited: false,
+            automaticLayout: true,
+            // A generated lockfile can take Monaco's differ arbitrarily long. Past this it falls
+            // back to a coarser result, which for a file you are scrolling past is the right
+            // trade — an approximate diff beats a frozen pane.
+            maxComputationTime: 2000,
+            scrollBeyondLastLine: false,
+          }}
+        />
+      ) : (
+        <div className="h-full bg-[var(--cf-bg)]" />
+      )}
+    </div>
   );
 }
 
@@ -206,7 +269,7 @@ function DiffViewImpl({
                     </span>
                     <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
                   </div>
-                  <SplitFileDiff file={file} />
+                  <SplitFileDiff file={file} height={splitHeightOf(file)} />
                 </div>
               );
             })}

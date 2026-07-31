@@ -131,6 +131,7 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
             <AiRunLog
               runId={job.id}
               running
+              startedAt={job.createdAt}
               expanded={logExpanded}
               onToggle={() => setLogExpanded((v) => !v)}
             />

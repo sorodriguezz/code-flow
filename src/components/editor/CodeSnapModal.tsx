@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Camera, Check, Copy, Download, Hash, Loader2, Minus, Plus, SquareDashed, X } from "lucide-react";
 import {
@@ -142,7 +143,10 @@ export function CodeSnapModal({
 
   const lineCount = target.endLine - target.startLine + 1;
 
-  return (
+  // Portalled for the same reason as the file palette next to it: opened from inside the editor,
+  // its backdrop would be trapped in `.cf-ambient-bg`'s stacking context and paint under the app's
+  // own bars, leaving them clickable through the modal. See `ApiModal` for the full account.
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
@@ -285,7 +289,8 @@ export function CodeSnapModal({
           </div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

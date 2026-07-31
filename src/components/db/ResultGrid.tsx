@@ -215,7 +215,11 @@ export function ResultGrid({
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    // `isolate` keeps the grid's own layers — the sticky header, the pinned row-number gutter —
+    // inside the grid. They are ordered against each other, not against the rest of the app, and
+    // left un-isolated they climb into the page's stacking context and paint over whatever chrome
+    // sits alongside the panel, the resize seams included.
+    <div className="isolate flex h-full min-h-0 flex-col overflow-hidden">
       {/* The sweep's move/up land here rather than on the row that was pressed: capture is held by
           this element, because it is the one that survives the windowing. */}
       <div
@@ -439,7 +443,15 @@ export function ResultGrid({
                             >
                               {value === null ? "NULL" : preview(value)}
                             </span>
-                            {value !== null && value.length > CELL_PREVIEW_LIMIT && (
+                            {/* On every value that has one, not only on the ones past
+                                `CELL_PREVIEW_LIMIT`. What makes a cell unreadable is the column
+                                being narrower than its contents, and that is a width the user drags
+                                — an 80-character JSON in a 200px column is cut off just as
+                                thoroughly as a 4000-character one, and used to offer no way in. The
+                                button costs nothing when it isn't needed: it is invisible until the
+                                row is hovered, and its space is reserved either way, so nothing
+                                shifts. */}
+                            {value !== null && (
                               <button
                                 onClick={() =>
                                   openModal({

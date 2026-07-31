@@ -381,10 +381,8 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
             onCommit={setVariablesHeight}
           />
 
-          <div
-            className="flex shrink-0 flex-col border-t border-[var(--cf-border)]"
-            style={{ height: variablesHeight }}
-          >
+          {/* No `border-t`: the handle above is the seam, and a border here doubled it. */}
+          <div className="flex shrink-0 flex-col" style={{ height: variablesHeight }}>
             <div className="flex shrink-0 items-center gap-1 px-3 pt-1.5 text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("api.graphql.variables")}
             </div>

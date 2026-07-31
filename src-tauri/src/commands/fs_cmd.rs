@@ -40,6 +40,19 @@ pub fn create_file(repo_path: String, rel_path: String) -> Result<(), String> {
     fsops::create_file(&repo_path, &rel_path)
 }
 
+/// Renames a file or folder in place — the explorer's context menu and F2. Returns the new
+/// repo-relative path so the editor can re-point any tab that was showing it.
+#[tauri::command]
+pub fn rename_path(repo_path: String, from_rel: String, new_name: String) -> Result<String, String> {
+    fsops::rename_path(&repo_path, &from_rel, &new_name)
+}
+
+/// Sends a file or folder to the OS trash.
+#[tauri::command]
+pub fn delete_path(repo_path: String, rel_path: String) -> Result<(), String> {
+    fsops::delete_path(&repo_path, &rel_path)
+}
+
 #[tauri::command]
 pub fn open_in_default_app(repo_path: String, rel_path: String) -> Result<(), String> {
     fsops::open_in_default_app(&repo_path, &rel_path)

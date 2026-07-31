@@ -194,6 +194,82 @@ pub fn create_file(repo_path: &str, rel_path: &str) -> Result<(), String> {
         })
 }
 
+/// Renames a file or directory in place, keeping it in the same parent. Returns the new
+/// repo-relative path.
+///
+/// The new name must be a single plain name: renaming is for *naming*, and a slash typed into that
+/// box would quietly turn it into a move, with the folder it lands in created on the way. Moving is
+/// already a drag in the tree, where you can see the destination.
+pub fn rename_path(repo_path: &str, from_rel: &str, new_name: &str) -> Result<String, String> {
+    let name = new_name.trim();
+    if name.is_empty() {
+        return Err("name cannot be empty".to_string());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("a name cannot contain a path separator".to_string());
+    }
+    if name == "." || name == ".." {
+        return Err(format!("invalid name: {name}"));
+    }
+
+    let source = resolve_within_repo(repo_path, from_rel)?;
+    let base = Path::new(repo_path)
+        .canonicalize()
+        .map_err(|e| format!("invalid repo path: {e}"))?;
+    if source == base {
+        return Err("cannot rename the repository root".to_string());
+    }
+    let parent = source
+        .parent()
+        .ok_or_else(|| format!("cannot rename {from_rel}"))?;
+    let target = parent.join(name);
+    if target == source {
+        // Confirmed without changing anything — not an error, just nothing to do.
+        return Ok(from_rel.to_string());
+    }
+    // Case-only renames on a case-insensitive filesystem (`readme.md` → `README.md`) land here with
+    // `exists()` true for what is the *same* file, so `rename` handles them rather than being
+    // refused. Anything else keeping that name is a real collision.
+    if target.exists() && !same_file(&target, &source) {
+        return Err(format!("{name} already exists"));
+    }
+
+    std::fs::rename(&source, &target).map_err(|e| e.to_string())?;
+    Ok(target
+        .strip_prefix(&base)
+        .map_err(|_| "renamed outside the repository".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/"))
+}
+
+/// Whether two paths name the same file on disk, which is how a case-only rename is told apart
+/// from a collision on a case-insensitive filesystem.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Moves a file or directory to the OS trash.
+///
+/// Not `remove_dir_all`: this is reached by right-clicking a row in a tree, which is a much easier
+/// thing to do by accident than typing `rm -rf`, and a folder of uncommitted work has nothing to
+/// restore it from. The trash is the undo, and it is the one users already know how to open.
+pub fn delete_path(repo_path: &str, rel_path: &str) -> Result<(), String> {
+    let target = resolve_within_repo(repo_path, rel_path)?;
+    let base = Path::new(repo_path)
+        .canonicalize()
+        .map_err(|e| format!("invalid repo path: {e}"))?;
+    if target == base {
+        return Err("cannot delete the repository root".to_string());
+    }
+    if !target.exists() {
+        return Err(format!("{rel_path} no longer exists"));
+    }
+    trash::delete(&target).map_err(|e| e.to_string())
+}
+
 /// Opens a repo-relative file with the OS's default application. Implemented directly
 /// with the `open` crate (rather than the opener plugin's JS API) so path joining goes
 /// through `Path::join` instead of naive string concatenation on the frontend, which was
@@ -282,6 +358,39 @@ mod tests {
 
         // And nothing may leave the repository.
         assert!(move_path(&root, "a.ts", "..").is_err());
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// Renaming is deliberately narrower than moving, so the test is mostly about what it refuses.
+    #[test]
+    fn renames_in_place_and_refuses_to_move() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+        create_dir(&root, "src").unwrap();
+        create_file(&root, "src/old.ts").unwrap();
+        create_file(&root, "src/taken.ts").unwrap();
+
+        assert_eq!(rename_path(&root, "src/old.ts", "new.ts").unwrap(), "src/new.ts");
+        assert!(repo.join("src/new.ts").is_file());
+        assert!(!repo.join("src/old.ts").exists());
+
+        // A folder renames the same way.
+        assert_eq!(rename_path(&root, "src", "lib").unwrap(), "lib");
+        assert!(repo.join("lib/new.ts").is_file());
+
+        // The name is a name, not a path: a separator would make this a move with folders created
+        // on the way, which is what dragging is for.
+        assert!(rename_path(&root, "lib/new.ts", "nested/new.ts").is_err());
+        assert!(rename_path(&root, "lib/new.ts", "  ").is_err());
+        assert!(rename_path(&root, "lib/new.ts", "..").is_err());
+        // And an existing sibling is refused rather than clobbered.
+        assert!(rename_path(&root, "lib/new.ts", "taken.ts").is_err());
+        assert!(repo.join("lib/taken.ts").is_file());
+        // Confirming the name unchanged is a no-op, not a collision with itself.
+        assert_eq!(rename_path(&root, "lib/new.ts", "new.ts").unwrap(), "lib/new.ts");
+        // The root itself is not a thing you can rename from inside the tree.
+        assert!(rename_path(&root, "", "whatever").is_err());
 
         std::fs::remove_dir_all(&repo).ok();
     }

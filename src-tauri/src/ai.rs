@@ -406,6 +406,21 @@ pub trait AiEngine: Send + Sync {
         None
     }
 
+    /// Turns the stdout of [`AiEngine::list_models_args`] into model ids.
+    ///
+    /// The default is one id per line, which is what `opencode models` and `agy models` print. An
+    /// engine whose listing is written for humans rather than for scripts overrides this — `grok
+    /// models` reports "Available models:" and a bulleted list, and taking that verbatim would put
+    /// three sentences in the model picker.
+    fn parse_models(&self, stdout: &str) -> Vec<String> {
+        stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     /// Models this engine can enumerate *without running anything* — typically from a catalog its
     /// CLI already keeps on disk. Checked before [`AiEngine::list_models_args`], so an engine with
     /// no listing subcommand can still offer a current list.
@@ -448,6 +463,7 @@ pub trait AiEngine: Send + Sync {
 pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
     match provider {
         "gemini" => Box::new(crate::gemini::GeminiEngine),
+        "grok" => Box::new(crate::grok::GrokEngine),
         "opencode" => Box::new(crate::opencode::OpenCodeEngine),
         "codex" => Box::new(crate::codex::CodexEngine),
         "ollama" | "local" => Box::new(crate::ollama::OllamaEngine),
@@ -777,12 +793,7 @@ pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<Stri
             if detail.is_empty() { "no output" } else { detail }
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect())
+    Ok(engine.parse_models(&String::from_utf8_lossy(&output.stdout)))
 }
 
 /// The engine CLI's own version — what a chat turn records next to its model, so "which build

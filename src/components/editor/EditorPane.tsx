@@ -617,9 +617,12 @@ export function EditorPane({
       // Capture-phase, so clicking anywhere in the group — a tab, the breadcrumb, the code —
       // makes it the active one before whatever was clicked handles the event.
       onMouseDownCapture={onFocus}
-      className={`flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${
-        // Only worth highlighting when there's another group to be distinguished from.
-        focused && onCloseGroup ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)]"
+      className={`flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)] ${
+        // An inset ring rather than a border, now that the layout is flush: a resting border on
+        // every pane would sit against the seam between two of them and draw a second line. The
+        // ring takes no layout, so it appears only on the group that has focus — and only when
+        // there's another group for it to be distinguished from.
+        focused && onCloseGroup ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
       }`}
     >
       {activeTab ? (

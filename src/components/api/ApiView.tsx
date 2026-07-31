@@ -67,9 +67,11 @@ function ApiEmptyState() {
 
   return (
     <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3">
-      {/* `EmptyState` is `h-full`, so it needs a box with a resolved height to centre itself in;
-          without one it would either collapse or eat the row the buttons live in. */}
-      <div className="h-[150px] w-full">
+      {/* No fixed height. `EmptyState` is `h-full`, and a percentage height against a content-sized
+          parent resolves to `auto` — so it sizes to its own content and its internal centring is
+          simply a no-op, which is right here because the column outside already centres the whole
+          group. The 150px this used to carry was a guess that a two-line subtitle overflowed. */}
+      <div className="w-full">
         {/* The subtitle says "this workspace" rather than just "no collections": an empty API view
             straight after a workspace switch otherwise reads as "my collections are gone". */}
         <EmptyState
@@ -146,10 +148,10 @@ export function ApiView() {
   return (
     <>
       <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
-        {/* Padded and gapped so each column reads as its own card, the way the Editor view lays
-            out its rail, tree and editor. The request area is the one that gains most from it:
-            flush against the window it looked like a form bolted to the frame. */}
-        <div className="flex min-h-0 flex-1 gap-1.5 overflow-hidden p-2">
+        {/* Flush: no padding, no gaps. Each column is a plain surface and the only thing between two
+            of them is the `ResizeHandle`'s one-pixel seam — the same everywhere in the app, so the
+            five views read as one window rather than as cards floating on a background. */}
+        <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* Both workspaces stay mounted once visited, so switching back doesn't re-fetch a tree or
               throw away a result grid — the same reason `App` keeps its views mounted.
 
@@ -157,7 +159,7 @@ export function ApiView() {
               where the two sit as sibling rows — the same control that opens this tab in the first
               place, so there is no second switcher to keep in step with it. */}
           <div
-            className={`flex min-w-0 flex-1 gap-1.5 overflow-hidden ${
+            className={`flex min-w-0 flex-1 overflow-hidden ${
               apiWorkspace === "requests" ? "" : "hidden"
             }`}
           >

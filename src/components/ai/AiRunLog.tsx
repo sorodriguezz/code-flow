@@ -32,6 +32,7 @@ export function AiRunLog({
   runId,
   lines: explicitLines,
   running,
+  startedAt,
   label,
   expanded,
   onToggle,
@@ -42,6 +43,10 @@ export function AiRunLog({
   lines?: AiRunLine[];
   /** Drives the stop button, the timer and the progress bar — a finished run keeps its log. */
   running: boolean;
+  /** When the run actually began. Runs outlive the view that started them, so without this the
+   * timer measured how long this card had been mounted — a run left in the background and
+   * reopened five minutes later came back reading 0:00 and counting up from there. */
+  startedAt?: number | null;
   /** Overrides the headline. A finished trace wants something stable like "3 steps". */
   label?: string;
   expanded: boolean;
@@ -53,7 +58,7 @@ export function AiRunLog({
   const cancelling = useAiRunStore((s) => (runId ? (s.cancelling[runId] ?? false) : false));
   const cancel = useAiRunStore((s) => s.cancel);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const elapsed = useElapsed(running);
+  const elapsed = useElapsed(running, startedAt ?? null);
 
   // Follow the tail, the way a terminal does.
   useEffect(() => {
@@ -162,16 +167,18 @@ export function AiRunLog({
   );
 }
 
-/** Seconds since the run started, ticking while it does. Reset each time one begins. */
-function useElapsed(running: boolean): number {
-  const [seconds, setSeconds] = useState(0);
+/** Seconds since the run started, ticking while it does. Counted from `startedAt` when the caller
+ * knows it — mount time is only a fallback for a run whose start nobody recorded. */
+function useElapsed(running: boolean, startedAt: number | null): number {
+  const [seconds, setSeconds] = useState(() => (startedAt ? Math.floor((Date.now() - startedAt) / 1000) : 0));
   useEffect(() => {
     if (!running) return;
-    setSeconds(0);
-    const started = Date.now();
-    const timer = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 1000);
+    const started = startedAt ?? Date.now();
+    const tick = () => setSeconds(Math.max(0, Math.floor((Date.now() - started) / 1000)));
+    tick();
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
-  }, [running]);
+  }, [running, startedAt]);
   return seconds;
 }
 

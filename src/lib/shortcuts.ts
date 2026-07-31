@@ -1,8 +1,11 @@
-import { useUiStore, type MainView } from "../state/uiStore";
+import { useUiStore, type ApiWorkspace, type MainView } from "../state/uiStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { useNavigationStore } from "../state/navigationStore";
 import { useEditorCommandStore } from "../state/editorCommandStore";
+import { useDbCommandStore } from "../state/dbCommandStore";
+import { useDbStore } from "../state/dbStore";
+import { useDbModalStore } from "../state/dbModalStore";
 import { fetchNow, pullNow, pushNow } from "./gitActions";
 import type { Chord } from "./keys";
 import type { TranslationKey } from "./i18n/translations";
@@ -12,6 +15,7 @@ export type ShortcutGroup =
   | "panels"
   | "views"
   | "editor"
+  | "database"
   | "navigation"
   | "workspace"
   | "git";
@@ -27,6 +31,12 @@ export type ShortcutId =
   | "view.changes"
   | "view.editor"
   | "view.api"
+  | "view.database"
+  | "db.newConsole"
+  | "db.connections"
+  | "db.refresh"
+  | "db.filter"
+  | "db.apply"
   | "view.next"
   | "view.prev"
   | "editor.goToFile"
@@ -38,6 +48,10 @@ export type ShortcutId =
   | "editor.bookmarkToggle"
   | "editor.splitRight"
   | "editor.codeSnap"
+  | "editor.newFile"
+  | "editor.newFolder"
+  | "editor.renamePath"
+  | "editor.deletePath"
   | "nav.back"
   | "nav.forward"
   | "project.switcher"
@@ -66,19 +80,44 @@ export const SHORTCUT_GROUP_LABELS: Record<ShortcutGroup, TranslationKey> = {
   panels: "shortcuts.groupPanels",
   views: "shortcuts.groupViews",
   editor: "shortcuts.groupEditor",
+  database: "shortcuts.groupDatabase",
   navigation: "shortcuts.navigation",
   workspace: "shortcuts.groupWorkspace",
   git: "shortcuts.groupGit",
 };
 
-/** The API client is in the cycle because it is a view like the others — it was reachable only by
- * clicking the workspace menu, which made it the one destination with no keyboard route at all. */
-const VIEW_ORDER: MainView[] = ["graph", "changes", "editor", "api"];
+/**
+ * The five screens, in the order the keyboard walks them.
+ *
+ * A destination is a view *and*, for the two that share one, which workspace inside it — the API
+ * client and the database are both `activeView: "api"`, so naming only the view isn't enough to say
+ * where to go. It used to be a plain `MainView[]`, which meant `setActiveView("api")` from the
+ * database left `apiWorkspace` where it was and the screen didn't move: ⌘4 and ⌘5 were two numbers
+ * for whichever of the two you had open last.
+ */
+const VIEW_ORDER: { view: MainView; workspace?: ApiWorkspace }[] = [
+  { view: "graph" },
+  { view: "changes" },
+  { view: "editor" },
+  { view: "api", workspace: "requests" },
+  { view: "api", workspace: "database" },
+];
+
+/** Goes to a destination, using whichever setter can express it. */
+function goTo(destination: { view: MainView; workspace?: ApiWorkspace }): void {
+  const ui = useUiStore.getState();
+  if (destination.workspace) ui.openApiWorkspace(destination.workspace);
+  else ui.setActiveView(destination.view);
+}
 
 function cycleView(delta: number): void {
-  const { activeView, setActiveView } = useUiStore.getState();
-  const index = VIEW_ORDER.indexOf(activeView);
-  setActiveView(VIEW_ORDER[(index + delta + VIEW_ORDER.length) % VIEW_ORDER.length]);
+  const { activeView, apiWorkspace } = useUiStore.getState();
+  const index = VIEW_ORDER.findIndex(
+    (entry) =>
+      entry.view === activeView &&
+      (entry.workspace === undefined || entry.workspace === apiWorkspace),
+  );
+  goTo(VIEW_ORDER[(index + delta + VIEW_ORDER.length) % VIEW_ORDER.length]);
 }
 
 /** Replays a history entry — shared with the title bar's back/forward chevrons so both routes
@@ -88,6 +127,27 @@ export function goHistory(direction: "back" | "forward"): void {
   if (!entry) return;
   useUiStore.getState().setActiveView(entry.view);
   if (entry.projectId) useWorkspaceStore.getState().setActiveProject(entry.projectId);
+}
+
+/**
+ * Opens a SQL console on the connection the keystroke most likely meant.
+ *
+ * In order: the one behind the tab you are looking at, then any connection that is already open,
+ * then the first one configured. With none at all the console would have nothing to run against, so
+ * the shortcut opens the data sources dialog instead — landing somewhere useful beats doing nothing
+ * and looking broken.
+ */
+function newDbConsole(): void {
+  const db = useDbStore.getState();
+  const active = db.tabs.find((tab) => tab.id === db.activeTabId);
+  const connectionId =
+    active?.connectionId ?? db.connected[0] ?? db.connections[0]?.id ?? null;
+  useUiStore.getState().openApiWorkspace("database");
+  if (!connectionId) {
+    useDbModalStore.getState().openDbModal({ kind: "connections" });
+    return;
+  }
+  db.newConsole(connectionId);
 }
 
 function cycleProject(delta: number): void {
@@ -187,7 +247,14 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     group: "views",
     labelKey: "tabbar.api",
     defaultChord: "Mod+4",
-    run: () => useUiStore.getState().setActiveView("api"),
+    run: () => useUiStore.getState().openApiWorkspace("requests"),
+  },
+  {
+    id: "view.database",
+    group: "views",
+    labelKey: "db.title",
+    defaultChord: "Mod+5",
+    run: () => useUiStore.getState().openApiWorkspace("database"),
   },
   {
     id: "view.next",
@@ -281,6 +348,90 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "codesnap.action",
     defaultChord: "Mod+Shift+C",
     run: () => useEditorCommandStore.getState().send("codeSnap"),
+  },
+
+  /*
+   * The explorer's four, all acting on the row the tree has focused.
+   *
+   * ⇧⌘N and ⌥⇧⌘N pair on purpose — one letter, the folder variant wearing the extra modifier — and
+   * neither is taken. `F2` is the rename key in every file manager and IDE worth matching, and it
+   * is the one kind of chord that can be bound bare: a function key produces no text, so it fires
+   * with the caret in a field instead of typing into it. ⌘⌫ is the platform's own "move to trash",
+   * which is exactly what this does.
+   */
+  {
+    id: "editor.newFile",
+    group: "editor",
+    labelKey: "editor.newFile",
+    defaultChord: "Mod+Shift+N",
+    run: () => useEditorCommandStore.getState().send("newFile"),
+  },
+  {
+    id: "editor.newFolder",
+    group: "editor",
+    labelKey: "editor.newFolder",
+    defaultChord: "Mod+Alt+Shift+N",
+    run: () => useEditorCommandStore.getState().send("newFolder"),
+  },
+  {
+    id: "editor.renamePath",
+    group: "editor",
+    labelKey: "editor.rename",
+    defaultChord: "F2",
+    run: () => useEditorCommandStore.getState().send("renamePath"),
+  },
+  {
+    id: "editor.deletePath",
+    group: "editor",
+    labelKey: "editor.delete",
+    defaultChord: "Mod+Backspace",
+    run: () => useEditorCommandStore.getState().send("deletePath"),
+  },
+
+  /*
+   * The database workspace's actions.
+   *
+   * `Mod+Alt+…` throughout, because the unmodified pairs are taken by things people press far more
+   * often — ⇧⌘R is fetch, ⌘F is Monaco's find — and a database shortcut that stole one of those
+   * would be a bad trade for a workspace you are not always in.
+   */
+  {
+    id: "db.newConsole",
+    group: "database",
+    labelKey: "db.newConsole",
+    defaultChord: "Mod+Alt+N",
+    run: newDbConsole,
+  },
+  {
+    id: "db.connections",
+    group: "database",
+    labelKey: "db.dataSources",
+    defaultChord: "Mod+Alt+C",
+    run: () => {
+      useUiStore.getState().openApiWorkspace("database");
+      useDbModalStore.getState().openDbModal({ kind: "connections" });
+    },
+  },
+  {
+    id: "db.refresh",
+    group: "database",
+    labelKey: "db.refresh",
+    defaultChord: "Mod+Alt+R",
+    run: () => useDbCommandStore.getState().send("refresh"),
+  },
+  {
+    id: "db.filter",
+    group: "database",
+    labelKey: "db.filter",
+    defaultChord: "Mod+Alt+F",
+    run: () => useDbCommandStore.getState().send("filter"),
+  },
+  {
+    id: "db.apply",
+    group: "database",
+    labelKey: "db.apply",
+    defaultChord: "Mod+Alt+Enter",
+    run: () => useDbCommandStore.getState().send("apply"),
   },
 
   {

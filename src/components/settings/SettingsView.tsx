@@ -57,6 +57,11 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
 // Sections whose body carries a side rail of its own, and so needs the wider content column.
 const WIDE_SECTIONS = new Set<SettingsSectionId>(["azure", "claude", "api"]);
 
+/** Sections that carry a sub-nav and scroll the pane beside it rather than the whole column, so
+ * their heading and rail stay put while you read down a long list. They need a definite height to
+ * do that, which is what the `h-full` below hands them. */
+const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>(["claude"]);
+
 const WORKSPACE_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
   { id: "review", labelKey: "settings.review", icon: ShieldCheck },
   { id: "sdd", labelKey: "settings.sdd", icon: Workflow },
@@ -165,7 +170,8 @@ export function SettingsView() {
         </div>
 
         <div className="flex min-h-0 flex-1">
-          <nav style={{ width: navWidth }} className="shrink-0 overflow-y-auto border-r border-[var(--cf-border)] p-3">
+          {/* No `border-r`: the handle after this nav is the seam, and a border here doubled it. */}
+          <nav style={{ width: navWidth }} className="shrink-0 overflow-y-auto p-3">
             <p className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("settings.globalGroup")}
             </p>
@@ -200,7 +206,16 @@ export function SettingsView() {
           <div data-settings-scroll className="flex-1 overflow-x-auto overflow-y-scroll p-6">
             {/* Wider for the two sections that carry a nav of their own: 168px of rail out of 576
                 would leave their forms in a column narrower than the labels they carry. */}
-            <div className={`mx-auto ${WIDE_SECTIONS.has(section) ? "max-w-3xl" : "max-w-xl"}`}>
+            {/* `h-full` for the sections that scroll their own pane: they pin a header and a rail
+                and let only the pane beside it move, which needs a definite height to divide up.
+                The outer container deliberately keeps `overflow-y-scroll` even for them — the
+                reserved gutter above is what stops the centred column shifting sideways between
+                sections, and a pane that fits exactly never draws a thumb here anyway. */}
+            <div
+              className={`mx-auto ${WIDE_SECTIONS.has(section) ? "max-w-3xl" : "max-w-xl"} ${
+                SELF_SCROLLING_SECTIONS.has(section) ? "h-full" : ""
+              }`}
+            >
               {section === "appearance" && <ThemeSettings />}
               {section === "general" && <GeneralSettings />}
               {section === "keybindings" && <ShortcutsSettings />}

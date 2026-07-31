@@ -184,13 +184,20 @@ export function TerminalDock() {
     })),
   );
 
+  const [resizing, setResizing] = useState(false);
+
   return (
     <motion.div
       initial={{ height: 0, opacity: 0 }}
       animate={{ height, opacity: 1 }}
       exit={{ height: 0, opacity: 0 }}
-      transition={{ duration: 0.18, ease: "easeOut" }}
-      className="flex shrink-0 flex-col overflow-hidden border-t border-[var(--cf-border)] bg-[var(--cf-surface)]"
+      // Off while dragging, for the reason spelled out in `AiPanel`: `animate` eases toward every
+      // height the drag hands it, so the dock trailed the pointer by the whole duration.
+      transition={resizing ? { duration: 0 } : { duration: 0.18, ease: "easeOut" }}
+      // No `border-t`. The handle below draws the seam already, and a border here put a second line
+      // 3.5px above it — a doubled divider whose top half was the static one and whose bottom half
+      // was the one that lights up. One line, and it is the one you can grab.
+      className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
     >
       <ResizeHandle
         axis="y"
@@ -200,6 +207,7 @@ export function TerminalDock() {
         invert
         onChange={(h) => setSize("terminalPanelHeight", h)}
         onCommit={(h) => commitSize("terminalPanelHeight", h)}
+        onDragChange={setResizing}
       />
       <div className="flex h-8 shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2">
         <TerminalSquare size={13} className="mr-1 shrink-0 text-[var(--cf-text-muted)]" />

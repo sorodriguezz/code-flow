@@ -684,11 +684,23 @@ export const writeFileBytes = (path: string, contents: Uint8Array) =>
 export const movePath = (repoPath: string, fromRel: string, destDir: string) =>
   invoke<string>("move_path", { repoPath, fromRel, destDir });
 
+/** Creates a folder, and any missing parents — so `a/b/c` typed into one box works in one go. */
 export const createDir = (repoPath: string, relPath: string) =>
   invoke<void>("create_dir", { repoPath, relPath });
 
+/** Creates an empty file, and any missing parent folders: `docs/api/spec.md` makes `docs` and
+ * `docs/api` on the way. Refuses rather than truncating a file that already exists. */
 export const createFile = (repoPath: string, relPath: string) =>
   invoke<void>("create_file", { repoPath, relPath });
+
+/** Renames a file or folder in place, keeping it in the same parent. `newName` is a plain name —
+ * no separators. Returns the new repo-relative path. */
+export const renamePath = (repoPath: string, fromRel: string, newName: string) =>
+  invoke<string>("rename_path", { repoPath, fromRel, newName });
+
+/** Sends a file or folder to the OS trash, so a mis-aimed click is recoverable from Finder. */
+export const deletePath = (repoPath: string, relPath: string) =>
+  invoke<void>("delete_path", { repoPath, relPath });
 
 export const openInDefaultApp = (repoPath: string, relPath: string) =>
   invoke<void>("open_in_default_app", { repoPath, relPath });

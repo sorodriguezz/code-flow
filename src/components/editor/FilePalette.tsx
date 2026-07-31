@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { listRepoFiles } from "../../lib/tauri/commands";
 import { fileIconFor } from "../../lib/fileIcon";
 import { useT } from "../../state/languageStore";
@@ -104,7 +105,15 @@ export function FilePalette({
     }
   };
 
-  return (
+  // Portalled to `document.body`, for the reason spelled out at length on `ApiModal`: it opens from
+  // inside the editor, the editor lives in `.cf-ambient-bg`, and that element is `isolation:
+  // isolate`. The isolation is a stacking context, so no `z-index` here can lift the backdrop over
+  // the terminal dock, the AI panel or the status bar — they are later siblings of the isolated
+  // element, not descendants of it. Left in place the veil covered the viewport but painted *under*
+  // the app chrome, which is why the bars around the palette never dimmed and stayed clickable
+  // straight through it. Out here `z-50` puts it with the app's other root overlays: the command
+  // palette, Settings, the shortcuts sheet.
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/30 pt-[12vh]" onClick={onClose}>
       <div
         onClick={(e) => e.stopPropagation()}
@@ -150,6 +159,7 @@ export function FilePalette({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }

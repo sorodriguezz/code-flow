@@ -1113,7 +1113,11 @@ export function Sidebar() {
     <div className="flex shrink-0">
       <aside
         style={{ width: sidebarWidth }}
-        className="flex shrink-0 flex-col overflow-hidden border-r border-[var(--cf-border)] bg-[var(--cf-surface)]"
+        // No `border-r`. The `ResizeHandle` after this draws the seam already, and the border put a
+        // second line hard against the sidebar's edge — so the pair read as one thick divider whose
+        // live half sat off to the right, against the panel it isn't part of. Dropping it leaves one
+        // line, centred in the handle's own six pixels, with equal space to each panel.
+        className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
       >
         <div className="shrink-0 px-3 pt-3">
           <WorkspaceSwitcher />

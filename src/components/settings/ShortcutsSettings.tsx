@@ -11,7 +11,16 @@ import {
 } from "../../lib/shortcuts";
 import { chordKeycaps, eventToChord, isBindable } from "../../lib/keys";
 
-const GROUP_ORDER: ShortcutGroup[] = ["general", "panels", "views", "editor", "navigation", "workspace", "git"];
+const GROUP_ORDER: ShortcutGroup[] = [
+  "general",
+  "panels",
+  "views",
+  "editor",
+  "database",
+  "navigation",
+  "workspace",
+  "git",
+];
 
 /**
  * Captures the next chord the user presses and hands it back.

@@ -12,7 +12,7 @@ import { resolveFindingWithAi } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { AiRunLog } from "./AiRunLog";
 import { useRepoStore } from "../../state/repoStore";
-import { useResolutionsStore } from "../../state/resolutionsStore";
+import { useResolutionsStore, resolutionRunKey, type RunningResolution } from "../../state/resolutionsStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
@@ -56,13 +56,29 @@ export function useResolveWithAi(
   resolutionKey?: string,
 ) {
   const t = useT();
-  const [resolving, setResolving] = useState(false);
-  const [runId, setRunId] = useState<string | null>(null);
   const [localResolution, setLocalResolution] = useState<string | null>(null);
   const persisted = useResolutionsStore((s) =>
     projectId && resolutionKey ? s.byProject[projectId]?.[resolutionKey]?.text ?? null : null,
   );
   const resolution = resolutionKey ? persisted : localResolution;
+
+  // A keyed fix tracks its run in the store, so unmounting the card (leaving the PR, switching
+  // repos, closing the panel) doesn't lose the fact that it's still applying — the card picks the
+  // run back up when it returns. Without a key there's no identity to find it by, so it falls back
+  // to local state, exactly as the result does.
+  const runKey = projectId && resolutionKey ? resolutionRunKey(projectId, resolutionKey) : null;
+  const sharedRun = useResolutionsStore((s) => (runKey ? s.running[runKey] ?? null : null));
+  const [localRun, setLocalRun] = useState<RunningResolution | null>(null);
+  const activeRun = runKey ? sharedRun : localRun;
+  const resolving = activeRun !== null;
+  const runId = activeRun?.runId ?? null;
+  const runStartedAt = activeRun?.startedAt ?? null;
+
+  const markRunning = (run: RunningResolution | null) => {
+    if (!runKey) return setLocalRun(run);
+    if (run) useResolutionsStore.getState().startRun(runKey, run);
+    else useResolutionsStore.getState().finishRun(runKey);
+  };
 
   const record = (text: string) => {
     if (projectId && resolutionKey) useResolutionsStore.getState().save(projectId, resolutionKey, text);
@@ -102,9 +118,8 @@ export function useResolveWithAi(
     // A fix writes to the working tree, so it's the run that most needs to be watchable and
     // stoppable — the id ties both to this particular fix.
     const id = newRunId("fix");
-    setRunId(id);
     useAiRunStore.getState().start(id);
-    setResolving(true);
+    markRunning({ runId: id, startedAt: Date.now() });
     try {
       const result = await resolveFindingWithAi(projectId, promptText, id);
       record(result);
@@ -113,11 +128,11 @@ export function useResolveWithAi(
       if (!isCancellation(e)) pushErrorToast(String(e));
     } finally {
       useAiRunStore.getState().finish(id);
-      setResolving(false);
+      markRunning(null);
     }
   };
 
-  return { resolving, resolution, resolve, clearResolution, runId };
+  return { resolving, resolution, resolve, clearResolution, runId, runStartedAt };
 }
 
 /** The button + result text for `useResolveWithAi` — identical markup in `FindingCard` and
@@ -127,6 +142,7 @@ export function ResolveWithAiButton({
   resolving,
   resolution,
   runId,
+  runStartedAt,
   onClick,
   onClear,
   trailing,
@@ -136,6 +152,8 @@ export function ResolveWithAiButton({
   resolution: string | null;
   /** The in-flight (or last) run, so the live log and its stop button can be shown here. */
   runId?: string | null;
+  /** When that run began — the card can be reopened long after, and the timer has to say so. */
+  runStartedAt?: number | null;
   onClick: () => void;
   onClear?: () => void;
   /** An extra action sharing this row — a PR comment's "resolve the thread on the host", which
@@ -168,7 +186,13 @@ export function ResolveWithAiButton({
         {trailing}
       </div>
       {resolving && runId && (
-        <AiRunLog runId={runId} running expanded={logExpanded} onToggle={() => setLogExpanded((v) => !v)} />
+        <AiRunLog
+          runId={runId}
+          running
+          startedAt={runStartedAt}
+          expanded={logExpanded}
+          onToggle={() => setLogExpanded((v) => !v)}
+        />
       )}
       {resolution && (
         <div className="relative rounded-md border border-[color-mix(in_oklab,var(--cf-success)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_9%,transparent)] px-2.5 py-1.5 pr-6">
@@ -283,7 +307,7 @@ export function FindingCard({
   const t = useT();
   const [open, setOpen] = useState(defaultOpen);
   const { icon: Icon, color } = SEVERITY_STYLE[finding.severity];
-  const { resolving, resolution, resolve, clearResolution, runId } = useResolveWithAi(
+  const { resolving, resolution, resolve, clearResolution, runId, runStartedAt } = useResolveWithAi(
     projectId,
     prSourceBranch,
     resolutionKey,
@@ -358,6 +382,7 @@ export function FindingCard({
               resolving={resolving}
               resolution={resolution}
               runId={runId}
+              runStartedAt={runStartedAt}
               onClick={() => void resolve(formatFindingAsFixPrompt(finding))}
               onClear={clearResolution}
             />

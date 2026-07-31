@@ -37,6 +37,10 @@ dirs = "5"
 portable-pty = "0.8"
 notify = "6"
 open = "5"
+# Deleting from the explorer goes to the OS trash rather than to `remove_dir_all`. A tree row is an
+# easy thing to click by accident, and "undo" for a folder that is gone from disk is the user's
+# backup — this makes it the Finder/Explorer they already know.
+trash = "5"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",

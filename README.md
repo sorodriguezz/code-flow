@@ -4,170 +4,224 @@
 
 # CodeFlow
 
-### Tu cliente de Git de escritorio, con la IA que tú elijas.
+### Your desktop Git client, with the AI you choose.
 
-Gestiona repositorios, revisa pull requests y deja que la IA escriba tus commits,
-encuentre errores y resuelva conflictos — todo en una app rápida y nativa.
-**Y decides qué modelo hace cada cosa.**
+Manage repositories, review pull requests, and let AI write your commits, find bugs and
+resolve conflicts — all in a fast, native app. And when you're done, test the endpoint
+you just changed and query the database behind it without leaving the window.
+**You decide which model does what.**
 
-![version](https://img.shields.io/badge/versión-1.9.4-6C5CE7)
-![platform](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
-![proveedores](https://img.shields.io/badge/IA-Claude%20%7C%20Gemini%20%7C%20Open%20Code%20%7C%20Ollama-00B894)
-![idiomas](https://img.shields.io/badge/idiomas-ES%20%7C%20EN-0984E3)
+![version](https://img.shields.io/badge/version-1.9.5-6C5CE7)
+![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
+![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
+![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
+
+**English** · [Español](README.es.md)
 
 </div>
 
 ---
 
-CodeFlow reúne en un mismo lugar lo que normalmente está repartido entre tu cliente de
-Git, la web de GitHub/Azure DevOps y una terminal aparte. Ves tu historial, preparas y
-confirmas cambios, abres y revisas pull requests, y tienes un asistente de IA que
-entiende tu repositorio y trabaja contigo.
+CodeFlow gathers in one place what is normally split between your Git client, the
+GitHub/Azure DevOps website, a REST client, a database tool and a separate terminal. You
+read your history, stage and commit changes, open and review pull requests, and work with
+an AI assistant that understands your repository.
 
-**Lo que no vas a encontrar en otro cliente:** no te casa con un proveedor de IA. Usa
-varios a la vez y asigna cada tarea al modelo que mejor le va — incluido uno **local**,
-si tu código no puede salir de tu máquina.
+**What you won't find in another client:** it doesn't marry you to one AI provider. Use
+several at once and give each task to the model that suits it — including a **local** one,
+if your code can't leave your machine.
 
-## ✨ Un vistazo
+## ✨ At a glance
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/screenshots/graph.png" alt="Grafo de commits" /></td>
-    <td width="50%"><img src="docs/screenshots/changes.png" alt="Cambios y diff" /></td>
+    <td width="50%"><img src="docs/screenshots/graph.png" alt="Commit graph" /></td>
+    <td width="50%"><img src="docs/screenshots/changes.png" alt="Changes and diff" /></td>
   </tr>
   <tr>
-    <td align="center"><b>Grafo de commits</b> — historial y ramas de un vistazo</td>
-    <td align="center"><b>Cambios</b> — diff unificado o en paralelo</td>
+    <td align="center"><b>Commit graph</b> — history and branches at a glance</td>
+    <td align="center"><b>Changes</b> — unified or side-by-side diff</td>
   </tr>
   <tr>
-    <td width="50%"><img src="docs/screenshots/ai-settings.png" alt="Asistente de IA" /></td>
-    <td width="50%"><img src="docs/screenshots/pr-review.png" alt="Revisión con IA" /></td>
+    <td width="50%"><img src="docs/screenshots/ai-settings.png" alt="AI assistant" /></td>
+    <td width="50%"><img src="docs/screenshots/pr-review.png" alt="AI review" /></td>
   </tr>
   <tr>
-    <td align="center"><b>Asistente de IA</b> — proveedores y modelo por tarea</td>
-    <td align="center"><b>Revisión con IA</b> — hallazgos claros y accionables</td>
+    <td align="center"><b>AI assistant</b> — providers and a model per task</td>
+    <td align="center"><b>AI review</b> — clear, actionable findings</td>
   </tr>
 </table>
 
-## 🧠 La IA, a tu manera
+## 🧠 AI, your way
 
-Elige entre cuatro motores. CodeFlow **detecta cuáles tienes instalados** y te dice qué
-falta, en vez de dejarte adivinar por qué algo no funciona.
+Pick from seven engines. CodeFlow **detects which ones you have installed** and tells you
+what's missing, instead of leaving you to guess why something doesn't work.
 
-| Proveedor | Cómo funciona | Ideal para |
+| Provider | How it works | Best for |
 |---|---|---|
-| **Claude Code** | CLI, con herramientas | Revisiones a fondo y aplicar correcciones |
-| **Gemini** | CLI (Antigravity), con herramientas | Alternativa potente con cuenta de Google |
-| **Open Code** | CLI, cualquier modelo que configures | Mezclar proveedores a tu gusto |
-| **Ollama** | 🔒 **Local**, sin nube | Privacidad total, sin conexión y sin coste |
+| **Claude Code** | CLI, with tools | Deep reviews and applying fixes |
+| **Codex** | CLI, with tools | Your ChatGPT subscription, not API credits |
+| **Gemini** | CLI (Antigravity), with tools | A strong alternative on a Google account |
+| **Grok** | CLI, with tools | Resumes the exact conversation, not "the last one" |
+| **Open Code** | CLI, any model you configure | Mixing providers however you like |
+| **Ollama** | 🔒 **Local**, no cloud | Full privacy, offline, no cost |
+| **OpenAI** | API key, editable endpoint | OpenRouter, Groq, DeepSeek, Azure or vLLM |
 
-*Codex y DeepSeek, en camino.*
+The **OpenAI** entry speaks the usual `/v1/chat/completions` and the URL is yours to set,
+so any compatible service works through it without waiting for an entry of its own. The
+key goes to the system keychain.
 
-### Un motor distinto para cada tarea
+### A different engine for every task
 
-Aquí está la diferencia: no eliges «una IA» — eliges **quién hace qué**.
+Here's the difference: you don't pick "an AI" — you pick **who does what**.
 
-| Tarea | Por ejemplo… |
+| Task | For example… |
 |---|---|
-| Mensaje de commit | Un modelo local: instantáneo, gratis y sin salir de tu equipo |
-| Análisis pre-commit | Uno rápido, que corre en cada cambio |
-| Revisión de pull request | El más potente que tengas — aquí sí compensa |
-| Descripción de PR | El que mejor redacte |
-| Corregir hallazgos | Uno con acceso a herramientas, que edita los archivos |
-| Resolución de conflictos | El que prefieras, incluso local |
+| Commit message | A local model: instant, free, never leaves your machine |
+| Pre-commit analysis | Something fast, since it runs on every change |
+| Pull request review | The most capable one you have — this is where it pays off |
+| PR description | Whichever writes best |
+| Fixing findings | One with tool access, so it edits the files |
+| Conflict resolution | Whichever you prefer, local included |
 
-Lo que dejes en **«heredar»** usa tu proveedor por defecto, así que puedes ignorar la
-tabla entera si te vale uno para todo. Y desde el propio chat cambias de modelo **en dos
-clics**, sin pasar por Ajustes.
+Anything left on **"inherit"** uses your default provider, so you can ignore the whole
+table if one model does everything you need. And you switch model **in two clicks** from
+the chat itself, without going through Settings.
 
-### Lo que hace por ti
+### What it does for you
 
-- **Chatea con tu repo** — lee archivos, busca en el código y consulta el estado de Git para responderte.
-- **Mensajes de commit** redactados desde tus cambios preparados.
-- **Análisis pre-commit** — busca bugs y vulnerabilidades antes de confirmar, con un *quality gate* de fiabilidad, seguridad y mantenibilidad.
-- **Corrige hallazgos con un clic** — la IA aplica el arreglo en tu árbol de trabajo.
-- **Resuelve conflictos** — propuesta editable, con diff contra el archivo original, que no toca nada hasta que aceptas.
-- **Crea pull requests** con título y descripción generados desde el diff.
-- **Plantillas personalizables** para las cinco acciones, compartidas entre proveedores.
+- **Chat with your repo** — it reads files, searches the code and checks Git state to answer you.
+- **Commit messages** written from what you've staged.
+- **Pre-commit analysis** — finds bugs and vulnerabilities before you commit, with a quality gate for reliability, security and maintainability.
+- **Fix findings in one click** — the AI applies the change in your working tree.
+- **Resolve conflicts** — an editable proposal, diffed against the original file, that touches nothing until you accept.
+- **Create pull requests** with a title and description generated from the diff.
+- **Customizable templates** for all five actions, shared across providers.
 
-> 🔒 **¿Tu código no puede salir de la empresa?** Pon Ollama como proveedor y todo lo
-> anterior corre en tu máquina, sin conexión y sin coste por token.
-> *(Las funciones que editan archivos —corregir hallazgos, MCP— necesitan un CLI con
-> herramientas; la app te lo indica y oculta lo que no aplica.)*
+> 🔒 **Code that can't leave the company?** Set Ollama as your provider and everything
+> above runs on your machine, offline and with no cost per token.
+> *(Features that edit files — fixing findings, MCP — need an engine with tools, meaning
+> one of the five CLIs; the app says so and hides what doesn't apply.)*
 
-## 🌳 Git, de forma visual
+### Nothing is lost by looking away
 
-- **Grafo de commits** con ramas, para leer el historial de un vistazo.
-- **Prepara, confirma y descarta** cambios; diff **unificado o en paralelo**, seleccionable para copiar.
-- **Ramas, remotos y stashes** a mano, con **deshacer commit** cuando te equivocas.
-- **Fetch automático** en segundo plano: siempre sabes cuántos commits llevas de adelanto o atraso.
-- **Clona repositorios**, abre varios proyectos y agrúpalos en **espacios de trabajo**.
-- **Terminal integrada** (varias pestañas y paneles) y **editor de código** con vista previa de Markdown y diagramas.
+Everything the AI starts lives in the background, not in the screen that started it.
 
-## 🔀 Pull requests, sin salir de la app
+- **Several conversations at once**, no cap: ask in one, open another and ask there while
+  the first is still thinking.
+- **Switching chats, opening a pull request or closing the panel cancels nothing.** The
+  answer lands in the conversation that asked for it, on screen or not.
+- **Activity lists it all while it runs** — chats, PR reviews, pre-commit analyses and
+  fixes — with a count of how many are alive. One click puts you back where you were,
+  live log still going and the stop button still there.
+- **The timer tells the truth**: it counts from when the task started, not from when you
+  looked back at it.
 
-- Conecta **GitHub** y **Azure DevOps** — ambos a la vez, si hace falta.
-- **Revisa un PR pegando solo su enlace** (⇧⌘L): CodeFlow averigua a cuál de tus repos pertenece
-  — aunque esté en otro workspace — y lanza la revisión.
-- ¿El repo no está en tu máquina? **Revísalo igual, sin clonar**: el diff se lee de la API del host.
-  Es una revisión más superficial (el modelo no ve el resto del código), así que también puedes
-  clonarlo de un clic para la revisión completa.
-- **Lista, revisa y comenta** PRs; **aprueba, pide cambios o ciérralos**.
-- **Crea un PR** con título y descripción por IA, también como borrador.
-- Publica los comentarios de la **revisión de IA** directamente en el pull request.
+## 🌳 Git, visually
 
-## 🔒 Seguridad y privacidad
+- **Commit graph** with branches, to read history at a glance.
+- **Stage, commit and discard** changes; **unified or side-by-side** diff, selectable for copying.
+- **Branches, remotes and stashes** within reach, with **undo commit** for when you get it wrong.
+- **Automatic background fetch**: you always know how many commits you're ahead or behind.
+- **Clone repositories**, open several projects and group them into **workspaces**.
+- **Built-in terminal** (multiple tabs and panes) and a **code editor** with Markdown and diagram preview.
+- **Run and debug** through the Debug Adapter Protocol, with breakpoints and variables.
 
-- **Escaneo de secretos antes de cada commit** — detecta claves de API, tokens y llaves privadas, y te para a tiempo. Reglas deterministas, sin enviar nada a ningún sitio.
-- Tus **tokens viven en el llavero del sistema**, nunca en texto plano.
-- **Opción 100% local** con Ollama: tu código nunca sale del equipo.
-- Es una app de escritorio: sin servidor, sin cuenta, sin telemetría.
+## 🔀 Pull requests, without leaving the app
 
-## 🎨 Hazlo tuyo
+- Connect **GitHub** and **Azure DevOps** — both at once, if you need to.
+- **Review a PR by pasting only its link** (⇧⌘L): CodeFlow works out which of your repos it belongs to
+  — even one in another workspace — and starts the review.
+- Repo not on your machine? **Review it anyway, without cloning**: the diff is read from the host's API.
+  That's a shallower review (the model can't see the rest of the code), so you can also clone it in one
+  click for the full one.
+- **List, review and comment** on PRs; **approve, request changes or close** them.
+- **Create a PR** with an AI title and description, as a draft too.
+- Publish the **AI review's** comments straight onto the pull request.
 
-- Temas **claro, oscuro o del sistema**, con color de acento a elegir.
-- Interfaz en **español e inglés**.
-- **Plantillas de prompt** para commit, análisis, revisión, descripción de PR y conflictos.
-- Por espacio de trabajo: **contexto de revisión**, **instrucciones (.md)**, **Skills** y **servidores MCP**.
-- **Historial completo** de lo que ha hecho la IA — incluidos los fallos, para que mañana sepas qué pasó.
+## 🛰️ An API client, built in
 
-## ⚙️ Puesta en marcha
+Test the endpoint you just changed without switching apps — in the same window as the
+commit that changed it.
 
-**1. Abre tu repositorio**
-Pulsa **+** en la barra lateral y elige una carpeta con un repositorio Git. Repite para
-añadir todos los que quieras y agrúpalos en espacios de trabajo.
+- **Six protocols**: REST, GraphQL (with schema introspection), WebSocket, Socket.IO,
+  gRPC (from a `.proto` file or server reflection) and MQTT.
+- **Collections, folders and environments**, with variables resolved everywhere — URL,
+  headers, body and auth.
+- **Pre-request scripts and tests** in JavaScript, so a login can feed the call after it.
+- **Bring what you already have**: import from Postman, OpenAPI/Swagger, Insomnia, HAR or
+  a raw cURL command. Export back to Postman, OpenAPI or CodeFlow's own format.
+- **Run a whole collection** and read the result as a report.
+- **Generate the code** for a request in the language you work in.
+- **Share a collection with your team** through **your own** Supabase project — you host
+  it, so the requests and their secrets stay on infrastructure you control.
 
-**2. Elige tu asistente de IA**
-En **Ajustes › Asistente de IA › Proveedores** verás los cuatro motores con su estado
-(*Disponible* / *No encontrado*). Despliega el que quieras usar, comprueba su binario —o
-el endpoint, si es Ollama— y elige su modelo. Márcalo como **predeterminado** y listo.
+## 🗄️ Your databases, in the same window
 
-**3. Afina por tarea (opcional)**
-En **Modelo por tarea** asigna un motor distinto a cada acción. Todo empieza en
-«heredar», así que solo tocas lo que quieras cambiar.
+The query you need to check is one tab away from the migration you just wrote.
 
-**4. Conecta tu plataforma (opcional)**
-En **Ajustes › Alojamiento Git** conecta **GitHub** o **Azure DevOps** para ver y revisar
-pull requests. El token se guarda en el llavero de tu sistema operativo.
+- **Five engines**: PostgreSQL, Supabase, SQL Server, InterSystems IRIS and MongoDB.
+- **Browse the tree** — schemas, tables, views, routines, sequences, columns, indexes and keys.
+- **SQL console** with history, `EXPLAIN`, and results you can export.
+- **Edit rows in a grid**: changes stage locally and you see the exact statements before
+  anything runs.
+- **Read the DDL** of any object, and the **schema diagram** with its foreign keys.
+- **Read-only connections** for the ones you must not touch by accident, and an **SSH
+  tunnel** when the database sits behind a bastion.
+- Passwords go to the **system keychain**, never into the app's database.
 
-> 💡 ¿Quieres probarlo sin instalar ningún CLI? Instala [Ollama](https://ollama.com),
-> ejecuta `ollama pull qwen2.5-coder` y selecciónalo en Ajustes. Sin cuentas ni claves.
+## 🔒 Security and privacy
 
-## 💾 Descarga
+- **Secret scanning before every commit** — catches API keys, tokens and private keys, and stops you in time. Deterministic rules, nothing sent anywhere.
+- Your **tokens live in the system keychain**, never in plain text.
+- A **100% local option** with Ollama: your code never leaves the machine.
+- It's a desktop app: no server, no account, no telemetry.
 
-Disponible para **Windows** y **macOS**. Coge la última versión desde
-**[Releases](../../releases)**, ejecuta el instalador y ábrela. La app se
-**actualiza sola** cuando hay una versión nueva.
+## 🎨 Make it yours
 
-Puede seguir corriendo en segundo plano (icono en la bandeja) para mantener vivas las
-terminales y las tareas de IA aunque cierres la ventana.
+- **Light, dark or system** themes, with an accent color of your choosing.
+- Interface in **English and Spanish**.
+- **Prompt templates** for commit, analysis, review, PR description and conflicts.
+- Per workspace: **review context**, **instructions (.md)**, **Skills** and **MCP servers**.
+- **A full history** of what the AI has done — failures included, so tomorrow you know what happened.
 
-## 🌐 Idiomas
+## ⚙️ Getting started
 
-Español e inglés, cambiables en cualquier momento desde **Ajustes › General**.
+**1. Open your repository**
+Hit **+** in the sidebar and pick a folder with a Git repository. Repeat for as many as
+you like and group them into workspaces.
+
+**2. Choose your AI assistant**
+**Settings › AI Assistant › Providers** shows the seven engines with their status
+(*Available* / *Not found*). Expand the one you want, check its binary — or its endpoint,
+for Ollama and OpenAI — and pick a model. Mark it as **default** and you're done.
+
+**3. Tune it per task (optional)**
+Under **Model per task**, give each action a different engine. Everything starts on
+"inherit", so you only touch what you want to change.
+
+**4. Connect your platform (optional)**
+Under **Settings › Git Hosting**, connect **GitHub** or **Azure DevOps** to see and review
+pull requests. The token is stored in your operating system's keychain.
+
+> 💡 Want to try it without installing any CLI? Install [Ollama](https://ollama.com), run
+> `ollama pull qwen2.5-coder` and select it in Settings. No accounts, no keys.
+
+## 💾 Download
+
+Available for **Windows** and **macOS**. Grab the latest build from
+**[Releases](../../releases)**, run the installer and open it. The app **updates itself**
+when a new version lands.
+
+It can keep running in the background (tray icon) so your terminals and AI tasks stay
+alive even when you close the window.
+
+## 🌐 Languages
+
+English and Spanish, switchable at any time from **Settings › General**.
 
 ---
 
 <div align="center">
-<sub>Hecho para quien quiere Git, revisiones e IA en un mismo flujo. 💜</sub>
+<sub>Built for anyone who wants Git, reviews and AI in a single flow. 💜</sub>
 </div>

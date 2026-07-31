@@ -255,7 +255,8 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
         onCommit={(value) => commitSize("dbResultHeight", value)}
       />
 
-      <div style={{ height }} className="flex shrink-0 flex-col overflow-hidden border-t border-[var(--cf-border)]">
+      {/* No `border-t`: the handle above is the seam, and a border here doubled it. */}
+      <div style={{ height }} className="flex shrink-0 flex-col overflow-hidden">
         <ConsoleResults tab={tab} />
       </div>
     </div>

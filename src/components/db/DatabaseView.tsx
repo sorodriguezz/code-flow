@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronUp,
   Copy,
@@ -72,7 +72,7 @@ export function DatabaseView() {
 
   return (
     <>
-      <div className="flex min-h-0 flex-1 gap-1.5 overflow-hidden">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         <DbExplorer />
 
         <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD}`}>
@@ -152,6 +152,14 @@ function DbTabStrip() {
   // something; with a single connection it would be the same label repeated on every tab.
   const manyConnections = new Set(tabs.map((tab) => tab.connectionId)).size > 1;
 
+  // Every tab the same width, the way a browser's are, rather than each one sized to its own name.
+  // Table names run from `users` to `convenio_consumos_historico_2024`, and letting them set the
+  // width means the strip's geometry changes every time you open one — the tab you were aiming for
+  // has moved by the time you click. A fixed width costs a little space on the short names and buys
+  // a strip whose positions hold still; the full name is in the tooltip either way. Two connections
+  // put a second label on every tab, so the size that fits is a strip-wide answer, not a per-tab one.
+  const width = manyConnections ? "w-[220px]" : "w-[180px]";
+
   return (
     <div className="flex shrink-0 items-center gap-0.5 overflow-x-auto border-b border-[var(--cf-border)] px-1.5 py-1">
       {tabs.map((tab) => {
@@ -180,7 +188,7 @@ function DbTabStrip() {
               // Middle click closes, like every other tab strip in the app.
               if (e.button === 1) void closeTabSafely(tab);
             }}
-            className={`group flex shrink-0 cursor-default items-center gap-1.5 rounded-md px-2 py-1 text-[12px] ${
+            className={`group flex ${width} shrink-0 cursor-default items-center gap-1.5 rounded-md px-2 py-1 text-[12px] ${
               tab.id === activeTabId
                 ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
                 : "text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
@@ -188,9 +196,9 @@ function DbTabStrip() {
           >
             {connection && engine && <EngineBadge kind={connection.kind} label={engine.label} />}
             <Icon size={12} className="shrink-0" />
-            <span className="max-w-[180px] truncate">{tab.name}</span>
+            <span className="min-w-0 flex-1 truncate">{tab.name}</span>
             {manyConnections && connection && (
-              <span className="max-w-[120px] shrink truncate text-[10.5px] opacity-60">
+              <span className="min-w-0 max-w-[80px] shrink truncate text-[10.5px] opacity-60">
                 {connection.name}
               </span>
             )}
@@ -307,16 +315,52 @@ function CellModal({
 }) {
   const t = useT();
   const isNull = modal.value === null;
+  // A `jsonb` column arrives as the server rendered it, which is one line however deep the document
+  // is — readable as a value, unreadable as a structure. Indenting it is the whole reason to open a
+  // big value in a window instead of squinting at the cell.
+  const formatted = useMemo(() => prettyJson(modal.value), [modal.value]);
+  const [raw, setRaw] = useState(false);
+  const shown = isNull ? "NULL" : !raw && formatted ? formatted : (modal.value ?? "");
+
   return (
     <ApiModal
       icon={Table2}
       title={modal.column}
       subtitle={isNull ? "NULL" : t("db.charactersN", { n: String(modal.value?.length ?? 0) })}
       width="max-w-3xl"
+      height="h-[78vh]"
       onClose={onClose}
+      toolbar={
+        // Only where there is a choice to make: on a value that isn't JSON the pair would be two
+        // buttons that render the same text.
+        formatted ? (
+          <div className="inline-flex gap-0.5 rounded-lg bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
+            {[
+              { id: false, label: t("db.formatJson") },
+              { id: true, label: t("db.rawValue") },
+            ].map((entry) => (
+              <button
+                key={String(entry.id)}
+                type="button"
+                onClick={() => setRaw(entry.id)}
+                aria-pressed={raw === entry.id}
+                className={`rounded-[6px] px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                  raw === entry.id
+                    ? "bg-[var(--cf-surface)] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
+                    : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                }`}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+        ) : undefined
+      }
       footer={
         <div className="flex w-full items-center justify-end gap-2">
-          <GhostButton onClick={() => void navigator.clipboard.writeText(modal.value ?? "")}>
+          {/* What's on screen, not what was in the cell: having just asked for the indented form,
+              being handed the one-liner back would be a surprise. */}
+          <GhostButton onClick={() => void navigator.clipboard.writeText(shown)}>
             {t("db.copy")}
           </GhostButton>
           <GhostButton onClick={onClose}>{t("common.close")}</GhostButton>
@@ -327,11 +371,31 @@ function CellModal({
           `ConnectionModal`. Here the `<pre>` is the scroll container. */}
       <div className="min-h-0 flex-1 overflow-hidden p-4">
         <pre className="h-full overflow-auto whitespace-pre-wrap break-words rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] p-2 font-mono text-[12px] text-[var(--cf-text)]">
-          {isNull ? "NULL" : modal.value}
+          {shown}
         </pre>
       </div>
     </ApiModal>
   );
+}
+
+/** The indented form of a value that is JSON, or `null` for one that isn't — which is most of them,
+ * so the check is a cheap look at the first character before anything is parsed. The size cap is
+ * there because a `jsonb` column can hold a document far larger than anyone will read, and
+ * re-serializing it would block the window to produce something nobody scrolls to the end of. */
+const JSON_FORMAT_LIMIT = 2_000_000;
+
+function prettyJson(value: string | null): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed.length > JSON_FORMAT_LIMIT) return null;
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+  try {
+    const indented = JSON.stringify(JSON.parse(trimmed), null, 2);
+    // A scalar wrapped in nothing (`{}`, `[]`) comes back unchanged; offering to "format" it is an
+    // offer to do nothing.
+    return indented === trimmed ? null : indented;
+  } catch {
+    return null;
+  }
 }
 
 /**
