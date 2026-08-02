@@ -11,6 +11,7 @@ import { ChangesPanel } from "./components/git/ChangesPanel";
 import { AiPanel } from "./components/ai/AiPanel";
 import { EditorView } from "./components/editor/EditorView";
 import { ApiView } from "./components/api/ApiView";
+import { AgentsView } from "./components/agents/AgentsView";
 import { TerminalDock } from "./components/terminal/TerminalDock";
 import { SettingsView } from "./components/settings/SettingsView";
 import { CommandPalette } from "./components/layout/CommandPalette";
@@ -51,9 +52,12 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
 
 /** Views that aren't about a repository, so the "no project open" empty state must not swallow
  * them — but that do belong to a workspace. The API client owns the workspace's
- * collections/environments and is expected to be usable before any repo has been added to it. */
+ * collections/environments and is expected to be usable before any repo has been added to it;
+ * the agent console owns the workspace's agent roster, which is likewise defined before there is
+ * anything for an agent to work on. */
 const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "api", render: () => <ApiView /> },
+  { id: "agents", render: () => <AgentsView /> },
 ];
 
 function MainContent() {

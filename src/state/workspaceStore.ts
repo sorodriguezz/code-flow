@@ -129,6 +129,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   },
 
   removeProject: async (id, workspaceId) => {
+    // Before the delete, and imported dynamically on purpose: `chainStore` subscribes to *this*
+    // store at module scope, so a static import here would be a cycle whose initialisation order
+    // decides whether the subscription exists. Deleting the repository first would leave an engine
+    // writing into a directory the app has already forgotten.
+    const { useChainStore } = await import("./chainStore");
+    await useChainStore.getState().abortForProject(id);
     await api.deleteProject(id);
     set((s) => ({
       projectsByWorkspace: {
@@ -198,3 +204,16 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     return projectsByWorkspace[activeWorkspaceId]?.find((p) => p.id === activeProjectId) ?? null;
   },
 }));
+
+/** A stable empty list. A selector that builds `[]` on the fly hands back a new reference on every
+ * call, and `useSyncExternalStore` reads a new reference as "the store changed" — which re-renders,
+ * which calls the selector again. React only reports it ("The result of getSnapshot should be
+ * cached") once the loop has already taken the view down. */
+const NO_PROJECTS: Project[] = [];
+
+/** The active workspace's repositories. Use this rather than reaching into `projectsByWorkspace`
+ * from a component selector — see [`NO_PROJECTS`]. */
+export const useActiveProjects = (): Project[] =>
+  useWorkspaceStore((s) =>
+    s.activeWorkspaceId ? (s.projectsByWorkspace[s.activeWorkspaceId] ?? NO_PROJECTS) : NO_PROJECTS,
+  );

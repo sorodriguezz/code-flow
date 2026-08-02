@@ -2,7 +2,9 @@ mod ado;
 mod ai;
 mod api;
 mod appmenu;
+mod ai_locks;
 mod ai_runs;
+mod backup;
 mod claude;
 mod commands;
 mod dap;
@@ -16,7 +18,10 @@ mod gemini;
 mod git;
 mod grok;
 mod github;
+mod gitlab;
+mod oauth;
 mod ollama;
+mod onedrive;
 mod openai;
 mod opencode;
 mod paths;
@@ -92,6 +97,16 @@ pub fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     tauri::Builder::default()
+        // First, and it has to be first: this is what makes a second launch raise the window that
+        // is already running instead of opening a rival one.
+        //
+        // Two instances on one SQLite file is not merely untidy — each would run its own
+        // `recover_after_restart` and demote the other's live rows to `interrupted`, and the
+        // per-repository lease that keeps two engines out of one working copy is a *per-process*
+        // registry, so it would not see across them at all.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
@@ -112,6 +127,9 @@ pub fn run() {
             if let Ok(dir) = app.path().resource_dir() {
                 paths::set_resource_dir(dir);
             }
+            // The scheduled backup. Ticks on the clock rather than on every edit, and an unchanged
+            // configuration costs it a hash — see `backup::auto`.
+            backup::auto::spawn(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -123,6 +141,11 @@ pub fn run() {
                 let app = window.app_handle();
                 if !app.state::<tray::QuittingFlag>().is_quitting() {
                     api.prevent_close();
+                    // Said out loud before hiding. The webview keeps running, which is the whole
+                    // point of hiding rather than exiting — but it also means anything that
+                    // *dispatches* work on its own would keep launching engines with no window to
+                    // show them in and no button to stop them with. An agent chain parks on this.
+                    let _ = tauri::Emitter::emit(app, "app:background", ());
                     hide_to_background(window);
                 }
             }
@@ -130,6 +153,27 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::app_cmd::quit_app,
             commands::app_cmd::reset_app_data,
+            commands::backup_cmd::backup_state,
+            commands::backup_cmd::backup_save_settings,
+            commands::backup_cmd::backup_save_drive,
+            commands::backup_cmd::backup_save_onedrive,
+            commands::backup_cmd::onedrive_status,
+            commands::backup_cmd::onedrive_connect,
+            commands::backup_cmd::onedrive_disconnect,
+            commands::backup_cmd::backup_set_passphrase,
+            commands::backup_cmd::backup_clear_passphrase,
+            commands::backup_cmd::backup_passphrase_matches,
+            commands::backup_cmd::backup_export_to_file,
+            commands::backup_cmd::backup_run_now,
+            commands::backup_cmd::backup_pick_and_inspect,
+            commands::backup_cmd::backup_inspect_configured,
+            commands::backup_cmd::backup_inspect_drive,
+            commands::backup_cmd::backup_inspect_onedrive,
+            commands::backup_cmd::backup_restore_file,
+            commands::backup_cmd::backup_restore_drive,
+            commands::backup_cmd::backup_restore_onedrive,
+            commands::backup_cmd::backup_pick_folder,
+            commands::backup_cmd::backup_reveal_folder,
             commands::repos::pick_folder,
             commands::repos::default_clone_dir,
             commands::repos::create_workspace,
@@ -194,6 +238,29 @@ pub fn run() {
             commands::settings::list_workspace_agents,
             commands::settings::upsert_workspace_agent,
             commands::settings::delete_workspace_agent,
+            commands::agents_cmd::list_agent_tasks,
+            commands::agents_cmd::get_agent_task,
+            commands::agents_cmd::create_agent_task,
+            commands::agents_cmd::update_agent_task_run,
+            commands::agents_cmd::set_agent_task_project,
+            commands::agents_cmd::rename_agent_task,
+            commands::agents_cmd::delete_agent_task,
+            commands::agents_cmd::list_agent_chains,
+            commands::agents_cmd::get_chain_detail,
+            commands::agents_cmd::create_agent_chain,
+            commands::agents_cmd::claim_next_chain_step,
+            commands::agents_cmd::complete_chain_step,
+            commands::agents_cmd::approve_chain_gate,
+            commands::agents_cmd::skip_chain_step,
+            commands::agents_cmd::retry_chain_step,
+            commands::agents_cmd::resume_chain,
+            commands::agents_cmd::abort_chain,
+            commands::agents_cmd::delete_chain,
+            commands::agents_cmd::harvest_chain_step,
+            commands::agents_cmd::create_continuation_chain,
+            commands::agents_cmd::list_chain_templates,
+            commands::agents_cmd::upsert_chain_template,
+            commands::agents_cmd::delete_chain_template,
             commands::settings::list_review_runs,
             commands::settings::get_review_run,
             commands::settings::mark_review_finding,
@@ -203,6 +270,7 @@ pub fn run() {
             commands::settings::delete_review_runs_for_pr,
             commands::settings::purge_workspace_review_runs,
             commands::settings::export_review_runs,
+            commands::settings::import_review_runs,
             commands::settings::list_review_contexts,
             commands::settings::upsert_review_context,
             commands::settings::delete_review_context,
@@ -225,12 +293,12 @@ pub fn run() {
             commands::secrets_cmd::set_github_token,
             commands::secrets_cmd::get_github_token,
             commands::secrets_cmd::delete_github_token,
+            commands::secrets_cmd::set_gitlab_token,
+            commands::secrets_cmd::get_gitlab_token,
+            commands::secrets_cmd::delete_gitlab_token,
             commands::secrets_cmd::set_ai_api_key,
             commands::secrets_cmd::has_ai_api_key,
             commands::secrets_cmd::delete_ai_api_key,
-            commands::secrets_cmd::set_api_backup_passphrase,
-            commands::secrets_cmd::get_api_backup_passphrase,
-            commands::secrets_cmd::delete_api_backup_passphrase,
             commands::claude_cmd::generate_commit_message,
             commands::claude_cmd::draft_pr_comment_reply,
             commands::claude_cmd::list_ai_models,
@@ -276,6 +344,8 @@ pub fn run() {
             commands::ado_cmd::pr_review_decision,
             commands::github_cmd::link_project_github,
             commands::github_cmd::github_authenticated_user,
+            commands::gitlab_cmd::link_project_gitlab,
+            commands::gitlab_cmd::gitlab_authenticated_user,
             commands::fs_cmd::list_dir,
             commands::fs_cmd::list_repo_files,
             commands::fs_cmd::search_repo,
@@ -393,16 +463,10 @@ pub fn run() {
             commands::api_cmd::api_pick_file,
             commands::api_cmd::api_save_file,
             commands::api_cmd::api_read_text_file,
-            commands::api_cmd::api_write_text_file,
-            commands::api_cmd::api_export_all,
-            commands::api_cmd::api_import_all,
             commands::api_cmd::gdrive_status,
             commands::api_cmd::gdrive_set_client_secret,
             commands::api_cmd::gdrive_connect,
             commands::api_cmd::gdrive_disconnect,
-            commands::api_cmd::gdrive_find_file,
-            commands::api_cmd::gdrive_upload,
-            commands::api_cmd::gdrive_download,
             commands::api_cmd::supabase_install_sql,
             commands::api_cmd::supabase_set_anon_key,
             commands::api_cmd::supabase_has_key,

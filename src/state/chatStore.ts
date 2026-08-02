@@ -1,8 +1,22 @@
 import { create } from "zustand";
-import { sendChatMessage, getChatConversation, type ChatAgentOverride } from "../lib/tauri/commands";
+import {
+  getChatConversation,
+  isRepoBusy,
+  sendChatMessage,
+  REPO_BUSY_MARKER,
+  type ChatAgentOverride,
+} from "../lib/tauri/commands";
 import { useChatHistoryStore } from "./activityStore";
 import { isCancellation, newRunId, useAiRunStore, type AiRunLine } from "./aiRunStore";
+import { translate } from "./languageStore";
+import { pushErrorToast } from "./toastStore";
 import { formatAgentLogLine } from "../lib/agentLog";
+
+/** The repository name the backend puts after its busy marker. */
+function repoNameFromBusy(error: string): string {
+  const at = error.indexOf(REPO_BUSY_MARKER);
+  return at < 0 ? "" : error.slice(at + REPO_BUSY_MARKER.length).replace(/"$/, "").trim();
+}
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -108,8 +122,11 @@ function liveTitle(message: string): string {
 }
 
 /** Rehydrates a stored trace into the shape the log component renders, applying the same
- * formatting the live view uses so a reopened turn reads identically to a fresh one. */
-function parseTrace(raw: string | null): AiRunLine[] | undefined {
+ * formatting the live view uses so a reopened turn reads identically to a fresh one.
+ *
+ * Exported for `agentsStore`, which replays the same `activity_log` rows: an agent task is a
+ * conversation with a role attached, and a reopened one has to read the same as a reopened chat. */
+export function parseTrace(raw: string | null): AiRunLine[] | undefined {
   if (!raw) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -261,6 +278,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
         void useChatHistoryStore.getState().load(projectId);
       })
       .catch((e) => {
+        // Another run already owns this repository's working copy, so this turn never reached an
+        // engine: nothing was recorded, nothing was edited. Filing it in the transcript as a red
+        // failure bubble would be a lie about something that did not happen — so the question is
+        // taken back out and the reason is said once, in passing.
+        if (isRepoBusy(e)) {
+          settle((session) => ({
+            ...session,
+            messages: session.messages.slice(0, -1),
+            sending: false,
+            runId: null,
+            runStartedAt: null,
+            updatedAt: Date.now(),
+          }));
+          pushErrorToast(translate("agents.busyInRepo", { name: repoNameFromBusy(String(e)) }));
+          return;
+        }
         const cancelled = isCancellation(e);
         const trace = useAiRunStore.getState().linesFor(runId);
         settle((session) => ({

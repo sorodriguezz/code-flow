@@ -15,6 +15,7 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 use super::api_queries;
 use super::models::{ApiCollection, ApiEnvironment, ApiFolder, ApiRequestRow, Workspace};
 use super::queries::now;
@@ -67,6 +68,14 @@ pub struct ImportSummary {
 // Export
 // ---------------------------------------------------------------------------
 
+/// Reads every workspace's API data into one payload.
+///
+/// Only the tests below still call it. Moving a machine is now the whole-install backup's job
+/// (`crate::backup`), which dumps the tables generically rather than through this shape, and the
+/// shared-collection sync only ever *applies* records — it builds its own payload per collection.
+/// Kept because it is what the round-trip assertions on [`import_all`] are written against, and
+/// re-deriving those fixtures by hand would test the fixtures rather than the import.
+#[cfg(test)]
 pub fn export_all(conn: &Connection) -> rusqlite::Result<ApiBackup> {
     // One consistent snapshot. Without it the read spans several statements, and a sync applying a
     // pull between two of them would put a backup on disk that holds a collection but not the

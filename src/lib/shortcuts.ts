@@ -32,6 +32,7 @@ export type ShortcutId =
   | "view.editor"
   | "view.api"
   | "view.database"
+  | "view.agents"
   | "db.newConsole"
   | "db.connections"
   | "db.refresh"
@@ -101,6 +102,7 @@ const VIEW_ORDER: { view: MainView; workspace?: ApiWorkspace }[] = [
   { view: "editor" },
   { view: "api", workspace: "requests" },
   { view: "api", workspace: "database" },
+  { view: "agents" },
 ];
 
 /** Goes to a destination, using whichever setter can express it. */
@@ -255,6 +257,13 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "db.title",
     defaultChord: "Mod+5",
     run: () => useUiStore.getState().openApiWorkspace("database"),
+  },
+  {
+    id: "view.agents",
+    group: "views",
+    labelKey: "tabbar.agents",
+    defaultChord: "Mod+6",
+    run: () => useUiStore.getState().setActiveView("agents"),
   },
   {
     id: "view.next",

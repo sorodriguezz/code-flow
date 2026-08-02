@@ -25,6 +25,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
+import { CONFIRM_POST_KEYS, POSTED_KEYS, VIEW_ON_KEYS } from "../../lib/providerLabels";
 import { discardPrFinding, getReviewRun } from "../../lib/tauri/commands";
 import { parseClaudeError } from "../../lib/claudeError";
 import {
@@ -607,11 +608,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
     if (chosen.length === 0 && !postSummary) return;
     // Publishing only the summary is its own sentence: "post 0 comment(s)" describes nothing.
     const confirmKey =
-      chosen.length === 0
-        ? "pr.confirmPostSummaryOnly"
-        : pr.provider === "github"
-          ? "chat.confirmPostGithub"
-          : "chat.confirmPost";
+      chosen.length === 0 ? "pr.confirmPostSummaryOnly" : CONFIRM_POST_KEYS[pr.provider];
     if (!(await confirmAction(t(confirmKey, { id: pr.id, n: chosen.length }), false))) return;
     const items = chosen.map((f) => ({
       file: f.location?.file ?? null,
@@ -804,9 +801,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
 
   // Footer buttons truncate when the panel is narrow, so their label doubles as the tooltip.
   const publishLabel = posted
-    ? pr.provider === "github"
-      ? t("chat.postedGithub")
-      : t("chat.posted")
+    ? t(POSTED_KEYS[pr.provider])
     : posting
       ? t("chat.posting")
       : t("chat.postToPr");
@@ -830,7 +825,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
               className="mt-1 inline-flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
             >
               <ExternalLink size={10} />
-              {pr.provider === "github" ? t("chat.viewOnGithub") : t("chat.viewOnAdo")}
+              {t(VIEW_ON_KEYS[pr.provider])}
             </a>
             {!loading && !error && parsed && (
               <div className="mt-1.5">

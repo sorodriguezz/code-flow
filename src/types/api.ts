@@ -896,24 +896,6 @@ export interface ApiSettings {
   /** Save every send into `api_history`. */
   saveHistory: boolean;
   historyLimit: number;
-  /** Where the automatic backup goes: a file on this disk, or the user's own Google Drive. */
-  backupTarget: "local" | "drive";
-  /**
-   * Where the automatic backup is written when the target is `local`. Empty means no destination
-   * has been chosen yet, which is also the only reason `autoBackup` can't be turned on.
-   */
-  backupPath: string;
-  autoBackup: boolean;
-  /**
-   * The OAuth client of the user's *own* Google Cloud project — never one of ours, so their backup
-   * doesn't pass through anybody else's registration. The matching client secret and the refresh
-   * token live in the OS credential store; only this public half is a setting.
-   */
-  driveClientId: string;
-  /** The Drive file being kept up to date. Learned on the first upload, or found on another machine. */
-  driveFileId: string;
-  /** The connected account, shown so "connected" doesn't leave the user guessing which login. */
-  driveAccount: string;
   /**
    * The user's own Supabase project for shared collections. The anon key and every share token live
    * in the OS credential store; only the project URL is a setting.
@@ -933,14 +915,18 @@ export interface ApiSettings {
   supabaseCheckedAt: string;
   /** Keep shared collections in step in the background as well as on demand. */
   syncAuto: boolean;
-  /**
-   * Seal the backup with the passphrase held in the OS credential store. Off means the file is
-   * readable JSON with every credential stripped out of it — see `lib/api/backup.ts`.
-   */
-  backupEncrypt: boolean;
-  /** ISO timestamp of the last successful write, for the line under the destination. */
-  lastBackupAt: string;
 }
+
+/*
+ * Backup used to live here — `backupTarget`, `backupPath`, `autoBackup`, `drive*`, `backupEncrypt`,
+ * `lastBackupAt`. It moved out when it stopped being about the API client: what travels now is the
+ * whole install, credentials included, so its settings belong to the app rather than to one of its
+ * views. See `state/backup_settings` in the database and `components/settings/BackupSettings.tsx`.
+ *
+ * The Google client id is the one field that was worth rescuing rather than dropping — a user who
+ * had already created a Google Cloud project should not have to do it twice — and it is carried
+ * across on the first launch after upgrading (see `backup::auto::spawn`).
+ */
 
 export interface ClientCert {
   id: string;
@@ -967,18 +953,10 @@ export function defaultApiSettings(): ApiSettings {
     prettyPrint: true,
     saveHistory: true,
     historyLimit: 500,
-    backupTarget: "local",
-    backupPath: "",
-    autoBackup: false,
-    driveClientId: "",
-    driveFileId: "",
-    driveAccount: "",
     supabaseUrl: "",
     supabaseReady: false,
     supabaseCheckedAt: "",
     syncAuto: true,
-    backupEncrypt: true,
-    lastBackupAt: "",
   };
 }
 

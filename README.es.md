@@ -11,7 +11,7 @@ encuentre errores y resuelva conflictos — todo en una app rápida y nativa. Y 
 termines, prueba el endpoint que acabas de cambiar y consulta la base de datos que hay
 detrás sin salir de la ventana. **Y decides qué modelo hace cada cosa.**
 
-![versión](https://img.shields.io/badge/versión-1.10.2-6C5CE7)
+![versión](https://img.shields.io/badge/versión-1.11.0-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-ES%20%7C%20EN-0984E3)

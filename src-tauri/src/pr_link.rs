@@ -14,6 +14,9 @@ pub enum PrLinkTarget {
     /// else: it picks both the token to use and the REST base URL.
     GitHub { host: String, owner: String, repo: String, number: i64 },
     Azure { org: String, project: String, repo: String, number: i64 },
+    /// `project` is the full path including every group (`acme/backend/auth`), and `number` is the
+    /// merge request's per-project `iid` — the number the URL shows.
+    GitLab { host: String, project: String, number: i64 },
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -130,12 +133,54 @@ fn parse_azure(host: &str, segments: &[String]) -> Option<PrLinkTarget> {
     }
 }
 
-/// Parses a pasted pull-request link. Returns `None` for anything that isn't a PR URL on a host
-/// we can talk to — including a GitHub Enterprise host the user hasn't connected yet, which is
-/// indistinguishable from any other self-hosted git server.
-pub fn parse(url: &str, known_github_hosts: &[String]) -> Option<PrLinkTarget> {
+/// Recognizes a GitLab merge-request link.
+///
+/// GitLab's shape is `https://{host}/{group}/…/{project}/-/merge_requests/{iid}`, and the project
+/// path in front of it can be any number of segments deep because groups nest. The `-` segment is
+/// GitLab's own separator between a project's path and the route inside it, which is what makes
+/// the split unambiguous however deep the groups go. Instances predating it (GitLab 12) omit the
+/// `-`, so a bare `…/merge_requests/{iid}` is accepted too.
+///
+/// As with GitHub Enterprise, the host must be one we already know is GitLab: a self-managed
+/// instance is indistinguishable from any other git server by its URL alone.
+fn parse_gitlab(host: &str, segments: &[String], known_gitlab_hosts: &[String]) -> Option<PrLinkTarget> {
+    let matched = known_gitlab_hosts.iter().find(|h| h.eq_ignore_ascii_case(host))?;
+    // The *last* `merge_requests`, so a project literally named `merge_requests` can't shadow the
+    // route — its own MR link would carry the word twice.
+    let route = segments
+        .iter()
+        .rposition(|s| s.eq_ignore_ascii_case("merge_requests") || s.eq_ignore_ascii_case("merge_request"))?;
+    let number: i64 = segments.get(route + 1)?.parse().ok()?;
+
+    let mut path_end = route;
+    if path_end > 0 && segments[path_end - 1] == "-" {
+        path_end -= 1;
+    }
+    let project = segments[..path_end].join("/");
+    // A namespace and a project at the very least; anything shorter isn't a GitLab project path.
+    if project.split('/').filter(|s| !s.is_empty()).count() < 2 {
+        return None;
+    }
+
+    Some(PrLinkTarget::GitLab {
+        host: matched.clone(),
+        project: project.trim_end_matches(".git").to_string(),
+        number,
+    })
+}
+
+/// Parses a pasted pull-request or merge-request link. Returns `None` for anything that isn't one
+/// on a host we can talk to — including a GitHub Enterprise or self-managed GitLab host the user
+/// hasn't connected yet, which is indistinguishable from any other self-hosted git server.
+pub fn parse(
+    url: &str,
+    known_github_hosts: &[String],
+    known_gitlab_hosts: &[String],
+) -> Option<PrLinkTarget> {
     let (host, segments) = split(url)?;
-    parse_github(&host, &segments, known_github_hosts).or_else(|| parse_azure(&host, &segments))
+    parse_github(&host, &segments, known_github_hosts)
+        .or_else(|| parse_gitlab(&host, &segments, known_gitlab_hosts))
+        .or_else(|| parse_azure(&host, &segments))
 }
 
 #[cfg(test)]
@@ -144,6 +189,15 @@ mod tests {
 
     fn hosts() -> Vec<String> {
         vec!["github.com".to_string(), "ghe.contoso.com".to_string()]
+    }
+
+    fn gitlab_hosts() -> Vec<String> {
+        vec!["gitlab.com".to_string(), "git.contoso.com".to_string()]
+    }
+
+    /// The tests below name the GitHub allowlist explicitly and take the GitLab one as read.
+    fn parse(url: &str, known_github_hosts: &[String]) -> Option<PrLinkTarget> {
+        super::parse(url, known_github_hosts, &gitlab_hosts())
     }
 
     #[test]
@@ -208,10 +262,58 @@ mod tests {
     }
 
     #[test]
+    fn parses_gitlab_links() {
+        assert_eq!(
+            parse("https://gitlab.com/acme/widget/-/merge_requests/42", &hosts()),
+            Some(PrLinkTarget::GitLab {
+                host: "gitlab.com".into(),
+                project: "acme/widget".into(),
+                number: 42,
+            })
+        );
+        // Nested groups — the case GitHub's two-segment rule cannot express.
+        assert_eq!(
+            parse("https://gitlab.com/acme/backend/services/auth/-/merge_requests/7/diffs?view=inline", &hosts()),
+            Some(PrLinkTarget::GitLab {
+                host: "gitlab.com".into(),
+                project: "acme/backend/services/auth".into(),
+                number: 7,
+            })
+        );
+        // The pre-GitLab-12 shape, with no `-` separator.
+        assert_eq!(
+            parse("https://git.contoso.com/team/app/merge_requests/3", &hosts()),
+            Some(PrLinkTarget::GitLab {
+                host: "git.contoso.com".into(),
+                project: "team/app".into(),
+                number: 3,
+            })
+        );
+        // A self-managed instance nobody has connected is indistinguishable from any other git
+        // server, so it stays unrecognized rather than being guessed at.
+        assert_eq!(parse("https://git.unknown.com/team/app/-/merge_requests/3", &hosts()), None);
+    }
+
+    /// A project literally called `merge_requests` must not shadow the route it is named after.
+    #[test]
+    fn a_project_named_after_the_route_still_parses() {
+        assert_eq!(
+            parse("https://gitlab.com/acme/merge_requests/-/merge_requests/5", &hosts()),
+            Some(PrLinkTarget::GitLab {
+                host: "gitlab.com".into(),
+                project: "acme/merge_requests".into(),
+                number: 5,
+            })
+        );
+    }
+
+    #[test]
     fn rejects_non_pr_links() {
         assert_eq!(parse("https://github.com/acme/widget", &hosts()), None);
         assert_eq!(parse("https://github.com/acme/widget/issues/42", &hosts()), None);
         assert_eq!(parse("https://dev.azure.com/contoso/Web/_git/api", &hosts()), None);
+        assert_eq!(parse("https://gitlab.com/acme/widget/-/issues/42", &hosts()), None);
+        assert_eq!(parse("https://gitlab.com/acme/widget", &hosts()), None);
         assert_eq!(parse("not a url", &hosts()), None);
     }
 }

@@ -81,6 +81,13 @@ pub fn github_token_key(host: &str) -> String {
     format!("github-token:{host}")
 }
 
+/// GitLab's API authenticates one personal access token against every project the account can see,
+/// so it is keyed per host exactly like GitHub — leaving room for a self-managed GitLab instance
+/// alongside gitlab.com without changing the shape.
+pub fn gitlab_token_key(host: &str) -> String {
+    format!("gitlab-token:{host}")
+}
+
 /// API key for an HTTP AI provider (OpenAI and any OpenAI-compatible endpoint). Keyed per
 /// provider id so several can be configured side by side, and kept in the OS credential store
 /// rather than `app_settings` — unlike a binary path or a model id, this is a real credential.
@@ -88,9 +95,20 @@ pub fn ai_api_key(provider: &str) -> String {
     format!("ai-api-key:{provider}")
 }
 
-/// Passphrase the API-client backup is encrypted with. In the credential store rather than in
-/// `app_settings` for the obvious reason, and there is exactly one: the automatic backup has to be
+/// Passphrase the whole-install backup is sealed with. In the credential store rather than in
+/// `app_settings` for the obvious reason, and there is exactly one: the scheduled backup has to be
 /// able to write the file unattended, which it cannot do if the only copy is in the user's head.
+///
+/// Storing it here is deliberately *not* a weakening of the file. The threat the encryption answers
+/// is a copy of the backup sitting in Google Drive or iCloud, where the credential store is not; on
+/// the machine itself an attacker who can read the Keychain can already read everything the backup
+/// contains.
+pub fn backup_passphrase_key() -> String {
+    "codeflow-backup-passphrase".to_string()
+}
+
+/// Where that passphrase lived when the backup covered only the API client. Still read, once, so an
+/// existing setup carries over instead of asking the user for a passphrase they already chose.
 pub fn api_backup_passphrase_key() -> String {
     "api-backup-passphrase".to_string()
 }
@@ -106,6 +124,15 @@ pub fn gdrive_client_secret_key() -> String {
 /// until the user revokes it.
 pub fn gdrive_refresh_token_key() -> String {
     "gdrive-refresh-token".to_string()
+}
+
+/// The OneDrive grant. There is no client-secret counterpart: the Entra app registration is a
+/// public client, so the whole of that setup is an id the user pastes into a plain settings field.
+///
+/// Rewritten on every refresh rather than only at connect time — Microsoft rotates these, and the
+/// value stored here after a week is not the one the user's browser originally granted.
+pub fn onedrive_refresh_token_key() -> String {
+    "onedrive-refresh-token".to_string()
 }
 
 /// The anon key of one Supabase project, keyed by its host.

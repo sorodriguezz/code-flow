@@ -2,16 +2,26 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { AzureDevOpsSettings } from "./AzureDevOpsSettings";
 import { GitHubSettings } from "./GitHubSettings";
+import { GitLabSettings } from "./GitLabSettings";
 import { ActivePill } from "../common/ActivePill";
 import { VCS_PROVIDERS } from "../../lib/vcsProviders";
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { VcsProvider } from "../../types/domain";
+import type { TranslationKey } from "../../lib/i18n/translations";
+
+/** One hint per provider, as a lookup rather than a ternary: a chain of `?:` silently falls
+ * through to Azure for anything it doesn't name, which is exactly how a third provider ends up
+ * describing itself as the first. A `Record<VcsProvider, …>` cannot compile with an arm missing. */
+const HINT_KEYS: Record<VcsProvider, TranslationKey> = {
+  azure: "settings.azureHint",
+  github: "settings.githubHint",
+  gitlab: "settings.gitlabHint",
+};
 
 /** The single "Git hosting" settings section — a provider switcher (Azure DevOps / GitHub /
- * GitLab-coming-soon) over whichever provider's credential form is active. Opens on the
- * provider the caller deep-linked to (e.g. a "needs a GitHub token" hint jumps straight here
- * with GitHub selected).
+ * GitLab) over whichever provider's credential form is active. Opens on the provider the caller
+ * deep-linked to (e.g. a "needs a GitLab token" hint jumps straight here with GitLab selected).
  *
  * Behind a side rail, the same shape as the AI assistant and API client sections down to the
  * sliding pill: one nested-nav idea across the window rather than a row of provider cards here
@@ -37,8 +47,7 @@ export function GitHostingSettings() {
     bodyRef.current?.closest("[data-settings-scroll]")?.scrollTo({ top: 0 });
   }, [provider]);
 
-  // Only the two wired providers can be selected, so the hint tracks the same fork as the body.
-  const hintKey = provider === "github" ? "settings.githubHint" : "settings.azureHint";
+  const hintKey = HINT_KEYS[provider];
 
   return (
     <section>
@@ -55,9 +64,7 @@ export function GitHostingSettings() {
             <button
               key={id}
               disabled={!available}
-              // `disabled` is what stops GitLab being picked; the `id` check is what tells the
-              // compiler so, since `VcsProvider` covers only the providers that have a form.
-              onClick={() => id !== "gitlab" && setProvider(id)}
+              onClick={() => setProvider(id)}
               aria-current={provider === id ? "page" : undefined}
               title={label}
               // Colour and the pill carry the selection; no weight change, which would re-measure
@@ -94,7 +101,9 @@ export function GitHostingSettings() {
                 the keychain), so it stays. */}
             <p className="mb-4 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(hintKey)}</p>
 
-            {provider === "github" ? <GitHubSettings /> : <AzureDevOpsSettings />}
+            {provider === "github" && <GitHubSettings />}
+            {provider === "gitlab" && <GitLabSettings />}
+            {provider === "azure" && <AzureDevOpsSettings />}
           </div>
         </div>
       </div>

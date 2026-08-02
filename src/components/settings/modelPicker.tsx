@@ -106,7 +106,9 @@ export function ModelField({
   /** Per-provider "where to find the ID" note, shown under the custom input. */
   customHint?: ReactNode;
   customPlaceholder?: string;
-  size?: "sm" | "md";
+  /** Passed straight through to `Select` — `field` is the one to reach for when the picker shares
+   * a row or a stack with text inputs, so their bottom edges line up. */
+  size?: "sm" | "md" | "field";
   onChoice: (v: string) => void;
   onCustom: (v: string) => void;
 }) {

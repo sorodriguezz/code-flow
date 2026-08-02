@@ -6,9 +6,13 @@ use crate::tray::QuittingFlag;
 /// The only path that actually terminates the process — everything else (title bar close
 /// button, Alt+F4, the red traffic light) hides the window instead so background jobs and
 /// terminals keep running, so this has to explicitly mark intent before exiting.
+///
+/// The last thing before exiting is the backup, when the user asked for one on quit: the session
+/// that just ended is precisely the one a scheduled backup is most likely not to have caught.
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     use tauri::Manager;
+    crate::backup::auto::flush_on_exit(&app);
     app.state::<QuittingFlag>().mark_quitting();
     app.exit(0);
 }

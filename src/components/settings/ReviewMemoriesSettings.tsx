@@ -12,6 +12,7 @@ import {
   MessageSquare,
   ShieldOff,
   Trash2,
+  Upload,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -19,6 +20,7 @@ import {
   deleteReviewRunsForPr,
   exportReviewRuns,
   getReviewRun,
+  importReviewRuns,
   listFpSuppressions,
   listReviewRuns,
   markReviewFinding,
@@ -49,7 +51,7 @@ const ESTADOS: Record<string, { icon: LucideIcon; color: string; labelKey: Trans
  * The provider prefix is dropped and, for GitHub, the host too — what identifies the repository in
  * a list of a workspace's own repositories is the last part of the path. */
 function repoLabel(repoKey: string): string {
-  const withoutProvider = repoKey.replace(/^(github|azure):/, "");
+  const withoutProvider = repoKey.replace(/^(github|gitlab|azure):/, "");
   const parts = withoutProvider.split("/").filter(Boolean);
   return parts.slice(-2).join("/") || withoutProvider;
 }
@@ -254,12 +256,64 @@ export function ReviewMemoriesSettings() {
     await reload(workspaceId);
   };
 
-  const exportRuns = async (id?: string) => {
+  /**
+   * Export, at whichever of the three scopes was asked for: one run, one repository, or everything
+   * on screen.
+   *
+   * The header's button follows the repository filter rather than always meaning "everything" —
+   * a filtered list with a button that quietly exports the repositories it is hiding would be the
+   * more surprising of the two. Its label names the repository outright so the scope is never a
+   * guess.
+   */
+  const exportRuns = async (scope: { runId?: string; projectId?: string }) => {
     const dir = await openDialog({ directory: true, multiple: false, title: t("settings.memoryExportTitle") });
     if (typeof dir !== "string") return;
     try {
-      const n = await exportReviewRuns(workspaceId, id, dir);
-      pushToast(t("settings.memoryExported", { n }), "success");
+      const { runs, rules } = await exportReviewRuns(workspaceId, scope, dir);
+      pushToast(
+        rules > 0
+          ? t("settings.memoryExportedWithRules", { n: runs, rules })
+          : t("settings.memoryExported", { n: runs }),
+        "success",
+      );
+    } catch (e) {
+      pushToast(String(e), "error");
+    }
+  };
+
+  /**
+   * Import, from a folder an export wrote.
+   *
+   * The outcome is reported in full rather than as one number, because the three ways it can fall
+   * short are all actionable and none of them is an error: runs already here (nothing to do), runs
+   * for a repository this workspace hasn't linked (link it and import again), and folders that
+   * couldn't be read (an incomplete copy).
+   */
+  const importRuns = async () => {
+    const dir = await openDialog({ directory: true, multiple: false, title: t("settings.memoryImportTitle") });
+    if (typeof dir !== "string") return;
+    try {
+      const outcome = await importReviewRuns(workspaceId, dir);
+      await reload(workspaceId);
+      pushToast(
+        t("settings.memoryImported", {
+          n: outcome.imported,
+          skipped: outcome.alreadyPresent,
+          rules: outcome.rules,
+        }),
+        "success",
+      );
+      if (outcome.unmatchedRepos.length > 0) {
+        pushToast(
+          t("settings.memoryImportUnmatched", {
+            repos: outcome.unmatchedRepos.map(repoLabel).join(", "),
+          }),
+          "info",
+        );
+      }
+      if (outcome.unreadable > 0) {
+        pushToast(t("settings.memoryImportUnreadable", { n: outcome.unreadable }), "info");
+      }
     } catch (e) {
       pushToast(String(e), "error");
     }
@@ -267,14 +321,25 @@ export function ReviewMemoriesSettings() {
 
   // The rules are shown even with no saved runs: purging the memory doesn't (and shouldn't) drop
   // them, and a rule you can't see is a rule you can't take back.
+  //
+  // Import belongs here too, and this is the state that needs it most: a machine with no memory of
+  // its own is exactly the one someone is carrying an export to.
   if (runs.length === 0) {
     return (
       <div className="space-y-3">
         <FpSuppressionsSection workspaceId={workspaceId} />
         <EmptyState icon={Database} title={t("settings.memoryEmpty")} subtitle={t("settings.memoryEmptyHint")} />
+        <div className="flex justify-center">
+          <button onClick={() => void importRuns()} className={`${HEADER_BUTTON} hover:text-[var(--cf-text)]`}>
+            <Upload size={12} /> {t("settings.memoryImport")}
+          </button>
+        </div>
       </div>
     );
   }
+
+  /** The repository the export button will actually write, when the list is filtered to one. */
+  const filtered = repoFilter ? repos.find((r) => r.projectId === repoFilter) : undefined;
 
   return (
     <div className="space-y-3">
@@ -287,8 +352,17 @@ export function ReviewMemoriesSettings() {
           {t("settings.memoryHint", { n: runs.length })}
         </p>
         <div className="flex shrink-0 items-center gap-1.5">
-          <button onClick={() => void exportRuns()} className={`${HEADER_BUTTON} hover:text-[var(--cf-text)]`}>
-            <Download size={12} /> {t("settings.memoryExportAll")}
+          <button
+            onClick={() => void exportRuns({ projectId: filtered?.projectId })}
+            className={`${HEADER_BUTTON} hover:text-[var(--cf-text)]`}
+          >
+            <Download size={12} />
+            {filtered
+              ? t("settings.memoryExportRepo", { repo: filtered.projectName })
+              : t("settings.memoryExportAll")}
+          </button>
+          <button onClick={() => void importRuns()} className={`${HEADER_BUTTON} hover:text-[var(--cf-text)]`}>
+            <Upload size={12} /> {t("settings.memoryImport")}
           </button>
           <button onClick={() => void purge()} className={`${HEADER_BUTTON} hover:text-[var(--cf-danger)]`}>
             <Trash2 size={12} /> {t("settings.memoryPurge")}
@@ -365,7 +439,7 @@ export function ReviewMemoriesSettings() {
                     <RunAction
                       icon={Download}
                       label={t("settings.memoryExportOne")}
-                      onClick={() => void exportRuns(run.id)}
+                      onClick={() => void exportRuns({ runId: run.id })}
                     />
                     <RunAction
                       icon={Trash2}

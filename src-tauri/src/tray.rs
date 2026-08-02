@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Flips to `true` only when the user deliberately quits (tray menu "Quit", or the platform's
 /// own quit shortcut) — the main window's close button/Alt+F4/red traffic light all raise the
@@ -26,6 +26,10 @@ pub fn show_main_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        // The other half of `app:background` (see `lib.rs`'s close handler): the webview never
+        // stopped running, so the only thing that tells the frontend it is on screen again — and
+        // that an agent chain may start dispatching once more — is this.
+        let _ = app.emit("app:foreground", ());
     }
 }
 
@@ -42,6 +46,9 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "quit" => {
+                // Same last step as the in-app quit: the session about to end is the one a
+                // scheduled backup is least likely to have caught.
+                crate::backup::auto::flush_on_exit(app);
                 app.state::<QuittingFlag>().mark_quitting();
                 app.exit(0);
             }

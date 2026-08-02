@@ -5,9 +5,10 @@ import type { ApiSettingsTab } from "./apiModalStore";
 // its commands. Erased at compile time; there is no runtime cycle.
 import type { ShortcutGroup } from "../lib/shortcuts";
 
-/** `api` is the odd one out: it's the built-in API client, which is app-global rather than
- * scoped to a repo, so it renders whether or not a project is open (see `App.tsx`). */
-export type MainView = "graph" | "changes" | "editor" | "api";
+/** `api` and `agents` are the odd ones out: the built-in API client and the agent console are
+ * scoped to the *workspace* rather than to a repo, so they render whether or not a project is
+ * open (see `App.tsx`). Both are reached from the workspace menu rather than from the tab bar. */
+export type MainView = "graph" | "changes" | "editor" | "api" | "agents";
 
 export type SettingsSectionId =
   | "appearance"
@@ -18,6 +19,7 @@ export type SettingsSectionId =
   | "terminal"
   | "azure"
   | "claude"
+  | "backup"
   | "review"
   | "sdd"
   | "skills"

@@ -24,7 +24,6 @@ export type ApiSettingsTab =
   | "proxy"
   | "certificates"
   | "general"
-  | "backup"
   | "collab";
 
 export type ApiModal =

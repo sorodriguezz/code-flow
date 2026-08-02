@@ -10,6 +10,7 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 /// One finding as remembered for reconciliation — a slim projection of what the review markdown
 /// contains, not the full rendered finding. Persisted as the `review_runs.findings` JSON, and
@@ -86,7 +87,7 @@ pub struct ReviewMeta {
     pub model: String,
     pub project_id: String,
     pub project_name: String,
-    /// Which repository this run actually reviewed — `github:host/owner/repo` or
+    /// Which repository this run actually reviewed — `github:host/owner/repo`, `gitlab:host/full/path` or
     /// `azure:org/project/repoId` (see `repo_key` in `ado_cmd`).
     ///
     /// The project id alone doesn't answer that question: a project is a row pointing at a clone,
@@ -370,7 +371,7 @@ pub fn reconcile(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FpSuppression {
     pub id: String,
-    /// Which repository this rule belongs to (the `repo_key` — `github:host/owner/repo` or
+    /// Which repository this rule belongs to (the `repo_key` — `github:host/owner/repo`, `gitlab:host/full/path` or
     /// `azure:org/project/repoId`). Every rule in a workspace lives in one list and is filtered by
     /// this, so two repositories in the same workspace never silence each other's findings.
     pub repo_key: String,
@@ -518,6 +519,107 @@ pub fn resolved_history_section(findings: &[MemoryFinding]) -> Option<String> {
     Some(s)
 }
 
+// ---------------------------------------------------------------------------
+// Moving memory between installs
+// ---------------------------------------------------------------------------
+//
+// Export writes one folder per run — `review.md`, `meta.json`, `diff.patch`, `findings.json` — and
+// import reads the same shape back. The parts below are the decisions that shape has to encode:
+// what identifies a run once it is outside the database, and which local project a run coming from
+// somewhere else belongs to.
+
+/// The `review_runs` columns that aren't inside `meta`, written beside a run on export as
+/// `run.json`.
+///
+/// Without it a folder is content with no identity: the row's id lives only in the database, and
+/// an import would have to invent one — which is how re-importing the same folder ends up creating
+/// a second copy of a review that was already there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunIdentity {
+    pub id: String,
+    pub project_id: String,
+    pub workspace_id: String,
+    pub pr_id: i64,
+    pub iter: i64,
+    pub level: String,
+    pub created_at: String,
+    /// Repeated from `meta.repo_key` so routing an import needs only this file, and so a folder
+    /// assembled by hand has one obvious place to say which repository it belongs to.
+    #[serde(default)]
+    pub repo_key: String,
+}
+
+/// A run id for a folder that has no `run.json` — one exported before identities were written
+/// beside them, or hand-assembled.
+///
+/// Derived from what makes the run unique rather than generated fresh, because the insert is
+/// `ON CONFLICT DO NOTHING`: a uuid would defeat that and make every re-import of the same folder
+/// look like a run the database had never seen.
+pub fn derived_run_id(repo_key: &str, pr_id: i64, iter: i64, created_at: &str) -> String {
+    let digest = Sha256::digest(format!("{repo_key}|{pr_id}|{iter}|{created_at}").as_bytes());
+    format!("imported-{:x}", digest).chars().take(33).collect()
+}
+
+/// A project on *this* machine, as much of it as routing an import needs.
+#[derive(Debug, Clone)]
+pub struct LocalProject {
+    pub id: String,
+    /// `None` when the project isn't linked to a pull-request host, and so cannot be the
+    /// destination for any repository's memory.
+    pub repo_key: Option<String>,
+}
+
+/// Which local project an imported run belongs to, or `None` when nothing here is that repository.
+///
+/// **By repository, never by the id the export carries.** That id names a row in another install's
+/// database; the row it happens to name here may point at entirely different code, and handing it
+/// the findings would be the exact confusion `MEMORY_SCOPE` in `db::queries` exists to prevent.
+///
+/// The id fallback applies only to runs recorded before repository keys were tracked, where the
+/// project genuinely *was* the repository — and only when that id exists here. A run that names a
+/// repository this workspace doesn't have is reported back rather than placed somewhere plausible:
+/// the fix is to link the repository and import again, which the user can only do if they are told.
+pub fn resolve_project<'a>(run: &RunIdentity, local: &'a [LocalProject]) -> Option<&'a LocalProject> {
+    let wanted = run.repo_key.trim().to_lowercase();
+    if !wanted.is_empty() {
+        return local.iter().find(|p| {
+            p.repo_key.as_deref().is_some_and(|k| k.trim().to_lowercase() == wanted)
+        });
+    }
+    local.iter().find(|p| p.id == run.project_id)
+}
+
+/// Adds the rules an import brought in to the ones already here, returning the merged list and how
+/// many were actually new.
+///
+/// Deduplicated by what a rule *means* — repository, category, scope — rather than by its id: ids
+/// are minted per install, so two machines that independently dismissed the same finding hold the
+/// same rule under different ids, and id-matching would file it twice. The existing reason is kept
+/// on a collision, because it is the one the person using this machine wrote.
+pub fn merge_suppressions(
+    existing: &[FpSuppression],
+    incoming: &[FpSuppression],
+) -> (Vec<FpSuppression>, usize) {
+    let key = |r: &FpSuppression| {
+        let file = r.archivo.as_deref().unwrap_or_default().trim_start_matches('/').to_lowercase();
+        format!("{}|{}|{}", r.repo_key.to_lowercase(), r.categoria.to_lowercase(), file)
+    };
+    let mut merged = existing.to_vec();
+    let mut seen: Vec<String> = merged.iter().map(key).collect();
+    let mut added = 0;
+    for rule in incoming {
+        let k = key(rule);
+        if seen.contains(&k) {
+            continue;
+        }
+        seen.push(k);
+        merged.push(rule.clone());
+        added += 1;
+    }
+    (merged, added)
+}
+
 /// A one-line, human-facing summary of a re-review delta, prepended to the returned review so the
 /// user immediately sees what changed since the last run. Renders as plain summary prose in the
 /// review panel (it sits before the findings, so the frontend parser keeps it out of the findings
@@ -627,6 +729,113 @@ mod tests {
         assert!(block.contains("ignorado"));
         // The one still open must not be told to the model as already settled.
         assert!(!block.contains("F-002"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Moving memory between installs
+    // ---------------------------------------------------------------------
+
+    fn identity(repo_key: &str, project_id: &str) -> RunIdentity {
+        RunIdentity {
+            id: "job-1".into(),
+            project_id: project_id.into(),
+            workspace_id: "ws-source".into(),
+            pr_id: 42,
+            iter: 3,
+            level: "deep".into(),
+            created_at: "2026-08-01T10:00:00Z".into(),
+            repo_key: repo_key.into(),
+        }
+    }
+
+    fn local(id: &str, repo_key: Option<&str>) -> LocalProject {
+        LocalProject { id: id.into(), repo_key: repo_key.map(str::to_string) }
+    }
+
+    #[test]
+    fn a_run_is_routed_to_the_project_that_is_its_repository() {
+        let here = vec![
+            local("p-other", Some("github:github.com/acme/other")),
+            local("p-app", Some("github:github.com/acme/app")),
+        ];
+        let run = identity("github:github.com/acme/app", "p-from-the-other-machine");
+        assert_eq!(resolve_project(&run, &here).map(|p| p.id.as_str()), Some("p-app"));
+    }
+
+    /// The dangerous case, and the reason routing ignores the exported project id: two installs
+    /// mint their own ids, so the id a run carries can name a *different* repository here. Placing
+    /// the run there would hand one repository another's findings.
+    #[test]
+    fn a_matching_project_id_never_overrides_the_repository() {
+        let here = vec![local("p-shared-id", Some("github:github.com/acme/completely-different"))];
+        let run = identity("github:github.com/acme/app", "p-shared-id");
+        assert!(resolve_project(&run, &here).is_none());
+    }
+
+    /// A repository this workspace doesn't have must come back as unresolved rather than land
+    /// somewhere plausible — that is what lets the UI name it and say "link it and import again".
+    #[test]
+    fn an_unknown_repository_resolves_to_nothing() {
+        let here = vec![local("p-app", Some("github:github.com/acme/app"))];
+        assert!(resolve_project(&identity("gitlab:gitlab.com/acme/app", "p-app"), &here).is_none());
+        // An unlinked project is not a candidate for anyone's memory.
+        assert!(resolve_project(&identity("github:github.com/acme/app", "x"), &[local("p", None)]).is_none());
+    }
+
+    /// Runs recorded before repository keys existed carry an empty one, and back then the project
+    /// *was* the repository — the same reading `MEMORY_SCOPE` gives them.
+    #[test]
+    fn a_legacy_run_without_a_repository_falls_back_to_its_project_id() {
+        let here = vec![local("p-app", Some("github:github.com/acme/app")), local("p-legacy", None)];
+        assert_eq!(
+            resolve_project(&identity("", "p-legacy"), &here).map(|p| p.id.as_str()),
+            Some("p-legacy")
+        );
+        assert!(resolve_project(&identity("", "p-gone"), &here).is_none());
+    }
+
+    #[test]
+    fn repository_keys_are_matched_regardless_of_case() {
+        let here = vec![local("p-app", Some("github:github.com/acme/app"))];
+        let run = identity("GitHub:GitHub.com/Acme/App", "x");
+        assert_eq!(resolve_project(&run, &here).map(|p| p.id.as_str()), Some("p-app"));
+    }
+
+    /// Re-importing the same folder must be a no-op, which only works if the id it is given is a
+    /// function of the run rather than freshly generated.
+    #[test]
+    fn a_derived_id_is_stable_for_the_same_run_and_different_for_another() {
+        let a = derived_run_id("github:github.com/acme/app", 42, 3, "2026-08-01T10:00:00Z");
+        assert_eq!(a, derived_run_id("github:github.com/acme/app", 42, 3, "2026-08-01T10:00:00Z"));
+        assert_ne!(a, derived_run_id("github:github.com/acme/app", 42, 4, "2026-08-01T10:00:00Z"));
+        assert_ne!(a, derived_run_id("github:github.com/acme/other", 42, 3, "2026-08-01T10:00:00Z"));
+        assert!(a.starts_with("imported-"));
+    }
+
+    /// Two installs that each dismissed the same finding hold the same rule under different ids.
+    /// Merging by id would file it twice; merging by meaning keeps one, and keeps the reason the
+    /// person on this machine wrote.
+    #[test]
+    fn merging_rules_dedupes_by_meaning_not_by_id() {
+        let mine = FpSuppression { id: "mine".into(), motivo: "el mío".into(), ..rule("stale-ref", Some("a.ts")) };
+        let theirs = FpSuppression { id: "theirs".into(), motivo: "el suyo".into(), ..rule("stale-ref", Some("/a.ts")) };
+        let fresh = rule("n-plus-one", None);
+
+        let (merged, added) = merge_suppressions(&[mine], &[theirs, fresh]);
+        assert_eq!(added, 1, "only the genuinely new rule counts");
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].motivo, "el mío", "the local reason survives the collision");
+        assert!(merged.iter().any(|r| r.categoria == "n-plus-one"));
+    }
+
+    /// Same category, same file, *different repository* — two rules, not one.
+    #[test]
+    fn merging_rules_keeps_repositories_apart() {
+        let here = rule("stale-ref", Some("a.ts"));
+        let elsewhere = FpSuppression { repo_key: "github:github.com/acme/other".into(), ..rule("stale-ref", Some("a.ts")) };
+        let (merged, added) = merge_suppressions(&[here], &[elsewhere]);
+        assert_eq!(added, 1);
+        assert_eq!(merged.len(), 2);
     }
 
     #[test]

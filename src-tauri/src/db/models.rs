@@ -25,6 +25,10 @@ pub struct Project {
     pub github_owner: Option<String>,
     pub github_repo: Option<String>,
     pub github_host: Option<String>,
+    /// The project's full path including every group it is nested under
+    /// (`acme/backend/services/auth`) — GitLab has no "owner/repo" split to store.
+    pub gitlab_project: Option<String>,
+    pub gitlab_host: Option<String>,
     pub sort_order: i64,
     pub created_at: String,
 }
@@ -49,6 +53,10 @@ pub struct NewProject {
     pub github_repo: Option<String>,
     #[serde(default)]
     pub github_host: Option<String>,
+    #[serde(default)]
+    pub gitlab_project: Option<String>,
+    #[serde(default)]
+    pub gitlab_host: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +113,135 @@ pub struct WorkspaceAgent {
     pub enabled: bool,
     pub sort_order: i64,
     pub created_at: String,
+}
+
+/// One agent task: a goal handed to a roster agent and worked on against one repository. The
+/// turns themselves are `activity_log` rows sharing `conversation_id`; this row is the task's
+/// identity and its overall state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentTask {
+    pub id: String,
+    pub workspace_id: String,
+    pub project_id: String,
+    /// The roster row this came from, or `""` once that agent has been deleted.
+    pub agent_id: String,
+    /// Snapshot of the agent's name at creation, so a deleted agent still reads as itself.
+    pub agent_name: String,
+    pub provider: String,
+    pub model: String,
+    pub prompt: String,
+    pub goal: String,
+    pub title: String,
+    pub conversation_id: String,
+    /// `draft` | `running` | `idle` | `done` | `error` | `cancelled`.
+    pub status: String,
+    pub turns: i64,
+    pub last_error: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// An ordered plan of agent steps against one repository. The steps' turns are ordinary agent
+/// tasks; this row is the plan's identity and the scheduler's whole state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentChain {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub goal: String,
+    /// `queued` | `running` | `gated` | `paused` | `failed` | `done` | `aborted`.
+    pub status: String,
+    pub current_step: i64,
+    pub step_count: i64,
+    /// A translation key (`chain.interrupted`, `chain.repoBusy`, …) or a raw engine error.
+    pub last_reason: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One step of a chain. The agent's identity and routing are snapshotted at creation — see the
+/// table's comment in `migrations.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentChainStep {
+    pub id: String,
+    pub chain_id: String,
+    pub step_index: i64,
+    pub agent_id: String,
+    pub agent_name: String,
+    pub provider: String,
+    pub model: String,
+    pub prompt: String,
+    pub instruction: String,
+    pub gate: bool,
+    pub gate_cleared: bool,
+    pub pending_input: String,
+    pub task_id: String,
+    pub run_id: String,
+    pub log_count_at_dispatch: i64,
+    pub output_text: String,
+    pub output_truncated: bool,
+    /// `pending` | `running` | `done` | `error` | `interrupted` | `skipped`.
+    pub status: String,
+    pub attempts: i64,
+    pub last_error: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One step as the frontend authors it, before anything is snapshotted or persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewChainStep {
+    pub agent_id: String,
+    pub instruction: String,
+    pub gate: bool,
+}
+
+/// What [`queries::claim_next_chain_step`] hands back: the chain as it now stands, plus — only
+/// when it decided a step must actually run — the task to run it against and the exact message.
+///
+/// Deliberately one type with an optional payload rather than an enum: the caller must apply the
+/// chain state on *every* outcome, and an enum invites handling only the interesting arm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainClaim {
+    pub chain: AgentChain,
+    /// `run` when there is work to dispatch, `idle` when the claim decided otherwise (gated,
+    /// finished, failed, or the chain was not queued to begin with).
+    pub kind: String,
+    pub task: Option<AgentTask>,
+    pub step: Option<AgentChainStep>,
+    pub message: String,
+}
+
+/// A chain and its steps, for the detail pane.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainDetail {
+    pub chain: AgentChain,
+    pub steps: Vec<AgentChainStep>,
+}
+
+/// A reusable chain plan. Configuration, not history — see the table comment in `migrations.rs`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainTemplate {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub description: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+    /// Always loaded with the template: a plan with its steps withheld is not a plan.
+    pub steps: Vec<ChainTemplateStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainTemplateStep {
+    pub id: String,
+    pub template_id: String,
+    pub step_index: i64,
+    /// Named, never snapshotted: a template is meant to follow the roster.
+    pub agent_id: String,
+    pub instruction: String,
+    pub gate: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

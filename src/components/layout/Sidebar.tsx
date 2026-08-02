@@ -42,8 +42,17 @@ import {
   openRepoInBrowser,
 } from "../../lib/tauri/commands";
 import { loadGithubConnections } from "../../lib/githubConnections";
+import { loadGitlabConnections } from "../../lib/gitlabConnections";
 import { loadAdoConnections } from "../../lib/adoConnections";
-import type { BranchInfo, GithubConnection, Project, PullRequestSummary, StashInfo, VcsProvider } from "../../types/domain";
+import type {
+  BranchInfo,
+  GithubConnection,
+  GitlabConnection,
+  Project,
+  PullRequestSummary,
+  StashInfo,
+  VcsProvider,
+} from "../../types/domain";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
@@ -52,6 +61,7 @@ import { CreateBranchModal } from "./CreateBranchModal";
 import { MoveProjectModal } from "./MoveProjectModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
+import { ConnectGitlabModal } from "./ConnectGitlabModal";
 import { CreatePrModal } from "./CreatePrModal";
 import { StashDiffModal } from "./StashDiffModal";
 import { pushErrorToast } from "../../state/toastStore";
@@ -532,6 +542,8 @@ interface HostingState {
   ado: string[];
   /** Configured GitHub connections (github.com and/or Enterprise hosts). */
   github: GithubConnection[];
+  /** Configured GitLab connections (gitlab.com and/or self-managed instances). */
+  gitlab: GitlabConnection[];
 }
 
 function PullRequestsSection({ project }: { project: Project }) {
@@ -560,7 +572,8 @@ function PullRequestsSection({ project }: { project: Project }) {
 
   const initiallyLinked = Boolean(
     (project.ado_org && project.ado_project && project.ado_repo_id) ||
-      (project.github_owner && project.github_repo),
+      (project.github_owner && project.github_repo) ||
+      project.gitlab_project,
   );
   const [linkState, setLinkState] = useState<LinkState>(
     initiallyLinked ? { status: "linked" } : { status: "checking" },
@@ -571,16 +584,17 @@ function PullRequestsSection({ project }: { project: Project }) {
     (async () => {
       const ado = await loadAdoConnections().catch(() => []);
       const github = await loadGithubConnections().catch(() => []);
-      if (!cancelled) setHosting({ ado: ado.map((c) => c.org), github });
+      const gitlab = await loadGitlabConnections().catch(() => []);
+      if (!cancelled) setHosting({ ado: ado.map((c) => c.org), github, gitlab });
     })();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // Tries to derive the PR host (Azure DevOps org/project/repo or GitHub owner/repo) straight
-  // from this repo's own remote URL — git already knows where the repo lives, so there's no
-  // reason to make the user pick it again.
+  // Tries to derive the PR host — Azure DevOps org/project/repo, GitHub owner/repo, or a GitLab
+  // project path — straight from this repo's own remote URL. Git already knows where the repo
+  // lives, so there's no reason to make the user pick it again.
   const runAutoDetect = async (cancelledRef: { current: boolean }) => {
     try {
       const result = await autoLinkProject(project.id);
@@ -623,8 +637,9 @@ function PullRequestsSection({ project }: { project: Project }) {
     (async () => {
       const ado = await loadAdoConnections().catch(() => []);
       const github = await loadGithubConnections().catch(() => []);
+      const gitlab = await loadGitlabConnections().catch(() => []);
       if (ref.current) return;
-      setHosting({ ado: ado.map((c) => c.org), github });
+      setHosting({ ado: ado.map((c) => c.org), github, gitlab });
       await runAutoDetect(ref);
     })();
     return () => {
@@ -663,7 +678,9 @@ function PullRequestsSection({ project }: { project: Project }) {
         <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">
           {provider === "github"
             ? t("sidebar.needsGithubToken")
-            : t("sidebar.needsTokenFor", { org: linkState.identifier })}{" "}
+            : provider === "gitlab"
+              ? t("sidebar.needsGitlabToken", { host: linkState.identifier })
+              : t("sidebar.needsTokenFor", { org: linkState.identifier })}{" "}
           <button onClick={() => openSettings("azure", provider)} className="text-[var(--cf-accent)] hover:underline">
             {t("statusbar.settings")}
           </button>
@@ -672,7 +689,12 @@ function PullRequestsSection({ project }: { project: Project }) {
     );
   }
 
-  if (linkState.status === "notDetected" && hosting.ado.length === 0 && hosting.github.length === 0) {
+  if (
+    linkState.status === "notDetected" &&
+    hosting.ado.length === 0 &&
+    hosting.github.length === 0 &&
+    hosting.gitlab.length === 0
+  ) {
     return (
       <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} defaultOpen>
         <div className="space-y-0.5">
@@ -703,6 +725,15 @@ function PullRequestsSection({ project }: { project: Project }) {
             {t("sidebar.linkGithubRepo")}
           </button>
         )}
+        {hosting.gitlab.length > 0 && (
+          <button
+            onClick={() => setShowConnect("gitlab")}
+            className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          >
+            <GitMerge size={12} />
+            {t("sidebar.linkGitlabRepo")}
+          </button>
+        )}
         {hosting.ado.length > 0 && (
           <button
             onClick={() => setShowConnect("azure")}
@@ -724,6 +755,14 @@ function PullRequestsSection({ project }: { project: Project }) {
           <ConnectGithubModal
             projectId={project.id}
             hosts={hosting.github.map((c) => c.host)}
+            onConnected={onConnected}
+            onClose={() => setShowConnect(false)}
+          />
+        )}
+        {showConnect === "gitlab" && (
+          <ConnectGitlabModal
+            projectId={project.id}
+            hosts={hosting.gitlab.map((c) => c.host)}
             onConnected={onConnected}
             onClose={() => setShowConnect(false)}
           />
@@ -1155,6 +1194,8 @@ export function Sidebar() {
       github_owner: null,
       github_repo: null,
       github_host: null,
+      gitlab_project: null,
+      gitlab_host: null,
     });
   };
 

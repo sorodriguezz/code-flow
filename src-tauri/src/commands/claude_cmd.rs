@@ -10,6 +10,7 @@ use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::ai::{self, AiEngine};
+use crate::ai_locks;
 use crate::ai_runs;
 use crate::commands::ado_cmd::build_mcp_config;
 use crate::commands::skills_cmd::sync_skills_into_project;
@@ -394,6 +395,12 @@ pub async fn analyze_working_changes(
     };
     let workspace_id = project.workspace_id.clone();
 
+    // Analysis reads the tree rather than editing it, but it still spawns an engine against this
+    // working copy and still syncs skills into `<repo>/.claude/skills` — which an agent turn on the
+    // same folder deletes and recreates underneath it. One engine per repository, everywhere.
+    let _repo_lease = ai_locks::acquire(&project.local_path)
+        .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
+
     let (contexts, mcps, skills, config, analyze_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
@@ -475,6 +482,11 @@ pub async fn resolve_finding_with_ai(
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Project not found".to_string())?
     };
+    // This one writes: it applies a fix to the working copy. Same lease as a chat turn, for the
+    // same reason — two engines editing one checkout take restore points over each other.
+    let _repo_lease = ai_locks::acquire(&project.local_path)
+        .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
+
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         load_ai_config(&conn, AiTask::Fix)?
@@ -558,6 +570,13 @@ pub async fn send_chat_message(
             .ok_or_else(|| "Project not found".to_string())?
     };
     let workspace_id = project.workspace_id.clone();
+
+    // One engine per working copy, taken before anything else happens. Refusing here — rather than
+    // after the checkpoint, or once the CLI is already writing — is what makes a busy repository a
+    // free retry: no restore point is taken, no turn is recorded, nothing to undo. Held until this
+    // function returns, by any route (see `ai_locks`).
+    let _repo_lease = ai_locks::acquire(&project.local_path)
+        .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
 
     let (contexts, mcps, skills, config, session_id) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;

@@ -32,6 +32,24 @@ pub fn delete_github_token(host: String) -> Result<(), String> {
     secrets::delete_secret(&secrets::github_token_key(&host))
 }
 
+// GitLab tokens are keyed per host for the same reason as GitHub's: gitlab.com and one or more
+// self-managed instances are a normal thing to be connected to at once, and a personal access
+// token is only ever valid against the instance that issued it.
+#[tauri::command]
+pub fn set_gitlab_token(host: String, token: String) -> Result<(), String> {
+    secrets::set_secret(&secrets::gitlab_token_key(&host), &token)
+}
+
+#[tauri::command]
+pub fn get_gitlab_token(host: String) -> Result<Option<String>, String> {
+    secrets::get_secret(&secrets::gitlab_token_key(&host))
+}
+
+#[tauri::command]
+pub fn delete_gitlab_token(host: String) -> Result<(), String> {
+    secrets::delete_secret(&secrets::gitlab_token_key(&host))
+}
+
 // AI provider API keys. Deliberately no "get" command: the key is only ever read backend-side when
 // building a request, so it never travels to the frontend — Settings just asks whether one is set.
 #[tauri::command]
@@ -49,22 +67,4 @@ pub fn has_ai_api_key(provider: String) -> Result<bool, String> {
 #[tauri::command]
 pub fn delete_ai_api_key(provider: String) -> Result<(), String> {
     secrets::delete_secret(&secrets::ai_api_key(&provider))
-}
-
-// The backup passphrase. Unlike the AI keys this one *is* readable from the frontend: the
-// encryption runs there (WebCrypto), so the passphrase has to reach it to encrypt an automatic
-// backup or to open one on restore.
-#[tauri::command]
-pub fn set_api_backup_passphrase(passphrase: String) -> Result<(), String> {
-    secrets::set_secret(&secrets::api_backup_passphrase_key(), &passphrase)
-}
-
-#[tauri::command]
-pub fn get_api_backup_passphrase() -> Result<Option<String>, String> {
-    secrets::get_secret(&secrets::api_backup_passphrase_key())
-}
-
-#[tauri::command]
-pub fn delete_api_backup_passphrase() -> Result<(), String> {
-    secrets::delete_secret(&secrets::api_backup_passphrase_key())
 }

@@ -109,6 +109,169 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             created_at   TEXT NOT NULL
         );
 
+        -- One agent task: a goal handed to a roster agent (`workspace_agents`) and worked on
+        -- against one repository of this workspace.
+        --
+        -- Scoped to the workspace because the roster is — but it also names the project it runs
+        -- in, because every agentic backend command resolves its working directory from
+        -- `projects.local_path`, so a task with no repository could never actually run.
+        --
+        -- The task carries no transcript of its own: its turns are ordinary `activity_log` rows
+        -- sharing `conversation_id`, exactly like a chat, so reopening a task replays the same
+        -- rows — and the same stored traces — the AI panel would show. What lives here is only
+        -- what `activity_log` cannot say: which agent was picked, and how the task as a whole is
+        -- doing.
+        --
+        -- `provider` and `prompt` are *copied* off the agent at creation rather than read back
+        -- through `agent_id`: an agent edited or deleted next week must not silently rewrite what
+        -- a task already ran as. `model` is the one field a later turn may change, which is why it
+        -- reads as "what the next turn will use" rather than as a frozen record.
+        CREATE TABLE IF NOT EXISTS agent_tasks (
+            id              TEXT PRIMARY KEY,
+            workspace_id    TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            project_id      TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            -- The roster row this came from, or '' once that agent has been deleted.
+            agent_id        TEXT NOT NULL DEFAULT '',
+            -- Snapshot of the agent's name, so a deleted agent still reads as itself here.
+            agent_name      TEXT NOT NULL DEFAULT '',
+            provider        TEXT NOT NULL DEFAULT '',
+            model           TEXT NOT NULL DEFAULT '',
+            prompt          TEXT NOT NULL DEFAULT '',
+            -- The goal as first written, and the name shown in the list (the goal's first line
+            -- until the user renames it).
+            goal            TEXT NOT NULL DEFAULT '',
+            title           TEXT NOT NULL DEFAULT '',
+            -- The app's own conversation id; `activity_log.session_id` for every turn of this task.
+            conversation_id TEXT NOT NULL,
+            -- 'draft' | 'running' | 'idle' | 'done' | 'error' | 'cancelled'. `running` is only
+            -- meaningful within the session that set it; a row still saying so at startup is one
+            -- whose app was killed mid-turn, and the store demotes it on load.
+            status          TEXT NOT NULL DEFAULT 'draft',
+            turns           INTEGER NOT NULL DEFAULT 0,
+            last_error      TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_tasks_workspace
+            ON agent_tasks(workspace_id, updated_at DESC);
+
+        -- One chain: an ordered plan of agent steps worked through against ONE repository.
+        --
+        -- Deliberately no `workspace_id`, unlike `agent_tasks` above. Moving a repository between
+        -- workspaces rewrites only `projects.workspace_id`, so a copy kept here would go stale and
+        -- the chain would vanish from its workspace's list while still owning live tasks. The
+        -- listing joins `projects` instead, and each step's task takes the workspace id read live
+        -- off that row at the moment it is created.
+        --
+        -- `status` is the scheduler's entire state. Only the claim/complete pair and the four
+        -- explicit user commands write it; nothing in the task layer touches it.
+        CREATE TABLE IF NOT EXISTS agent_chains (
+            id           TEXT PRIMARY KEY,
+            project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            title        TEXT NOT NULL DEFAULT '',
+            goal         TEXT NOT NULL DEFAULT '',
+            -- 'queued' | 'running' | 'gated' | 'paused' | 'failed' | 'done' | 'aborted'
+            status       TEXT NOT NULL DEFAULT 'paused',
+            current_step INTEGER NOT NULL DEFAULT 0,
+            step_count   INTEGER NOT NULL DEFAULT 0,
+            -- Why it is not moving, in the chain's own words: a translation key
+            -- (`chain.interrupted`, `chain.repoBusy`, …) or a raw engine error.
+            last_reason  TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_chains_project
+            ON agent_chains(project_id, updated_at DESC);
+
+        -- One step of a chain.
+        --
+        -- `agent_id`/`agent_name`/`provider`/`model`/`prompt` are snapshotted off the roster for
+        -- EVERY step when the chain is created — not at dispatch — for the same reason
+        -- `agent_tasks` snapshots them: an agent edited or deleted next week must not silently
+        -- rewrite what a chain paused for a week is about to run as.
+        --
+        -- `task_id` carries no foreign key, the same convention as `agent_tasks.agent_id`: the
+        -- step has to outlive its task in order to be able to say the task is gone, and a CASCADE
+        -- here would silently shorten the plan when a user deletes one step's task.
+        --
+        -- `output_text` is a COPY of the answer, not a pointer into `activity_log`. Deleting a
+        -- task deletes its conversation, and a gate can hold a chain for days — reading the
+        -- handoff back at dispatch time would break in both cases.
+        --
+        -- `log_count_at_dispatch` is `COUNT(*)` of the task's `activity_log` rows at the instant of
+        -- dispatch. After a crash it is the only way to point at the row *this* run wrote rather
+        -- than at whatever is newest: a retry after an error would otherwise harvest the previous
+        -- attempt's error text and hand it forward as if it were the plan.
+        CREATE TABLE IF NOT EXISTS agent_chain_steps (
+            id            TEXT PRIMARY KEY,
+            chain_id      TEXT NOT NULL REFERENCES agent_chains(id) ON DELETE CASCADE,
+            step_index    INTEGER NOT NULL,
+            agent_id      TEXT NOT NULL DEFAULT '',
+            agent_name    TEXT NOT NULL DEFAULT '',
+            provider      TEXT NOT NULL DEFAULT '',
+            model         TEXT NOT NULL DEFAULT '',
+            prompt        TEXT NOT NULL DEFAULT '',
+            instruction   TEXT NOT NULL DEFAULT '',
+            -- The plan's declared review point. Never cleared: `gate_cleared` records the approval
+            -- separately, so a retried step re-gates and the plan can still be read as authored.
+            gate          INTEGER NOT NULL DEFAULT 0,
+            gate_cleared  INTEGER NOT NULL DEFAULT 0,
+            -- Frozen when the chain parks at this step's gate, and sent verbatim. Editing the
+            -- handoff writes here, and a non-empty value always wins over recomposition — which is
+            -- what makes the preview the user approves byte-for-byte what runs.
+            pending_input TEXT NOT NULL DEFAULT '',
+            task_id       TEXT NOT NULL DEFAULT '',
+            run_id        TEXT NOT NULL DEFAULT '',
+            log_count_at_dispatch INTEGER NOT NULL DEFAULT -1,
+            output_text      TEXT NOT NULL DEFAULT '',
+            output_truncated INTEGER NOT NULL DEFAULT 0,
+            -- 'pending' | 'running' | 'done' | 'error' | 'interrupted' | 'skipped'
+            status        TEXT NOT NULL DEFAULT 'pending',
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            last_error    TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            UNIQUE (chain_id, step_index)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_chain_steps
+            ON agent_chain_steps(chain_id, step_index);
+
+        -- A reusable chain plan: the same three steps you run on every ticket, written once.
+        --
+        -- Unlike `agent_chains` these are **configuration**, not history — they belong to the
+        -- workspace, they carry no run state, and they travel with a backup (see
+        -- `backup::snapshot::TABLES`). A template names its agents by id and never snapshots their
+        -- routing: a template is meant to follow the roster, which is the opposite of a running
+        -- chain, where a snapshot is exactly what keeps it honest.
+        CREATE TABLE IF NOT EXISTS workspace_chain_templates (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS workspace_chain_template_steps (
+            id          TEXT PRIMARY KEY,
+            template_id TEXT NOT NULL REFERENCES workspace_chain_templates(id) ON DELETE CASCADE,
+            step_index  INTEGER NOT NULL,
+            -- The roster row, resolved at the moment a chain is created from this template. An
+            -- agent since deleted leaves the step for the user to re-point rather than silently
+            -- dropping it.
+            agent_id    TEXT NOT NULL DEFAULT '',
+            instruction TEXT NOT NULL DEFAULT '',
+            gate        INTEGER NOT NULL DEFAULT 0,
+            UNIQUE (template_id, step_index)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_chain_template_steps
+            ON workspace_chain_template_steps(template_id, step_index);
+
         -- MCP servers configured per workspace; written out as a --mcp-config JSON file for
         -- headless `claude -p` invocations against any project in the workspace.
         CREATE TABLE IF NOT EXISTS workspace_mcps (
@@ -493,6 +656,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_custom_label_to_job_history(conn)?;
     add_github_columns_to_projects(conn)?;
     add_github_host_to_projects(conn)?;
+    add_gitlab_columns_to_projects(conn)?;
     add_enabled_to_workspace_skills(conn)?;
     add_provider_to_workspace_agents(conn)?;
     add_pinned_to_api_collections(conn)?;
@@ -524,6 +688,22 @@ fn add_github_host_to_projects(conn: &Connection) -> rusqlite::Result<()> {
         return Ok(());
     }
     conn.execute_batch("ALTER TABLE projects ADD COLUMN github_host TEXT;")
+}
+
+/// GitLab's coordinates for a linked project.
+///
+/// One path column rather than GitHub's owner/repo pair, because GitLab groups nest arbitrarily —
+/// `acme/backend/services/auth` is a perfectly ordinary project — so there is no "owner" to split
+/// off. That full path is also exactly what the REST API takes (URL-encoded) as its project id, so
+/// storing it whole means never having to reassemble it.
+fn add_gitlab_columns_to_projects(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "projects", "gitlab_project")? {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN gitlab_project TEXT;")?;
+    }
+    if !has_column(conn, "projects", "gitlab_host")? {
+        conn.execute_batch("ALTER TABLE projects ADD COLUMN gitlab_host TEXT;")?;
+    }
+    Ok(())
 }
 
 /// `workspace_skills` gained an `enabled` flag so skills can be toggled off (e.g. when not using

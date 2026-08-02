@@ -1,7 +1,9 @@
 pub mod activity_cmd;
 pub mod ado_cmd;
+pub mod agents_cmd;
 pub mod api_cmd;
 pub mod app_cmd;
+pub mod backup_cmd;
 pub mod checkpoint_cmd;
 pub mod claude_cmd;
 pub mod db_cmd;
@@ -9,6 +11,7 @@ pub mod debug_cmd;
 pub mod fs_cmd;
 pub mod git_ops;
 pub mod github_cmd;
+pub mod gitlab_cmd;
 pub mod repos;
 pub mod secret_scan_cmd;
 pub mod secrets_cmd;

@@ -18,7 +18,9 @@ export type LayoutKey =
   | "apiSnippetWidth"
   | "apiResponseHeight"
   | "dbSidebarWidth"
-  | "dbResultHeight";
+  | "dbResultHeight"
+  | "agentsListWidth"
+  | "agentsRosterWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -38,6 +40,8 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   apiResponseHeight: "layout_api_response_height",
   dbSidebarWidth: "layout_db_sidebar_width",
   dbResultHeight: "layout_db_result_height",
+  agentsListWidth: "layout_agents_list_width",
+  agentsRosterWidth: "layout_agents_roster_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -58,6 +62,8 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   apiResponseHeight: 320,
   dbSidebarWidth: 300,
   dbResultHeight: 340,
+  agentsListWidth: 320,
+  agentsRosterWidth: 300,
 };
 
 interface LayoutState {

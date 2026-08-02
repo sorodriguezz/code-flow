@@ -1,76 +1,33 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  Cloud,
   Info,
-  DatabaseBackup,
-  Download,
   Network,
   Plus,
-  RefreshCw,
   Settings2,
   Share2,
   ShieldCheck,
   Trash2,
-  Upload,
   Waypoints,
   type LucideIcon,
 } from "lucide-react";
-import { BetaBadge } from "../common/BetaBadge";
 import { Checkbox } from "../common/Checkbox";
-import { Select } from "../common/Select";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import { Field, GhostButton, Row } from "./ApiModal";
-import { Actions, Group, HelpLink, Note, Panel, Status } from "./settingsChrome";
+import { Panel } from "./settingsChrome";
 import { CollaborationPanel } from "./CollaborationPanel";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
-import { useCollabStore } from "../../state/collabStore";
 import { useUiStore } from "../../state/uiStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
-import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import {
-  apiDeleteBackupPassphrase,
-  apiExportAll,
-  apiGetBackupPassphrase,
-  apiImportAll,
-  apiPickFile,
-  apiReadTextFile,
-  apiSaveFile,
-  apiSetBackupPassphrase,
-  gdriveConnect,
-  gdriveDisconnect,
-  gdriveDownload,
-  gdriveFindFile,
-  gdriveSetClientSecret,
-  gdriveStatus,
-  type DriveStatus,
-} from "../../lib/tauri/apiCommands";
-import {
-  backupFileName,
-  backupIsEncrypted,
-  BackupPassphraseError,
-  buildBackupFile,
-  DRIVE_BACKUP_NAME,
-  openBackupFile,
-} from "../../lib/api/backup";
-import { backupDestinationReady, runBackup } from "../../lib/api/autoBackup";
+import { apiPickFile } from "../../lib/tauri/apiCommands";
 import type { ClientCert } from "../../types/api";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 const CERT_EXTENSIONS = ["p12", "pfx", "pem", "crt", "cer"];
 const KEY_EXTENSIONS = ["pem", "key"];
-
-/**
- * The consoles the bring-your-own credentials come from.
- */
-const HELP_URLS = {
-  googleCredentials: "https://console.cloud.google.com/apis/credentials",
-  googleDriveApi: "https://console.cloud.google.com/apis/library/drive.googleapis.com",
-  googleDesktopAppDocs: "https://developers.google.com/identity/protocols/oauth2/native-app",
-} as const;
 
 function newCertId(): string {
   return `cert-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -80,18 +37,6 @@ function newCertId(): string {
 function number(value: string, fallback: number): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
-}
-
-/** A value the user reads rather than edits — a path, a token, an account. */
-function Readout({ value, title }: { value: string; title?: string }) {
-  return (
-    <p
-      title={title ?? value}
-      className="mb-1.5 truncate rounded border border-[var(--cf-border)] bg-black/[0.02] px-1.5 py-1 font-mono text-[11px] text-[var(--cf-text-muted)] dark:bg-white/[0.03]"
-    >
-      {value}
-    </p>
-  );
 }
 
 /** A path field with a native picker beside it, used by all four certificate slots. */
@@ -390,374 +335,11 @@ function GeneralPanel() {
 
 // ---------------------------------------------------------------------------
 
-/**
- * Export/import of every workspace's API data, plus the destination the automatic backup keeps up
- * to date. See `lib/api/backup.ts` for what travels and what a passphrase changes; the passphrase
- * itself lives in the OS credential store, never in `api_settings`.
- */
-function BackupPanel() {
-  const t = useT();
-  const settings = useApiStore((s) => s.settings);
-  const updateSettings = useApiStore((s) => s.updateSettings);
-  const pushToast = useToastStore((s) => s.pushToast);
-
-  const [passphrase, setPassphrase] = useState("");
-  const [loaded, setLoaded] = useState(false);
-  const [replace, setReplace] = useState(false);
-  const [busy, setBusy] = useState(false);
-
-  // Recomputed on every render rather than memoised: it reads the same store slice this component
-  // already subscribes to, so it is never stale and never worth a dependency list.
-  const ready = backupDestinationReady();
-
-  // Whether anything here is also synced with a team — it changes what a `replace` restore does,
-  // because the wipe it performs travels to everyone as a pile of deletions.
-  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const shared = useCollabStore((s) =>
-    s.shares.some((share) => share.workspace_id === workspaceId),
-  );
-
-  useEffect(() => {
-    void apiGetBackupPassphrase()
-      .then((stored) => setPassphrase(stored ?? ""))
-      .catch(() => {})
-      .finally(() => setLoaded(true));
-  }, []);
-
-  // Debounced so typing a passphrase isn't one credential-store write per keystroke. Gated on
-  // `loaded` so the empty initial state can't wipe the stored one before it has been read back.
-  useEffect(() => {
-    if (!loaded) return;
-    const timer = setTimeout(() => {
-      const write = passphrase === "" ? apiDeleteBackupPassphrase() : apiSetBackupPassphrase(passphrase);
-      void write.catch((e: unknown) => pushErrorToast(String(e)));
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [passphrase, loaded]);
-
-  /** The passphrase a write should use — `""` means the stripped-plaintext form. */
-  const sealWith = (): string => {
-    if (!settings.backupEncrypt) return "";
-    if (passphrase === "") throw new Error(t("api.backup.setPassphraseFirst"));
-    return passphrase;
-  };
-
-  const writeThroughDialog = async (remember: boolean) => {
-    setBusy(true);
-    try {
-      const text = await buildBackupFile(await apiExportAll(), sealWith());
-      const path = await apiSaveFile(backupFileName(), text);
-      if (!path) return;
-      const now = new Date().toISOString();
-      await updateSettings(remember ? { backupPath: path, lastBackupAt: now } : { lastBackupAt: now });
-      pushToast(t("api.backup.done", { path }), "success");
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const backupNow = async () => {
-    setBusy(true);
-    try {
-      const path = await runBackup();
-      if (path) pushToast(t("api.backup.done", { path }), "success");
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /** Restores from an already-read backup, whether it came off the disk or out of Drive. */
-  const applyBackup = async (text: string) => {
-    const encrypted = backupIsEncrypted(text);
-    if (encrypted && passphrase === "") {
-      pushErrorToast(t("api.backup.needPassphrase"));
-      return;
-    }
-    if (!(await confirmAction(replace ? t("api.backup.replaceConfirm") : t("api.backup.mergeConfirm")))) {
-      return;
-    }
-
-    const payload = await openBackupFile(text, encrypted ? passphrase : "");
-    const summary = await apiImportAll(payload, replace);
-
-    // The import writes straight to SQLite, and it can have created workspaces this session has
-    // never seen — so both the workspace list and this workspace's tree have to be re-read.
-    await useWorkspaceStore.getState().loadWorkspaces();
-    await useApiStore.getState().reloadTree();
-    await useApiStore.getState().reloadEnvironments();
-
-    pushToast(
-      t("api.backup.imported", {
-        collections: String(summary.collections),
-        requests: String(summary.requests),
-        environments: String(summary.environments),
-      }),
-      "success",
-    );
-  };
-
-  /** One place to turn a failed restore into a sentence, since two buttons can start one. */
-  const runRestore = async (read: () => Promise<string>) => {
-    setBusy(true);
-    try {
-      await applyBackup(await read());
-    } catch (e) {
-      pushErrorToast(
-        e instanceof BackupPassphraseError && e.wrong ? t("api.backup.wrongPassphrase") : String(e),
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const importFromFile = async () => {
-    const path = await apiPickFile(["json"]).catch((e: unknown) => {
-      pushErrorToast(String(e));
-      return null;
-    });
-    if (path) await runRestore(() => apiReadTextFile(path));
-  };
-
-  const importFromDrive = () =>
-    runRestore(async () => {
-      const fileId =
-        settings.driveFileId || (await gdriveFindFile(settings.driveClientId, DRIVE_BACKUP_NAME));
-      if (!fileId) throw new Error(t("api.backup.driveNoFile"));
-      if (fileId !== settings.driveFileId) await updateSettings({ driveFileId: fileId });
-      return gdriveDownload(settings.driveClientId, fileId);
-    });
-
-  const lastBackup =
-    settings.lastBackupAt === ""
-      ? t("api.backup.never")
-      : new Date(settings.lastBackupAt).toLocaleString();
-
-  return (
-    <Panel>
-      <Note>{t("api.backup.about")}</Note>
-
-      <Group title={t("api.backup.groupEncryption")}>
-        <Row label={t("api.backup.encrypt")} hint={t("api.backup.encryptHint")}>
-          <Checkbox
-            checked={settings.backupEncrypt}
-            onChange={(backupEncrypt) => void updateSettings({ backupEncrypt })}
-          />
-        </Row>
-        <Row label={t("api.backup.passphrase")} hint={t("api.backup.passphraseHint")} wide>
-          <Field
-            type="password"
-            disabled={!settings.backupEncrypt}
-            value={passphrase}
-            placeholder={t("api.backup.passphrasePlaceholder")}
-            onChange={setPassphrase}
-          />
-        </Row>
-      </Group>
-
-      <Group title={t("api.backup.groupManual")}>
-        <Actions>
-          <GhostButton onClick={() => void writeThroughDialog(false)} disabled={busy}>
-            <Upload size={12} />
-            {t("api.backup.exportNow")}
-          </GhostButton>
-          <GhostButton onClick={() => void importFromFile()} disabled={busy}>
-            <Download size={12} />
-            {t("api.backup.import")}
-          </GhostButton>
-          <label className="ml-1 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
-            <Checkbox checked={replace} onChange={setReplace} />
-            {t("api.backup.replace")}
-          </label>
-        </Actions>
-        <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-          {replace ? t("api.backup.replaceHint") : t("api.backup.mergeHint")}
-        </p>
-        {/* Restoring into a workspace that is also shared goes wrong in two different ways, and
-            which one depends on the checkbox above — so the warning has to say which. */}
-        {shared && (
-          <Note tone="warning">
-            {replace ? t("api.backup.replaceSharedWarning") : t("api.backup.mergeSharedWarning")}
-          </Note>
-        )}
-      </Group>
-
-      <Group title={t("api.backup.groupAutomatic")}>
-        <Row label={t("api.backup.target")} hint={t("api.backup.targetHint")} wide>
-          <Select
-            size="sm"
-            value={settings.backupTarget}
-            onChange={(value) =>
-              void updateSettings({ backupTarget: value === "drive" ? "drive" : "local" })
-            }
-            options={[
-              { value: "local", label: t("api.backup.targetLocal") },
-              { value: "drive", label: t("api.backup.targetDrive") },
-            ]}
-            ariaLabel={t("api.backup.target")}
-          />
-        </Row>
-
-        {settings.backupTarget === "local" ? (
-          <>
-            <Row label={t("api.backup.destination")} hint={t("api.backup.destinationHint")} wide>
-              <GhostButton onClick={() => void writeThroughDialog(true)} disabled={busy}>
-                {t("api.settings.browse")}
-              </GhostButton>
-            </Row>
-            {settings.backupPath !== "" && <Readout value={settings.backupPath} />}
-          </>
-        ) : (
-          <DriveConnection busy={busy} onRestore={() => void importFromDrive()} />
-        )}
-
-        <Row label={t("api.backup.auto")} hint={t("api.backup.autoHint")}>
-          <Checkbox
-            checked={settings.autoBackup}
-            disabled={!ready}
-            onChange={(autoBackup) => void updateSettings({ autoBackup })}
-          />
-        </Row>
-
-        {/* Two machines writing one destination don't merge — the file is whatever the last one
-            wrote. Worth saying where the destination is chosen, not in a doc nobody opens. */}
-        {settings.autoBackup && <Note>{t("api.backup.oneWriterWarning")}</Note>}
-
-        <div className="mt-1 flex items-center justify-between gap-2">
-          <Status tone={settings.lastBackupAt === "" ? "muted" : "success"}>
-            {t("api.backup.lastAt", { at: lastBackup })}
-          </Status>
-          <GhostButton onClick={() => void backupNow()} disabled={busy || !ready}>
-            <RefreshCw size={12} />
-            {t("api.backup.runNow")}
-          </GhostButton>
-        </div>
-      </Group>
-    </Panel>
-  );
-}
-
-/**
- * The user's own Google OAuth client, and the consent flow that turns it into a connection.
- *
- * The credentials are theirs, from a Google Cloud project they create: the backup goes to their
- * Drive through their own registration, with nothing of ours in the path. The price is the setup
- * described in `api.backup.driveSetup`, which is why the fields are spelled out rather than hidden
- * behind a single "Connect" button that would fail with an opaque error.
- */
-function DriveConnection({ busy, onRestore }: { busy: boolean; onRestore: () => void }) {
-  const t = useT();
-  const settings = useApiStore((s) => s.settings);
-  const updateSettings = useApiStore((s) => s.updateSettings);
-
-  const [status, setStatus] = useState<DriveStatus>({ has_secret: false, connected: false });
-  const [secret, setSecret] = useState("");
-  const [connecting, setConnecting] = useState(false);
-
-  const refresh = () => void gdriveStatus().then(setStatus).catch(() => {});
-  useEffect(refresh, []);
-
-  const saveSecret = async (value: string) => {
-    setSecret(value);
-    await gdriveSetClientSecret(value).catch((e: unknown) => pushErrorToast(String(e)));
-    refresh();
-  };
-
-  const connect = async () => {
-    setConnecting(true);
-    try {
-      const account = await gdriveConnect(settings.driveClientId);
-      await updateSettings({ driveAccount: account.email });
-      refresh();
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setConnecting(false);
-    }
-  };
-
-  const disconnect = async () => {
-    if (!(await confirmAction(t("api.backup.driveDisconnectConfirm")))) return;
-    await gdriveDisconnect().catch((e: unknown) => pushErrorToast(String(e)));
-    // The file id is scoped to the account that was connected; keeping it would make the next
-    // connection try to overwrite a file it may no longer be allowed to see.
-    await updateSettings({ driveAccount: "", driveFileId: "" });
-    refresh();
-  };
-
-  return (
-    <div className="mb-1">
-      <Note>{t("api.backup.driveSetup")}</Note>
-      {/* In the order the setup actually happens: turn the API on, then create the client. */}
-      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1">
-        <HelpLink url={HELP_URLS.googleDriveApi}>{t("api.backup.driveHelpEnable")}</HelpLink>
-        <HelpLink url={HELP_URLS.googleCredentials}>{t("api.backup.driveHelpCreate")}</HelpLink>
-        <HelpLink url={HELP_URLS.googleDesktopAppDocs}>{t("api.backup.driveHelpDocs")}</HelpLink>
-      </div>
-
-      <Row label={t("api.backup.driveClientId")} wide>
-        <Field
-          mono
-          value={settings.driveClientId}
-          placeholder="…apps.googleusercontent.com"
-          onChange={(driveClientId) => void updateSettings({ driveClientId })}
-        />
-      </Row>
-      <Row label={t("api.backup.driveClientSecret")} wide>
-        <Field
-          type="password"
-          value={secret}
-          placeholder={status.has_secret ? t("api.backup.driveSecretStored") : ""}
-          onChange={(value) => void saveSecret(value)}
-        />
-      </Row>
-
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
-        {status.connected ? (
-          <>
-            <Status tone="success">
-              {settings.driveAccount === ""
-                ? t("api.backup.driveConnected")
-                : t("api.backup.driveConnectedAs", { email: settings.driveAccount })}
-            </Status>
-            <Actions>
-              <GhostButton onClick={onRestore} disabled={busy}>
-                <Download size={12} />
-                {t("api.backup.driveRestore")}
-              </GhostButton>
-              <GhostButton onClick={() => void disconnect()}>
-                {t("api.backup.driveDisconnect")}
-              </GhostButton>
-            </Actions>
-          </>
-        ) : (
-          <>
-            <Status tone="muted">{t("api.backup.driveNotConnected")}</Status>
-            <GhostButton
-              onClick={() => void connect()}
-              disabled={connecting || settings.driveClientId.trim() === "" || !status.has_secret}
-            >
-              <Cloud size={12} />
-              {connecting ? t("api.backup.driveWaiting") : t("api.backup.driveConnect")}
-            </GhostButton>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-
-const TABS: { id: ApiSettingsTab; labelKey: TranslationKey; icon: LucideIcon; beta?: boolean }[] = [
+const TABS: { id: ApiSettingsTab; labelKey: TranslationKey; icon: LucideIcon }[] = [
   { id: "network", labelKey: "api.settings.network", icon: Network },
   { id: "proxy", labelKey: "api.settings.proxy", icon: Waypoints },
   { id: "certificates", labelKey: "api.settings.certificates", icon: ShieldCheck },
   { id: "general", labelKey: "settings.general", icon: Settings2 },
-  { id: "backup", labelKey: "api.backup.title", icon: DatabaseBackup, beta: true },
   { id: "collab", labelKey: "api.collab.title", icon: Share2 },
 ];
 
@@ -765,8 +347,12 @@ const TABS: { id: ApiSettingsTab; labelKey: TranslationKey; icon: LucideIcon; be
  * The settings themselves, without the modal around them, so the `api` section of the main
  * Settings window shows exactly the same controls instead of a second copy that drifts.
  *
- * Behind sub-tabs rather than stacked: five groups down one scroll meant the backup controls — the
- * ones a new user has to find — sat below three screens of transport tuning nobody edits twice.
+ * Behind sub-tabs rather than stacked: several groups down one scroll put the ones a new user has
+ * to find below three screens of transport tuning nobody edits twice.
+ *
+ * The backup tab used to live here and no longer does — it grew from "this workspace's requests"
+ * into the whole install, credentials included, which is not a property of the API client. It is
+ * now its own section of Settings (`components/settings/BackupSettings.tsx`).
  */
 export function ApiSettingsBody() {
   const t = useT();
@@ -820,7 +406,7 @@ export function ApiSettingsBody() {
           never moves — and behaves exactly like the outer settings nav, whose own pill has always
           been smooth for the simple reason that it isn't sticky. */}
       <motion.nav layoutRoot className="sticky top-0 w-[168px] shrink-0 self-start">
-        {TABS.map(({ id, labelKey, icon: Icon, beta }) => (
+        {TABS.map(({ id, labelKey, icon: Icon }) => (
           <button
             key={id}
             onClick={() => setTab(id)}
@@ -839,7 +425,6 @@ export function ApiSettingsBody() {
             <span className="relative flex min-w-0 flex-1 items-center gap-1.5">
               <Icon size={13} className="shrink-0" />
               <span className="truncate">{t(labelKey)}</span>
-              {beta && <BetaBadge className="ml-auto" />}
             </span>
           </button>
         ))}
@@ -850,7 +435,6 @@ export function ApiSettingsBody() {
         {tab === "proxy" && <ProxyPanel />}
         {tab === "certificates" && <CertificatesPanel />}
         {tab === "general" && <GeneralPanel />}
-        {tab === "backup" && <BackupPanel />}
         {tab === "collab" && <CollaborationPanel />}
       </div>
     </div>

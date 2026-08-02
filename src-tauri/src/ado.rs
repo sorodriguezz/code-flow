@@ -163,8 +163,8 @@ pub struct PullRequestSummary {
     pub author: String,
     pub created_at: String,
     pub url: String,
-    /// Which VCS this PR came from — "azure" | "github" — so the UI can label the "view on…"
-    /// link and post-confirmation correctly without inspecting the URL.
+    /// Which VCS this PR came from — "azure" | "github" | "gitlab" — so the UI can label the
+    /// "view on…" link and post-confirmation correctly without inspecting the URL.
     pub provider: String,
 }
 

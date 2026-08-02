@@ -89,6 +89,10 @@ fn rules() -> &'static [Rule] {
                 r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b",
             ),
             Rule::new("github-pat", "GitHub fine-grained PAT", "critical", r"\bgithub_pat_[A-Za-z0-9_]{22,}\b"),
+            // `glpat-` prefixes every GitLab personal access token, and a project one as well.
+            // Without this a leaked GitLab token walks past a scan that catches its GitHub
+            // equivalent — and CodeFlow now asks users to create one.
+            Rule::new("gitlab-pat", "GitLab access token", "critical", r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
             Rule::new("google-api-key", "Google API key", "critical", r"\bAIza[0-9A-Za-z\-_]{35}\b"),
             Rule::new("slack-token", "Slack token", "critical", r"\bxox[baprs]-[0-9A-Za-z-]{10,48}\b"),
             Rule::new(
@@ -216,6 +220,26 @@ mod tests {
         assert_eq!(hits[0].rule, "github-token");
         assert_eq!(hits[0].line, 42);
         assert!(!hits[0].preview.contains("0123456789")); // masked
+    }
+
+    /// The GitLab equivalent, which the app now asks users to create — so a staged one has to be
+    /// caught the same way a staged GitHub token is.
+    #[test]
+    fn detects_gitlab_token() {
+        // Built at runtime so the full literal never lands in the source: written whole, GitHub's
+        // push protection blocks every push of this repo as if the fixture were a live token.
+        let token = format!("glpat-{}", "AbCdEf1234567890xyzQ");
+        let hits = scan_diff(&[added(&format!("GITLAB_TOKEN={token}"))]);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].rule, "gitlab-pat");
+        assert!(!hits[0].preview.contains("AbCdEf1234567890"), "the token must be masked");
+    }
+
+    /// `glpat-` on its own is a prefix, not a credential — flagging every mention of it would
+    /// train people to click past the warning that matters.
+    #[test]
+    fn a_bare_gitlab_prefix_is_not_a_token() {
+        assert!(scan_diff(&[added("// tokens start with glpat-")]).is_empty());
     }
 
     #[test]

@@ -73,6 +73,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 
     app.on_menu_event(|app, event| {
         if event.id.as_ref() == "quit" {
+            // Cmd+Q is a real quit, so it takes the same closing backup as the tray's.
+            crate::backup::auto::flush_on_exit(app);
             app.state::<crate::tray::QuittingFlag>().mark_quitting();
             app.exit(0);
         }

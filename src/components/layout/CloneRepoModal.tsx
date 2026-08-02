@@ -72,6 +72,8 @@ export function CloneRepoModal({
         github_owner: null,
         github_repo: null,
         github_host: null,
+      gitlab_project: null,
+      gitlab_host: null,
       });
       onCloned?.(project);
       onClose();

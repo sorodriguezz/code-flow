@@ -90,6 +90,24 @@ md-5 = "0.10"
 hex = "0.4"
 rand = "0.9"
 rumqttc = "0.24"
+
+# ---------------- Full backup ----------------
+# The whole-install backup is sealed in Rust rather than in the webview: the payload is the entire
+# configuration plus every credential in the OS store, and pushing megabytes of it across the IPC
+# bridge to be encrypted by WebCrypto would cost two JSON round trips and a base64 copy for no gain.
+#
+# Argon2id (not PBKDF2) because this passphrase is the only thing standing between a file the user
+# is about to put in Google Drive and every token they own: memory-hardness is what makes a GPU
+# attack cost something. AES-256-GCM seals it, and the header travels as the AAD so the KDF
+# parameters can't be edited down without the tag failing.
+aes-gcm = { version = "0.10", features = ["std"] }
+argon2 = "0.5"
+# Pure-Rust deflate (miniz_oxide): the payload is highly repetitive JSON, and compressing before
+# encrypting is what keeps a several-megabyte configuration a few hundred kilobytes in the cloud.
+flate2 = "1"
+# Wipes the derived key and the decrypted plaintext once they've served their purpose, so a
+# passphrase-derived key doesn't linger in freed memory for the rest of the session.
+zeroize = "1"
 # gRPC without a `protoc` binary on the user's machine: `protox` is a pure-Rust .proto compiler
 # producing a FileDescriptorSet, `prost-reflect` turns that into dynamic messages at runtime, and
 # `tonic` carries them over the wire through a hand-written codec (there is no generated stub —
@@ -147,6 +165,7 @@ mongodb = { version = "3", default-features = false, features = [
     "dns-resolver",
     "rustls-tls",
 ] }
+tauri-plugin-single-instance = "2.4.3"
 
 # `keyring` ships with no OS credential-store backend enabled by default — without one
 # of these, Entry::set_password()/get_password() silently round-trip through a

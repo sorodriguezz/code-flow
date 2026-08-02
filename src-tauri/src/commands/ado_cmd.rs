@@ -11,11 +11,15 @@ use crate::db::{
 };
 use crate::git;
 use crate::github;
+use crate::gitlab;
 use crate::paths;
 use crate::secrets;
 
 /// Which VCS host a project's PR features talk to, resolved from whichever set of link columns
-/// is populated. A project links to at most one host; GitHub wins if both were somehow set.
+/// is populated. A project links to at most one host; the order below is the tie-break if more
+/// than one set were somehow written — GitHub, then GitLab, then Azure — and the same order is
+/// asserted by the "already linked" guards in [`resolve_pr_link`], so a project carrying two
+/// providers' columns can never be routed at one host here and matched at another there.
 /// This is the single dispatch point the shared PR commands (list / review / comment) branch
 /// on, so the frontend, the `prStore`, and the whole Claude review pipeline stay provider-neutral.
 enum LinkedRepo {
@@ -23,12 +27,19 @@ enum LinkedRepo {
     /// `host` is "github.com" or a GitHub Enterprise hostname — picks both the token to use and
     /// the REST base URL.
     GitHub { host: String, owner: String, repo: String },
+    /// One path field rather than an owner/repo pair: GitLab groups nest, so
+    /// `acme/backend/services/auth` is an ordinary project with nothing to split off the front.
+    GitLab { host: String, project: String },
 }
 
 fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
     if let (Some(owner), Some(repo)) = (project.github_owner.clone(), project.github_repo.clone()) {
         let host = project.github_host.clone().unwrap_or_else(|| github::GITHUB_COM.to_string());
         return Ok(LinkedRepo::GitHub { host, owner, repo });
+    }
+    if let Some(path) = project.gitlab_project.clone().filter(|p| !p.trim().is_empty()) {
+        let host = project.gitlab_host.clone().unwrap_or_else(|| gitlab::GITLAB_COM.to_string());
+        return Ok(LinkedRepo::GitLab { host, project: path });
     }
     if let (Some(org), Some(ado_project), Some(repo_id)) =
         (project.ado_org.clone(), project.ado_project.clone(), project.ado_repo_id.clone())
@@ -48,10 +59,24 @@ fn repo_key(link: &LinkedRepo) -> String {
         LinkedRepo::GitHub { host, owner, repo } => {
             format!("github:{host}/{owner}/{repo}").to_lowercase()
         }
+        // Variable-length for GitLab, since its groups nest — harmless, because this string is
+        // only ever compared for equality, never parsed back apart. The `gitlab:` prefix is what
+        // stops a GitLab project inheriting a same-named GitHub one's findings.
+        LinkedRepo::GitLab { host, project } => format!("gitlab:{host}/{project}").to_lowercase(),
         LinkedRepo::Azure { org, project, repo_id } => {
             format!("azure:{org}/{project}/{repo_id}").to_lowercase()
         }
     }
+}
+
+/// The repository key of a project, or `None` when it isn't linked to a pull-request host yet.
+///
+/// Goes through [`linked_repo`] rather than reading the columns directly so it inherits that
+/// function's provider precedence: a project carrying two providers' columns must resolve to the
+/// same repository here as it does when a review actually runs, or memory recorded under one key
+/// would be looked for under another.
+pub(crate) fn project_repo_key(project: &Project) -> Option<String> {
+    linked_repo(project).ok().map(|link| repo_key(&link))
 }
 
 fn github_token(host: &str) -> Result<String, String> {
@@ -59,8 +84,14 @@ fn github_token(host: &str) -> Result<String, String> {
         .ok_or_else(|| format!("No GitHub token saved for \"{host}\" — connect it in Settings first"))
 }
 
+fn gitlab_token(host: &str) -> Result<String, String> {
+    secrets::get_secret(&secrets::gitlab_token_key(host))?
+        .ok_or_else(|| format!("No GitLab token saved for \"{host}\" — connect it in Settings first"))
+}
+
+/// The `[{"host": …}]` shape both `github_connections` and `gitlab_connections` are stored in.
 #[derive(Deserialize)]
-struct GithubConnectionHost {
+struct ConnectionHost {
     host: String,
 }
 
@@ -81,15 +112,23 @@ struct AdoConnectionOrg {
 /// password" dialog. [`auto_link_project`] runs on every repo opened or switched to, so reading
 /// the Keychain from here meant one such prompt per repo switch. The credential itself is still
 /// read — later, only when a request to the host is actually made.
-fn github_connected_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
+fn connected_hosts(db: &State<'_, Db>, setting: &str) -> Result<Vec<String>, String> {
     let raw = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::get_setting(&conn, "github_connections").map_err(|e| e.to_string())?
+        queries::get_setting(&conn, setting).map_err(|e| e.to_string())?
     };
     let Some(raw) = raw else { return Ok(Vec::new()) };
-    Ok(serde_json::from_str::<Vec<GithubConnectionHost>>(&raw)
+    Ok(serde_json::from_str::<Vec<ConnectionHost>>(&raw)
         .map(|conns| conns.into_iter().map(|c| c.host).collect())
         .unwrap_or_default())
+}
+
+fn github_connected_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
+    connected_hosts(db, "github_connections")
+}
+
+fn gitlab_connected_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
+    connected_hosts(db, "gitlab_connections")
 }
 
 fn ado_connected_orgs(db: &State<'_, Db>) -> Result<Vec<String>, String> {
@@ -116,13 +155,20 @@ fn ado_connected_orgs(db: &State<'_, Db>) -> Result<Vec<String>, String> {
 /// deliberately wider than [`github_connected_hosts`]: `github.com` is recognizable whether or not
 /// a token is saved, which is what lets a detected-but-unconnected remote report `NeedsToken`.
 fn github_known_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
-    Ok(detectable_github_hosts(&github_connected_hosts(db)?))
+    Ok(detectable_hosts(github::GITHUB_COM, &github_connected_hosts(db)?))
+}
+
+/// The same allowlist for GitLab. The rule matters more here than it does for GitHub: a GitLab
+/// project path has no fixed number of segments, so without an allowlist every self-hosted git
+/// server on earth would look like a plausible GitLab remote.
+fn gitlab_known_hosts(db: &State<'_, Db>) -> Result<Vec<String>, String> {
+    Ok(detectable_hosts(gitlab::GITLAB_COM, &gitlab_connected_hosts(db)?))
 }
 
 /// The allowlist itself, split out so a caller that already loaded the connected hosts (see
 /// [`auto_link_project`]) doesn't read the same setting twice.
-fn detectable_github_hosts(connected: &[String]) -> Vec<String> {
-    let mut hosts = vec![github::GITHUB_COM.to_string()];
+fn detectable_hosts(canonical: &str, connected: &[String]) -> Vec<String> {
+    let mut hosts = vec![canonical.to_string()];
     for host in connected {
         if !hosts.iter().any(|h| h.eq_ignore_ascii_case(host)) {
             hosts.push(host.clone());
@@ -168,21 +214,23 @@ pub(crate) fn build_mcp_config(mcps: &[WorkspaceMcp], workspace_id: &str) -> Res
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status")]
 pub enum AutoLinkResult {
-    /// Detected a supported remote (Azure Repos or GitHub) and a token for it was already
+    /// Detected a supported remote (Azure Repos, GitHub or GitLab) and a token for it was already
     /// saved — linked automatically, no user action needed.
     Linked { project: Project },
     /// Detected a supported remote, but no token is saved for it yet. `provider` is
-    /// "azure" | "github"; `identifier` is the org (Azure) or owner (GitHub) it was detected
-    /// under, shown in the "needs a token" hint.
+    /// "azure" | "github" | "gitlab"; `identifier` is what the hint names it by — the org
+    /// (Azure), the owner (GitHub), or the host (GitLab, whose tokens are per-instance and whose
+    /// nested group path has no single "owner" segment to point at).
     NeedsToken { provider: String, identifier: String },
     /// The remote isn't a recognized host (or there's no remote at all) — falls back to
     /// manual linking.
     NotDetected,
 }
 
-/// Called once per project when its Pull Requests section first needs data: tries to derive
-/// the host org/project/repo (Azure) or owner/repo (GitHub) straight from the local repo's own
-/// remote URL instead of making the user hunt through dropdowns for something git already knows.
+/// Called once per project when its Pull Requests section first needs data: tries to derive the
+/// host org/project/repo (Azure), owner/repo (GitHub) or full project path (GitLab) straight from
+/// the local repo's own remote URL, instead of making the user hunt through dropdowns for
+/// something git already knows.
 ///
 /// Reads the remote straight from the repo's actual git config rather than the `projects`
 /// table's `remote_url` column — that column is only populated at "Clone repository" time,
@@ -206,8 +254,10 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
     ordered.extend(remotes.iter().filter(|r| r.name != "origin"));
 
     let connected_github_hosts = github_connected_hosts(&db)?;
+    let connected_gitlab_hosts = gitlab_connected_hosts(&db)?;
     let connected_ado_orgs = ado_connected_orgs(&db)?;
-    let known_github_hosts = detectable_github_hosts(&connected_github_hosts);
+    let known_github_hosts = detectable_hosts(github::GITHUB_COM, &connected_github_hosts);
+    let known_gitlab_hosts = detectable_hosts(gitlab::GITLAB_COM, &connected_gitlab_hosts);
 
     // The repo binds to the first remote we recognize *and* already have a token for — so with
     // both GitHub and Azure DevOps connected, each repo auto-links to the host that's actually
@@ -229,6 +279,20 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
                 return Ok(AutoLinkResult::Linked { project: linked });
             } else if needs_token.is_none() {
                 needs_token = Some(AutoLinkResult::NeedsToken { provider: "github".to_string(), identifier: detected.owner });
+            }
+        } else if let Some(detected) = gitlab::detect_from_remote_url(url, &known_gitlab_hosts) {
+            if connected_gitlab_hosts.iter().any(|h| h.eq_ignore_ascii_case(&detected.host)) {
+                let conn = db.0.lock().map_err(|e| e.to_string())?;
+                queries::link_project_gitlab(&conn, &project_id, &detected.project, &detected.host)
+                    .map_err(|e| e.to_string())?;
+                let linked = queries::get_project(&conn, &project_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Project not found".to_string())?;
+                return Ok(AutoLinkResult::Linked { project: linked });
+            } else if needs_token.is_none() {
+                // The host, not the group: a GitLab token authenticates against the whole
+                // instance, so that is what the hint has to tell the user to connect.
+                needs_token = Some(AutoLinkResult::NeedsToken { provider: "gitlab".to_string(), identifier: detected.host });
             }
         } else if let Some(detected) = ado::detect_from_remote_url(url) {
             if connected_ado_orgs.iter().any(|o| o.eq_ignore_ascii_case(&detected.org)) {
@@ -277,8 +341,8 @@ pub fn link_project_ado(
     queries::link_project_ado(&conn, &id, &ado_org, &ado_project, &ado_repo_id).map_err(|e| e.to_string())
 }
 
-/// Clears whichever VCS link (Azure DevOps or GitHub) a project currently has — the sidebar's
-/// "Disconnect" doesn't need to know which provider it was.
+/// Clears whichever VCS link (Azure DevOps, GitHub or GitLab) a project currently has — the
+/// sidebar's "Disconnect" doesn't need to know which provider it was.
 #[tauri::command]
 pub fn unlink_project(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -288,6 +352,10 @@ pub fn unlink_project(db: State<Db>, id: String) -> Result<(), String> {
 /// Percent-encodes spaces in an Azure DevOps org/project/repo path segment for a browser URL
 /// (those names routinely contain spaces — "Marketing Website"). GitHub owner/repo can't
 /// contain spaces, so they need no encoding.
+///
+/// Deliberately **not** what a GitLab API path needs: there the project's slashes have to become
+/// `%2F` or the router reads them as route segments. That encoder lives in `gitlab.rs`; this one
+/// stays correct for GitLab's *browser* URLs, where the slashes must stay literal.
 fn web_encode(s: &str) -> String {
     s.replace(' ', "%20")
 }
@@ -306,9 +374,13 @@ fn repo_web_url(db: &State<'_, Db>, project_id: &str) -> Result<Option<String>, 
     ordered.extend(remotes.iter().filter(|r| r.name != "origin"));
 
     let known_github_hosts = github_known_hosts(db)?;
+    let known_gitlab_hosts = gitlab_known_hosts(db)?;
     for remote in &ordered {
         if let Some(d) = github::detect_from_remote_url(&remote.url, &known_github_hosts) {
             return Ok(Some(format!("https://{}/{}/{}", d.host, d.owner, d.repo)));
+        }
+        if let Some(d) = gitlab::detect_from_remote_url(&remote.url, &known_gitlab_hosts) {
+            return Ok(Some(format!("https://{}/{}", d.host, d.project)));
         }
         if let Some(d) = ado::detect_from_remote_url(&remote.url) {
             return Ok(Some(format!(
@@ -365,6 +437,10 @@ pub async fn list_pull_requests(
             let token = github_token(&host)?;
             github::list_pull_requests(&host, &owner, &repo, &token).await
         }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(&host)?;
+            gitlab::list_merge_requests(&host, &path, &token).await
+        }
     }
 }
 
@@ -384,7 +460,7 @@ pub enum PrLinkResolution {
         pr: ado::PullRequestSummary,
     },
     /// The host is recognized but nothing is saved to authenticate with it — `identifier` is the
-    /// GitHub host or the Azure DevOps organization the token is missing for.
+    /// GitHub or GitLab host, or the Azure DevOps organization, the token is missing for.
     NeedsToken { provider: String, identifier: String },
     /// The PR was read fine, but no repository in CodeFlow points at it. `clone_url` is what the
     /// "clone it and review" offer uses; the PR itself is carried so it can still be previewed.
@@ -447,14 +523,15 @@ fn find_project_for_link(
     Ok(None)
 }
 
-/// Resolves a pasted pull-request URL — GitHub (including Enterprise) or Azure DevOps — into a
-/// PR plus the local repository it belongs to, linking that repository to its host if it wasn't
-/// already. This is what makes "review this PR" reachable from a link someone sent you, instead
-/// of only from the sidebar list of a project you already had open.
+/// Resolves a pasted pull-request URL — GitHub (including Enterprise), GitLab (including
+/// self-managed) or Azure DevOps — into a PR plus the local repository it belongs to, linking that
+/// repository to its host if it wasn't already. This is what makes "review this PR" reachable from
+/// a link someone sent you, instead of only from the sidebar list of a project you already had open.
 #[tauri::command]
 pub async fn resolve_pr_link(db: State<'_, Db>, url: String) -> Result<PrLinkResolution, String> {
     let known_hosts = github_known_hosts(&db)?;
-    let Some(target) = crate::pr_link::parse(&url, &known_hosts) else {
+    let known_gitlab_hosts = gitlab_known_hosts(&db)?;
+    let Some(target) = crate::pr_link::parse(&url, &known_hosts, &known_gitlab_hosts) else {
         return Ok(PrLinkResolution::Unrecognized);
     };
 
@@ -505,6 +582,49 @@ pub async fn resolve_pr_link(db: State<'_, Db>, url: String) -> Result<PrLinkRes
                 },
             })
         }
+        crate::pr_link::PrLinkTarget::GitLab { host, project: path, number } => {
+            let Some(token) = secrets::get_secret(&secrets::gitlab_token_key(&host))? else {
+                return Ok(PrLinkResolution::NeedsToken {
+                    provider: "gitlab".to_string(),
+                    identifier: host,
+                });
+            };
+            let pr = gitlab::get_merge_request(&host, &path, number, &token).await?;
+            let found = find_project_for_link(
+                &db,
+                &projects,
+                |p| {
+                    same_opt(&p.gitlab_project, &path)
+                        && same(p.gitlab_host.as_deref().unwrap_or(gitlab::GITLAB_COM), &host)
+                        // GitHub outranks GitLab in `linked_repo`, so a project carrying both
+                        // would dispatch there. The remote pass below repairs the columns.
+                        && !(p.github_owner.is_some() && p.github_repo.is_some())
+                },
+                |remote_url| {
+                    gitlab::detect_from_remote_url(remote_url, &known_gitlab_hosts)
+                        .map(|d| same(&d.host, &host) && same(&d.project, &path))
+                        .unwrap_or(false)
+                },
+                |conn, project_id| {
+                    queries::link_project_gitlab(conn, project_id, &path, &host)
+                        .map_err(|e| e.to_string())
+                },
+            )?;
+            Ok(match found {
+                Some(project) => PrLinkResolution::Ready {
+                    project_id: project.id,
+                    workspace_id: project.workspace_id,
+                    project_name: project.name,
+                    pr,
+                },
+                None => PrLinkResolution::NoLocalRepo {
+                    provider: "gitlab".to_string(),
+                    repo_label: path.clone(),
+                    clone_url: format!("https://{host}/{path}.git"),
+                    pr,
+                },
+            })
+        }
         crate::pr_link::PrLinkTarget::Azure { org, project: ado_project, repo, number } => {
             let Some(pat) = secrets::get_secret(&secrets::ado_pat_key(&org))? else {
                 return Ok(PrLinkResolution::NeedsToken {
@@ -524,9 +644,11 @@ pub async fn resolve_pr_link(db: State<'_, Db>, url: String) -> Result<PrLinkRes
                     same_opt(&p.ado_org, &org)
                         && same_opt(&p.ado_project, &ado_project)
                         && same_opt(&p.ado_repo_id, &repo)
-                        // `linked_repo` prefers GitHub, so a project carrying both would dispatch
-                        // there instead. Leave it to the remote pass, which repairs the columns.
+                        // `linked_repo` ranks GitHub and GitLab above Azure, so a project carrying
+                        // either one's columns as well would dispatch there instead. Leave it to
+                        // the remote pass, which repairs the columns.
                         && !(p.github_owner.is_some() && p.github_repo.is_some())
+                        && p.gitlab_project.is_none()
                 },
                 |remote_url| {
                     ado::detect_from_remote_url(remote_url)
@@ -571,17 +693,19 @@ fn link_credentials(
     url: &str,
 ) -> Result<(crate::pr_link::PrLinkTarget, String), String> {
     let known_hosts = github_known_hosts(db)?;
-    let target = crate::pr_link::parse(url, &known_hosts)
+    let known_gitlab_hosts = gitlab_known_hosts(db)?;
+    let target = crate::pr_link::parse(url, &known_hosts, &known_gitlab_hosts)
         .ok_or_else(|| "That isn't a pull-request link CodeFlow can read".to_string())?;
     let credential = match &target {
         crate::pr_link::PrLinkTarget::GitHub { host, .. } => github_token(host)?,
+        crate::pr_link::PrLinkTarget::GitLab { host, .. } => gitlab_token(host)?,
         crate::pr_link::PrLinkTarget::Azure { org, .. } => pat_for_org(org)?,
     };
     Ok((target, credential))
 }
 
-/// How a repo-less pull request names the repository it lives in — "owner/repo" on GitHub,
-/// "project/repo" on Azure DevOps — plus where that repository could be cloned from.
+/// How a repo-less pull request names the repository it lives in — "owner/repo" on GitHub, the
+/// full group path on GitLab, "project/repo" on Azure DevOps — plus where it could be cloned from.
 ///
 /// Same strings [`resolve_pr_link`] reports for `NoLocalRepo`, so a review filed in Activity names
 /// its repository exactly like the modal that opened it did. `canonical` carries the project/repo
@@ -591,6 +715,11 @@ fn link_repo_coords(target: &crate::pr_link::PrLinkTarget, canonical: Option<(&s
     match target {
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, .. } => {
             (format!("{owner}/{repo}"), format!("https://{host}/{owner}/{repo}.git"))
+        }
+        // GitLab links always carry the human-readable path, so `canonical` never applies here —
+        // the same reason it doesn't on GitHub.
+        crate::pr_link::PrLinkTarget::GitLab { host, project, .. } => {
+            (project.clone(), format!("https://{host}/{project}.git"))
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, .. } => {
             let (project, repo) = canonical.unwrap_or((project, repo));
@@ -625,6 +754,12 @@ async fn fetch_pr_and_diff(
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             let pr = github::get_pull_request(host, owner, repo, *number, credential).await?;
             let diff = github::pull_request_diff(host, owner, repo, *number, credential).await?;
+            let (repo_label, clone_url) = link_repo_coords(target, None);
+            Ok(LinkPr { pr, diff, repo_label, clone_url })
+        }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            let pr = gitlab::get_merge_request(host, project, *number, credential).await?;
+            let diff = gitlab::merge_request_diff(host, project, *number, credential).await?;
             let (repo_label, clone_url) = link_repo_coords(target, None);
             Ok(LinkPr { pr, diff, repo_label, clone_url })
         }
@@ -694,6 +829,9 @@ fn link_review_workspace(
     let slug = match target {
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             slugify(&format!("github-{host}-{owner}-{repo}-{number}"))
+        }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            slugify(&format!("gitlab-{host}-{project}-{number}"))
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             slugify(&format!("azure-{org}-{project}-{repo}-{number}"))
@@ -782,6 +920,9 @@ pub async fn review_pr_from_link(
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             github::list_pr_comment_threads(host, owner, repo, *number, &credential).await.unwrap_or_default()
         }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            gitlab::list_pr_comment_threads(host, project, *number, &credential).await.unwrap_or_default()
+        }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             ado::list_pr_comment_threads(org, project, repo, *number, &credential).await.unwrap_or_default()
         }
@@ -848,6 +989,9 @@ pub async fn pr_link_pull_request(db: State<'_, Db>, url: String) -> Result<ado:
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             github::get_pull_request(host, owner, repo, *number, &credential).await
         }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            gitlab::get_merge_request(host, project, *number, &credential).await
+        }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             Ok(ado::get_pull_request(org, project, repo, *number, &credential).await?.summary)
         }
@@ -862,6 +1006,9 @@ pub async fn pr_link_comment_threads(db: State<'_, Db>, url: String) -> Result<V
     match &target {
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             github::list_pr_comment_threads(host, owner, repo, *number, &credential).await
+        }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            gitlab::list_pr_comment_threads(host, project, *number, &credential).await
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             ado::list_pr_comment_threads(org, project, repo, *number, &credential).await
@@ -886,6 +1033,10 @@ pub async fn pr_link_resolve_comment_thread(
             ThreadHost::GitHub { host, owner, repo, token: &credential },
             *number,
         ),
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => (
+            ThreadHost::GitLab { host, project, token: &credential },
+            *number,
+        ),
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => (
             ThreadHost::Azure { org, project, repo, pat: &credential },
             *number,
@@ -902,6 +1053,9 @@ pub async fn pr_link_decision(db: State<'_, Db>, url: String) -> Result<String, 
     match &target {
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             github::viewer_decision(host, owner, repo, *number, &credential).await
+        }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            gitlab::viewer_decision(host, project, *number, &credential).await
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             ado::viewer_decision(org, project, repo, *number, &credential).await
@@ -936,6 +1090,21 @@ pub async fn act_on_pr_link(
                 other => Err(format!("unknown PR action: {other}")),
             }?;
             (github::get_pull_request(host, owner, repo, *number, &credential).await?, None)
+        }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            match action.as_str() {
+                "approve" => gitlab::submit_pr_review(host, project, *number, "APPROVE", &comment, &credential).await,
+                // GitLab has no free-tier "changes requested" state, so the client withdraws any
+                // approval and posts the explanation — which is why a comment is required here
+                // rather than optional as it is on GitHub.
+                "request_changes" => {
+                    let text = if comment.trim().is_empty() { "Cambios solicitados desde CodeFlow." } else { &comment };
+                    gitlab::submit_pr_review(host, project, *number, "REQUEST_CHANGES", text, &credential).await
+                }
+                "close" => gitlab::close_merge_request(host, project, *number, &credential).await,
+                other => Err(format!("unknown PR action: {other}")),
+            }?;
+            (gitlab::get_merge_request(host, project, *number, &credential).await?, None)
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             match action.as_str() {
@@ -991,6 +1160,32 @@ pub async fn post_pr_link_review_comment(
     let mut failures: Vec<String> = Vec::new();
 
     match &target {
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            for (i, item) in items.iter().enumerate() {
+                // The anchored form reads the merge request's diff refs itself, and falls back to a
+                // plain note when the location can't be anchored — same shape as the GitHub arm.
+                let posted = match &item.location {
+                    Some(loc) => gitlab::post_pr_comment_anchored(
+                        host, project, *number, &item.content, &loc.file, loc.start_line, loc.end_line, &credential,
+                    )
+                    .await
+                    .map(|_| ()),
+                    None => gitlab::post_pr_comment(host, project, *number, &item.content, &credential)
+                        .await
+                        .map(|_| ()),
+                };
+                if let Err(e) = posted {
+                    failures.push(format!("#{}: {e}", i + 1));
+                }
+            }
+            if post_summary {
+                if let Some(text) = &summary {
+                    if let Err(e) = gitlab::post_pr_comment(host, project, *number, text, &credential).await {
+                        failures.push(format!("summary: {e}"));
+                    }
+                }
+            }
+        }
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             let head_sha = if items.iter().any(|it| it.location.is_some()) {
                 github::head_sha_for(host, owner, repo, *number, &credential).await.ok()
@@ -1153,6 +1348,13 @@ pub async fn create_pull_request(
             )
             .await
         }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(&host)?;
+            gitlab::create_merge_request(
+                &host, &path, &title, &description, &source_branch, &target_branch, draft, &token,
+            )
+            .await
+        }
     }
 }
 
@@ -1174,6 +1376,10 @@ pub async fn list_pr_comment_threads(
             let token = github_token(&host)?;
             github::list_pr_comment_threads(&host, &owner, &repo, pr_id, &token).await
         }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(&host)?;
+            gitlab::list_pr_comment_threads(&host, &path, pr_id, &token).await
+        }
     }
 }
 
@@ -1187,6 +1393,7 @@ const THREAD_FIXED: i32 = 2;
 enum ThreadHost<'a> {
     Azure { org: &'a str, project: &'a str, repo: &'a str, pat: &'a str },
     GitHub { host: &'a str, owner: &'a str, repo: &'a str, token: &'a str },
+    GitLab { host: &'a str, project: &'a str, token: &'a str },
 }
 
 /// What closing a conversation from CodeFlow actually managed to do.
@@ -1212,8 +1419,8 @@ pub struct ThreadCloseOutcome {
 /// for the author than an open one.
 ///
 /// `wont_fix` is what makes this honest on Azure, which distinguishes the two closes: a review
-/// comment the team decided *not* to act on is closed as "won't fix", not as "fixed". GitHub has a
-/// single resolved state, so the flag only shapes the reply there.
+/// comment the team decided *not* to act on is closed as "won't fix", not as "fixed". GitHub and
+/// GitLab each have a single resolved state, so the flag only shapes the reply there.
 ///
 /// Both halves are best-effort in different ways. A failed reply aborts (there is no point closing
 /// a conversation whose explanation never arrived); a failed close comes back in the outcome, with
@@ -1244,6 +1451,17 @@ async fn reply_and_close_thread(
                     github::post_pr_comment(host, owner, repo, pr_id, text, token).await?;
                 }
             }
+            ThreadHost::GitLab { host, project, token } => {
+                // Same fallback as GitHub's, for the same reason: a plain merge-request note
+                // belongs to no discussion, so rather than dropping the user's words the reply
+                // becomes a new note on the merge request.
+                if gitlab::reply_pr_comment(host, project, pr_id, thread_id, text, token)
+                    .await
+                    .is_err()
+                {
+                    gitlab::post_pr_comment(host, project, pr_id, text, token).await?;
+                }
+            }
         }
         replied = true;
     }
@@ -1256,6 +1474,11 @@ async fn reply_and_close_thread(
         ThreadHost::GitHub { host, owner, repo, token } => {
             github::resolve_review_thread_for_comment(host, owner, repo, pr_id, thread_id, token).await
         }
+        // Only a diff-anchored discussion is resolvable on GitLab; a plain note is not, and the
+        // refusal comes back in the outcome rather than being swallowed as a silent success.
+        ThreadHost::GitLab { host, project, token } => {
+            gitlab::resolve_discussion_for_note(host, project, pr_id, thread_id, token).await
+        }
     };
 
     Ok(match closed {
@@ -1265,17 +1488,18 @@ async fn reply_and_close_thread(
 }
 
 /// Closes one comment thread on the host — Azure's `fixed`/`won't fix`, GitHub's
-/// `resolveReviewThread` — optionally leaving a reply on it first.
+/// `resolveReviewThread`, GitLab's resolved discussion — optionally leaving a reply on it first.
 ///
 /// The reply is the point: a reviewer's comment is often closed *without* the change being made
 /// ("this is intentional", "handled in another PR"), and closing it silently leaves the author
 /// looking at a conversation that ended with no answer. So the comment travels with the close, and
 /// `wont_fix` keeps the record straight about which of the two happened.
 ///
-/// `thread_id` is the id [`list_pr_comment_threads`] reported, which is a real thread on Azure and
-/// the root comment of a review thread on GitHub (the shape each host's API addresses). GitHub's
-/// conversation-level comments belong to no review thread and cannot be resolved at all — that
-/// comes back as `resolved: false` with the reason, rather than silently doing nothing.
+/// `thread_id` is the id [`list_pr_comment_threads`] reported: a real thread on Azure, and the
+/// root comment of a review thread on GitHub or of a discussion on GitLab (the shape each host's
+/// API addresses). GitHub's conversation-level comments and GitLab's plain notes belong to no
+/// resolvable thread at all — that comes back as `resolved: false` with the reason, rather than
+/// silently doing nothing.
 #[tauri::command]
 pub async fn resolve_pr_comment_thread(
     db: State<'_, Db>,
@@ -1295,6 +1519,11 @@ pub async fn resolve_pr_comment_thread(
         LinkedRepo::GitHub { host, owner, repo } => {
             let token = github_token(&host)?;
             let target = ThreadHost::GitHub { host: &host, owner: &owner, repo: &repo, token: &token };
+            reply_and_close_thread(target, pr_id, thread_id, body.as_deref(), wont_fix).await
+        }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(&host)?;
+            let target = ThreadHost::GitLab { host: &host, project: &path, token: &token };
             reply_and_close_thread(target, pr_id, thread_id, body.as_deref(), wont_fix).await
         }
     }
@@ -1447,6 +1676,11 @@ pub async fn discard_pr_finding(
                 github::reply_pr_review_comment(host, owner, repo, pr_id, thread_id, &cuerpo, &token).await?;
                 github::resolve_review_thread_for_comment(host, owner, repo, pr_id, thread_id, &token).await
             }
+            LinkedRepo::GitLab { host, project: path } => {
+                let token = gitlab_token(host)?;
+                gitlab::reply_pr_comment(host, path, pr_id, thread_id, &cuerpo, &token).await?;
+                gitlab::resolve_discussion_for_note(host, path, pr_id, thread_id, &token).await
+            }
         }
     }
     .await;
@@ -1507,6 +1741,10 @@ pub async fn review_pull_request(
             let token = github_token(host)?;
             github::list_pull_requests(host, owner, repo, &token).await?
         }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(host)?;
+            gitlab::list_merge_requests(host, path, &token).await?
+        }
     };
     let pr = prs
         .into_iter()
@@ -1517,14 +1755,26 @@ pub async fn review_pull_request(
     // against whatever refs are already local rather than blocking the review outright.
     let _ = crate::remote::fetch(app.clone(), project.local_path.clone(), None).await;
 
-    // For GitHub, also fetch the PR's canonical head ref (`refs/pull/<n>/head`) into a local
-    // tracking ref and diff against that — so the review reflects the PR's exact head commit
-    // even when it comes from a fork or a head branch that isn't a normal origin branch. Falls
-    // back to the head branch name if that targeted fetch fails.
+    // For GitHub and GitLab, also fetch the request's canonical head ref into a local tracking
+    // ref and diff against that — so the review reflects its exact head commit even when it comes
+    // from a fork or a head branch that isn't a normal origin branch. Both hosts publish one;
+    // GitHub calls it `refs/pull/<n>/head` and GitLab `refs/merge-requests/<iid>/head`. Falls back
+    // to the head branch name if that targeted fetch fails.
+    //
+    // The two local ref prefixes are deliberately different: a project re-linked from one host to
+    // the other would otherwise diff against the previous host's stale ref of the same number.
     let head_ref = match &link {
         LinkedRepo::GitHub { .. } => {
             let local_ref = format!("refs/remotes/origin/codeflow-pr-{pr_id}");
             let refspec = format!("+refs/pull/{pr_id}/head:{local_ref}");
+            match crate::remote::fetch_refspec(app.clone(), project.local_path.clone(), "origin".to_string(), refspec).await {
+                Ok(_) => local_ref,
+                Err(_) => pr.source_branch.clone(),
+            }
+        }
+        LinkedRepo::GitLab { .. } => {
+            let local_ref = format!("refs/remotes/origin/codeflow-mr-{pr_id}");
+            let refspec = format!("+refs/merge-requests/{pr_id}/head:{local_ref}");
             match crate::remote::fetch_refspec(app.clone(), project.local_path.clone(), "origin".to_string(), refspec).await {
                 Ok(_) => local_ref,
                 Err(_) => pr.source_branch.clone(),
@@ -1582,6 +1832,15 @@ pub async fn review_pull_request(
             Ok(token) => (
                 github::list_pr_comment_threads(host, owner, repo, pr_id, &token).await.unwrap_or_default(),
                 github::get_authenticated_user(host, &token).await.ok(),
+            ),
+            Err(_) => (Vec::new(), None),
+        },
+        LinkedRepo::GitLab { host, project: path } => match gitlab_token(host) {
+            Ok(token) => (
+                gitlab::list_pr_comment_threads(host, path, pr_id, &token).await.unwrap_or_default(),
+                // The username, which is exactly what GitLab puts in a note's `author.username` —
+                // the comparison `comments_since` makes to tell our own comments from a reviewer's.
+                gitlab::get_authenticated_user(host, &token).await.ok(),
             ),
             Err(_) => (Vec::new(), None),
         },
@@ -2018,6 +2277,47 @@ pub async fn post_pr_review_comment(
     let mut failures = Vec::new();
 
     match &link {
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(host)?;
+            for (i, item) in items.iter().enumerate() {
+                let idx = index_of(&findings, item);
+                // The *note* id of the discussion this finding already owns, if it has one — the
+                // integer `MemoryFinding.thread_id` records, from which the client looks the
+                // discussion back up. See `gitlab::discussion_of_note`.
+                let note = idx.and_then(|k| findings[k].thread_id);
+                let resolved = idx.map(|k| findings[k].estado == "resuelto").unwrap_or(false);
+                let outcome = match note {
+                    None => match &item.location {
+                        Some(loc) => gitlab::post_pr_comment_anchored(
+                            host, path, pr_id, &item.content, &loc.file, loc.start_line, loc.end_line, &token,
+                        )
+                        .await
+                        .map(Some),
+                        None => gitlab::post_pr_comment(host, path, pr_id, &item.content, &token).await.map(Some),
+                    },
+                    Some(nid) => {
+                        let text = if resolved {
+                            format!("✔️ Resuelto en la iteración {iter} — {today}.")
+                        } else {
+                            format!("➡️ Sigue presente en la iteración {iter} — {today}.")
+                        };
+                        let r = gitlab::reply_pr_comment(host, path, pr_id, nid, &text, &token).await;
+                        if r.is_ok() && resolved {
+                            let _ = gitlab::resolve_discussion_for_note(host, path, pr_id, nid, &token).await;
+                        }
+                        r.map(|_| None)
+                    }
+                };
+                apply_post_outcome(&mut findings, idx, outcome, i, &mut failures);
+            }
+            if post_summary {
+                if let Some(text) = &summary {
+                    if let Err(e) = gitlab::post_pr_comment(host, path, pr_id, text, &token).await {
+                        failures.push(format!("summary: {e}"));
+                    }
+                }
+            }
+        }
         LinkedRepo::Azure { org, project: ado_project, repo_id } => {
             let pat = pat_for_org(org)?;
             for (i, item) in items.iter().enumerate() {
@@ -2151,6 +2451,10 @@ pub async fn pr_review_decision(db: State<'_, Db>, project_id: String, pr_id: i6
             let token = github_token(&host)?;
             github::viewer_decision(&host, &owner, &repo, pr_id, &token).await
         }
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(&host)?;
+            gitlab::viewer_decision(&host, &path, pr_id, &token).await
+        }
     }
 }
 
@@ -2172,9 +2476,10 @@ pub struct PrLinkActionOutcome {
 
 /// Approve / request-changes / close a pull request on whichever host it's linked to. `action`
 /// is one of `"approve"` | `"request_changes"` | `"close"`; the provider-specific mapping lives
-/// here (GitHub review events / state vs Azure reviewer vote / abandon). `body` is an optional
-/// comment carried on a GitHub review (GitHub requires a non-empty body to request changes, so a
-/// default is substituted when blank); Azure votes carry no message.
+/// here (GitHub review events / state vs Azure reviewer vote / abandon vs GitLab
+/// approve / unapprove / `state_event`). `body` is an optional comment carried on a GitHub review
+/// and on a GitLab decision — both need a non-empty body to request changes, so a default is
+/// substituted when blank; Azure votes carry no message.
 ///
 /// Deciding on a pull request is a real event in the project's history, not a fire-and-forget
 /// button, so it's filed in Activity alongside the reviews — and the PR is re-read from the host
@@ -2214,6 +2519,21 @@ pub async fn act_on_pull_request(
                 other => Err(format!("unknown PR action: {other}")),
             }?;
             github::get_pull_request(host, owner, repo, pr_id, &token).await?
+        }
+        // The same mapping the link-only twin uses; both go through `gitlab::submit_pr_review`
+        // rather than spelling out approve/unapprove here, so the two cannot drift.
+        LinkedRepo::GitLab { host, project: path } => {
+            let token = gitlab_token(host)?;
+            match action.as_str() {
+                "approve" => gitlab::submit_pr_review(host, path, pr_id, "APPROVE", &comment, &token).await,
+                "request_changes" => {
+                    let text = if comment.trim().is_empty() { "Cambios solicitados desde CodeFlow." } else { &comment };
+                    gitlab::submit_pr_review(host, path, pr_id, "REQUEST_CHANGES", text, &token).await
+                }
+                "close" => gitlab::close_merge_request(host, path, pr_id, &token).await,
+                other => Err(format!("unknown PR action: {other}")),
+            }?;
+            gitlab::get_merge_request(host, path, pr_id, &token).await?
         }
     };
 

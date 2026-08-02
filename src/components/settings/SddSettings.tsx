@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { BookOpen, ChevronDown, Plus, Trash2, Users, Workflow, type LucideIcon } from "lucide-react";
 import { deleteWorkspaceAgent, listWorkspaceAgents, upsertWorkspaceAgent } from "../../lib/tauri/commands";
 import { WorkspacePromptEditor } from "./WorkspacePromptEditor";
+import { useAgentsStore } from "../../state/agentsStore";
+import { useChainStore } from "../../state/chainStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -71,13 +73,19 @@ export function SddSettings() {
       {tab === "guide" && <GuideTab />}
       {tab === "agents" && <AgentsTab workspaceId={workspaceId} />}
       {tab === "stages" && (
-        <WorkspacePromptEditor
-          kind="sdd_stages"
-          hintKey="settings.sddStagesHint"
-          placeholderKey="settings.sddStagesPlaceholder"
-          resetConfirmKey="settings.sddStagesResetConfirm"
-          rows={8}
-        />
+        <div className="space-y-4">
+          {/* The executable half. The free-text editor below it is kept, and kept *below*: it is
+              what people already wrote their process in, and nothing here destroys it — but a
+              template is the one of the two that actually runs. */}
+          <ChainTemplatesSection workspaceId={workspaceId} />
+          <WorkspacePromptEditor
+            kind="sdd_stages"
+            hintKey="settings.sddStagesHint"
+            placeholderKey="settings.sddStagesPlaceholder"
+            resetConfirmKey="settings.sddStagesResetConfirm"
+            rows={8}
+          />
+        </div>
       )}
     </section>
   );
@@ -93,6 +101,79 @@ function GuideTab() {
       className="cf-markdown-preview max-h-[460px] overflow-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-4 py-3 text-[13px]"
       dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
     />
+  );
+}
+
+/**
+ * The workspace's reusable chain plans, listed and removable.
+ *
+ * Read-only apart from delete, on purpose: a plan is authored where it is used — in the new-chain
+ * dialog, against the live roster, with the agent picker that knows which agents can actually run.
+ * A second editor here would be a second place for those rules to drift out of agreement.
+ */
+function ChainTemplatesSection({ workspaceId }: { workspaceId: string }) {
+  const t = useT();
+  const templates = useChainStore((s) => s.templates);
+  const roster = useAgentsStore((s) => s.roster);
+
+  useEffect(() => {
+    // The Agents view may never have been opened in this session, and this section is reachable
+    // without it — so both stores are asked for the workspace rather than assumed to have it. The
+    // roster is what turns a template's agent ids back into names.
+    void useAgentsStore.getState().setWorkspace(workspaceId);
+    void useChainStore.getState().setWorkspace(workspaceId);
+    void useChainStore.getState().reloadTemplates();
+  }, [workspaceId]);
+
+  const remove = async (id: string, name: string) => {
+    if (!(await confirmAction(t("agents.deleteTemplateConfirm", { name })))) return;
+    await useChainStore.getState().removeTemplate(id);
+  };
+
+  return (
+    <section>
+      <h4 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        {t("agents.templates")}
+      </h4>
+      <p className="mb-2 text-[13px] text-[var(--cf-text-muted)]">{t("agents.templatesHint")}</p>
+
+      {templates.length === 0 ? (
+        <p className="text-[12px] text-[var(--cf-text-muted)]">{t("agents.templatesEmpty")}</p>
+      ) : (
+        <div className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-lg border border-[var(--cf-border)]">
+          {templates.map((template) => (
+            <div key={template.id} className="flex items-start gap-2 p-2.5">
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[13px] font-medium">{template.name}</span>
+                <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
+                  {t("agents.templateStepsN", { n: template.steps.length })}
+                  {" · "}
+                  {template.steps
+                    .map(
+                      (step) =>
+                        roster.find((a) => a.id === step.agent_id)?.name || t("settings.sddNewAgent"),
+                    )
+                    .join(" → ")}
+                </span>
+                {template.description && (
+                  <span className="mt-0.5 block truncate text-[11px] text-[var(--cf-text-muted)]">
+                    {template.description}
+                  </span>
+                )}
+              </span>
+              <button
+                onClick={() => void remove(template.id, template.name)}
+                title={t("common.delete")}
+                aria-label={t("common.delete")}
+                className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 

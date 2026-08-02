@@ -21,6 +21,10 @@ export interface Project {
   github_owner: string | null;
   github_repo: string | null;
   github_host: string | null;
+  /** The project's full path including every group it is nested under (`acme/backend/auth`).
+   * One column, not an owner/repo pair: GitLab groups nest, so there is nothing to split off. */
+  gitlab_project: string | null;
+  gitlab_host: string | null;
   sort_order: number;
   created_at: string;
 }
@@ -38,11 +42,26 @@ export interface NewProject {
   github_owner: string | null;
   github_repo: string | null;
   github_host: string | null;
+  /** The project's full path including every group it is nested under (`acme/backend/auth`).
+   * One column, not an owner/repo pair: GitLab groups nest, so there is nothing to split off. */
+  gitlab_project: string | null;
+  gitlab_host: string | null;
 }
 
 /** A saved GitHub connection — one per host (github.com or an Enterprise Server). Persisted as
  * the `github_connections` app-setting (JSON); the token itself lives in the OS keychain. */
 export interface GithubConnection {
+  host: string;
+  username: string;
+}
+
+/** A saved GitLab connection — one per host (gitlab.com or a self-managed instance). Persisted
+ * as the `gitlab_connections` app-setting (JSON); the token itself lives in the OS keychain.
+ *
+ * That list is also the allowlist auto-detection reads. It carries more weight than GitHub's: a
+ * GitLab project path has no fixed number of segments, so an unlisted host is indistinguishable
+ * from any other self-hosted git server. */
+export interface GitlabConnection {
   host: string;
   username: string;
 }
@@ -197,7 +216,7 @@ export interface SavedFinding {
  * request — these are read into every review of the repository they name. */
 export interface FpSuppression {
   id: string;
-  /** `github:host/owner/repo` or `azure:org/project/repoId`. */
+  /** `github:host/owner/repo`, `gitlab:host/full/path` or `azure:org/project/repoId`. */
   repo_key: string;
   categoria: string;
   /** The file the rule is scoped to, or null for "this category, anywhere in the repo". */
@@ -253,6 +272,145 @@ export interface WorkspaceAgent {
   enabled: boolean;
   sort_order: number;
   created_at: string;
+}
+
+/**
+ * Where an agent task stands.
+ *
+ * `draft` has never been sent. `idle` finished a turn and is waiting on the user — the state a
+ * task spends most of its life in, and the one worth surfacing in the list. `running` is only
+ * meaningful inside the session that set it: a row still saying so when the app starts is one
+ * that was killed mid-turn, and `agentsStore` demotes it to `idle` on load rather than showing a
+ * spinner for a process that died yesterday.
+ */
+export type AgentTaskStatus = "draft" | "running" | "idle" | "done" | "error" | "cancelled";
+
+/** One goal handed to a roster agent and worked on against one repository of the workspace. */
+export interface AgentTask {
+  id: string;
+  workspace_id: string;
+  /** The repository the turns run in — an agent has to have a working directory. */
+  project_id: string;
+  /** The `WorkspaceAgent` this came from, or `""` once that agent has been deleted. */
+  agent_id: string;
+  /** The agent's name as it was at creation, so a deleted agent still reads as itself. */
+  agent_name: string;
+  /** Copied off the agent at creation: editing the roster must not rewrite a task that already ran. */
+  provider: string;
+  prompt: string;
+  /** The one piece of routing a later turn may change. */
+  model: string;
+  goal: string;
+  title: string;
+  /** `activity_log.session_id` for every turn of this task. Prefixed `agent-`. */
+  conversation_id: string;
+  status: AgentTaskStatus;
+  turns: number;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Where a chain stands. `queued` means the scheduler may dispatch its next step as soon as the
+ * repository frees; `gated` is parked *before* a step the plan marks for review, which is the
+ * user's move; `paused` is parked for any other reason — stopped, interrupted, window hidden.
+ *
+ * Nothing ever moves from `paused` or `failed` on its own. A turn edits a real working copy, so
+ * resuming is always a click.
+ */
+export type ChainStatus = "queued" | "running" | "gated" | "paused" | "failed" | "done" | "aborted";
+
+/** `interrupted` is the app-was-killed case: the turn never landed, so the tree may hold half of
+ * its edits and only a human can say what to do. */
+export type ChainStepStatus = "pending" | "running" | "done" | "error" | "interrupted" | "skipped";
+
+/** An ordered plan of agent steps against one repository. */
+export interface AgentChain {
+  id: string;
+  project_id: string;
+  title: string;
+  goal: string;
+  status: ChainStatus;
+  current_step: number;
+  step_count: number;
+  /** A translation key (`chain.interrupted`, `chain.repoBusy`, …) or a raw engine error. */
+  last_reason: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentChainStep {
+  id: string;
+  chain_id: string;
+  step_index: number;
+  /** Snapshotted off the roster when the chain was authored — see `AgentTask`. */
+  agent_id: string;
+  agent_name: string;
+  provider: string;
+  model: string;
+  prompt: string;
+  instruction: string;
+  gate: boolean;
+  gate_cleared: boolean;
+  /** The message frozen at the gate, sent verbatim. Editing the handoff writes here. */
+  pending_input: string;
+  task_id: string;
+  run_id: string;
+  log_count_at_dispatch: number;
+  /** A *copy* of the answer, so the handoff survives deleting the step's task. */
+  output_text: string;
+  output_truncated: boolean;
+  status: ChainStepStatus;
+  attempts: number;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** One step as the dialog authors it, before anything is snapshotted. */
+export interface NewChainStep {
+  agent_id: string;
+  instruction: string;
+  gate: boolean;
+}
+
+/** What the backend hands back when asked what happens next. `kind: "idle"` still carries a fresh
+ * `chain` that the caller must apply — the claim may have gated, finished or failed it. */
+export interface ChainClaim {
+  chain: AgentChain;
+  kind: "run" | "idle";
+  task: AgentTask | null;
+  step: AgentChainStep | null;
+  message: string;
+}
+
+export interface ChainDetail {
+  chain: AgentChain;
+  steps: AgentChainStep[];
+}
+
+/** A reusable chain plan. Configuration rather than history: it belongs to the workspace, carries
+ * no run state, and travels with a backup. */
+export interface ChainTemplate {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+  steps: ChainTemplateStep[];
+}
+
+export interface ChainTemplateStep {
+  id: string;
+  template_id: string;
+  step_index: number;
+  /** Named, never snapshotted — a template is meant to follow the roster. */
+  agent_id: string;
+  instruction: string;
+  gate: boolean;
 }
 
 export interface WorkspaceSkill {
@@ -378,7 +536,7 @@ export interface AdoRepo {
   name: string;
 }
 
-export type VcsProvider = "azure" | "github";
+export type VcsProvider = "azure" | "github" | "gitlab";
 
 /** AI-drafted PR title + body, returned by `generate_pr_description` to prefill the create form. */
 export interface PrDescriptionDraft {

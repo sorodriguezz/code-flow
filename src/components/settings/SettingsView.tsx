@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import {
   Bot,
   Cloud,
+  DatabaseBackup,
   FolderGit2,
   GitBranch,
   Globe,
@@ -26,6 +27,7 @@ import { McpSettings } from "./McpSettings";
 import { GitSettings } from "./GitSettings";
 import { TerminalSettings } from "./TerminalSettings";
 import { GeneralSettings } from "./GeneralSettings";
+import { BackupSettings } from "./BackupSettings";
 import { ShortcutsSettings } from "./ShortcutsSettings";
 import { ApiSettingsBody } from "../api/ApiSettingsPanel";
 import { ActivePill } from "../common/ActivePill";
@@ -52,10 +54,15 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
   { id: "azure", labelKey: "settings.gitHostingSection", icon: Cloud },
   { id: "claude", labelKey: "settings.aiSection", icon: Bot },
   { id: "api", labelKey: "api.settings.title", icon: Zap },
+  // Last of the global list on purpose: it is the section you visit twice — once to set it up, and
+  // once on the day something went wrong — rather than one you pass through.
+  { id: "backup", labelKey: "backup.title", icon: DatabaseBackup },
 ];
 
 // Sections whose body carries a side rail of its own, and so needs the wider content column.
-const WIDE_SECTIONS = new Set<SettingsSectionId>(["azure", "claude", "api"]);
+// Backup has no rail, but its rows carry paths and a Google client id — values that are unreadable
+// truncated to a narrow column.
+const WIDE_SECTIONS = new Set<SettingsSectionId>(["azure", "claude", "api", "backup"]);
 
 /** Sections that carry a sub-nav and scroll the pane beside it rather than the whole column, so
  * their heading and rail stay put while you read down a long list. They need a definite height to
@@ -225,6 +232,7 @@ export function SettingsView() {
               {section === "azure" && <GitHostingSettings />}
               {section === "claude" && <ClaudeSettings />}
               {section === "api" && <ApiSettingsBody />}
+              {section === "backup" && <BackupSettings />}
               {section === "review" && <ReviewSettings />}
               {section === "sdd" && <SddSettings />}
               {section === "skills" && <SkillsSettings />}

@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion, type Variants } from "framer-motion";
 import {
   ArrowRight,
+  Bot,
   Check,
   ChevronDown,
   Database,
@@ -60,6 +61,15 @@ const TOOLS: WorkspaceTool[] = [
     icon: Database,
     labelKey: "tabbar.databases",
     descriptionKey: "tabbar.databasesDescription",
+  },
+  // No `workspace`: the agent console is a view of its own. It sits here rather than in the tab
+  // bar for the same reason the other two do — the roster belongs to the workspace, and switching
+  // repository doesn't change which agents exist.
+  {
+    id: "agents",
+    icon: Bot,
+    labelKey: "tabbar.agents",
+    descriptionKey: "tabbar.agentsDescription",
   },
 ];
 

@@ -3,7 +3,14 @@ import type {
   ActivityLogEntry,
   AdoProject,
   AdoRepo,
+  AgentChain,
+  AgentTask,
+  AgentTaskStatus,
   AutoLinkResult,
+  ChainClaim,
+  ChainDetail,
+  ChainTemplate,
+  NewChainStep,
   BranchInfo,
   ChatConversationSummary,
   CommitInfo,
@@ -319,6 +326,129 @@ export const upsertWorkspaceAgent = (
 
 export const deleteWorkspaceAgent = (id: string) => invoke<void>("delete_workspace_agent", { id });
 
+// ---------- agent tasks ----------
+
+export const listAgentTasks = (workspaceId: string) =>
+  invoke<AgentTask[]>("list_agent_tasks", { workspaceId });
+
+export const getAgentTask = (id: string) => invoke<AgentTask | null>("get_agent_task", { id });
+
+/** `provider`/`prompt` are the agent's, snapshotted here on purpose — see `AgentTask`. */
+export const createAgentTask = (
+  workspaceId: string,
+  projectId: string,
+  agentId: string,
+  agentName: string,
+  provider: string,
+  model: string,
+  prompt: string,
+  goal: string,
+  title: string,
+) =>
+  invoke<AgentTask>("create_agent_task", {
+    workspaceId,
+    projectId,
+    agentId,
+    agentName,
+    provider,
+    model,
+    prompt,
+    goal,
+    title,
+  });
+
+export const updateAgentTaskRun = (
+  id: string,
+  status: AgentTaskStatus,
+  model: string,
+  turns: number,
+  lastError: string,
+) => invoke<void>("update_agent_task_run", { id, status, model, turns, lastError });
+
+/** Ignored by the backend once the task has turns — moving a repo out from under a conversation
+ * that has already edited it is not something a stale screen gets to do. */
+export const setAgentTaskProject = (id: string, projectId: string) =>
+  invoke<void>("set_agent_task_project", { id, projectId });
+
+export const renameAgentTask = (id: string, title: string) =>
+  invoke<void>("rename_agent_task", { id, title });
+
+export const deleteAgentTask = (id: string) => invoke<void>("delete_agent_task", { id });
+
+// ---------- agent chains ----------
+
+export const listAgentChains = (workspaceId: string) =>
+  invoke<AgentChain[]>("list_agent_chains", { workspaceId });
+
+export const getChainDetail = (chainId: string) =>
+  invoke<ChainDetail | null>("get_chain_detail", { chainId });
+
+export const createAgentChain = (projectId: string, title: string, goal: string, steps: NewChainStep[]) =>
+  invoke<ChainDetail>("create_agent_chain", { projectId, title, goal, steps });
+
+/** Asks the backend what happens next *and* records it. Everything that could refuse has already
+ * refused by the time this resolves; `kind: "run"` means a step is now marked dispatched on disk
+ * and the caller is obliged to run it and report back. */
+export const claimNextChainStep = (chainId: string, runId: string) =>
+  invoke<ChainClaim>("claim_next_chain_step", { chainId, runId });
+
+export const completeChainStep = (
+  stepId: string,
+  outcome: "done" | "error" | "cancelled" | "requeue",
+  outputText: string,
+  reason: string,
+) => invoke<AgentChain | null>("complete_chain_step", { stepId, outcome, outputText, reason });
+
+export const approveChainGate = (chainId: string, input: string) =>
+  invoke<AgentChain | null>("approve_chain_gate", { chainId, input });
+
+export const skipChainStep = (chainId: string) => invoke<AgentChain | null>("skip_chain_step", { chainId });
+
+export const retryChainStep = (chainId: string) => invoke<AgentChain | null>("retry_chain_step", { chainId });
+
+export const resumeChain = (chainId: string) => invoke<AgentChain | null>("resume_chain", { chainId });
+
+export const abortChain = (chainId: string) => invoke<AgentChain | null>("abort_chain", { chainId });
+
+export const deleteChain = (chainId: string) => invoke<void>("delete_chain", { chainId });
+
+/** For a step whose run outlived the webview: `null` until its turn lands. */
+export const harvestChainStep = (stepId: string) =>
+  invoke<AgentChain | null>("harvest_chain_step", { stepId });
+
+/** "Carry on from here": a chain whose first step is `source` — already finished, its answer ready
+ * to hand on. */
+export const createContinuationChain = (
+  sourceTaskId: string,
+  title: string,
+  goal: string,
+  steps: NewChainStep[],
+) => invoke<ChainDetail>("create_continuation_chain", { sourceTaskId, title, goal, steps });
+
+// ---------- chain templates ----------
+
+export const listChainTemplates = (workspaceId: string) =>
+  invoke<ChainTemplate[]>("list_chain_templates", { workspaceId });
+
+export const upsertChainTemplate = (
+  id: string | undefined,
+  workspaceId: string,
+  name: string,
+  description: string,
+  steps: NewChainStep[],
+) => invoke<ChainTemplate>("upsert_chain_template", { id: id ?? null, workspaceId, name, description, steps });
+
+export const deleteChainTemplate = (id: string) => invoke<void>("delete_chain_template", { id });
+
+/** The marker `send_chat_message` returns when another run already owns the working copy
+ * (`ai_locks::BUSY_MARKER`). Not an engine failure and not the user's doing — the turn never ran,
+ * so the honest response is to wait and try again, which is what a chain does automatically. */
+export const REPO_BUSY_MARKER = "REPO_BUSY::";
+
+export function isRepoBusy(error: unknown): boolean {
+  return String(error).includes(REPO_BUSY_MARKER);
+}
+
 // ---------- review memory (review_runs) ----------
 
 export const listReviewRuns = (workspaceId: string) =>
@@ -376,10 +506,53 @@ export const deleteReviewRunsForPr = (projectId: string, prId: number) =>
 export const purgeWorkspaceReviewRuns = (workspaceId: string) =>
   invoke<void>("purge_workspace_review_runs", { workspaceId });
 
-/** Exports one run (by `id`) or all of the workspace's runs (`id` undefined) to `destDir`.
- * Returns how many runs were written. */
-export const exportReviewRuns = (workspaceId: string, id: string | undefined, destDir: string) =>
-  invoke<number>("export_review_runs", { workspaceId, id: id ?? null, destDir });
+/** What an export wrote. `rules` is the standing false positives that travelled with it. */
+export interface MemoryExportOutcome {
+  runs: number;
+  rules: number;
+}
+
+/** What an import found in a folder, and what it did with it. */
+export interface MemoryImportOutcome {
+  imported: number;
+  /** Runs this install already had — the harmless case of importing the same folder twice. */
+  alreadyPresent: number;
+  rules: number;
+  /** Repositories named by runs in the folder that no project here is linked to. Named rather than
+   * counted, because the fix is to link that repository and import again. */
+  unmatchedRepos: string[];
+  /** Folders that looked like a run but couldn't be read back. */
+  unreadable: number;
+}
+
+/**
+ * Exports review memory to `destDir`, at one of three scopes: one run (`runId`), every run of one
+ * repository (`projectId`), or — with neither — the whole workspace.
+ *
+ * The last two also carry the standing false positives in scope. A machine restored without those
+ * re-argues every finding a human already dismissed, which is most of what this memory is worth.
+ */
+export const exportReviewRuns = (
+  workspaceId: string,
+  scope: { runId?: string; projectId?: string },
+  destDir: string,
+) =>
+  invoke<MemoryExportOutcome>("export_review_runs", {
+    workspaceId,
+    id: scope.runId ?? null,
+    projectId: scope.projectId ?? null,
+    destDir,
+  });
+
+/**
+ * Reads a folder written by {@link exportReviewRuns} back into this workspace.
+ *
+ * Runs are routed to the local project that *is* the repository each one names, so a run whose
+ * repository isn't here is reported instead of filed against whatever project shares its id on the
+ * machine that wrote it. Nothing already here is overwritten.
+ */
+export const importReviewRuns = (workspaceId: string, srcDir: string) =>
+  invoke<MemoryImportOutcome>("import_review_runs", { workspaceId, srcDir });
 
 export const listReviewContexts = (workspaceId: string) =>
   invoke<ReviewContext[]>("list_review_contexts", { workspaceId });
@@ -472,6 +645,21 @@ export const setGithubToken = (host: string, token: string) =>
 export const getGithubToken = (host: string) => invoke<string | null>("get_github_token", { host });
 
 export const deleteGithubToken = (host: string) => invoke<void>("delete_github_token", { host });
+
+/** GitLab tokens are keyed per host too — gitlab.com and one or more self-managed instances are a
+ * normal thing to be connected to at once, and a token only ever works on the instance that
+ * issued it. */
+export const setGitlabToken = (host: string, token: string) =>
+  invoke<void>("set_gitlab_token", { host, token });
+
+export const getGitlabToken = (host: string) => invoke<string | null>("get_gitlab_token", { host });
+
+export const deleteGitlabToken = (host: string) => invoke<void>("delete_gitlab_token", { host });
+
+/** Validates the saved token and returns the username it belongs to, so a wrong or expired one is
+ * reported the moment it is pasted rather than the next time a merge request list is opened. */
+export const gitlabAuthenticatedUser = (host: string) =>
+  invoke<string>("gitlab_authenticated_user", { host });
 
 /** Validates the token saved for `host`, returning the login it authenticates as. */
 export const githubAuthenticatedUser = (host: string) =>
@@ -574,14 +762,14 @@ export const sendChatMessage = (
     agentPrompt: agent?.prompt ?? null,
   });
 
-// ---------- pull requests (Azure DevOps / GitHub) ----------
+// ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------
 
 export const adoListProjects = (org: string) => invoke<AdoProject[]>("ado_list_projects", { org });
 
 export const adoListRepos = (org: string, project: string) =>
   invoke<AdoRepo[]>("ado_list_repos", { org, project });
 
-/** Auto-detects the PR host (Azure DevOps or GitHub) straight from the repo's git remote. */
+/** Auto-detects the PR host (Azure DevOps, GitHub or GitLab) straight from the repo's git remote. */
 export const autoLinkProject = (projectId: string) =>
   invoke<AutoLinkResult>("auto_link_project", { projectId });
 
@@ -591,19 +779,26 @@ export const linkProjectAdo = (id: string, adoOrg: string, adoProject: string, a
 export const linkProjectGithub = (id: string, githubOwner: string, githubRepo: string, githubHost: string) =>
   invoke<void>("link_project_github", { id, githubOwner, githubRepo, githubHost });
 
-/** Clears whichever VCS link (Azure DevOps or GitHub) the project currently has. */
+/** Links a project to a GitLab project by its **full path**, groups and all
+ * (`acme/backend/auth`) — the identifier GitLab's own API takes, and the reason there is no
+ * owner/repo pair here the way there is for GitHub. */
+export const linkProjectGitlab = (id: string, gitlabProject: string, gitlabHost: string) =>
+  invoke<void>("link_project_gitlab", { id, gitlabProject, gitlabHost });
+
+/** Clears whichever VCS link (Azure DevOps, GitHub or GitLab) the project currently has. */
 export const unlinkProject = (id: string) => invoke<void>("unlink_project", { id });
 
-/** Opens the project's repository home page (GitHub / Azure DevOps) in the default browser. */
+/** Opens the project's repository home page (GitHub / GitLab / Azure DevOps) in the browser. */
 export const openRepoInBrowser = (projectId: string) =>
   invoke<void>("open_repo_in_browser", { projectId });
 
 export const listPullRequests = (projectId: string) =>
   invoke<PullRequestSummary[]>("list_pull_requests", { projectId });
 
-/** Resolves a pasted pull-request URL (GitHub, GitHub Enterprise or Azure DevOps) into the PR
- * plus the local repository it belongs to — linking that repository to its host when it wasn't
- * already, so the review runs with the project's full context. */
+/** Resolves a pasted pull-request or merge-request URL — GitHub (including Enterprise), GitLab
+ * (including self-managed) or Azure DevOps — into the PR plus the local repository it belongs to,
+ * linking that repository to its host when it wasn't already, so the review runs with the
+ * project's full context. */
 export const resolvePrLink = (url: string) => invoke<PrLinkResolution>("resolve_pr_link", { url });
 
 export const listPrCommentThreads = (projectId: string, prId: number) =>

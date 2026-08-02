@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { resolvePrLink } from "../../lib/tauri/commands";
+import { VIEW_ON_KEYS } from "../../lib/providerLabels";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { usePrStore } from "../../state/prStore";
 import { useUiStore } from "../../state/uiStore";
@@ -27,7 +28,14 @@ import type { PrLinkResolution, PullRequestSummary } from "../../types/domain";
 function looksLikePrLink(text: string): boolean {
   const value = text.trim().toLowerCase();
   if (value.length > 500 || !/^https?:\/\//.test(value)) return false;
-  return value.includes("/pull/") || value.includes("/pullrequest/") || value.includes("/pullrequests/");
+  return (
+    value.includes("/pull/") ||
+    value.includes("/pullrequest/") ||
+    value.includes("/pullrequests/") ||
+    // GitLab's own shape — without it a merge-request URL already on the clipboard is never
+    // offered, which is the whole convenience this modal exists for.
+    value.includes("/merge_requests/")
+  );
 }
 
 function PrPreview({ pr }: { pr: PullRequestSummary }) {
@@ -51,7 +59,7 @@ function PrPreview({ pr }: { pr: PullRequestSummary }) {
         className="mt-1 inline-flex items-center gap-1 pl-[18px] text-[11px] text-[var(--cf-accent)] hover:underline"
       >
         <ExternalLink size={10} />
-        {pr.provider === "github" ? t("chat.viewOnGithub") : t("chat.viewOnAdo")}
+        {t(VIEW_ON_KEYS[pr.provider])}
       </a>
     </div>
   );

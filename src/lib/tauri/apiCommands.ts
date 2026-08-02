@@ -17,7 +17,6 @@ import type {
   SocketIoConnectRequest,
   WsConnectRequest,
 } from "../../types/api";
-import type { ApiBackupPayload } from "../api/backup";
 
 /**
  * IPC surface for the built-in API client.
@@ -223,25 +222,13 @@ export const apiSaveFile = (defaultName: string, contents: string) =>
 /** Reads a text file the user picked (collection import, CSV/JSON runner data). */
 export const apiReadTextFile = (path: string) => invoke<string>("api_read_text_file", { path });
 
-/** Writes to a path already chosen — the automatic backup can't open a dialog on a timer. */
-export const apiWriteTextFile = (path: string, contents: string) =>
-  invoke<void>("api_write_text_file", { path, contents });
-
-// ---------- backup ----------
-
 /**
- * Every workspace's collections, folders, requests and environments. History and cookies are
- * deliberately absent: one is a log, the other holds live sessions.
+ * The result of applying a batch of records, shared by the shared-collection sync.
+ *
+ * The whole-install backup no longer goes through here at all — it is built, sealed and applied
+ * entirely in Rust (`lib/tauri/backupCommands.ts` is its thin IPC surface), because the payload it
+ * carries is every credential on the machine and there is nothing for the webview to do with it.
  */
-export const apiExportAll = () => invoke<ApiBackupPayload>("api_export_all");
-
-/**
- * `replace = false` merges — newest `updated_at` wins and nothing is deleted; `replace = true`
- * empties the workspaces named in the backup first.
- */
-export const apiImportAll = (backup: ApiBackupPayload, replace: boolean) =>
-  invoke<ApiImportSummary>("api_import_all", { backup, replace });
-
 export interface ApiImportSummary {
   workspaces: number;
   collections: number;
@@ -249,15 +236,6 @@ export interface ApiImportSummary {
   requests: number;
   environments: number;
 }
-
-// ---------- backup passphrase (OS credential store) ----------
-
-export const apiSetBackupPassphrase = (passphrase: string) =>
-  invoke<void>("set_api_backup_passphrase", { passphrase });
-
-export const apiGetBackupPassphrase = () => invoke<string | null>("get_api_backup_passphrase");
-
-export const apiDeleteBackupPassphrase = () => invoke<void>("delete_api_backup_passphrase");
 
 // ---------- backup destination: the user's own Google Drive ----------
 
@@ -278,21 +256,6 @@ export const gdriveConnect = (clientId: string) =>
   invoke<{ email: string }>("gdrive_connect", { clientId });
 
 export const gdriveDisconnect = () => invoke<void>("gdrive_disconnect");
-
-/** The backup this OAuth client already has in Drive, if another machine wrote one. */
-export const gdriveFindFile = (clientId: string, name: string) =>
-  invoke<string | null>("gdrive_find_file", { clientId, name });
-
-/** Creates or overwrites the backup file; returns its id. */
-export const gdriveUpload = (
-  clientId: string,
-  fileId: string | null,
-  name: string,
-  contents: string,
-) => invoke<string>("gdrive_upload", { clientId, fileId, name, contents });
-
-export const gdriveDownload = (clientId: string, fileId: string) =>
-  invoke<string>("gdrive_download", { clientId, fileId });
 
 // ---------- shared collections on the user's own Supabase project ----------
 

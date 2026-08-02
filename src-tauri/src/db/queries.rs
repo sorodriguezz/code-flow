@@ -3,8 +3,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::models::{
-    ActivityLogEntry, ChatConversationSummary, JobHistoryEntry, NewProject, Project, ReviewContext, ReviewRunDetail,
-    ReviewRunSummary, Workspace, WorkspaceActivityEntry, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill,
+    ActivityLogEntry, AgentChain, AgentChainStep, AgentTask, ChainClaim, ChainDetail, ChainTemplate,
+    ChainTemplateStep, ChatConversationSummary, JobHistoryEntry, NewChainStep, NewProject, Project,
+    ReviewContext, ReviewRunDetail, ReviewRunSummary, Workspace, WorkspaceActivityEntry, WorkspaceAgent,
+    WorkspaceMcp, WorkspaceSkill,
 };
 
 /// The timestamp every record is stamped with, truncated to **microseconds**.
@@ -225,6 +227,15 @@ pub fn set_review_run_findings(conn: &Connection, id: &str, findings: &str) -> r
     Ok(())
 }
 
+/// Whether a run with this id is already stored. Its own query rather than a `get_review_run` that
+/// is thrown away: an import asks this once per folder, and the row it would otherwise load carries
+/// the whole review and its diff.
+pub fn review_run_exists(conn: &Connection, id: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT 1 FROM review_runs WHERE id = ?1", params![id], |_| Ok(()))
+        .optional()
+        .map(|found| found.is_some())
+}
+
 pub fn delete_review_run(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM review_runs WHERE id = ?1", params![id])?;
     Ok(())
@@ -337,12 +348,14 @@ pub fn create_project(conn: &Connection, input: NewProject) -> rusqlite::Result<
         github_owner: input.github_owner,
         github_repo: input.github_repo,
         github_host: input.github_host,
+        gitlab_project: input.gitlab_project,
+        gitlab_host: input.gitlab_host,
         sort_order: 0,
         created_at: now(),
     };
     conn.execute(
-        "INSERT INTO projects (id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, github_owner, github_repo, github_host, sort_order, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO projects (id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, github_owner, github_repo, github_host, gitlab_project, gitlab_host, sort_order, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             project.id,
             project.workspace_id,
@@ -357,6 +370,8 @@ pub fn create_project(conn: &Connection, input: NewProject) -> rusqlite::Result<
             project.github_owner,
             project.github_repo,
             project.github_host,
+            project.gitlab_project,
+            project.gitlab_host,
             project.sort_order,
             project.created_at,
         ],
@@ -379,12 +394,14 @@ fn map_project(row: &rusqlite::Row) -> rusqlite::Result<Project> {
         github_owner: row.get(10)?,
         github_repo: row.get(11)?,
         github_host: row.get(12)?,
-        sort_order: row.get(13)?,
-        created_at: row.get(14)?,
+        gitlab_project: row.get(13)?,
+        gitlab_host: row.get(14)?,
+        sort_order: row.get(15)?,
+        created_at: row.get(16)?,
     })
 }
 
-const PROJECT_COLUMNS: &str = "id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, github_owner, github_repo, github_host, sort_order, created_at";
+const PROJECT_COLUMNS: &str = "id, workspace_id, name, local_path, remote_url, color, icon, ado_org, ado_project, ado_repo_id, github_owner, github_repo, github_host, gitlab_project, gitlab_host, sort_order, created_at";
 
 pub fn list_projects(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<Project>> {
     let sql = format!(
@@ -443,13 +460,38 @@ pub fn link_project_github(
     Ok(())
 }
 
-/// Clears every VCS link (Azure DevOps *and* GitHub) on a project — a project is linked to at
-/// most one host at a time, so "disconnect" wipes whichever one is set without the caller
+/// Links a project to a GitLab project by its **full path** — every group it is nested under,
+/// then the project (`acme/backend/services/auth`). That is the identifier GitLab's own API takes,
+/// and unlike GitHub there is no owner/repo pair to split it into.
+///
+/// Like its siblings this sets only its own provider's columns; clearing the others is
+/// [`unlink_project`]'s job, and every caller that re-links calls that first.
+pub fn link_project_gitlab(
+    conn: &Connection,
+    id: &str,
+    gitlab_project: &str,
+    gitlab_host: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE projects SET gitlab_project = ?1, gitlab_host = ?2 WHERE id = ?3",
+        params![gitlab_project, gitlab_host, id],
+    )?;
+    Ok(())
+}
+
+/// Clears every VCS link — Azure DevOps, GitHub *and* GitLab — on a project. A project is linked
+/// to at most one host at a time, so "disconnect" wipes whichever one is set without the caller
 /// needing to know which provider it was.
+///
+/// Every column matters. This also runs immediately before a project is re-linked to a pasted
+/// link's host, and a provider left behind here would still satisfy `linked_repo`'s precedence
+/// order — sending the next review at the host the user just navigated away from, silently and
+/// without an error.
 pub fn unlink_project(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE projects SET ado_org = NULL, ado_project = NULL, ado_repo_id = NULL, \
-         github_owner = NULL, github_repo = NULL, github_host = NULL WHERE id = ?1",
+         github_owner = NULL, github_repo = NULL, github_host = NULL, \
+         gitlab_project = NULL, gitlab_host = NULL WHERE id = ?1",
         params![id],
     )?;
     Ok(())
@@ -656,6 +698,1001 @@ pub fn delete_workspace_agent(conn: &Connection, id: &str) -> rusqlite::Result<(
     Ok(())
 }
 
+// ---------- agent tasks ----------
+
+/// Marks an `activity_log.session_id` as belonging to an agent task rather than to an ordinary
+/// chat. Turns are recorded by the same code path either way, so this prefix is what lets the two
+/// features own their own conversations: the Agents view lists (and deletes) exactly these, and
+/// `list_chat_conversations` skips exactly these.
+pub const AGENT_CONVERSATION_PREFIX: &str = "agent-";
+
+const AGENT_TASK_COLUMNS: &str = "id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt, \
+     goal, title, conversation_id, status, turns, last_error, created_at, updated_at";
+
+fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
+    Ok(AgentTask {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        project_id: row.get(2)?,
+        agent_id: row.get(3)?,
+        agent_name: row.get(4)?,
+        provider: row.get(5)?,
+        model: row.get(6)?,
+        prompt: row.get(7)?,
+        goal: row.get(8)?,
+        title: row.get(9)?,
+        conversation_id: row.get(10)?,
+        status: row.get(11)?,
+        turns: row.get(12)?,
+        last_error: row.get(13)?,
+        created_at: row.get(14)?,
+        updated_at: row.get(15)?,
+    })
+}
+
+/// Most recently touched first — a list of work in progress is read from the top, and the one you
+/// just answered is the one you are most likely to come back to.
+pub fn list_agent_tasks(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<AgentTask>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {AGENT_TASK_COLUMNS} FROM agent_tasks WHERE workspace_id = ?1
+         ORDER BY updated_at DESC, created_at DESC"
+    ))?;
+    let rows = stmt.query_map(params![workspace_id], |row| map_agent_task(row))?;
+    rows.collect()
+}
+
+pub fn get_agent_task(conn: &Connection, id: &str) -> rusqlite::Result<Option<AgentTask>> {
+    conn.query_row(
+        &format!("SELECT {AGENT_TASK_COLUMNS} FROM agent_tasks WHERE id = ?1"),
+        params![id],
+        |row| map_agent_task(row),
+    )
+    .optional()
+}
+
+/// The [`AGENT_CONVERSATION_PREFIX`] on the conversation id is what tells an `activity_log` row
+/// that belongs to a task apart from one that belongs to an ordinary chat, without adding a column
+/// to a table every chat turn in the app writes to.
+#[allow(clippy::too_many_arguments)]
+pub fn create_agent_task(
+    conn: &Connection,
+    workspace_id: &str,
+    project_id: &str,
+    agent_id: &str,
+    agent_name: &str,
+    provider: &str,
+    model: &str,
+    prompt: &str,
+    goal: &str,
+    title: &str,
+) -> rusqlite::Result<AgentTask> {
+    let stamp = now();
+    let task = AgentTask {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: workspace_id.to_string(),
+        project_id: project_id.to_string(),
+        agent_id: agent_id.to_string(),
+        agent_name: agent_name.to_string(),
+        provider: provider.to_string(),
+        model: model.to_string(),
+        prompt: prompt.to_string(),
+        goal: goal.to_string(),
+        title: title.to_string(),
+        conversation_id: format!("{AGENT_CONVERSATION_PREFIX}{}", Uuid::new_v4()),
+        status: "draft".to_string(),
+        turns: 0,
+        last_error: String::new(),
+        created_at: stamp.clone(),
+        updated_at: stamp,
+    };
+    conn.execute(
+        "INSERT INTO agent_tasks (id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt,
+            goal, title, conversation_id, status, turns, last_error, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        params![
+            task.id,
+            task.workspace_id,
+            task.project_id,
+            task.agent_id,
+            task.agent_name,
+            task.provider,
+            task.model,
+            task.prompt,
+            task.goal,
+            task.title,
+            task.conversation_id,
+            task.status,
+            task.turns,
+            task.last_error,
+            task.created_at,
+            task.updated_at,
+        ],
+    )?;
+    Ok(task)
+}
+
+/// Writes only what a turn changes. `updated_at` is re-stamped, which is also what re-sorts the
+/// list — the task you just spoke to moves to the top.
+pub fn update_agent_task_run(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    model: &str,
+    turns: i64,
+    last_error: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_tasks SET status = ?2, model = ?3, turns = ?4, last_error = ?5, updated_at = ?6
+         WHERE id = ?1",
+        params![id, status, model, turns, last_error, now()],
+    )?;
+    Ok(())
+}
+
+/// The repository a task runs in, changeable only while it has no turns yet — after that the
+/// engine session and the working tree it has already touched both belong to the old one.
+pub fn set_agent_task_project(conn: &Connection, id: &str, project_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_tasks SET project_id = ?2, updated_at = ?3 WHERE id = ?1 AND turns = 0",
+        params![id, project_id, now()],
+    )?;
+    Ok(())
+}
+
+pub fn rename_agent_task(conn: &Connection, id: &str, title: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_tasks SET title = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, title, now()],
+    )?;
+    Ok(())
+}
+
+pub fn delete_agent_task(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM agent_tasks WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+// ---------- agent chains ----------
+
+/// A chain is a list, never a graph — there is no back-edge column anywhere, so it cannot loop by
+/// construction. These two are the belt to that pair of braces: a plan nobody meant to author, and
+/// a step that keeps failing, both stop on their own.
+pub const MAX_CHAIN_STEPS: usize = 8;
+const MAX_STEP_ATTEMPTS: i64 = 3;
+
+/// How much of a step's answer is carried into the next step's opening message.
+///
+/// 6k and not 60k, and this is the least obvious constraint in the codebase: `claude.rs` passes the
+/// composed message as **one argv element** (`cmd.arg("-p").arg(inv.prompt)`), and on Windows a
+/// provider installed through npm resolves to a `.cmd` shim, which routes the whole command line
+/// through cmd.exe — whose ceiling is 8191 characters, not 32767. Nothing else in the app
+/// systematically builds prompts this large, so the limit belongs to this feature.
+///
+/// For anything bigger the channel is the working copy itself: have one step write `docs/plan.md`
+/// and the next read it. That is a convention, and the authoring dialog says so.
+const HANDOFF_MAX: usize = 6_000;
+const HANDOFF_HEAD: usize = 4_000;
+const HANDOFF_TAIL: usize = 2_000;
+
+/// Head **and** tail, because a plan's conclusion is at the bottom: keeping only the first N
+/// characters would hand the next agent the throat-clearing and drop the decision. Cut on
+/// `chars()` so a fixed offset can never split a code point.
+fn clamp_handoff(text: &str) -> (String, bool) {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= HANDOFF_MAX {
+        return (text.to_string(), false);
+    }
+    let omitted = chars.len() - HANDOFF_HEAD - HANDOFF_TAIL;
+    let head: String = chars[..HANDOFF_HEAD].iter().collect();
+    let tail: String = chars[chars.len() - HANDOFF_TAIL..].iter().collect();
+    (format!("{head}\n\n…[{omitted} characters omitted]…\n\n{tail}"), true)
+}
+
+/// The message a step opens with.
+///
+/// The headings are English scaffolding around the user's own words, deliberately not translated:
+/// they are read by an engine, not by a person, and threading the app's locale through the backend
+/// so a prompt could say "Objetivo" would buy nothing an LLM notices.
+///
+/// The objective is repeated on every step because every step is a fresh engine session that has
+/// no memory of the chain (see `claim_next_chain_step`).
+fn compose_chain_input(goal: &str, instruction: &str, previous: Option<(&str, i64, &str)>) -> String {
+    let mut out = String::new();
+    if !goal.trim().is_empty() {
+        out.push_str("## Objective\n");
+        out.push_str(goal.trim());
+        out.push_str("\n\n");
+    }
+    if let Some((agent_name, index, output)) = previous {
+        out.push_str(&format!("## Context — {agent_name} (step {})\n", index + 1));
+        out.push_str(output.trim());
+        out.push_str("\n\n");
+    }
+    out.push_str("## Your task\n");
+    out.push_str(instruction.trim());
+    out
+}
+
+const CHAIN_COLUMNS: &str =
+    "id, project_id, title, goal, status, current_step, step_count, last_reason, created_at, updated_at";
+
+/// The same columns qualified for the join in [`list_agent_chains`]. Written out rather than
+/// derived from [`CHAIN_COLUMNS`] by string substitution — a `replace("id,", "c.id,")` also
+/// rewrites the `id` inside `project_id`, and the result compiles perfectly and fails at runtime.
+const CHAIN_COLUMNS_QUALIFIED: &str = "c.id, c.project_id, c.title, c.goal, c.status, c.current_step, \
+     c.step_count, c.last_reason, c.created_at, c.updated_at";
+
+fn map_chain(row: &rusqlite::Row) -> rusqlite::Result<AgentChain> {
+    Ok(AgentChain {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        goal: row.get(3)?,
+        status: row.get(4)?,
+        current_step: row.get(5)?,
+        step_count: row.get(6)?,
+        last_reason: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+const STEP_COLUMNS: &str = "id, chain_id, step_index, agent_id, agent_name, provider, model, prompt, \
+     instruction, gate, gate_cleared, pending_input, task_id, run_id, log_count_at_dispatch, \
+     output_text, output_truncated, status, attempts, last_error, created_at, updated_at";
+
+fn map_step(row: &rusqlite::Row) -> rusqlite::Result<AgentChainStep> {
+    Ok(AgentChainStep {
+        id: row.get(0)?,
+        chain_id: row.get(1)?,
+        step_index: row.get(2)?,
+        agent_id: row.get(3)?,
+        agent_name: row.get(4)?,
+        provider: row.get(5)?,
+        model: row.get(6)?,
+        prompt: row.get(7)?,
+        instruction: row.get(8)?,
+        gate: row.get(9)?,
+        gate_cleared: row.get(10)?,
+        pending_input: row.get(11)?,
+        task_id: row.get(12)?,
+        run_id: row.get(13)?,
+        log_count_at_dispatch: row.get(14)?,
+        output_text: row.get(15)?,
+        output_truncated: row.get(16)?,
+        status: row.get(17)?,
+        attempts: row.get(18)?,
+        last_error: row.get(19)?,
+        created_at: row.get(20)?,
+        updated_at: row.get(21)?,
+    })
+}
+
+fn chain_row(conn: &Connection, id: &str) -> rusqlite::Result<Option<AgentChain>> {
+    conn.query_row(
+        &format!("SELECT {CHAIN_COLUMNS} FROM agent_chains WHERE id = ?1"),
+        params![id],
+        map_chain,
+    )
+    .optional()
+}
+
+fn steps_of(conn: &Connection, chain_id: &str) -> rusqlite::Result<Vec<AgentChainStep>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE chain_id = ?1 ORDER BY step_index"
+    ))?;
+    let rows = stmt.query_map(params![chain_id], map_step)?;
+    rows.collect()
+}
+
+/// The next step waiting to run, or `None` when the plan is spent.
+fn next_pending_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<AgentChainStep>> {
+    conn.query_row(
+        &format!(
+            "SELECT {STEP_COLUMNS} FROM agent_chain_steps
+             WHERE chain_id = ?1 AND status = 'pending' ORDER BY step_index LIMIT 1"
+        ),
+        params![chain_id],
+        map_step,
+    )
+    .optional()
+}
+
+/// The nearest earlier step that actually produced something, walking backwards — so a skipped or
+/// output-less step degrades into "no context" instead of handing the next agent an empty block.
+fn previous_output(
+    conn: &Connection,
+    chain_id: &str,
+    step_index: i64,
+) -> rusqlite::Result<Option<(String, i64, String)>> {
+    conn.query_row(
+        "SELECT agent_name, step_index, output_text FROM agent_chain_steps
+         WHERE chain_id = ?1 AND step_index < ?2 AND output_text <> ''
+         ORDER BY step_index DESC LIMIT 1",
+        params![chain_id, step_index],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+}
+
+fn set_chain_state(conn: &Connection, id: &str, status: &str, reason: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_chains SET status = ?2, last_reason = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, status, reason, now()],
+    )?;
+    Ok(())
+}
+
+/// Chains of the workspace, newest activity first. Joined against `projects` rather than storing a
+/// `workspace_id`: a repository moved to another workspace has to take its chains with it.
+pub fn list_agent_chains(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<AgentChain>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {CHAIN_COLUMNS_QUALIFIED} FROM agent_chains c JOIN projects p ON p.id = c.project_id
+         WHERE p.workspace_id = ?1 ORDER BY c.updated_at DESC, c.created_at DESC"
+    ))?;
+    let rows = stmt.query_map(params![workspace_id], map_chain)?;
+    rows.collect()
+}
+
+pub fn get_chain_detail(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<ChainDetail>> {
+    let Some(chain) = chain_row(conn, chain_id)? else { return Ok(None) };
+    let steps = steps_of(conn, chain_id)?;
+    Ok(Some(ChainDetail { chain, steps }))
+}
+
+/// Writes the plan. Every step's agent is snapshotted here, at authoring time — not at dispatch —
+/// so a chain that waits a week at a gate still runs as the roster read when it was written.
+///
+/// Created `paused`: nothing in this app starts an engine the user did not just ask it to. The
+/// frontend queues it in a second call, which is also what makes "create then decide" possible.
+pub fn create_agent_chain(
+    conn: &Connection,
+    project_id: &str,
+    title: &str,
+    goal: &str,
+    steps: &[NewChainStep],
+) -> rusqlite::Result<ChainDetail> {
+    let workspace_id: String =
+        conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project_id], |r| r.get(0))?;
+    let roster = list_workspace_agents(conn, &workspace_id)?;
+
+    let tx = conn.unchecked_transaction()?;
+    let stamp = now();
+    let chain = AgentChain {
+        id: Uuid::new_v4().to_string(),
+        project_id: project_id.to_string(),
+        title: title.to_string(),
+        goal: goal.to_string(),
+        status: "paused".to_string(),
+        current_step: 0,
+        step_count: steps.len() as i64,
+        last_reason: String::new(),
+        created_at: stamp.clone(),
+        updated_at: stamp.clone(),
+    };
+    tx.execute(
+        "INSERT INTO agent_chains (id, project_id, title, goal, status, current_step, step_count,
+            last_reason, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            chain.id,
+            chain.project_id,
+            chain.title,
+            chain.goal,
+            chain.status,
+            chain.current_step,
+            chain.step_count,
+            chain.last_reason,
+            chain.created_at,
+            chain.updated_at,
+        ],
+    )?;
+
+    for (index, step) in steps.iter().enumerate() {
+        let agent = roster.iter().find(|a| a.id == step.agent_id);
+        tx.execute(
+            "INSERT INTO agent_chain_steps (id, chain_id, step_index, agent_id, agent_name, provider,
+                model, prompt, instruction, gate, gate_cleared, pending_input, task_id, run_id,
+                log_count_at_dispatch, output_text, output_truncated, status, attempts, last_error,
+                created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, '', '', '', -1, '', 0, 'pending', 0, '', ?11, ?11)",
+            params![
+                Uuid::new_v4().to_string(),
+                chain.id,
+                index as i64,
+                step.agent_id,
+                agent.map(|a| a.name.clone()).unwrap_or_default(),
+                agent.map(|a| a.provider.clone()).unwrap_or_default(),
+                agent.map(|a| a.model.clone()).unwrap_or_default(),
+                agent.map(|a| a.prompt.clone()).unwrap_or_default(),
+                step.instruction,
+                step.gate,
+                stamp,
+            ],
+        )?;
+    }
+    tx.commit()?;
+    let steps = steps_of(conn, &chain.id)?;
+    Ok(ChainDetail { chain, steps })
+}
+
+/// "Carry on from here": a chain whose first step is an existing task, already finished.
+///
+/// Step 0 is created `done` with that task's last successful answer copied into `output_text` and
+/// its `task_id` pointing back at it, so the transcript is one click away and the handoff composes
+/// exactly as it would have if the task had been step 0 all along. It never runs, which is why a
+/// source agent that has since been deleted is harmless here.
+#[allow(clippy::too_many_arguments)]
+pub fn create_continuation_chain(
+    conn: &Connection,
+    source_task_id: &str,
+    title: &str,
+    goal: &str,
+    steps: &[NewChainStep],
+) -> rusqlite::Result<ChainDetail> {
+    let task = get_agent_task(conn, source_task_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+    // The last turn that actually produced something. A failed or stopped turn has nothing to hand
+    // on, and reaching further back would quietly carry forward an answer the user already moved
+    // past.
+    let answer: Option<String> = conn
+        .query_row(
+            "SELECT answer FROM activity_log
+             WHERE project_id = ?1 AND session_id = ?2 AND is_error = 0
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+            params![task.project_id, task.conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    let seed = NewChainStep {
+        agent_id: task.agent_id.clone(),
+        instruction: task.goal.clone(),
+        gate: false,
+    };
+    let mut plan = vec![seed];
+    plan.extend(steps.iter().cloned());
+    let detail = create_agent_chain(conn, &task.project_id, title, goal, &plan)?;
+
+    let (output, truncated) = clamp_handoff(answer.unwrap_or_default().trim());
+    if let Some(first) = detail.steps.first() {
+        conn.execute(
+            "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3,
+                task_id = ?4, agent_name = ?5, updated_at = ?6
+             WHERE id = ?1",
+            params![first.id, output, truncated, task.id, task.agent_name, now()],
+        )?;
+    }
+    get_chain_detail(conn, &detail.chain.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+fn idle_claim(chain: AgentChain) -> ChainClaim {
+    ChainClaim { chain, kind: "idle".to_string(), task: None, step: None, message: String::new() }
+}
+
+/// Decides — and records — what happens next. **Everything that could refuse has refused before
+/// the caller is told to run anything**, and every fact the run will need (its task, its run id,
+/// the exact message, the ordinal that recovery reads) is committed here, before dispatch.
+///
+/// That ordering is the whole robustness story: the driver is frontend code that can be killed
+/// between any two lines, so nothing may exist in the engine that does not already exist on disk.
+pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) -> rusqlite::Result<ChainClaim> {
+    let Some(chain) = chain_row(conn, chain_id)? else {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    };
+    if chain.status != "queued" {
+        return Ok(idle_claim(chain));
+    }
+
+    // The repository can be gone even though the chain is not: `projects` cascades to
+    // `agent_chains`, but a claim racing the delete would otherwise create a task in a vacuum.
+    let project: Option<(String, String)> = conn
+        .query_row(
+            "SELECT workspace_id, local_path FROM projects WHERE id = ?1",
+            params![chain.project_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((workspace_id, _local_path)) = project else {
+        set_chain_state(conn, chain_id, "failed", "chain.projectGone")?;
+        return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
+    };
+
+    let Some(step) = next_pending_step(conn, chain_id)? else {
+        set_chain_state(conn, chain_id, "done", "")?;
+        return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
+    };
+
+    // A gate parks the chain *before* the step, and freezes the message while it waits — so what
+    // the user approves is byte-for-byte what runs, however long they take to look at it.
+    if step.gate && !step.gate_cleared {
+        if step.pending_input.is_empty() {
+            let previous = previous_output(conn, chain_id, step.step_index)?;
+            let message = compose_chain_input(
+                &chain.goal,
+                &step.instruction,
+                previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
+            );
+            conn.execute(
+                "UPDATE agent_chain_steps SET pending_input = ?2, updated_at = ?3 WHERE id = ?1",
+                params![step.id, message, now()],
+            )?;
+        }
+        conn.execute(
+            "UPDATE agent_chains SET status = 'gated', current_step = ?2, last_reason = '', updated_at = ?3
+             WHERE id = ?1",
+            params![chain_id, step.step_index, now()],
+        )?;
+        return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
+    }
+
+    // Mirrors `isRunnableAgent` on the frontend, and it has to be a hard stop rather than a
+    // fallback: `send_chat_message` only honours an agent's routing when provider *and* model are
+    // both set, and otherwise quietly runs on the normal chat routing. A step that "works" on the
+    // wrong engine is far worse than a chain that stops and says why.
+    if step.provider.trim().is_empty() || step.model.trim().is_empty() {
+        conn.execute(
+            "UPDATE agent_chain_steps SET status = 'error', last_error = 'chain.agentNotRoutable', updated_at = ?2
+             WHERE id = ?1",
+            params![step.id, now()],
+        )?;
+        set_chain_state(conn, chain_id, "failed", "chain.agentNotRoutable")?;
+        return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
+    }
+
+    if step.attempts >= MAX_STEP_ATTEMPTS {
+        set_chain_state(conn, chain_id, "failed", "chain.attemptsExhausted")?;
+        return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
+    }
+
+    let tx = conn.unchecked_transaction()?;
+
+    // The workspace is read live off `projects`, so a repository moved between workspaces files
+    // this step's task under the one it is in now rather than the one it was created in.
+    let task = match get_agent_task(&tx, &step.task_id)? {
+        Some(existing) => existing,
+        None => {
+            let title = if step.instruction.trim().is_empty() {
+                chain.title.clone()
+            } else {
+                step.instruction.trim().chars().take(64).collect()
+            };
+            create_agent_task(
+                &tx,
+                &workspace_id,
+                &chain.project_id,
+                &step.agent_id,
+                &step.agent_name,
+                &step.provider,
+                &step.model,
+                &step.prompt,
+                &step.instruction,
+                &title,
+            )?
+        }
+    };
+
+    let message = if step.pending_input.is_empty() {
+        let previous = previous_output(&tx, chain_id, step.step_index)?;
+        compose_chain_input(
+            &chain.goal,
+            &step.instruction,
+            previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
+        )
+    } else {
+        step.pending_input.clone()
+    };
+
+    // How many turns this conversation already holds. Recovery reads the row at exactly this
+    // offset, so a retry after an error can never harvest the previous attempt's error text and
+    // hand it forward as though it were the plan.
+    let log_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM activity_log WHERE project_id = ?1 AND session_id = ?2",
+        params![chain.project_id, task.conversation_id],
+        |row| row.get(0),
+    )?;
+
+    tx.execute(
+        "UPDATE agent_chain_steps SET status = 'running', task_id = ?2, run_id = ?3, pending_input = ?4,
+            log_count_at_dispatch = ?5, attempts = attempts + 1, updated_at = ?6
+         WHERE id = ?1",
+        params![step.id, task.id, run_id, message, log_count, now()],
+    )?;
+    tx.execute(
+        "UPDATE agent_chains SET status = 'running', current_step = ?2, last_reason = '', updated_at = ?3
+         WHERE id = ?1",
+        params![chain_id, step.step_index, now()],
+    )?;
+    tx.commit()?;
+
+    let chain = chain_row(conn, chain_id)?.unwrap_or(chain);
+    let step = conn.query_row(
+        &format!("SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE id = ?1"),
+        params![step.id],
+        map_step,
+    )?;
+    Ok(ChainClaim { chain, kind: "run".to_string(), task: Some(task), step: Some(step), message })
+}
+
+/// Records how a dispatched step ended, and decides where the chain goes next.
+///
+/// `outcome` is one of `done` | `error` | `cancelled` | `requeue`. The last two both return the
+/// step to `pending`, and both are safe to re-send: a stopped turn is never written to
+/// `activity_log`, and a requeued one never reached an engine at all.
+pub fn complete_chain_step(
+    conn: &Connection,
+    step_id: &str,
+    outcome: &str,
+    output_text: &str,
+    reason: &str,
+) -> rusqlite::Result<Option<AgentChain>> {
+    let step: Option<AgentChainStep> = conn
+        .query_row(
+            &format!("SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE id = ?1"),
+            params![step_id],
+            map_step,
+        )
+        .optional()?;
+    let Some(step) = step else { return Ok(None) };
+    let chain_id = step.chain_id.clone();
+
+    match outcome {
+        "done" => {
+            let (clamped, truncated) = clamp_handoff(output_text.trim());
+            conn.execute(
+                "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3,
+                    run_id = '', last_error = '', updated_at = ?4
+                 WHERE id = ?1",
+                params![step.id, clamped, truncated, now()],
+            )?;
+            match next_pending_step(conn, &chain_id)? {
+                None => set_chain_state(conn, &chain_id, "done", "")?,
+                Some(next) => {
+                    // An answer with nothing in it must never cascade: three agents working from
+                    // an empty context block is the worst outcome this feature can produce, so the
+                    // next step is force-gated and the user is told why.
+                    if clamped.is_empty() {
+                        conn.execute(
+                            "UPDATE agent_chain_steps SET gate = 1, gate_cleared = 0, updated_at = ?2 WHERE id = ?1",
+                            params![next.id, now()],
+                        )?;
+                        set_chain_state(conn, &chain_id, "queued", "chain.emptyOutput")?;
+                    } else {
+                        set_chain_state(conn, &chain_id, "queued", "")?;
+                    }
+                }
+            }
+        }
+        "error" => {
+            conn.execute(
+                "UPDATE agent_chain_steps SET status = 'error', run_id = '', last_error = ?2, updated_at = ?3
+                 WHERE id = ?1",
+                params![step.id, reason, now()],
+            )?;
+            set_chain_state(conn, &chain_id, "failed", reason)?;
+        }
+        // Back to `pending`, never to `error`: the turn was either stopped (never persisted) or
+        // refused before it ran (the repository was busy), so re-sending the identical message
+        // cannot duplicate anything.
+        "cancelled" | "requeue" => {
+            conn.execute(
+                "UPDATE agent_chain_steps SET status = 'pending', run_id = '', updated_at = ?2 WHERE id = ?1",
+                params![step.id, now()],
+            )?;
+            let next = if outcome == "requeue" { "queued" } else { "paused" };
+            set_chain_state(conn, &chain_id, next, reason)?;
+        }
+        _ => return Ok(chain_row(conn, &chain_id)?),
+    }
+    chain_row(conn, &chain_id)
+}
+
+/// Approves the gate the chain is parked at and lets it go. `input` overrides the frozen message
+/// when the user edited it, and is written before the state changes so the preview can never
+/// disagree with what runs.
+pub fn approve_chain_gate(conn: &Connection, chain_id: &str, input: &str) -> rusqlite::Result<Option<AgentChain>> {
+    let Some(step) = next_pending_step(conn, chain_id)? else {
+        set_chain_state(conn, chain_id, "done", "")?;
+        return chain_row(conn, chain_id);
+    };
+    let message = if input.trim().is_empty() { step.pending_input.clone() } else { input.to_string() };
+    conn.execute(
+        "UPDATE agent_chain_steps SET gate_cleared = 1, pending_input = ?2, updated_at = ?3 WHERE id = ?1",
+        params![step.id, message, now()],
+    )?;
+    set_chain_state(conn, chain_id, "queued", "")?;
+    chain_row(conn, chain_id)
+}
+
+/// Marks the step the chain is waiting on as deliberately not run. Composition then walks back
+/// past it to the nearest earlier answer.
+pub fn skip_chain_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<AgentChain>> {
+    let target: Option<AgentChainStep> = conn
+        .query_row(
+            &format!(
+                "SELECT {STEP_COLUMNS} FROM agent_chain_steps
+                 WHERE chain_id = ?1 AND status IN ('pending', 'error', 'interrupted')
+                 ORDER BY step_index LIMIT 1"
+            ),
+            params![chain_id],
+            map_step,
+        )
+        .optional()?;
+    if let Some(step) = target {
+        conn.execute(
+            "UPDATE agent_chain_steps SET status = 'skipped', run_id = '', updated_at = ?2 WHERE id = ?1",
+            params![step.id, now()],
+        )?;
+    }
+    match next_pending_step(conn, chain_id)? {
+        Some(_) => set_chain_state(conn, chain_id, "queued", "")?,
+        None => set_chain_state(conn, chain_id, "done", "")?,
+    }
+    chain_row(conn, chain_id)
+}
+
+/// Puts a failed or interrupted step back in the queue. `attempts` is deliberately not reset —
+/// three tries is three tries, however they were spent.
+pub fn retry_chain_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<AgentChain>> {
+    let target: Option<AgentChainStep> = conn
+        .query_row(
+            &format!(
+                "SELECT {STEP_COLUMNS} FROM agent_chain_steps
+                 WHERE chain_id = ?1 AND status IN ('error', 'interrupted') ORDER BY step_index LIMIT 1"
+            ),
+            params![chain_id],
+            map_step,
+        )
+        .optional()?;
+    let Some(step) = target else { return chain_row(conn, chain_id) };
+    if step.attempts >= MAX_STEP_ATTEMPTS {
+        set_chain_state(conn, chain_id, "failed", "chain.attemptsExhausted")?;
+        return chain_row(conn, chain_id);
+    }
+    conn.execute(
+        "UPDATE agent_chain_steps SET status = 'pending', run_id = '', last_error = '', updated_at = ?2
+         WHERE id = ?1",
+        params![step.id, now()],
+    )?;
+    set_chain_state(conn, chain_id, "queued", "")?;
+    chain_row(conn, chain_id)
+}
+
+/// Hands a parked chain back to the scheduler. Only from a state the user parked it in — a failed
+/// chain goes through `retry_chain_step`, which is where the attempt cap lives.
+pub fn resume_chain(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<AgentChain>> {
+    let Some(chain) = chain_row(conn, chain_id)? else { return Ok(None) };
+    if chain.status == "paused" {
+        set_chain_state(conn, chain_id, "queued", "")?;
+    }
+    chain_row(conn, chain_id)
+}
+
+pub fn abort_chain(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<AgentChain>> {
+    set_chain_state(conn, chain_id, "aborted", "")?;
+    chain_row(conn, chain_id)
+}
+
+pub fn delete_chain(conn: &Connection, chain_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM agent_chains WHERE id = ?1", params![chain_id])?;
+    Ok(())
+}
+
+/// The turn a dispatched step wrote, found by **ordinal** rather than by recency.
+///
+/// `log_count_at_dispatch` was recorded before the run started, so this reads the row that run
+/// produced and no other. `None` means the turn never landed — the step was interrupted, and the
+/// working copy may hold half of its edits, which is a question only a human can answer.
+fn harvest_row(conn: &Connection, step: &AgentChainStep) -> rusqlite::Result<Option<(String, bool)>> {
+    if step.task_id.is_empty() || step.log_count_at_dispatch < 0 {
+        return Ok(None);
+    }
+    let conversation: Option<(String, String)> = conn
+        .query_row(
+            "SELECT project_id, conversation_id FROM agent_tasks WHERE id = ?1",
+            params![step.task_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((project_id, conversation_id)) = conversation else { return Ok(None) };
+    conn.query_row(
+        "SELECT answer, is_error FROM activity_log
+         WHERE project_id = ?1 AND session_id = ?2
+         ORDER BY created_at ASC, id ASC LIMIT 1 OFFSET ?3",
+        params![project_id, conversation_id, step.log_count_at_dispatch],
+        |row| Ok((row.get(0)?, row.get::<_, bool>(1)?)),
+    )
+    .optional()
+}
+
+/// Polled by the frontend for a step whose run outlived the webview. Completes it the moment its
+/// turn lands, so a reload costs the log but never the work.
+pub fn harvest_chain_step(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<AgentChain>> {
+    let step: Option<AgentChainStep> = conn
+        .query_row(
+            &format!("SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE id = ?1"),
+            params![step_id],
+            map_step,
+        )
+        .optional()?;
+    let Some(step) = step else { return Ok(None) };
+    if step.status != "running" {
+        return chain_row(conn, &step.chain_id);
+    }
+    match harvest_row(conn, &step)? {
+        Some((answer, false)) => complete_chain_step(conn, &step.id, "done", &answer, ""),
+        Some((answer, true)) => complete_chain_step(conn, &step.id, "error", "", &answer),
+        None => Ok(None),
+    }
+}
+
+/// Run once per launch, from `db::init`, before any UI exists.
+///
+/// This is where "the app was killed mid-step" is answered, and it deliberately lives here rather
+/// than in a store: the frontend's own demotion only runs if the user opens the Agents view, so a
+/// task left `running` by a killed session would keep a spinner and a repository slot until
+/// someone happened to look.
+///
+/// **Nothing is ever resumed here.** An agent turn edits a real working copy with edits
+/// auto-approved; dispatching one the instant the app opens, into a tree the user has not looked at
+/// since, is the single thing that must not happen. Chains park and ask.
+pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
+    let running: Vec<AgentChainStep> = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE status = 'running'"
+        ))?;
+        let rows = stmt.query_map([], map_step)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for step in &running {
+        match harvest_row(conn, step)? {
+            // The turn landed before the process died: keep the work rather than throwing it away.
+            Some((answer, false)) => {
+                let (clamped, truncated) = clamp_handoff(answer.trim());
+                conn.execute(
+                    "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3,
+                        run_id = '', updated_at = ?4
+                     WHERE id = ?1",
+                    params![step.id, clamped, truncated, now()],
+                )?;
+            }
+            Some((answer, true)) => {
+                conn.execute(
+                    "UPDATE agent_chain_steps SET status = 'error', run_id = '', last_error = ?2, updated_at = ?3
+                     WHERE id = ?1",
+                    params![step.id, answer, now()],
+                )?;
+            }
+            // No row means the turn never completed. The tree may hold half its edits, and the
+            // run's `checkpoint_before` is still in `refs/codeflow/checkpoints/`.
+            None => {
+                conn.execute(
+                    "UPDATE agent_chain_steps SET status = 'interrupted', run_id = '', updated_at = ?2
+                     WHERE id = ?1",
+                    params![step.id, now()],
+                )?;
+            }
+        }
+    }
+
+    conn.execute("UPDATE agent_tasks SET status = 'idle' WHERE status = 'running'", [])?;
+    // `queued` is demoted along with `running`: a queued chain with nobody pumping it is a chain
+    // that looks like it is about to start and never will.
+    conn.execute(
+        "UPDATE agent_chains SET status = 'paused', last_reason = 'chain.interrupted', updated_at = ?1
+         WHERE status IN ('running', 'queued')",
+        params![now()],
+    )?;
+    Ok(())
+}
+
+// ---------- chain templates ----------
+
+fn template_steps(conn: &Connection, template_id: &str) -> rusqlite::Result<Vec<ChainTemplateStep>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, template_id, step_index, agent_id, instruction, gate
+         FROM workspace_chain_template_steps WHERE template_id = ?1 ORDER BY step_index",
+    )?;
+    let rows = stmt.query_map(params![template_id], |row| {
+        Ok(ChainTemplateStep {
+            id: row.get(0)?,
+            template_id: row.get(1)?,
+            step_index: row.get(2)?,
+            agent_id: row.get(3)?,
+            instruction: row.get(4)?,
+            gate: row.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn list_chain_templates(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<ChainTemplate>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, name, description, sort_order, created_at, updated_at
+         FROM workspace_chain_templates WHERE workspace_id = ?1 ORDER BY sort_order, created_at",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |row| {
+        Ok(ChainTemplate {
+            id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            name: row.get(2)?,
+            description: row.get(3)?,
+            sort_order: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+            steps: Vec::new(),
+        })
+    })?;
+    let mut templates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    for template in &mut templates {
+        template.steps = template_steps(conn, &template.id)?;
+    }
+    Ok(templates)
+}
+
+/// Replaces the template wholesale: the steps are the template, and a partial update would need a
+/// diff whose only purpose would be to preserve ids nothing else refers to.
+pub fn upsert_chain_template(
+    conn: &Connection,
+    id: Option<String>,
+    workspace_id: &str,
+    name: &str,
+    description: &str,
+    steps: &[NewChainStep],
+) -> rusqlite::Result<ChainTemplate> {
+    let tx = conn.unchecked_transaction()?;
+    let stamp = now();
+    let existing = id.as_ref().and_then(|existing_id| {
+        tx.query_row(
+            "SELECT sort_order, created_at FROM workspace_chain_templates WHERE id = ?1",
+            params![existing_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok()
+    });
+    let (sort_order, created_at) = existing.unwrap_or((0, stamp.clone()));
+    let template_id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    tx.execute(
+        "INSERT INTO workspace_chain_templates (id, workspace_id, name, description, sort_order, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, description = excluded.description,
+            updated_at = excluded.updated_at",
+        params![template_id, workspace_id, name, description, sort_order, created_at, stamp],
+    )?;
+    tx.execute("DELETE FROM workspace_chain_template_steps WHERE template_id = ?1", params![template_id])?;
+    for (index, step) in steps.iter().enumerate() {
+        tx.execute(
+            "INSERT INTO workspace_chain_template_steps (id, template_id, step_index, agent_id, instruction, gate)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                Uuid::new_v4().to_string(),
+                template_id,
+                index as i64,
+                step.agent_id,
+                step.instruction,
+                step.gate
+            ],
+        )?;
+    }
+    tx.commit()?;
+
+    Ok(ChainTemplate {
+        id: template_id.clone(),
+        workspace_id: workspace_id.to_string(),
+        name: name.to_string(),
+        description: description.to_string(),
+        sort_order,
+        created_at,
+        updated_at: stamp,
+        steps: template_steps(conn, &template_id)?,
+    })
+}
+
+pub fn delete_chain_template(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM workspace_chain_templates WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 // ---------- workspace MCP servers ----------
 
 pub fn upsert_workspace_mcp(
@@ -825,6 +1862,12 @@ pub fn list_chat_conversations(
 
     for e in &entries {
         let Some(sid) = e.session_id.clone() else { continue };
+        // An agent task's turns live in this table too, but the Agents view owns their lifecycle.
+        // Listed here they would show up as ordinary chats, where deleting one would wipe the
+        // transcript of a task that still exists — and rename it under a title the task never sees.
+        if sid.starts_with(AGENT_CONVERSATION_PREFIX) {
+            continue;
+        }
         if let Some(q) = &needle {
             if e.question.to_lowercase().contains(q.as_str()) || e.answer.to_lowercase().contains(q.as_str()) {
                 matched.insert(sid.clone());
@@ -1143,6 +2186,8 @@ mod tests {
                 github_owner: None,
                 github_repo: None,
                 github_host: None,
+                gitlab_project: None,
+                gitlab_host: None,
             },
         )
         .unwrap();

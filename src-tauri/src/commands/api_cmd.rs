@@ -14,7 +14,6 @@ use crate::api::{
     ApiRegistry, GrpcCallRequest, GrpcDescribeRequest, GrpcResponse, GrpcServiceInfo, HttpResponse, HttpSendRequest,
     MqttConnectRequest, SocketIoConnectRequest, WsConnectRequest,
 };
-use crate::db::api_backup::{self, ApiBackup, ImportOptions, ImportSummary};
 use crate::db::{api_queries, api_sync, models::*, Db};
 use crate::gdrive;
 use crate::supabase;
@@ -427,42 +426,10 @@ pub fn api_read_text_file(path: String) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| format!("{path} is not valid UTF-8 text"))
 }
 
-// ---------- backup ----------
-
-/// Every workspace's collections, folders, requests and environments in one payload. The frontend
-/// is what turns this into a file — encrypting it first when the user supplied a passphrase.
-#[tauri::command]
-pub fn api_export_all(db: State<Db>) -> Result<ApiBackup, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    api_backup::export_all(&conn).map_err(|e| e.to_string())
-}
-
-/// `replace = false` merges (newest `updated_at` wins, nothing is ever deleted); `replace = true`
-/// empties the workspaces named in the backup first, for a clean restore.
-#[tauri::command]
-pub fn api_import_all(db: State<Db>, backup: ApiBackup, replace: bool) -> Result<ImportSummary, String> {
-    let mut conn = db.0.lock().map_err(|e| e.to_string())?;
-    api_backup::import_all(
-        &mut conn,
-        &backup,
-        // A backup is the same person's other machine, so a workspace they re-created by hand
-        // there is theirs to merge into rather than a second copy to create.
-        ImportOptions { replace, match_by_name: true },
-    )
-    .map_err(|e| e.to_string())
-}
-
-/// Writes a file at a path the user already chose — no dialog. Backing up on a timer can't open
-/// one, and the destination is a setting by then.
-#[tauri::command]
-pub fn api_write_text_file(path: String, contents: String) -> Result<(), String> {
-    if let Some(parent) = std::path::Path::new(&path).parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-    }
-    std::fs::write(&path, contents).map_err(|e| format!("{path}: {e}"))
-}
-
-// ---------- backup destination: the user's own Google Drive ----------
+// ---------- Google Drive as a backup destination ----------
+//
+// Only the connection lives here. Finding, uploading and downloading the backup itself are
+// driven from `backup_cmd`, which never sends the bytes across the bridge.
 
 /// Whether the pieces of the Drive connection are in place. Two flags rather than one because the
 /// UI has to say *which* step is missing: credentials not entered, or consent not granted.
@@ -494,28 +461,6 @@ pub async fn gdrive_connect(client_id: String) -> Result<gdrive::DriveAccount, S
 #[tauri::command]
 pub fn gdrive_disconnect() -> Result<(), String> {
     gdrive::disconnect()
-}
-
-/// The id of a backup this OAuth client already has in Drive — how a second machine adopts the
-/// first one's file instead of starting a rival copy.
-#[tauri::command]
-pub async fn gdrive_find_file(client_id: String, name: String) -> Result<Option<String>, String> {
-    gdrive::find_file(client_id, name).await
-}
-
-#[tauri::command]
-pub async fn gdrive_upload(
-    client_id: String,
-    file_id: Option<String>,
-    name: String,
-    contents: String,
-) -> Result<String, String> {
-    gdrive::upload(client_id, file_id, name, contents).await
-}
-
-#[tauri::command]
-pub async fn gdrive_download(client_id: String, file_id: String) -> Result<String, String> {
-    gdrive::download(client_id, file_id).await
 }
 
 // ---------- shared collections on the user's own Supabase project ----------
