@@ -4,8 +4,6 @@ import { analyzeWorkingChanges } from "../../lib/tauri/commands";
 import { parseAnalysis } from "../../lib/parseAnalysis";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
-import { useChatStore } from "../../state/chatStore";
-import { ChatAgentPicker } from "./ChatAgentPicker";
 import { useT } from "../../state/languageStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { renderMarkdown } from "../../lib/markdown";
@@ -33,15 +31,13 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
   );
 
   const runAnalysis = () => {
-    // The workspace's active SDD/Harness agent (if any) analyzes as that role.
-    const agent = useChatStore.getState().agentByProject[projectId] ?? null;
     const id = useJobsStore.getState().run({
       projectId,
       kind: "analyze-changes",
       // A per-run time stamp in the label so each analysis is identifiable in the Activity
       // list instead of every entry reading the same "Análisis de cambios".
       label: `${t("analyze.title")} · ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
-      task: (jobId) => analyzeWorkingChanges(projectId, jobId, agent),
+      task: (jobId) => analyzeWorkingChanges(projectId, jobId),
     });
     // Pin this section to the run it just started, so its own result shows here and the
     // Activity list highlights the right row.
@@ -105,7 +101,6 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
               </div>
             )}
           </div>
-          <ChatAgentPicker projectId={projectId} />
           <button
             onClick={runAnalysis}
             disabled={loading}

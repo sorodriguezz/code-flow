@@ -1,6 +1,5 @@
 import * as api from "./tauri/commands";
 import type { PrAction, PostFindingItem } from "./tauri/commands";
-import type { ChatAgentOverride } from "./tauri/commands";
 import type {
   JobHistoryEntry,
   PrDecision,
@@ -139,14 +138,8 @@ export function postFindings(
  * link-backed one reads the diff from the host's API and doesn't — a weaker review, on purpose,
  * and the panel says so.
  */
-export function review(
-  target: PrTarget,
-  prId: number,
-  jobId: string,
-  level: string,
-  agent: ChatAgentOverride | null,
-): Promise<string> {
+export function review(target: PrTarget, prId: number, jobId: string, level: string): Promise<string> {
   return target.kind === "project"
-    ? api.reviewPullRequest(target.projectId, prId, jobId, level, agent)
+    ? api.reviewPullRequest(target.projectId, prId, jobId, level)
     : api.reviewPrFromLink(target.url, jobId, level, target.workspaceId);
 }

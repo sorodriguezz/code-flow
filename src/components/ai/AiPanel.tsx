@@ -92,7 +92,6 @@ import { AiRunLog } from "./AiRunLog";
 import { CheckpointsModal } from "./CheckpointsModal";
 import { AnalyzeSection } from "./AnalyzeSection";
 import { ChatModelPicker } from "./ChatModelPicker";
-import { ChatAgentPicker } from "./ChatAgentPicker";
 import { ReviewLevelSelector } from "./ReviewLevelSelector";
 import { AiErrorBanner } from "./AiErrorBanner";
 import type { PrDecision, PullRequestSummary, PrCommentThread, SavedFinding } from "../../types/domain";
@@ -1030,8 +1029,6 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
                   three words select. */}
               <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{t("pr.levelLabel")}</span>
               <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={loading} />
-              {/* Agents are picked per project; a link session has none to pick for. */}
-              {projectId && <ChatAgentPicker projectId={projectId} />}
             </div>
             <div className="flex items-center gap-1.5">
               {reviewText && !loading && (
@@ -1545,7 +1542,6 @@ function ChatSection({ projectId }: { projectId: string }) {
                 per-conversation override. Once there are turns on screen the picker locks to the
                 current provider's versions: sessions don't transfer between CLIs. */}
             <ChatModelPicker liveModel={chat.model} chatActive={chat.messages.length > 0} />
-            <ChatAgentPicker projectId={projectId} />
             <button
               onClick={submit}
               disabled={!input.trim() || chat.sending}
@@ -1637,7 +1633,10 @@ export function AiPanel() {
         // line beside it — see the note in `TerminalDock`.
         className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
       >
-        <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3">
+        {/* `h-10`, matching `TabBar` — the two sit side by side at the top of the same row, so
+            their bottom borders are read as one line across the window and any difference shows
+            up as a step at the seam. */}
+        <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3">
           <Sparkles size={13} className="text-[var(--cf-accent)]" />
           <span className="text-[12px] font-semibold">{t("chat.title")}</span>
           <div className="ml-auto flex items-center gap-1">

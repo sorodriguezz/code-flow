@@ -2,7 +2,6 @@ import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { useJobsStore } from "./jobsStore";
-import { useChatStore } from "./chatStore";
 import { useLanguageStore } from "./languageStore";
 import { usePrWatchStore } from "./prWatchStore";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -223,9 +222,6 @@ export const usePrStore = create<PrState>((set, get) => ({
       (target.kind === "project" ? get().prsByProject[target.projectId]?.find((p) => p.id === prId) : undefined) ??
       (shown?.id === prId ? shown : undefined);
     const activeLevel = level ?? get().reviewLevel;
-    // The workspace's active SDD/Harness agent (if any) reviews as that role. A link session has
-    // no project to have picked an agent for, so it reviews as itself.
-    const agent = target.kind === "project" ? useChatStore.getState().agentByProject[target.projectId] ?? null : null;
     // A link review shares its bucket with every other repository reviewed from a link in this
     // workspace, so the row has to say which repo it is — and carry enough to reopen the session
     // later. The same shape the backend persists (see `link_activity_meta`), so the row reads
@@ -251,7 +247,7 @@ export const usePrStore = create<PrState>((set, get) => ({
       kind: "pr-review",
       label,
       meta: { prId, level: activeLevel, ...linkMeta },
-      task: (jobId) => prTarget.review(target, prId, jobId, activeLevel, agent),
+      task: (jobId) => prTarget.review(target, prId, jobId, activeLevel),
     });
   },
 

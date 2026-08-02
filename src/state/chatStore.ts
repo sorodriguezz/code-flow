@@ -4,7 +4,6 @@ import {
   isRepoBusy,
   sendChatMessage,
   REPO_BUSY_MARKER,
-  type ChatAgentOverride,
 } from "../lib/tauri/commands";
 import { useChatHistoryStore } from "./activityStore";
 import { isCancellation, newRunId, useAiRunStore, type AiRunLine } from "./aiRunStore";
@@ -158,10 +157,6 @@ interface ChatState {
    * a blank new chat — which is a view state, not a lifecycle one: whatever was showing before is
    * still in `byConversation`, still running if it was running. */
   activeByProject: Record<string, string | null>;
-  /** The SDD/Harness agent selected for a project's chat, if any — its provider+model+prompt run
-   * each turn as that role. `null`/absent means the normal chat routing. */
-  agentByProject: Record<string, ChatAgentOverride | null>;
-  setAgent: (projectId: string, agent: ChatAgentOverride | null) => void;
   /** Fire-and-forget — the reply lands in its own conversation whenever it arrives, so it isn't
    * lost (or misfiled) if the user switches chats, projects, or closes the AI panel while the
    * engine is still answering. Several conversations can be in flight at once; only a second turn
@@ -187,10 +182,6 @@ interface ChatState {
 export const useChatStore = create<ChatState>((set, get) => ({
   byConversation: {},
   activeByProject: {},
-  agentByProject: {},
-
-  setAgent: (projectId, agent) =>
-    set((s) => ({ agentByProject: { ...s.agentByProject, [projectId]: agent } })),
 
   sessionFor: (projectId) => {
     const id = get().activeByProject[projectId];
@@ -246,8 +237,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     };
 
-    const agent = get().agentByProject[projectId] ?? null;
-    void sendChatMessage(projectId, trimmed, base.sessionId, conversationId, runId, agent)
+    // No agent override: a role-driven turn is what the Agents view is for, and this chat is
+    // deliberately the plain one — the routing it shows in the composer is the routing it uses.
+    void sendChatMessage(projectId, trimmed, base.sessionId, conversationId, runId)
       .then((reply) => {
         // The live log is already in memory and formatted; attaching it to the message is what
         // keeps "what did it do?" answerable after the run ends, without a second round trip.
