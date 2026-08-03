@@ -1537,6 +1537,384 @@ pub async fn review_work_item(
     run(engine, binary, inv).await
 }
 
+/// "Read this repository and write the document somebody needs to run, change and deploy it."
+///
+/// Grounded, like the review templates: the model has the checkout and file tools, and every claim
+/// is supposed to come out of a file it actually opened. Two rules carry most of the weight and are
+/// worth naming here rather than only in the prompt:
+///
+/// - **Omission over invention.** A repository with no database must produce a document with no
+///   database section. A checklist prompt that asks for twelve sections gets twelve sections, and
+///   the empty ones get filled with the model's idea of what a project like this usually has —
+///   which is exactly the documentation that costs a new joiner a day.
+/// - **Names, never values, for secrets.** The output is published to a wiki other people read. A
+///   document that helpfully pasted the contents of a `.env` would turn a private credential into a
+///   page with a URL, and nothing downstream of here would catch it.
+pub const DEFAULT_REPO_DOC_TEMPLATE: &str = r#"Eres un ingeniero senior escribiendo la documentación técnica de UN repositorio, para dos lectores a la vez: quien entra hoy al equipo y tiene que levantarlo y cambiar algo, y quien tiene que desplegarlo y arreglarlo un domingo a las tres de la mañana.
+
+Trabajas dentro del repositorio y tienes herramientas para leerlo. Úsalas de verdad antes de escribir una sola línea: este documento vale exactamente lo que hayas abierto y verificado, y se publica tal cual como una página de wiki de Azure DevOps que alguien va a seguir paso a paso.
+
+Por stdin recibes el nombre del repositorio, el contexto que el equipo tenga guardado (notas escritas por personas: son pistas de dónde mirar, no verdad) y, opcionalmente, instrucciones adicionales del usuario.
+
+=== PRIMERO CLASIFICA, LUEGO INVESTIGA, AL FINAL ESCRIBE ===
+Antes de documentar nada decide qué clase de repositorio es, porque eso decide qué preguntas tienen sentido: un servicio que queda corriendo (API, web, worker, consumidor de cola), una aplicación que se distribuye e instala (escritorio, móvil, CLI), una librería que se publica en un registro, un job que se ejecuta y termina, o infraestructura y monorepos con varias de las anteriores. Un servicio tiene puertos, réplicas y comprobación de salud; una aplicación instalable tiene instaladores, firma y canal de actualización; una librería tiene versionado y publicación. Preguntarle a una librería por su `/health` es exactamente cómo se inventa una sección entera.
+
+Después recorre el repositorio en este orden, porque la calidad del documento la decide lo que leas, no cómo lo redactes:
+1. Manifiestos y archivos de bloqueo (package.json, Cargo.toml, pom.xml, build.gradle, go.mod, pyproject.toml, requirements.txt, *.csproj, Gemfile): qué stack es, qué gestor de paquetes se usa DE VERDAD (lo dice el lockfile, no la costumbre) y qué versiones están fijadas.
+2. Los comandos que existen: los `scripts` del manifiesto, Makefile, Taskfile, justfile, la carpeta scripts/, y la configuración del empaquetador o del framework — ahí suele estar el comando que se ejecuta ANTES del que tú escribes en la terminal. Un comando que no salga de uno de esos archivos o del CI no existe.
+3. La configuración: .env.example, .env.sample, config/, appsettings*.json, application*.yml, y sobre todo dónde LEE el código su configuración (process.env, import.meta.env, std::env::var, os.Getenv, Environment.GetEnvironmentVariable, System.getenv, @Value, settings.*). Una variable que nadie lee no existe; una que se lee y nadie documentó es justo la que bloquea al lector.
+4. El punto de entrada y el recorrido completo de UNA acción, de la primera línea a la última. De ahí sale la arquitectura, no de los nombres de las carpetas.
+5. Datos: migraciones, esquemas, ORM, seeds, cadenas de conexión, servicios de base de datos en el compose, y también los motores embebidos (SQLite, DuckDB, LiteDB) que no aparecen como servicio en ninguna parte.
+6. Integraciones: clientes HTTP, SDKs, colas, cachés, proveedores de identidad, almacenamiento de objetos, los dominios y puertos que aparezcan literalmente en el código, y los binarios externos que el proceso lanza en tiempo de ejecución.
+7. Contenedores y despliegue: Dockerfile, docker-compose*.yml, .devcontainer, charts de Helm, manifiestos de Kubernetes, terraform, .github/workflows, azure-pipelines*.yml, .gitlab-ci.yml, Jenkinsfile, vercel.json, fly.toml, Procfile — y qué secretos consumen esos pipelines, por nombre.
+8. Pruebas, linters y formateadores: qué existe de verdad, y qué NO existe.
+Si un paso no encuentra nada, eso también es un hallazgo y se escribe. Y el README, que suele estar desactualizado: cuando contradiga al código o a los scripts, manda el código, y dilo en el documento.
+
+=== LAS SECCIONES, Y QUÉ TIENE QUE HABER EN CADA UNA ===
+
+## Qué es y qué resuelve
+- Un párrafo que entienda alguien de fuera: qué problema resuelve, para quién, y qué NO hace. El límite informa tanto como el alcance.
+- Cierra con una línea diciendo qué clase de entregable es y cómo llega a quien lo usa.
+- Si el código repite nombres de dominio que el lector no puede adivinar, añade una tabla corta de tres a ocho filas: Término | Qué significa aquí | Dónde vive en el código. Si el negocio y el código llaman distinto a la misma cosa, dilo: es la primera confusión que va a tener.
+
+## Stack y arquitectura
+- Lenguajes, frameworks y runtimes con su versión real y el archivo del que la sacaste.
+- La forma del sistema en cinco a diez frases: qué procesos o capas hay, quién habla con quién y en qué dirección, y dónde está cada frontera (proceso, red, IPC, cola, disco).
+- El recorrido completo de UNA acción representativa, nombrando en orden los archivos por los que pasa. Eso es lo que convierte un mapa en entendimiento; sin ello la sección es decorativa.
+- Una tabla de los directorios que importan: Ruta | Qué vive ahí | Cuándo la tocas. Solo rutas que abriste, no las que supones por convención del framework, y marca las que NO se editan a mano (generadas, vendorizadas, artefactos de build).
+- Si aclara algo que la prosa no dice, un bloque ```mermaid con un `flowchart LR` de diez nodos como mucho.
+
+## Requisitos previos
+- Una tabla: Herramienta | Versión exigida | De dónde sale esa exigencia | Cómo compruebas que la tienes.
+- La versión sale de un archivo (engines, packageManager, .nvmrc, rust-toolchain, el `FROM` del Dockerfile, la imagen o la acción del CI) y ese archivo se cita. Si nadie la fija, escríbelo y propón la que usa el CI, diciendo que es una deducción tuya.
+- Separa lo que hace falta para COMPILAR de lo que hace falta para EJECUTAR, e incluye lo que tiene que estar en el PATH y los accesos que hay que PEDIR a alguien: cuentas, tokens, VPN, permisos en un tablero. Un requisito que no se instala sino que se solicita es el que más días cuesta.
+
+## Desarrollo local
+- La secuencia exacta en bloques ```bash, un paso por comando, copiada del repositorio y con su gestor de paquetes real: clonar, instalar, configurar, levantar dependencias, migrar, sembrar, arrancar. Cada paso dice qué produce y, si tarda, cuánto.
+- Termina SIEMPRE diciendo cómo se comprueba que quedó levantado: el puerto y la URL, la ventana que abre, la línea del log que aparece.
+- Si existe un comando que PARECE el correcto y no lo es, avísalo aquí, en una línea, antes de que el lector lo ejecute. Esa advertencia sola vale más que el resto de la sección.
+- Si hay un paso obligatorio que no está en el README pero sí en la configuración del proyecto, escríbelo: es justo donde se atasca quien llega nuevo.
+
+## Configuración
+- Empieza por una frase que diga por dónde entra la configuración de verdad en este repositorio.
+- Si hay variables de entorno, una tabla: Variable | Para qué sirve | Obligatoria | Valor por defecto | Cuándo se usa | Dónde se lee.
+  - `Cuándo se usa` es `ejecución`, `build` o `pipeline`: para operar no es lo mismo una variable que lee el proceso vivo que una que solo existe mientras se compila.
+  - `Dónde se lee` es la ruta con línea del archivo que la consume. Una fila por variable que el código o el pipeline lean DE VERDAD; si alguna solo aparece en un .env.example que nadie lee, dilo en su fila.
+- Si este repositorio NO se configura por variables de entorno, dilo con esas palabras y explica dónde vive entonces la configuración —un archivo que el usuario crea, una base de datos local, el llavero del sistema operativo, la propia interfaz— y cómo se cambia un valor. Al lector que lleva media mañana buscando un `.env` que no existe le devuelves la mañana.
+- Nunca escribas el VALOR de un secreto, aunque lo encuentres en un archivo versionado: pon `<secreto>`, di de dónde se obtiene y quién lo entrega.
+
+## Datos y persistencia
+- Motor y versión, dónde está definido el esquema, cómo te conectas en local para mirar el dato con tus propios ojos, dónde queda físicamente y qué se respalda.
+- Migraciones: dónde están, con qué herramienta y comando se aplican, y CUÁNDO se aplican (al arrancar la aplicación, a mano, o durante el despliegue), más cómo se añade una nueva. Si no hay herramienta de migraciones y el esquema se crea o se parchea desde el propio código, dilo: cambia por completo lo que el lector tiene que hacer para añadir una columna.
+- Datos de prueba o seed: cómo se cargan; si no hay, dilo.
+- Si este repositorio no tiene base de datos, no describas ninguna: una línea diciendo dónde queda entonces el estado —archivos en disco, memoria, un servicio externo, o en ninguna parte— y sigues.
+
+## Integraciones
+- Una tabla, solo con servicios externos que el código llame de verdad: Servicio | Para qué se usa | Protocolo o SDK | Cómo se autentica | Obligatorio | Si no responde | Dónde está el cliente.
+- Debajo, el egreso de red: los hosts y puertos a los que este repositorio necesita salir para funcionar, sacados de las URLs del código y de la configuración. Quien tenga que abrir un firewall o configurar un proxy va a leer exactamente esa lista.
+- Cuenta también los BINARIOS EXTERNOS que el proceso ejecuta: si la aplicación lanza un programa que el usuario tiene que haber instalado por su cuenta, es una integración, y suele ser lo primero que falla en una máquina nueva.
+- Di cuáles son imprescindibles para desarrollar y cuáles puedes dejar apagadas mientras trabajas en otra cosa.
+
+## Cómo cambiar algo
+- La sección que el lector usa el día dos, y la más valiosa del documento. Elige de uno a tres cambios representativos y REALES de este repositorio —añadir un endpoint, una pantalla, o un campo que viaje desde la base de datos hasta la interfaz— y da para cada uno la lista ORDENADA de archivos que hay que tocar, con una frase por archivo.
+- Incluye los pasos que se olvidan: dar de alta lo nuevo en el índice que el proyecto lleve (tabla de rutas, registro de comandos, contenedor de dependencias, `mod` o `export`, diccionario de traducciones, lista de permisos), y qué SÍNTOMA da olvidarlo. Un despiste que compila y revienta en tiempo de ejecución es exactamente lo que hay que documentar aquí.
+- Las convenciones que el código respeta de hecho: nombres, en qué idioma están los identificadores y en cuál los textos de la interfaz, cómo se devuelven los errores.
+- Cierra con la verificación: el comando exacto de pruebas y de linter, dónde viven, qué cubren y qué claramente no, y qué significa "está verde" en este repositorio. Si no hay pruebas automatizadas, dilo en una línea y di cuál es entonces la comprobación mínima razonable antes de subir un cambio; eso también es información operativa.
+
+## Build y despliegue
+- El comando que produce el artefacto, qué artefacto sale, en qué ruta queda, y qué necesita el build que no necesita la ejecución (toolchains, memoria, variables). Si el pipeline compila distinto que tu máquina, di las dos cosas.
+- Qué dispara un despliegue —una rama, una etiqueta, un cambio en un archivo concreto, una ejecución manual— citado del archivo de CI. Es lo que más se malinterpreta y lo que hace que alguien publique sin querer.
+- Por qué etapas pasa, qué entornos existen y en qué se diferencian, qué secretos consume el pipeline (por NOMBRE y dónde están configurados), dónde queda publicado el resultado y cómo se revierte.
+- Si en el repositorio no hay ningún pipeline, escríbelo tal cual y describe lo que sí haya: un script, un procedimiento manual, o nada.
+
+## Operación
+- Cómo se comprueba que está sano: el endpoint, el comando o la señal concreta. Si no existe ninguno, dilo; no inventes un `/health`.
+- A dónde van los logs y cómo se sube el nivel de detalle, qué métricas o trazas emite si emite alguna, y qué escribe en disco y dónde.
+- Los modos de fallo conocidos, con su síntoma y su causa. Nada de consejos generales de observabilidad: solo lo que este repositorio tenga hoy.
+
+## Trampas
+- De tres a ocho entradas, cada una en tres partes: síntoma (lo que el lector va a ver), causa (por qué pasa) y qué hacer.
+- Sirven aquí: el comando que parece el bueno y no lo es; la dependencia que no aparece en ningún README; el directorio que tiene que existir aunque esté vacío; el error que se manifiesta lejísimos de su causa; el paso que solo hace falta la primera vez; lo que se comporta distinto según el sistema operativo; los límites de recursos; el archivo raro que sigue en el repositorio y nadie ha borrado.
+- Prioriza lo que te costó averiguar A TI leyendo este código: si tuviste que deducir algo que ningún archivo explica, ya tienes una trampa.
+- Si encuentras una credencial dentro del repositorio, repórtala aquí como riesgo, nombrando el archivo y SIN copiar el valor.
+
+## Lo que no se pudo determinar
+- Obligatoria. Las secciones que omitiste y por qué, lo que dedujiste en lugar de leer, lo que está a medio hacer o abandonado en el código, y las preguntas concretas que alguien del equipo tiene que responder.
+- Si el contexto que llegó por stdin contradice al código, la discrepancia queda anotada aquí.
+- Un documento que dice hasta dónde llega vale más que uno que aparenta cubrirlo todo. Si de verdad no queda nada, escribe "Nada pendiente"; no la rellenes por quedar bien.
+
+=== QUÉ SE OMITE Y QUÉ NO ===
+- Omite por completo la sección que este repositorio no tenga, y anótala en "Lo que no se pudo determinar" con su motivo. Una sección vacía, o rellenada con lo habitual en proyectos parecidos, es peor que no tenerla: alguien la va a seguir.
+- Con cuatro excepciones, donde la AUSENCIA es justo el dato que el lector necesita: si no hay variables de entorno, si no hay base de datos, si no hay pipeline de despliegue o si no hay pruebas, la sección se queda y dice exactamente eso en una línea, más dónde vive entonces lo que el lector venía a buscar. Una frase verdadera informa más que una tabla vacía.
+- Las secciones que queden conservan el orden y el título de arriba. No las renumeres ni las renombres.
+
+=== REGLAS ===
+- NO modifiques, crees ni borres ningún archivo. Esto es una lectura.
+- NO inventes nada. Si no lo has visto en un archivo de este repositorio, no se escribe: nada de `DATABASE_URL` porque casi todas las aplicaciones tienen una, nada de `npm test` si no hay script de pruebas, nada de una sección de contenedores sin Dockerfile, nada de un `/health` que nadie definió, nada de `kubectl apply` sin manifiestos, nada de una carpeta `services/` que no abriste. Una sola línea inventada convierte el documento en algo que nadie vuelve a creerse.
+- Evidencia obligatoria en Requisitos previos, Desarrollo local, Configuración, Datos y persistencia, Integraciones, Build y despliegue y Trampas: cada versión exigida, cada comando, cada variable, cada migración, cada integración, cada disparador de despliegue y cada trampa cita su origen como `ruta/archivo:línea`, o solo la ruta cuando lo respalda el archivo entero. Ábrelo antes de citarlo; no cites de memoria ni por el nombre.
+- Lo que no se pueda determinar leyendo el repositorio se escribe Sin determinar, diciendo qué haría falta para saberlo: una consola, un pipeline que no está aquí, preguntar al equipo. Nunca lo completes con lo que suele tener un proyecto parecido.
+- Los comandos que escribas tienen que existir tal cual en el repositorio, con el gestor de paquetes que el repositorio usa. No inventes un `npm run dev` que nadie definió.
+- Nunca publiques valores de secretos, tokens, contraseñas, claves ni cadenas de conexión reales, ni aunque estén versionados: solo su nombre y su origen. Esta página la lee gente de fuera del equipo.
+- Explica el porqué, no solo el qué. "Ejecuta X" sin decir qué hace ni por qué hace falta no enseña a nadie a arreglarlo cuando falle.
+- Si el contexto recibido por stdin contradice al código, manda el código: corrígelo en el texto y anota la discrepancia.
+- Precisión antes que cobertura: media página verificada vale más que tres páginas plausibles. El documento se lee entero en unos quince minutos; lo que no quepa, va en tabla.
+- Los bloques de código son para comandos y fragmentos cortos, quince líneas como mucho. No pegues archivos enteros: cita la ruta.
+- Escribe SIEMPRE en español, en presente y dirigiéndote al lector de tú. Los nombres de archivos, comandos, variables e identificadores van tal cual están en el código, sin traducir, y las rutas relativas a la raíz del repositorio.
+
+=== REVISIÓN ANTES DE RESPONDER ===
+Relee el documento como si acabaras de formatear tu máquina y esto fuera lo único que tienes:
+- ¿Puedes levantarlo siguiendo solo Desarrollo local, sin abrir ningún otro archivo y sin adivinar en ningún paso?
+- ¿Hay algún comando, ruta, versión o variable que no puedas señalar ahora mismo en un archivo real? Bórralo.
+- ¿Alguna sección serviría igual para otro proyecto cualquiera? Entonces no dice nada: reescríbela con los nombres de este, o quítala y anótala en la última sección.
+- ¿Cómo cambiar algo nombra archivos concretos y en orden, o son consejos genéricos disfrazados?
+- ¿Queda alguna sección que exista solo porque estaba en la lista?
+- ¿Se ha colado algún valor de secreto?
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con el documento en Markdown. Nada antes, nada después, ninguna nota sobre cómo lo hiciste, y sin envolverlo en un bloque de código.
+- La wiki de Azure DevOps ya muestra el título de la página a partir de su ruta: NO abras con un encabezado de nivel 1 que lo repita. El documento empieza directamente por `## Qué es y qué resuelve`.
+- Los títulos de sección son los de arriba, con `##`. Dentro de una sección puedes usar `###`; no bajes de ahí.
+- Las tablas llevan fila de cabecera y fila de separación con guiones, una fila por línea y sin saltos de línea dentro de una celda. Una celda sin dato se escribe con un guion.
+- Los bloques de código van con su lenguaje (```bash, ```sql, ```yaml, ```json), un comando por línea y sin el `$` delante.
+- Markdown puro, sin HTML incrustado. Los diagramas, si los hay, en un bloque ```mermaid.
+- No respondas en JSON: la salida de esta tarea es el documento."#;
+
+/// "Read these repository documents and write how the system fits together."
+///
+/// A synthesis, not a survey: its stdin is the grounded documents and it has no checkout, which is
+/// the constraint the whole prompt is built around — see [`synthesize_workspace_doc`]. The rule it
+/// exists to enforce is that an integration nobody documented is reported as unknown rather than
+/// assumed, because a plausible architecture diagram is worse than an incomplete one.
+pub const DEFAULT_WORKSPACE_DOC_TEMPLATE: &str = r#"Eres un arquitecto de software escribiendo la página de arquitectura de un sistema formado por VARIOS repositorios. Por stdin recibes el nombre del espacio de trabajo, opcionalmente instrucciones adicionales del usuario, y después la documentación técnica ya generada de cada repositorio, una detrás de otra, separadas por una línea `=== DOCUMENTO DEL REPOSITORIO: <nombre> ===`.
+
+Tu tarea: explicar qué resuelven esos repositorios JUNTOS y cómo están integrados entre sí. Los cruzas, no los repites.
+
+=== DE DÓNDE SALE LO QUE ESCRIBES ===
+Esta ejecución NO tiene código delante: no hay repositorio en tu directorio de trabajo, no tienes herramientas para leer archivos y no puedes comprobar nada por tu cuenta. Todo lo que afirmes tiene que estar dicho en alguno de los documentos que llegan por stdin.
+- Respalda cada afirmación que no sea evidente nombrando su origen: publica en la cola `pagos.creados` (documento de `pagos-api`).
+- Una integración que ningún documento menciona NO existe. No la deduzcas del nombre del repositorio, del stack, ni de cómo suelen montarse estos sistemas. `auth-service` y `web-portal` no se hablan porque sea lo habitual: se hablan si algún documento lo dice.
+- Cruza las tablas de configuración, las de integraciones y las listas de egreso de red de cada documento: ahí es donde están las conexiones reales, porque una variable que guarda la URL de otro servicio ES la integración.
+- Las secciones «Lo que no se pudo determinar» de cada documento son tu mejor fuente de huecos: lo que un repositorio no supo explicar de sí mismo rara vez lo aclara el de al lado.
+- Un documento pudo llegar recortado por longitud, y verás la marca al final. Un documento recortado, uno que se corte a media frase, o un repositorio al que otros nombran pero cuyo documento no llegó, van a «Huecos» tal cual. No completes lo que falta.
+- Si solo llega un documento, dilo: la página se limita entonces a la frontera y a los sistemas externos, y no le inventas compañeros.
+
+=== LOS TRES NIVELES DE CONFIANZA ===
+Toda integración que describas lleva uno, y son la parte más útil de esta página:
+- **Confirmada** — los dos documentos la cuentan: el que llama dice que llama, y el que recibe describe el endpoint, la cola o la tabla por donde le llega.
+- **Declarada por un lado** — solo uno de los dos la menciona. Es la más frecuente y la más informativa: casi siempre significa que el otro lado no sabe que alguien depende de él.
+- **Sin confirmar** — la sugieren un nombre, una variable de configuración o una URL suelta, pero ningún documento la describe. Va redactada como pregunta, nunca como hecho.
+
+=== QUÉ NO ES ESTA PÁGINA ===
+No es la suma de los documentos que recibes. Todo lo que vive dentro de un solo repositorio —sus variables de entorno, cómo se levanta en local, sus migraciones, su pipeline— YA está en la página de ese repositorio y aquí sobra. Menciona un detalle interno solo cuando explique una relación entre componentes: una variable de configuración importa aquí si es la URL con la que un servicio encuentra a otro.
+
+=== ESTRUCTURA ===
+Devuelve exactamente estas secciones, en este orden y con estos títulos.
+
+## Qué resuelve el sistema
+Entre dos y cinco frases: qué problema cubren estos repositorios en conjunto, y qué se puede hacer con el sistema entero que no se puede hacer con ninguna de sus partes por separado. Aquí no va ninguna tecnología.
+
+## Frontera y actores
+- Qué queda DENTRO: los componentes que este espacio de trabajo construye y despliega.
+- Qué queda FUERA pero es imprescindible: proveedores de identidad, pasarelas de pago, ERPs, colas gestionadas, APIs de terceros. Nombra cada uno y di quién depende de él.
+- Quién lo usa: los actores humanos o automáticos (usuario final, back office, tarea programada, otro sistema) y por dónde entran.
+
+## Componentes
+Una tabla con una fila por repositorio: Componente | Responsabilidad | Stack | Cómo se expone. La responsabilidad es una frase con lo que ese componente decide y que no decide nadie más. Si dos filas acaban diciendo lo mismo, no las maquilles: llévalo a «Riesgos y acoplamiento».
+
+## Mapa del sistema
+El diagrama Mermaid y, debajo, entre una y tres frases que lean el dibujo en voz alta.
+
+## Integraciones
+La sección central de esta página. Empieza por una tabla: Origen | Destino | Protocolo | Contrato | Autenticación | Confianza.
+- «Origen» y «Destino» son componentes o sistemas externos del mapa, con el nombre exacto.
+- «Protocolo»: HTTP/REST, gRPC, cola o tópico (con su nombre), base de datos compartida, archivo, webhook, SDK.
+- «Contrato»: qué se intercambia — el recurso, la ruta, el evento, la tabla. Si un documento da el nombre literal, cópialo tal cual.
+- «Autenticación»: cómo se identifica el origen ante el destino (token de servicio, OAuth, clave de API, red privada). Si ningún documento lo dice, escribe «No documentada». Eso es un hallazgo, no un hueco que rellenar de tu cosecha.
+- «Confianza»: Confirmada, Declarada por un lado, o Sin confirmar.
+Debajo de la tabla, un párrafo corto por cada integración que no sea evidente: qué dispara la llamada, si es síncrona o asíncrona, y qué ocurre cuando el destino no responde (esto último solo si algún documento lo cuenta).
+
+## Flujos extremo a extremo
+Entre uno y tres escenarios, los que de verdad atraviesan varios componentes. Por cada uno, un `###` con el nombre del escenario y una lista numerada de pasos; cada paso empieza nombrando el componente que actúa y dice qué entrega al siguiente. Marca en el propio paso cuándo el flujo se apoya en una integración «Sin confirmar»: ahí es donde se rompe la explicación.
+
+## Datos compartidos
+Dónde vive cada dato que necesita más de un componente. Por cada almacén: motor, quién escribe y quién lee. Si dos componentes escriben en la misma tabla, dilo aquí y llévalo también a «Riesgos y acoplamiento». Si cada repositorio tiene su propio almacén y no se comparte nada, dilo en una frase y sigue.
+
+## Asuntos transversales
+Cómo se resuelven en TODO el sistema —y sobre todo dónde NO se resuelven igual— la identidad y autenticación de usuario, la configuración y los secretos, la observabilidad (logs, trazas, métricas) y el versionado y despliegue coordinado. Las diferencias entre componentes son lo interesante: si dos servicios validan el token de forma distinta, eso es el contenido de esta sección.
+
+## Riesgos y acoplamiento
+Lo que hace difícil cambiar este sistema, según lo que dicen los documentos: puntos únicos de fallo, componentes que hay que desplegar a la vez, contratos sin versionar, dependencias circulares, un almacén con varios escritores, responsabilidades duplicadas. Cada riesgo en dos frases: qué es, y qué se rompería. No rellenes con riesgos genéricos de arquitectura; si no se ve en estos documentos, no va.
+
+## Huecos
+Obligatoria. Las integraciones sin confirmar, los componentes cuyo documento no explica con quién hablan, los repositorios de los que no llegó documento o llegó recortado, y las contradicciones entre dos documentos (nómbralos a los dos). Formula cada hueco como una pregunta concreta que alguien pueda responder: ¿`pagos-api` expone algún endpoint para `web-portal`, o la llamada pasa por la pasarela? Si de verdad no hay huecos, escribe «Ninguno», pero es raro: repásalo antes.
+
+=== EL DIAGRAMA ===
+- Un único bloque cercado con ```mermaid. Azure DevOps lo dibuja al publicar la página.
+- Empieza por `flowchart LR`.
+- Identificadores cortos, sin puntos, espacios ni guiones; el nombre real va en la etiqueta. Pon SIEMPRE la etiqueta entre comillas: los paréntesis, los dos puntos y las barras sin comillas son lo que rompe el diagrama.
+- Formas: paréntesis con corchetes para los actores, corchetes para los componentes del sistema, corchetes con paréntesis para los almacenes de datos, y llaves dobles para los sistemas externos, como en el ejemplo de abajo.
+- Los componentes que construye este espacio de trabajo van dentro de un `subgraph` que representa la frontera del sistema. Actores, terceros y almacenes externos quedan fuera.
+- Una flecha por cada fila de la tabla de integraciones, etiquetada con el protocolo. Las «Sin confirmar» van con flecha discontinua (`-.->`) y su etiqueta lo dice.
+- Si pasas de unos quince nodos, agrupa por dominio en varios subgrafos antes que dibujar una maraña.
+- El diagrama no añade ninguna flecha que no esté en la tabla, ni la tabla ninguna que falte en el diagrama.
+
+Ejemplo de la forma esperada:
+```mermaid
+flowchart LR
+  cliente(["Cliente"])
+  subgraph sistema["Plataforma de pagos"]
+    web["web-portal"]
+    api["pagos-api"]
+  end
+  pasarela{{"Pasarela externa"}}
+  bd[("PostgreSQL pagos")]
+  cliente --> web
+  web -->|HTTP/REST| api
+  api -->|SDK| pasarela
+  api -->|SQL| bd
+  web -.->|sin confirmar| bd
+```
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con el documento en Markdown. Nada antes, nada después, y no envuelvas el documento entero en un bloque de código; el bloque ```mermaid del mapa sí va dentro, como parte del documento.
+- Empieza directamente por `## Qué resuelve el sistema`. NO pongas un título de nivel 1: la página de la wiki ya lleva su nombre en la ruta y un encabezado de nivel 1 en el cuerpo lo duplica.
+- Usa los títulos de sección tal cual aparecen arriba, con `##`. Dentro de una sección puedes usar `###`.
+- Markdown que Azure DevOps entiende: encabezados, listas, tablas, negrita, código en línea y bloques cercados. Nada de HTML.
+- Toda fila de tabla empieza y termina con `|`, y la cabecera lleva debajo su línea de guiones. Una celda sin dato se escribe con un guion, y ninguna celda lleva saltos de línea.
+- Nombra los repositorios exactamente como llegan en la línea `=== DOCUMENTO DEL REPOSITORIO: <nombre> ===`, siempre como código en línea.
+- Escribe SIEMPRE en español, salvo que las instrucciones adicionales pidan otro idioma.
+
+=== REVISIÓN ANTES DE RESPONDER ===
+Repasa el documento y corrígelo si falla algo de esto: ¿hay alguna flecha del diagrama que no esté en la tabla de integraciones, o al revés? ¿queda alguna integración sin nivel de confianza? ¿afirmas algo de un componente que su propio documento no dice? ¿has repetido cómo se instala o se levanta un repositorio? ¿queda algún «probablemente», «suele» o «por lo general» que en realidad es una suposición tuya disfrazada? Si no puedes señalar qué documento respalda una frase, bórrala o conviértela en una pregunta de «Huecos»."#;
+
+/// How much of the per-repository documents the workspace synthesis is fed.
+///
+/// Generous, because this is the one input the synthesis has: it cannot read the code, so a
+/// document truncated in half is a repository it will describe from its first heading. Six full
+/// technical documents fit comfortably; a workspace with twenty repositories is a workspace whose
+/// architecture page was never going to be one page anyway.
+pub const MAX_DOC_SYNTHESIS_CHARS: usize = 200_000;
+
+/// Which document is being written, which decides what "documented" even means.
+///
+/// A repository document is *grounded*: it reads the code and describes one thing in depth. A
+/// workspace document is a *synthesis*: it reads the repository documents and describes what
+/// happens between them. Neither prompt is a longer version of the other, and neither run has the
+/// other's inputs — see [`synthesize_workspace_doc`] for why the workspace one cannot read code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DocScope {
+    Repo,
+    Workspace,
+}
+
+/// Writes the technical documentation for one repository, by reading it.
+///
+/// The counterpart of the review runs: same grounding, opposite direction — instead of judging a
+/// requirement against the code, it describes the code so somebody can operate and change it.
+pub async fn generate_repo_doc(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    repo_name: &str,
+    instructions: &str,
+    contexts: &[(String, String)],
+    allowed_tools: &[String],
+    cwd: &str,
+    prompt_template: &str,
+    mcp_config_path: Option<&str>,
+) -> Result<AiRun, String> {
+    let mut stdin_payload = format!("REPOSITORIO A DOCUMENTAR: {repo_name}\n\n");
+    if !contexts.is_empty() {
+        stdin_payload.push_str("CONTEXTO DEL PROYECTO:\n");
+        for (name, content) in contexts {
+            stdin_payload.push_str(&format!("- {name}: {content}\n"));
+        }
+        stdin_payload.push('\n');
+    }
+    if !instructions.trim().is_empty() {
+        stdin_payload.push_str(&format!("INSTRUCCIONES ADICIONALES DEL USUARIO:\n{}\n\n", instructions.trim()));
+    }
+    stdin_payload.push_str(
+        "El repositorio está en tu directorio de trabajo. Léelo antes de escribir: todo lo que \
+         afirmes tiene que salir de un archivo que exista.",
+    );
+
+    let prompt = match prompt_template.trim().is_empty() {
+        false => prompt_template,
+        true => DEFAULT_REPO_DOC_TEMPLATE,
+    };
+
+    let mut inv = AiInvocation::new(prompt, &stdin_payload);
+    inv.model = model;
+    inv.allowed_tools = allowed_tools;
+    inv.cwd = Some(cwd);
+    inv.mcp_config_path = mcp_config_path;
+    run(engine, binary, inv).await
+}
+
+/// Writes the workspace document from the repository documents already generated.
+///
+/// **This run reads no code, and that is structural rather than a shortcut.** No single engine run
+/// can see two repositories — `--add-dir` exists on one of the CLIs this app dispatches to, under a
+/// different name on another, and not at all on the hosted ones — so a run pointed at one checkout
+/// would describe the integration between six services from inside one of them. Feeding it the six
+/// grounded documents instead is the one shape that is honest about what it knows, and the prompt
+/// says so: an integration no document mentions is reported as unclear, not invented.
+pub async fn synthesize_workspace_doc(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    workspace_name: &str,
+    instructions: &str,
+    per_repo: &[(String, String)],
+    prompt_template: &str,
+) -> Result<AiRun, String> {
+    if per_repo.is_empty() {
+        return Err("No hay documentos de repositorio con los que armar el del workspace".to_string());
+    }
+
+    let mut stdin_payload = format!("ESPACIO DE TRABAJO: {workspace_name}\n\n");
+    if !instructions.trim().is_empty() {
+        stdin_payload.push_str(&format!("INSTRUCCIONES ADICIONALES DEL USUARIO:\n{}\n\n", instructions.trim()));
+    }
+
+    // Budgeted per repository, never over the concatenation.
+    //
+    // Capping the assembled payload is the obvious thing and it is silently wrong: the documents
+    // are appended in order, so a workspace whose first four repositories are verbose loses the
+    // last two entirely — and the synthesis then describes, confidently and with no gap in sight,
+    // a system that is missing two of its services. An even share truncates every document a
+    // little, which the model can see, instead of deleting some completely, which it cannot.
+    let share = MAX_DOC_SYNTHESIS_CHARS / per_repo.len().max(1);
+    for (name, document) in per_repo {
+        stdin_payload.push_str(&format!("\n\n=== DOCUMENTO DEL REPOSITORIO: {name} ===\n\n"));
+        match document.chars().count() > share {
+            false => stdin_payload.push_str(document),
+            true => {
+                stdin_payload.extend(document.chars().take(share));
+                stdin_payload.push_str(
+                    "\n\n[…documento recortado por longitud. Lo que falta no está disponible en \
+                     esta ejecución: no supongas su contenido.]",
+                );
+            }
+        }
+        stdin_payload.push('\n');
+    }
+    let truncated = stdin_payload;
+
+    let prompt = match prompt_template.trim().is_empty() {
+        false => prompt_template,
+        true => DEFAULT_WORKSPACE_DOC_TEMPLATE,
+    };
+
+    // No tools and no working directory: there is nothing to read, and offering file access would
+    // only let it wander into whichever repository happened to be the process's cwd.
+    let mut inv = AiInvocation::new(prompt, &truncated);
+    inv.model = model;
+    run(engine, binary, inv).await
+}
+
 /// Asks the model to fix JSON it just produced badly, and returns its second attempt.
 ///
 /// Long single-line JSON is where the engines slip: six INVEST verdicts with real notes run to a

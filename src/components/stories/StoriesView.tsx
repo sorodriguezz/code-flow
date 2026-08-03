@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { CircleHelp, ClipboardList, ScanSearch } from "lucide-react";
+import { BookText, CircleHelp, ClipboardList, ScanSearch } from "lucide-react";
 import { StoryBatchList } from "./StoryBatchList";
 import { StoryBatchDetail } from "./StoryBatchDetail";
 import { StoryTargetPanel } from "./StoryTargetPanel";
 import { NewStoryBatchModal } from "./NewStoryBatchModal";
 import { WorkItemReviewView } from "./WorkItemReviewView";
+import { WikiView } from "./WikiView";
 import { ActivePill } from "../common/ActivePill";
 import { StoriesHelpModal } from "./StoriesHelpModal";
 import { CARD } from "../api/panelChrome";
@@ -17,16 +18,19 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 
 /**
- * The two directions this workspace runs in.
+ * The three directions this section runs in.
  *
- * Peers, not a screen and a detour: one derives a backlog from documentation, the other takes a
- * work item that already exists and asks what it is missing. They share the workspace, the Azure
- * connection and the repositories, and a team moves between them within one refinement session —
- * which is what makes them tabs rather than two places to navigate to.
+ * Peers, not a screen and two detours. **Redactar** derives a backlog from documentation.
+ * **Revisar** takes a work item that already exists and asks what it is missing. **Wiki** runs the
+ * other way round again — it reads the code and writes the documentation the first two assume
+ * somebody wrote. They share the workspace, the Azure connection and the repositories, and a team
+ * moves between them inside one session, which is what makes them tabs rather than three places to
+ * navigate to.
  */
 const MODES = [
   { id: "batches" as const, labelKey: "stories.tabBatches" as const, icon: ClipboardList },
   { id: "review" as const, labelKey: "stories.tabReview" as const, icon: ScanSearch },
+  { id: "wiki" as const, labelKey: "stories.tabWiki" as const, icon: BookText },
 ];
 
 const LIST_MIN = 240;
@@ -141,7 +145,9 @@ export function StoriesView() {
           </button>
         </div>
 
-        {mode === "review" ? (
+        {mode === "wiki" ? (
+          <WikiView />
+        ) : mode === "review" ? (
           <WorkItemReviewView />
         ) : (
           <div className="flex min-h-0 flex-1 overflow-hidden">

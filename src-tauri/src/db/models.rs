@@ -182,6 +182,39 @@ pub struct StoryBatch {
     pub updated_at: String,
 }
 
+/// One page of generated technical documentation.
+///
+/// See the `doc_pages` table comment for why the two scopes share a table and what `project_id`
+/// being absent actually means.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocPage {
+    pub id: String,
+    pub workspace_id: String,
+    /// The repository this documents. `None` for a workspace-scope document.
+    pub project_id: Option<String>,
+    /// `repo` | `workspace`.
+    pub scope: String,
+    pub title: String,
+    /// Markdown, which is what a wiki page is.
+    pub content: String,
+    pub ado_org: String,
+    pub ado_project: String,
+    pub wiki_id: String,
+    pub wiki_name: String,
+    /// Wiki-absolute, e.g. `/Servicios/Checkout API`.
+    pub page_path: String,
+    pub published_at: String,
+    pub published_url: String,
+    pub engine: String,
+    pub model: String,
+    pub version: String,
+    /// `draft` | `generating` | `ready` | `error`.
+    pub status: String,
+    pub last_error: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// One saved review of a work item that already exists on the board.
 ///
 /// A record of a session, not a live view of the item: the story on Azure moves on and this does

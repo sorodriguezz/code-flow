@@ -62,7 +62,7 @@ import type {
   WorkItemReviewRow,
   WorkItemReviewStage,
 } from "../../types/domain";
-import type { AdoWikiPageRef, AdoWorkItemRef } from "../../types/domain";
+import type { AdoWikiPageRef, AdoWorkItemRef, DocPage, DocResult, DocScope } from "../../types/domain";
 import type { FindingLocation } from "../parseAnalysis";
 
 // ---------- app lifecycle ----------
@@ -1376,6 +1376,65 @@ export const adoCreateChildTasks = (input: {
   workItemType: string;
   tasks: { title: string; detail: string }[];
 }) => invoke<AdoWorkItemRef[]>("ado_create_child_tasks", input);
+
+// ---------- technical documentation ----------
+
+export const listDocPages = (workspaceId: string) => invoke<DocPage[]>("list_doc_pages", { workspaceId });
+
+export const createDocPage = (input: {
+  workspaceId: string;
+  /** The repository being documented; omit for a workspace-scope document. */
+  projectId?: string;
+  scope: DocScope;
+  title: string;
+}) => invoke<DocPage>("create_doc_page", input);
+
+export const setDocPageContent = (id: string, content: string) =>
+  invoke<void>("set_doc_page_content", { id, content });
+
+export const setDocPageTitle = (id: string, title: string) => invoke<void>("set_doc_page_title", { id, title });
+
+export const setDocPageTarget = (input: {
+  id: string;
+  org: string;
+  project: string;
+  wikiId: string;
+  wikiName: string;
+  pagePath: string;
+}) => invoke<void>("set_doc_page_target", input);
+
+export const deleteDocPage = (id: string) => invoke<void>("delete_doc_page", { id });
+
+/** Publishes a stored document to its configured wiki and records that it landed. */
+export const publishDocPage = (id: string) => invoke<AdoWikiPageRef>("publish_doc_page", { id });
+
+/**
+ * Generates a document's content by reading the code.
+ *
+ * For `workspace` scope this runs once per repository and then a synthesis pass — no single engine
+ * run can see two checkouts, so the architecture document is written from the grounded ones.
+ */
+export const generateDocPage = (input: {
+  workspaceId: string;
+  docId: string;
+  scope: DocScope;
+  projectIds: string[];
+  instructions: string;
+  useContext: boolean;
+  runId: string;
+  agent?: { provider: string; model: string };
+}) =>
+  invoke<DocResult>("generate_doc_page", {
+    workspaceId: input.workspaceId,
+    docId: input.docId,
+    scope: input.scope,
+    projectIds: input.projectIds,
+    instructions: input.instructions,
+    useContext: input.useContext,
+    runId: input.runId,
+    agentProvider: input.agent?.provider,
+    agentModel: input.agent?.model,
+  });
 
 /** Publishes one page to a wiki. Azure DevOps today; a second host gets its own command. */
 export const adoPublishWikiPage = (input: {

@@ -606,6 +606,336 @@ pub async fn review_work_item(
     })
 }
 
+// ---------- technical documentation ----------
+
+/// A generated document, plus what produced it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DocResult {
+    pub content: String,
+    pub engine: String,
+    pub model: String,
+    pub version: String,
+    pub elapsed_ms: u64,
+    /// How many repositories were actually read. For a workspace document this is how many
+    /// grounded passes fed the synthesis, which is the difference between an architecture page and
+    /// an opinion.
+    pub repos_read: usize,
+}
+
+#[tauri::command]
+pub fn list_doc_pages(
+    db: State<Db>,
+    workspace_id: String,
+) -> Result<Vec<crate::db::models::DocPage>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_doc_pages(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// Creates an empty document. Its content arrives when the generation runs, or when the user types.
+///
+/// The scope invariant is enforced here because the schema cannot enforce it (this database uses no
+/// CHECK constraints) and getting it wrong one way is silently destructive: a workspace document
+/// that carried a `project_id` would be cascade-deleted the day somebody removes that one
+/// repository from the workspace, taking the architecture page with it.
+#[tauri::command]
+pub fn create_doc_page(
+    db: State<Db>,
+    workspace_id: String,
+    project_id: Option<String>,
+    scope: String,
+    title: String,
+) -> Result<crate::db::models::DocPage, String> {
+    let project_id = match scope.as_str() {
+        "repo" => Some(
+            project_id
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| "Un documento de repositorio tiene que decir cuál".to_string())?,
+        ),
+        "workspace" => None,
+        other => return Err(format!("Alcance de documento desconocido: {other}")),
+    };
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::create_doc_page(&conn, &workspace_id, project_id.as_deref(), &scope, &title)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_doc_page_content(db: State<Db>, id: String, content: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_doc_page_content(&conn, &id, &content, "ready", "").map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_doc_page_title(db: State<Db>, id: String, title: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_doc_page_title(&conn, &id, &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn set_doc_page_target(
+    db: State<Db>,
+    id: String,
+    org: String,
+    project: String,
+    wiki_id: String,
+    wiki_name: String,
+    page_path: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_doc_page_target(&conn, &id, &org, &project, &wiki_id, &wiki_name, &page_path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_doc_page(db: State<Db>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::delete_doc_page(&conn, &id).map_err(|e| e.to_string())
+}
+
+/// Publishes a document to its wiki and records that it landed.
+#[tauri::command]
+pub async fn publish_doc_page(
+    db: State<'_, Db>,
+    id: String,
+) -> Result<boards::AdoWikiPageRef, String> {
+    let page = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_doc_page(&conn, &id).map_err(|e| e.to_string())?
+    }
+    .ok_or_else(|| "Ese documento ya no existe".to_string())?;
+
+    if page.ado_org.trim().is_empty()
+        || page.ado_project.trim().is_empty()
+        || page.wiki_id.trim().is_empty()
+        || page.page_path.trim().is_empty()
+    {
+        return Err("Elige a qué wiki y a qué ruta publicar antes de publicar".to_string());
+    }
+    if page.content.trim().is_empty() {
+        return Err("Este documento está vacío".to_string());
+    }
+
+    let pat = pat_for_org(&page.ado_org)?;
+    let published = boards::put_wiki_page(
+        &page.ado_org,
+        &page.ado_project,
+        &page.wiki_id,
+        &page.page_path,
+        &page.content,
+        &pat,
+    )
+    .await?;
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::mark_doc_page_published(&conn, &id, &published.url).map_err(|e| e.to_string())?;
+    Ok(published)
+}
+
+/// Generates a document's content by reading the code.
+///
+/// Two shapes behind one command, because the user makes one choice ("document this repo" /
+/// "document how the workspace fits together") and the split is an artefact of how the engines work:
+///
+/// - **repo** — one grounded run in that repository's checkout.
+/// - **workspace** — one grounded run *per* repository, then a synthesis run over their output. No
+///   single run can see two checkouts (see [`ai::synthesize_workspace_doc`]), so the alternative
+///   would be describing six services from inside one of them.
+///
+/// The whole thing is one run scope, so the log reads as one job and a single Stop halts all of it.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_doc_page(
+    app: AppHandle,
+    db: State<'_, Db>,
+    workspace_id: String,
+    doc_id: String,
+    scope: ai::DocScope,
+    project_ids: Vec<String>,
+    instructions: String,
+    use_context: bool,
+    run_id: Option<String>,
+    agent_provider: Option<String>,
+    agent_model: Option<String>,
+) -> Result<DocResult, String> {
+    if project_ids.is_empty() {
+        return Err("Elige al menos un repositorio que documentar".to_string());
+    }
+
+    let (projects, workspace_name) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut found = Vec::with_capacity(project_ids.len());
+        for id in &project_ids {
+            found.push(
+                queries::get_project(&conn, id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Ese repositorio ya no está en el espacio de trabajo".to_string())?,
+            );
+        }
+        // Named from the list rather than by id: there is no single-workspace read, and the list
+        // is a handful of rows. The name is only a label inside the prompt, so a workspace renamed
+        // mid-run costing nothing is exactly the right amount of care.
+        let name = queries::list_workspaces(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|w| w.id == workspace_id)
+            .map(|w| w.name)
+            .unwrap_or_default();
+        (found, name)
+    };
+
+    let paths: Vec<String> = projects.iter().map(|p| p.local_path.clone()).collect();
+    let _repo_leases = ai_locks::acquire_all(&paths)
+        .map_err(|at| format!("{}{}", ai_locks::BUSY_MARKER, projects[at].name))?;
+
+    let (contexts, mcps, skills, config, repo_template, workspace_template) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
+            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
+                load_ai_config_for(&conn, p, m)?
+            }
+            // Same routing as the review: both read a whole repository to say something about it.
+            _ => load_ai_config(&conn, AiTask::StoryVerify)?,
+        };
+        let repo_template =
+            queries::get_workspace_prompt(&conn, &workspace_id, "repo_doc").map_err(|e| e.to_string())?;
+        let workspace_template = queries::get_workspace_prompt(&conn, &workspace_id, "workspace_doc")
+            .map_err(|e| e.to_string())?;
+        (contexts, mcps, skills, config, repo_template, workspace_template)
+    };
+
+    let enabled_contexts: Vec<(String, String)> = match use_context {
+        true => contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)).collect(),
+        false => Vec::new(),
+    };
+    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
+
+    // Status only — emphatically not the content. Blanking the body here and restoring it in the
+    // failure arm was the first shape of this, and it meant stopping a regeneration replaced a
+    // document the user had written, and possibly already published, with nothing.
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let _ = queries::set_doc_page_status(&conn, &doc_id, "generating", "");
+    }
+
+    let mut answered_by = String::new();
+    let started = std::time::Instant::now();
+    let result: Result<String, String> = crate::ai_runs::scoped(app, run_id, async {
+        let mut per_repo: Vec<(String, String)> = Vec::with_capacity(projects.len());
+        for project in &projects {
+            let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
+            let run = ai::generate_repo_doc(
+                &*config.engine,
+                &config.binary,
+                &config.model,
+                &project.name,
+                &instructions,
+                &enabled_contexts,
+                &config.tools,
+                &project.local_path,
+                &repo_template,
+                mcp_config_path.as_deref(),
+            )
+            .await?;
+            if let Some(model) = run.model {
+                answered_by = model;
+            }
+            per_repo.push((project.name.clone(), strip_code_fence(&run.text)));
+        }
+
+        match scope {
+            // One repository asked for, one document produced — no synthesis to do, and running one
+            // would only paraphrase what the grounded pass already said better.
+            //
+            // Joined rather than headed: the template forbids a level-1 heading (the wiki takes the
+            // page title from its path), so stamping `# {name}` here would contradict the contract
+            // the document was written to. The UI only ever sends one repository for this scope
+            // anyway — the join is what keeps a hand-made call from silently losing documents.
+            ai::DocScope::Repo => {
+                Ok(per_repo.into_iter().map(|(_, document)| document).collect::<Vec<_>>().join("\n\n---\n\n"))
+            }
+            ai::DocScope::Workspace => {
+                let run = ai::synthesize_workspace_doc(
+                    &*config.engine,
+                    &config.binary,
+                    &config.model,
+                    &workspace_name,
+                    &instructions,
+                    &per_repo,
+                    &workspace_template,
+                )
+                .await?;
+                if let Some(model) = run.model {
+                    answered_by = model;
+                }
+                Ok(strip_code_fence(&run.text))
+            }
+        }
+    })
+    .await;
+
+    let version = ai::engine_version(&*config.engine, &config.binary).await.unwrap_or_default();
+    let engine_label = config.engine.label().to_string();
+    let model = match answered_by.is_empty() {
+        true => config.model.clone(),
+        false => answered_by,
+    };
+
+    match result {
+        Ok(content) => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            queries::set_doc_page_content(&conn, &doc_id, &content, "ready", "")
+                .map_err(|e| e.to_string())?;
+            queries::set_doc_page_provenance(&conn, &doc_id, &engine_label, &model, &version)
+                .map_err(|e| e.to_string())?;
+            Ok(DocResult {
+                content,
+                engine: engine_label,
+                model,
+                version,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                repos_read: projects.len(),
+            })
+        }
+        Err(e) => {
+            // A cancelled run is not an error state for the row: the user stopped it, and whatever
+            // the document already said is still what it says. Only the status moves.
+            let cancelled = e.starts_with(crate::ai_runs::CANCELLED_MARKER);
+            let conn = db.0.lock().map_err(|err| err.to_string())?;
+            let _ = queries::set_doc_page_status(
+                &conn,
+                &doc_id,
+                if cancelled { "draft" } else { "error" },
+                if cancelled { "" } else { &e },
+            );
+            Err(e)
+        }
+    }
+}
+
+/// Markdown that arrived wrapped in a ```markdown fence, unwrapped.
+///
+/// The engines are told to answer with the document itself and mostly do, but a fenced answer is
+/// common enough that publishing it verbatim would put three backticks at the top of a wiki page.
+/// Only a fence that wraps the *whole* answer is removed — an inner code block is content.
+fn strip_code_fence(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else { return trimmed.to_string() };
+    let Some((first_line, body)) = rest.split_once('\n') else { return trimmed.to_string() };
+    // The opening fence may carry a language tag and nothing else; anything else means this is a
+    // code block that happens to start the document.
+    if !first_line.trim().chars().all(|c| c.is_alphanumeric() || c == '-' || c == '+') {
+        return trimmed.to_string();
+    }
+    match body.trim_end().strip_suffix("```") {
+        Some(inner) => inner.trim_end().to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
 // ---------- publishing a review back to the board ----------
 
 /// Writes the reviewed text back onto the work item it came from.

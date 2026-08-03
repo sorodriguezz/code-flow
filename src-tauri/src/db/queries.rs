@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use super::models::{
     ActivityLogEntry, AgentChain, AgentChainStep, AgentTask, ChainClaim, ChainDetail, ChainTemplate,
-    ChainTemplateStep, ChatConversationSummary, JobHistoryEntry, NewChainStep, NewProject, Project,
+    ChainTemplateStep, ChatConversationSummary, DocPage, JobHistoryEntry, NewChainStep, NewProject, Project,
     ReviewContext, ReviewRunDetail, ReviewRunSummary, StoryBatch, StoryBatchDetail, StoryDraft, Workspace,
     WorkspaceActivityEntry, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill, WorkItemReviewRow,
 };
@@ -269,6 +269,8 @@ pub fn workspace_prompt_default(kind: &str) -> &'static str {
         "work_item_bug_analyze" => crate::ai::DEFAULT_WORK_ITEM_BUG_ANALYZE_TEMPLATE,
         "work_item_criteria" => crate::ai::DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE,
         "work_item_tasks" => crate::ai::DEFAULT_WORK_ITEM_TASKS_TEMPLATE,
+        "repo_doc" => crate::ai::DEFAULT_REPO_DOC_TEMPLATE,
+        "workspace_doc" => crate::ai::DEFAULT_WORKSPACE_DOC_TEMPLATE,
         // The SDD/Harness pipeline stages reuse this per-workspace text store; they start empty
         // (no preconfig — the user defines them). The guide is static frontend content, not stored.
         "sdd_stages" => "",
@@ -1595,6 +1597,12 @@ pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
         "UPDATE story_batches SET status = 'draft', updated_at = ?1 WHERE status = 'generating'",
         params![now()],
     )?;
+    // Same reasoning for a document caught mid-generation. Its body is left alone: a run that had
+    // already written one is a run whose work is worth keeping.
+    conn.execute(
+        "UPDATE doc_pages SET status = 'draft', updated_at = ?1 WHERE status = 'generating'",
+        params![now()],
+    )?;
     Ok(())
 }
 
@@ -2243,6 +2251,182 @@ fn map_draft(row: &rusqlite::Row) -> rusqlite::Result<StoryDraft> {
 
 /// The workspace's batches, newest activity first — the same ordering the agent console's task
 /// list uses, so the two read the same way.
+// ---------- documentation pages ----------
+
+const DOC_PAGE_COLUMNS: &str = "id, workspace_id, project_id, scope, title, content, ado_org, \
+    ado_project, wiki_id, wiki_name, page_path, published_at, published_url, engine, model, \
+    version, status, last_error, created_at, updated_at";
+
+fn map_doc_page(row: &rusqlite::Row) -> rusqlite::Result<DocPage> {
+    Ok(DocPage {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        project_id: row.get(2)?,
+        scope: row.get(3)?,
+        title: row.get(4)?,
+        content: row.get(5)?,
+        ado_org: row.get(6)?,
+        ado_project: row.get(7)?,
+        wiki_id: row.get(8)?,
+        wiki_name: row.get(9)?,
+        page_path: row.get(10)?,
+        published_at: row.get(11)?,
+        published_url: row.get(12)?,
+        engine: row.get(13)?,
+        model: row.get(14)?,
+        version: row.get(15)?,
+        status: row.get(16)?,
+        last_error: row.get(17)?,
+        created_at: row.get(18)?,
+        updated_at: row.get(19)?,
+    })
+}
+
+/// The workspace's documents, newest first.
+///
+/// A stale `generating` is corrected on disk by `recover_after_restart`, not papered over here.
+/// Demoting it in memory as well was the first shape of this and it was worse than either option
+/// alone: the list said `draft` while `get_doc_page` — which the publish and generate commands both
+/// read — still said `generating`, so the row the user was looking at and the row being acted on
+/// disagreed about whether a run was in flight.
+pub fn list_doc_pages(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<DocPage>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {DOC_PAGE_COLUMNS} FROM doc_pages WHERE workspace_id = ?1 ORDER BY updated_at DESC"
+    ))?;
+    let rows = stmt.query_map(params![workspace_id], map_doc_page)?;
+    rows.collect()
+}
+
+/// Moves a document's status without touching its body.
+///
+/// Separate from [`set_doc_page_content`] because marking a row `generating` used to go through it
+/// with an empty string, which meant stopping a regeneration — or having it fail — replaced the
+/// document the user had written and possibly already published with nothing. A status is not a
+/// content edit, and the two must not share a write.
+pub fn set_doc_page_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    last_error: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE doc_pages SET status = ?2, last_error = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, status, last_error, now()],
+    )?;
+    Ok(())
+}
+
+pub fn get_doc_page(conn: &Connection, id: &str) -> rusqlite::Result<Option<DocPage>> {
+    conn.query_row(
+        &format!("SELECT {DOC_PAGE_COLUMNS} FROM doc_pages WHERE id = ?1"),
+        params![id],
+        map_doc_page,
+    )
+    .optional()
+}
+
+/// Creates an empty document. Its content arrives when the generation runs, or when the user types.
+///
+/// Separate from the generation for the same reason `create_story_batch` is: the row is what the
+/// user *chose to document*, and it has to survive a generation that failed — otherwise the only
+/// way to retry is to make the choice again.
+pub fn create_doc_page(
+    conn: &Connection,
+    workspace_id: &str,
+    project_id: Option<&str>,
+    scope: &str,
+    title: &str,
+) -> rusqlite::Result<DocPage> {
+    let id = Uuid::new_v4().to_string();
+    let stamp = now();
+    conn.execute(
+        "INSERT INTO doc_pages (id, workspace_id, project_id, scope, title, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+        params![id, workspace_id, project_id, scope, title, stamp],
+    )?;
+    Ok(get_doc_page(conn, &id)?.expect("the row was just inserted"))
+}
+
+/// Replaces a document's body. Used by both the generation and the editor.
+pub fn set_doc_page_content(
+    conn: &Connection,
+    id: &str,
+    content: &str,
+    status: &str,
+    last_error: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE doc_pages SET content = ?2, status = ?3, last_error = ?4, updated_at = ?5 \
+         WHERE id = ?1",
+        params![id, content, status, last_error, now()],
+    )?;
+    Ok(())
+}
+
+/// Stamps what generated a document. Split from the content write because a run that produced
+/// nothing still ran, and knowing which engine failed is worth as much as knowing which succeeded.
+pub fn set_doc_page_provenance(
+    conn: &Connection,
+    id: &str,
+    engine: &str,
+    model: &str,
+    version: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE doc_pages SET engine = ?2, model = ?3, version = ?4, updated_at = ?5 WHERE id = ?1",
+        params![id, engine, model, version, now()],
+    )?;
+    Ok(())
+}
+
+pub fn set_doc_page_title(conn: &Connection, id: &str, title: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE doc_pages SET title = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, title, now()],
+    )?;
+    Ok(())
+}
+
+/// Where this document publishes. Remembered per document — a team routinely puts its architecture
+/// page in one wiki and a service runbook in another.
+pub fn set_doc_page_target(
+    conn: &Connection,
+    id: &str,
+    org: &str,
+    project: &str,
+    wiki_id: &str,
+    wiki_name: &str,
+    page_path: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE doc_pages SET ado_org = ?2, ado_project = ?3, wiki_id = ?4, wiki_name = ?5, \
+         page_path = ?6, updated_at = ?7 WHERE id = ?1",
+        params![id, org, project, wiki_id, wiki_name, page_path, now()],
+    )?;
+    Ok(())
+}
+
+/// Records that the page reached the wiki. Kept apart from the target so "where it would go" and
+/// "where it actually went" can differ — which is exactly the state after the target is retargeted.
+///
+/// Clears `last_error` on the way: a document that failed to generate, was then fixed by hand and
+/// published is not a document with an error, and leaving the string would keep a red banner over
+/// a page that is live.
+pub fn mark_doc_page_published(conn: &Connection, id: &str, url: &str) -> rusqlite::Result<()> {
+    let stamp = now();
+    conn.execute(
+        "UPDATE doc_pages SET published_at = ?2, published_url = ?3, last_error = '', \
+         status = 'ready', updated_at = ?2 WHERE id = ?1",
+        params![id, stamp, url],
+    )?;
+    Ok(())
+}
+
+pub fn delete_doc_page(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM doc_pages WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 // ---------- work item reviews ----------
 
 const WORK_ITEM_REVIEW_COLUMNS: &str = "id, workspace_id, ado_org, work_item_id, work_item_type, \
@@ -3032,5 +3216,101 @@ mod tests {
         set_story_batch_status(&conn, &batch.id, "generating", "").unwrap();
         recover_after_restart(&conn).unwrap();
         assert_eq!(get_story_batch(&conn, &batch.id).unwrap().unwrap().batch.status, "draft");
+    }
+
+    /// The two scopes share a table, and `project_id` is what tells them apart: a repository
+    /// document names the repo it describes, a workspace one names none because its subject is
+    /// what happens *between* them. Both have to round-trip.
+    #[test]
+    fn a_document_remembers_its_scope_its_target_and_where_it_was_published() {
+        let (conn, project) = fixture();
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+
+        let repo_doc = create_doc_page(&conn, &workspace, Some(&project), "repo", "checkout-api").unwrap();
+        let system_doc = create_doc_page(&conn, &workspace, None, "workspace", "Arquitectura").unwrap();
+        assert_eq!(repo_doc.project_id.as_deref(), Some(project.as_str()));
+        assert_eq!(system_doc.project_id, None, "a workspace document documents no single repo");
+
+        set_doc_page_content(&conn, &repo_doc.id, "# checkout-api\n\nVariables…", "ready", "").unwrap();
+        set_doc_page_target(&conn, &repo_doc.id, "acme", "Plataforma", "wiki-1", "Plataforma.wiki", "/Servicios/Checkout")
+            .unwrap();
+        mark_doc_page_published(&conn, &repo_doc.id, "https://dev.azure.com/acme/_wiki").unwrap();
+
+        let stored = get_doc_page(&conn, &repo_doc.id).unwrap().unwrap();
+        assert!(stored.content.starts_with("# checkout-api"));
+        assert_eq!(stored.page_path, "/Servicios/Checkout");
+        assert_eq!(stored.wiki_name, "Plataforma.wiki");
+        assert!(!stored.published_at.is_empty());
+
+        // Newest first, and both scopes in one list.
+        let listed = list_doc_pages(&conn, &workspace).unwrap();
+        assert_eq!(listed.len(), 2);
+
+        delete_doc_page(&conn, &system_doc.id).unwrap();
+        assert_eq!(list_doc_pages(&conn, &workspace).unwrap().len(), 1);
+    }
+
+    /// A row still claiming to be mid-generation after a restart would show a spinner nothing is
+    /// going to stop, so the recovery pass demotes it **on disk** — and the document it had already
+    /// written survives that, because a killed run's work is still work.
+    #[test]
+    fn a_generating_document_is_demoted_on_restart_without_losing_its_body() {
+        let (conn, project) = fixture();
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+        let page = create_doc_page(&conn, &workspace, Some(&project), "repo", "api").unwrap();
+        set_doc_page_content(&conn, &page.id, "# api\n\nLo que alcanzó a escribir", "ready", "").unwrap();
+        set_doc_page_status(&conn, &page.id, "generating", "").unwrap();
+
+        // Before recovery the row tells the truth rather than a convenient lie: the list and
+        // `get_doc_page` have to agree about whether a run is in flight.
+        assert_eq!(list_doc_pages(&conn, &workspace).unwrap()[0].status, "generating");
+
+        recover_after_restart(&conn).unwrap();
+        let recovered = get_doc_page(&conn, &page.id).unwrap().unwrap();
+        assert_eq!(recovered.status, "draft");
+        assert!(recovered.content.contains("Lo que alcanzó a escribir"));
+    }
+
+    /// The bug this guards: marking a row `generating` used to go through the content write with an
+    /// empty string, so stopping a regeneration replaced a document the user had written — and
+    /// possibly already published — with nothing.
+    #[test]
+    fn starting_and_failing_a_generation_never_touches_the_document() {
+        let (conn, project) = fixture();
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+        let page = create_doc_page(&conn, &workspace, Some(&project), "repo", "api").unwrap();
+        set_doc_page_content(&conn, &page.id, "# api\n\nDocumento publicado", "ready", "").unwrap();
+
+        set_doc_page_status(&conn, &page.id, "generating", "").unwrap();
+        set_doc_page_status(&conn, &page.id, "error", "el motor falló").unwrap();
+
+        let after = get_doc_page(&conn, &page.id).unwrap().unwrap();
+        assert!(after.content.contains("Documento publicado"), "a failed run must not erase the page");
+        assert_eq!(after.last_error, "el motor falló");
+    }
+
+    /// Documents belong to the repository they describe: dropping the repo from the workspace has
+    /// to take its document with it rather than leave one pointing at nothing.
+    #[test]
+    fn deleting_a_repository_takes_its_document_with_it() {
+        let (conn, project) = fixture();
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+        create_doc_page(&conn, &workspace, Some(&project), "repo", "api").unwrap();
+        create_doc_page(&conn, &workspace, None, "workspace", "Arquitectura").unwrap();
+
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        conn.execute("DELETE FROM projects WHERE id = ?1", params![project]).unwrap();
+
+        let left = list_doc_pages(&conn, &workspace).unwrap();
+        assert_eq!(left.len(), 1, "the workspace document survives; the repository one does not");
+        assert_eq!(left[0].scope, "workspace");
     }
 }

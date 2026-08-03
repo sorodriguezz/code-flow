@@ -872,6 +872,46 @@ export type WorkItemReview =
   | { stage: "criteria"; criteria: ProposedCriterion[] }
   | { stage: "tasks"; tasks: ProposedTask[] };
 
+/** Which document is being written — see `DocScope` in the Rust AI layer. */
+export type DocScope = "repo" | "workspace";
+
+/** One page of generated technical documentation, as stored. */
+export interface DocPage {
+  id: string;
+  workspace_id: string;
+  /** The repository it documents. `null` for a workspace-scope document. */
+  project_id: string | null;
+  scope: DocScope;
+  title: string;
+  /** Markdown, which is what a wiki page is. */
+  content: string;
+  ado_org: string;
+  ado_project: string;
+  wiki_id: string;
+  wiki_name: string;
+  page_path: string;
+  published_at: string;
+  published_url: string;
+  engine: string;
+  model: string;
+  version: string;
+  /** `draft` | `generating` | `ready` | `error`. */
+  status: string;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A finished generation, plus what produced it. */
+export interface DocResult {
+  content: string;
+  engine: string;
+  model: string;
+  version: string;
+  elapsed_ms: number;
+  repos_read: number;
+}
+
 /** A work item the app just wrote to or created. */
 export interface AdoWorkItemRef {
   id: number;

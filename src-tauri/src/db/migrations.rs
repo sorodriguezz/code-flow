@@ -428,6 +428,58 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_work_item_reviews_workspace
             ON work_item_reviews(workspace_id, updated_at DESC);
 
+        -- One page of generated technical documentation, before and after the user edits it.
+        --
+        -- `project_id` is what makes the two scopes one table rather than two. A **repository**
+        -- document names the repo it describes; a **workspace** document names none, because its
+        -- subject is precisely what happens *between* the repositories — how they integrate and
+        -- what they solve together. That is not a missing project_id, it is a different question,
+        -- so `scope` says which on the row rather than leaving the reader to infer it from a null.
+        --
+        -- `content` is the document as it stands: generated once, then edited by hand, with no
+        -- record of which words came from which. Keeping the model's original alongside was
+        -- considered and dropped — a diff nobody reads costs a column and invites the question of
+        -- which one publishes.
+        --
+        -- The publish target lives here rather than on the workspace because a team routinely puts
+        -- its architecture page in one wiki and a service's runbook in another, and because the
+        -- page path is per-document by nature.
+        CREATE TABLE IF NOT EXISTS doc_pages (
+            id            TEXT PRIMARY KEY,
+            workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- The repository this documents. Null for a workspace-scope document.
+            project_id    TEXT REFERENCES projects(id) ON DELETE CASCADE,
+            -- 'repo' | 'workspace'
+            scope         TEXT NOT NULL DEFAULT 'repo',
+            title         TEXT NOT NULL DEFAULT '',
+            -- Markdown, which is what an Azure DevOps wiki page is.
+            content       TEXT NOT NULL DEFAULT '',
+            -- Where it publishes. Empty until the user picks a target.
+            ado_org       TEXT NOT NULL DEFAULT '',
+            ado_project   TEXT NOT NULL DEFAULT '',
+            wiki_id       TEXT NOT NULL DEFAULT '',
+            wiki_name     TEXT NOT NULL DEFAULT '',
+            -- Wiki-absolute, e.g. '/Servicios/Checkout API'.
+            page_path     TEXT NOT NULL DEFAULT '',
+            published_at  TEXT NOT NULL DEFAULT '',
+            published_url TEXT NOT NULL DEFAULT '',
+            -- What generated it. Snapshotted like `story_batches.model`: documentation is only
+            -- worth what the engine that read the code was, and re-reading today's routing would
+            -- rewrite what a page published last month says about itself.
+            engine        TEXT NOT NULL DEFAULT '',
+            model         TEXT NOT NULL DEFAULT '',
+            version       TEXT NOT NULL DEFAULT '',
+            -- 'draft' | 'generating' | 'ready' | 'error'. `generating` is only meaningful inside
+            -- the session that set it; a row still saying so at startup is demoted on load.
+            status        TEXT NOT NULL DEFAULT 'draft',
+            last_error    TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_doc_pages_workspace
+            ON doc_pages(workspace_id, updated_at DESC);
+
         -- MCP servers configured per workspace; written out as a --mcp-config JSON file for
         -- headless `claude -p` invocations against any project in the workspace.
         CREATE TABLE IF NOT EXISTS workspace_mcps (
