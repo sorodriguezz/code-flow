@@ -43,6 +43,7 @@ fn key_for(local_path: &str) -> String {
 /// Held for as long as a run owns its repository. Releasing on `Drop` is the whole point: it
 /// covers every exit of the run — reply, engine error, cancellation, `?` on some DB read halfway
 /// down, or a panic — without a single explicit release call to forget.
+#[derive(Debug)]
 pub struct RepoLease {
     key: String,
 }
@@ -64,6 +65,35 @@ pub fn acquire(local_path: &str) -> Option<RepoLease> {
         return None;
     }
     Some(RepoLease { key })
+}
+
+/// Takes several repositories at once, or gives back the first that was already busy.
+///
+/// Exists because one run can legitimately span more than one working copy — reviewing a story
+/// against every repository it touches — and doing that with a loop over [`acquire`] has a trap the
+/// caller cannot see: the same folder can appear twice in a workspace (two `projects` rows, one
+/// directory), and the second `acquire` would be refused *by the first one*, so a run would report
+/// itself busy. Deduplicating needs [`key_for`], which is private on purpose — the normalisation is
+/// this module's business — so the deduplication has to happen here.
+///
+/// `Err(index)` is the position in `local_paths` of the folder somebody else holds, so the caller
+/// can name the repository rather than the path. All-or-nothing: the leases taken so far drop on
+/// the way out, because half a review is not a review.
+pub fn acquire_all(local_paths: &[String]) -> Result<Vec<RepoLease>, usize> {
+    let mut taken: Vec<RepoLease> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for (at, path) in local_paths.iter().enumerate() {
+        // A folder already covered by a lease this call took is not a conflict — it is the same
+        // repository named twice, and it is already ours.
+        if !seen.insert(key_for(path)) {
+            continue;
+        }
+        match acquire(path) {
+            Some(lease) => taken.push(lease),
+            None => return Err(at),
+        }
+    }
+    Ok(taken)
 }
 
 // Deliberately no `is_busy`: a caller that intends to run must take `acquire`, because any
@@ -106,5 +136,36 @@ mod tests {
         let b = acquire("/tmp/cf-lease-b").expect("free");
         drop(a);
         drop(b);
+    }
+
+    #[test]
+    fn several_folders_are_taken_together() {
+        let held = acquire_all(&["/tmp/cf-all-a".to_string(), "/tmp/cf-all-b".to_string()])
+            .expect("both free");
+        assert_eq!(held.len(), 2);
+        assert!(acquire("/tmp/cf-all-a").is_none(), "the batch holds the first");
+        assert!(acquire("/tmp/cf-all-b").is_none(), "the batch holds the second");
+        drop(held);
+        assert!(acquire("/tmp/cf-all-a").is_some(), "dropping the batch releases every folder");
+    }
+
+    /// The trap this function exists for: one folder listed twice must not refuse itself.
+    #[test]
+    fn one_folder_named_twice_is_not_a_conflict() {
+        let held = acquire_all(&["/tmp/cf-all-dup/".to_string(), "/tmp/cf-all-dup".to_string()])
+            .expect("the same folder twice is still just one repository");
+        assert_eq!(held.len(), 1, "it is taken once, not twice");
+    }
+
+    /// A batch that cannot be taken whole is not taken at all — otherwise a refused review would
+    /// leave the repositories it did get locked behind it.
+    #[test]
+    fn a_busy_folder_releases_the_ones_already_taken() {
+        let other = acquire("/tmp/cf-all-busy").expect("free");
+        let refused =
+            acquire_all(&["/tmp/cf-all-free".to_string(), "/tmp/cf-all-busy".to_string()]);
+        assert_eq!(refused.unwrap_err(), 1, "it reports which one was busy");
+        assert!(acquire("/tmp/cf-all-free").is_some(), "the first one was given back");
+        drop(other);
     }
 }

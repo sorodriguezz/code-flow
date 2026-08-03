@@ -799,13 +799,30 @@ export interface AdoWorkItem {
   work_item_type: string;
   title: string;
   state: string;
+  team_project: string;
   description_html: string;
+  /** Where a **Bug** actually keeps its prose — the Agile and Scrum bug forms have no description. */
+  repro_steps_html: string;
+  /** Environment, version, OS. Half the context of a bug report lives here. */
+  system_info_html: string;
   acceptance_criteria_html: string;
+  /** `0` means "not estimated", which for a Basic-process item is the only possible answer. */
+  effort: number;
+  /** The field the estimate came out of, so the UI can name it instead of inventing one. */
+  effort_field: string;
   tags: string;
   area_path: string;
   iteration_path: string;
   children: AdoWorkItemChild[];
 }
+
+/**
+ * What is being reviewed, which decides what "well written" means.
+ *
+ * A story is judged by INVEST; a bug by whether anyone can reproduce it. Only the analysis stage
+ * branches on this — criteria and tasks are the same job either way.
+ */
+export type WorkItemKind = "story" | "bug";
 
 export type WorkItemReviewStage = "analyze" | "criteria" | "tasks";
 
@@ -825,12 +842,15 @@ export interface ReviewFinding {
   /** Written to be pasted as-is. The review never edits the story itself. */
   proposal: string;
   evidence: string[];
+  /** Which repository it came from. Empty when only one was reviewed. */
+  repo: string;
 }
 
 export interface ProposedCriterion {
   gherkin: string;
   rationale: string;
   evidence: string[];
+  repo: string;
 }
 
 export interface ProposedTask {
@@ -839,6 +859,7 @@ export interface ProposedTask {
   title: string;
   detail: string;
   evidence: string[];
+  repo: string;
 }
 
 /** Tagged by stage, so the caller reads the shape it asked for. */

@@ -127,6 +127,11 @@ pub struct ReviewFinding {
     pub proposal: String,
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// Which repository this came out of. Filled in by the merge, empty when only one was
+    /// reviewed. `#[serde(default)]` because the model never sends it — a run does not know it was
+    /// one of several.
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +141,9 @@ pub struct ProposedCriterion {
     pub rationale: String,
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// See [`ReviewFinding::repo`].
+    #[serde(default)]
+    pub repo: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,6 +155,9 @@ pub struct ProposedTask {
     pub detail: String,
     #[serde(default)]
     pub evidence: Vec<String>,
+    /// See [`ReviewFinding::repo`].
+    #[serde(default)]
+    pub repo: String,
 }
 
 /// What one stage of the review answered. Tagged by stage so the frontend reads the shape it asked
@@ -240,6 +251,8 @@ fn parse_review(stage: ai::WorkItemReviewStage, text: &str) -> Result<WorkItemRe
                         kind: if t.kind.eq_ignore_ascii_case("qa") { "qa".to_string() } else { "dev".to_string() },
                         detail: t.detail.trim().to_string(),
                         evidence: t.evidence,
+                        // Stamped by the merge once it knows whether more than one repository ran.
+                        repo: String::new(),
                     })
                     .collect(),
             })
@@ -247,37 +260,132 @@ fn parse_review(stage: ai::WorkItemReviewStage, text: &str) -> Result<WorkItemRe
     }
 }
 
-/// Runs one stage of the review against a repository.
+/// How the six checklist verdicts of several repositories reconcile into one.
+///
+/// The checklist is a property of the *story*, not of a repository, so N runs answering it N times
+/// is an artefact of how the review is executed. The worst verdict wins: one repository finding the
+/// story untestable is not cancelled out by another that had nothing to say about it.
+fn worst_verdict(a: &str, b: &str) -> String {
+    let rank = |verdict: &str| match verdict {
+        "missing" => 2,
+        "weak" => 1,
+        _ => 0,
+    };
+    if rank(b) > rank(a) { b.to_string() } else { a.to_string() }
+}
+
+/// Folds one repository's answer into the running result.
+fn merge_review(into: &mut WorkItemReview, from: WorkItemReview, repo: &str, tag_repo: bool) {
+    let tag = if tag_repo { repo } else { "" };
+    match (into, from) {
+        (
+            WorkItemReview::Analyze { summary, invest, findings },
+            WorkItemReview::Analyze { summary: next_summary, invest: next_invest, findings: next },
+        ) => {
+            if !next_summary.trim().is_empty() {
+                if !summary.is_empty() {
+                    summary.push('\n');
+                }
+                summary.push_str(&match tag_repo {
+                    true => format!("{repo}: {next_summary}"),
+                    false => next_summary,
+                });
+            }
+            for letter in next_invest {
+                match invest.iter_mut().find(|held| held.letter == letter.letter) {
+                    Some(held) => {
+                        held.verdict = worst_verdict(&held.verdict, &letter.verdict);
+                        // The note that explains the worse verdict is the one worth keeping.
+                        if held.note.trim().is_empty() || held.verdict == letter.verdict {
+                            held.note = letter.note;
+                        }
+                    }
+                    None => invest.push(letter),
+                }
+            }
+            findings.extend(next.into_iter().map(|f| ReviewFinding { repo: tag.to_string(), ..f }));
+        }
+        (WorkItemReview::Criteria { criteria }, WorkItemReview::Criteria { criteria: next }) => {
+            criteria
+                .extend(next.into_iter().map(|c| ProposedCriterion { repo: tag.to_string(), ..c }));
+        }
+        (WorkItemReview::Tasks { tasks }, WorkItemReview::Tasks { tasks: next }) => {
+            tasks.extend(next.into_iter().map(|t| ProposedTask { repo: tag.to_string(), ..t }));
+        }
+        // Unreachable: every run in one call is the same stage. Dropping rather than panicking
+        // because a mismatched shape is not worth taking the user's review down for.
+        _ => {}
+    }
+}
+
+fn empty_review(stage: ai::WorkItemReviewStage) -> WorkItemReview {
+    match stage {
+        ai::WorkItemReviewStage::Analyze => WorkItemReview::Analyze {
+            summary: String::new(),
+            invest: Vec::new(),
+            findings: Vec::new(),
+        },
+        ai::WorkItemReviewStage::Criteria => WorkItemReview::Criteria { criteria: Vec::new() },
+        ai::WorkItemReviewStage::Tasks => WorkItemReview::Tasks { tasks: Vec::new() },
+    }
+}
+
+/// Runs one stage of the review against one or more repositories.
 ///
 /// `story_text` is assembled by the frontend from the work item it fetched, because that is where
 /// Azure's HTML is turned into the text the user is looking at — sending anything else would judge
 /// a story the user never saw.
+///
+/// **One engine run per repository, merged here.** The alternative — a single run pointed at several
+/// directories at once — only exists on some of the engines this app dispatches to (`--add-dir` on
+/// one, `--dir` on another, nothing at all on the hosted ones), so it would quietly review one
+/// repository out of three depending on which provider the workspace happens to be configured with.
+/// The cost is real and worth stating: no single run ever sees two repositories, so an inconsistency
+/// *between* them — the front calling an endpoint the back does not expose — cannot be found this
+/// way. What the user gets is one merged list, with each item saying which repository it came from.
+///
+/// Every repository is leased for the whole call. A story reviewed against a working copy another
+/// agent is editing would be judged against a tree that changes underneath it.
 #[tauri::command]
 pub async fn review_work_item(
     app: AppHandle,
     db: State<'_, Db>,
     workspace_id: String,
-    project_id: String,
+    project_ids: Vec<String>,
     stage: ai::WorkItemReviewStage,
+    kind: ai::WorkItemKind,
     story_text: String,
     run_id: Option<String>,
     agent_provider: Option<String>,
     agent_model: Option<String>,
 ) -> Result<WorkItemReview, String> {
-    let project = {
+    if project_ids.is_empty() {
+        return Err("Elige al menos un repositorio contra el que revisar la historia".to_string());
+    }
+
+    let projects = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::get_project(&conn, &project_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Elige el repositorio contra el que revisar la historia".to_string())?
+        let mut found = Vec::with_capacity(project_ids.len());
+        for id in &project_ids {
+            let project = queries::get_project(&conn, id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| "Ese repositorio ya no está en el espacio de trabajo".to_string())?;
+            found.push(project);
+        }
+        found
     };
 
-    let _repo_lease = ai_locks::acquire(&project.local_path)
-        .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
+    // Taken as a batch: one busy repository refuses the whole review rather than half of it, and
+    // the same folder listed twice is one repository rather than a conflict with itself.
+    let paths: Vec<String> = projects.iter().map(|p| p.local_path.clone()).collect();
+    let _repo_leases = ai_locks::acquire_all(&paths)
+        .map_err(|at| format!("{}{}", ai_locks::BUSY_MARKER, projects[at].name))?;
 
-    let prompt_kind = match stage {
-        ai::WorkItemReviewStage::Analyze => "work_item_analyze",
-        ai::WorkItemReviewStage::Criteria => "work_item_criteria",
-        ai::WorkItemReviewStage::Tasks => "work_item_tasks",
+    let prompt_kind = match (stage, kind) {
+        (ai::WorkItemReviewStage::Analyze, ai::WorkItemKind::Bug) => "work_item_bug_analyze",
+        (ai::WorkItemReviewStage::Analyze, ai::WorkItemKind::Story) => "work_item_analyze",
+        (ai::WorkItemReviewStage::Criteria, _) => "work_item_criteria",
+        (ai::WorkItemReviewStage::Tasks, _) => "work_item_tasks",
     };
 
     let (contexts, mcps, skills, config, template) = {
@@ -298,33 +406,41 @@ pub async fn review_work_item(
         (contexts, mcps, skills, config, template)
     };
 
-    let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
-
     let enabled_contexts: Vec<(String, String)> =
         contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)).collect();
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
+    let tag_repo = projects.len() > 1;
 
-    let result = crate::ai_runs::scoped(app, run_id, async {
-        ai::review_work_item(
-            &*config.engine,
-            &config.binary,
-            &config.model,
-            stage,
-            &story_text,
-            &enabled_contexts,
-            &config.tools,
-            &project.local_path,
-            &template,
-            mcp_config_path.as_deref(),
-        )
-        .await
+    // One scope for the whole call, so the run log reads as one review rather than as N runs the
+    // user did not ask for, and so a single Stop halts all of it.
+    let result: Result<WorkItemReview, String> = crate::ai_runs::scoped(app, run_id, async {
+        let mut merged = empty_review(stage);
+        for project in &projects {
+            let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
+            let text = ai::review_work_item(
+                &*config.engine,
+                &config.binary,
+                &config.model,
+                stage,
+                kind,
+                &story_text,
+                &enabled_contexts,
+                &config.tools,
+                &project.local_path,
+                &template,
+                mcp_config_path.as_deref(),
+            )
+            .await?;
+            merge_review(&mut merged, parse_review(stage, &text)?, &project.name, tag_repo);
+        }
+        Ok(merged)
     })
     .await;
 
     if matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
         return Err(result.unwrap_err());
     }
-    parse_review(stage, &result?)
+    result
 }
 
 // ---------- batches ----------
@@ -1273,5 +1389,126 @@ mod tests {
         assert!(payload.contains("Criterio 2:"));
         // A story with no description contributes no empty label to confuse the numbering.
         assert!(!payload.contains("Contexto:"));
+    }
+
+    fn finding(issue: &str) -> ReviewFinding {
+        ReviewFinding {
+            section: "descripcion".to_string(),
+            severity: "media".to_string(),
+            issue: issue.to_string(),
+            proposal: "algo".to_string(),
+            evidence: vec![],
+            repo: String::new(),
+        }
+    }
+
+    fn letter(name: &str, verdict: &str, note: &str) -> InvestVerdict {
+        InvestVerdict { letter: name.to_string(), verdict: verdict.to_string(), note: note.to_string() }
+    }
+
+    /// The checklist belongs to the story, not to a repository, so N answers have to become one —
+    /// and the repository that found the story untestable must not be outvoted by the one that had
+    /// nothing to say about it.
+    #[test]
+    fn the_worst_verdict_survives_the_merge() {
+        let mut merged = empty_review(ai::WorkItemReviewStage::Analyze);
+        merge_review(
+            &mut merged,
+            WorkItemReview::Analyze {
+                summary: "sin problemas".to_string(),
+                invest: vec![letter("T", "ok", "")],
+                findings: vec![],
+            },
+            "front",
+            true,
+        );
+        merge_review(
+            &mut merged,
+            WorkItemReview::Analyze {
+                summary: "falta el borde".to_string(),
+                invest: vec![letter("T", "missing", "no hay forma de verificarlo")],
+                findings: vec![],
+            },
+            "back",
+            true,
+        );
+        match merged {
+            WorkItemReview::Analyze { summary, invest, .. } => {
+                assert_eq!(invest.len(), 1, "one letter stays one letter");
+                assert_eq!(invest[0].verdict, "missing");
+                assert_eq!(invest[0].note, "no hay forma de verificarlo", "the note explains the verdict that won");
+                assert_eq!(summary, "front: sin problemas\nback: falta el borde");
+            }
+            _ => panic!("stage changed under the merge"),
+        }
+    }
+
+    /// With several repositories each proposal has to say where it came from; with one, saying so
+    /// would be noise on every row.
+    #[test]
+    fn findings_are_tagged_only_when_more_than_one_repository_ran() {
+        let mut many = empty_review(ai::WorkItemReviewStage::Analyze);
+        merge_review(
+            &mut many,
+            WorkItemReview::Analyze { summary: String::new(), invest: vec![], findings: vec![finding("a")] },
+            "api",
+            true,
+        );
+        let mut one = empty_review(ai::WorkItemReviewStage::Analyze);
+        merge_review(
+            &mut one,
+            WorkItemReview::Analyze { summary: String::new(), invest: vec![], findings: vec![finding("a")] },
+            "api",
+            false,
+        );
+        match (many, one) {
+            (
+                WorkItemReview::Analyze { findings: tagged, .. },
+                WorkItemReview::Analyze { findings: untagged, .. },
+            ) => {
+                assert_eq!(tagged[0].repo, "api");
+                assert_eq!(untagged[0].repo, "", "a single repository needs no label");
+            }
+            _ => panic!("stage changed under the merge"),
+        }
+    }
+
+    #[test]
+    fn every_repository_contributes_its_own_tasks() {
+        let mut merged = empty_review(ai::WorkItemReviewStage::Tasks);
+        for repo in ["front", "back"] {
+            merge_review(
+                &mut merged,
+                WorkItemReview::Tasks {
+                    tasks: vec![ProposedTask {
+                        kind: "dev".to_string(),
+                        title: format!("[DEV] tocar {repo}"),
+                        detail: String::new(),
+                        evidence: vec![],
+                        repo: String::new(),
+                    }],
+                },
+                repo,
+                true,
+            );
+        }
+        match merged {
+            WorkItemReview::Tasks { tasks } => {
+                assert_eq!(tasks.len(), 2);
+                assert_eq!(tasks[0].repo, "front");
+                assert_eq!(tasks[1].repo, "back");
+            }
+            _ => panic!("stage changed under the merge"),
+        }
+    }
+
+    /// A `[QA]` title that already carries its marker must not collect a second one.
+    #[test]
+    fn the_prefix_is_put_on_once_however_the_model_wrote_it() {
+        assert_eq!(prefixed_title("qa", "Probar el alta"), "[QA] Probar el alta");
+        assert_eq!(prefixed_title("qa", "[QA] Probar el alta"), "[QA] Probar el alta");
+        assert_eq!(prefixed_title("qa", "[Dev] Probar el alta"), "[QA] Probar el alta");
+        assert_eq!(prefixed_title("dev", "[DEV] [QA] Mover"), "[DEV] Mover");
+        assert_eq!(prefixed_title("cualquier-cosa", "Mover"), "[DEV] Mover", "unknown kinds are dev");
     }
 }

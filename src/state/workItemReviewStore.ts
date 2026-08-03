@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { adoGetWorkItem, adoParseWorkItemRef, reviewWorkItem } from "../lib/tauri/commands";
 import { htmlToText, splitCriteria, storyPayload } from "../lib/workItemHtml";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
+import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type {
@@ -10,6 +11,7 @@ import type {
   ProposedCriterion,
   ProposedTask,
   ReviewFinding,
+  WorkItemKind,
   WorkItemReviewStage,
 } from "../types/domain";
 
@@ -25,6 +27,27 @@ import type {
  * each is meant to read a story the user has already curated with what the previous one proposed.
  */
 
+/**
+ * Whether this is judged as a story or as a defect.
+ *
+ * Matched on the type *name*, because that is all the API gives that is stable across process
+ * templates and languages — a Spanish-language project reports "Error" where an English one reports
+ * "Bug". Anything unrecognised is reviewed as a story: the story checklist asked of a Feature is
+ * merely a stretch, while the bug checklist asked of a requirement is nonsense.
+ */
+export function kindOf(workItemType: string): WorkItemKind {
+  return /bug|error|defect|incidencia|defecto/i.test(workItemType) ? "bug" : "story";
+}
+
+/** The estimate as the process itself names it, or an empty string when nobody estimated it. */
+export function effortLabel(item: AdoWorkItem): string {
+  if (!item.effort) return "";
+  const unit = item.effort_field.split(".").pop() ?? "";
+  const name = unit === "StoryPoints" ? "story points" : unit === "Size" ? "size" : "effort";
+  // Whole numbers print whole: "5 story points", not "5.0".
+  return `${Number.isInteger(item.effort) ? item.effort : item.effort.toFixed(1)} ${name}`;
+}
+
 /** The analysis stage's answer, kept whole so the summary and its findings can't drift apart. */
 export interface StoryAnalysis {
   summary: string;
@@ -37,8 +60,12 @@ interface WorkItemReviewState {
   input: string;
   /** The organisation a bare id belongs to — filled from the last link, or from the batch target. */
   org: string;
-  /** The repository the analysis reads. Empty means "not chosen yet", which blocks the AI stages. */
-  projectId: string;
+  /**
+   * The repositories the analysis reads. A story usually lives across more than one — the API that
+   * exposes it and the front that consumes it — and reviewing it against only one is how half its
+   * behaviour goes unchecked. Empty blocks the AI stages.
+   */
+  projectIds: string[];
   loading: boolean;
   error: string;
   item: AdoWorkItem | null;
@@ -46,6 +73,8 @@ interface WorkItemReviewState {
   /** The story as text, editable, seeded from the work item and never written back on its own. */
   title: string;
   description: string;
+  /** A bug's steps. Kept apart from the description because in Azure they are different fields. */
+  reproSteps: string;
   criteria: string[];
 
   analysis: StoryAnalysis | null;
@@ -58,12 +87,13 @@ interface WorkItemReviewState {
 
   setInput: (input: string) => void;
   setOrg: (org: string) => void;
-  setProject: (projectId: string) => void;
+  toggleProject: (projectId: string) => void;
   load: () => Promise<void>;
   run: (stage: WorkItemReviewStage) => Promise<void>;
   stop: (stage: WorkItemReviewStage) => Promise<void>;
   setTitle: (title: string) => void;
   setDescription: (description: string) => void;
+  setReproSteps: (reproSteps: string) => void;
   setCriterion: (at: number, value: string) => void;
   addCriterion: (value: string) => void;
   removeCriterion: (at: number) => void;
@@ -77,6 +107,7 @@ const EMPTY = {
   item: null,
   title: "",
   description: "",
+  reproSteps: "",
   criteria: [] as string[],
   analysis: null,
   proposedCriteria: [] as ProposedCriterion[],
@@ -87,15 +118,21 @@ const EMPTY = {
 export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => ({
   input: "",
   org: "",
-  projectId: "",
+  projectIds: [],
   runByStage: {},
   ...EMPTY,
 
   setInput: (input) => set({ input }),
   setOrg: (org) => set({ org }),
-  setProject: (projectId) => set({ projectId }),
+  toggleProject: (projectId) =>
+    set((s) => ({
+      projectIds: s.projectIds.includes(projectId)
+        ? s.projectIds.filter((id) => id !== projectId)
+        : [...s.projectIds, projectId],
+    })),
   setTitle: (title) => set({ title }),
   setDescription: (description) => set({ description }),
+  setReproSteps: (reproSteps) => set({ reproSteps }),
   setCriterion: (at, value) =>
     set((s) => ({ criteria: s.criteria.map((c, i) => (i === at ? value : c)) })),
   addCriterion: (value) => set((s) => ({ criteria: [...s.criteria, value] })),
@@ -113,7 +150,7 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       // A bare id carries no organisation, so it falls back to the one already on screen. Failing
       // here rather than guessing: fetching the wrong org's item 4821 would look like it worked.
       const resolved = ref.org ?? org.trim();
-      if (!resolved) throw new Error("Falta la organización de Azure DevOps");
+      if (!resolved) throw new Error(translate("huReview.orgMissing"));
       const item = await adoGetWorkItem(resolved, ref.id);
       set({
         // Everything derived from the previous item goes with it — a review of story A must not
@@ -123,6 +160,7 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
         item,
         title: item.title,
         description: htmlToText(item.description_html),
+        reproSteps: htmlToText(item.repro_steps_html),
         criteria: splitCriteria(htmlToText(item.acceptance_criteria_html)),
       });
     } catch (e: unknown) {
@@ -133,8 +171,8 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
   run: async (stage) => {
     const state = get();
     if (state.runByStage[stage] || !state.item) return;
-    if (!state.projectId) {
-      pushErrorToast("Elige el repositorio contra el que revisar la historia");
+    if (state.projectIds.length === 0) {
+      pushErrorToast(translate("huReview.pickReposFirst"));
       return;
     }
     const workspaceId = activeWorkspaceId();
@@ -148,11 +186,16 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
     try {
       const review = await reviewWorkItem({
         workspaceId,
-        projectId: state.projectId,
+        projectIds: state.projectIds,
         stage,
+        kind: kindOf(state.item.work_item_type),
         storyText: storyPayload({
           title: state.title,
+          workItemType: state.item.work_item_type,
+          effort: effortLabel(state.item),
           description: state.description,
+          reproSteps: state.reproSteps,
+          systemInfo: htmlToText(state.item.system_info_html),
           criteria: state.criteria,
           tasks: state.item.children.map((child) => ({ title: child.title, state: child.state })),
         }),
@@ -193,6 +236,6 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
  */
 function activeWorkspaceId(): string | null {
   const id = useWorkspaceStore.getState().activeWorkspaceId;
-  if (!id) pushErrorToast("Abre un espacio de trabajo para revisar historias");
+  if (!id) pushErrorToast(translate("huReview.noWorkspace"));
   return id;
 }

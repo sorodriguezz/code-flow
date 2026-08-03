@@ -1012,6 +1012,23 @@ pub enum WorkItemReviewStage {
     Tasks,
 }
 
+/// What kind of thing is being reviewed, which decides what "well written" even means.
+///
+/// A user story is judged by INVEST and by whether its behaviour is expressible in Gherkin. None of
+/// that applies to a bug: asking whether a defect is "Negotiable" is a category error, and the
+/// questions that matter — can somebody reproduce this, what was expected, how do we know it is
+/// fixed — have no counterpart in the story checklist. One prompt for both would be a checklist
+/// that is wrong half the time.
+///
+/// Only the analysis branches. Acceptance criteria and the work breakdown are the same job either
+/// way: describe the observable outcome, then list what it takes to get there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkItemKind {
+    Story,
+    Bug,
+}
+
 /// "Read this story and tell me what is missing from it."
 ///
 /// Points the engine at the repository the story will be built in, so "falta decir qué pasa cuando
@@ -1044,6 +1061,44 @@ Tu tarea: decir qué le falta a esta historia para estar lista, sin reescribirla
 - `letter` es una de: I, N, V, E, S, T. Incluye las seis, en ese orden.
 - `verdict` es uno de: `ok`, `weak`, `missing`.
 - `section` es una de: `titulo`, `narrativa`, `descripcion`, `criterios`.
+- `severity` es una de: `alta`, `media`, `baja`.
+- No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
+
+/// The same review, asked of a defect instead of a story.
+///
+/// Same output shape as the story analysis — the screen renders one kind of finding — but the
+/// `invest` array carries a different six-point checklist, because a bug that cannot be reproduced
+/// is broken in a way "Independent" has no word for.
+pub const DEFAULT_WORK_ITEM_BUG_ANALYZE_TEMPLATE: &str = r#"Eres un QA técnico revisando un BUG que YA está reportado en Azure DevOps. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo: úsalas antes de responder, porque un bug se juzga contra el código donde ocurre.
+
+Por stdin recibes el bug: su título, sus pasos para reproducir, la información de entorno si la tiene, y sus criterios de aceptación actuales (que suelen venir vacíos).
+
+Tu tarea: decir qué le falta a este reporte para que alguien pueda arreglarlo y para que QA pueda cerrarlo, sin reescribirlo tú.
+
+=== LOS SEIS PUNTOS (van en `invest`, uno por letra) ===
+- R (Reproducible): ¿hay pasos numerados que otra persona pueda seguir sin adivinar? ¿Dice desde qué pantalla o endpoint se empieza?
+- E (Esperado): ¿dice qué debería pasar? Un bug sin comportamiento esperado es una opinión.
+- O (Obtenido): ¿dice qué pasa en su lugar, con el mensaje, código o captura concretos?
+- C (Contexto): entorno, versión, usuario, datos de prueba, navegador o ambiente. ¿Se sabe dónde ocurre?
+- A (Alcance): ¿se sabe a quién afecta y con qué frecuencia — siempre, a veces, un solo cliente?
+- V (Verificable): ¿hay una condición de cierre observable? ¿Cómo sabrá QA que quedó arreglado?
+
+=== REGLAS ===
+- NO modifiques, crees ni borres ningún archivo. Esto es una lectura.
+- NO reescribas el bug. Cada hallazgo propone UN texto concreto que el humano decidirá si pega, y dice a qué parte pertenece.
+- `proposal` es el texto listo para pegar, redactado como iría en el reporte — no una instrucción del estilo "deberías añadir...".
+- Usa el código para ubicar el fallo: si encuentras el archivo o la función donde ocurre lo descrito, cítalo. Si el reporte contradice lo que hace el código, ese es el hallazgo más valioso que puedes dar.
+- La evidencia son rutas reales del repositorio con línea, relativas a la raíz: "src/ot/horario.ts:88". Verifica que existen; no cites de memoria. Sin evidencia, deja `evidence` vacío; no la inventes.
+- Si el reporte ya está bien en un punto, dilo con `verdict` `ok` y no inventes un hallazgo para rellenar.
+- Escribe SIEMPRE en español.
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
+- El objeto tiene exactamente esta forma:
+{"summary":"","invest":[{"letter":"R","verdict":"ok","note":""}],"findings":[{"section":"descripcion","severity":"media","issue":"","proposal":"","evidence":["ruta/archivo.ext:12"]}]}
+- `letter` es una de: R, E, O, C, A, V. Incluye las seis, en ese orden.
+- `verdict` es uno de: `ok`, `weak`, `missing`.
+- `section` es una de: `titulo`, `narrativa`, `descripcion`, `criterios`. Usa `descripcion` para los pasos de reproducción y `criterios` para la condición de cierre.
 - `severity` es una de: `alta`, `media`, `baja`.
 - No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
 
@@ -1396,6 +1451,7 @@ pub async fn review_work_item(
     binary: &str,
     model: &str,
     stage: WorkItemReviewStage,
+    kind: WorkItemKind,
     story_text: &str,
     contexts: &[(String, String)],
     allowed_tools: &[String],
@@ -1421,10 +1477,11 @@ pub async fn review_work_item(
 
     let prompt = match prompt_template.trim().is_empty() {
         false => prompt_template,
-        true => match stage {
-            WorkItemReviewStage::Analyze => DEFAULT_WORK_ITEM_ANALYZE_TEMPLATE,
-            WorkItemReviewStage::Criteria => DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE,
-            WorkItemReviewStage::Tasks => DEFAULT_WORK_ITEM_TASKS_TEMPLATE,
+        true => match (stage, kind) {
+            (WorkItemReviewStage::Analyze, WorkItemKind::Bug) => DEFAULT_WORK_ITEM_BUG_ANALYZE_TEMPLATE,
+            (WorkItemReviewStage::Analyze, WorkItemKind::Story) => DEFAULT_WORK_ITEM_ANALYZE_TEMPLATE,
+            (WorkItemReviewStage::Criteria, _) => DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE,
+            (WorkItemReviewStage::Tasks, _) => DEFAULT_WORK_ITEM_TASKS_TEMPLATE,
         },
     };
 

@@ -266,6 +266,7 @@ pub fn workspace_prompt_default(kind: &str) -> &'static str {
         "user_stories" => crate::ai::DEFAULT_USER_STORIES_TEMPLATE,
         "story_verify" => crate::ai::DEFAULT_STORY_VERIFY_TEMPLATE,
         "work_item_analyze" => crate::ai::DEFAULT_WORK_ITEM_ANALYZE_TEMPLATE,
+        "work_item_bug_analyze" => crate::ai::DEFAULT_WORK_ITEM_BUG_ANALYZE_TEMPLATE,
         "work_item_criteria" => crate::ai::DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE,
         "work_item_tasks" => crate::ai::DEFAULT_WORK_ITEM_TASKS_TEMPLATE,
         // The SDD/Harness pipeline stages reuse this per-workspace text store; they start empty

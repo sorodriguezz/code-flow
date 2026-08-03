@@ -425,12 +425,16 @@ struct RawHref {
 
 /// The three fields the estimate lives in, one per process template. Only the one this type
 /// actually defines is sent — see [`work_item_type_fields`].
+///
+/// Per *process*, not per type: an Agile bug carries Story Points exactly like the user story next
+/// to it, and an Agile Feature carries Effort. Reading these as "the story field, the PBI field and
+/// the requirement field" is what makes it look like a bug has no estimate.
 const ESTIMATE_FIELDS: [&str; 3] = [
-    // Agile — "User Story"
+    // Agile — User Story, Bug
     "Microsoft.VSTS.Scheduling.StoryPoints",
-    // Scrum — "Product Backlog Item"
+    // Scrum — Product Backlog Item, Bug; and Agile — Feature, Epic
     "Microsoft.VSTS.Scheduling.Effort",
-    // CMMI — "Requirement"
+    // CMMI — Requirement
     "Microsoft.VSTS.Scheduling.Size",
 ];
 
@@ -550,10 +554,28 @@ pub struct AdoWorkItem {
     pub work_item_type: String,
     pub title: String,
     pub state: String,
+    /// The project it lives in. Read rather than taken from the link: this is addressed by
+    /// organisation, and a link copied before the item was moved names the old one.
+    pub team_project: String,
     pub description_html: String,
+    /// `Microsoft.VSTS.TCM.ReproSteps`, which is where a **Bug** actually keeps its prose.
+    ///
+    /// The Agile and Scrum bug forms have no Description box at all — the field exists on the type,
+    /// so the API returns it without complaint, and it is always empty. Reading only
+    /// `System.Description` is why a bug loaded with nothing to review.
+    pub repro_steps_html: String,
+    /// `Microsoft.VSTS.TCM.SystemInfo` — environment, version, OS. Half the context of a bug report
+    /// lives here rather than in the steps.
+    pub system_info_html: String,
     /// Empty when the process template has no such field, which is not a failure: a Basic-process
     /// "Issue" keeps its criteria inside the description.
     pub acceptance_criteria_html: String,
+    /// The estimate, whatever this process calls it. `0.0` means "not estimated" — which for a
+    /// Basic-process item is the only possible answer, since Basic defines no estimate field.
+    pub effort: f64,
+    /// Which field the estimate came out of, so the UI can say "Story Points" or "Effort" rather
+    /// than inventing a name for a number whose meaning is per-process.
+    pub effort_field: String,
     pub tags: String,
     pub area_path: String,
     pub iteration_path: String,
@@ -592,6 +614,46 @@ struct RawRelation {
 
 fn field_str(fields: &HashMap<String, serde_json::Value>, name: &str) -> String {
     fields.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string()
+}
+
+/// The first of `names` the item actually filled in, and which one that was.
+///
+/// Prose lives in a different field per work item type — `System.Description` for a story, Repro
+/// Steps for a bug, Symptom for a CMMI bug — and the type list is open: an inherited process can
+/// rename or add. Asking the item what it has beats deciding from its type name, which would have
+/// to be matched against a catalogue that a customer's own process is free to fall outside of.
+fn first_filled<'a>(
+    fields: &HashMap<String, serde_json::Value>,
+    names: &[&'a str],
+) -> (String, &'a str) {
+    for name in names {
+        let value = field_str(fields, name);
+        if !value.trim().is_empty() {
+            return (value, name);
+        }
+    }
+    (String::new(), "")
+}
+
+/// A numeric field, as a number.
+///
+/// Story points and effort come back as JSON numbers, so [`field_str`]'s `as_str` returns `None`
+/// for them and the estimate would read as absent rather than as five. The string fallback is for
+/// an inherited process that declared its own estimate field as text.
+fn field_f64(fields: &HashMap<String, serde_json::Value>, name: &str) -> Option<f64> {
+    let value = fields.get(name)?;
+    value.as_f64().or_else(|| value.as_str()?.trim().parse().ok())
+}
+
+/// The estimate and the field it came from. `ESTIMATE_FIELDS` is process-wide rather than
+/// per-type: an Agile bug carries Story Points exactly like the story next to it does.
+fn estimate_of(fields: &HashMap<String, serde_json::Value>) -> (f64, String) {
+    for name in ESTIMATE_FIELDS {
+        if let Some(value) = field_f64(fields, name) {
+            return (value, name.to_string());
+        }
+    }
+    (0.0, String::new())
 }
 
 /// The id at the end of `…/_apis/wit/workItems/1234` — how a relation names what it points at.
@@ -638,14 +700,27 @@ pub async fn get_work_item(org: &str, id: i64, pat: &str) -> Result<AdoWorkItem,
         .and_then(|link| link.href)
         .unwrap_or_else(|| format!("https://dev.azure.com/{org_enc}/_workitems/edit/{id}"));
 
+    // The GET asks for no `fields=` filter, so everything the item has is already in hand — the
+    // description and the estimate are a mapping problem here, not another round trip.
+    let (repro_steps_html, _) = first_filled(
+        &raw.fields,
+        &["Microsoft.VSTS.TCM.ReproSteps", "Microsoft.VSTS.CMMI.Symptom"],
+    );
+    let (effort, effort_field) = estimate_of(&raw.fields);
+
     Ok(AdoWorkItem {
         id: raw.id,
         url: html_url,
         work_item_type: field_str(&raw.fields, "System.WorkItemType"),
         title: field_str(&raw.fields, "System.Title"),
         state: field_str(&raw.fields, "System.State"),
+        team_project: field_str(&raw.fields, "System.TeamProject"),
         description_html: field_str(&raw.fields, "System.Description"),
+        repro_steps_html,
+        system_info_html: field_str(&raw.fields, "Microsoft.VSTS.TCM.SystemInfo"),
         acceptance_criteria_html: field_str(&raw.fields, "Microsoft.VSTS.Common.AcceptanceCriteria"),
+        effort,
+        effort_field,
         tags: field_str(&raw.fields, "System.Tags"),
         area_path: field_str(&raw.fields, "System.AreaPath"),
         iteration_path: field_str(&raw.fields, "System.IterationPath"),
@@ -843,6 +918,59 @@ mod tests {
         assert_eq!(parse_work_item_ref("-3"), None);
         assert_eq!(parse_work_item_ref("una historia sobre el checkout"), None);
         assert_eq!(parse_work_item_ref("https://dev.azure.com/fabrikam/Checkout/_git/repo"), None);
+    }
+
+    fn fields_of(pairs: &[(&str, serde_json::Value)]) -> HashMap<String, serde_json::Value> {
+        pairs.iter().map(|(k, v)| ((*k).to_string(), v.clone())).collect()
+    }
+
+    /// The bug case that started this: `System.Description` exists on the type and is empty,
+    /// because the Agile bug form writes its prose into Repro Steps instead.
+    #[test]
+    fn a_bug_narrates_in_its_repro_steps() {
+        let fields = fields_of(&[
+            ("System.Description", serde_json::json!("")),
+            ("Microsoft.VSTS.TCM.ReproSteps", serde_json::json!("<div>1. Abrir la OT</div>")),
+        ]);
+        let (text, from) = first_filled(
+            &fields,
+            &["Microsoft.VSTS.TCM.ReproSteps", "Microsoft.VSTS.CMMI.Symptom"],
+        );
+        assert_eq!(text, "<div>1. Abrir la OT</div>");
+        assert_eq!(from, "Microsoft.VSTS.TCM.ReproSteps");
+    }
+
+    #[test]
+    fn a_field_nobody_filled_in_names_nothing() {
+        let fields = fields_of(&[("Microsoft.VSTS.TCM.ReproSteps", serde_json::json!("   "))]);
+        let (text, from) = first_filled(&fields, &["Microsoft.VSTS.TCM.ReproSteps"]);
+        assert!(text.is_empty());
+        assert_eq!(from, "", "whitespace is not prose");
+    }
+
+    /// The estimate arrives as a JSON *number*, so the string accessor reads it as absent — which
+    /// is exactly how an estimated story came back saying it had none.
+    #[test]
+    fn the_estimate_is_read_as_a_number() {
+        let fields = fields_of(&[("Microsoft.VSTS.Scheduling.StoryPoints", serde_json::json!(5))]);
+        assert_eq!(field_str(&fields, "Microsoft.VSTS.Scheduling.StoryPoints"), "");
+        assert_eq!(estimate_of(&fields), (5.0, "Microsoft.VSTS.Scheduling.StoryPoints".to_string()));
+    }
+
+    #[test]
+    fn scrum_and_cmmi_estimates_are_found_under_their_own_names() {
+        let scrum = fields_of(&[("Microsoft.VSTS.Scheduling.Effort", serde_json::json!(8.0))]);
+        assert_eq!(estimate_of(&scrum).0, 8.0);
+        let cmmi = fields_of(&[("Microsoft.VSTS.Scheduling.Size", serde_json::json!("13"))]);
+        assert_eq!(cmmi.len(), 1);
+        assert_eq!(estimate_of(&cmmi).0, 13.0, "a process that declared it as text still counts");
+    }
+
+    /// Basic defines no estimate field at all, so "no estimate" has to be a legitimate answer
+    /// rather than something the UI reports as a failed read.
+    #[test]
+    fn an_unestimated_item_reports_zero_and_no_field() {
+        assert_eq!(estimate_of(&fields_of(&[])), (0.0, String::new()));
     }
 
     /// A relation points at the API route, not the page — the id is the last segment either way,

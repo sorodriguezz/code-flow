@@ -90,13 +90,30 @@ export function splitCriteria(text: string): string[] {
  */
 export function storyPayload(input: {
   title: string;
+  workItemType: string;
+  effort: string;
   description: string;
+  /** A bug's steps, which is where its prose actually lives. Empty for a story. */
+  reproSteps: string;
+  /** Environment and version, when the bug reported any. */
+  systemInfo: string;
   criteria: string[];
   tasks: { title: string; state: string }[];
 }): string {
-  const parts = [`TÍTULO: ${input.title.trim()}`];
+  const parts = [`TIPO: ${input.workItemType.trim() || "(desconocido)"}`, `TÍTULO: ${input.title.trim()}`];
+
+  // Said even when absent: "sin estimar" is a finding in itself, and a model that never sees the
+  // field cannot tell the difference between unestimated and not shown to it.
+  parts.push(`ESTIMACIÓN: ${input.effort.trim() || "sin estimar"}`);
 
   parts.push(`\nDESCRIPCIÓN:\n${input.description.trim() || "(vacía)"}`);
+
+  if (input.reproSteps.trim()) {
+    parts.push(`\nPASOS PARA REPRODUCIR:\n${input.reproSteps.trim()}`);
+  }
+  if (input.systemInfo.trim()) {
+    parts.push(`\nENTORNO:\n${input.systemInfo.trim()}`);
+  }
 
   parts.push(
     input.criteria.length > 0

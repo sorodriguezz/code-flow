@@ -56,6 +56,7 @@ import type {
   WorkspaceAgent,
   WorkspaceMcp,
   WorkspaceSkill,
+  WorkItemKind,
   WorkItemRef,
   WorkItemReview,
   WorkItemReviewStage,
@@ -1327,16 +1328,19 @@ export const adoGetWorkItem = (org: string, id: number) =>
  */
 export const reviewWorkItem = (input: {
   workspaceId: string;
-  projectId: string;
+  /** One or more. Each is read by its own engine run and the answers are merged in Rust. */
+  projectIds: string[];
   stage: WorkItemReviewStage;
+  kind: WorkItemKind;
   storyText: string;
   runId: string;
   agent?: { provider: string; model: string };
 }) =>
   invoke<WorkItemReview>("review_work_item", {
     workspaceId: input.workspaceId,
-    projectId: input.projectId,
+    projectIds: input.projectIds,
     stage: input.stage,
+    kind: input.kind,
     storyText: input.storyText,
     runId: input.runId,
     agentProvider: input.agent?.provider,
