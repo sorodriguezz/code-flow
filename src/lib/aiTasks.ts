@@ -21,6 +21,11 @@ export const AI_TASKS: AiTaskDef[] = [
   { key: "fix", labelKey: "task.fix", hintKey: "task.fixHint", agenticOnly: true },
   { key: "conflict", labelKey: "task.conflict", hintKey: "task.conflictHint" },
   { key: "inline", labelKey: "task.inline", hintKey: "task.inlineHint" },
+  { key: "stories", labelKey: "task.stories", hintKey: "task.storiesHint" },
+  // Reads the repository to answer, so it needs an engine with tools — a text-only local model
+  // would answer from the criteria alone, which is the confident-and-wrong verdict this whole
+  // feature exists to avoid.
+  { key: "story_verify", labelKey: "task.storyVerify", hintKey: "task.storyVerifyHint", agenticOnly: true },
 ];
 
 export const AI_TASK_KEYS = AI_TASKS.map((t) => t.key);

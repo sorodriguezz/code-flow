@@ -878,6 +878,122 @@ pub const DEFAULT_PR_DESCRIPTION_TEMPLATE: &str =
      - No incluyas el diff crudo ni bloques de código salvo que sean imprescindibles.\n\
      - Responde solo con la descripción, sin texto adicional antes o después.";
 
+/// How much documentation is worth sending in one go. A wiki section past this is a whole product
+/// manual, and the stories that come back from it are generic — the answer there is to select fewer
+/// pages, which the picker makes easy, not to send more text.
+pub const MAX_STORIES_SOURCE_CHARS: usize = 60_000;
+
+/// The instructions behind "generate user stories from this documentation".
+///
+/// Stored per workspace (`workspace_prompts`, kind `user_stories`) so a team can bend the house
+/// style — INVEST wording, Gherkin vs checklist criteria, which language — without touching code.
+/// The **output contract** is deliberately restated as rules the model can't reasonably drop: the
+/// answer is parsed as JSON, and a template edited into prose would otherwise silently produce a
+/// batch that fails to parse.
+pub const DEFAULT_USER_STORIES_TEMPLATE: &str = r#"Eres un Product Owner técnico y analista QA especializado en BDD (Behaviour-Driven Development). Por stdin recibes documentación de producto (una o varias páginas de wiki, especificaciones o notas) y, opcionalmente, instrucciones adicionales del usuario.
+
+Tu tarea: derivar historias de usuario listas para el backlog cuyos criterios de aceptación se puedan automatizar con Cucumber TAL CUAL, sin que QA tenga que reescribirlos.
+
+=== INVEST: las seis condiciones que toda historia debe cumplir ===
+- Independiente: se puede construir y probar sin esperar a otra historia del lote. Si dos se necesitan mutuamente, fúndelas en una o divídelas por el dato que comparten.
+- Negociable: describe el QUÉ y el PARA QUÉ, nunca la solución técnica. Sin nombres de tabla, endpoints, componentes ni librerías.
+- Valiosa: el "para <beneficio>" nombra un resultado observable para el negocio o el usuario. "Para que el sistema guarde el dato" no es valor; "para no tener que repetir la dirección en cada compra" sí.
+- Estimable: si falta información para dimensionarla, escríbela igual y deja la duda en `notes` y en `open_questions`.
+- Pequeña (Small): una historia = una capacidad. Si necesitas más de 6 escenarios, divídela: por regla de negocio, por rol, o separando el camino feliz de las excepciones.
+- Testeable: cada criterio termina en algo observable y comprobable. Si no sabes cómo se verificaría, no es un criterio: es un deseo.
+
+=== GHERKIN: sintaxis en español (la que Cucumber acepta con `# language: es`) ===
+- Un elemento de `acceptance_criteria` = UN escenario completo, con su línea de título primero:
+  Escenario: <qué demuestra este caso>
+  Dado <contexto o estado inicial ya existente>
+  Cuando <la única acción del actor>
+  Entonces <resultado observable>
+- Pasos adicionales con `Y` / `Pero`. Palabras clave válidas: Escenario, Esquema del escenario, Ejemplos, Dado, Cuando, Entonces, Y, Pero.
+- NUNCA dos `Cuando` en un escenario. Dos acciones son dos escenarios; si el segundo `Cuando` es en realidad preparación, es un `Dado`.
+- Cada `Entonces` afirma UN hecho. "Entonces se muestra el resumen y se envía el correo y se descuenta el stock" son tres pasos (`Entonces` + `Y` + `Y`).
+- Cuando varios casos solo se diferencian en los datos, usa un esquema en lugar de repetir el escenario:
+  Esquema del escenario: <título>
+  Dado …
+  Cuando … <parametro> …
+  Entonces … <resultado>
+  Ejemplos:
+    | parametro | resultado |
+    | valor1    | esperado1 |
+    | valor2    | esperado2 |
+  Los `<parámetros>` del cuerpo deben coincidir EXACTAMENTE con las cabeceras de la tabla, y toda fila de tabla empieza y termina con `|`.
+- Declarativo, no imperativo. "Cuando el cliente confirma el pago", NO "Cuando hace clic en el botón #pagar". Un criterio atado a un selector, una URL o un nombre de pantalla se rompe con el primer rediseño y deja de servir como contrato.
+- Tercera persona e impersonal, y sobre todo CONSISTENTE: reutiliza la misma redacción exacta para un paso que significa lo mismo en varias historias. Cada frase distinta es un step definition más que alguien tiene que escribir y mantener.
+- Nada de datos inventados: usa los valores que da la documentación, o descríbelos por su regla ("un importe superior al límite diario").
+
+=== COBERTURA: entre 2 y 6 escenarios por historia ===
+1. El camino feliz.
+2. Al menos un camino alternativo o una variante de datos que importe.
+3. Las validaciones, errores y estados vacíos que mencione la documentación.
+4. Los límites, cuando haya un umbral numérico o temporal (el valor justo dentro y el justo fuera).
+5. Los permisos, cuando la documentación distinga quién puede hacer qué.
+Los requisitos no funcionales (rendimiento, auditoría, seguridad, accesibilidad) van como escenario propio con su umbral medible, o como historia aparte si tienen entidad suficiente.
+
+=== CONTENIDO ===
+- `narrative` sigue exactamente "Como <rol>, quiero <capacidad>, para <beneficio>". El rol es concreto ("cajero", "cliente registrado", "administrador de la tienda"); no escribas "usuario" a secas si la documentación distingue roles.
+- `title` corto (máximo 80 caracteres), sin el prefijo "Historia:".
+- `description` en 2-5 frases: contexto, qué entra en el alcance, qué queda FUERA, y las reglas de negocio que aplican.
+- `tags` son 1-4 etiquetas cortas en minúsculas y sin espacios (usa guiones). Se publican como etiquetas del work item y también sirven como etiquetas Gherkin (`@checkout`), así que deben ser válidas como tales.
+- NO inventes funcionalidad que la documentación no respalde. Toda ambigüedad va a `notes` de la historia afectada y a `open_questions`.
+- Escribe SIEMPRE en español, salvo que las instrucciones adicionales pidan otro idioma.
+
+=== ESTIMACIÓN Y CLASIFICACIÓN ===
+- `story_points` usa la serie de Fibonacci (1, 2, 3, 5, 8, 13). Usa 0 si no hay base para estimar.
+- `priority` es un entero de 1 (crítica) a 4 (baja), siguiendo la convención de Azure Boards.
+
+=== REVISIÓN ANTES DE RESPONDER ===
+Repasa cada historia y corrígela si falla algo de esto: ¿el `para` nombra valor real? ¿algún escenario tiene dos `Cuando`? ¿algún `Entonces` afirma más de una cosa? ¿algún paso menciona un botón, una pantalla o un endpoint? ¿hay más de 6 escenarios (entonces divide la historia)? ¿queda algún criterio que no sabrías comprobar?
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
+- El objeto tiene exactamente esta forma:
+{"stories":[{"title":"","narrative":"","description":"","acceptance_criteria":[""],"priority":2,"story_points":3,"tags":[""],"notes":""}],"open_questions":[""]}
+- `notes` y `open_questions` pueden ir vacíos ("" y []), el resto de campos siempre presentes.
+- Cada elemento de `acceptance_criteria` es UN escenario entero en una sola cadena, con sus saltos de línea escapados como \n. No uses saltos de línea sin escapar dentro de las cadenas JSON."#;
+
+/// How much of a story set is worth sending to a verification run. The stories go on stdin; the
+/// *code* is read by the engine itself from the working directory, so this only has to bound the
+/// backlog side of the payload.
+pub const MAX_STORIES_VERIFY_CHARS: usize = 40_000;
+
+/// The instructions behind "check these acceptance criteria against the code".
+///
+/// Stored per workspace (`workspace_prompts`, kind `story_verify`) like the generator's, so a team
+/// can tighten what counts as evidence. Read-only by construction: the engine is pointed at the
+/// repository to *look*, and the prompt says so — nothing here writes a file, and the verdicts land
+/// in CodeFlow's own rows rather than in the working copy.
+pub const DEFAULT_STORY_VERIFY_TEMPLATE: &str = r#"Eres un QA técnico verificando criterios de aceptación contra el código de un repositorio. Trabajas en el directorio del repositorio y tienes herramientas para leerlo: úsalas antes de responder. Por stdin recibes historias de usuario numeradas, cada una con sus criterios de aceptación en Gherkin, también numerados.
+
+Tu tarea: por CADA criterio, decidir si el código que hay HOY en este repositorio satisface ese comportamiento, y respaldarlo con evidencia del propio repositorio.
+
+=== VEREDICTOS (usa exactamente uno por criterio) ===
+- `pass` — encontraste el código que implementa el comportamiento y puedes señalar dónde está.
+- `fail` — el comportamiento no existe, o el código hace algo que lo contradice.
+- `partial` — una parte está implementada y otra no (por ejemplo el camino feliz sí, pero la validación del criterio no).
+- `unknown` — no pudiste determinarlo: el criterio depende de infraestructura, de configuración o de un sistema externo que no está aquí, o es demasiado ambiguo para comprobarlo.
+
+=== REGLAS ===
+- NO modifiques, crees ni borres ningún archivo. Esto es una lectura, no un arreglo.
+- La evidencia son rutas reales del repositorio con número de línea, relativas a la raíz: "src/pago/checkout.ts:120". Verifica que el archivo existe y que la línea es la relevante; no cites de memoria.
+- Sin evidencia citable no puede haber `pass`. Si no encuentras el archivo, el veredicto es `fail` o `unknown`, nunca `pass`.
+- Un test automatizado que ya cubra el criterio es la mejor evidencia posible: cítalo y marca `covered_by_test` en true. Un `pass` sin test es código que cumple pero que nada protege — dilo en `note`.
+- Ante la duda, `unknown`. Un falso "cumple" es peor que un "no lo sé", porque QA deja de mirar justo donde está el hueco.
+- `note` es una frase corta y concreta: qué falta para el `fail`, qué parte falta para el `partial`, o qué te impidió decidir en el `unknown`. Para un `pass` puede ir vacía.
+- `summary` es una frase por historia con la conclusión global.
+- Escribe SIEMPRE en español.
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
+- El objeto tiene exactamente esta forma:
+{"stories":[{"story":1,"summary":"","criteria":[{"criterion":1,"verdict":"pass","evidence":["ruta/archivo.ext:120"],"note":"","covered_by_test":false}]}]}
+- `story` y `criterion` son los números tal y como aparecen en el texto de stdin, empezando en 1. No los reordenes ni los renumeres.
+- Incluye TODAS las historias y TODOS sus criterios, también los que queden en `unknown`.
+- No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
+
 pub const DEFAULT_RESOLVE_CONFLICT_TEMPLATE: &str =
     "Eres un ingeniero de software resolviendo un conflicto de merge de git. Se te entregan por \
      stdin tres versiones de un mismo archivo: BASE (el ancestro común), OURS (la rama actual) y \
@@ -1060,6 +1176,127 @@ pub async fn generate_pr_description(
     inv.model = model;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
+}
+
+/// Derives user stories with acceptance criteria from documentation.
+///
+/// Text-in / text-out with no tools and no working directory, like [`inline_edit`] and unlike the
+/// review pipeline: the source is documentation the caller already gathered (an Azure DevOps wiki,
+/// a handful of Markdown files, pasted text), never something the engine goes and finds. That is
+/// what lets this run in a workspace with no repository open at all, on any provider including a
+/// local Ollama model.
+///
+/// Returns the model's raw answer; the caller parses it with [`extract_json_block`], because what
+/// to do with a malformed answer (retry, show it, keep the previous batch) is not this layer's call.
+pub async fn generate_user_stories(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    source_text: &str,
+    instructions: &str,
+    count_hint: i64,
+    prompt_template: &str,
+) -> Result<String, String> {
+    if source_text.trim().is_empty() {
+        return Err("No hay documentación de la que derivar historias".to_string());
+    }
+
+    let truncated: String = source_text.chars().take(MAX_STORIES_SOURCE_CHARS).collect();
+    let mut stdin_payload = String::new();
+    // The count is a hint, not a rule: documentation that describes three things should not be
+    // padded to ten, and the prompt says so rather than the number being sent alone.
+    if count_hint > 0 {
+        stdin_payload.push_str(&format!(
+            "NÚMERO ORIENTATIVO DE HISTORIAS: {count_hint} (aproximado; prioriza la cobertura real \
+             de la documentación sobre alcanzar esta cifra)\n\n"
+        ));
+    }
+    match instructions.trim() {
+        "" => {}
+        extra => stdin_payload.push_str(&format!("INSTRUCCIONES ADICIONALES DEL USUARIO:\n{extra}\n\n")),
+    }
+    stdin_payload.push_str(&format!("=== DOCUMENTACIÓN ===\n{truncated}"));
+
+    let prompt = if prompt_template.trim().is_empty() {
+        DEFAULT_USER_STORIES_TEMPLATE
+    } else {
+        prompt_template
+    };
+
+    let mut inv = AiInvocation::new(prompt, &stdin_payload);
+    inv.model = model;
+    let run = run(engine, binary, inv).await?;
+    Ok(run.text)
+}
+
+/// Checks a set of acceptance criteria against the code of a repository.
+///
+/// The mirror image of [`generate_user_stories`]: that one is text-in/text-out with no repository,
+/// this one *needs* the repository and nothing else. The stories go on stdin already numbered; the
+/// code is read by the engine itself from `cwd`, which is why this task — unlike generation —
+/// cannot be routed to a model with no tools.
+///
+/// Nothing is written to the working copy. The engine is pointed at the repo to look, the prompt
+/// says so, and `auto_approve_edits` is left off, so a run that decided to "fix" a gap would stall
+/// on the permission prompt rather than quietly change a file QA is about to test.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_stories_against_code(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    stories_text: &str,
+    contexts: &[(String, String)],
+    allowed_tools: &[String],
+    cwd: &str,
+    prompt_template: &str,
+    mcp_config_path: Option<&str>,
+) -> Result<String, String> {
+    if stories_text.trim().is_empty() {
+        return Err("No hay criterios de aceptación que verificar".to_string());
+    }
+
+    let truncated: String = stories_text.chars().take(MAX_STORIES_VERIFY_CHARS).collect();
+    let mut stdin_payload = String::new();
+    if !contexts.is_empty() {
+        stdin_payload.push_str("CONTEXTO DEL PROYECTO:\n");
+        for (name, content) in contexts {
+            stdin_payload.push_str(&format!("- {name}: {content}\n"));
+        }
+        stdin_payload.push('\n');
+    }
+    stdin_payload.push_str("=== HISTORIAS Y CRITERIOS A VERIFICAR ===\n");
+    stdin_payload.push_str(&truncated);
+
+    let prompt = if prompt_template.trim().is_empty() {
+        DEFAULT_STORY_VERIFY_TEMPLATE
+    } else {
+        prompt_template
+    };
+
+    let mut inv = AiInvocation::new(prompt, &stdin_payload);
+    inv.model = model;
+    inv.allowed_tools = allowed_tools;
+    inv.cwd = Some(cwd);
+    inv.mcp_config_path = mcp_config_path;
+    let run = run(engine, binary, inv).await?;
+    Ok(run.text)
+}
+
+/// Pulls the JSON object out of a model's answer.
+///
+/// Engines told "respond with JSON only" still wrap it in a ```json fence, prefix it with "Aquí
+/// tienes las historias:", or append a closing remark — often varying between runs of the same
+/// model. Slicing from the first `{` to the last `}` survives all three, and a response that has
+/// no object at all returns `None` so the caller can report the raw text rather than a parse error
+/// about a character offset the user can't see.
+pub fn extract_json_block(text: &str) -> Option<&str> {
+    let trimmed = text.trim();
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    Some(&trimmed[start..=end])
 }
 
 /// Proposes a merged version of a conflicted file from its base/ours/theirs versions. Returns the
@@ -1346,5 +1583,16 @@ mod tests {
     #[test]
     fn a_genuine_failure_is_not_a_quota_signal() {
         assert!(!quota_signal("error: unknown flag --nope"));
+    }
+
+    /// Every wrapper a model has actually put around "respond with JSON only", plus the case where
+    /// there is no object at all — which has to read as "no answer" rather than as a parse error.
+    #[test]
+    fn json_is_recovered_from_whatever_the_model_wrapped_it_in() {
+        let fenced = "Aquí tienes las historias:\n```json\n{\"stories\": []}\n```\nEspero que sirva.";
+        assert_eq!(extract_json_block(fenced), Some("{\"stories\": []}"));
+        assert_eq!(extract_json_block("  {\"a\":{\"b\":1}}  "), Some("{\"a\":{\"b\":1}}"));
+        assert_eq!(extract_json_block("no pude generar historias"), None);
+        assert_eq!(extract_json_block("} desordenado {"), None);
     }
 }

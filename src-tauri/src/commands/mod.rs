@@ -17,5 +17,6 @@ pub mod secret_scan_cmd;
 pub mod secrets_cmd;
 pub mod settings;
 pub mod skills_cmd;
+pub mod stories_cmd;
 pub mod terminal_cmd;
 pub mod watcher_cmd;

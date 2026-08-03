@@ -272,6 +272,118 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_chain_template_steps
             ON workspace_chain_template_steps(template_id, step_index);
 
+        -- One run of "read this documentation, write the backlog": the source it was derived
+        -- from, the Azure Boards target it publishes to, and the stories themselves (in
+        -- `story_drafts` below).
+        --
+        -- Scoped to the WORKSPACE, not to a project, for the same reason the agent roster is: a
+        -- requirement is written before there is code to write it against, and a batch derived
+        -- from a wiki must not need a repository to exist. `project_id` is therefore nullable and
+        -- only carries the repo whose Markdown was read, for the `files` source.
+        --
+        -- `source_text` is a COPY of what was sent to the model, not a pointer at the wiki page.
+        -- The wiki is edited by other people; re-running a generation a week later against a page
+        -- that has since changed would silently produce a different backlog under the same title,
+        -- and comparing a story against the text it came from would no longer be possible.
+        CREATE TABLE IF NOT EXISTS story_batches (
+            id            TEXT PRIMARY KEY,
+            workspace_id  TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- The repository whose files were read, for `source_kind = 'files'`. Null otherwise.
+            project_id    TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            title         TEXT NOT NULL DEFAULT '',
+            -- 'wiki' | 'files' | 'text'
+            source_kind   TEXT NOT NULL DEFAULT 'text',
+            -- Human-readable provenance: the wiki page paths, the file paths, or '' for pasted text.
+            source_ref    TEXT NOT NULL DEFAULT '',
+            source_text   TEXT NOT NULL DEFAULT '',
+            instructions  TEXT NOT NULL DEFAULT '',
+            -- What the generation ran on. Snapshotted like `agent_tasks` does: re-reading the
+            -- workspace's routing next month must not rewrite what this batch says it used.
+            provider      TEXT NOT NULL DEFAULT '',
+            model         TEXT NOT NULL DEFAULT '',
+            -- The Azure Boards target. Empty until the user picks one; every story of the batch
+            -- publishes against it, which is what makes "publish selected" a single decision.
+            ado_org         TEXT NOT NULL DEFAULT '',
+            ado_project     TEXT NOT NULL DEFAULT '',
+            work_item_type  TEXT NOT NULL DEFAULT '',
+            area_path       TEXT NOT NULL DEFAULT '',
+            iteration_path  TEXT NOT NULL DEFAULT '',
+            tags            TEXT NOT NULL DEFAULT '',
+            -- What the model couldn't answer from the documentation. Kept on the batch rather than
+            -- on a story because an ambiguity usually spans several of them.
+            open_questions  TEXT NOT NULL DEFAULT '[]',
+            -- The repository the acceptance criteria are checked against ("does the code already
+            -- do this?"). Deliberately NOT `project_id`: that one records where the source Markdown
+            -- was read from, and a backlog derived from a wiki is routinely validated against a
+            -- repo that had nothing to do with writing it.
+            verify_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            -- What the last verification ran on, and when. Snapshotted like `provider`/`model`
+            -- above: a verdict is only worth as much as the engine and the moment that produced it,
+            -- and QA has to be able to see both before trusting a green criterion.
+            verify_provider TEXT NOT NULL DEFAULT '',
+            verify_model    TEXT NOT NULL DEFAULT '',
+            verified_at     TEXT NOT NULL DEFAULT '',
+            -- 'draft' | 'generating' | 'ready' | 'error'. `generating` is only meaningful inside
+            -- the session that set it; a row still saying so at startup is demoted on load.
+            status        TEXT NOT NULL DEFAULT 'draft',
+            last_error    TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_story_batches_workspace
+            ON story_batches(workspace_id, updated_at DESC);
+
+        -- One user story: what the model proposed, as the user has since edited it, plus where it
+        -- ended up on Azure Boards.
+        --
+        -- `work_item_id` is the whole point of keeping these rows after a publish: it is what stops
+        -- a second click on "publish" creating a duplicate work item, and what lets the card link
+        -- to the real thing. A published story is deliberately still editable here — the edit just
+        -- no longer travels to Azure, and the card says so.
+        CREATE TABLE IF NOT EXISTS story_drafts (
+            id            TEXT PRIMARY KEY,
+            batch_id      TEXT NOT NULL REFERENCES story_batches(id) ON DELETE CASCADE,
+            seq           INTEGER NOT NULL DEFAULT 0,
+            title         TEXT NOT NULL DEFAULT '',
+            -- "Como <rol>, quiero <capacidad>, para <beneficio>".
+            narrative     TEXT NOT NULL DEFAULT '',
+            description   TEXT NOT NULL DEFAULT '',
+            -- JSON array of strings, one Gherkin criterion per element (each may be multi-line).
+            acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+            -- Azure Boards' own scale: 1 (critical) to 4 (low). 0 means "leave the field alone".
+            priority      INTEGER NOT NULL DEFAULT 0,
+            -- REAL, not INTEGER: Azure accepts fractional estimates and half-points are real usage.
+            story_points  REAL NOT NULL DEFAULT 0,
+            tags          TEXT NOT NULL DEFAULT '',
+            notes         TEXT NOT NULL DEFAULT '',
+            -- 0 until published; the Azure work item id afterwards.
+            work_item_id  INTEGER NOT NULL DEFAULT 0,
+            work_item_url TEXT NOT NULL DEFAULT '',
+            -- What the last "check this against the code" run concluded for this story.
+            -- '' (never checked) | 'pass' | 'partial' | 'fail' | 'unknown'. Rolled up from the
+            -- per-criterion verdicts below rather than taken from the model, so the badge on the
+            -- card can never disagree with the criteria it summarises.
+            verify_status   TEXT NOT NULL DEFAULT '',
+            verify_summary  TEXT NOT NULL DEFAULT '',
+            -- JSON array positionally aligned with `acceptance_criteria`: one
+            -- {verdict, evidence[], note, covered_by_test} per criterion. Same encoding as the
+            -- criteria themselves, and for the same reason — evidence is multi-line.
+            verify_criteria TEXT NOT NULL DEFAULT '[]',
+            -- When this story's verdicts were produced. Cleared whenever the criteria are edited:
+            -- a verdict about text that has since changed is worse than no verdict, because QA
+            -- stops looking exactly where the gap now is.
+            verified_at     TEXT NOT NULL DEFAULT '',
+            -- 'draft' | 'published' | 'error'
+            status        TEXT NOT NULL DEFAULT 'draft',
+            last_error    TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_story_drafts_batch
+            ON story_drafts(batch_id, seq);
+
         -- MCP servers configured per workspace; written out as a --mcp-config JSON file for
         -- headless `claude -p` invocations against any project in the workspace.
         CREATE TABLE IF NOT EXISTS workspace_mcps (
@@ -663,6 +775,57 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_updated_at_to_folders_and_environments(conn)?;
     add_collection_id_to_tombstones(conn)?;
     add_project_url_to_shared_collections(conn)?;
+    add_verification_to_story_batches(conn)?;
+    add_verification_to_story_drafts(conn)?;
+    Ok(())
+}
+
+/// Story batches gained a second repository reference — the one their acceptance criteria are
+/// *checked against* — plus the provenance of the last check.
+///
+/// Kept apart from `project_id` (which records where the source Markdown was read) because the two
+/// answer different questions and are routinely different repositories: a backlog derived from a
+/// product wiki is validated against the service that implements it.
+fn add_verification_to_story_batches(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "story_batches")? {
+        return Ok(());
+    }
+    // Nullable with a NULL default, which is what SQLite requires of an added column that carries
+    // a REFERENCES clause.
+    if !has_column(conn, "story_batches", "verify_project_id")? {
+        conn.execute_batch(
+            "ALTER TABLE story_batches ADD COLUMN verify_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;",
+        )?;
+    }
+    for column in ["verify_provider", "verify_model", "verified_at"] {
+        if !has_column(conn, "story_batches", column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE story_batches ADD COLUMN {column} TEXT NOT NULL DEFAULT '';"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
+/// Stories gained the verdicts of "does the code already satisfy this?" — a rolled-up status for
+/// the card's badge and one entry per acceptance criterion. Existing rows default to never-checked
+/// (`''` / `'[]'`), which is exactly what they are.
+fn add_verification_to_story_drafts(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "story_drafts")? {
+        return Ok(());
+    }
+    for (column, default) in [
+        ("verify_status", "''"),
+        ("verify_summary", "''"),
+        ("verify_criteria", "'[]'"),
+        ("verified_at", "''"),
+    ] {
+        if !has_column(conn, "story_drafts", column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE story_drafts ADD COLUMN {column} TEXT NOT NULL DEFAULT {default};"
+            ))?;
+        }
+    }
     Ok(())
 }
 

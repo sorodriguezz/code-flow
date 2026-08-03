@@ -622,3 +622,150 @@ export interface TerminalOpened {
   profile_id: string;
   profile_name: string;
 }
+
+// ---------- user stories (wiki in, Azure Boards out) ----------
+
+/** One wiki of an Azure DevOps project. `kind` is `projectWiki` or `codeWiki`. */
+export interface AdoWiki {
+  id: string;
+  name: string;
+  kind: string;
+}
+
+/** One page of a wiki, flattened out of the tree the API answers with — `depth` is what lets the
+ * picker redraw the nesting without re-deriving it from the slashes in `path`. */
+export interface AdoWikiPage {
+  /** The wiki-absolute path, e.g. `/Producto/Checkout`. This is the page's identity. */
+  path: string;
+  title: string;
+  depth: number;
+  has_children: boolean;
+}
+
+/** A work item type the project's process defines — "User Story" on Agile, "Product Backlog Item"
+ * on Scrum, "Issue" on Basic. Read from the host, never assumed. */
+export interface AdoWorkItemType {
+  name: string;
+  reference_name: string;
+  description: string;
+  /** Hex without the leading `#`, as Azure reports it. */
+  color: string;
+}
+
+/** One node of the area or iteration tree. `path` is already in the form the work item field
+ * takes (`Proyecto\Área\Sub`). */
+export interface AdoClassificationNode {
+  path: string;
+  name: string;
+  depth: number;
+}
+
+/** Where a batch's documentation came from. */
+export type StorySourceKind = "wiki" | "files" | "text";
+
+/** `generating` is only meaningful inside the session that set it — a row still saying so at
+ * startup is one whose app was killed mid-run, and the backend demotes it on load. */
+export type StoryBatchStatus = "draft" | "generating" | "ready" | "error";
+
+/** One run of "read this documentation, write the backlog". */
+export interface StoryBatch {
+  id: string;
+  workspace_id: string;
+  /** The repository whose Markdown was read, for the `files` source. `null` otherwise — a batch
+   * derived from a wiki needs no repository at all. */
+  project_id: string | null;
+  title: string;
+  source_kind: StorySourceKind;
+  /** Human-readable provenance: the wiki pages, the file paths, or `""` for pasted text. */
+  source_ref: string;
+  /** A copy of exactly what was sent to the model — the wiki moves on, this doesn't. */
+  source_text: string;
+  instructions: string;
+  provider: string;
+  model: string;
+  ado_org: string;
+  ado_project: string;
+  work_item_type: string;
+  area_path: string;
+  iteration_path: string;
+  /** Applied to every story of the batch, on top of the story's own. */
+  tags: string;
+  /** JSON array of strings: what the documentation left ambiguous. */
+  open_questions: string;
+  /** The repository whose code the acceptance criteria are checked against. `null` until picked —
+   * deliberately not `project_id`, which records where the documentation came from. */
+  verify_project_id: string | null;
+  /** What the last verification ran on, and when. Empty until one has run. */
+  verify_provider: string;
+  verify_model: string;
+  verified_at: string;
+  status: StoryBatchStatus;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** What checking a criterion against the code concluded. `unknown` is a real answer, not a
+ * failure to answer: it means nobody has proven it either way, which is exactly where QA should
+ * still be looking. */
+export type StoryVerdict = "pass" | "partial" | "fail" | "unknown";
+
+/** One criterion's verdict, as stored in `StoryDraft.verify_criteria`. */
+export interface CriterionVerdict {
+  verdict: StoryVerdict;
+  /** Repository-relative `path:line` references backing the verdict. */
+  evidence: string[];
+  note: string;
+  covered_by_test: boolean;
+}
+
+export type StoryDraftStatus = "draft" | "published" | "error";
+
+/** One user story as it stands right now — the model's proposal plus every edit since, and the
+ * Azure Boards work item it became. */
+export interface StoryDraft {
+  id: string;
+  batch_id: string;
+  seq: number;
+  title: string;
+  /** "Como <rol>, quiero <capacidad>, para <beneficio>". */
+  narrative: string;
+  description: string;
+  /** JSON array of strings, one criterion per element (each may be multi-line Gherkin). */
+  acceptance_criteria: string;
+  /** Azure Boards' scale: 1 (critical) … 4 (low). `0` leaves the field alone. */
+  priority: number;
+  /** `0` leaves the estimate alone. */
+  story_points: number;
+  tags: string;
+  notes: string;
+  /** `0` until published; the work item id afterwards, which is what stops a duplicate. */
+  work_item_id: number;
+  work_item_url: string;
+  /** What the last check against the code concluded. `""` means never checked. Rolled up from
+   * `verify_criteria`, so it can never disagree with the criteria underneath it. */
+  verify_status: StoryVerdict | "";
+  verify_summary: string;
+  /** JSON array of {@link CriterionVerdict}, positionally aligned with `acceptance_criteria`. */
+  verify_criteria: string;
+  /** Cleared whenever the criteria are edited — a verdict about text that has since changed is
+   * worse than no verdict, because it stops QA looking exactly where the gap now is. */
+  verified_at: string;
+  status: StoryDraftStatus;
+  last_error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoryBatchDetail {
+  batch: StoryBatch;
+  stories: StoryDraft[];
+}
+
+/** What a publish did, story by story. The whole list comes back — including the rows that
+ * failed, which now carry their own reason — so the view re-renders from one answer. */
+export interface StoryPublishOutcome {
+  stories: StoryDraft[];
+  published: number;
+  failed: number;
+}

@@ -5,8 +5,8 @@ use uuid::Uuid;
 use super::models::{
     ActivityLogEntry, AgentChain, AgentChainStep, AgentTask, ChainClaim, ChainDetail, ChainTemplate,
     ChainTemplateStep, ChatConversationSummary, JobHistoryEntry, NewChainStep, NewProject, Project,
-    ReviewContext, ReviewRunDetail, ReviewRunSummary, Workspace, WorkspaceActivityEntry, WorkspaceAgent,
-    WorkspaceMcp, WorkspaceSkill,
+    ReviewContext, ReviewRunDetail, ReviewRunSummary, StoryBatch, StoryBatchDetail, StoryDraft, Workspace,
+    WorkspaceActivityEntry, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill,
 };
 
 /// The timestamp every record is stamped with, truncated to **microseconds**.
@@ -263,6 +263,8 @@ pub fn purge_workspace_review_runs(conn: &Connection, workspace_id: &str) -> rus
 pub fn workspace_prompt_default(kind: &str) -> &'static str {
     match kind {
         "pr_description" => crate::ai::DEFAULT_PR_DESCRIPTION_TEMPLATE,
+        "user_stories" => crate::ai::DEFAULT_USER_STORIES_TEMPLATE,
+        "story_verify" => crate::ai::DEFAULT_STORY_VERIFY_TEMPLATE,
         // The SDD/Harness pipeline stages reuse this per-workspace text store; they start empty
         // (no preconfig — the user defines them). The guide is static frontend content, not stored.
         "sdd_stages" => "",
@@ -1582,6 +1584,13 @@ pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
          WHERE status IN ('running', 'queued')",
         params![now()],
     )?;
+    // A batch still claiming to be generating is one whose app was killed mid-run: there is no
+    // process left to finish it, and leaving it would show a spinner that never resolves. Its
+    // stories, if the previous run had already written any, are untouched.
+    conn.execute(
+        "UPDATE story_batches SET status = 'draft', updated_at = ?1 WHERE status = 'generating'",
+        params![now()],
+    )?;
     Ok(())
 }
 
@@ -2161,6 +2170,483 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
     Ok(())
 }
 
+// ---------- user stories (story_batches / story_drafts) ----------
+
+const BATCH_COLUMNS: &str = "id, workspace_id, project_id, title, source_kind, source_ref, source_text, \
+    instructions, provider, model, ado_org, ado_project, work_item_type, area_path, iteration_path, \
+    tags, open_questions, status, last_error, created_at, updated_at, verify_project_id, \
+    verify_provider, verify_model, verified_at";
+
+fn map_batch(row: &rusqlite::Row) -> rusqlite::Result<StoryBatch> {
+    Ok(StoryBatch {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        project_id: row.get(2)?,
+        title: row.get(3)?,
+        source_kind: row.get(4)?,
+        source_ref: row.get(5)?,
+        source_text: row.get(6)?,
+        instructions: row.get(7)?,
+        provider: row.get(8)?,
+        model: row.get(9)?,
+        ado_org: row.get(10)?,
+        ado_project: row.get(11)?,
+        work_item_type: row.get(12)?,
+        area_path: row.get(13)?,
+        iteration_path: row.get(14)?,
+        tags: row.get(15)?,
+        open_questions: row.get(16)?,
+        status: row.get(17)?,
+        last_error: row.get(18)?,
+        created_at: row.get(19)?,
+        updated_at: row.get(20)?,
+        verify_project_id: row.get(21)?,
+        verify_provider: row.get(22)?,
+        verify_model: row.get(23)?,
+        verified_at: row.get(24)?,
+    })
+}
+
+const DRAFT_COLUMNS: &str = "id, batch_id, seq, title, narrative, description, acceptance_criteria, \
+    priority, story_points, tags, notes, work_item_id, work_item_url, status, last_error, created_at, \
+    updated_at, verify_status, verify_summary, verify_criteria, verified_at";
+
+fn map_draft(row: &rusqlite::Row) -> rusqlite::Result<StoryDraft> {
+    Ok(StoryDraft {
+        id: row.get(0)?,
+        batch_id: row.get(1)?,
+        seq: row.get(2)?,
+        title: row.get(3)?,
+        narrative: row.get(4)?,
+        description: row.get(5)?,
+        acceptance_criteria: row.get(6)?,
+        priority: row.get(7)?,
+        story_points: row.get(8)?,
+        tags: row.get(9)?,
+        notes: row.get(10)?,
+        work_item_id: row.get(11)?,
+        work_item_url: row.get(12)?,
+        status: row.get(13)?,
+        last_error: row.get(14)?,
+        created_at: row.get(15)?,
+        updated_at: row.get(16)?,
+        verify_status: row.get(17)?,
+        verify_summary: row.get(18)?,
+        verify_criteria: row.get(19)?,
+        verified_at: row.get(20)?,
+    })
+}
+
+/// The workspace's batches, newest activity first — the same ordering the agent console's task
+/// list uses, so the two read the same way.
+pub fn list_story_batches(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<StoryBatch>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {BATCH_COLUMNS} FROM story_batches WHERE workspace_id = ?1 ORDER BY updated_at DESC"
+    ))?;
+    let rows = stmt.query_map(params![workspace_id], map_batch)?;
+    rows.collect()
+}
+
+pub fn get_story_batch(conn: &Connection, id: &str) -> rusqlite::Result<Option<StoryBatchDetail>> {
+    let batch = conn
+        .query_row(
+            &format!("SELECT {BATCH_COLUMNS} FROM story_batches WHERE id = ?1"),
+            params![id],
+            map_batch,
+        )
+        .optional()?;
+    let Some(batch) = batch else { return Ok(None) };
+    Ok(Some(StoryBatchDetail { stories: list_story_drafts(conn, id)?, batch }))
+}
+
+pub fn list_story_drafts(conn: &Connection, batch_id: &str) -> rusqlite::Result<Vec<StoryDraft>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {DRAFT_COLUMNS} FROM story_drafts WHERE batch_id = ?1 ORDER BY seq, created_at"
+    ))?;
+    let rows = stmt.query_map(params![batch_id], map_draft)?;
+    rows.collect()
+}
+
+/// Creates an empty batch: its source is captured now, its stories arrive when the generation runs.
+///
+/// The two are separate steps because the source is what the user *chose* and the stories are what
+/// a model *proposed* — a generation that fails, or one the user re-runs with different
+/// instructions, must not take the selected wiki pages down with it.
+#[allow(clippy::too_many_arguments)]
+pub fn create_story_batch(
+    conn: &Connection,
+    workspace_id: &str,
+    project_id: Option<&str>,
+    title: &str,
+    source_kind: &str,
+    source_ref: &str,
+    source_text: &str,
+    instructions: &str,
+) -> rusqlite::Result<StoryBatch> {
+    let batch = StoryBatch {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: workspace_id.to_string(),
+        project_id: project_id.map(str::to_string),
+        title: title.to_string(),
+        source_kind: source_kind.to_string(),
+        source_ref: source_ref.to_string(),
+        source_text: source_text.to_string(),
+        instructions: instructions.to_string(),
+        provider: String::new(),
+        model: String::new(),
+        ado_org: String::new(),
+        ado_project: String::new(),
+        work_item_type: String::new(),
+        area_path: String::new(),
+        iteration_path: String::new(),
+        tags: String::new(),
+        open_questions: "[]".to_string(),
+        verify_project_id: None,
+        verify_provider: String::new(),
+        verify_model: String::new(),
+        verified_at: String::new(),
+        status: "draft".to_string(),
+        last_error: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    conn.execute(
+        "INSERT INTO story_batches (id, workspace_id, project_id, title, source_kind, source_ref,
+            source_text, instructions, provider, model, ado_org, ado_project, work_item_type, area_path,
+            iteration_path, tags, open_questions, status, last_error, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+        params![
+            batch.id, batch.workspace_id, batch.project_id, batch.title, batch.source_kind, batch.source_ref,
+            batch.source_text, batch.instructions, batch.provider, batch.model, batch.ado_org,
+            batch.ado_project, batch.work_item_type, batch.area_path, batch.iteration_path, batch.tags,
+            batch.open_questions, batch.status, batch.last_error, batch.created_at, batch.updated_at,
+        ],
+    )?;
+    Ok(batch)
+}
+
+pub fn rename_story_batch(conn: &Connection, id: &str, title: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_batches SET title = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, title, now()],
+    )?;
+    Ok(())
+}
+
+/// Saves where this batch publishes to. One target per batch, deliberately: "publish the selected
+/// stories" has to be a single decision, not one dropdown per card.
+#[allow(clippy::too_many_arguments)]
+pub fn set_story_batch_target(
+    conn: &Connection,
+    id: &str,
+    ado_org: &str,
+    ado_project: &str,
+    work_item_type: &str,
+    area_path: &str,
+    iteration_path: &str,
+    tags: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_batches SET ado_org = ?2, ado_project = ?3, work_item_type = ?4, area_path = ?5,
+            iteration_path = ?6, tags = ?7, updated_at = ?8
+         WHERE id = ?1",
+        params![id, ado_org, ado_project, work_item_type, area_path, iteration_path, tags, now()],
+    )?;
+    Ok(())
+}
+
+/// The extra instructions the next generation runs with. Separate from the source: the whole point
+/// of keeping the source text is that "generate again, but split the payment story in two" re-reads
+/// exactly the documentation the first run saw.
+pub fn set_story_batch_instructions(conn: &Connection, id: &str, instructions: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_batches SET instructions = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, instructions, now()],
+    )?;
+    Ok(())
+}
+
+pub fn set_story_batch_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    last_error: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_batches SET status = ?2, last_error = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, status, last_error, now()],
+    )?;
+    Ok(())
+}
+
+/// Records what a finished generation ran on, and what it couldn't answer.
+pub fn set_story_batch_run(
+    conn: &Connection,
+    id: &str,
+    provider: &str,
+    model: &str,
+    open_questions: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_batches SET provider = ?2, model = ?3, open_questions = ?4, updated_at = ?5
+         WHERE id = ?1",
+        params![id, provider, model, open_questions, now()],
+    )?;
+    Ok(())
+}
+
+pub fn delete_story_batch(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM story_batches WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// What one generated story carries into the database. A plain struct rather than eleven
+/// positional arguments, because the command layer builds a whole list of these at once.
+pub struct NewStoryDraft {
+    pub title: String,
+    pub narrative: String,
+    pub description: String,
+    /// Already JSON-encoded by the caller — the parsed shape lives in the command layer.
+    pub acceptance_criteria: String,
+    pub priority: i64,
+    pub story_points: f64,
+    pub tags: String,
+    pub notes: String,
+}
+
+/// Writes a generation's stories into a batch.
+///
+/// **Published stories are kept.** A re-run is "propose these again from the same documentation",
+/// and a work item that already exists on Azure Boards is not a proposal any more — deleting its
+/// row would strip the only record that it was published and let the next publish create a
+/// duplicate. Fresh stories are appended after them.
+pub fn replace_story_drafts(
+    conn: &Connection,
+    batch_id: &str,
+    stories: &[NewStoryDraft],
+) -> rusqlite::Result<Vec<StoryDraft>> {
+    conn.execute(
+        "DELETE FROM story_drafts WHERE batch_id = ?1 AND work_item_id = 0",
+        params![batch_id],
+    )?;
+    let kept: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM story_drafts WHERE batch_id = ?1",
+        params![batch_id],
+        |row| row.get(0),
+    )?;
+    for (i, story) in stories.iter().enumerate() {
+        insert_story_draft(conn, batch_id, kept + i as i64, story)?;
+    }
+    list_story_drafts(conn, batch_id)
+}
+
+fn insert_story_draft(
+    conn: &Connection,
+    batch_id: &str,
+    seq: i64,
+    story: &NewStoryDraft,
+) -> rusqlite::Result<StoryDraft> {
+    let draft = StoryDraft {
+        id: Uuid::new_v4().to_string(),
+        batch_id: batch_id.to_string(),
+        seq,
+        title: story.title.clone(),
+        narrative: story.narrative.clone(),
+        description: story.description.clone(),
+        acceptance_criteria: story.acceptance_criteria.clone(),
+        priority: story.priority,
+        story_points: story.story_points,
+        tags: story.tags.clone(),
+        notes: story.notes.clone(),
+        work_item_id: 0,
+        work_item_url: String::new(),
+        verify_status: String::new(),
+        verify_summary: String::new(),
+        verify_criteria: "[]".to_string(),
+        verified_at: String::new(),
+        status: "draft".to_string(),
+        last_error: String::new(),
+        created_at: now(),
+        updated_at: now(),
+    };
+    conn.execute(
+        "INSERT INTO story_drafts (id, batch_id, seq, title, narrative, description, acceptance_criteria,
+            priority, story_points, tags, notes, work_item_id, work_item_url, status, last_error,
+            created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        params![
+            draft.id, draft.batch_id, draft.seq, draft.title, draft.narrative, draft.description,
+            draft.acceptance_criteria, draft.priority, draft.story_points, draft.tags, draft.notes,
+            draft.work_item_id, draft.work_item_url, draft.status, draft.last_error, draft.created_at,
+            draft.updated_at,
+        ],
+    )?;
+    Ok(draft)
+}
+
+/// Adds one empty story to the end of a batch — the "write one myself" path, which is the same
+/// path a generated story ends up on once it has been edited.
+pub fn add_story_draft(conn: &Connection, batch_id: &str) -> rusqlite::Result<StoryDraft> {
+    let next: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(seq), -1) + 1 FROM story_drafts WHERE batch_id = ?1",
+        params![batch_id],
+        |row| row.get(0),
+    )?;
+    insert_story_draft(
+        conn,
+        batch_id,
+        next,
+        &NewStoryDraft {
+            title: String::new(),
+            narrative: String::new(),
+            description: String::new(),
+            acceptance_criteria: "[]".to_string(),
+            priority: 0,
+            story_points: 0.0,
+            tags: String::new(),
+            notes: String::new(),
+        },
+    )
+}
+
+/// Saves the user's edits to one story. Never touches `work_item_id`/`status`: editing a published
+/// story changes the draft here, not the work item on Azure — the card says as much.
+///
+/// **Editing the criteria drops the verification.** A verdict is an answer about one exact wording;
+/// once that wording changes, keeping the verdict would show a green "cumple" against a criterion
+/// nothing has ever checked — and QA stops looking precisely where the gap now is. Everything else
+/// (title, points, tags) leaves the verdicts alone, because none of it changes what was verified.
+#[allow(clippy::too_many_arguments)]
+pub fn save_story_draft(
+    conn: &Connection,
+    id: &str,
+    title: &str,
+    narrative: &str,
+    description: &str,
+    acceptance_criteria: &str,
+    priority: i64,
+    story_points: f64,
+    tags: &str,
+    notes: &str,
+) -> rusqlite::Result<Option<StoryDraft>> {
+    let previous_criteria: Option<String> = conn
+        .query_row(
+            "SELECT acceptance_criteria FROM story_drafts WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    conn.execute(
+        "UPDATE story_drafts SET title = ?2, narrative = ?3, description = ?4, acceptance_criteria = ?5,
+            priority = ?6, story_points = ?7, tags = ?8, notes = ?9, updated_at = ?10
+         WHERE id = ?1",
+        params![id, title, narrative, description, acceptance_criteria, priority, story_points, tags, notes, now()],
+    )?;
+    if previous_criteria.as_deref().is_some_and(|before| before != acceptance_criteria) {
+        clear_story_verification(conn, id)?;
+    }
+    conn.query_row(
+        &format!("SELECT {DRAFT_COLUMNS} FROM story_drafts WHERE id = ?1"),
+        params![id],
+        map_draft,
+    )
+    .optional()
+}
+
+/// The repository a batch's criteria are checked against. `None` clears it — a batch with no
+/// repository simply can't run the check, and the button says so rather than guessing a repo.
+pub fn set_story_batch_verify_project(
+    conn: &Connection,
+    id: &str,
+    project_id: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_batches SET verify_project_id = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, project_id, now()],
+    )?;
+    Ok(())
+}
+
+/// Records what the last verification ran on. Written once per run, after the verdicts land, so a
+/// run that failed to parse leaves the previous (honest) stamp in place.
+pub fn set_story_batch_verification_run(
+    conn: &Connection,
+    id: &str,
+    provider: &str,
+    model: &str,
+) -> rusqlite::Result<()> {
+    let stamp = now();
+    conn.execute(
+        "UPDATE story_batches SET verify_provider = ?2, verify_model = ?3, verified_at = ?4,
+            updated_at = ?4
+         WHERE id = ?1",
+        params![id, provider, model, stamp],
+    )?;
+    Ok(())
+}
+
+/// Files one story's verdicts. `criteria` is the JSON array the command layer built, positionally
+/// aligned with the story's own `acceptance_criteria`.
+pub fn save_story_verification(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    summary: &str,
+    criteria: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_drafts SET verify_status = ?2, verify_summary = ?3, verify_criteria = ?4,
+            verified_at = ?5
+         WHERE id = ?1",
+        params![id, status, summary, criteria, now()],
+    )?;
+    Ok(())
+}
+
+/// Forgets a story's verdicts — back to never-checked. Note this deliberately does *not* touch
+/// `updated_at`: dropping a stale verdict is bookkeeping, not an edit, and letting it reorder the
+/// batch list would make a story look freshly worked on because someone fixed a typo in it.
+pub fn clear_story_verification(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_drafts SET verify_status = '', verify_summary = '', verify_criteria = '[]',
+            verified_at = ''
+         WHERE id = ?1",
+        params![id],
+    )?;
+    Ok(())
+}
+
+/// Files the work item a story became. This is the row that makes publishing idempotent.
+pub fn mark_story_published(
+    conn: &Connection,
+    id: &str,
+    work_item_id: i64,
+    work_item_url: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_drafts SET work_item_id = ?2, work_item_url = ?3, status = 'published',
+            last_error = '', updated_at = ?4
+         WHERE id = ?1",
+        params![id, work_item_id, work_item_url, now()],
+    )?;
+    Ok(())
+}
+
+pub fn mark_story_error(conn: &Connection, id: &str, error: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_drafts SET status = 'error', last_error = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, error, now()],
+    )?;
+    Ok(())
+}
+
+/// Deleting a story that was already published only forgets it here; the work item stays on Azure
+/// Boards, which is the only honest thing this app can do about something a whole team can see.
+pub fn delete_story_draft(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM story_drafts WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2325,5 +2811,126 @@ mod tests {
 
         delete_workspace_activity(&conn, "job-1").unwrap();
         assert!(list_workspace_activity(&conn, &ws.id).unwrap().is_empty());
+    }
+
+    fn story_fixture() -> (Connection, StoryBatch) {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let ws = create_workspace(&conn, "ws", "folder", "#fff").unwrap();
+        let batch =
+            create_story_batch(&conn, &ws.id, None, "Checkout", "wiki", "/Producto", "documentación", "")
+                .unwrap();
+        (conn, batch)
+    }
+
+    fn proposal(title: &str) -> NewStoryDraft {
+        NewStoryDraft {
+            title: title.to_string(),
+            narrative: "Como usuario, quiero pagar, para completar mi compra".to_string(),
+            description: "contexto".to_string(),
+            acceptance_criteria: r#"["Dado …\nCuando …\nEntonces …"]"#.to_string(),
+            priority: 2,
+            story_points: 3.0,
+            tags: "checkout".to_string(),
+            notes: String::new(),
+        }
+    }
+
+    /// The contract that makes re-generating safe: a story that already exists on Azure Boards
+    /// survives the re-run (its work item id is the only thing stopping a duplicate), and the new
+    /// proposals are appended after it rather than renumbered on top of it.
+    #[test]
+    fn regenerating_keeps_published_stories_and_appends_the_rest() {
+        let (conn, batch) = story_fixture();
+        let first = replace_story_drafts(&conn, &batch.id, &[proposal("Pagar"), proposal("Cancelar")]).unwrap();
+        assert_eq!(first.len(), 2);
+
+        mark_story_published(&conn, &first[0].id, 4321, "https://dev.azure.com/x/_workitems/edit/4321").unwrap();
+
+        let second = replace_story_drafts(&conn, &batch.id, &[proposal("Reembolsar")]).unwrap();
+        assert_eq!(second.len(), 2, "the published story is kept, the unpublished one replaced");
+        assert_eq!(second[0].title, "Pagar");
+        assert_eq!(second[0].work_item_id, 4321);
+        assert_eq!(second[0].status, "published");
+        assert_eq!(second[1].title, "Reembolsar");
+        // Appended *after* what was kept, so the sequence never collides.
+        assert_eq!(second[1].seq, 1);
+    }
+
+    /// Editing a published story changes the draft here and nothing on the host — the work item id
+    /// has to survive the save, or the next publish would create a duplicate.
+    #[test]
+    fn editing_a_published_story_keeps_its_work_item() {
+        let (conn, batch) = story_fixture();
+        let stories = replace_story_drafts(&conn, &batch.id, &[proposal("Pagar")]).unwrap();
+        mark_story_published(&conn, &stories[0].id, 99, "https://x/99").unwrap();
+
+        let saved = save_story_draft(
+            &conn, &stories[0].id, "Pagar con tarjeta", "Como usuario…", "otro contexto", "[]", 1, 5.0, "pagos", "",
+        )
+        .unwrap()
+        .expect("the story still exists");
+        assert_eq!(saved.title, "Pagar con tarjeta");
+        assert_eq!(saved.story_points, 5.0);
+        assert_eq!(saved.work_item_id, 99);
+        assert_eq!(saved.status, "published");
+    }
+
+    /// A verdict is an answer about one exact wording. Editing that wording has to drop it, or the
+    /// card would show a green "cumple" against a criterion nothing has ever checked — and QA would
+    /// stop looking exactly where the gap now is. Everything else is left alone: renaming a story
+    /// or re-estimating it changes nothing about what was verified.
+    #[test]
+    fn editing_the_criteria_drops_the_verdicts_but_renaming_does_not() {
+        let (conn, batch) = story_fixture();
+        let stories = replace_story_drafts(&conn, &batch.id, &[proposal("Pagar")]).unwrap();
+        let id = &stories[0].id;
+        let verdicts = r#"[{"verdict":"pass","evidence":["src/pago.ts:12"],"note":"","covered_by_test":true}]"#;
+        save_story_verification(&conn, id, "pass", "Implementada", verdicts).unwrap();
+
+        // Same criteria, different title: the verification still describes what was checked.
+        let renamed = save_story_draft(
+            &conn, id, "Pagar con tarjeta", "Como usuario…", "contexto",
+            r#"["Dado …\nCuando …\nEntonces …"]"#, 2, 3.0, "checkout", "",
+        )
+        .unwrap()
+        .expect("the story still exists");
+        assert_eq!(renamed.verify_status, "pass");
+        assert_eq!(renamed.verify_criteria, verdicts);
+
+        // A criterion rewritten: every verdict on the row is now about text that no longer exists.
+        let edited = save_story_draft(
+            &conn, id, "Pagar con tarjeta", "Como usuario…", "contexto",
+            r#"["Escenario: otro\nDado …"]"#, 2, 3.0, "checkout", "",
+        )
+        .unwrap()
+        .expect("the story still exists");
+        assert_eq!(edited.verify_status, "");
+        assert_eq!(edited.verify_summary, "");
+        assert_eq!(edited.verify_criteria, "[]");
+        assert_eq!(edited.verified_at, "");
+    }
+
+    /// A batch is workspace-scoped and its stories hang off it: deleting the workspace has to take
+    /// both away, and deleting the batch has to take its stories.
+    #[test]
+    fn a_batch_and_its_stories_cascade() {
+        let (conn, batch) = story_fixture();
+        replace_story_drafts(&conn, &batch.id, &[proposal("Pagar")]).unwrap();
+        assert_eq!(get_story_batch(&conn, &batch.id).unwrap().unwrap().stories.len(), 1);
+
+        delete_story_batch(&conn, &batch.id).unwrap();
+        assert!(get_story_batch(&conn, &batch.id).unwrap().is_none());
+        assert!(list_story_drafts(&conn, &batch.id).unwrap().is_empty());
+    }
+
+    /// A batch left mid-generation by a killed session must not come back showing a spinner for a
+    /// process that died yesterday.
+    #[test]
+    fn a_generating_batch_is_demoted_on_restart() {
+        let (conn, batch) = story_fixture();
+        set_story_batch_status(&conn, &batch.id, "generating", "").unwrap();
+        recover_after_restart(&conn).unwrap();
+        assert_eq!(get_story_batch(&conn, &batch.id).unwrap().unwrap().batch.status, "draft");
     }
 }

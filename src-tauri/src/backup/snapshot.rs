@@ -34,6 +34,11 @@ pub const TABLES: &[&str] = &[
     "workspace_chain_templates",
     "workspace_chain_template_steps",
     "workspace_mcps",
+    // Authored content, not a log: a backlog derived from a wiki is something the user wrote and
+    // edited, and it is workspace-scoped, so it restores onto another machine meaning the same
+    // thing. (Both tables come after `projects` — `story_batches.project_id` points at it.)
+    "story_batches",
+    "story_drafts",
     "app_settings",
     "api_collections",
     "api_folders",

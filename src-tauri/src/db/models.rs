@@ -141,6 +141,92 @@ pub struct AgentTask {
     pub updated_at: String,
 }
 
+/// One run of "read this documentation, write the backlog": where the requirements came from,
+/// where the stories are going on Azure Boards, and how the generation itself went.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoryBatch {
+    pub id: String,
+    pub workspace_id: String,
+    /// The repository whose Markdown was read, for the `files` source. `None` otherwise — a batch
+    /// derived from a wiki needs no repository at all.
+    pub project_id: Option<String>,
+    pub title: String,
+    /// `wiki` | `files` | `text`.
+    pub source_kind: String,
+    /// Human-readable provenance: the wiki pages, the file paths, or `""` for pasted text.
+    pub source_ref: String,
+    /// A copy of exactly what was sent to the model — the wiki moves on, this doesn't.
+    pub source_text: String,
+    pub instructions: String,
+    pub provider: String,
+    pub model: String,
+    pub ado_org: String,
+    pub ado_project: String,
+    pub work_item_type: String,
+    pub area_path: String,
+    pub iteration_path: String,
+    pub tags: String,
+    /// JSON array of strings: what the documentation left ambiguous.
+    pub open_questions: String,
+    /// The repository whose code the acceptance criteria are checked against. `None` until the
+    /// user picks one — deliberately not `project_id`, which records where the source came from.
+    pub verify_project_id: Option<String>,
+    /// What the last verification ran on, and when. Empty until one has run.
+    pub verify_provider: String,
+    pub verify_model: String,
+    pub verified_at: String,
+    /// `draft` | `generating` | `ready` | `error`.
+    pub status: String,
+    pub last_error: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One user story as it stands right now — the model's proposal plus every edit since, and the
+/// Azure Boards work item it became.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoryDraft {
+    pub id: String,
+    pub batch_id: String,
+    pub seq: i64,
+    pub title: String,
+    /// "Como <rol>, quiero <capacidad>, para <beneficio>".
+    pub narrative: String,
+    pub description: String,
+    /// JSON array of strings, one criterion per element (each may be multi-line Gherkin).
+    pub acceptance_criteria: String,
+    /// Azure Boards' scale: 1 (critical) … 4 (low). `0` leaves the field alone.
+    pub priority: i64,
+    /// `0` leaves the estimate alone. Fractional on purpose — Azure accepts half points.
+    pub story_points: f64,
+    pub tags: String,
+    pub notes: String,
+    /// `0` until published; the work item id afterwards, which is what stops a duplicate.
+    pub work_item_id: i64,
+    pub work_item_url: String,
+    /// What the last check against the code concluded: `""` (never checked) | `pass` | `partial` |
+    /// `fail` | `unknown`. Rolled up from `verify_criteria`, never taken from the model directly.
+    pub verify_status: String,
+    pub verify_summary: String,
+    /// JSON array positionally aligned with `acceptance_criteria` — one verdict per criterion.
+    pub verify_criteria: String,
+    /// Cleared whenever the criteria are edited: a verdict about text that has since changed is
+    /// worse than no verdict at all.
+    pub verified_at: String,
+    /// `draft` | `published` | `error`.
+    pub status: String,
+    pub last_error: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A batch and its stories in one round trip — what the detail pane renders.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoryBatchDetail {
+    pub batch: StoryBatch,
+    pub stories: Vec<StoryDraft>,
+}
+
 /// An ordered plan of agent steps against one repository. The steps' turns are ordinary agent
 /// tasks; this row is the plan's identity and the scheduler's whole state.
 #[derive(Debug, Clone, Serialize, Deserialize)]

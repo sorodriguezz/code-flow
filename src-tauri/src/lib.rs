@@ -5,6 +5,7 @@ mod appmenu;
 mod ai_locks;
 mod ai_runs;
 mod backup;
+mod boards;
 mod claude;
 mod commands;
 mod dap;
@@ -342,6 +343,27 @@ pub fn run() {
             commands::ado_cmd::post_pr_review_comment,
             commands::ado_cmd::act_on_pull_request,
             commands::ado_cmd::pr_review_decision,
+            // ---- user stories (workspace-scoped: wiki in, Azure Boards out) ----
+            commands::stories_cmd::ado_list_wikis,
+            commands::stories_cmd::ado_list_wiki_pages,
+            commands::stories_cmd::ado_wiki_pages_content,
+            commands::stories_cmd::ado_list_work_item_types,
+            commands::stories_cmd::ado_list_classification_nodes,
+            commands::stories_cmd::list_story_batches,
+            commands::stories_cmd::get_story_batch,
+            commands::stories_cmd::create_story_batch,
+            commands::stories_cmd::rename_story_batch,
+            commands::stories_cmd::set_story_batch_target,
+            commands::stories_cmd::set_story_batch_instructions,
+            commands::stories_cmd::set_story_batch_verify_project,
+            commands::stories_cmd::delete_story_batch,
+            commands::stories_cmd::generate_stories,
+            commands::stories_cmd::verify_stories,
+            commands::stories_cmd::write_story_feature_file,
+            commands::stories_cmd::add_story_draft,
+            commands::stories_cmd::save_story_draft,
+            commands::stories_cmd::delete_story_draft,
+            commands::stories_cmd::publish_stories,
             commands::github_cmd::link_project_github,
             commands::github_cmd::github_authenticated_user,
             commands::gitlab_cmd::link_project_gitlab,

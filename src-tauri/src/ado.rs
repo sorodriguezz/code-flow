@@ -1,12 +1,12 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-const API_VERSION: &str = "7.1";
+pub(crate) const API_VERSION: &str = "7.1";
 /// A handful of Azure DevOps endpoints (notably `connectionData`) never went GA, and the server
 /// rejects a plain `7.1` on them with a 400 demanding the `-preview` suffix.
 const PREVIEW_API_VERSION: &str = "7.1-preview";
 
-fn auth_header(pat: &str) -> String {
+pub(crate) fn auth_header(pat: &str) -> String {
     let token = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
     format!("Basic {token}")
 }
@@ -17,7 +17,7 @@ fn auth_header(pat: &str) -> String {
 /// DevOps' server rejects any literal `:` in the request path (IIS request validation), so
 /// interpolating a raw URL straight into the path 404s/400s in a confusing way; normalizing
 /// here means it works no matter which form ended up saved.
-fn normalize_org(org: &str) -> String {
+pub(crate) fn normalize_org(org: &str) -> String {
     let trimmed = org.trim().trim_end_matches('/');
     for prefix in ["https://dev.azure.com/", "http://dev.azure.com/"] {
         if let Some(rest) = trimmed.strip_prefix(prefix) {
@@ -37,7 +37,7 @@ fn normalize_org(org: &str) -> String {
 /// Percent-encodes a single URL path segment (org/project names routinely contain spaces —
 /// e.g. "Marketing Website" — which a raw, unencoded `format!` would send straight through
 /// and break just as badly as the `:` case above).
-fn encode_segment(s: &str) -> String {
+pub(crate) fn encode_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -48,7 +48,7 @@ fn encode_segment(s: &str) -> String {
     out
 }
 
-fn client() -> reqwest::Client {
+pub(crate) fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
@@ -122,7 +122,7 @@ pub fn detect_from_remote_url(remote_url: &str) -> Option<DetectedAdoRepo> {
     None
 }
 
-async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, pat: &str) -> Result<T, String> {
+pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, pat: &str) -> Result<T, String> {
     let res = client()
         .get(url)
         .header("Authorization", auth_header(pat))
@@ -169,8 +169,8 @@ pub struct PullRequestSummary {
 }
 
 #[derive(Deserialize)]
-struct ListResponse<T> {
-    value: Vec<T>,
+pub(crate) struct ListResponse<T> {
+    pub(crate) value: Vec<T>,
 }
 
 #[derive(Deserialize)]

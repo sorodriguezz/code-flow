@@ -312,7 +312,7 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
     Ok(needs_token.unwrap_or(AutoLinkResult::NotDetected))
 }
 
-fn pat_for_org(org: &str) -> Result<String, String> {
+pub(crate) fn pat_for_org(org: &str) -> Result<String, String> {
     secrets::get_secret(&secrets::ado_pat_key(org))?
         .ok_or_else(|| format!("No Azure DevOps token saved for organization \"{org}\" — connect it in Settings first"))
 }

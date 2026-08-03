@@ -33,6 +33,7 @@ export type ShortcutId =
   | "view.api"
   | "view.database"
   | "view.agents"
+  | "view.stories"
   | "db.newConsole"
   | "db.connections"
   | "db.refresh"
@@ -88,7 +89,7 @@ export const SHORTCUT_GROUP_LABELS: Record<ShortcutGroup, TranslationKey> = {
 };
 
 /**
- * The five screens, in the order the keyboard walks them.
+ * The screens, in the order the keyboard walks them.
  *
  * A destination is a view *and*, for the two that share one, which workspace inside it — the API
  * client and the database are both `activeView: "api"`, so naming only the view isn't enough to say
@@ -103,6 +104,7 @@ const VIEW_ORDER: { view: MainView; workspace?: ApiWorkspace }[] = [
   { view: "api", workspace: "requests" },
   { view: "api", workspace: "database" },
   { view: "agents" },
+  { view: "stories" },
 ];
 
 /** Goes to a destination, using whichever setter can express it. */
@@ -264,6 +266,13 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "tabbar.agents",
     defaultChord: "Mod+6",
     run: () => useUiStore.getState().setActiveView("agents"),
+  },
+  {
+    id: "view.stories",
+    group: "views",
+    labelKey: "tabbar.stories",
+    defaultChord: "Mod+7",
+    run: () => useUiStore.getState().setActiveView("stories"),
   },
   {
     id: "view.next",

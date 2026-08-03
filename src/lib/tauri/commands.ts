@@ -37,6 +37,15 @@ import type {
   SecretHit,
   ShellProfile,
   StashInfo,
+  AdoWiki,
+  AdoWikiPage,
+  AdoWorkItemType,
+  AdoClassificationNode,
+  StoryBatch,
+  StoryBatchDetail,
+  StoryDraft,
+  StoryPublishOutcome,
+  StorySourceKind,
   TerminalOpened,
   ThreadCloseOutcome,
   ReviewRunDetail,
@@ -1125,3 +1134,174 @@ export const prLinkDecision = (url: string) => invoke<PrDecision>("pr_link_decis
  * plus the workspace Activity row the decision was filed under. */
 export const actOnPrLink = (url: string, workspaceId: string, action: PrAction, body?: string) =>
   invoke<PrLinkActionOutcome>("act_on_pr_link", { url, workspaceId, action, body });
+
+// ---------- user stories: reading the source ----------
+
+/** The wikis of one Azure DevOps project — a project wiki, plus any code wikis published from a
+ * repo. Authenticated with the PAT saved for `org`. */
+export const adoListWikis = (org: string, project: string) =>
+  invoke<AdoWiki[]>("ado_list_wikis", { org, project });
+
+/** Every page of a wiki, flattened and depth-tagged, in the order the wiki lists them. */
+export const adoListWikiPages = (org: string, project: string, wiki: string) =>
+  invoke<AdoWikiPage[]>("ado_list_wiki_pages", { org, project, wiki });
+
+/** The selected pages' Markdown, concatenated under their own paths — one round trip for the
+ * whole selection rather than one per page. */
+export const adoWikiPagesContent = (org: string, project: string, wiki: string, paths: string[]) =>
+  invoke<string>("ado_wiki_pages_content", { org, project, wiki, paths });
+
+// ---------- user stories: the Azure Boards target ----------
+
+/** The work item types the project's process actually defines. Read from the host: "User Story"
+ * exists on Agile, "Product Backlog Item" on Scrum, "Issue" on Basic. */
+export const adoListWorkItemTypes = (org: string, project: string) =>
+  invoke<AdoWorkItemType[]>("ado_list_work_item_types", { org, project });
+
+/** The project's area or iteration tree, flattened, with each node's path already in the form the
+ * work item field takes. */
+export const adoListClassificationNodes = (org: string, project: string, structure: "areas" | "iterations") =>
+  invoke<AdoClassificationNode[]>("ado_list_classification_nodes", { org, project, structure });
+
+// ---------- user stories: batches ----------
+
+export const listStoryBatches = (workspaceId: string) =>
+  invoke<StoryBatch[]>("list_story_batches", { workspaceId });
+
+export const getStoryBatch = (id: string) =>
+  invoke<StoryBatchDetail | null>("get_story_batch", { id });
+
+/** Creates the batch with its source already captured; the stories arrive when the generation
+ * runs. `sourceText` is copied, not referenced — the wiki it came from will move on. */
+export const createStoryBatch = (
+  workspaceId: string,
+  projectId: string | null,
+  title: string,
+  sourceKind: StorySourceKind,
+  sourceRef: string,
+  sourceText: string,
+  instructions: string,
+) =>
+  invoke<StoryBatch>("create_story_batch", {
+    workspaceId,
+    projectId,
+    title,
+    sourceKind,
+    sourceRef,
+    sourceText,
+    instructions,
+  });
+
+export const renameStoryBatch = (id: string, title: string) =>
+  invoke<void>("rename_story_batch", { id, title });
+
+/** One Azure Boards target per batch — "publish the selected stories" has to be a single
+ * decision, not one dropdown per card. */
+export const setStoryBatchTarget = (
+  id: string,
+  adoOrg: string,
+  adoProject: string,
+  workItemType: string,
+  areaPath: string,
+  iterationPath: string,
+  tags: string,
+) =>
+  invoke<void>("set_story_batch_target", {
+    id,
+    adoOrg,
+    adoProject,
+    workItemType,
+    areaPath,
+    iterationPath,
+    tags,
+  });
+
+/** The extra instructions the *next* generation runs with. The captured source is untouched, which
+ * is what makes re-running a comparison rather than a fresh start. */
+export const setStoryBatchInstructions = (id: string, instructions: string) =>
+  invoke<void>("set_story_batch_instructions", { id, instructions });
+
+/** The repository whose code this set's acceptance criteria are checked against. `null` clears it.
+ * Not the same as the set's source repository: a backlog derived from a product wiki is routinely
+ * verified against the service that implements it. */
+export const setStoryBatchVerifyProject = (id: string, projectId: string | null) =>
+  invoke<void>("set_story_batch_verify_project", { id, projectId });
+
+export const deleteStoryBatch = (id: string) => invoke<void>("delete_story_batch", { id });
+
+/** Derives the batch's stories from the documentation it already holds. Re-runnable: stories
+ * already published survive it, fresh proposals are appended after them. */
+export const generateStories = (
+  batchId: string,
+  runId: string,
+  count: number,
+  agent?: { provider: string; model: string },
+) =>
+  invoke<StoryBatchDetail>("generate_stories", {
+    batchId,
+    runId,
+    count,
+    agentProvider: agent?.provider ?? null,
+    agentModel: agent?.model ?? null,
+  });
+
+// ---------- user stories: one story ----------
+
+export const addStoryDraft = (batchId: string) => invoke<StoryDraft>("add_story_draft", { batchId });
+
+/** Saves the user's edits. Never touches `work_item_id` — editing a published story changes the
+ * draft here, not the work item on Azure. */
+export const saveStoryDraft = (
+  id: string,
+  fields: {
+    title: string;
+    narrative: string;
+    description: string;
+    acceptanceCriteria: string[];
+    priority: number;
+    storyPoints: number;
+    tags: string;
+    notes: string;
+  },
+) =>
+  invoke<StoryDraft>("save_story_draft", {
+    id,
+    title: fields.title,
+    narrative: fields.narrative,
+    description: fields.description,
+    acceptanceCriteria: fields.acceptanceCriteria,
+    priority: fields.priority,
+    storyPoints: fields.storyPoints,
+    tags: fields.tags,
+    notes: fields.notes,
+  });
+
+export const deleteStoryDraft = (id: string) => invoke<void>("delete_story_draft", { id });
+
+/** Checks the set's acceptance criteria against the code of the repository it points at, and
+ * files a verdict per criterion with the evidence behind it. Read-only: the engine is pointed at
+ * the working copy to look, never to change it. `storyIds` empty means every story that has
+ * criteria. */
+export const verifyStories = (
+  batchId: string,
+  runId: string,
+  storyIds: string[],
+  agent?: { provider: string; model: string },
+) =>
+  invoke<StoryBatchDetail>("verify_stories", {
+    batchId,
+    runId,
+    storyIds,
+    agentProvider: agent?.provider ?? null,
+    agentModel: agent?.model ?? null,
+  });
+
+/** Writes the set's Gherkin into `<repo>/features/<name>.feature`, in the repository the criteria
+ * are verified against. Returns the absolute path it landed on. */
+export const writeStoryFeatureFile = (batchId: string, fileName: string, contents: string) =>
+  invoke<string>("write_story_feature_file", { batchId, fileName, contents });
+
+/** Creates one work item per selected story. Already-published stories are skipped, and every
+ * story is attempted even when an earlier one fails. */
+export const publishStories = (batchId: string, storyIds: string[]) =>
+  invoke<StoryPublishOutcome>("publish_stories", { batchId, storyIds });

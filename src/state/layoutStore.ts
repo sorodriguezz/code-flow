@@ -20,7 +20,9 @@ export type LayoutKey =
   | "dbSidebarWidth"
   | "dbResultHeight"
   | "agentsListWidth"
-  | "agentsRosterWidth";
+  | "agentsRosterWidth"
+  | "storiesListWidth"
+  | "storiesRailWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -42,6 +44,8 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   dbResultHeight: "layout_db_result_height",
   agentsListWidth: "layout_agents_list_width",
   agentsRosterWidth: "layout_agents_roster_width",
+  storiesListWidth: "layout_stories_list_width",
+  storiesRailWidth: "layout_stories_rail_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -64,6 +68,10 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   dbResultHeight: 340,
   agentsListWidth: 320,
   agentsRosterWidth: 300,
+  storiesListWidth: 300,
+  // Wider than the agent roster: this rail holds four dependent dropdowns whose values are Azure
+  // paths ("Proyecto\Área\Subárea"), which are unreadable truncated.
+  storiesRailWidth: 320,
 };
 
 interface LayoutState {

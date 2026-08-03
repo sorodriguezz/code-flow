@@ -71,6 +71,15 @@ pub(crate) enum AiTask {
     /// The editor's inline edit (Ctrl+I over a selection). Text-only like `Conflict`, so it can
     /// be routed to a fast local model — which is the point: this one runs while you type.
     Inline,
+    /// Deriving user stories and acceptance criteria from documentation. Text-only and repo-less,
+    /// so it routes anywhere — including a local model, which is often the right call for a task
+    /// whose input is a wiki page rather than a codebase.
+    Stories,
+    /// Checking a story's acceptance criteria against the code of a repository. The opposite of
+    /// [`AiTask::Stories`] in what it needs: this one reads the codebase, so it has to run on an
+    /// engine with tools — a text-only local model would answer from the criteria alone, which is
+    /// exactly the confident-and-wrong verdict the whole feature exists to avoid.
+    StoryVerify,
 }
 
 impl AiTask {
@@ -87,6 +96,8 @@ impl AiTask {
             AiTask::Fix => "fix",
             AiTask::Conflict => "conflict",
             AiTask::Inline => "inline",
+            AiTask::Stories => "stories",
+            AiTask::StoryVerify => "story_verify",
         }
     }
 }

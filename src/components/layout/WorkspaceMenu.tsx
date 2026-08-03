@@ -14,6 +14,7 @@ import {
   Bot,
   Check,
   ChevronDown,
+  ClipboardList,
   Database,
   Info,
   Layers,
@@ -70,6 +71,16 @@ const TOOLS: WorkspaceTool[] = [
     icon: Bot,
     labelKey: "tabbar.agents",
     descriptionKey: "tabbar.agentsDescription",
+  },
+  // Below the agents, and workspace-scoped for the plainest reason of the three: a requirement is
+  // written before the code that satisfies it, so this screen has to work in a workspace whose
+  // repositories don't exist yet.
+  {
+    id: "stories",
+    icon: ClipboardList,
+    labelKey: "tabbar.stories",
+    descriptionKey: "tabbar.storiesDescription",
+    beta: true,
   },
 ];
 

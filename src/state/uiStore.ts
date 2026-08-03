@@ -5,10 +5,11 @@ import type { ApiSettingsTab } from "./apiModalStore";
 // its commands. Erased at compile time; there is no runtime cycle.
 import type { ShortcutGroup } from "../lib/shortcuts";
 
-/** `api` and `agents` are the odd ones out: the built-in API client and the agent console are
- * scoped to the *workspace* rather than to a repo, so they render whether or not a project is
- * open (see `App.tsx`). Both are reached from the workspace menu rather than from the tab bar. */
-export type MainView = "graph" | "changes" | "editor" | "api" | "agents";
+/** `api`, `agents` and `stories` are the odd ones out: the built-in API client, the agent console
+ * and the user-stories workspace are scoped to the *workspace* rather than to a repo, so they
+ * render whether or not a project is open (see `App.tsx`). All three are reached from the workspace
+ * menu rather than from the tab bar. */
+export type MainView = "graph" | "changes" | "editor" | "api" | "agents" | "stories";
 
 export type SettingsSectionId =
   | "appearance"
