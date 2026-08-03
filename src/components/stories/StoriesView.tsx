@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
-import { ClipboardList, ScanSearch } from "lucide-react";
+import { CircleHelp, ClipboardList, ScanSearch } from "lucide-react";
 import { StoryBatchList } from "./StoryBatchList";
 import { StoryBatchDetail } from "./StoryBatchDetail";
 import { StoryTargetPanel } from "./StoryTargetPanel";
 import { NewStoryBatchModal } from "./NewStoryBatchModal";
 import { WorkItemReviewView } from "./WorkItemReviewView";
 import { ActiveUnderline } from "../common/ActivePill";
+import { StoriesHelpModal } from "./StoriesHelpModal";
 import { CARD } from "../api/panelChrome";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -60,6 +61,7 @@ export function StoriesView() {
 
   const [composing, setComposing] = useState(false);
   const [mode, setMode] = useState<(typeof MODES)[number]["id"]>("batches");
+  const [helpOpen, setHelpOpen] = useState(false);
 
   useEffect(() => {
     void useStoriesStore.getState().setWorkspace(workspaceId);
@@ -114,6 +116,19 @@ export function StoriesView() {
               {t(labelKey)}
             </button>
           ))}
+          {/* At the end of the strip rather than inside either tab: the manual covers both
+              directions, and the limits that matter most — the review never writes to Azure, the
+              session is not saved — belong to the workspace, not to whichever half is on screen. */}
+          <button
+            type="button"
+            onClick={() => setHelpOpen(true)}
+            title={t("stories.helpHint")}
+            aria-label={t("stories.help")}
+            className="ml-auto flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+          >
+            <CircleHelp size={13} />
+            {t("stories.help")}
+          </button>
         </div>
 
         {mode === "review" ? (
@@ -163,6 +178,7 @@ export function StoriesView() {
       </div>
 
       {composing && <NewStoryBatchModal onClose={() => setComposing(false)} />}
+      {helpOpen && <StoriesHelpModal onClose={() => setHelpOpen(false)} />}
     </>
   );
 }

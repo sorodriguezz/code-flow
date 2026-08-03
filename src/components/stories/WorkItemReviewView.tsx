@@ -15,6 +15,7 @@ import {
   Info,
   Link2,
   ListChecks,
+  Play,
   Plug,
   Plus,
   ScanSearch,
@@ -107,9 +108,17 @@ function Field({
   );
 }
 
-/** The one line a section shows before it has anything to show. */
-function SectionHint({ running, children }: { running: boolean; children: React.ReactNode }) {
+/**
+ * What a section says before it has anything to say — and the way to fill it.
+ *
+ * The button repeats the one in the band above on purpose: a rail of three grey sentences reads as
+ * three captions, and the user has to work out that the thing that fills them is somewhere else.
+ */
+function SectionHint({ stage, children }: { stage: WorkItemReviewStage; children: React.ReactNode }) {
   const t = useT();
+  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage[stage]));
+  const ready = useWorkItemReviewStore((s) => Boolean(s.item) && s.projectIds.length > 0);
+
   if (running) {
     return (
       <p className="flex items-center gap-2 text-[11.5px] text-[var(--cf-text-muted)]">
@@ -118,7 +127,21 @@ function SectionHint({ running, children }: { running: boolean; children: React.
       </p>
     );
   }
-  return <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{children}</p>;
+  return (
+    <div className="space-y-2">
+      <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{children}</p>
+      <button
+        type="button"
+        disabled={!ready}
+        title={ready ? t(`huReview.what.${stage}`) : t("huReview.pickReposFirst")}
+        onClick={() => void store().run(stage)}
+        className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text)]"
+      >
+        <Play size={10} />
+        {t(`huReview.run.${stage}`)}
+      </button>
+    </div>
+  );
 }
 
 /** Where a proposal came from, shown only when more than one repository was read. */
@@ -153,6 +176,19 @@ function CardActions({ onCopy, onDismiss }: { onCopy: () => void; onDismiss: () 
       </button>
     </>
   );
+}
+
+/**
+ * How many rows a box needs to show what is in it.
+ *
+ * Every criterion was a fixed three-row textarea, so a five-line scenario arrived clipped with its
+ * own scrollbar — seven of those read as a wall of half-sentences rather than as the acceptance
+ * criteria of one story. Counting lines rather than measuring pixels because the text here is
+ * line-oriented, and because the CSS that would do it (`field-sizing: content`) is Chromium-only
+ * and this app also runs on WKWebView.
+ */
+function rowsFor(text: string, min: number, max: number): number {
+  return Math.min(max, Math.max(min, text.split("\n").length + 1));
 }
 
 const PRIMARY_ACTION =
@@ -203,7 +239,7 @@ function FindingRow({ finding, at }: { finding: ReviewFinding; at: number }) {
       )}
       <div className="mt-2 flex items-center gap-1">
         {finding.proposal.trim() && (
-          <button type="button" onClick={insert} className={PRIMARY_ACTION}>
+          <button type="button" onClick={insert} title={t("huReview.insertHint")} className={PRIMARY_ACTION}>
             {t("huReview.insert")}
           </button>
         )}
@@ -263,6 +299,7 @@ function RepoPicker() {
         type="button"
         onClick={() => setOpen((wasOpen) => !wasOpen)}
         aria-expanded={open}
+        title={t("huReview.reposHint")}
         className="flex max-w-[22rem] items-center gap-1.5 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] hover:border-[var(--cf-accent)]"
       >
         <FolderGit2 size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
@@ -323,7 +360,7 @@ function StageChip({
     <button
       type="button"
       disabled={!ready && !running}
-      title={ready || running ? undefined : t("huReview.pickReposFirst")}
+      title={running ? t("huReview.stopHint") : ready ? t(`huReview.what.${stage}`) : t("huReview.pickReposFirst")}
       onClick={() => void (running ? store().stop(stage) : store().run(stage))}
       className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-40 ${
         primary && !running
@@ -455,6 +492,7 @@ export function WorkItemReviewView() {
         <button
           type="button"
           disabled={loading || !input.trim()}
+          title={t("huReview.loadHint")}
           onClick={() => void store().load()}
           className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
         >
@@ -512,6 +550,7 @@ export function WorkItemReviewView() {
             <button
               type="button"
               onClick={() => void openExternalUrl(item.url).catch((e: unknown) => pushErrorToast(String(e)))}
+              title={t("huReview.openInAzureHint")}
               className="mt-[3px] flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
             >
               <ExternalLink size={11} />
@@ -522,7 +561,6 @@ export function WorkItemReviewView() {
           {/* 3 — what it is read against, and the three steps in order */}
           <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
             <RepoPicker />
-            <span className="text-[11px] text-[var(--cf-text-muted)]">{t("huReview.reposHint")}</span>
             <div className="ml-auto flex flex-wrap items-center gap-1.5">
               {STAGES.map(({ stage, icon }, at) => (
                 <div key={stage} className="flex items-center gap-1.5">
@@ -549,7 +587,7 @@ export function WorkItemReviewView() {
                 >
                   <textarea
                     value={isBug ? reproSteps : description}
-                    rows={7}
+                    rows={rowsFor(isBug ? reproSteps : description, 7, 24)}
                     onChange={(e) => (isBug ? store().setReproSteps(e.target.value) : store().setDescription(e.target.value))}
                     className={`${FIELD_FULL} min-h-[9rem] resize-y leading-relaxed`}
                   />
@@ -562,7 +600,7 @@ export function WorkItemReviewView() {
                   <Field label={t("stories.fieldDescription")} hint={t("huReview.bugDescriptionHint")}>
                     <textarea
                       value={description}
-                      rows={4}
+                      rows={rowsFor(description, 4, 16)}
                       onChange={(e) => store().setDescription(e.target.value)}
                       className={`${FIELD_FULL} resize-y leading-relaxed`}
                     />
@@ -576,6 +614,7 @@ export function WorkItemReviewView() {
                     <button
                       type="button"
                       onClick={() => store().addCriterion("")}
+                      title={t("huReview.addCriterionHint")}
                       className="flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
                     >
                       <Plus size={11} />
@@ -595,7 +634,7 @@ export function WorkItemReviewView() {
                         <div className="min-w-0 flex-1">
                           <textarea
                             value={criterion}
-                            rows={3}
+                            rows={rowsFor(criterion, 3, 20)}
                             onChange={(e) => store().setCriterion(at, e.target.value)}
                             className={`${FIELD_FULL} resize-y font-mono text-[11px] leading-relaxed`}
                           />
@@ -626,6 +665,7 @@ export function WorkItemReviewView() {
                           onClick={() =>
                             void openExternalUrl(child.url).catch((e: unknown) => pushErrorToast(String(e)))
                           }
+                          title={t("huReview.openChildHint")}
                           className="flex w-full items-baseline gap-2 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-left hover:border-[var(--cf-accent)]"
                         >
                           <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
@@ -648,7 +688,7 @@ export function WorkItemReviewView() {
               <section className="border-b border-[var(--cf-border)] px-3 py-3">
                 <h3 className="mb-2 text-[13px] font-semibold text-[var(--cf-text)]">{t("huReview.analysis")}</h3>
                 {!analysis ? (
-                  <SectionHint running={Boolean(running.analyze)}>{t("huReview.analysisHint")}</SectionHint>
+                  <SectionHint stage="analyze">{t("huReview.analysisHint")}</SectionHint>
                 ) : (
                   <div className="space-y-2">
                     <div className="flex flex-wrap items-center gap-1">
@@ -686,7 +726,7 @@ export function WorkItemReviewView() {
               <section className="border-b border-[var(--cf-border)] px-3 py-3">
                 <h3 className="mb-2 text-[13px] font-semibold text-[var(--cf-text)]">{t("huReview.criteria")}</h3>
                 {liveCounts.criteria === 0 ? (
-                  <SectionHint running={Boolean(running.criteria)}>{t("huReview.criteriaHint")}</SectionHint>
+                  <SectionHint stage="criteria">{t("huReview.criteriaHint")}</SectionHint>
                 ) : (
                   <div className="space-y-2">
                     {proposedCriteria.map((criterion, at) =>
@@ -713,6 +753,7 @@ export function WorkItemReviewView() {
                                 store().addCriterion(criterion.gherkin);
                                 store().dismiss(`criterion:${at}`);
                               }}
+                              title={t("huReview.addToStoryHint")}
                               className={PRIMARY_ACTION}
                             >
                               {t("huReview.addToStory")}
@@ -744,6 +785,7 @@ export function WorkItemReviewView() {
                           t("huReview.copied"),
                         )
                       }
+                      title={t("huReview.copyAllTasksHint")}
                       className="ml-auto flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
                     >
                       <Copy size={11} />
@@ -752,7 +794,7 @@ export function WorkItemReviewView() {
                   )}
                 </div>
                 {liveCounts.tasks === 0 ? (
-                  <SectionHint running={Boolean(running.tasks)}>{t("huReview.tasksHint")}</SectionHint>
+                  <SectionHint stage="tasks">{t("huReview.tasksHint")}</SectionHint>
                 ) : (
                   <div className="space-y-2">
                     {proposedTasks.map((task, at) => (
