@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Bug,
+  Check,
   ChevronDown,
   ChevronRight,
   CircleAlert,
@@ -22,6 +23,7 @@ import {
   ShieldCheck,
   Trash2,
   TriangleAlert,
+  User,
   Wrench,
 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
@@ -34,9 +36,16 @@ import { useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { loadAdoConnections } from "../../lib/adoConnections";
+import { htmlToText } from "../../lib/workItemHtml";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
-import type { ProposedTask, ReviewFinding, StorySection, WorkItemReviewStage } from "../../types/domain";
+import type {
+  AdoWorkItemChild,
+  ProposedTask,
+  ReviewFinding,
+  StorySection,
+  WorkItemReviewStage,
+} from "../../types/domain";
 
 /**
  * Deliberately carries no width. A `w-full` baked in here loses to — or beats, depending on which
@@ -48,11 +57,14 @@ const FIELD =
 /** The common case, spelled once: a field that owns its row. */
 const FIELD_FULL = `${FIELD} w-full`;
 
-/** Severity as a shape on the card's edge, not only as a coloured word too small to compare. */
+/** Severity as a shape on the card's edge, not only as a coloured word too small to compare.
+ * The hover repeat is load-bearing: `CARD_MOTION`'s hover tint is the `border-color` shorthand,
+ * which at hover specificity resets this longhand too — without the repeat, pointing at a card
+ * is exactly when its severity colour would fade out. */
 const SEVERITY_RAIL: Record<ReviewFinding["severity"], string> = {
-  alta: "border-l-[var(--cf-danger)]",
-  media: "border-l-[var(--cf-warning)]",
-  baja: "border-l-[var(--cf-border)]",
+  alta: "border-l-[var(--cf-danger)] hover:border-l-[var(--cf-danger)]",
+  media: "border-l-[var(--cf-warning)] hover:border-l-[var(--cf-warning)]",
+  baja: "border-l-[var(--cf-border)] hover:border-l-[var(--cf-border)]",
 };
 const SEVERITY_TEXT: Record<ReviewFinding["severity"], string> = {
   alta: "text-[var(--cf-danger)]",
@@ -60,6 +72,40 @@ const SEVERITY_TEXT: Record<ReviewFinding["severity"], string> = {
   baja: "text-[var(--cf-text-muted)]",
 };
 const SEVERITY_ICON = { alta: TriangleAlert, media: CircleAlert, baja: Info } as const;
+
+/** The same severity, as a wash over the whole card — faint enough to rank, not to shout. */
+const SEVERITY_CARD: Record<ReviewFinding["severity"], string> = {
+  alta: "bg-[color-mix(in_oklab,var(--cf-danger)_4%,var(--cf-surface))]",
+  media: "bg-[color-mix(in_oklab,var(--cf-warning)_4%,var(--cf-surface))]",
+  baja: "bg-[var(--cf-surface)]",
+};
+
+/**
+ * Every proposal card moves the same way: rises in when it arrives, lifts a shadow under the
+ * pointer. One string, so a new kind of card cannot arrive with half the behaviour.
+ */
+const CARD_MOTION =
+  "cf-rise transition-[border-color,box-shadow] duration-150 hover:border-[color-mix(in_oklab,var(--cf-accent)_40%,var(--cf-border))] hover:shadow-[var(--cf-shadow)]";
+
+/** Staggered entry: each card waits on the one above, capped so a long list doesn't crawl. */
+function riseDelay(at: number): React.CSSProperties {
+  return { "--cf-rise-delay": `${Math.min(at, 8) * 45}ms` } as React.CSSProperties;
+}
+
+/**
+ * How a child task's state is coloured. Azure states are free strings per process template — and
+ * per language — so this matches the families rather than the exact words, and stays quiet for
+ * anything it does not recognise: an unknown state is not news, just a state.
+ */
+function stateTone(state: string): string {
+  if (/clos|done|complet|resolv|cerrad|resuelt|termin/i.test(state))
+    return "border-[color-mix(in_oklab,var(--cf-success)_45%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] text-[var(--cf-success)]";
+  if (/activ|progress|doing|curso|desarrollo/i.test(state))
+    return "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_10%,transparent)] text-[var(--cf-accent)]";
+  if (/remov|elimin/i.test(state))
+    return "border-[color-mix(in_oklab,var(--cf-danger)_45%,transparent)] bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] text-[var(--cf-danger)]";
+  return "border-[var(--cf-border)] bg-transparent text-[var(--cf-text-muted)]";
+}
 
 /** Six cells of one size, so the row reads as a gauge rather than as six words. */
 const INVEST_CELL = {
@@ -84,13 +130,30 @@ function copy(text: string, done: string) {
 
 const store = useWorkItemReviewStore.getState;
 
+/** The tinted square every section heading wears — one shape, so the eye learns it once. */
+function IconChip({ icon: Icon, tone = "accent" }: { icon: typeof ScanSearch; tone?: "accent" | "danger" }) {
+  return (
+    <span
+      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md ${
+        tone === "danger"
+          ? "bg-[color-mix(in_oklab,var(--cf-danger)_12%,transparent)] text-[var(--cf-danger)]"
+          : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+      }`}
+    >
+      <Icon size={11} />
+    </span>
+  );
+}
+
 /** Label, control and an optional line of context — the third beat the story card's fields have. */
 function Field({
+  icon,
   label,
   hint,
   action,
   children,
 }: {
+  icon?: typeof ScanSearch;
   label: string;
   hint?: string;
   action?: React.ReactNode;
@@ -99,12 +162,39 @@ function Field({
   return (
     <section className="py-3 first:pt-0 last:pb-0">
       <div className="mb-1.5 flex items-center gap-2">
+        {icon && <IconChip icon={icon} />}
         <h3 className="text-[13px] font-semibold text-[var(--cf-text)]">{label}</h3>
         {action && <span className="ml-auto">{action}</span>}
       </div>
       {children}
       {hint && <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">{hint}</p>}
     </section>
+  );
+}
+
+/** The aside's section heading: icon chip, title, and how many proposals are alive in it. */
+function AsideTitle({
+  icon,
+  label,
+  count,
+  action,
+}: {
+  icon: typeof ScanSearch;
+  label: string;
+  count?: number;
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="mb-2 flex items-center gap-2">
+      <IconChip icon={icon} />
+      <h3 className="text-[13px] font-semibold text-[var(--cf-text)]">{label}</h3>
+      {(count ?? 0) > 0 && (
+        <span className="rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
+          {count}
+        </span>
+      )}
+      {action && <span className="ml-auto">{action}</span>}
+    </div>
   );
 }
 
@@ -217,7 +307,8 @@ function FindingRow({ finding, at }: { finding: ReviewFinding; at: number }) {
 
   return (
     <article
-      className={`rounded-md border border-l-2 border-[var(--cf-border)] px-2.5 py-2 ${SEVERITY_RAIL[finding.severity] ?? SEVERITY_RAIL.baja}`}
+      style={riseDelay(at)}
+      className={`rounded-md border border-l-2 border-[var(--cf-border)] px-2.5 py-2 ${SEVERITY_RAIL[finding.severity] ?? SEVERITY_RAIL.baja} ${SEVERITY_CARD[finding.severity] ?? SEVERITY_CARD.baja} ${CARD_MOTION}`}
     >
       <div className="flex flex-wrap items-center gap-1.5">
         <Icon size={11} className={`shrink-0 ${SEVERITY_TEXT[finding.severity] ?? SEVERITY_TEXT.baja}`} />
@@ -256,10 +347,17 @@ function TaskRow({ task, at }: { task: ProposedTask; at: number }) {
   if (dismissed) return null;
 
   return (
-    <article className="flex gap-2 rounded-md border border-[var(--cf-border)] px-2.5 py-2">
+    <article
+      style={riseDelay(at)}
+      className={`flex gap-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
+    >
       <span
         title={task.kind === "qa" ? t("huReview.qaTask") : t("huReview.devTask")}
-        className="mt-[3px] flex h-5 w-5 shrink-0 items-center justify-center rounded border border-[var(--cf-border)] text-[var(--cf-text-muted)]"
+        className={`mt-[3px] flex h-5 w-5 shrink-0 items-center justify-center rounded ${
+          task.kind === "qa"
+            ? "bg-[color-mix(in_oklab,var(--cf-warning)_14%,transparent)] text-[var(--cf-warning)]"
+            : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+        }`}
       >
         {task.kind === "qa" ? <FlaskConical size={11} /> : <Wrench size={11} />}
       </span>
@@ -279,6 +377,91 @@ function TaskRow({ task, at }: { task: ProposedTask; at: number }) {
             onCopy={() => copy(`${task.title}\n\n${task.detail}`, t("huReview.copied"))}
             onDismiss={() => store().dismiss(key)}
           />
+        </div>
+      </div>
+    </article>
+  );
+}
+
+/**
+ * One task the story already has, readable in place.
+ *
+ * The row used to be nothing but a link to the browser, which made the board the only place the
+ * task's text could be read — mid-review, that is a context switch per task. The content now
+ * arrives with the title in the same batch read, so the chevron opens it here; the browser link
+ * stays for editing, which this screen deliberately does not do.
+ */
+function ChildTaskRow({ child, at }: { child: AdoWorkItemChild; at: number }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const isBugChild = kindOf(child.work_item_type) === "bug";
+  const content = htmlToText(child.description_html);
+
+  return (
+    <article
+      style={riseDelay(at)}
+      className={`overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] ${CARD_MOTION}`}
+    >
+      <div className="flex items-center gap-1.5 py-1 pl-1.5 pr-1">
+        <button
+          type="button"
+          onClick={() => setOpen((was) => !was)}
+          aria-expanded={open}
+          aria-controls={`hu-child-${child.id}`}
+          title={open ? t("huReview.hideTaskContent") : t("huReview.showTaskContent")}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        >
+          <ChevronRight
+            size={12}
+            className={`shrink-0 text-[var(--cf-text-muted)] transition-transform duration-200 ${open ? "rotate-90" : ""}`}
+          />
+          <span title={child.work_item_type}>
+            <IconChip icon={isBugChild ? Bug : ClipboardCheck} tone={isBugChild ? "danger" : "accent"} />
+          </span>
+          <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">#{child.id}</span>
+          <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">{child.title}</span>
+          <span
+            className={`shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium ${stateTone(child.state)}`}
+          >
+            {child.state}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => void openExternalUrl(child.url).catch((e: unknown) => pushErrorToast(String(e)))}
+          title={t("huReview.openChildHint")}
+          aria-label={t("huReview.openChildHint")}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
+        >
+          <ExternalLink size={12} />
+        </button>
+      </div>
+      {/* 0fr→1fr is the height animation CSS can do without measuring: the row grows to whatever
+          the task says, and a paragraph of it stays one smooth open instead of a jump. The
+          animated `visibility` is what makes the collapse true for assistive tech as well —
+          overflow clipping alone leaves the text in the accessibility tree under a button that
+          says `aria-expanded=false`. Transitioned with the same duration so it flips to hidden
+          only once the row has finished closing. */}
+      <div
+        id={`hu-child-${child.id}`}
+        className={`grid transition-[grid-template-rows] duration-200 ease-out ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
+      >
+        <div
+          className={`min-h-0 overflow-hidden transition-[visibility] duration-200 ${open ? "visible" : "invisible"}`}
+        >
+          <div className="border-t border-[var(--cf-border)] px-3 py-2">
+            <p className="flex items-center gap-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+              <User size={10} className="shrink-0" />
+              {child.assigned_to || t("huReview.unassigned")}
+            </p>
+            {content ? (
+              <p className="mt-1.5 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-[var(--cf-text)]">
+                {content}
+              </p>
+            ) : (
+              <p className="mt-1.5 text-[11.5px] italic text-[var(--cf-text-muted)]">{t("huReview.taskNoContent")}</p>
+            )}
+          </div>
         </div>
       </div>
     </article>
@@ -356,19 +539,25 @@ function StageChip({
   const ready = useWorkItemReviewStore((s) => Boolean(s.item) && s.projectIds.length > 0);
 
   const label = running ? t("huReview.stop") : t(`huReview.run.${stage}`);
+  // Produced something and is at rest: the step is behind you, and its number can say so.
+  const done = count > 0 && !running;
   return (
     <button
       type="button"
       disabled={!ready && !running}
       title={running ? t("huReview.stopHint") : ready ? t(`huReview.what.${stage}`) : t("huReview.pickReposFirst")}
       onClick={() => void (running ? store().stop(stage) : store().run(stage))}
-      className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-40 ${
+      className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-[background-color,border-color,color,box-shadow] duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
         primary && !running
-          ? "bg-[var(--cf-accent)] text-white hover:brightness-110"
+          ? "bg-[var(--cf-accent)] text-white shadow-[0_1px_6px_color-mix(in_oklab,var(--cf-accent)_45%,transparent)] hover:brightness-110"
           : "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
       }`}
     >
-      <span className="tabular-nums opacity-60">{index}</span>
+      {done ? (
+        <Check size={11} className={primary ? "" : "text-[var(--cf-success)]"} />
+      ) : (
+        <span className="tabular-nums opacity-60">{index}</span>
+      )}
       {running ? <ThinkingOrb size="sm" /> : <Icon size={11} />}
       {label}
       {count > 0 && !running && (
@@ -447,7 +636,10 @@ export function WorkItemReviewView() {
     // A hundred percent of the parent would be the strip's height too much, and with the parent
     // clipping its overflow the footer — the one place that says nothing is written to Azure — is
     // exactly what would fall off the bottom.
-    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)]">
+    //
+    // `cf-ambient-bg` instead of flat surface: the same faint corner washes Graph and Changes sit
+    // on, which is what keeps a screen that is mostly text boxes from reading as a grey form.
+    <div className="cf-ambient-bg flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* 1 — what to load */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
         {orgs.length === 0 ? (
@@ -508,7 +700,7 @@ export function WorkItemReviewView() {
       )}
 
       {!item ? (
-        <div className="flex min-h-0 flex-1 flex-col items-center justify-center px-8 pb-10">
+        <div className="cf-fade-in flex min-h-0 flex-1 flex-col items-center justify-center px-8 pb-10">
           <EmptyState icon={ScanSearch} title={t("huReview.emptyTitle")} subtitle={t("huReview.emptyShort")} />
           <p className="-mt-2 max-w-md break-all rounded-md border border-dashed border-[var(--cf-border)] px-3 py-2 text-center font-mono text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
             {t("huReview.emptyExample")}
@@ -518,9 +710,15 @@ export function WorkItemReviewView() {
         <>
           {/* 2 — what is loaded. The title lives here, at the top of the type scale, instead of
               inside a 12px field under a 10px label. */}
-          <div className="flex shrink-0 items-start gap-2.5 border-b border-[var(--cf-border)] px-4 py-2.5">
-            <span className="mt-[3px] flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)]">
-              {anyRunning ? <ThinkingOrb size="sm" /> : <TypeIcon size={14} className="text-[var(--cf-text-muted)]" />}
+          <div className="cf-fade-in flex shrink-0 items-start gap-2.5 border-b border-[var(--cf-border)] px-4 py-2.5">
+            <span
+              className={`mt-[3px] flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
+                isBug
+                  ? "bg-[color-mix(in_oklab,var(--cf-danger)_12%,transparent)] text-[var(--cf-danger)]"
+                  : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+              }`}
+            >
+              {anyRunning ? <ThinkingOrb size="sm" /> : <TypeIcon size={14} />}
             </span>
             <div className="min-w-0 flex-1">
               <input
@@ -532,8 +730,9 @@ export function WorkItemReviewView() {
               <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-[11px] text-[var(--cf-text-muted)]">
                 <span className="font-mono">#{item.id}</span>
                 <span>{item.work_item_type}</span>
-                <span aria-hidden>·</span>
-                <span>{item.state}</span>
+                <span className={`rounded-full border px-1.5 py-px text-[10px] font-medium ${stateTone(item.state)}`}>
+                  {item.state}
+                </span>
                 <span aria-hidden>·</span>
                 <span className="inline-flex items-center gap-1">
                   <Gauge size={11} />
@@ -577,11 +776,13 @@ export function WorkItemReviewView() {
             </div>
           </div>
 
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
-            {/* The item itself, editable and local */}
+          <div className="cf-fade-in flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
+            {/* The item itself, editable and local. `mx-auto` because on a wide window the capped
+                column otherwise hugs the left edge with a third of the pane empty beside it. */}
             <div className="min-w-0 flex-1 overflow-y-auto px-4 py-3">
-              <div className="w-full max-w-3xl divide-y divide-[var(--cf-border)]">
+              <div className="mx-auto w-full max-w-3xl divide-y divide-[var(--cf-border)]">
                 <Field
+                  icon={FileText}
                   label={isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription")}
                   hint={isBug ? t("huReview.reproHint") : t("huReview.descriptionHint")}
                 >
@@ -597,7 +798,7 @@ export function WorkItemReviewView() {
                     in the description box that the form does not show. Hiding it would silently
                     drop text the review is about to be asked to judge. */}
                 {isBug && description.trim() && (
-                  <Field label={t("stories.fieldDescription")} hint={t("huReview.bugDescriptionHint")}>
+                  <Field icon={FileText} label={t("stories.fieldDescription")} hint={t("huReview.bugDescriptionHint")}>
                     <textarea
                       value={description}
                       rows={rowsFor(description, 4, 16)}
@@ -608,6 +809,7 @@ export function WorkItemReviewView() {
                 )}
 
                 <Field
+                  icon={ListChecks}
                   label={t("stories.fieldCriteria")}
                   hint={t("huReview.criteriaFieldHint")}
                   action={
@@ -653,29 +855,13 @@ export function WorkItemReviewView() {
                   </div>
                 </Field>
 
-                <Field label={t("huReview.existingTasks")} hint={t("huReview.existingTasksHint")}>
+                <Field icon={ClipboardCheck} label={t("huReview.existingTasks")} hint={t("huReview.existingTasksHint")}>
                   {item.children.length === 0 ? (
                     <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("huReview.noTasks")}</p>
                   ) : (
-                    <div className="space-y-1">
-                      {item.children.map((child) => (
-                        <button
-                          key={child.id}
-                          type="button"
-                          onClick={() =>
-                            void openExternalUrl(child.url).catch((e: unknown) => pushErrorToast(String(e)))
-                          }
-                          title={t("huReview.openChildHint")}
-                          className="flex w-full items-baseline gap-2 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-left hover:border-[var(--cf-accent)]"
-                        >
-                          <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
-                            #{child.id}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
-                            {child.title}
-                          </span>
-                          <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{child.state}</span>
-                        </button>
+                    <div className="space-y-1.5">
+                      {item.children.map((child, at) => (
+                        <ChildTaskRow key={child.id} child={child} at={at} />
                       ))}
                     </div>
                   )}
@@ -683,10 +869,11 @@ export function WorkItemReviewView() {
               </div>
             </div>
 
-            {/* What the review proposes */}
-            <aside className="flex w-full min-w-0 flex-col overflow-y-auto border-t border-[var(--cf-border)] lg:w-[26rem] lg:shrink-0 lg:border-l lg:border-t-0">
+            {/* What the review proposes. A touch of surface over the ambient wash, so the rail
+                reads as its own region without needing a heavier border. */}
+            <aside className="flex w-full min-w-0 flex-col overflow-y-auto border-t border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-surface)_55%,transparent)] lg:w-[26rem] lg:shrink-0 lg:border-l lg:border-t-0">
               <section className="border-b border-[var(--cf-border)] px-3 py-3">
-                <h3 className="mb-2 text-[13px] font-semibold text-[var(--cf-text)]">{t("huReview.analysis")}</h3>
+                <AsideTitle icon={ScanSearch} label={t("huReview.analysis")} count={liveCounts.analyze} />
                 {!analysis ? (
                   <SectionHint stage="analyze">{t("huReview.analysisHint")}</SectionHint>
                 ) : (
@@ -724,16 +911,20 @@ export function WorkItemReviewView() {
               </section>
 
               <section className="border-b border-[var(--cf-border)] px-3 py-3">
-                <h3 className="mb-2 text-[13px] font-semibold text-[var(--cf-text)]">{t("huReview.criteria")}</h3>
+                <AsideTitle icon={ListChecks} label={t("huReview.criteria")} count={liveCounts.criteria} />
                 {liveCounts.criteria === 0 ? (
                   <SectionHint stage="criteria">{t("huReview.criteriaHint")}</SectionHint>
                 ) : (
                   <div className="space-y-2">
                     {proposedCriteria.map((criterion, at) =>
                       dismissed[`criterion:${at}`] ? null : (
-                        <article key={at} className="rounded-md border border-[var(--cf-border)] px-2.5 py-2">
+                        <article
+                          key={at}
+                          style={riseDelay(at)}
+                          className={`rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
+                        >
                           <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                            <ListChecks size={11} />
+                            <ListChecks size={11} className="text-[var(--cf-success)]" />
                             {t("huReview.gherkin")}
                             <span className="tabular-nums">#{at + 1}</span>
                             <RepoChip repo={criterion.repo} />
@@ -771,28 +962,32 @@ export function WorkItemReviewView() {
               </section>
 
               <section className="px-3 py-3">
-                <div className="mb-2 flex items-center gap-2">
-                  <h3 className="text-[13px] font-semibold text-[var(--cf-text)]">{t("huReview.tasks")}</h3>
-                  {liveCounts.tasks > 0 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        copy(
-                          proposedTasks
-                            .filter((_, at) => !dismissed[`task:${at}`])
-                            .map((task) => task.title)
-                            .join("\n"),
-                          t("huReview.copied"),
-                        )
-                      }
-                      title={t("huReview.copyAllTasksHint")}
-                      className="ml-auto flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
-                    >
-                      <Copy size={11} />
-                      {t("huReview.copyAllTasks")}
-                    </button>
-                  )}
-                </div>
+                <AsideTitle
+                  icon={ClipboardCheck}
+                  label={t("huReview.tasks")}
+                  count={liveCounts.tasks}
+                  action={
+                    liveCounts.tasks > 0 ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          copy(
+                            proposedTasks
+                              .filter((_, at) => !dismissed[`task:${at}`])
+                              .map((task) => task.title)
+                              .join("\n"),
+                            t("huReview.copied"),
+                          )
+                        }
+                        title={t("huReview.copyAllTasksHint")}
+                        className="flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
+                      >
+                        <Copy size={11} />
+                        {t("huReview.copyAllTasks")}
+                      </button>
+                    ) : undefined
+                  }
+                />
                 {liveCounts.tasks === 0 ? (
                   <SectionHint stage="tasks">{t("huReview.tasksHint")}</SectionHint>
                 ) : (

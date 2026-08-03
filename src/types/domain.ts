@@ -786,6 +786,10 @@ export interface AdoWorkItemChild {
   work_item_type: string;
   title: string;
   state: string;
+  /** What the task says, as Azure stores it — HTML, shown through `htmlToText`. */
+  description_html: string;
+  /** Display name of whoever it is assigned to. Empty when nobody is. */
+  assigned_to: string;
 }
 
 /**

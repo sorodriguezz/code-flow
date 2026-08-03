@@ -591,6 +591,12 @@ pub struct AdoWorkItemChild {
     pub work_item_type: String,
     pub title: String,
     pub state: String,
+    /// What the task actually says — so the review screen can show it without a round trip to the
+    /// browser. Same field fallback as the parent: a Task keeps prose in Description, a Bug child
+    /// in Repro Steps.
+    pub description_html: String,
+    /// Who it is assigned to, by display name. Empty when nobody is.
+    pub assigned_to: String,
 }
 
 #[derive(Deserialize)]
@@ -614,6 +620,21 @@ struct RawRelation {
 
 fn field_str(fields: &HashMap<String, serde_json::Value>, name: &str) -> String {
     fields.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string()
+}
+
+/// An identity field, as the person's display name.
+///
+/// Azure returns AssignedTo as an identity object, not a string — `{"displayName": …,
+/// "uniqueName": …}` — so [`field_str`] would read it as empty. The string fallback covers the
+/// old on-premises servers that still send a combined `"Name <email>"` string.
+fn field_person(fields: &HashMap<String, serde_json::Value>, name: &str) -> String {
+    let Some(value) = fields.get(name) else { return String::new() };
+    value
+        .get("displayName")
+        .and_then(|display| display.as_str())
+        .or_else(|| value.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// The first of `names` the item actually filled in, and which one that was.
@@ -738,7 +759,8 @@ async fn list_work_items(
     // the PAT can't see — and it reports those as nulls, hence the `Option` in the envelope.
     let url = format!(
         "https://dev.azure.com/{org_enc}/_apis/wit/workitems\
-         ?ids={list}&fields=System.Title,System.State,System.WorkItemType\
+         ?ids={list}&fields=System.Title,System.State,System.WorkItemType,System.Description,\
+         Microsoft.VSTS.TCM.ReproSteps,Microsoft.VSTS.CMMI.Symptom,System.AssignedTo\
          &errorPolicy=omit&api-version={API_VERSION}"
     );
     let raw: ListResponse<Option<RawWorkItem>> = get_json(&url, pat).await?;
@@ -746,12 +768,20 @@ async fn list_work_items(
         .value
         .into_iter()
         .flatten()
-        .map(|item| AdoWorkItemChild {
-            url: format!("https://dev.azure.com/{org_enc}/_workitems/edit/{}", item.id),
-            id: item.id,
-            work_item_type: field_str(&item.fields, "System.WorkItemType"),
-            title: field_str(&item.fields, "System.Title"),
-            state: field_str(&item.fields, "System.State"),
+        .map(|item| {
+            let (description_html, _) = first_filled(
+                &item.fields,
+                &["System.Description", "Microsoft.VSTS.TCM.ReproSteps", "Microsoft.VSTS.CMMI.Symptom"],
+            );
+            AdoWorkItemChild {
+                url: format!("https://dev.azure.com/{org_enc}/_workitems/edit/{}", item.id),
+                id: item.id,
+                work_item_type: field_str(&item.fields, "System.WorkItemType"),
+                title: field_str(&item.fields, "System.Title"),
+                state: field_str(&item.fields, "System.State"),
+                description_html,
+                assigned_to: field_person(&item.fields, "System.AssignedTo"),
+            }
         })
         .collect())
 }
