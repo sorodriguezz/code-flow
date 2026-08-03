@@ -18,7 +18,16 @@
   --cf-success: #16a34a;
   --cf-danger: #dc2626;
   --cf-warning: #d97706;
-  --cf-titlebar-gradient: linear-gradient(120deg, #c9e9e6 0%, #d8c9ec 45%, #f3c9d8 100%);
+  /* Mixed halfway into the surface rather than used at full strength: the bar spans the whole
+     window and never changes, so at full saturation three hues of it were the loudest thing on
+     screen permanently — chrome outshouting the content it frames. Halved, the identity survives
+     and the accent is free to mean something again where it does carry information. */
+  --cf-titlebar-gradient: linear-gradient(
+    120deg,
+    color-mix(in oklab, #c9e9e6 50%, var(--cf-surface)) 0%,
+    color-mix(in oklab, #d8c9ec 50%, var(--cf-surface)) 45%,
+    color-mix(in oklab, #f3c9d8 50%, var(--cf-surface)) 100%
+  );
   --cf-shadow: 0 1px 2px rgba(20, 20, 40, 0.04), 0 8px 24px rgba(20, 20, 40, 0.06);
   /* Same hue family as the titlebar gradient, just as faint washes rather than a solid
      band — the ambient background behind Graph/Changes/Editor (see .cf-ambient-bg below). */
@@ -39,7 +48,13 @@
   --cf-success: #4ade80;
   --cf-danger: #f87171;
   --cf-warning: #fbbf24;
-  --cf-titlebar-gradient: linear-gradient(120deg, #163a3a 0%, #2a2148 45%, #3a1f30 100%);
+  /* Same halving as the light theme — see the note there. */
+  --cf-titlebar-gradient: linear-gradient(
+    120deg,
+    color-mix(in oklab, #163a3a 50%, var(--cf-surface)) 0%,
+    color-mix(in oklab, #2a2148 50%, var(--cf-surface)) 45%,
+    color-mix(in oklab, #3a1f30 50%, var(--cf-surface)) 100%
+  );
   --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.4);
   --cf-ambient-1: color-mix(in oklab, #2dd4c4 16%, transparent);
   --cf-ambient-2: color-mix(in oklab, #8b6fd9 16%, transparent);
@@ -59,7 +74,13 @@
     --cf-success: #4ade80;
     --cf-danger: #f87171;
     --cf-warning: #fbbf24;
-    --cf-titlebar-gradient: linear-gradient(120deg, #163a3a 0%, #2a2148 45%, #3a1f30 100%);
+    /* Same halving as the light theme — see the note there. */
+    --cf-titlebar-gradient: linear-gradient(
+      120deg,
+      color-mix(in oklab, #163a3a 50%, var(--cf-surface)) 0%,
+      color-mix(in oklab, #2a2148 50%, var(--cf-surface)) 45%,
+      color-mix(in oklab, #3a1f30 50%, var(--cf-surface)) 100%
+    );
     --cf-shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.4);
     --cf-ambient-1: color-mix(in oklab, #2dd4c4 16%, transparent);
     --cf-ambient-2: color-mix(in oklab, #8b6fd9 16%, transparent);
@@ -126,9 +147,14 @@ body {
   background: transparent;
 }
 
-[data-tauri-drag-region] {
-  -webkit-app-region: drag;
-}
+/* Dragging the window is left entirely to the `data-tauri-drag-region` attribute: Tauri's injected
+   mousedown handler walks the event path and gives up as soon as it meets a button, link, input or
+   anything with an interactive role, so the title bar's own controls keep their clicks.
+   The `-webkit-app-region: drag` rule that used to live here did the opposite — it marks the
+   header's whole box as OS caption area, and children only leave that area by declaring `no-drag`,
+   which none of them did. Every control in the bar therefore sat inside a native drag region:
+   press with a pixel of movement and the OS took the mouse to move the window, so the `click`
+   never arrived. Don't reintroduce it without `no-drag` on each control. */
 
 /* Fixed, viewport-sized wash behind Graph/Changes/Editor — those views previously sat on
    plain solid `--cf-bg` with nothing else painted behind them, which read as flat and

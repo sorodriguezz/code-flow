@@ -167,7 +167,11 @@ export function TitleBar() {
 
   return (
     <header
-      data-tauri-drag-region
+      // `deep`, not a bare attribute: the bar's controls live inside two flex wrappers, and a bare
+      // attribute only drags on direct hits to the header itself — every gap inside a wrapper was
+      // dead. `deep` drags from anywhere in the subtree, and Tauri's handler still steps aside for
+      // buttons, links, inputs and anything with an interactive role, so no control loses a click.
+      data-tauri-drag-region="deep"
       className="relative flex h-11 shrink-0 items-center justify-between px-3"
       style={{ background: "var(--cf-titlebar-gradient)" }}
     >
@@ -208,7 +212,10 @@ export function TitleBar() {
       </div>
 
       <div className="flex items-center gap-2">
-        <div className="relative">
+        {/* Opted out of the header's drag region: the open menu hangs a full-screen backdrop and a
+            popover off this wrapper, and both are plain divs — under `deep` they would turn a press
+            anywhere on screen into a window drag instead of closing the menu. */}
+        <div data-tauri-drag-region="false" className="relative">
           <button
             onClick={() => setShowAiMenu((v) => !v)}
             className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-black/60 hover:bg-black/10 dark:text-white/70"

@@ -263,36 +263,17 @@ function AgentComposer({ taskId }: { taskId: string }) {
     }
     return false;
   });
-  // Seeded once, at mount, and never re-derived. A task that has never run starts with its goal in
-  // the box rather than asking the user to retype what they already wrote in the dialog — but this
-  // deliberately does not run as an effect: the task row is replaced on every store write (a turn
-  // landing, a model picked from the chip right below), and re-seeding on those would wipe the
-  // follow-up the user is typing while they wait. Switching task remounts this via the parent's
-  // `key`, which is what makes once-at-mount the whole story.
+  // Always starts empty. The goal is already on screen — as the dashed block above while nothing
+  // has run, and as the user's own bubble the moment the first turn is sent — so a copy down here
+  // was duplicate text that read as an unsent draft sitting under a turn already in flight.
   //
-  // Keyed off `turns` rather than off the loaded messages: the transcript is hydrated
-  // asynchronously, so a task with history has an empty message list for its first render.
-  const [input, setInput] = useState(() => {
-    const state = useAgentsStore.getState();
-    const row = state.tasks.find((candidate) => candidate.id === taskId);
-    const entry = state.live[taskId];
-    const neverRun = row?.turns === 0 && !(entry?.sending ?? false) && (entry?.messages.length ?? 0) === 0;
-    return neverRun && row ? row.goal : "";
-  });
+  // It used to be seeded from `task.goal` and then cleared by watching for the first turn to start,
+  // which made an empty composer depend on winning a race: the dialog creates the task and sends
+  // its goal as two store writes, and this box mounts somewhere in between. Nothing is left for the
+  // seed to serve either — `NewTaskModal` sends the goal as it creates the task, and no code path
+  // produces `status: "draft"`, so there is no such thing as a task waiting to be sent.
+  const [input, setInput] = useState("");
   const sending = live?.sending ?? false;
-
-  // The dialog creates the task and starts its first turn as two steps, so this can mount in the
-  // gap between them and seed a goal that is already on its way to the engine. Once the turn is
-  // real — running, or in the transcript — the goal is up there in the thread and the copy down
-  // here reads as an unsent draft. Dropped only while it is still untouched: whatever the user
-  // typed over it is theirs, and the seed is never restored after this fires.
-  const seeded = useRef(input);
-  const started = sending || (live?.messages.length ?? 0) > 0 || (task?.turns ?? 0) > 0;
-  useEffect(() => {
-    if (!seeded.current || !started) return;
-    setInput((current) => (current === seeded.current ? "" : current));
-    seeded.current = "";
-  }, [started]);
 
   if (!task) return null;
 

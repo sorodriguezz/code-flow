@@ -102,10 +102,15 @@ export function StoryCard({
 
   return (
     <article
-      className={`rounded-md border transition-colors ${
+      // Selection is a rail on the left edge, not a fill. Every story in a batch starts selected,
+      // so a filled card marked the default state rather than a choice — eight of them turned the
+      // list into a block of accent colour that the scores and the open-questions box then had to
+      // compete with. The checkbox already says "selected"; the rail just makes it scannable down
+      // the column. The 2px left border is on both states so flipping one only recolours it.
+      className={`rounded-md border border-l-2 bg-[var(--cf-bg)] transition-colors ${
         selected
-          ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[var(--cf-accent-soft)]"
-          : "border-[var(--cf-border)] bg-[var(--cf-bg)]"
+          ? "border-[var(--cf-border)] border-l-[var(--cf-accent)]"
+          : "border-[var(--cf-border)] border-l-[var(--cf-border)]"
       }`}
     >
       <div className="flex items-start gap-2 px-2 py-2">
