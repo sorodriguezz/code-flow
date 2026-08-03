@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft,
   Bug,
   ChevronDown,
   ChevronRight,
@@ -353,7 +352,7 @@ function StageChip({
  * the user's own hands — inserted into the local copy, or copied out — which is what makes it safe to
  * run against a board other people are working from.
  */
-export function WorkItemReviewView({ onClose }: { onClose: () => void }) {
+export function WorkItemReviewView() {
   const t = useT();
   const openSettings = useUiStore((s) => s.openSettings);
   const input = useWorkItemReviewStore((s) => s.input);
@@ -407,19 +406,13 @@ export function WorkItemReviewView({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
+    // `flex-1`, not `h-full`: this is one child of the stories view's column, under the tab strip.
+    // A hundred percent of the parent would be the strip's height too much, and with the parent
+    // clipping its overflow the footer — the one place that says nothing is written to Azure — is
+    // exactly what would fall off the bottom.
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)]">
       {/* 1 — what to load */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
-        <button
-          type="button"
-          onClick={onClose}
-          title={t("huReview.back")}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-        >
-          <ArrowLeft size={14} />
-        </button>
-        <span className="shrink-0 text-[13px] font-semibold text-[var(--cf-text)]">{t("huReview.title")}</span>
-
         {orgs.length === 0 ? (
           <button
             type="button"

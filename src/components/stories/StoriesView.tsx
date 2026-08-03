@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { ClipboardList } from "lucide-react";
+import { ClipboardList, ScanSearch } from "lucide-react";
 import { StoryBatchList } from "./StoryBatchList";
 import { StoryBatchDetail } from "./StoryBatchDetail";
 import { StoryTargetPanel } from "./StoryTargetPanel";
 import { NewStoryBatchModal } from "./NewStoryBatchModal";
 import { WorkItemReviewView } from "./WorkItemReviewView";
+import { ActiveUnderline } from "../common/ActivePill";
 import { CARD } from "../api/panelChrome";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -13,6 +14,19 @@ import { useStoriesStore } from "../../state/storiesStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
+
+/**
+ * The two directions this workspace runs in.
+ *
+ * Peers, not a screen and a detour: one derives a backlog from documentation, the other takes a
+ * work item that already exists and asks what it is missing. They share the workspace, the Azure
+ * connection and the repositories, and a team moves between them within one refinement session —
+ * which is what makes them tabs rather than two places to navigate to.
+ */
+const MODES = [
+  { id: "batches" as const, labelKey: "stories.tabBatches" as const, icon: ClipboardList },
+  { id: "review" as const, labelKey: "stories.tabReview" as const, icon: ScanSearch },
+];
 
 const LIST_MIN = 240;
 const LIST_MAX = 460;
@@ -45,7 +59,7 @@ export function StoriesView() {
   const commitSize = useLayoutStore((s) => s.commitSize);
 
   const [composing, setComposing] = useState(false);
-  const [reviewing, setReviewing] = useState(false);
+  const [mode, setMode] = useState<(typeof MODES)[number]["id"]>("batches");
 
   useEffect(() => {
     void useStoriesStore.getState().setWorkspace(workspaceId);
@@ -54,7 +68,7 @@ export function StoriesView() {
   // Scoped to the view: it stays mounted once opened, so an unscoped ⌘N would open the new-batch
   // dialog while the user is looking at a diff.
   useEffect(() => {
-    if (activeView !== "stories") return;
+    if (activeView !== "stories" || mode !== "batches") return;
     const handler = (e: KeyboardEvent) => {
       if (e.defaultPrevented || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
       // Lower-cased: with caps lock on, `key` is "N" and a bare comparison silently misses.
@@ -65,7 +79,7 @@ export function StoriesView() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeView, composing]);
+  }, [activeView, composing, mode]);
 
   if (!workspaceId) {
     return (
@@ -79,59 +93,73 @@ export function StoriesView() {
     );
   }
 
-  // Takes over the whole view rather than opening beside the columns: reviewing one story is its
-  // own sitting, and the batch list, the batch detail and the Boards target all belong to the other
-  // direction of travel. The session itself lives in its own store, so leaving and coming back finds
-  // the story still loaded.
-  if (reviewing) return <WorkItemReviewView onClose={() => setReviewing(false)} />;
-
   return (
     <>
       <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          <StoryBatchList
-            width={listWidth}
-            onNewBatch={() => setComposing(true)}
-            onReview={() => setReviewing(true)}
-          />
-          <ResizeHandle
-            axis="x"
-            value={listWidth}
-            min={LIST_MIN}
-            max={LIST_MAX}
-            onChange={(value) => setSize("storiesListWidth", value)}
-            onCommit={(value) => commitSize("storiesListWidth", value)}
-          />
+        {/* Both tabs stay mounted as buttons so the underline has something to slide between —
+            see `ActiveUnderline`. The panes below do not: the review keeps its session in its own
+            store, so switching away and back finds the work item still loaded. */}
+        <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2">
+          {MODES.map(({ id, labelKey, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setMode(id)}
+              className={`relative -mb-px flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] ${
+                mode === id ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              }`}
+            >
+              {mode === id && <ActiveUnderline layoutId="cf-stories-mode-underline" />}
+              <Icon size={13} />
+              {t(labelKey)}
+            </button>
+          ))}
+        </div>
 
-          {/* Keyed on the batch: every bit of local state in the detail pane — which card is open,
-              which criterion is being edited — belongs to one batch and must not survive a switch. */}
-          <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD}`}>
-            {selectedId ? (
-              <StoryBatchDetail key={selectedId} batchId={selectedId} />
-            ) : (
-              <EmptyState
-                icon={ClipboardList}
-                title={t("stories.selectBatch")}
-                subtitle={t("stories.selectBatchHint")}
-              />
+        {mode === "review" ? (
+          <WorkItemReviewView />
+        ) : (
+          <div className="flex min-h-0 flex-1 overflow-hidden">
+            <StoryBatchList width={listWidth} onNewBatch={() => setComposing(true)} />
+            <ResizeHandle
+              axis="x"
+              value={listWidth}
+              min={LIST_MIN}
+              max={LIST_MAX}
+              onChange={(value) => setSize("storiesListWidth", value)}
+              onCommit={(value) => commitSize("storiesListWidth", value)}
+            />
+
+            {/* Keyed on the batch: every bit of local state in the detail pane — which card is open,
+                which criterion is being edited — belongs to one batch and must not survive a switch. */}
+            <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD}`}>
+              {selectedId ? (
+                <StoryBatchDetail key={selectedId} batchId={selectedId} />
+              ) : (
+                <EmptyState
+                  icon={ClipboardList}
+                  title={t("stories.selectBatch")}
+                  subtitle={t("stories.selectBatchHint")}
+                />
+              )}
+            </div>
+
+            {targetOpen && selectedId && (
+              <>
+                <ResizeHandle
+                  axis="x"
+                  value={railWidth}
+                  min={RAIL_MIN}
+                  max={RAIL_MAX}
+                  invert
+                  onChange={(value) => setSize("storiesRailWidth", value)}
+                  onCommit={(value) => commitSize("storiesRailWidth", value)}
+                />
+                <StoryTargetPanel key={selectedId} batchId={selectedId} width={railWidth} />
+              </>
             )}
           </div>
-
-          {targetOpen && selectedId && (
-            <>
-              <ResizeHandle
-                axis="x"
-                value={railWidth}
-                min={RAIL_MIN}
-                max={RAIL_MAX}
-                invert
-                onChange={(value) => setSize("storiesRailWidth", value)}
-                onCommit={(value) => commitSize("storiesRailWidth", value)}
-              />
-              <StoryTargetPanel key={selectedId} batchId={selectedId} width={railWidth} />
-            </>
-          )}
-        </div>
+        )}
       </div>
 
       {composing && <NewStoryBatchModal onClose={() => setComposing(false)} />}
