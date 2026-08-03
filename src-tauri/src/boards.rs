@@ -6,10 +6,11 @@
 //! path encoding, the `{value: […]}` envelope) is shared from there, so both halves speak to the
 //! same server the same way.
 //!
-//! The direction of travel is one-way on purpose: wiki pages are only ever read, work items are
-//! only ever created. Nothing here edits or deletes anything that already exists on the host.
+//! Nothing here edits or deletes anything that already exists on the host: wiki pages and work
+//! items are read, and work items are created. A story that is already on the board can be pulled
+//! in and reviewed, but whatever the review concludes goes back through the user's own hands.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -535,9 +536,325 @@ pub async fn create_work_item(
     Ok(AdoWorkItemRef { id: created.id, url })
 }
 
+// ---------- reading a work item that already exists ----------
+
+/// A work item as the review screen needs it.
+///
+/// The prose arrives as the HTML Azure stores it in, unconverted. The review only reads it, and
+/// leaving one converter — the frontend's, which has to render the thing anyway — is what keeps the
+/// text the user is looking at and the text the analysis judged from drifting apart.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdoWorkItem {
+    pub id: i64,
+    pub url: String,
+    pub work_item_type: String,
+    pub title: String,
+    pub state: String,
+    pub description_html: String,
+    /// Empty when the process template has no such field, which is not a failure: a Basic-process
+    /// "Issue" keeps its criteria inside the description.
+    pub acceptance_criteria_html: String,
+    pub tags: String,
+    pub area_path: String,
+    pub iteration_path: String,
+    /// Hierarchy children — the tasks the story already has, which the review shows before
+    /// proposing any of its own.
+    pub children: Vec<AdoWorkItemChild>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AdoWorkItemChild {
+    pub id: i64,
+    pub url: String,
+    pub work_item_type: String,
+    pub title: String,
+    pub state: String,
+}
+
+#[derive(Deserialize)]
+struct RawWorkItem {
+    id: i64,
+    #[serde(default)]
+    fields: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    relations: Vec<RawRelation>,
+    #[serde(rename = "_links", default)]
+    links: Option<RawLinks>,
+}
+
+#[derive(Deserialize)]
+struct RawRelation {
+    #[serde(default)]
+    rel: String,
+    #[serde(default)]
+    url: String,
+}
+
+fn field_str(fields: &HashMap<String, serde_json::Value>, name: &str) -> String {
+    fields.get(name).and_then(|value| value.as_str()).unwrap_or_default().to_string()
+}
+
+/// The id at the end of `…/_apis/wit/workItems/1234` — how a relation names what it points at.
+fn id_from_relation_url(url: &str) -> Option<i64> {
+    url.rsplit('/').next()?.parse().ok()
+}
+
+/// Azure's batch read caps at 200 ids, and a story with more children than that has a problem this
+/// screen can't help with.
+const MAX_CHILDREN: usize = 200;
+
+/// One work item, plus the children it already has.
+///
+/// Addressed by organisation rather than by project: the id is unique across the organisation, so
+/// this still resolves an item that has been moved since the link was copied.
+pub async fn get_work_item(org: &str, id: i64, pat: &str) -> Result<AdoWorkItem, String> {
+    if id <= 0 {
+        return Err("Ese identificador de work item no es válido".to_string());
+    }
+    let org_enc = encode_segment(&normalize_org(org));
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/_apis/wit/workitems/{id}\
+         ?$expand=relations&api-version={API_VERSION}"
+    );
+    let raw: RawWorkItem = get_json(&url, pat).await?;
+
+    let child_ids: Vec<i64> = raw
+        .relations
+        .iter()
+        .filter(|relation| relation.rel == "System.LinkTypes.Hierarchy-Forward")
+        .filter_map(|relation| id_from_relation_url(&relation.url))
+        .take(MAX_CHILDREN)
+        .collect();
+    // Best-effort: the story is what the user asked for, and a child in a project this PAT cannot
+    // read must not cost them the whole item.
+    let children = match child_ids.is_empty() {
+        true => Vec::new(),
+        false => list_work_items(&org_enc, &child_ids, pat).await.unwrap_or_default(),
+    };
+
+    let html_url = raw
+        .links
+        .and_then(|links| links.html)
+        .and_then(|link| link.href)
+        .unwrap_or_else(|| format!("https://dev.azure.com/{org_enc}/_workitems/edit/{id}"));
+
+    Ok(AdoWorkItem {
+        id: raw.id,
+        url: html_url,
+        work_item_type: field_str(&raw.fields, "System.WorkItemType"),
+        title: field_str(&raw.fields, "System.Title"),
+        state: field_str(&raw.fields, "System.State"),
+        description_html: field_str(&raw.fields, "System.Description"),
+        acceptance_criteria_html: field_str(&raw.fields, "Microsoft.VSTS.Common.AcceptanceCriteria"),
+        tags: field_str(&raw.fields, "System.Tags"),
+        area_path: field_str(&raw.fields, "System.AreaPath"),
+        iteration_path: field_str(&raw.fields, "System.IterationPath"),
+        children,
+    })
+}
+
+async fn list_work_items(
+    org_enc: &str,
+    ids: &[i64],
+    pat: &str,
+) -> Result<Vec<AdoWorkItemChild>, String> {
+    let list = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+    // `errorPolicy=omit` returns the readable ones instead of failing the batch over a single item
+    // the PAT can't see — and it reports those as nulls, hence the `Option` in the envelope.
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/_apis/wit/workitems\
+         ?ids={list}&fields=System.Title,System.State,System.WorkItemType\
+         &errorPolicy=omit&api-version={API_VERSION}"
+    );
+    let raw: ListResponse<Option<RawWorkItem>> = get_json(&url, pat).await?;
+    Ok(raw
+        .value
+        .into_iter()
+        .flatten()
+        .map(|item| AdoWorkItemChild {
+            url: format!("https://dev.azure.com/{org_enc}/_workitems/edit/{}", item.id),
+            id: item.id,
+            work_item_type: field_str(&item.fields, "System.WorkItemType"),
+            title: field_str(&item.fields, "System.Title"),
+            state: field_str(&item.fields, "System.State"),
+        })
+        .collect())
+}
+
+/// What a pasted work-item reference resolves to.
+///
+/// `org` and `project` are `None` for a bare id — the caller fills those in from the organisation
+/// the workspace is already pointed at, which is the common case for someone reading a number off
+/// a board they have open.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WorkItemRef {
+    pub org: Option<String>,
+    pub project: Option<String>,
+    pub id: i64,
+}
+
+/// Enough of a percent-decoder for one path segment: project names travel as `%20`-style escapes
+/// and have to come back as the name the user would recognise.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] == b'%' && at + 3 <= bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&value[at + 1..at + 3], 16) {
+                out.push(byte);
+                at += 3;
+                continue;
+            }
+        }
+        out.push(bytes[at]);
+        at += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| value.to_string())
+}
+
+/// Reads a work item out of whatever the user pasted: an edit URL, a board URL that names the item
+/// in its query string, or the bare number somebody read out in standup.
+///
+/// Deliberately lenient about the host. Azure DevOps is served from `dev.azure.com`, from the older
+/// `{org}.visualstudio.com`, and from on-premises Server installs on any hostname at all — so what
+/// identifies a work item here is the `_workitems` segment, not the domain it sits under.
+pub fn parse_work_item_ref(input: &str) -> Option<WorkItemRef> {
+    let text = input.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    // A bare id, with or without the `#` people put in front of it in chat.
+    let bare = text.strip_prefix('#').unwrap_or(text);
+    if let Ok(id) = bare.parse::<i64>() {
+        return (id > 0).then_some(WorkItemRef { org: None, project: None, id });
+    }
+
+    let without_scheme = text.split_once("://").map_or(text, |(_, rest)| rest);
+    let (path, query) = without_scheme.split_once('?').unwrap_or((without_scheme, ""));
+    let segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
+    let host = *segments.first()?;
+    if !host.contains('.') {
+        return None;
+    }
+
+    let marker = segments.iter().position(|segment| segment.eq_ignore_ascii_case("_workitems"));
+    let id = match marker {
+        Some(at) => segments.iter().skip(at + 1).find_map(|segment| segment.parse::<i64>().ok()),
+        // A board or backlog URL names the card it has open in the query string instead.
+        None => query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .find(|(key, _)| key.eq_ignore_ascii_case("workitem") || key.eq_ignore_ascii_case("id"))
+            .and_then(|(_, value)| value.parse::<i64>().ok()),
+    }?;
+    if id <= 0 {
+        return None;
+    }
+
+    // On `{org}.visualstudio.com` the organisation is the subdomain, so the first path segment is
+    // already the project; everywhere else the organisation is that first segment.
+    let (org, project_at) = match host.strip_suffix(".visualstudio.com") {
+        Some(name) => (Some(percent_decode(name)), 1),
+        None => (
+            segments.get(1).filter(|s| !s.starts_with('_')).map(|s| percent_decode(s)),
+            2,
+        ),
+    };
+    let project = segments
+        .get(project_at)
+        .filter(|segment| !segment.starts_with('_'))
+        .filter(|_| marker.is_none_or(|at| project_at < at))
+        .map(|segment| percent_decode(segment));
+
+    Some(WorkItemRef { org, project, id })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_a_work_item_out_of_an_edit_url() {
+        assert_eq!(
+            parse_work_item_ref("https://dev.azure.com/fabrikam/Web%20Store/_workitems/edit/4821"),
+            Some(WorkItemRef {
+                org: Some("fabrikam".to_string()),
+                project: Some("Web Store".to_string()),
+                id: 4821,
+            })
+        );
+    }
+
+    /// The older host puts the organisation in the subdomain, which moves every path segment along
+    /// one — read positionally, the project would come back as the organisation.
+    #[test]
+    fn the_visualstudio_host_keeps_its_org_in_the_subdomain() {
+        assert_eq!(
+            parse_work_item_ref("https://fabrikam.visualstudio.com/Checkout/_workitems/edit/12"),
+            Some(WorkItemRef {
+                org: Some("fabrikam".to_string()),
+                project: Some("Checkout".to_string()),
+                id: 12,
+            })
+        );
+    }
+
+    /// A URL with no project in it must not promote `_workitems` into the project slot.
+    #[test]
+    fn an_org_level_url_reports_no_project() {
+        assert_eq!(
+            parse_work_item_ref("https://dev.azure.com/fabrikam/_workitems/edit/7"),
+            Some(WorkItemRef { org: Some("fabrikam".to_string()), project: None, id: 7 })
+        );
+    }
+
+    /// Dragging a card open on a board never leaves `_workitems` in the path — the id is in the
+    /// query string, and that is the URL sitting in the address bar when someone copies it.
+    #[test]
+    fn a_board_url_names_its_open_card_in_the_query() {
+        assert_eq!(
+            parse_work_item_ref("https://dev.azure.com/fabrikam/Checkout/_boards/board/t/Team/Stories/?workitem=903"),
+            Some(WorkItemRef {
+                org: Some("fabrikam".to_string()),
+                project: Some("Checkout".to_string()),
+                id: 903,
+            })
+        );
+    }
+
+    #[test]
+    fn a_bare_id_carries_no_org_of_its_own() {
+        assert_eq!(
+            parse_work_item_ref("  #4821 "),
+            Some(WorkItemRef { org: None, project: None, id: 4821 })
+        );
+        assert_eq!(
+            parse_work_item_ref("4821"),
+            Some(WorkItemRef { org: None, project: None, id: 4821 })
+        );
+    }
+
+    #[test]
+    fn nothing_that_names_no_work_item_parses() {
+        assert_eq!(parse_work_item_ref(""), None);
+        assert_eq!(parse_work_item_ref("0"), None);
+        assert_eq!(parse_work_item_ref("-3"), None);
+        assert_eq!(parse_work_item_ref("una historia sobre el checkout"), None);
+        assert_eq!(parse_work_item_ref("https://dev.azure.com/fabrikam/Checkout/_git/repo"), None);
+    }
+
+    /// A relation points at the API route, not the page — the id is the last segment either way,
+    /// and reading it wrong would attach somebody else's children to the story.
+    #[test]
+    fn a_relation_url_gives_up_its_id() {
+        assert_eq!(
+            id_from_relation_url("https://dev.azure.com/fabrikam/_apis/wit/workItems/512"),
+            Some(512)
+        );
+        assert_eq!(id_from_relation_url("https://dev.azure.com/fabrikam/_apis/wit/workItems/"), None);
+    }
 
     /// A classification node's work-item field value is the chain of names — never the `path`
     /// Azure reports, which carries an `\Area\` segment `System.AreaPath` must not contain.

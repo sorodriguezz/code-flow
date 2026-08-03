@@ -769,3 +769,80 @@ export interface StoryPublishOutcome {
   published: number;
   failed: number;
 }
+
+// ---------- reviewing a work item that is already on the board ----------
+
+/** What a pasted work-item reference resolved to. `org`/`project` are null for a bare id. */
+export interface WorkItemRef {
+  org: string | null;
+  project: string | null;
+  id: number;
+}
+
+/** A child of a user story — the tasks it already has. */
+export interface AdoWorkItemChild {
+  id: number;
+  url: string;
+  work_item_type: string;
+  title: string;
+  state: string;
+}
+
+/**
+ * One work item as Azure stores it. The prose fields arrive as HTML and are turned into text by
+ * `workItemHtml`, which is also what gets sent to the review — so the story that was judged is the
+ * one on screen.
+ */
+export interface AdoWorkItem {
+  id: number;
+  url: string;
+  work_item_type: string;
+  title: string;
+  state: string;
+  description_html: string;
+  acceptance_criteria_html: string;
+  tags: string;
+  area_path: string;
+  iteration_path: string;
+  children: AdoWorkItemChild[];
+}
+
+export type WorkItemReviewStage = "analyze" | "criteria" | "tasks";
+
+export interface InvestVerdict {
+  letter: string;
+  verdict: "ok" | "weak" | "missing";
+  note: string;
+}
+
+/** Which part of the story a finding belongs to. */
+export type StorySection = "titulo" | "narrativa" | "descripcion" | "criterios";
+
+export interface ReviewFinding {
+  section: StorySection;
+  severity: "alta" | "media" | "baja";
+  issue: string;
+  /** Written to be pasted as-is. The review never edits the story itself. */
+  proposal: string;
+  evidence: string[];
+}
+
+export interface ProposedCriterion {
+  gherkin: string;
+  rationale: string;
+  evidence: string[];
+}
+
+export interface ProposedTask {
+  kind: "dev" | "qa";
+  /** Already carries its `[DEV]`/`[QA]` prefix — the backend puts it on. */
+  title: string;
+  detail: string;
+  evidence: string[];
+}
+
+/** Tagged by stage, so the caller reads the shape it asked for. */
+export type WorkItemReview =
+  | { stage: "analyze"; summary: string; invest: InvestVerdict[]; findings: ReviewFinding[] }
+  | { stage: "criteria"; criteria: ProposedCriterion[] }
+  | { stage: "tasks"; tasks: ProposedTask[] };

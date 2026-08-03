@@ -278,7 +278,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                     if (tags !== target.tags) save({ tags });
                   }}
                   placeholder="backlog; checkout"
-                  className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                  className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
                 />
               </Field>
 
@@ -304,7 +304,7 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
                 }
               }}
               placeholder={t("stories.instructionsPlaceholder")}
-              className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+              className="w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
             />
           </Field>
           {batch.provider && (

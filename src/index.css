@@ -15,6 +15,13 @@
   --cf-text-muted: #6b6b7d;
   --cf-accent: #6366f1;
   --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 14%, var(--cf-surface));
+  /* A field has to read as a field on both surfaces it lands on — the white panels, where a white
+     fill alone says nothing, and the tinted cards, where a transparent one said nothing at all. So
+     the border does most of the work and is deliberately darker than `--cf-border`: that one is
+     tuned for dividing regions, and a divider's weight is too quiet for the edge of something you
+     are meant to type into. */
+  --cf-field: #ffffff;
+  --cf-field-border: #cfcfdd;
   --cf-success: #16a34a;
   --cf-danger: #dc2626;
   --cf-warning: #d97706;
@@ -45,6 +52,11 @@
   --cf-text-muted: #9797ab;
   --cf-accent: #818cf8;
   --cf-accent-soft: #2a2a44;
+  /* Dark fields go darker than the surface, not lighter — a well rather than a raised tile, which
+     is the direction a dark UI reads as "recessed, put text here". Same reasoning as the light
+     theme's note. */
+  --cf-field: #131320;
+  --cf-field-border: #3d3d50;
   --cf-success: #4ade80;
   --cf-danger: #f87171;
   --cf-warning: #fbbf24;
@@ -71,6 +83,9 @@
     --cf-text-muted: #9797ab;
     --cf-accent: #818cf8;
     --cf-accent-soft: #2a2a44;
+    /* Same as the explicit dark theme above. */
+    --cf-field: #131320;
+    --cf-field-border: #3d3d50;
     --cf-success: #4ade80;
     --cf-danger: #f87171;
     --cf-warning: #fbbf24;

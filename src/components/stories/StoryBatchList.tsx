@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ClipboardList, MoreHorizontal, Pencil, Plus, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
+import { ClipboardList, MoreHorizontal, Pencil, Plus, ScanSearch, Search, SlidersHorizontal, Trash2, X } from "lucide-react";
 import { BATCH_STATUS, SOURCE_KIND } from "./storyStatus";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { CARD } from "../api/panelChrome";
@@ -26,7 +26,15 @@ type RowMenu = { x: number; y: number; id: string };
  * distinguishes two of them — where the source came from, how many stories are in it, and how many
  * of those have reached Azure Boards.
  */
-export function StoryBatchList({ width, onNewBatch }: { width: number; onNewBatch: () => void }) {
+export function StoryBatchList({
+  width,
+  onNewBatch,
+  onReview,
+}: {
+  width: number;
+  onNewBatch: () => void;
+  onReview: () => void;
+}) {
   const t = useT();
   const batches = useStoriesStore((s) => s.batches);
   const loading = useStoriesStore((s) => s.loading);
@@ -82,6 +90,11 @@ export function StoryBatchList({ width, onNewBatch }: { width: number; onNewBatc
         </span>
         <ToolbarButton onClick={onNewBatch} title={t("stories.newBatch")}>
           <Plus size={13} />
+        </ToolbarButton>
+        {/* The other direction through this screen: a story that already exists, read back in to be
+            reviewed rather than written from documentation. */}
+        <ToolbarButton onClick={onReview} title={t("huReview.open")}>
+          <ScanSearch size={13} />
         </ToolbarButton>
         <ToolbarButton onClick={toggleTarget} active={targetOpen} title={t("stories.target")}>
           <SlidersHorizontal size={13} />

@@ -994,6 +994,110 @@ Tu tarea: por CADA criterio, decidir si el código que hay HOY en este repositor
 - Incluye TODAS las historias y TODOS sus criterios, también los que queden en `unknown`.
 - No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
 
+/// How much of one work item is worth sending. A single story is small; the ceiling is here for the
+/// description somebody pasted a whole specification into.
+pub const MAX_WORK_ITEM_REVIEW_CHARS: usize = 30_000;
+
+/// Which question the review is asking on this run.
+///
+/// Three calls rather than one that answers everything: the criteria are written against the story
+/// *after* the user has taken or rejected what the analysis proposed, and the tasks against the
+/// story after that. Answering all three at once would be proposing tasks for a story nobody has
+/// agreed to yet — and the whole point of this screen is that the human decides in between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkItemReviewStage {
+    Analyze,
+    Criteria,
+    Tasks,
+}
+
+/// "Read this story and tell me what is missing from it."
+///
+/// Points the engine at the repository the story will be built in, so "falta decir qué pasa cuando
+/// el pago se rechaza" can be grounded in a rejection path that already exists in the code rather
+/// than guessed from the prose. Read-only, like the verification run it sits next to.
+pub const DEFAULT_WORK_ITEM_ANALYZE_TEMPLATE: &str = r#"Eres un analista funcional revisando una historia de usuario que YA está escrita en Azure DevOps. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo: úsalas antes de responder, porque tus propuestas tienen que encajar con el sistema que existe hoy.
+
+Por stdin recibes la historia: su título, su descripción y sus criterios de aceptación actuales (que pueden venir vacíos).
+
+Tu tarea: decir qué le falta a esta historia para estar lista, sin reescribirla tú.
+
+=== QUÉ EVALUAR ===
+- INVEST, letra por letra: Independent, Negotiable, Valuable, Estimable, Small, Testable.
+- Formato BDD: ¿se entiende quién la pide, qué quiere y para qué? ¿La descripción dice el comportamiento esperado o solo nombra una pantalla?
+- Gherkin y testabilidad Cucumber: ¿los criterios actuales son escenarios verificables (Dado/Cuando/Entonces), o son deseos sin condición observable? ¿Falta el camino de error, el borde, el estado vacío?
+- Huecos contra el código: comportamientos que el sistema ya tiene y que esta historia ignora, o que la contradicen.
+
+=== REGLAS ===
+- NO modifiques, crees ni borres ningún archivo. Esto es una lectura.
+- NO reescribas la historia. Cada hallazgo propone UN texto concreto que el humano decidirá si pega o no, y dice a qué parte de la historia pertenece.
+- `proposal` es el texto listo para pegar, redactado como iría en la historia — no una instrucción del estilo "deberías añadir...".
+- La evidencia son rutas reales del repositorio con línea, relativas a la raíz: "src/pago/checkout.ts:120". Verifica que existen; no cites de memoria. Un hallazgo sin evidencia deja `evidence` vacío, no inventes una.
+- Si la historia ya está bien en algo, dilo con `verdict` `ok` y no inventes un hallazgo para rellenar.
+- Escribe SIEMPRE en español.
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
+- El objeto tiene exactamente esta forma:
+{"summary":"","invest":[{"letter":"I","verdict":"ok","note":""}],"findings":[{"section":"titulo","severity":"media","issue":"","proposal":"","evidence":["ruta/archivo.ext:12"]}]}
+- `letter` es una de: I, N, V, E, S, T. Incluye las seis, en ese orden.
+- `verdict` es uno de: `ok`, `weak`, `missing`.
+- `section` es una de: `titulo`, `narrativa`, `descripcion`, `criterios`.
+- `severity` es una de: `alta`, `media`, `baja`.
+- No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
+
+/// "Now write the acceptance criteria for the story as it stands."
+pub const DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE: &str = r#"Eres un QA técnico escribiendo criterios de aceptación en Gherkin para una historia de usuario. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo: úsalas, porque los criterios tienen que ser verificables contra este sistema.
+
+Por stdin recibes la historia ya revisada: título, descripción y los criterios que tenga hasta ahora.
+
+Tu tarea: proponer los criterios de aceptación que faltan para que esta historia se pueda dar por terminada.
+
+=== REGLAS ===
+- NO modifiques, crees ni borres ningún archivo.
+- Cada criterio es UN escenario completo en Gherkin español: `Dado ...`, `Cuando ...`, `Entonces ...`, con `Y` para los pasos adicionales.
+- Cada paso describe algo observable. Nada de "Entonces el sistema funciona correctamente": di qué se ve, qué se guarda o qué se responde.
+- Cubre el camino feliz, el de error y al menos un borde (vacío, límite, permiso denegado) cuando la historia lo admita.
+- NO repitas un criterio que la historia ya tiene. Si uno existente está mal escrito, propón la versión corregida y dilo en `rationale`.
+- `rationale` es una frase: por qué hace falta este escenario.
+- La evidencia son rutas reales del repositorio con línea, relativas a la raíz. Sin evidencia, deja `evidence` vacío.
+- Escribe SIEMPRE en español.
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
+- El objeto tiene exactamente esta forma:
+{"criteria":[{"gherkin":"Dado ...\nCuando ...\nEntonces ...","rationale":"","evidence":[]}]}
+- Cada `gherkin` es un escenario entero en una sola cadena, con sus saltos de línea escapados como \n."#;
+
+/// "And now the work it breaks down into."
+///
+/// The `[DEV]` / `[QA]` prefixes are deliberately *not* asked for here — CodeFlow puts them on when
+/// it builds the task, so the convention holds even on the run where the model forgets it.
+pub const DEFAULT_WORK_ITEM_TASKS_TEMPLATE: &str = r#"Eres un tech lead partiendo una historia de usuario en tareas de trabajo. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo: úsalas, porque las tareas tienen que hablar de este código y no de un sistema imaginario.
+
+Por stdin recibes la historia con sus criterios de aceptación, y la lista de tareas que ya tiene (que puede venir vacía).
+
+Tu tarea: proponer las tareas que faltan para completar la historia.
+
+=== REGLAS ===
+- NO modifiques, crees ni borres ningún archivo.
+- Cada tarea es de desarrollo (`dev`) o de QA (`qa`). Las de QA son de prueba y verificación; las de desarrollo, de construcción.
+- NO pongas prefijos como [DEV] o [QA] en el título: los añade la aplicación.
+- El título es una acción concreta y corta, empezando por un verbo. Nada de "Trabajar en el checkout".
+- NO repitas una tarea que ya existe en la lista recibida. Si una existente se queda corta, propón la que falta y explícalo en `detail`.
+- Cada criterio de aceptación tiene que quedar cubierto por al menos una tarea de QA.
+- `detail` son una o dos frases: qué hay que hacer y dónde, citando rutas del repositorio cuando las conozcas.
+- La evidencia son rutas reales del repositorio con línea, relativas a la raíz. Sin evidencia, deja `evidence` vacío.
+- Escribe SIEMPRE en español.
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
+- El objeto tiene exactamente esta forma:
+{"tasks":[{"kind":"dev","title":"","detail":"","evidence":[]}]}
+- `kind` es exactamente `dev` o `qa`.
+- No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
+
 pub const DEFAULT_RESOLVE_CONFLICT_TEMPLATE: &str =
     "Eres un ingeniero de software resolviendo un conflicto de merge de git. Se te entregan por \
      stdin tres versiones de un mismo archivo: BASE (el ancestro común), OURS (la rama actual) y \
@@ -1271,6 +1375,57 @@ pub async fn verify_stories_against_code(
         DEFAULT_STORY_VERIFY_TEMPLATE
     } else {
         prompt_template
+    };
+
+    let mut inv = AiInvocation::new(prompt, &stdin_payload);
+    inv.model = model;
+    inv.allowed_tools = allowed_tools;
+    inv.cwd = Some(cwd);
+    inv.mcp_config_path = mcp_config_path;
+    let run = run(engine, binary, inv).await?;
+    Ok(run.text)
+}
+
+/// One stage of reviewing a story that already exists on the board.
+///
+/// Same shape as [`verify_stories_against_code`] — the story on stdin, the repository read by the
+/// engine from its working directory — because it is the same kind of run: read code, judge prose,
+/// write nothing.
+pub async fn review_work_item(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    stage: WorkItemReviewStage,
+    story_text: &str,
+    contexts: &[(String, String)],
+    allowed_tools: &[String],
+    cwd: &str,
+    prompt_template: &str,
+    mcp_config_path: Option<&str>,
+) -> Result<String, String> {
+    if story_text.trim().is_empty() {
+        return Err("Esa historia no tiene texto que revisar".to_string());
+    }
+
+    let truncated: String = story_text.chars().take(MAX_WORK_ITEM_REVIEW_CHARS).collect();
+    let mut stdin_payload = String::new();
+    if !contexts.is_empty() {
+        stdin_payload.push_str("CONTEXTO DEL PROYECTO:\n");
+        for (name, content) in contexts {
+            stdin_payload.push_str(&format!("- {name}: {content}\n"));
+        }
+        stdin_payload.push('\n');
+    }
+    stdin_payload.push_str("=== HISTORIA DE USUARIO ===\n");
+    stdin_payload.push_str(&truncated);
+
+    let prompt = match prompt_template.trim().is_empty() {
+        false => prompt_template,
+        true => match stage {
+            WorkItemReviewStage::Analyze => DEFAULT_WORK_ITEM_ANALYZE_TEMPLATE,
+            WorkItemReviewStage::Criteria => DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE,
+            WorkItemReviewStage::Tasks => DEFAULT_WORK_ITEM_TASKS_TEMPLATE,
+        },
     };
 
     let mut inv = AiInvocation::new(prompt, &stdin_payload);

@@ -366,7 +366,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
                     value={fileQuery}
                     onChange={(e) => setFileQuery(e.target.value)}
                     placeholder={t("stories.filesSearchPlaceholder")}
-                    className="w-full rounded-md border border-[var(--cf-border)] bg-transparent py-1 pl-6 pr-2 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                    className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] py-1 pl-6 pr-2 text-[12px] outline-none focus:border-[var(--cf-accent)]"
                   />
                 </div>
                 <div className="max-h-64 overflow-y-auto rounded-md border border-[var(--cf-border)] p-1">
@@ -405,7 +405,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
               rows={12}
               onChange={(e) => setPasted(e.target.value)}
               placeholder={t("stories.pastedTextPlaceholder")}
-              className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+              className="w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
             />
           </Field>
         )}
@@ -416,7 +416,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder={t("stories.batchNamePlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+              className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
             />
           </Field>
           <Field label={t("stories.count")} hint={t("stories.countHint")}>
@@ -436,7 +436,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
             rows={3}
             onChange={(e) => setInstructions(e.target.value)}
             placeholder={t("stories.instructionsPlaceholder")}
-            className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+            className="w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
           />
         </Field>
 

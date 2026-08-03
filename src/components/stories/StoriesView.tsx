@@ -4,6 +4,7 @@ import { StoryBatchList } from "./StoryBatchList";
 import { StoryBatchDetail } from "./StoryBatchDetail";
 import { StoryTargetPanel } from "./StoryTargetPanel";
 import { NewStoryBatchModal } from "./NewStoryBatchModal";
+import { WorkItemReviewView } from "./WorkItemReviewView";
 import { CARD } from "../api/panelChrome";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
@@ -44,6 +45,7 @@ export function StoriesView() {
   const commitSize = useLayoutStore((s) => s.commitSize);
 
   const [composing, setComposing] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
 
   useEffect(() => {
     void useStoriesStore.getState().setWorkspace(workspaceId);
@@ -77,11 +79,21 @@ export function StoriesView() {
     );
   }
 
+  // Takes over the whole view rather than opening beside the columns: reviewing one story is its
+  // own sitting, and the batch list, the batch detail and the Boards target all belong to the other
+  // direction of travel. The session itself lives in its own store, so leaving and coming back finds
+  // the story still loaded.
+  if (reviewing) return <WorkItemReviewView onClose={() => setReviewing(false)} />;
+
   return (
     <>
       <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
         <div className="flex min-h-0 flex-1 overflow-hidden">
-          <StoryBatchList width={listWidth} onNewBatch={() => setComposing(true)} />
+          <StoryBatchList
+            width={listWidth}
+            onNewBatch={() => setComposing(true)}
+            onReview={() => setReviewing(true)}
+          />
           <ResizeHandle
             axis="x"
             value={listWidth}

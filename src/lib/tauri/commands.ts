@@ -3,6 +3,7 @@ import type {
   ActivityLogEntry,
   AdoProject,
   AdoRepo,
+  AdoWorkItem,
   AgentChain,
   AgentTask,
   AgentTaskStatus,
@@ -55,6 +56,9 @@ import type {
   WorkspaceAgent,
   WorkspaceMcp,
   WorkspaceSkill,
+  WorkItemRef,
+  WorkItemReview,
+  WorkItemReviewStage,
 } from "../../types/domain";
 import type { FindingLocation } from "../parseAnalysis";
 
@@ -1305,3 +1309,36 @@ export const writeStoryFeatureFile = (batchId: string, fileName: string, content
  * story is attempted even when an earlier one fails. */
 export const publishStories = (batchId: string, storyIds: string[]) =>
   invoke<StoryPublishOutcome>("publish_stories", { batchId, storyIds });
+
+// ---------- reviewing a work item that is already on the board ----------
+
+/** Resolves a pasted link or a bare id into the organisation, project and id it names. */
+export const adoParseWorkItemRef = (input: string) =>
+  invoke<WorkItemRef>("ado_parse_work_item_ref", { input });
+
+export const adoGetWorkItem = (org: string, id: number) =>
+  invoke<AdoWorkItem>("ado_get_work_item", { org, id });
+
+/**
+ * Runs one stage of the review against a repository.
+ *
+ * `storyText` is assembled here rather than in Rust: Azure's HTML becomes text in the frontend, and
+ * sending anything else would judge a story the user never saw.
+ */
+export const reviewWorkItem = (input: {
+  workspaceId: string;
+  projectId: string;
+  stage: WorkItemReviewStage;
+  storyText: string;
+  runId: string;
+  agent?: { provider: string; model: string };
+}) =>
+  invoke<WorkItemReview>("review_work_item", {
+    workspaceId: input.workspaceId,
+    projectId: input.projectId,
+    stage: input.stage,
+    storyText: input.storyText,
+    runId: input.runId,
+    agentProvider: input.agent?.provider,
+    agentModel: input.agent?.model,
+  });

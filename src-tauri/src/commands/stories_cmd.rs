@@ -84,6 +84,249 @@ pub async fn ado_list_classification_nodes(
     boards::list_classification_nodes(&org, &project, &structure, &pat).await
 }
 
+// ---------- reviewing a story that is already on the board ----------
+
+/// Resolves whatever the user pasted into the organisation, project and id it names.
+///
+/// Kept in Rust rather than done in the frontend so there is one answer to "what counts as a work
+/// item reference" — the same one that then has to fetch it.
+#[tauri::command]
+pub fn ado_parse_work_item_ref(input: String) -> Result<boards::WorkItemRef, String> {
+    boards::parse_work_item_ref(&input)
+        .ok_or_else(|| "Pega el enlace de un work item de Azure DevOps, o su número".to_string())
+}
+
+/// One work item and the children it already has, for the review screen to read.
+#[tauri::command]
+pub async fn ado_get_work_item(org: String, id: i64) -> Result<boards::AdoWorkItem, String> {
+    let pat = pat_for_org(&org)?;
+    boards::get_work_item(&org, id, &pat).await
+}
+
+/// One INVEST letter and how the story does on it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InvestVerdict {
+    pub letter: String,
+    /// `ok` | `weak` | `missing`.
+    pub verdict: String,
+    pub note: String,
+}
+
+/// Something the story is missing, and the text that would fix it.
+///
+/// `proposal` is written to be pasted as-is: the user takes it, edits it, or throws it away. The
+/// review never edits the story itself, which is what makes running it safe on a board other people
+/// are working from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewFinding {
+    /// `titulo` | `narrativa` | `descripcion` | `criterios` — which part of the story it belongs to.
+    pub section: String,
+    /// `alta` | `media` | `baja`.
+    pub severity: String,
+    pub issue: String,
+    pub proposal: String,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposedCriterion {
+    /// One whole Gherkin scenario.
+    pub gherkin: String,
+    pub rationale: String,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposedTask {
+    /// `dev` | `qa`.
+    pub kind: String,
+    /// Already carries its `[DEV]` or `[QA]` prefix — see [`prefixed_title`].
+    pub title: String,
+    pub detail: String,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+/// What one stage of the review answered. Tagged by stage so the frontend reads the shape it asked
+/// for rather than guessing from which arrays came back non-empty.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "stage", rename_all = "lowercase")]
+pub enum WorkItemReview {
+    Analyze { summary: String, invest: Vec<InvestVerdict>, findings: Vec<ReviewFinding> },
+    Criteria { criteria: Vec<ProposedCriterion> },
+    Tasks { tasks: Vec<ProposedTask> },
+}
+
+#[derive(Deserialize)]
+struct RawAnalysis {
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    invest: Vec<InvestVerdict>,
+    #[serde(default)]
+    findings: Vec<ReviewFinding>,
+}
+
+#[derive(Deserialize)]
+struct RawCriteria {
+    #[serde(default)]
+    criteria: Vec<ProposedCriterion>,
+}
+
+#[derive(Deserialize)]
+struct RawTasks {
+    #[serde(default)]
+    tasks: Vec<ProposedTask>,
+}
+
+/// Puts the `[DEV]`/`[QA]` marker on, here rather than in the prompt.
+///
+/// The convention is the user's, and it has to hold on every run — including the one where the
+/// model forgets the instruction, or helpfully writes `[Dev]`. Stripping any prefix it did emit
+/// keeps a second run from producing `[QA] [QA] …`.
+fn prefixed_title(kind: &str, title: &str) -> String {
+    let marker = if kind.eq_ignore_ascii_case("qa") { "QA" } else { "DEV" };
+    let mut bare = title.trim();
+    while let Some(rest) = bare.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((tag, tail)) if tag.eq_ignore_ascii_case("qa") || tag.eq_ignore_ascii_case("dev") => {
+                bare = tail.trim_start();
+            }
+            _ => break,
+        }
+    }
+    format!("[{marker}] {bare}")
+}
+
+/// Split out from the command so it is testable without an engine.
+fn parse_review(stage: ai::WorkItemReviewStage, text: &str) -> Result<WorkItemReview, String> {
+    let json = ai::extract_json_block(text)
+        .ok_or_else(|| format!("El modelo no devolvió JSON. Respondió:\n\n{}", text.trim()))?;
+    let unreadable =
+        |e: serde_json::Error| format!("El modelo devolvió un JSON que no se pudo leer ({e}). Respondió:\n\n{json}");
+
+    match stage {
+        ai::WorkItemReviewStage::Analyze => {
+            let parsed: RawAnalysis = serde_json::from_str(json).map_err(unreadable)?;
+            Ok(WorkItemReview::Analyze {
+                summary: parsed.summary.trim().to_string(),
+                invest: parsed.invest,
+                // A finding with nothing to paste is an observation, and this screen is for the
+                // ones the user can act on.
+                findings: parsed
+                    .findings
+                    .into_iter()
+                    .filter(|f| !f.proposal.trim().is_empty() || !f.issue.trim().is_empty())
+                    .collect(),
+            })
+        }
+        ai::WorkItemReviewStage::Criteria => {
+            let parsed: RawCriteria = serde_json::from_str(json).map_err(unreadable)?;
+            Ok(WorkItemReview::Criteria {
+                criteria: parsed.criteria.into_iter().filter(|c| !c.gherkin.trim().is_empty()).collect(),
+            })
+        }
+        ai::WorkItemReviewStage::Tasks => {
+            let parsed: RawTasks = serde_json::from_str(json).map_err(unreadable)?;
+            Ok(WorkItemReview::Tasks {
+                tasks: parsed
+                    .tasks
+                    .into_iter()
+                    .filter(|t| !t.title.trim().is_empty())
+                    .map(|t| ProposedTask {
+                        title: prefixed_title(&t.kind, &t.title),
+                        kind: if t.kind.eq_ignore_ascii_case("qa") { "qa".to_string() } else { "dev".to_string() },
+                        detail: t.detail.trim().to_string(),
+                        evidence: t.evidence,
+                    })
+                    .collect(),
+            })
+        }
+    }
+}
+
+/// Runs one stage of the review against a repository.
+///
+/// `story_text` is assembled by the frontend from the work item it fetched, because that is where
+/// Azure's HTML is turned into the text the user is looking at — sending anything else would judge
+/// a story the user never saw.
+#[tauri::command]
+pub async fn review_work_item(
+    app: AppHandle,
+    db: State<'_, Db>,
+    workspace_id: String,
+    project_id: String,
+    stage: ai::WorkItemReviewStage,
+    story_text: String,
+    run_id: Option<String>,
+    agent_provider: Option<String>,
+    agent_model: Option<String>,
+) -> Result<WorkItemReview, String> {
+    let project = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_project(&conn, &project_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Elige el repositorio contra el que revisar la historia".to_string())?
+    };
+
+    let _repo_lease = ai_locks::acquire(&project.local_path)
+        .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
+
+    let prompt_kind = match stage {
+        ai::WorkItemReviewStage::Analyze => "work_item_analyze",
+        ai::WorkItemReviewStage::Criteria => "work_item_criteria",
+        ai::WorkItemReviewStage::Tasks => "work_item_tasks",
+    };
+
+    let (contexts, mcps, skills, config, template) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
+        let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
+            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
+                load_ai_config_for(&conn, p, m)?
+            }
+            // Same routing as the verification run: both read code to judge a requirement, so a
+            // team that picked a model for one meant it for the other.
+            _ => load_ai_config(&conn, AiTask::StoryVerify)?,
+        };
+        let template =
+            queries::get_workspace_prompt(&conn, &workspace_id, prompt_kind).map_err(|e| e.to_string())?;
+        (contexts, mcps, skills, config, template)
+    };
+
+    let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
+
+    let enabled_contexts: Vec<(String, String)> =
+        contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)).collect();
+    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
+
+    let result = crate::ai_runs::scoped(app, run_id, async {
+        ai::review_work_item(
+            &*config.engine,
+            &config.binary,
+            &config.model,
+            stage,
+            &story_text,
+            &enabled_contexts,
+            &config.tools,
+            &project.local_path,
+            &template,
+            mcp_config_path.as_deref(),
+        )
+        .await
+    })
+    .await;
+
+    if matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
+        return Err(result.unwrap_err());
+    }
+    parse_review(stage, &result?)
+}
+
 // ---------- batches ----------
 
 #[tauri::command]

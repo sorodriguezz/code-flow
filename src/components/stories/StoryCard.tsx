@@ -208,7 +208,7 @@ export function StoryCard({
               onChange={(e) => patch({ title: e.target.value })}
               onBlur={commit}
               placeholder={t("stories.fieldTitlePlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+              className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
             />
           </CardField>
 
@@ -218,7 +218,7 @@ export function StoryCard({
               onChange={(e) => patch({ narrative: e.target.value })}
               onBlur={commit}
               placeholder={t("stories.fieldNarrativePlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+              className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
             />
           </CardField>
 
@@ -228,7 +228,7 @@ export function StoryCard({
               rows={3}
               onChange={(e) => patch({ description: e.target.value })}
               onBlur={commit}
-              className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+              className="w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
             />
           </CardField>
 
@@ -262,7 +262,7 @@ export function StoryCard({
                       onChange={(e) => setCriterion(i, e.target.value)}
                       onBlur={commit}
                       placeholder={t("stories.criterionPlaceholder")}
-                      className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[11px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+                      className="w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 font-mono text-[11px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
                     />
                     {/* Both readings of this exact criterion, directly under it: what is wrong with
                         how it is written, and what the code says about it. Kept next to the text
@@ -326,7 +326,7 @@ export function StoryCard({
                 value={draft.tags}
                 onChange={(e) => patch({ tags: e.target.value })}
                 onBlur={commit}
-                className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+                className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
               />
             </CardField>
           </div>
@@ -337,7 +337,7 @@ export function StoryCard({
               rows={2}
               onChange={(e) => patch({ notes: e.target.value })}
               onBlur={commit}
-              className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+              className="w-full resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
             />
           </CardField>
 
