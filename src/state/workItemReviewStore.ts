@@ -82,6 +82,29 @@ export const PUBLISH_STEPS = ["description", "criteria", "tasks"] as const;
 export type PublishStep = (typeof PUBLISH_STEPS)[number];
 
 /**
+ * The one path through the screen, in order.
+ *
+ * `analysis` opens it and is deliberately not a publish step: it is a judgement about the whole
+ * story — INVEST, and the findings — and there is no field on the board it corresponds to. Every
+ * other step is a decision about one part of the item, and the three columns filter to it.
+ *
+ * The screen used to carry two of these at once: the AI runs (analizar / criterios / tareas) and
+ * the publish steps (descripción / criterios / tareas). Two near-identical triads that shared two
+ * of their three names, so neither read as a path. There is one now, and the AI run for a step
+ * lives inside that step's own column.
+ */
+export const REVIEW_STEPS = ["analysis", "description", "criteria", "tasks"] as const;
+export type ReviewStep = (typeof REVIEW_STEPS)[number];
+
+/** Which AI stage, if any, produces the proposals for a step. `description` has none of its own —
+ *  what it gets to work with are the analysis findings aimed at the story's prose. */
+export const STAGE_OF_STEP: Partial<Record<ReviewStep, WorkItemReviewStage>> = {
+  analysis: "analyze",
+  criteria: "criteria",
+  tasks: "tasks",
+};
+
+/**
  * What is staged to go back to the board, and what already went.
  *
  * Separate from the story on the left on purpose. The middle column is what the AI proposes and the
@@ -169,7 +192,7 @@ interface WorkItemReviewState {
   /** The third column: what the user decided goes back to the board. */
   queue: PublishQueue;
   /** Which step the screen is walking the user through. */
-  step: PublishStep;
+  step: ReviewStep;
   /** The step currently being written to Azure, if any. */
   publishing: PublishStep | null;
 
@@ -193,7 +216,7 @@ interface WorkItemReviewState {
   addCriterion: (value: string) => void;
   removeCriterion: (at: number) => void;
   dismiss: (key: string) => void;
-  setStep: (step: PublishStep) => void;
+  setStep: (step: ReviewStep) => void;
   /** Puts the story's current text, or a proposal, into the publish column. */
   stageDescription: (text: string) => void;
   stageCriteria: (criteria: string[]) => void;
@@ -223,8 +246,12 @@ const EMPTY = {
   proposedTasks: [] as ProposedTask[],
   dismissed: {} as Record<string, true>,
   provenance: {} as Partial<Record<WorkItemReviewStage, ReviewProvenance>>,
+  // Cleared with the rest: a run still registered here after the session was replaced would let a
+  // late answer land on the new story. The engine process is left to finish on its own — stopping
+  // it is the user's call, and its output simply has nowhere to go now.
+  runByStage: {} as Partial<Record<WorkItemReviewStage, string>>,
   queue: EMPTY_QUEUE,
-  step: "description" as PublishStep,
+  step: "analysis" as ReviewStep,
   publishing: null,
   sessionId: "",
   openedFrom: null,
@@ -235,7 +262,6 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
   org: "",
   projectIds: [],
   useContext: false,
-  runByStage: {},
   history: [],
   ...EMPTY,
 
@@ -258,8 +284,24 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
   dismiss: (key) => set((s) => ({ dismissed: { ...s.dismissed, [key]: true } })),
   setStep: (step) => set({ step }),
 
-  stageDescription: (text) => set((s) => ({ queue: { ...s.queue, description: text } })),
-  stageCriteria: (criteria) => set((s) => ({ queue: { ...s.queue, criteria } })),
+  // Staging empties is refused rather than allowed-and-warned. `null` means "not staged" and an
+  // empty string means "the user emptied this on purpose", so an accidental empty stage would arm
+  // Publish with a payload that blanks the field on a board other people are reading.
+  stageDescription: (text) => {
+    if (!text.trim()) {
+      pushErrorToast(translate("huReview.stageEmpty"));
+      return;
+    }
+    set((s) => ({ queue: { ...s.queue, description: text } }));
+  },
+  stageCriteria: (criteria) => {
+    const kept = criteria.filter((criterion) => criterion.trim());
+    if (kept.length === 0) {
+      pushErrorToast(translate("huReview.stageEmpty"));
+      return;
+    }
+    set((s) => ({ queue: { ...s.queue, criteria: kept } }));
+  },
   stageTask: (task) =>
     set((s) => ({
       queue: {
@@ -337,6 +379,13 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
         useContext: state.useContext,
         runId,
       });
+
+      // The session may have moved on: loading another work item, or opening one from the history,
+      // replaces everything while this run is still in flight. `runByStage` is cleared by both, so
+      // a run whose id is no longer registered is a run whose answer belongs to a story that is no
+      // longer on screen — and writing it here would put story A's analysis under story B, then
+      // save it there.
+      if (get().runByStage[stage] !== runId) return;
 
       const { review, ...provenance } = result;
       if (review.stage === "analyze") {
