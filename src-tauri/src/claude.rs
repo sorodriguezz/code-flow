@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
+use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
 
 /// Commit-message generation always runs on Haiku regardless of the user's configured review
 /// model — it's a small, mechanical task that doesn't need a bigger model.
@@ -134,10 +134,18 @@ fn interpret_output(
         .filter(|t| !t.is_empty());
 
     if let Some(text) = result_text {
-        if quota_signal(text) {
+        let failed = !success || parsed.as_ref().is_some_and(|p| p.is_error);
+        // Which question to ask depends on whether this text is a *reason* or an *answer*: on a
+        // failed run any signal anywhere explains the failure, but on a successful one only a
+        // message that is nothing but the refusal counts. See `refusal_reply`.
+        let refused = match failed {
+            true => quota_signal(text),
+            false => refusal_reply(text),
+        };
+        if refused {
             return Err(format!("{QUOTA_MARKER}{text}"));
         }
-        if !success || parsed.as_ref().is_some_and(|p| p.is_error) {
+        if failed {
             return Err(text.to_string());
         }
         let model = parsed.as_ref().and_then(model_used);
@@ -168,7 +176,7 @@ fn interpret_output(
     if fallback.is_empty() {
         return Err("claude produced no output".to_string());
     }
-    if quota_signal(fallback) {
+    if refusal_reply(fallback) {
         return Err(format!("{QUOTA_MARKER}{fallback}"));
     }
     Ok(AiRun { text: fallback.to_string(), session_id: None, model: None })

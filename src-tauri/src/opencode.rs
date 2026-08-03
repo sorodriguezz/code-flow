@@ -38,7 +38,7 @@
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
+use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
 
 /// opencode addresses models as `provider/model`; leaving the commit model empty lets opencode use
 /// whatever default the user configured instead of forcing a provider they might not have set up.
@@ -267,7 +267,7 @@ fn interpret_output(
         if text.is_empty() {
             return Err("opencode produced no output".to_string());
         }
-        if quota_signal(text) {
+        if refusal_reply(text) {
             return Err(format!("{QUOTA_MARKER}{text}"));
         }
         return Ok(AiRun { text: text.to_string(), session_id: parsed.session_id, model: None });
@@ -298,7 +298,7 @@ fn interpret_output(
             err.to_string()
         });
     }
-    if quota_signal(text) {
+    if refusal_reply(text) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
     // No events means no session id to report. `None` costs this conversation its continuity (the

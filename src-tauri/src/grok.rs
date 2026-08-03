@@ -36,7 +36,7 @@
 
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
+use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
 
 const DEFAULT_BINARY: &str = "grok";
 
@@ -221,7 +221,7 @@ fn interpret_output(
     // back to treating stdout as the reply rather than failing: a usable answer in the wrong shape
     // still beats an error, and this is also what a future `--output-format` change would look like.
     let Ok(reply) = serde_json::from_str::<GrokReply>(raw) else {
-        if quota_signal(raw) {
+        if refusal_reply(raw) {
             return Err(format!("{QUOTA_MARKER}{raw}"));
         }
         return Ok(AiRun { text: raw.to_string(), session_id: None, model: None });
@@ -231,7 +231,7 @@ fn interpret_output(
     if text.is_empty() {
         return Err("grok produced no output".to_string());
     }
-    if quota_signal(text) {
+    if refusal_reply(text) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
 

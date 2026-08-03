@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { adoGetWorkItem, adoParseWorkItemRef, reviewWorkItem } from "../lib/tauri/commands";
+import { parseClaudeError } from "../lib/claudeError";
 import { htmlToText, splitCriteria, storyPayload } from "../lib/workItemHtml";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
@@ -212,7 +213,10 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
     } catch (e: unknown) {
       // A stopped run is not a failure: nothing was written, and the previous answer is still on
       // screen exactly as it was.
-      if (!isCancellation(e)) pushErrorToast(String(e));
+      //
+      // Parsed rather than raw: a provider refusal arrives tagged with the quota marker, and
+      // `String(e)` would put that machine prefix in front of the sentence the user reads.
+      if (!isCancellation(e)) pushErrorToast(parseClaudeError(String(e)).message);
     } finally {
       useAiRunStore.getState().finish(runId);
       set((s) => {

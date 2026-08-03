@@ -55,6 +55,25 @@ pub(crate) fn quota_signal(text: &str) -> bool {
     QUOTA_SIGNALS.iter().any(|s| lower.contains(s))
 }
 
+/// The longest a message can be and still be *only* a refusal.
+///
+/// Every real one is a line or two — "Claude AI usage limit reached|1751…", "Insufficient
+/// balance. Manage your billing here: …". Nothing a provider says to turn a run down needs a
+/// paragraph, so the generous end of "a line or two" is the whole test.
+const MAX_REFUSAL_CHARS: usize = 400;
+
+/// Whether a **successful** run's own reply is a refusal rather than an answer.
+///
+/// A different question from [`quota_signal`], and deliberately stricter. On a failed run any of
+/// those phrases anywhere is evidence of why it failed. On a run that *succeeded*, the phrase has
+/// to **be** the whole message — because the model is also free to write about rate limits and
+/// billing, and it does: a story review that reported "the appointment search is an HTTP call to
+/// SAP, which has a rate limit" was matched on its own prose, thrown away, and shown to the user
+/// as "you are out of quota" with the finished analysis as the error text.
+pub(crate) fn refusal_reply(text: &str) -> bool {
+    text.chars().count() <= MAX_REFUSAL_CHARS && quota_signal(text)
+}
+
 /// Tags a limit/billing refusal with [`QUOTA_MARKER`] so the frontend renders its dedicated notice
 /// instead of a bare red error. The subprocess engines do this inside their own `interpret`; the
 /// HTTP ones never reach that, so [`run`] applies it to their results here.
@@ -1795,6 +1814,30 @@ mod tests {
     #[test]
     fn a_genuine_failure_is_not_a_quota_signal() {
         assert!(!quota_signal("error: unknown flag --nope"));
+    }
+
+    /// The bug this guards: a *finished* review whose own prose mentioned a rate limit was read
+    /// as the provider refusing, so the analysis the user waited for was thrown away and shown
+    /// to them as "you are out of quota". A model writing about limits is not a model being
+    /// limited — on a successful run the refusal has to be the whole message.
+    #[test]
+    fn an_answer_that_merely_talks_about_limits_is_not_a_refusal() {
+        let analysis = format!(
+            "{{\"summary\":\"La búsqueda de citas no es una query local sino una llamada HTTP a \
+             IRIS/SAP que tiene rate limit, y el módulo de billing queda fuera del alcance. {}\"}}",
+            "Detalle adicional del análisis. ".repeat(20),
+        );
+        assert!(quota_signal(&analysis), "the phrases really are in there");
+        assert!(!refusal_reply(&analysis));
+    }
+
+    /// The other side of the same line: a real refusal is short, and still has to be caught even
+    /// when the CLI reports it on a run that exited cleanly.
+    #[test]
+    fn a_short_standalone_refusal_still_reads_as_one() {
+        assert!(refusal_reply("Claude AI usage limit reached|1751234567"));
+        assert!(refusal_reply("Error: Insufficient balance. Manage your billing here: https://x/billing"));
+        assert!(!refusal_reply("error: unknown flag --nope"));
     }
 
     /// Every wrapper a model has actually put around "respond with JSON only", plus the case where

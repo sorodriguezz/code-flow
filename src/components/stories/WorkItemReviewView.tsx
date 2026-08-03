@@ -636,10 +636,7 @@ export function WorkItemReviewView() {
     // A hundred percent of the parent would be the strip's height too much, and with the parent
     // clipping its overflow the footer — the one place that says nothing is written to Azure — is
     // exactly what would fall off the bottom.
-    //
-    // `cf-ambient-bg` instead of flat surface: the same faint corner washes Graph and Changes sit
-    // on, which is what keeps a screen that is mostly text boxes from reading as a grey form.
-    <div className="cf-ambient-bg flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)]">
       {/* 1 — what to load */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
         {orgs.length === 0 ? (
@@ -869,9 +866,10 @@ export function WorkItemReviewView() {
               </div>
             </div>
 
-            {/* What the review proposes. A touch of surface over the ambient wash, so the rail
-                reads as its own region without needing a heavier border. */}
-            <aside className="flex w-full min-w-0 flex-col overflow-y-auto border-t border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-surface)_55%,transparent)] lg:w-[26rem] lg:shrink-0 lg:border-l lg:border-t-0">
+            {/* What the review proposes. One step back from the editor's surface — recessed in
+                dark, faintly grey in light — so the rail reads as its own region and the white
+                cards on it keep an edge, without needing a heavier border. */}
+            <aside className="flex w-full min-w-0 flex-col overflow-y-auto border-t border-[var(--cf-border)] bg-[var(--cf-bg)] lg:w-[26rem] lg:shrink-0 lg:border-l lg:border-t-0">
               <section className="border-b border-[var(--cf-border)] px-3 py-3">
                 <AsideTitle icon={ScanSearch} label={t("huReview.analysis")} count={liveCounts.analyze} />
                 {!analysis ? (

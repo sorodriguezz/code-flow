@@ -30,7 +30,7 @@
 
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
+use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
 
 const DEFAULT_BINARY: &str = "codex";
 
@@ -200,7 +200,7 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
             err.to_string()
         });
     }
-    if quota_signal(text) {
+    if refusal_reply(text) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
     Ok(AiRun { text: text.to_string(), session_id: session_id_from_preamble(stderr), model: None })
