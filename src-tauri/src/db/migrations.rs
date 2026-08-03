@@ -109,6 +109,27 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             created_at   TEXT NOT NULL
         );
 
+        -- A folder for agent work — "Migración API", "Refactor auth". Purely an organising device: it
+        -- holds tasks and chains, it runs nothing, and it is deliberately NOT a repository (`projects`),
+        -- which is where a turn's working copy comes from. One task can belong to at most one of these.
+        --
+        -- Membership is recorded on the child as a plain id with no foreign key, the same convention
+        -- `agent_tasks.agent_id` uses: deleting a folder must leave the work standing, so the delete
+        -- clears the pointer instead of cascading.
+        CREATE TABLE IF NOT EXISTS agent_projects (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            color        TEXT NOT NULL DEFAULT '#6366f1',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_agent_projects_workspace
+            ON agent_projects(workspace_id, sort_order);
+
         -- One agent task: a goal handed to a roster agent (`workspace_agents`) and worked on
         -- against one repository of this workspace.
         --
@@ -141,6 +162,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- until the user renames it).
             goal            TEXT NOT NULL DEFAULT '',
             title           TEXT NOT NULL DEFAULT '',
+            -- The `agent_projects` folder this is filed under, or '' when it is filed nowhere.
+            agent_project_id TEXT NOT NULL DEFAULT '',
+            -- Whether the list keeps it in its pinned section, wherever else it lives.
+            pinned          INTEGER NOT NULL DEFAULT 0,
             -- The app's own conversation id; `activity_log.session_id` for every turn of this task.
             conversation_id TEXT NOT NULL,
             -- 'draft' | 'running' | 'idle' | 'done' | 'error' | 'cancelled'. `running` is only
@@ -171,6 +196,10 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
             title        TEXT NOT NULL DEFAULT '',
             goal         TEXT NOT NULL DEFAULT '',
+            -- The `agent_projects` folder this is filed under, or '' when it is filed nowhere.
+            agent_project_id TEXT NOT NULL DEFAULT '',
+            -- Whether the list keeps it in its pinned section, wherever else it lives.
+            pinned       INTEGER NOT NULL DEFAULT 0,
             -- 'queued' | 'running' | 'gated' | 'paused' | 'failed' | 'done' | 'aborted'
             status       TEXT NOT NULL DEFAULT 'paused',
             current_step INTEGER NOT NULL DEFAULT 0,
@@ -873,6 +902,47 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_project_url_to_shared_collections(conn)?;
     add_verification_to_story_batches(conn)?;
     add_verification_to_story_drafts(conn)?;
+    add_grouping_to_agent_tasks(conn)?;
+    add_grouping_to_agent_chains(conn)?;
+    Ok(())
+}
+
+/// Tasks and chains gained the two columns the task tree is built out of: the folder they are filed
+/// under, and whether they sit in the pinned section.
+///
+/// Both are organisation, not run state — nothing in the scheduler or in a turn reads them — which
+/// is why they default to "unset" and why there is no backfill to write: a database that predates
+/// folders has everything filed nowhere, and that is exactly what an empty `agent_project_id` and
+/// an unpinned flag already say.
+fn add_grouping_to_agent_tasks(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "agent_tasks")? {
+        return Ok(());
+    }
+    if !has_column(conn, "agent_tasks", "agent_project_id")? {
+        conn.execute_batch(
+            "ALTER TABLE agent_tasks ADD COLUMN agent_project_id TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    if !has_column(conn, "agent_tasks", "pinned")? {
+        conn.execute_batch("ALTER TABLE agent_tasks ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    Ok(())
+}
+
+/// The chain half of [`add_grouping_to_agent_tasks`] — see its comment for why neither needs a
+/// backfill.
+fn add_grouping_to_agent_chains(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "agent_chains")? {
+        return Ok(());
+    }
+    if !has_column(conn, "agent_chains", "agent_project_id")? {
+        conn.execute_batch(
+            "ALTER TABLE agent_chains ADD COLUMN agent_project_id TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    if !has_column(conn, "agent_chains", "pinned")? {
+        conn.execute_batch("ALTER TABLE agent_chains ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;")?;
+    }
     Ok(())
 }
 

@@ -22,7 +22,11 @@ export type LayoutKey =
   | "agentsListWidth"
   | "agentsRosterWidth"
   | "storiesListWidth"
-  | "storiesRailWidth";
+  | "storiesRailWidth"
+  | "wikiListWidth"
+  | "wikiPublishWidth"
+  | "huReviewSourceWidth"
+  | "huReviewPublishWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -46,6 +50,10 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   agentsRosterWidth: "layout_agents_roster_width",
   storiesListWidth: "layout_stories_list_width",
   storiesRailWidth: "layout_stories_rail_width",
+  wikiListWidth: "layout_wiki_list_width",
+  wikiPublishWidth: "layout_wiki_publish_width",
+  huReviewSourceWidth: "layout_hu_review_source_width",
+  huReviewPublishWidth: "layout_hu_review_publish_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -72,6 +80,13 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // Wider than the agent roster: this rail holds four dependent dropdowns whose values are Azure
   // paths ("Proyecto\Área\Subárea"), which are unreadable truncated.
   storiesRailWidth: 320,
+  wikiListWidth: 260,
+  wikiPublishWidth: 280,
+  // The review board's outer columns. Only these two are stored: the middle one is what the other
+  // two leave, so giving it a width of its own would mean three numbers that have to keep adding
+  // up to the window — and a window resize would have to arbitrate between them.
+  huReviewSourceWidth: 360,
+  huReviewPublishWidth: 304,
 };
 
 interface LayoutState {

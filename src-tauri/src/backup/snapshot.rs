@@ -33,6 +33,7 @@ pub const TABLES: &[&str] = &[
     "workspace_agents",
     "workspace_chain_templates",
     "workspace_chain_template_steps",
+    "agent_projects",
     "workspace_mcps",
     // Authored content, not a log: a backlog derived from a wiki is something the user wrote and
     // edited, and it is workspace-scoped, so it restores onto another machine meaning the same
@@ -58,7 +59,11 @@ pub const TABLES: &[&str] = &[
 ///   restored elsewhere it would be a list of work pointing at repositories and transcripts that
 ///   were never there — and `agent_chains`/`agent_chain_steps` go with it for the same reason,
 ///   plus a worse one: a chain carries a live scheduler state, and restoring one mid-flight onto
-///   another machine would hand it a plan that believes a step is running somewhere.
+///   another machine would hand it a plan that believes a step is running somewhere. `agent_projects`
+///   travels while all three of these stay behind, and the asymmetry is the point: the folders are a
+///   filing scheme the user authored, and they restore empty, whereas carrying the work inside them
+///   would put a list of tasks on a machine that has neither the repositories nor the transcripts
+///   they name.
 /// - `api_cookies` — live sessions. Restoring them would move a signed-in session between machines.
 /// - `api_tombstones`, `api_sync_base`, `api_sync_conflicts` — the bookkeeping of one machine's
 ///   sync with a shared collection. It describes *this* install's relationship with the server; on

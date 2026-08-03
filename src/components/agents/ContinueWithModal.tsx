@@ -50,6 +50,9 @@ export function ContinueWithModal({ taskId, onClose }: { taskId: string; onClose
         title: task.title,
         goal: task.goal,
         steps: [{ agent_id: agent.id, instruction, gate }],
+        // The chain carries on the task's work, so it is filed where that task was — asking again
+        // here would be asking the same question twice about one piece of work.
+        agentProjectId: task.agent_project_id,
         start,
       });
       onClose();

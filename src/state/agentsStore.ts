@@ -1,16 +1,21 @@
 import { create } from "zustand";
 import {
   createAgentTask,
+  deleteAgentProject,
   deleteAgentTask,
   deleteChatConversation,
   getChatConversation,
   isRepoBusy,
+  listAgentProjects,
   listAgentTasks,
   listWorkspaceAgents,
   renameAgentTask,
   sendChatMessage,
+  setAgentTaskGroup,
+  setAgentTaskPinned,
   setAgentTaskProject,
   updateAgentTaskRun,
+  upsertAgentProject,
   REPO_BUSY_MARKER,
 } from "../lib/tauri/commands";
 import { notifyTurnSettled } from "./agentEvents";
@@ -18,7 +23,7 @@ import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { parseTrace, type ChatMessage } from "./chatStore";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
-import type { AgentTask, AgentTaskStatus, WorkspaceAgent } from "../types/domain";
+import type { AgentProject, AgentTask, AgentTaskStatus, WorkspaceAgent } from "../types/domain";
 
 /** The repository name the backend put after its busy marker, for the "not now" message. */
 function busyRepoName(error: string): string {
@@ -72,15 +77,35 @@ const EMPTY_LIVE: AgentTaskLive = {
   loaded: false,
 };
 
-export type TaskGrouping = "date" | "status" | "agent";
+/** How the list is arranged. `tree` is the folders-and-pins view and the only one that shows a
+ * chain as a chain; the other two are flat questions about tasks alone. */
+export type TaskGrouping = "tree" | "status" | "agent";
+
+/** The order `list_agent_projects` returns — the user's own arrangement, name as the tie-break.
+ * Local edits are re-sorted through it so a renamed folder sits where the next load will put it. */
+function compareProjects(a: AgentProject, b: AgentProject): number {
+  if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order;
+  return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+}
+
+/** Tree nodes the list shows expanded before the user has said anything about them.
+ *
+ * `open` records decisions, not state, so an untouched section has no entry at all — and without
+ * this the first click on one of these would write `true` and look like nothing happened. */
+export const OPEN_BY_DEFAULT = new Set(["sec:projects", "sec:pinned", "sec:tasks"]);
 
 interface AgentsState {
   workspaceId: string | null;
   tasks: AgentTask[];
   roster: WorkspaceAgent[];
+  /** The workspace's task folders. Configuration, so it loads with the workspace. */
+  projects: AgentProject[];
   live: Record<string, AgentTaskLive>;
   selectedId: string | null;
   groupBy: TaskGrouping;
+  /** Which tree nodes are open, by key (`sec:projects`, `proj:<id>`, `chain:<id>`). View state:
+   * it follows the question being asked, so it is not persisted. */
+  open: Record<string, boolean>;
   query: string;
   /** Whether the roster rail is open. A view state, so it lives here rather than in `uiStore` —
    * nothing outside this view needs to open it. */
@@ -89,11 +114,27 @@ interface AgentsState {
 
   setWorkspace: (id: string | null) => Promise<void>;
   reloadRoster: () => Promise<void>;
+  /** Creates a folder when `id` is absent, edits it otherwise. Rejects with the backend's reason —
+   * `agents.projectNameRequired` for a blank name — which the dialog renders translated. */
+  saveProject: (input: { id?: string; name: string; description: string; color: string }) => Promise<void>;
+  /**
+   * Deletes a folder. The work filed in it survives, unfiled.
+   *
+   * It only unfiles the *tasks*: chains live in `chainStore`, which may depend on this store and
+   * not the reverse, so the caller runs `chainStore.forgetProject(id)` once this resolves.
+   */
+  removeProject: (id: string) => Promise<void>;
   setGroupBy: (grouping: TaskGrouping) => void;
   setQuery: (query: string) => void;
   toggleRoster: () => void;
+  toggleOpen: (key: string) => void;
   select: (taskId: string | null) => Promise<void>;
-  create: (input: { projectId: string; agent: WorkspaceAgent; goal: string }) => Promise<AgentTask>;
+  create: (input: {
+    projectId: string;
+    agent: WorkspaceAgent;
+    goal: string;
+    agentProjectId?: string;
+  }) => Promise<AgentTask>;
   /** Adds a task created outside this store (a chain step). Unlike `create` it does **not** touch
    * `selectedId`: a background step must not yank the detail pane out from under the user. */
   adopt: (task: AgentTask) => void;
@@ -107,6 +148,10 @@ interface AgentsState {
   stop: (taskId: string) => Promise<void>;
   setModel: (taskId: string, model: string) => Promise<void>;
   setProject: (taskId: string, projectId: string) => Promise<void>;
+  /** Files the task under an `AgentProject`, or unfiles it with `""`. Not `setProject`, which is
+   * the repository the turns run in. */
+  setTaskGroup: (taskId: string, agentProjectId: string) => Promise<void>;
+  setTaskPinned: (taskId: string, pinned: boolean) => Promise<void>;
   setStatus: (taskId: string, status: AgentTaskStatus) => Promise<void>;
   rename: (taskId: string, title: string) => Promise<void>;
   remove: (taskId: string) => Promise<void>;
@@ -128,9 +173,11 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   workspaceId: null,
   tasks: [],
   roster: [],
+  projects: [],
   live: {},
   selectedId: null,
-  groupBy: "date",
+  groupBy: "tree",
+  open: {},
   query: "",
   rosterOpen: false,
   loading: false,
@@ -146,15 +193,18 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       workspaceId: id,
       tasks: [],
       roster: [],
+      projects: [],
       live: Object.fromEntries(Object.entries(s.live).filter(([, entry]) => entry.sending)),
       selectedId: null,
+      open: {},
       query: "",
       loading: id !== null,
     }));
     if (!id) return;
-    const [tasks, roster] = await Promise.all([
+    const [tasks, roster, projects] = await Promise.all([
       listAgentTasks(id).catch(() => [] as AgentTask[]),
       listWorkspaceAgents(id).catch(() => [] as WorkspaceAgent[]),
+      listAgentProjects(id).catch(() => [] as AgentProject[]),
     ]);
     set((s) => {
       if (s.workspaceId !== id) return s;
@@ -169,7 +219,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
           void updateAgentTaskRun(task.id, "idle", task.model, task.turns, "");
         }
       }
-      return { tasks: settled, roster, loading: false };
+      return { tasks: settled, roster, projects, loading: false };
     });
   },
 
@@ -180,9 +230,33 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     set((s) => (s.workspaceId === id ? { roster } : s));
   },
 
+  // Written on the backend first, unlike every other write here: a new folder's id and its place
+  // in the order are the backend's to decide, and a blank name is its to refuse.
+  saveProject: async ({ id, name, description, color }) => {
+    const workspaceId = get().workspaceId;
+    if (!workspaceId) return;
+    const saved = await upsertAgentProject(id ?? null, workspaceId, name, description, color);
+    set((s) => {
+      if (s.workspaceId !== workspaceId) return s;
+      const others = s.projects.filter((project) => project.id !== saved.id);
+      return { projects: [...others, saved].sort(compareProjects) };
+    });
+  },
+
+  removeProject: async (id) => {
+    set((s) => ({
+      projects: s.projects.filter((project) => project.id !== id),
+      // The rows on disk are unfiled by the delete itself; this is only the copy on screen.
+      tasks: s.tasks.map((task) => (task.agent_project_id === id ? { ...task, agent_project_id: "" } : task)),
+    }));
+    await deleteAgentProject(id);
+  },
+
   setGroupBy: (groupBy) => set({ groupBy }),
   setQuery: (query) => set({ query }),
   toggleRoster: () => set((s) => ({ rosterOpen: !s.rosterOpen })),
+  toggleOpen: (key) =>
+    set((s) => ({ open: { ...s.open, [key]: !(s.open[key] ?? OPEN_BY_DEFAULT.has(key)) } })),
 
   liveFor: (taskId) => (taskId ? (get().live[taskId] ?? EMPTY_LIVE) : EMPTY_LIVE),
 
@@ -221,7 +295,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     });
   },
 
-  create: async ({ projectId, agent, goal }) => {
+  create: async ({ projectId, agent, goal, agentProjectId }) => {
     const workspaceId = get().workspaceId;
     if (!workspaceId) throw new Error("no workspace");
     const task = await createAgentTask(
@@ -234,6 +308,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       agent.prompt,
       goal,
       taskTitleFrom(goal),
+      agentProjectId ?? "",
     );
     // Newest first, matching the backend's ordering so the list doesn't reshuffle on next load.
     set((s) => ({
@@ -513,6 +588,28 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       ),
     }));
     await setAgentTaskProject(taskId, projectId);
+  },
+
+  // Filing and pinning leave `updated_at` where it is, on both sides: the list is ordered by it,
+  // and neither is work done on the task.
+  setTaskGroup: async (taskId, agentProjectId) => {
+    const task = get().tasks.find((candidate) => candidate.id === taskId);
+    if (!task || task.agent_project_id === agentProjectId) return;
+    set((s) => ({
+      tasks: s.tasks.map((candidate) =>
+        candidate.id === taskId ? { ...candidate, agent_project_id: agentProjectId } : candidate,
+      ),
+    }));
+    await setAgentTaskGroup(taskId, agentProjectId);
+  },
+
+  setTaskPinned: async (taskId, pinned) => {
+    const task = get().tasks.find((candidate) => candidate.id === taskId);
+    if (!task || task.pinned === pinned) return;
+    set((s) => ({
+      tasks: s.tasks.map((candidate) => (candidate.id === taskId ? { ...candidate, pinned } : candidate)),
+    }));
+    await setAgentTaskPinned(taskId, pinned);
   },
 
   setStatus: async (taskId, status) => {

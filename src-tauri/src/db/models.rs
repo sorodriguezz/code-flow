@@ -115,6 +115,20 @@ pub struct WorkspaceAgent {
     pub created_at: String,
 }
 
+/// A folder the user files agent work into. Not a repository: a task still names the `Project` its
+/// turns run in, and this only says where the user put it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProject {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub description: String,
+    pub color: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// One agent task: a goal handed to a roster agent and worked on against one repository. The
 /// turns themselves are `activity_log` rows sharing `conversation_id`; this row is the task's
 /// identity and its overall state.
@@ -132,6 +146,11 @@ pub struct AgentTask {
     pub prompt: String,
     pub goal: String,
     pub title: String,
+    /// The [`AgentProject`] this is filed under, or `""` for none. Organisation only — it never
+    /// changes which repository a turn runs in.
+    pub agent_project_id: String,
+    /// Whether the list keeps it in its pinned section, wherever else it lives.
+    pub pinned: bool,
     pub conversation_id: String,
     /// `draft` | `running` | `idle` | `done` | `error` | `cancelled`.
     pub status: String,
@@ -291,6 +310,11 @@ pub struct AgentChain {
     pub project_id: String,
     pub title: String,
     pub goal: String,
+    /// The [`AgentProject`] this is filed under, or `""` for none. Its steps' tasks inherit it, so
+    /// a chain and the work it produced are always filed together.
+    pub agent_project_id: String,
+    /// Whether the list keeps it in its pinned section, wherever else it lives.
+    pub pinned: bool,
     /// `queued` | `running` | `gated` | `paused` | `failed` | `done` | `aborted`.
     pub status: String,
     pub current_step: i64,
@@ -328,6 +352,22 @@ pub struct AgentChainStep {
     pub last_error: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// A chain step stripped to what the task list needs to draw it: which chain it belongs to, which
+/// task it produced, and how it ended. Deliberately without `prompt`, `pending_input` and
+/// `output_text` — the handoff alone runs to 6k characters a step, and the list loads every chain
+/// of the workspace at once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainStepBrief {
+    pub id: String,
+    pub chain_id: String,
+    pub step_index: i64,
+    pub agent_name: String,
+    pub instruction: String,
+    pub gate: bool,
+    pub task_id: String,
+    pub status: String,
 }
 
 /// One step as the frontend authors it, before anything is snapshotted or persisted.

@@ -274,6 +274,19 @@ export interface WorkspaceAgent {
   created_at: string;
 }
 
+/** A folder for agent work. Not a repository: `AgentTask.project_id` is still the git working copy
+ * a turn runs in, and this is only where the user filed it. */
+export interface AgentProject {
+  id: string;
+  workspace_id: string;
+  name: string;
+  description: string;
+  color: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
 /**
  * Where an agent task stands.
  *
@@ -302,6 +315,10 @@ export interface AgentTask {
   model: string;
   goal: string;
   title: string;
+  /** The `AgentProject` this is filed under, or `""` for none. */
+  agent_project_id: string;
+  /** Whether it sits in the list's pinned section. */
+  pinned: boolean;
   /** `activity_log.session_id` for every turn of this task. Prefixed `agent-`. */
   conversation_id: string;
   status: AgentTaskStatus;
@@ -331,6 +348,10 @@ export interface AgentChain {
   project_id: string;
   title: string;
   goal: string;
+  /** The `AgentProject` this is filed under, or `""` for none. */
+  agent_project_id: string;
+  /** Whether it sits in the list's pinned section. */
+  pinned: boolean;
   status: ChainStatus;
   current_step: number;
   step_count: number;
@@ -366,6 +387,19 @@ export interface AgentChainStep {
   last_error: string;
   created_at: string;
   updated_at: string;
+}
+
+/** A chain step as the task list needs it — see the Rust `ChainStepBrief` for why it is not the
+ * whole row. */
+export interface ChainStepBrief {
+  id: string;
+  chain_id: string;
+  step_index: number;
+  agent_name: string;
+  instruction: string;
+  gate: boolean;
+  task_id: string;
+  status: ChainStepStatus;
 }
 
 /** One step as the dialog authors it, before anything is snapshotted. */

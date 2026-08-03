@@ -38,11 +38,31 @@ const draft = (agentId: string): DraftStep => ({
  * All of it is decided here because none of it can move afterwards without lying: the repository
  * is the working copy every step will edit, and each step's agent is snapshotted the moment this
  * dialog is submitted, so a roster edited next week does not rewrite a plan that is already
- * running.
+ * running. The folder is the exception — it only says where the chain is filed, and the list can
+ * move it later.
+ *
+ * With `templateId` the same form doubles as the template editor: a saved plan has exactly the
+ * fields a chain is authored from, so editing one in a second dialog would mean two forms drifting
+ * apart over one shape.
  */
-export function NewChainModal({ onClose, onManageAgents }: { onClose: () => void; onManageAgents: () => void }) {
+export function NewChainModal({
+  onClose,
+  onManageAgents,
+  initialAgentProjectId = "",
+  templateId = null,
+}: {
+  onClose: () => void;
+  onManageAgents: () => void;
+  /** The folder the chain and its step tasks are filed under — set when the dialog was opened from
+   * one. */
+  initialAgentProjectId?: string;
+  /** A saved plan opened for editing rather than merely applied: the form starts as that template
+   * and saving overwrites it instead of leaving a near-identical copy next to it. */
+  templateId?: string | null;
+}) {
   const t = useT();
   const roster = useAgentsStore((s) => s.roster);
+  const agentProjects = useAgentsStore((s) => s.projects);
   const templates = useChainStore((s) => s.templates);
   const projects = useActiveProjects();
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
@@ -53,6 +73,9 @@ export function NewChainModal({ onClose, onManageAgents }: { onClose: () => void
 
   const [projectId, setProjectId] = useState(
     () => (activeProjectId && projects.some((p) => p.id === activeProjectId) ? activeProjectId : projects[0]?.id) ?? "",
+  );
+  const [agentProjectId, setAgentProjectId] = useState(() =>
+    agentProjects.some((p) => p.id === initialAgentProjectId) ? initialAgentProjectId : "",
   );
   const [title, setTitle] = useState("");
   const [goal, setGoal] = useState("");
@@ -110,15 +133,30 @@ export function NewChainModal({ onClose, onManageAgents }: { onClose: () => void
     );
   };
 
+  // Only on mount, and deliberately not keyed on `templates`: saving reloads that list, and an
+  // effect that watched it would re-apply the stored plan over whatever the user had typed since.
+  useEffect(() => {
+    if (!templateId) return;
+    applyTemplate(templateId);
+    const template = templates.find((candidate) => candidate.id === templateId);
+    // The description rides the goal box because that is where `saveAsTemplate` reads it back from;
+    // leaving it empty would silently blank the template's description on the next update.
+    if (template) setGoal((current) => current || template.description);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const saveAsTemplate = async () => {
     const name = title.trim();
     if (!name) return;
     await useChainStore.getState().saveTemplate({
+      id: templateId ?? undefined,
       name,
       description: goal.trim(),
       steps: steps.map(({ agent_id, instruction, gate }) => ({ agent_id, instruction, gate })),
     });
-    useToastStore.getState().pushToast(t("agents.templateSaved"), "success");
+    useToastStore
+      .getState()
+      .pushToast(t(templateId ? "agents.templateUpdated" : "agents.templateSaved"), "success");
   };
 
   const submit = async (start: boolean) => {
@@ -130,6 +168,7 @@ export function NewChainModal({ onClose, onManageAgents }: { onClose: () => void
         title: title.trim() || goal.trim().split("\n")[0].slice(0, 64) || t("agents.newChain"),
         goal,
         steps: steps.map(({ agent_id, instruction, gate }) => ({ agent_id, instruction, gate })),
+        agentProjectId,
         start,
       });
       onClose();
@@ -164,7 +203,7 @@ export function NewChainModal({ onClose, onManageAgents }: { onClose: () => void
             title={t("agents.saveTemplateHint")}
           >
             <BookmarkPlus size={13} />
-            {t("agents.saveTemplate")}
+            {t(templateId ? "agents.updateTemplate" : "agents.saveTemplate")}
           </GhostButton>
           <span className="ml-auto flex items-center gap-2">
             <GhostButton onClick={onClose} disabled={busy}>
@@ -186,7 +225,9 @@ export function NewChainModal({ onClose, onManageAgents }: { onClose: () => void
           <Note tone="warning">{`${t("agents.noProjects")} — ${t("agents.noProjectsHint")}`}</Note>
         )}
 
-        {templates.length > 0 && (
+        {/* Hidden while a template is being edited: filling this form from a *second* plan would
+            mean the update button writing someone else's steps over the one that was opened. */}
+        {!templateId && templates.length > 0 && (
           <Field label={t("agents.template")}>
             <Select
               size="field"
@@ -224,6 +265,23 @@ export function NewChainModal({ onClose, onManageAgents }: { onClose: () => void
             />
           </Field>
         </div>
+
+        {/* Filing, never routing — and one field away from the repository, which is the one place a
+            user could reasonably read the two as the same thing. Hence the hint, and hence "no
+            project" being an ordinary option: leaving it alone has to look like a decision rather
+            than like something left unfilled. The chain's step tasks inherit it. */}
+        <Field label={t("agents.project")} hint={t("agents.projectHint")}>
+          <Select
+            size="field"
+            value={agentProjectId}
+            ariaLabel={t("agents.project")}
+            onChange={setAgentProjectId}
+            options={[
+              { value: "", label: t("agents.projectNone") },
+              ...agentProjects.map((p) => ({ value: p.id, label: p.name })),
+            ]}
+          />
+        </Field>
 
         <Field label={t("agents.goal")}>
           <textarea

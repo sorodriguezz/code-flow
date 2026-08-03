@@ -13,8 +13,11 @@ import {
   harvestChainStep,
   listAgentChains,
   listChainTemplates,
+  listWorkspaceChainSteps,
   resumeChain,
   retryChainStep,
+  setChainGroup,
+  setChainPinned,
   skipChainStep,
   upsertChainTemplate,
 } from "../lib/tauri/commands";
@@ -26,6 +29,7 @@ import type {
   AgentChain,
   AgentChainStep,
   ChainDetail,
+  ChainStepBrief,
   ChainTemplate,
   NewChainStep,
 } from "../types/domain";
@@ -57,18 +61,26 @@ interface ChainState {
   templates: ChainTemplate[];
   /** Steps of whichever chain is open, keyed by chain id. Only the open one is loaded. */
   stepsByChain: Record<string, AgentChainStep[]>;
+  /** Every chain's steps, slim — what the task list needs to draw a chain as a group and to give
+   * its icon a state. `stepsByChain` stays the full, single-chain load the detail pane reads. */
+  briefsByChain: Record<string, ChainStepBrief[]>;
   selectedId: string | null;
+  /** The template open in the middle column, if any. Mutually exclusive with a chain and a task. */
+  selectedTemplateId: string | null;
   /** True while the window is hidden to the tray — nothing dispatches then. */
   background: boolean;
 
   setWorkspace: (id: string | null) => Promise<void>;
   select: (chainId: string | null) => Promise<void>;
+  /** Opens a template in the middle column. Mirrors `select`, including which store clears which. */
+  selectTemplate: (templateId: string | null) => void;
   refresh: (chainId: string) => Promise<void>;
   create: (input: {
     projectId: string;
     title: string;
     goal: string;
     steps: NewChainStep[];
+    agentProjectId: string;
     start: boolean;
   }) => Promise<ChainDetail>;
   /** Advances a chain by at most one step. Safe to call repeatedly and concurrently. */
@@ -81,6 +93,12 @@ interface ChainState {
   remove: (chainId: string) => Promise<void>;
   /** Stops anything live and aborts every chain of a repository that is about to be deleted. */
   abortForProject: (projectId: string) => Promise<void>;
+  /** Files the chain under an `AgentProject`, or unfiles it with `""` — a folder, not the
+   * repository the steps run in. */
+  setGroup: (chainId: string, agentProjectId: string) => Promise<void>;
+  setPinned: (chainId: string, pinned: boolean) => Promise<void>;
+  /** Drops a deleted folder's id off every chain that pointed at it. */
+  forgetProject: (agentProjectId: string) => void;
 
   reloadTemplates: () => Promise<void>;
   saveTemplate: (input: {
@@ -96,6 +114,7 @@ interface ChainState {
     title: string;
     goal: string;
     steps: NewChainStep[];
+    agentProjectId: string;
     start: boolean;
   }) => Promise<ChainDetail>;
 }
@@ -111,18 +130,29 @@ export const useChainStore = create<ChainState>((set, get) => ({
   chains: [],
   templates: [],
   stepsByChain: {},
+  briefsByChain: {},
   selectedId: null,
+  selectedTemplateId: null,
   background: false,
 
   setWorkspace: async (id) => {
     if (get().workspaceId === id) return;
-    set({ workspaceId: id, chains: [], templates: [], stepsByChain: {}, selectedId: null });
+    set({
+      workspaceId: id,
+      chains: [],
+      templates: [],
+      stepsByChain: {},
+      briefsByChain: {},
+      selectedId: null,
+      selectedTemplateId: null,
+    });
     if (!id) return;
-    const [chains, templates] = await Promise.all([
+    const [chains, templates, briefs] = await Promise.all([
       listAgentChains(id).catch(() => [] as AgentChain[]),
       listChainTemplates(id).catch(() => [] as ChainTemplate[]),
+      listWorkspaceChainSteps(id).catch(() => [] as ChainStepBrief[]),
     ]);
-    set((s) => (s.workspaceId === id ? { chains, templates } : s));
+    set((s) => (s.workspaceId === id ? { chains, templates, briefsByChain: groupBriefs(briefs) } : s));
     // A chain left `running` by a killed session was already demoted to `paused` by
     // `recover_after_restart`; one that is `queued` here is one the user resumed and then closed
     // the view on, so it is picked up rather than left looking about to start.
@@ -133,11 +163,18 @@ export const useChainStore = create<ChainState>((set, get) => ({
   },
 
   select: async (chainId) => {
-    set({ selectedId: chainId });
+    // The template goes whatever the argument is: `select(null)` is how a task takes the column,
+    // so leaving a template behind would put two things in it.
+    set({ selectedId: chainId, selectedTemplateId: null });
     // Exactly one thing occupies the middle column. Cleared from here rather than the other way
     // round because this store may depend on the task store and not the reverse.
     if (chainId) useAgentsStore.setState({ selectedId: null });
     if (chainId) await get().refresh(chainId);
+  },
+
+  selectTemplate: (templateId) => {
+    set({ selectedTemplateId: templateId, selectedId: null });
+    if (templateId) useAgentsStore.setState({ selectedId: null });
   },
 
   refresh: async (chainId) => {
@@ -146,18 +183,23 @@ export const useChainStore = create<ChainState>((set, get) => ({
     set((s) => ({
       chains: s.chains.map((c) => (c.id === chainId ? detail.chain : c)),
       stepsByChain: { ...s.stepsByChain, [chainId]: detail.steps },
+      briefsByChain: { ...s.briefsByChain, [chainId]: detail.steps.map(briefOf) },
     }));
   },
 
-  create: async ({ projectId, title, goal, steps, start }) => {
-    const detail = await createAgentChain(projectId, title, goal, steps);
+  create: async ({ projectId, title, goal, steps, agentProjectId, start }) => {
+    const detail = await createAgentChain(projectId, title, goal, steps, agentProjectId);
     set((s) => ({
       // Filtered rather than blindly prepended: the workspace subscription can have reloaded the
       // list while the create was in flight, and a chain listed twice is a duplicate React key —
       // which does not fail loudly, it silently drops one of the two.
       chains: [detail.chain, ...s.chains.filter((c) => c.id !== detail.chain.id)],
       stepsByChain: { ...s.stepsByChain, [detail.chain.id]: detail.steps },
+      briefsByChain: { ...s.briefsByChain, [detail.chain.id]: detail.steps.map(briefOf) },
       selectedId: detail.chain.id,
+      // A chain started from a template is authored with that template still open; the new chain
+      // is what the user is now looking at.
+      selectedTemplateId: null,
     }));
     // Created parked, then queued in a separate call: nothing in this app starts an engine as a
     // side effect of writing a row.
@@ -187,11 +229,19 @@ export const useChainStore = create<ChainState>((set, get) => ({
       }
       stepId = claim.step.id;
       useAgentsStore.getState().adopt(claim.task);
+      // Both copies of the step, or the tree would draw the running step as still pending for as
+      // long as the turn takes — the next write to either is `settleStep`, minutes later.
       set((s) => ({
         stepsByChain: {
           ...s.stepsByChain,
           [chainId]: (s.stepsByChain[chainId] ?? []).map((step) =>
             step.id === claim.step!.id ? claim.step! : step,
+          ),
+        },
+        briefsByChain: {
+          ...s.briefsByChain,
+          [chainId]: (s.briefsByChain[chainId] ?? []).map((brief) =>
+            brief.id === claim.step!.id ? briefOf(claim.step!) : brief,
           ),
         },
       }));
@@ -256,9 +306,11 @@ export const useChainStore = create<ChainState>((set, get) => ({
     await deleteChain(chainId);
     set((s) => {
       const { [chainId]: _dropped, ...stepsByChain } = s.stepsByChain;
+      const { [chainId]: _droppedBriefs, ...briefsByChain } = s.briefsByChain;
       return {
         chains: s.chains.filter((c) => c.id !== chainId),
         stepsByChain,
+        briefsByChain,
         selectedId: s.selectedId === chainId ? null : s.selectedId,
       };
     });
@@ -281,6 +333,34 @@ export const useChainStore = create<ChainState>((set, get) => ({
     });
   },
 
+  // Filing and pinning leave `updated_at` alone on both sides — the list is ordered by it, and
+  // neither says anything about the plan itself.
+  setGroup: async (chainId, agentProjectId) => {
+    const chain = get().chains.find((c) => c.id === chainId);
+    if (!chain || chain.agent_project_id === agentProjectId) return;
+    set((s) => ({
+      chains: s.chains.map((c) => (c.id === chainId ? { ...c, agent_project_id: agentProjectId } : c)),
+    }));
+    await setChainGroup(chainId, agentProjectId);
+  },
+
+  setPinned: async (chainId, pinned) => {
+    const chain = get().chains.find((c) => c.id === chainId);
+    if (!chain || chain.pinned === pinned) return;
+    set((s) => ({ chains: s.chains.map((c) => (c.id === chainId ? { ...c, pinned } : c)) }));
+    await setChainPinned(chainId, pinned);
+  },
+
+  // The delete already unfiled these rows on disk. This is the copy on screen, and it is the
+  // caller's to run — `agentsStore.removeProject` cannot reach in here, the dependency between the
+  // two stores only runs the other way.
+  forgetProject: (agentProjectId) =>
+    set((s) => ({
+      chains: s.chains.map((c) =>
+        c.agent_project_id === agentProjectId ? { ...c, agent_project_id: "" } : c,
+      ),
+    })),
+
   reloadTemplates: async () => {
     const id = get().workspaceId;
     if (!id) return;
@@ -300,12 +380,14 @@ export const useChainStore = create<ChainState>((set, get) => ({
     set((s) => ({ templates: s.templates.filter((template) => template.id !== id) }));
   },
 
-  continueFrom: async ({ sourceTaskId, title, goal, steps, start }) => {
-    const detail = await createContinuationChain(sourceTaskId, title, goal, steps);
+  continueFrom: async ({ sourceTaskId, title, goal, steps, agentProjectId, start }) => {
+    const detail = await createContinuationChain(sourceTaskId, title, goal, steps, agentProjectId);
     set((s) => ({
       chains: [detail.chain, ...s.chains.filter((c) => c.id !== detail.chain.id)],
       stepsByChain: { ...s.stepsByChain, [detail.chain.id]: detail.steps },
+      briefsByChain: { ...s.briefsByChain, [detail.chain.id]: detail.steps.map(briefOf) },
       selectedId: detail.chain.id,
+      selectedTemplateId: null,
     }));
     // The seeded step is already `done`, so starting goes straight to the agent the user picked —
     // it never re-runs the task it came from.
@@ -322,6 +404,29 @@ type SetState = (partial: Partial<ChainState> | ((s: ChainState) => Partial<Chai
 
 function isTerminal(status: AgentChain["status"]): boolean {
   return status === "done" || status === "aborted";
+}
+
+/** The slim step the tree draws with, taken off a full row rather than re-read: whoever already
+ * holds the detail holds a newer copy than another workspace-wide query would return. */
+function briefOf(step: AgentChainStep): ChainStepBrief {
+  return {
+    id: step.id,
+    chain_id: step.chain_id,
+    step_index: step.step_index,
+    agent_name: step.agent_name,
+    instruction: step.instruction,
+    gate: step.gate,
+    task_id: step.task_id,
+    status: step.status,
+  };
+}
+
+/** Buckets the workspace-wide load by chain. The backend already ordered it by chain then step
+ * index, so each bucket comes out in step order. */
+function groupBriefs(briefs: ChainStepBrief[]): Record<string, ChainStepBrief[]> {
+  const byChain: Record<string, ChainStepBrief[]> = {};
+  for (const brief of briefs) (byChain[brief.chain_id] ??= []).push(brief);
+  return byChain;
 }
 
 function applyChain(chain: AgentChain, set: SetState) {

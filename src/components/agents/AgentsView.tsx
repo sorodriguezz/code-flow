@@ -4,10 +4,12 @@ import { AgentTaskList } from "./AgentTaskList";
 import { AgentTaskDetail } from "./AgentTaskDetail";
 import { AgentRosterPanel } from "./AgentRosterPanel";
 import { AgentEditorModal } from "./AgentEditorModal";
+import { AgentProjectModal } from "./AgentProjectModal";
 import { AgentsHelpModal } from "./AgentsHelpModal";
 import { ChainDetail } from "./ChainDetail";
 import { NewChainModal } from "./NewChainModal";
 import { NewTaskModal } from "./NewTaskModal";
+import { TemplateDetail } from "./TemplateDetail";
 import { useChainStore } from "../../state/chainStore";
 import { CARD } from "../api/panelChrome";
 import { EmptyState } from "../common/EmptyState";
@@ -17,19 +19,25 @@ import { useLayoutStore } from "../../state/layoutStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
-import type { WorkspaceAgent } from "../../types/domain";
+import type { AgentProject, WorkspaceAgent } from "../../types/domain";
 
 const LIST_MIN = 240;
-const LIST_MAX = 480;
+/** Wider than the other rails in the app: this one nests a folder, a chain inside it and that
+ * chain's steps inside that, and three levels of indent have to leave a task's name room to read. */
+const LIST_MAX = 600;
 const ROSTER_MIN = 240;
 const ROSTER_MAX = 460;
+
+/** What the chain dialog was opened for: the folder to file the plan under, and — when it was
+ * opened from a saved plan — which template it is editing rather than merely copying. */
+type ChainDraft = { agentProjectId: string; templateId: string | null };
 
 /**
  * The agent console: the workspace's agents, the tasks they are working on, and the conversation
  * with whichever task is open.
  *
  * Three flush columns, the same shape the API client and the editor use — the task list on the
- * left, the open task in the middle, and the roster as a rail on the right that is toggled rather
+ * left, the open thing in the middle, and the roster as a rail on the right that is toggled rather
  * than always present, because managing *who the agents are* is a much rarer act than talking to
  * one of them.
  *
@@ -52,10 +60,15 @@ export function AgentsView() {
   /** The agent being created or edited in the modal — `null` when it's closed. `"new"` opens it
    * empty, since an agent that hasn't been saved yet has no row to point at. */
   const [editing, setEditing] = useState<WorkspaceAgent | "new" | null>(null);
-  const [composing, setComposing] = useState(false);
-  const [chaining, setChaining] = useState(false);
+  /** The folder being created or edited. Same convention as `editing`. */
+  const [editingProject, setEditingProject] = useState<AgentProject | "new" | null>(null);
+  /** The folder a new task should land in, or `null` when the dialog is closed. A string and not a
+   * boolean because "which folder" is part of what the dialog was opened *for*. */
+  const [composing, setComposing] = useState<string | null>(null);
+  const [chaining, setChaining] = useState<ChainDraft | null>(null);
   const [helping, setHelping] = useState(false);
   const selectedChainId = useChainStore((s) => s.selectedId);
+  const selectedTemplateId = useChainStore((s) => s.selectedTemplateId);
 
   useEffect(() => {
     void useAgentsStore.getState().setWorkspace(workspaceId);
@@ -75,13 +88,21 @@ export function AgentsView() {
       if (e.key.toLowerCase() !== "n") return;
       // A dialog already covers the view, and Settings covers the whole app — opening a second
       // one behind either is the same bug the API client guards against.
-      if (composing || chaining || editing !== null || useUiStore.getState().settingsOpen) return;
+      if (
+        composing !== null ||
+        chaining !== null ||
+        editing !== null ||
+        editingProject !== null ||
+        useUiStore.getState().settingsOpen
+      ) {
+        return;
+      }
       e.preventDefault();
-      setComposing(true);
+      setComposing("");
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeView, composing, chaining, editing]);
+  }, [activeView, composing, chaining, editing, editingProject]);
 
   if (!workspaceId) {
     return (
@@ -91,6 +112,13 @@ export function AgentsView() {
     );
   }
 
+  /** Opening a saved plan: the authoring dialog, loaded from it and pointed back at it, so saving
+   * updates the template instead of leaving a near-identical copy beside it. */
+  const openTemplate = (templateId: string) => {
+    const template = useChainStore.getState().templates.find((candidate) => candidate.id === templateId) ?? null;
+    setChaining({ agentProjectId: "", templateId: template ? template.id : null });
+  };
+
   return (
     <>
       <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
@@ -99,9 +127,12 @@ export function AgentsView() {
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <AgentTaskList
             width={listWidth}
-            onNewTask={() => setComposing(true)}
-            onNewChain={() => setChaining(true)}
+            onNewTask={(agentProjectId) => setComposing(agentProjectId)}
+            onNewChain={(agentProjectId) => setChaining({ agentProjectId, templateId: null })}
             onNewAgent={() => setEditing("new")}
+            onNewProject={() => setEditingProject("new")}
+            onEditProject={setEditingProject}
+            onUseTemplate={openTemplate}
             onHelp={() => setHelping(true)}
           />
           <ResizeHandle
@@ -113,12 +144,14 @@ export function AgentsView() {
             onCommit={(value) => commitSize("agentsListWidth", value)}
           />
 
-          {/* A chain and a task are mutually exclusive in the middle column: selecting either
-              clears the other, so there is exactly one thing on screen and one thing the action
-              bar belongs to. Both are keyed, for the same reason — every bit of local state in
-              those panes belongs to one row. */}
+          {/* A template, a chain and a task are mutually exclusive in the middle column: selecting
+              any one clears the other two, so there is exactly one thing on screen and one thing
+              the action bar belongs to. All three are keyed, for the same reason — every bit of
+              local state in those panes belongs to one row. */}
           <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD}`}>
-            {selectedChainId ? (
+            {selectedTemplateId ? (
+              <TemplateDetail key={selectedTemplateId} templateId={selectedTemplateId} onUse={openTemplate} />
+            ) : selectedChainId ? (
               <ChainDetail key={selectedChainId} chainId={selectedChainId} />
             ) : selectedId ? (
               <AgentTaskDetail key={selectedId} taskId={selectedId} />
@@ -151,15 +184,27 @@ export function AgentsView() {
           onClose={() => setEditing(null)}
         />
       )}
-      {composing && (
+      {editingProject !== null && (
+        <AgentProjectModal
+          project={editingProject === "new" ? null : editingProject}
+          onClose={() => setEditingProject(null)}
+        />
+      )}
+      {composing !== null && (
         <NewTaskModal
           suspended={editing !== null}
-          onClose={() => setComposing(false)}
+          initialAgentProjectId={composing}
+          onClose={() => setComposing(null)}
           onManageAgents={() => setEditing("new")}
         />
       )}
-      {chaining && (
-        <NewChainModal onClose={() => setChaining(false)} onManageAgents={() => setEditing("new")} />
+      {chaining !== null && (
+        <NewChainModal
+          initialAgentProjectId={chaining.agentProjectId}
+          templateId={chaining.templateId}
+          onClose={() => setChaining(null)}
+          onManageAgents={() => setEditing("new")}
+        />
       )}
       {helping && <AgentsHelpModal onClose={() => setHelping(false)} />}
     </>

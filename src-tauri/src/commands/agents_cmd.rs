@@ -9,7 +9,10 @@
 use tauri::State;
 
 use crate::db::{
-    models::{AgentChain, AgentTask, ChainClaim, ChainDetail, ChainTemplate, NewChainStep},
+    models::{
+        AgentChain, AgentProject, AgentTask, ChainClaim, ChainDetail, ChainStepBrief, ChainTemplate,
+        NewChainStep,
+    },
     queries, Db,
 };
 
@@ -38,6 +41,7 @@ pub fn create_agent_task(
     prompt: String,
     goal: String,
     title: String,
+    agent_project_id: String,
 ) -> Result<AgentTask, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::create_agent_task(
@@ -51,6 +55,7 @@ pub fn create_agent_task(
         &prompt,
         &goal,
         &title,
+        &agent_project_id,
     )
     .map_err(|e| e.to_string())
 }
@@ -116,6 +121,7 @@ pub fn create_agent_chain(
     title: String,
     goal: String,
     steps: Vec<NewChainStep>,
+    agent_project_id: String,
 ) -> Result<ChainDetail, String> {
     if steps.is_empty() {
         return Err("chain.noSteps".to_string());
@@ -124,7 +130,8 @@ pub fn create_agent_chain(
         return Err("chain.tooManySteps".to_string());
     }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::create_agent_chain(&conn, &project_id, &title, &goal, &steps).map_err(|e| e.to_string())
+    queries::create_agent_chain(&conn, &project_id, &title, &goal, &steps, &agent_project_id)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -196,6 +203,7 @@ pub fn create_continuation_chain(
     title: String,
     goal: String,
     steps: Vec<NewChainStep>,
+    agent_project_id: String,
 ) -> Result<ChainDetail, String> {
     if steps.is_empty() {
         return Err("chain.noSteps".to_string());
@@ -205,7 +213,8 @@ pub fn create_continuation_chain(
         return Err("chain.tooManySteps".to_string());
     }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::create_continuation_chain(&conn, &source_task_id, &title, &goal, &steps).map_err(|e| e.to_string())
+    queries::create_continuation_chain(&conn, &source_task_id, &title, &goal, &steps, &agent_project_id)
+        .map_err(|e| e.to_string())
 }
 
 // ---------- chain templates ----------
@@ -236,4 +245,82 @@ pub fn upsert_chain_template(
 pub fn delete_chain_template(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::delete_chain_template(&conn, &id).map_err(|e| e.to_string())
+}
+
+// ---------- agent projects ----------
+//
+// The folders the task tree is grouped by, and the four writers that file work into them. None of
+// these runs anything: a folder is where a task is kept, never where it runs.
+
+#[tauri::command]
+pub fn list_agent_projects(db: State<Db>, workspace_id: String) -> Result<Vec<AgentProject>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_agent_projects(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// Refuses a nameless folder here rather than only in the dialog: a row the tree can't label is one
+/// the user can never find again. The message is a translation key — the frontend renders an
+/// unrecognised reason verbatim, so it has to be something it can look up.
+#[tauri::command]
+pub fn upsert_agent_project(
+    db: State<Db>,
+    id: Option<String>,
+    workspace_id: String,
+    name: String,
+    description: String,
+    color: String,
+) -> Result<AgentProject, String> {
+    if name.trim().is_empty() {
+        return Err("agents.projectNameRequired".to_string());
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::upsert_agent_project(&conn, id.as_deref(), &workspace_id, &name, &description, &color)
+        .map_err(|e| e.to_string())
+}
+
+/// Keeps everything the folder held; only the filing goes away.
+#[tauri::command]
+pub fn delete_agent_project(db: State<Db>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::delete_agent_project(&conn, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn reorder_agent_projects(db: State<Db>, ids: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::reorder_agent_projects(&conn, &ids).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_agent_task_group(db: State<Db>, id: String, agent_project_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_agent_task_group(&conn, &id, &agent_project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_agent_task_pinned(db: State<Db>, id: String, pinned: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_agent_task_pinned(&conn, &id, pinned).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_chain_group(db: State<Db>, chain_id: String, agent_project_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_chain_group(&conn, &chain_id, &agent_project_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_chain_pinned(db: State<Db>, chain_id: String, pinned: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_chain_pinned(&conn, &chain_id, pinned).map_err(|e| e.to_string())
+}
+
+/// Every chain's steps at once, slim — what the task list needs to draw a chain as a group.
+#[tauri::command]
+pub fn list_workspace_chain_steps(
+    db: State<Db>,
+    workspace_id: String,
+) -> Result<Vec<ChainStepBrief>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_workspace_chain_steps(&conn, &workspace_id).map_err(|e| e.to_string())
 }

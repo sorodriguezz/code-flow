@@ -35,9 +35,11 @@ import {
 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
+import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { confirmAction } from "../../state/confirmStore";
+import { useLayoutStore } from "../../state/layoutStore";
 import {
   REVIEW_STEPS,
   STAGE_OF_STEP,
@@ -114,6 +116,26 @@ const CARD_MOTION =
 function riseDelay(at: number): React.CSSProperties {
   return { "--cf-rise-delay": `${Math.min(at, 8) * 45}ms` } as React.CSSProperties;
 }
+
+/**
+ * The two outer columns' widths, read from a custom property the board sets rather than from an
+ * inline style of their own.
+ *
+ * The board is three columns side by side only from `lg` up — below that it stacks, and a stacked
+ * column wants the full width. An inline `style={{ width }}` cannot be told about a breakpoint, so
+ * the number travels as a variable and the breakpoint stays where every other one in this file is:
+ * in the class list.
+ */
+const SOURCE_WIDTH = "w-full shrink-0 lg:w-[var(--cf-hu-source-w)]";
+const PUBLISH_WIDTH = "w-full shrink-0 lg:w-[var(--cf-hu-publish-w)]";
+
+/** What the two seams may drag between. The floors are the point at which each column's own
+ * content — a work-item field on the left, a confirm button and its warning on the right — starts
+ * wrapping into something unreadable. */
+const SOURCE_MIN = 260;
+const SOURCE_MAX = 560;
+const PUBLISH_MIN = 240;
+const PUBLISH_MAX = 520;
 
 /**
  * How a child task's state is coloured. Azure states are free strings per process template — and
@@ -825,7 +847,12 @@ function StoryColumn({ step }: { step: ReviewStep }) {
 
   if (step === "analysis") {
     return (
-      <Column icon={FileText} label={t("huReview.storyColumn")} hint={t("huReview.storyColumnHint")}>
+      <Column
+        icon={FileText}
+        label={t("huReview.storyColumn")}
+        hint={t("huReview.storyColumnHint")}
+        width={SOURCE_WIDTH}
+      >
         <div className="space-y-3">
           {analysis?.invest?.length ? (
             <div className="rounded-lg border border-[var(--cf-border)] p-2.5">
@@ -1177,7 +1204,7 @@ function PublishColumn({ step }: { step: ReviewStep }) {
 
   if (step === "analysis") {
     return (
-      <Column icon={UploadCloud} label={t("huReview.publishColumn")} width="lg:w-[19rem]">
+      <Column icon={UploadCloud} label={t("huReview.publishColumn")} width={PUBLISH_WIDTH}>
         <ColumnEmpty icon={UploadCloud}>{t("huReview.publishNotInAnalysis")}</ColumnEmpty>
       </Column>
     );
@@ -1207,7 +1234,7 @@ function PublishColumn({ step }: { step: ReviewStep }) {
       icon={UploadCloud}
       label={t("huReview.publishColumn")}
       count={count}
-      width="lg:w-[19rem]"
+      width={PUBLISH_WIDTH}
       footer={
         <div className="space-y-1.5">
           <p className="flex items-start gap-1.5 text-[10.5px] leading-snug text-[var(--cf-warning)]">
@@ -1426,6 +1453,10 @@ export function WorkItemReviewView() {
   const running = useWorkItemReviewStore((s) => s.runByStage);
   const openedFrom = useWorkItemReviewStore((s) => s.openedFrom);
   const step = useWorkItemReviewStore((s) => s.step);
+  const sourceWidth = useLayoutStore((s) => s.sizes.huReviewSourceWidth);
+  const publishWidth = useLayoutStore((s) => s.sizes.huReviewPublishWidth);
+  const setSize = useLayoutStore((s) => s.setSize);
+  const commitSize = useLayoutStore((s) => s.commitSize);
 
   const [orgs, setOrgs] = useState<string[]>([]);
   // Guards the auto-pick: the organisation must be chosen for the user only while they have not
@@ -1614,10 +1645,45 @@ export function WorkItemReviewView() {
             )}
           </div>
 
-          {/* 4 — the three columns, all filtered to the step above. */}
-          <div className="cf-fade-in flex min-h-0 flex-1 flex-col divide-y divide-[var(--cf-border)] overflow-hidden lg:flex-row lg:divide-x lg:divide-y-0">
+          {/* 4 — the three columns, all filtered to the step above.
+
+              The outer two are draggable and the middle one is what they leave, which is why only
+              two widths are stored. `lg:divide-x` is gone from here: from `lg` up the seams are the
+              handles themselves, and a divider plus a handle is two lines where the layout has one
+              edge. Below `lg` the board stacks, the handles are `display:none`, and `divide-y` goes
+              on drawing the horizontal seams it always did. */}
+          <div
+            className="cf-fade-in flex min-h-0 flex-1 flex-col divide-y divide-[var(--cf-border)] overflow-hidden lg:flex-row lg:divide-y-0"
+            style={
+              {
+                "--cf-hu-source-w": `${sourceWidth}px`,
+                "--cf-hu-publish-w": `${publishWidth}px`,
+              } as React.CSSProperties
+            }
+          >
             <StoryColumn key={`story-${step}`} step={step} />
+            <span className="contents max-lg:hidden">
+              <ResizeHandle
+                axis="x"
+                value={sourceWidth}
+                min={SOURCE_MIN}
+                max={SOURCE_MAX}
+                onChange={(value) => setSize("huReviewSourceWidth", value)}
+                onCommit={(value) => commitSize("huReviewSourceWidth", value)}
+              />
+            </span>
             <ProposalColumn key={`ai-${step}`} step={step} />
+            <span className="contents max-lg:hidden">
+              <ResizeHandle
+                axis="x"
+                value={publishWidth}
+                min={PUBLISH_MIN}
+                max={PUBLISH_MAX}
+                invert
+                onChange={(value) => setSize("huReviewPublishWidth", value)}
+                onCommit={(value) => commitSize("huReviewPublishWidth", value)}
+              />
+            </span>
             <PublishColumn key={`publish-${step}`} step={step} />
           </div>
 

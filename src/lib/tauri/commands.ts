@@ -5,11 +5,13 @@ import type {
   AdoRepo,
   AdoWorkItem,
   AgentChain,
+  AgentProject,
   AgentTask,
   AgentTaskStatus,
   AutoLinkResult,
   ChainClaim,
   ChainDetail,
+  ChainStepBrief,
   ChainTemplate,
   NewChainStep,
   BranchInfo,
@@ -360,6 +362,7 @@ export const createAgentTask = (
   prompt: string,
   goal: string,
   title: string,
+  agentProjectId: string,
 ) =>
   invoke<AgentTask>("create_agent_task", {
     workspaceId,
@@ -371,6 +374,7 @@ export const createAgentTask = (
     prompt,
     goal,
     title,
+    agentProjectId,
   });
 
 export const updateAgentTaskRun = (
@@ -399,8 +403,13 @@ export const listAgentChains = (workspaceId: string) =>
 export const getChainDetail = (chainId: string) =>
   invoke<ChainDetail | null>("get_chain_detail", { chainId });
 
-export const createAgentChain = (projectId: string, title: string, goal: string, steps: NewChainStep[]) =>
-  invoke<ChainDetail>("create_agent_chain", { projectId, title, goal, steps });
+export const createAgentChain = (
+  projectId: string,
+  title: string,
+  goal: string,
+  steps: NewChainStep[],
+  agentProjectId: string,
+) => invoke<ChainDetail>("create_agent_chain", { projectId, title, goal, steps, agentProjectId });
 
 /** Asks the backend what happens next *and* records it. Everything that could refuse has already
  * refused by the time this resolves; `kind: "run"` means a step is now marked dispatched on disk
@@ -439,7 +448,15 @@ export const createContinuationChain = (
   title: string,
   goal: string,
   steps: NewChainStep[],
-) => invoke<ChainDetail>("create_continuation_chain", { sourceTaskId, title, goal, steps });
+  agentProjectId: string,
+) =>
+  invoke<ChainDetail>("create_continuation_chain", {
+    sourceTaskId,
+    title,
+    goal,
+    steps,
+    agentProjectId,
+  });
 
 // ---------- chain templates ----------
 
@@ -464,6 +481,45 @@ export const REPO_BUSY_MARKER = "REPO_BUSY::";
 export function isRepoBusy(error: unknown): boolean {
   return String(error).includes(REPO_BUSY_MARKER);
 }
+
+// ---------- agent projects ----------
+
+export const listAgentProjects = (workspaceId: string) =>
+  invoke<AgentProject[]>("list_agent_projects", { workspaceId });
+
+/** `id` null creates, otherwise the row is updated in place. A blank name is refused backend-side
+ * with `agents.projectNameRequired`, which the caller renders translated. */
+export const upsertAgentProject = (
+  id: string | null,
+  workspaceId: string,
+  name: string,
+  description: string,
+  color: string,
+) => invoke<AgentProject>("upsert_agent_project", { id, workspaceId, name, description, color });
+
+/** The tasks and chains filed here survive: they only stop being filed. */
+export const deleteAgentProject = (id: string) => invoke<void>("delete_agent_project", { id });
+
+export const reorderAgentProjects = (ids: string[]) => invoke<void>("reorder_agent_projects", { ids });
+
+// Filing and pinning deliberately leave `updated_at` alone — the list is ordered by it, and moving
+// a task into a folder is not work done on the task.
+export const setAgentTaskGroup = (id: string, agentProjectId: string) =>
+  invoke<void>("set_agent_task_group", { id, agentProjectId });
+
+export const setAgentTaskPinned = (id: string, pinned: boolean) =>
+  invoke<void>("set_agent_task_pinned", { id, pinned });
+
+export const setChainGroup = (chainId: string, agentProjectId: string) =>
+  invoke<void>("set_chain_group", { chainId, agentProjectId });
+
+export const setChainPinned = (chainId: string, pinned: boolean) =>
+  invoke<void>("set_chain_pinned", { chainId, pinned });
+
+/** Every chain's steps at once, stripped to what the task list draws — the tree needs all of them,
+ * which the full rows of {@link getChainDetail} are far too heavy for. */
+export const listWorkspaceChainSteps = (workspaceId: string) =>
+  invoke<ChainStepBrief[]>("list_workspace_chain_steps", { workspaceId });
 
 // ---------- review memory (review_runs) ----------
 

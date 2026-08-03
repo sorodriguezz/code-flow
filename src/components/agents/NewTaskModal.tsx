@@ -16,6 +16,8 @@ import { useT } from "../../state/languageStore";
  * All three are decided here and not later because two of them are effectively final — the agent
  * is what the task *is*, and the repository is the working copy its turns will edit — so asking
  * for them up front is what keeps the task detail from having to explain why they are greyed out.
+ * The folder is the odd one out: it can be changed from the list whenever, and is asked for here
+ * only so that opening this dialog from inside a folder lands the task in it.
  *
  * Starting the task also sends the goal as its first turn. A task that exists but has said nothing
  * is a row that looks like work and isn't; if the user wanted to think about it longer they can
@@ -24,10 +26,13 @@ import { useT } from "../../state/languageStore";
 export function NewTaskModal({
   onClose,
   onManageAgents,
+  initialAgentProjectId = "",
   suspended = false,
 }: {
   onClose: () => void;
   onManageAgents: () => void;
+  /** The folder the task is filed under to begin with — set when the dialog was opened from one. */
+  initialAgentProjectId?: string;
   /** True while the agent editor is stacked on top of this dialog. Passed to `ApiModal`'s `busy`,
    * which is what takes this dialog's own Escape handler out of the window: both modals bind one,
    * neither can stop the other's, so a single Escape meant to back out of the editor was closing
@@ -36,6 +41,7 @@ export function NewTaskModal({
 }) {
   const t = useT();
   const roster = useAgentsStore((s) => s.roster);
+  const agentProjects = useAgentsStore((s) => s.projects);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const projects = useActiveProjects();
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
@@ -47,6 +53,9 @@ export function NewTaskModal({
   const [agentId, setAgentId] = useState(() => runnable[0]?.id ?? "");
   const [projectId, setProjectId] = useState(
     () => (activeProjectId && projects.some((p) => p.id === activeProjectId) ? activeProjectId : projects[0]?.id) ?? "",
+  );
+  const [agentProjectId, setAgentProjectId] = useState(() =>
+    agentProjects.some((p) => p.id === initialAgentProjectId) ? initialAgentProjectId : "",
   );
   const [goal, setGoal] = useState("");
   const [starting, setStarting] = useState(false);
@@ -71,7 +80,7 @@ export function NewTaskModal({
     if (!agent || !canStart) return;
     setStarting(true);
     try {
-      const task = await useAgentsStore.getState().create({ projectId, agent, goal });
+      const task = await useAgentsStore.getState().create({ projectId, agent, goal, agentProjectId });
       useAgentsStore.getState().send(task.id, goal);
       onClose();
     } finally {
@@ -141,6 +150,23 @@ export function NewTaskModal({
             ariaLabel={t("agents.repository")}
             onChange={setProjectId}
             options={projects.map((p) => ({ value: p.id, label: p.name }))}
+          />
+        </Field>
+
+        {/* Filing, never routing — and directly under the field that *is* routing, which is the one
+            place a user could reasonably read the two as the same thing. Hence the hint, and hence
+            "no project" being an ordinary option rather than an empty select: leaving it alone has
+            to look like a decision, not like something left unfilled. */}
+        <Field label={t("agents.project")} hint={t("agents.projectHint")}>
+          <Select
+            size="field"
+            value={agentProjectId}
+            ariaLabel={t("agents.project")}
+            onChange={setAgentProjectId}
+            options={[
+              { value: "", label: t("agents.projectNone") },
+              ...agentProjects.map((p) => ({ value: p.id, label: p.name })),
+            ]}
           />
         </Field>
 

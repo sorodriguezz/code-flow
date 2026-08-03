@@ -16,10 +16,12 @@ import {
 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
+import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { confirmAction } from "../../state/confirmStore";
 import { useDocsStore } from "../../state/docsStore";
+import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
@@ -33,6 +35,14 @@ const FIELD =
   "w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]";
 
 const store = useDocsStore.getState;
+
+/** The two rails' travel. The document list only has to hold a title and a scope glyph, so it is
+ * allowed to get narrow; the publish panel holds Azure paths, which are unreadable truncated, and
+ * so is given a higher floor. */
+const LIST_MIN = 200;
+const LIST_MAX = 420;
+const PUBLISH_MIN = 240;
+const PUBLISH_MAX = 460;
 
 /** The two kinds of document, as the sidebar and the composer both draw them. */
 const SCOPE_ICON: Record<DocScope, typeof BookText> = { repo: FileCode2, workspace: Network };
@@ -548,6 +558,10 @@ export function WikiView() {
   const pages = useDocsStore((s) => s.pages);
   const selectedId = useDocsStore((s) => s.selectedId);
   const runId = useDocsStore((s) => s.runId);
+  const listWidth = useLayoutStore((s) => s.sizes.wikiListWidth);
+  const publishWidth = useLayoutStore((s) => s.sizes.wikiPublishWidth);
+  const setSize = useLayoutStore((s) => s.setSize);
+  const commitSize = useLayoutStore((s) => s.commitSize);
 
   useEffect(() => {
     void store().setWorkspace(workspaceId);
@@ -557,7 +571,18 @@ export function WikiView() {
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden bg-[var(--cf-surface)]">
-      <DocumentList width={260} />
+      <DocumentList width={listWidth} />
+      {/* Outside the branch below on purpose: the list is there whether or not a page is open, so
+          its seam has to be draggable in the empty state too — that is the state a workspace with
+          one long-titled document spends most of its time in. */}
+      <ResizeHandle
+        axis="x"
+        value={listWidth}
+        min={LIST_MIN}
+        max={LIST_MAX}
+        onChange={(value) => setSize("wikiListWidth", value)}
+        onCommit={(value) => commitSize("wikiListWidth", value)}
+      />
 
       {!page ? (
         <div className="flex min-h-0 flex-1 items-center justify-center">
@@ -622,7 +647,16 @@ export function WikiView() {
             </div>
           </div>
 
-          <PublishPanel page={page} width={280} />
+          <ResizeHandle
+            axis="x"
+            value={publishWidth}
+            min={PUBLISH_MIN}
+            max={PUBLISH_MAX}
+            invert
+            onChange={(value) => setSize("wikiPublishWidth", value)}
+            onCommit={(value) => commitSize("wikiPublishWidth", value)}
+          />
+          <PublishPanel page={page} width={publishWidth} />
         </>
       )}
     </div>

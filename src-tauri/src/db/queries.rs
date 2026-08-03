@@ -3,10 +3,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::models::{
-    ActivityLogEntry, AgentChain, AgentChainStep, AgentTask, ChainClaim, ChainDetail, ChainTemplate,
-    ChainTemplateStep, ChatConversationSummary, DocPage, JobHistoryEntry, NewChainStep, NewProject, Project,
-    ReviewContext, ReviewRunDetail, ReviewRunSummary, StoryBatch, StoryBatchDetail, StoryDraft, Workspace,
-    WorkspaceActivityEntry, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill, WorkItemReviewRow,
+    ActivityLogEntry, AgentChain, AgentChainStep, AgentProject, AgentTask, ChainClaim, ChainDetail,
+    ChainStepBrief, ChainTemplate, ChainTemplateStep, ChatConversationSummary, DocPage, JobHistoryEntry,
+    NewChainStep, NewProject, Project, ReviewContext, ReviewRunDetail, ReviewRunSummary, StoryBatch,
+    StoryBatchDetail, StoryDraft, Workspace, WorkspaceActivityEntry, WorkspaceAgent, WorkspaceMcp,
+    WorkspaceSkill, WorkItemReviewRow,
 };
 
 /// The timestamp every record is stamped with, truncated to **microseconds**.
@@ -706,6 +707,151 @@ pub fn delete_workspace_agent(conn: &Connection, id: &str) -> rusqlite::Result<(
     Ok(())
 }
 
+// ---------- agent projects ----------
+
+fn map_agent_project(row: &rusqlite::Row) -> rusqlite::Result<AgentProject> {
+    Ok(AgentProject {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        name: row.get(2)?,
+        description: row.get(3)?,
+        color: row.get(4)?,
+        sort_order: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+const AGENT_PROJECT_COLUMNS: &str =
+    "id, workspace_id, name, description, color, sort_order, created_at, updated_at";
+
+/// The workspace's folders in the order the user arranged them, ties broken by name so a set
+/// created in one go (all `sort_order = 0` until the first drag) still reads alphabetically.
+pub fn list_agent_projects(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<AgentProject>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {AGENT_PROJECT_COLUMNS} FROM agent_projects WHERE workspace_id = ?1
+         ORDER BY sort_order ASC, name COLLATE NOCASE ASC"
+    ))?;
+    let rows = stmt.query_map(params![workspace_id], map_agent_project)?;
+    rows.collect()
+}
+
+/// Creates when `id` is `None`, otherwise edits in place. A new folder goes to the bottom of the
+/// workspace's list, which is where the user just asked for it to appear.
+pub fn upsert_agent_project(
+    conn: &Connection,
+    id: Option<&str>,
+    workspace_id: &str,
+    name: &str,
+    description: &str,
+    color: &str,
+) -> rusqlite::Result<AgentProject> {
+    let stamp = now();
+    let Some(existing_id) = id else {
+        let sort_order: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM agent_projects WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get(0),
+        )?;
+        let project = AgentProject {
+            id: Uuid::new_v4().to_string(),
+            workspace_id: workspace_id.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            color: color.to_string(),
+            sort_order,
+            created_at: stamp.clone(),
+            updated_at: stamp,
+        };
+        conn.execute(
+            &format!(
+                "INSERT INTO agent_projects ({AGENT_PROJECT_COLUMNS})
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ),
+            params![
+                project.id,
+                project.workspace_id,
+                project.name,
+                project.description,
+                project.color,
+                project.sort_order,
+                project.created_at,
+                project.updated_at,
+            ],
+        )?;
+        return Ok(project);
+    };
+
+    conn.execute(
+        "UPDATE agent_projects SET name = ?2, description = ?3, color = ?4, updated_at = ?5 WHERE id = ?1",
+        params![existing_id, name, description, color, stamp],
+    )?;
+    conn.query_row(
+        &format!("SELECT {AGENT_PROJECT_COLUMNS} FROM agent_projects WHERE id = ?1"),
+        params![existing_id],
+        map_agent_project,
+    )
+}
+
+/// Unfiles everything the folder held, then drops it. The work outlives the folder — that is the
+/// whole point of the membership pointer carrying no foreign key.
+pub fn delete_agent_project(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE agent_tasks SET agent_project_id = '' WHERE agent_project_id = ?1",
+        params![id],
+    )?;
+    tx.execute(
+        "UPDATE agent_chains SET agent_project_id = '' WHERE agent_project_id = ?1",
+        params![id],
+    )?;
+    tx.execute("DELETE FROM agent_projects WHERE id = ?1", params![id])?;
+    tx.commit()
+}
+
+/// `ids` is the section's full order, top to bottom.
+pub fn reorder_agent_projects(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (index, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE agent_projects SET sort_order = ?2 WHERE id = ?1",
+            params![id, index as i64],
+        )?;
+    }
+    tx.commit()
+}
+
+/// Files a task in a folder, or unfiles it with `""`.
+///
+/// None of the four filing/pinning writers touches `updated_at`, deliberately: the list is ordered
+/// by it, and putting a task in a folder is not work done on the task — re-stamping would shuffle a
+/// month-old task to the top of the tree for having been tidied away.
+pub fn set_agent_task_group(conn: &Connection, id: &str, agent_project_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_tasks SET agent_project_id = ?2 WHERE id = ?1",
+        params![id, agent_project_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_agent_task_pinned(conn: &Connection, id: &str, pinned: bool) -> rusqlite::Result<()> {
+    conn.execute("UPDATE agent_tasks SET pinned = ?2 WHERE id = ?1", params![id, pinned])?;
+    Ok(())
+}
+
+pub fn set_chain_group(conn: &Connection, chain_id: &str, agent_project_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_chains SET agent_project_id = ?2 WHERE id = ?1",
+        params![chain_id, agent_project_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_chain_pinned(conn: &Connection, chain_id: &str, pinned: bool) -> rusqlite::Result<()> {
+    conn.execute("UPDATE agent_chains SET pinned = ?2 WHERE id = ?1", params![chain_id, pinned])?;
+    Ok(())
+}
+
 // ---------- agent tasks ----------
 
 /// Marks an `activity_log.session_id` as belonging to an agent task rather than to an ordinary
@@ -714,8 +860,12 @@ pub fn delete_workspace_agent(conn: &Connection, id: &str) -> rusqlite::Result<(
 /// `list_chat_conversations` skips exactly these.
 pub const AGENT_CONVERSATION_PREFIX: &str = "agent-";
 
+/// The grouping pair is **appended**, not slotted in next to `title` where the table carries it:
+/// every mapper here reads by position, so inserting a column in the middle would silently shift
+/// fifteen `row.get(..)` calls onto their neighbours.
 const AGENT_TASK_COLUMNS: &str = "id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt, \
-     goal, title, conversation_id, status, turns, last_error, created_at, updated_at";
+     goal, title, conversation_id, status, turns, last_error, created_at, updated_at, \
+     agent_project_id, pinned";
 
 fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
     Ok(AgentTask {
@@ -735,6 +885,8 @@ fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
         last_error: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
+        agent_project_id: row.get(16)?,
+        pinned: row.get(17)?,
     })
 }
 
@@ -773,6 +925,7 @@ pub fn create_agent_task(
     prompt: &str,
     goal: &str,
     title: &str,
+    agent_project_id: &str,
 ) -> rusqlite::Result<AgentTask> {
     let stamp = now();
     let task = AgentTask {
@@ -786,6 +939,8 @@ pub fn create_agent_task(
         prompt: prompt.to_string(),
         goal: goal.to_string(),
         title: title.to_string(),
+        agent_project_id: agent_project_id.to_string(),
+        pinned: false,
         conversation_id: format!("{AGENT_CONVERSATION_PREFIX}{}", Uuid::new_v4()),
         status: "draft".to_string(),
         turns: 0,
@@ -795,8 +950,8 @@ pub fn create_agent_task(
     };
     conn.execute(
         "INSERT INTO agent_tasks (id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt,
-            goal, title, conversation_id, status, turns, last_error, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            goal, title, conversation_id, status, turns, last_error, created_at, updated_at, agent_project_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             task.id,
             task.workspace_id,
@@ -814,6 +969,7 @@ pub fn create_agent_task(
             task.last_error,
             task.created_at,
             task.updated_at,
+            task.agent_project_id,
         ],
     )?;
     Ok(task)
@@ -921,14 +1077,16 @@ fn compose_chain_input(goal: &str, instruction: &str, previous: Option<(&str, i6
     out
 }
 
-const CHAIN_COLUMNS: &str =
-    "id, project_id, title, goal, status, current_step, step_count, last_reason, created_at, updated_at";
+/// Appended rather than placed after `goal` where the table carries them, for the reason spelled
+/// out on [`AGENT_TASK_COLUMNS`].
+const CHAIN_COLUMNS: &str = "id, project_id, title, goal, status, current_step, step_count, last_reason, \
+     created_at, updated_at, agent_project_id, pinned";
 
 /// The same columns qualified for the join in [`list_agent_chains`]. Written out rather than
 /// derived from [`CHAIN_COLUMNS`] by string substitution — a `replace("id,", "c.id,")` also
 /// rewrites the `id` inside `project_id`, and the result compiles perfectly and fails at runtime.
 const CHAIN_COLUMNS_QUALIFIED: &str = "c.id, c.project_id, c.title, c.goal, c.status, c.current_step, \
-     c.step_count, c.last_reason, c.created_at, c.updated_at";
+     c.step_count, c.last_reason, c.created_at, c.updated_at, c.agent_project_id, c.pinned";
 
 fn map_chain(row: &rusqlite::Row) -> rusqlite::Result<AgentChain> {
     Ok(AgentChain {
@@ -942,6 +1100,8 @@ fn map_chain(row: &rusqlite::Row) -> rusqlite::Result<AgentChain> {
         last_reason: row.get(7)?,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
+        agent_project_id: row.get(10)?,
+        pinned: row.get(11)?,
     })
 }
 
@@ -1042,6 +1202,38 @@ pub fn list_agent_chains(conn: &Connection, workspace_id: &str) -> rusqlite::Res
     rows.collect()
 }
 
+/// Every step of every chain of the workspace, slim enough to load them all at once — the task list
+/// draws a chain as a group of its steps, so it needs all of them and none of their text.
+///
+/// Scoped through `projects` for the same reason [`list_agent_chains`] is: `agent_chains` carries no
+/// `workspace_id` of its own.
+pub fn list_workspace_chain_steps(
+    conn: &Connection,
+    workspace_id: &str,
+) -> rusqlite::Result<Vec<ChainStepBrief>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.id, s.chain_id, s.step_index, s.agent_name, s.instruction, s.gate, s.task_id, s.status
+         FROM agent_chain_steps s
+         JOIN agent_chains c ON c.id = s.chain_id
+         JOIN projects p ON p.id = c.project_id
+         WHERE p.workspace_id = ?1
+         ORDER BY s.chain_id, s.step_index",
+    )?;
+    let rows = stmt.query_map(params![workspace_id], |row| {
+        Ok(ChainStepBrief {
+            id: row.get(0)?,
+            chain_id: row.get(1)?,
+            step_index: row.get(2)?,
+            agent_name: row.get(3)?,
+            instruction: row.get(4)?,
+            gate: row.get(5)?,
+            task_id: row.get(6)?,
+            status: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn get_chain_detail(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<ChainDetail>> {
     let Some(chain) = chain_row(conn, chain_id)? else { return Ok(None) };
     let steps = steps_of(conn, chain_id)?;
@@ -1059,6 +1251,7 @@ pub fn create_agent_chain(
     title: &str,
     goal: &str,
     steps: &[NewChainStep],
+    agent_project_id: &str,
 ) -> rusqlite::Result<ChainDetail> {
     let workspace_id: String =
         conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project_id], |r| r.get(0))?;
@@ -1071,6 +1264,8 @@ pub fn create_agent_chain(
         project_id: project_id.to_string(),
         title: title.to_string(),
         goal: goal.to_string(),
+        agent_project_id: agent_project_id.to_string(),
+        pinned: false,
         status: "paused".to_string(),
         current_step: 0,
         step_count: steps.len() as i64,
@@ -1080,8 +1275,8 @@ pub fn create_agent_chain(
     };
     tx.execute(
         "INSERT INTO agent_chains (id, project_id, title, goal, status, current_step, step_count,
-            last_reason, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            last_reason, created_at, updated_at, agent_project_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             chain.id,
             chain.project_id,
@@ -1093,6 +1288,7 @@ pub fn create_agent_chain(
             chain.last_reason,
             chain.created_at,
             chain.updated_at,
+            chain.agent_project_id,
         ],
     )?;
 
@@ -1137,6 +1333,7 @@ pub fn create_continuation_chain(
     title: &str,
     goal: &str,
     steps: &[NewChainStep],
+    agent_project_id: &str,
 ) -> rusqlite::Result<ChainDetail> {
     let task = get_agent_task(conn, source_task_id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     // The last turn that actually produced something. A failed or stopped turn has nothing to hand
@@ -1159,7 +1356,7 @@ pub fn create_continuation_chain(
     };
     let mut plan = vec![seed];
     plan.extend(steps.iter().cloned());
-    let detail = create_agent_chain(conn, &task.project_id, title, goal, &plan)?;
+    let detail = create_agent_chain(conn, &task.project_id, title, goal, &plan, agent_project_id)?;
 
     let (output, truncated) = clamp_handoff(answer.unwrap_or_default().trim());
     if let Some(first) = detail.steps.first() {
@@ -1264,6 +1461,9 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
             } else {
                 step.instruction.trim().chars().take(64).collect()
             };
+            // Filed in the chain's own folder: a step's task is the chain's work, and a tree that
+            // showed the chain in one folder and the tasks it produced in another would be lying
+            // about where the work lives.
             create_agent_task(
                 &tx,
                 &workspace_id,
@@ -1275,6 +1475,7 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
                 &step.prompt,
                 &step.instruction,
                 &title,
+                &chain.agent_project_id,
             )?
         }
     };
