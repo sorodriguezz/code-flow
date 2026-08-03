@@ -6,7 +6,7 @@ use super::models::{
     ActivityLogEntry, AgentChain, AgentChainStep, AgentTask, ChainClaim, ChainDetail, ChainTemplate,
     ChainTemplateStep, ChatConversationSummary, JobHistoryEntry, NewChainStep, NewProject, Project,
     ReviewContext, ReviewRunDetail, ReviewRunSummary, StoryBatch, StoryBatchDetail, StoryDraft, Workspace,
-    WorkspaceActivityEntry, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill,
+    WorkspaceActivityEntry, WorkspaceAgent, WorkspaceMcp, WorkspaceSkill, WorkItemReviewRow,
 };
 
 /// The timestamp every record is stamped with, truncated to **microseconds**.
@@ -2243,6 +2243,102 @@ fn map_draft(row: &rusqlite::Row) -> rusqlite::Result<StoryDraft> {
 
 /// The workspace's batches, newest activity first — the same ordering the agent console's task
 /// list uses, so the two read the same way.
+// ---------- work item reviews ----------
+
+const WORK_ITEM_REVIEW_COLUMNS: &str = "id, workspace_id, ado_org, work_item_id, work_item_type, \
+    work_item_url, title, payload, engine, model, version, created_at, updated_at";
+
+fn map_work_item_review(row: &rusqlite::Row) -> rusqlite::Result<WorkItemReviewRow> {
+    Ok(WorkItemReviewRow {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        ado_org: row.get(2)?,
+        work_item_id: row.get(3)?,
+        work_item_type: row.get(4)?,
+        work_item_url: row.get(5)?,
+        title: row.get(6)?,
+        payload: row.get(7)?,
+        engine: row.get(8)?,
+        model: row.get(9)?,
+        version: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+    })
+}
+
+/// The workspace's saved reviews, newest first.
+///
+/// Carries the payload of every row: a session's JSON is a few kilobytes and the list is human
+/// sized (one per review anyone has run), so the split projection `story_batches` needs to avoid
+/// dragging whole diffs around would be complexity bought for nothing here.
+pub fn list_work_item_reviews(
+    conn: &Connection,
+    workspace_id: &str,
+) -> rusqlite::Result<Vec<WorkItemReviewRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORK_ITEM_REVIEW_COLUMNS} FROM work_item_reviews \
+         WHERE workspace_id = ?1 ORDER BY updated_at DESC"
+    ))?;
+    let rows = stmt.query_map(params![workspace_id], map_work_item_review)?;
+    rows.collect()
+}
+
+/// Writes a review session, creating it or overwriting the one with the same id.
+///
+/// An upsert rather than an insert because a session answers in three stages and the user keeps
+/// editing between them: every one of those is the *same* review being saved again, and a row per
+/// save would turn one sitting into a dozen indistinguishable history entries. `created_at`
+/// deliberately survives the update — it is when the review was started, and that is what makes
+/// the list read as a history.
+#[allow(clippy::too_many_arguments)]
+pub fn save_work_item_review(
+    conn: &Connection,
+    id: &str,
+    workspace_id: &str,
+    org: &str,
+    work_item_id: i64,
+    work_item_type: &str,
+    work_item_url: &str,
+    title: &str,
+    payload: &str,
+    engine: &str,
+    model: &str,
+    version: &str,
+) -> rusqlite::Result<()> {
+    let stamp = now();
+    conn.execute(
+        "INSERT INTO work_item_reviews \
+            (id, workspace_id, ado_org, work_item_id, work_item_type, work_item_url, title, \
+             payload, engine, model, version, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12) \
+         ON CONFLICT(id) DO UPDATE SET \
+            title = excluded.title, payload = excluded.payload, \
+            work_item_type = excluded.work_item_type, work_item_url = excluded.work_item_url, \
+            engine = excluded.engine, model = excluded.model, version = excluded.version, \
+            updated_at = excluded.updated_at",
+        params![
+            id,
+            workspace_id,
+            org,
+            work_item_id,
+            work_item_type,
+            work_item_url,
+            title,
+            payload,
+            engine,
+            model,
+            version,
+            stamp
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_work_item_review(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM work_item_reviews WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
 pub fn list_story_batches(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<StoryBatch>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {BATCH_COLUMNS} FROM story_batches WHERE workspace_id = ?1 ORDER BY updated_at DESC"

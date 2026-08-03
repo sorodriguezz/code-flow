@@ -1053,6 +1053,9 @@ pub enum WorkItemKind {
 /// Points the engine at the repository the story will be built in, so "falta decir qué pasa cuando
 /// el pago se rechaza" can be grounded in a rejection path that already exists in the code rather
 /// than guessed from the prose. Read-only, like the verification run it sits next to.
+///
+/// `cwd` is the repository to read, or `None` to judge the story on its text alone — see
+/// [`NO_REPO_NOTE`] for what the model is told in that case.
 pub const DEFAULT_WORK_ITEM_ANALYZE_TEMPLATE: &str = r#"Eres un analista funcional revisando una historia de usuario que YA está escrita en Azure DevOps. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo: úsalas antes de responder, porque tus propuestas tienen que encajar con el sistema que existe hoy.
 
 Por stdin recibes la historia: su título, su descripción y sus criterios de aceptación actuales (que pueden venir vacíos).
@@ -1465,6 +1468,18 @@ pub async fn verify_stories_against_code(
 /// Same shape as [`verify_stories_against_code`] — the story on stdin, the repository read by the
 /// engine from its working directory — because it is the same kind of run: read code, judge prose,
 /// write nothing.
+/// Told to the model when the review runs with no repository attached.
+///
+/// The templates are written for the grounded case — "úsalas antes de responder", "verifica que
+/// las rutas existen" — and a run with no working directory cannot obey either. Overriding it here
+/// rather than in a second set of templates keeps one prompt per stage, and keeps a workspace's
+/// own customised prompt working in both modes.
+const NO_REPO_NOTE: &str = "SIN REPOSITORIO EN ESTA EJECUCIÓN: no tienes acceso al código y no \
+    puedes leer archivos. Juzga la historia por su texto y por el contexto del proyecto si lo hay. \
+    Deja `evidence` SIEMPRE vacío: no cites rutas ni inventes archivos. No afirmes qué hace el \
+    sistema hoy — si algo depende del código, dilo como pregunta abierta en el hallazgo.\n\n";
+
+#[allow(clippy::too_many_arguments)]
 pub async fn review_work_item(
     engine: &dyn AiEngine,
     binary: &str,
@@ -1474,16 +1489,19 @@ pub async fn review_work_item(
     story_text: &str,
     contexts: &[(String, String)],
     allowed_tools: &[String],
-    cwd: &str,
+    cwd: Option<&str>,
     prompt_template: &str,
     mcp_config_path: Option<&str>,
-) -> Result<String, String> {
+) -> Result<AiRun, String> {
     if story_text.trim().is_empty() {
         return Err("Esa historia no tiene texto que revisar".to_string());
     }
 
     let truncated: String = story_text.chars().take(MAX_WORK_ITEM_REVIEW_CHARS).collect();
     let mut stdin_payload = String::new();
+    if cwd.is_none() {
+        stdin_payload.push_str(NO_REPO_NOTE);
+    }
     if !contexts.is_empty() {
         stdin_payload.push_str("CONTEXTO DEL PROYECTO:\n");
         for (name, content) in contexts {
@@ -1506,9 +1524,54 @@ pub async fn review_work_item(
 
     let mut inv = AiInvocation::new(prompt, &stdin_payload);
     inv.model = model;
-    inv.allowed_tools = allowed_tools;
-    inv.cwd = Some(cwd);
+    // No repository means no reason to hand the model file tools: there is nothing for them to
+    // reach, and offering them is how a run spends its turns discovering that.
+    inv.allowed_tools = match cwd {
+        Some(_) => allowed_tools,
+        None => &[],
+    };
+    inv.cwd = cwd;
     inv.mcp_config_path = mcp_config_path;
+    // The whole run, not just its text: the caller stamps the answer with the model that actually
+    // produced it, which is the only place the CLI's own choice is reported when none was forced.
+    run(engine, binary, inv).await
+}
+
+/// Asks the model to fix JSON it just produced badly, and returns its second attempt.
+///
+/// Long single-line JSON is where the engines slip: six INVEST verdicts with real notes run to a
+/// few thousand characters, and a bracket closed one key too late turns the whole answer into a
+/// parse error. The work that produced it — minutes of reading the repository — is already done
+/// and is all *in* the broken text, so re-running the review would pay for it twice and could
+/// just as easily slip again.
+///
+/// Deliberately the cheapest call this module makes: no tools, no working directory, no MCP. It
+/// is a text-shape repair, and a model that can read the repository is not needed to close a
+/// bracket. `error` is passed on because it names the exact position, which is far better than
+/// asking the model to find its own mistake.
+pub async fn repair_json(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    broken: &str,
+    shape: &str,
+    error: &str,
+) -> Result<String, String> {
+    let stdin_payload = format!("=== ERROR DEL PARSER ===\n{error}\n\n=== JSON A REPARAR ===\n{broken}");
+    let prompt = format!(
+        "Recibes por stdin un JSON mal formado y el error exacto que devolvió el parser.\n\n\
+         Tu única tarea es devolverlo bien formado. Reglas:\n\
+         - Responde ÚNICAMENTE con el objeto JSON corregido. Nada antes, nada después, sin bloques \
+           de código markdown.\n\
+         - Conserva TODO el contenido: no resumas, no acortes textos, no elimines elementos de los \
+           arrays. Solo arreglas la sintaxis y la estructura.\n\
+         - No traduzcas ni reescribas los textos: van tal cual están.\n\
+         - Escapa correctamente las comillas y los saltos de línea dentro de las cadenas.\n\
+         - El objeto corregido tiene exactamente esta forma:\n{shape}"
+    );
+
+    let mut inv = AiInvocation::new(&prompt, &stdin_payload);
+    inv.model = model;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }

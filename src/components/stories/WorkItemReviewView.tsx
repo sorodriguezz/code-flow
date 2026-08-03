@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  BookText,
   Bug,
   Check,
   ChevronDown,
@@ -7,12 +8,14 @@ import {
   CircleAlert,
   ClipboardCheck,
   Copy,
+  Cpu,
   Eraser,
   ExternalLink,
   FileText,
   FlaskConical,
   FolderGit2,
   Gauge,
+  History,
   Info,
   Link2,
   ListChecks,
@@ -21,8 +24,10 @@ import {
   Plus,
   ScanSearch,
   ShieldCheck,
+  Timer,
   Trash2,
   TriangleAlert,
+  UploadCloud,
   User,
   Wrench,
 } from "lucide-react";
@@ -31,7 +36,13 @@ import { EmptyState } from "../common/EmptyState";
 import { Select } from "../common/Select";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { confirmAction } from "../../state/confirmStore";
-import { effortLabel, kindOf, useWorkItemReviewStore } from "../../state/workItemReviewStore";
+import {
+  PUBLISH_STEPS,
+  effortLabel,
+  kindOf,
+  useWorkItemReviewStore,
+  type PublishStep,
+} from "../../state/workItemReviewStore";
 import { useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
@@ -207,7 +218,7 @@ function AsideTitle({
 function SectionHint({ stage, children }: { stage: WorkItemReviewStage; children: React.ReactNode }) {
   const t = useT();
   const running = useWorkItemReviewStore((s) => Boolean(s.runByStage[stage]));
-  const ready = useWorkItemReviewStore((s) => Boolean(s.item) && s.projectIds.length > 0);
+  const ready = useWorkItemReviewStore((s) => Boolean(s.item));
 
   if (running) {
     return (
@@ -223,7 +234,7 @@ function SectionHint({ stage, children }: { stage: WorkItemReviewStage; children
       <button
         type="button"
         disabled={!ready}
-        title={ready ? t(`huReview.what.${stage}`) : t("huReview.pickReposFirst")}
+        title={ready ? t(`huReview.what.${stage}`) : t("huReview.emptyShort")}
         onClick={() => void store().run(stage)}
         className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text)]"
       >
@@ -242,6 +253,28 @@ function RepoChip({ repo }: { repo: string }) {
       <FolderGit2 size={9} />
       {repo}
     </span>
+  );
+}
+
+/**
+ * Moves something into the publish column.
+ *
+ * Deliberately quiet — a link, not a button. Staging is not the commitment; it is the step *before*
+ * the commitment, and dressing it as a primary action would put the same visual weight on "I might
+ * send this" as the publish button puts on "send it".
+ */
+function StageButton({ onStage }: { onStage: () => void }) {
+  const t = useT();
+  return (
+    <button
+      type="button"
+      onClick={onStage}
+      title={t("huReview.stageHint")}
+      className="flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
+    >
+      <UploadCloud size={11} />
+      {t("huReview.stage")}
+    </button>
   );
 }
 
@@ -372,7 +405,8 @@ function TaskRow({ task, at }: { task: ProposedTask; at: number }) {
             {task.evidence.join(" · ")}
           </p>
         )}
-        <div className="mt-2 flex items-center gap-1">
+        <div className="mt-2 flex items-center gap-2">
+          <StageButton onStage={() => store().stageTask({ title: task.title, detail: task.detail })} />
           <CardActions
             onCopy={() => copy(`${task.title}\n\n${task.detail}`, t("huReview.copied"))}
             onDismiss={() => store().dismiss(key)}
@@ -468,7 +502,14 @@ function ChildTaskRow({ child, at }: { child: AdoWorkItemChild; at: number }) {
   );
 }
 
-/** Which repositories the review reads. Several, because a story rarely lives in one. */
+/**
+ * What the review is read against — none, some, or all of the workspace's repositories.
+ *
+ * Zero is a first-class answer and is labelled as one. A workspace is a project, and a story is
+ * routinely written before the code that satisfies it; the picker that *required* a repository made
+ * the screen unusable at exactly the moment refinement happens. The empty state therefore says
+ * "sin repositorio" as a choice rather than "elige uno" as an instruction.
+ */
 function RepoPicker() {
   const t = useT();
   const repos = useActiveProjects();
@@ -482,15 +523,15 @@ function RepoPicker() {
         type="button"
         onClick={() => setOpen((wasOpen) => !wasOpen)}
         aria-expanded={open}
-        title={t("huReview.reposHint")}
-        className="flex max-w-[22rem] items-center gap-1.5 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] hover:border-[var(--cf-accent)]"
+        title={chosen.length === 0 ? t("huReview.noReposHint") : t("huReview.reposHint")}
+        className="flex max-w-[22rem] items-center gap-1.5 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] transition-colors hover:border-[var(--cf-accent)]"
       >
         <FolderGit2 size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
         <span className={`min-w-0 truncate ${chosen.length ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"}`}>
-          {chosen.length === 0 ? t("huReview.pickRepos") : chosen.map((repo) => repo.name).join(" · ")}
+          {chosen.length === 0 ? t("huReview.noReposPicked") : chosen.map((repo) => repo.name).join(" · ")}
         </span>
         {chosen.length > 1 && (
-          <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
             {chosen.length}
           </span>
         )}
@@ -500,7 +541,10 @@ function RepoPicker() {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute left-0 top-full z-20 mt-1 max-h-72 w-64 overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
+          <div className="cf-fade-in absolute left-0 top-full z-20 mt-1 max-h-72 w-72 overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
+            <p className="px-2 py-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+              {t("huReview.reposOptional")}
+            </p>
             {repos.length === 0 && (
               <p className="px-2 py-1.5 text-[11.5px] text-[var(--cf-text-muted)]">{t("huReview.noRepos")}</p>
             )}
@@ -513,6 +557,346 @@ function RepoPicker() {
                 <span className="min-w-0 truncate">{repo.name}</span>
               </label>
             ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Whether the workspace's saved context notes travel with the story. */
+function ContextToggle() {
+  const t = useT();
+  const on = useWorkItemReviewStore((s) => s.useContext);
+  return (
+    <button
+      type="button"
+      onClick={() => store().setUseContext(!on)}
+      aria-pressed={on}
+      title={on ? t("huReview.useContextHint") : t("huReview.useContextOff")}
+      className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1.5 text-[12px] transition-colors ${
+        on
+          ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+          : "border-[var(--cf-field-border)] bg-[var(--cf-field)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)]"
+      }`}
+    >
+      <BookText size={12} className="shrink-0" />
+      <span className="min-w-0 truncate">{t("huReview.useContext")}</span>
+    </button>
+  );
+}
+
+/** What produced one stage's answer, in the one line it deserves. */
+function Provenance({ stage }: { stage: WorkItemReviewStage }) {
+  const t = useT();
+  const at = useWorkItemReviewStore((s) => s.provenance[stage]);
+  if (!at) return null;
+
+  const seconds = at.elapsed_ms / 1000;
+  const took = seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  const grounding =
+    at.repos_read > 0 ? t("huReview.groundedIn").replace("{n}", String(at.repos_read)) : t("huReview.groundedInNone");
+
+  return (
+    <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-[var(--cf-text-muted)]">
+      <Cpu size={10} className="shrink-0" />
+      <span className="font-mono">{at.model || at.engine}</span>
+      {at.version && <span className="font-mono opacity-70">{at.engine} {at.version}</span>}
+      <span aria-hidden>·</span>
+      <span className="inline-flex items-center gap-1">
+        <Timer size={10} />
+        {took}
+      </span>
+      <span aria-hidden>·</span>
+      <span>{grounding}</span>
+    </p>
+  );
+}
+
+const STEP_ICON: Record<PublishStep, typeof ScanSearch> = {
+  description: FileText,
+  criteria: ListChecks,
+  tasks: ClipboardCheck,
+};
+
+/**
+ * The order the three decisions are taken in, and where the user is in it.
+ *
+ * A marker, not a gate: nothing stops someone publishing tasks before the description, because a
+ * team that has already agreed the description elsewhere should not have to click through it. What
+ * the bar does is say what the recommended order *is*, and colour the step whose work is on screen.
+ */
+function StepBar() {
+  const t = useT();
+  const step = useWorkItemReviewStore((s) => s.step);
+  const queue = useWorkItemReviewStore((s) => s.queue);
+
+  const staged = (at: PublishStep) =>
+    at === "tasks" ? (queue.tasks?.length ?? 0) > 0 : queue[at] !== null;
+
+  return (
+    <div className="flex items-center gap-1">
+      {PUBLISH_STEPS.map((at, index) => {
+        const Icon = STEP_ICON[at];
+        const active = step === at;
+        const done = Boolean(queue.published[at]);
+        return (
+          <div key={at} className="flex items-center gap-1">
+            {index > 0 && <ChevronRight size={11} className="shrink-0 text-[var(--cf-text-muted)]" />}
+            <button
+              type="button"
+              onClick={() => store().setStep(at)}
+              aria-current={active ? "step" : undefined}
+              className={`relative flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-medium transition-colors ${
+                active
+                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              }`}
+            >
+              {done ? <Check size={11} className="text-[var(--cf-success)]" /> : <Icon size={11} />}
+              {t(`huReview.step${at[0].toUpperCase()}${at.slice(1)}` as "huReview.stepDescription")}
+              {staged(at) && !done && (
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent)]" aria-hidden />
+              )}
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * The third column: what goes back to the board, and the only place it leaves from.
+ *
+ * Everything else on this screen is local — the left column is the item as it stands, the middle is
+ * what a model proposed. This is the one that writes, so it is the one that asks: each step
+ * confirms separately, names what it is about to overwrite, and afterwards says what it did rather
+ * than quietly resetting.
+ */
+function PublishColumn() {
+  const t = useT();
+  const step = useWorkItemReviewStore((s) => s.step);
+  const queue = useWorkItemReviewStore((s) => s.queue);
+  const publishing = useWorkItemReviewStore((s) => s.publishing);
+  const item = useWorkItemReviewStore((s) => s.item);
+  const isBug = item ? kindOf(item.work_item_type) === "bug" : false;
+
+  const done = queue.published[step];
+  const busy = publishing === step;
+  const tasks = queue.tasks ?? [];
+  const criteria = queue.criteria ?? [];
+  const ready =
+    step === "tasks" ? tasks.length > 0 : step === "criteria" ? queue.criteria !== null : queue.description !== null;
+
+  const confirmText = () => {
+    if (step === "description") return t("huReview.confirmDescription");
+    if (step === "criteria") return t("huReview.confirmCriteria").replace("{n}", String(criteria.length));
+    return t("huReview.confirmTasks").replace("{n}", String(tasks.length));
+  };
+
+  return (
+    <div className="flex min-h-0 w-full flex-col overflow-hidden border-t border-[var(--cf-border)] bg-[var(--cf-surface)] lg:w-[22rem] lg:shrink-0 lg:border-l lg:border-t-0">
+      <div className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2.5">
+        <div className="flex items-center gap-2">
+          <IconChip icon={UploadCloud} />
+          <h3 className="text-[13px] font-semibold text-[var(--cf-text)]">{t("huReview.publishColumn")}</h3>
+        </div>
+        <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {t("huReview.publishColumnHint")}
+        </p>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+        {!ready ? (
+          <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("huReview.publishNothing")}</p>
+        ) : step === "description" ? (
+          <article className={`cf-rise rounded-md border border-[var(--cf-border)] px-2.5 py-2 ${CARD_MOTION}`}>
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+              {isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription")}
+            </p>
+            <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-[var(--cf-text)]">
+              {queue.description}
+            </p>
+          </article>
+        ) : step === "criteria" ? (
+          <div className="space-y-2">
+            {criteria.map((criterion, at) => (
+              <article
+                key={at}
+                style={riseDelay(at)}
+                className={`rounded-md border border-[var(--cf-border)] px-2.5 py-2 ${CARD_MOTION}`}
+              >
+                <p className="mb-1 text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">#{at + 1}</p>
+                <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-[var(--cf-text)]">
+                  {criterion}
+                </p>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {tasks.map((task, at) => (
+              <article
+                key={at}
+                style={riseDelay(at)}
+                className={`flex gap-2 rounded-md border border-[var(--cf-border)] px-2.5 py-2 ${CARD_MOTION}`}
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="break-words font-mono text-[11.5px] font-medium text-[var(--cf-text)]">{task.title}</p>
+                  {task.detail && (
+                    <p className="mt-1 break-words text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                      {task.detail}
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => store().unstageTask(at)}
+                  title={t("huReview.unstage")}
+                  aria-label={t("huReview.unstage")}
+                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                >
+                  <Trash2 size={12} />
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="shrink-0 space-y-1.5 border-t border-[var(--cf-border)] px-3 py-2.5">
+        {done && (
+          <p className="flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-success)]">
+            <Check size={11} className="mt-[2px] shrink-0" />
+            <span className="min-w-0 break-words">
+              {t("huReview.publishedAt")
+                .replace("{at}", new Date(done.at).toLocaleTimeString())
+                .replace("{n}", String(done.count))}
+            </span>
+          </p>
+        )}
+        <p className="flex items-start gap-1.5 text-[10.5px] leading-snug text-[var(--cf-warning)]">
+          <TriangleAlert size={10} className="mt-[2px] shrink-0" />
+          <span className="min-w-0">{t("huReview.writesToAzure")}</span>
+        </p>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            disabled={!ready || busy}
+            onClick={() => {
+              void confirmAction(confirmText()).then((ok) => {
+                if (ok) void store().publish(step);
+              });
+            }}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busy ? <ThinkingOrb size="sm" /> : <UploadCloud size={12} />}
+            {busy ? t("huReview.publishing") : done ? t("huReview.publishAgain") : t("huReview.publish")}
+          </button>
+          {ready && (
+            <button
+              type="button"
+              onClick={() => store().clearStep(step)}
+              title={t("huReview.clearStep")}
+              aria-label={t("huReview.clearStep")}
+              className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
+            >
+              <Eraser size={12} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Reviews saved in this workspace, and the way back into one. */
+function HistoryPicker() {
+  const t = useT();
+  const history = useWorkItemReviewStore((s) => s.history);
+  const openId = useWorkItemReviewStore((s) => s.sessionId);
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    void store().loadHistory();
+  }, []);
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((wasOpen) => !wasOpen)}
+        aria-expanded={open}
+        title={t("huReview.historyHint")}
+        className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+      >
+        <History size={12} className="shrink-0" />
+        {t("huReview.history")}
+        {history.length > 0 && (
+          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
+            {history.length}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="cf-fade-in absolute right-0 top-full z-20 mt-1 max-h-96 w-[26rem] overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
+            {history.length === 0 ? (
+              <p className="px-2 py-3 text-center text-[11.5px] text-[var(--cf-text-muted)]">
+                {t("huReview.historyEmpty")}
+              </p>
+            ) : (
+              history.map((row, at) => (
+                <div
+                  key={row.id}
+                  style={riseDelay(at)}
+                  className={`cf-rise group flex items-center gap-1 rounded-md ${
+                    row.id === openId ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => {
+                      store().openFromHistory(row);
+                      setOpen(false);
+                    }}
+                    className="min-w-0 flex-1 px-2 py-1.5 text-left"
+                  >
+                    <p className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
+                      <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
+                        #{row.work_item_id}
+                      </span>
+                      <span className="min-w-0 truncate font-medium">{row.title}</span>
+                    </p>
+                    <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+                      <span>{new Date(row.updated_at).toLocaleString()}</span>
+                      {row.model && (
+                        <>
+                          <span aria-hidden>·</span>
+                          <span className="min-w-0 truncate font-mono">{row.model}</span>
+                        </>
+                      )}
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void confirmAction(t("huReview.historyDeleteConfirm")).then((ok) => {
+                        if (ok) void store().removeFromHistory(row.id);
+                      });
+                    }}
+                    title={t("huReview.historyDelete")}
+                    aria-label={t("huReview.historyDelete")}
+                    className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              ))
+            )}
           </div>
         </>
       )}
@@ -536,7 +920,7 @@ function StageChip({
 }) {
   const t = useT();
   const running = useWorkItemReviewStore((s) => Boolean(s.runByStage[stage]));
-  const ready = useWorkItemReviewStore((s) => Boolean(s.item) && s.projectIds.length > 0);
+  const ready = useWorkItemReviewStore((s) => Boolean(s.item));
 
   const label = running ? t("huReview.stop") : t(`huReview.run.${stage}`);
   // Produced something and is at rest: the step is behind you, and its number can say so.
@@ -545,7 +929,7 @@ function StageChip({
     <button
       type="button"
       disabled={!ready && !running}
-      title={running ? t("huReview.stopHint") : ready ? t(`huReview.what.${stage}`) : t("huReview.pickReposFirst")}
+      title={running ? t("huReview.stopHint") : ready ? t(`huReview.what.${stage}`) : t("huReview.emptyShort")}
       onClick={() => void (running ? store().stop(stage) : store().run(stage))}
       className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium transition-[background-color,border-color,color,box-shadow] duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
         primary && !running
@@ -595,6 +979,7 @@ export function WorkItemReviewView() {
   const proposedTasks = useWorkItemReviewStore((s) => s.proposedTasks);
   const dismissed = useWorkItemReviewStore((s) => s.dismissed);
   const running = useWorkItemReviewStore((s) => s.runByStage);
+  const openedFrom = useWorkItemReviewStore((s) => s.openedFrom);
 
   const [orgs, setOrgs] = useState<string[]>([]);
   // Guards the auto-pick: the organisation must be chosen for the user only while they have not
@@ -687,7 +1072,17 @@ export function WorkItemReviewView() {
         >
           {loading ? t("huReview.loading") : t("huReview.load")}
         </button>
+        <HistoryPicker />
       </div>
+
+      {openedFrom && (
+        <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-[var(--cf-accent-soft)] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-accent)]">
+          <History size={11} className="mt-[2px] shrink-0" />
+          <span className="min-w-0 break-words" title={t("huReview.snapshotHint")}>
+            {t("huReview.snapshot").replace("{at}", new Date(openedFrom.at).toLocaleString())}
+          </span>
+        </p>
+      )}
 
       {error && (
         <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-danger)_7%,transparent)] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-danger)]">
@@ -757,6 +1152,9 @@ export function WorkItemReviewView() {
           {/* 3 — what it is read against, and the three steps in order */}
           <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
             <RepoPicker />
+            <ContextToggle />
+            <span className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" aria-hidden />
+            <StepBar />
             <div className="ml-auto flex flex-wrap items-center gap-1.5">
               {STAGES.map(({ stage, icon }, at) => (
                 <div key={stage} className="flex items-center gap-1.5">
@@ -782,6 +1180,7 @@ export function WorkItemReviewView() {
                   icon={FileText}
                   label={isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription")}
                   hint={isBug ? t("huReview.reproHint") : t("huReview.descriptionHint")}
+                  action={<StageButton onStage={() => store().stageDescription(isBug ? reproSteps : description)} />}
                 >
                   <textarea
                     value={isBug ? reproSteps : description}
@@ -810,15 +1209,20 @@ export function WorkItemReviewView() {
                   label={t("stories.fieldCriteria")}
                   hint={t("huReview.criteriaFieldHint")}
                   action={
-                    <button
-                      type="button"
-                      onClick={() => store().addCriterion("")}
-                      title={t("huReview.addCriterionHint")}
-                      className="flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
-                    >
-                      <Plus size={11} />
-                      {t("stories.addCriterion")}
-                    </button>
+                    <span className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => store().addCriterion("")}
+                        title={t("huReview.addCriterionHint")}
+                        className="flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
+                      >
+                        <Plus size={11} />
+                        {t("stories.addCriterion")}
+                      </button>
+                      <StageButton
+                        onStage={() => store().stageCriteria(criteria.filter((c) => c.trim()))}
+                      />
+                    </span>
                   }
                 >
                   <div className="space-y-1.5">
@@ -872,6 +1276,7 @@ export function WorkItemReviewView() {
             <aside className="flex w-full min-w-0 flex-col overflow-y-auto border-t border-[var(--cf-border)] bg-[var(--cf-bg)] lg:w-[26rem] lg:shrink-0 lg:border-l lg:border-t-0">
               <section className="border-b border-[var(--cf-border)] px-3 py-3">
                 <AsideTitle icon={ScanSearch} label={t("huReview.analysis")} count={liveCounts.analyze} />
+                <Provenance stage="analyze" />
                 {!analysis ? (
                   <SectionHint stage="analyze">{t("huReview.analysisHint")}</SectionHint>
                 ) : (
@@ -910,6 +1315,7 @@ export function WorkItemReviewView() {
 
               <section className="border-b border-[var(--cf-border)] px-3 py-3">
                 <AsideTitle icon={ListChecks} label={t("huReview.criteria")} count={liveCounts.criteria} />
+                <Provenance stage="criteria" />
                 {liveCounts.criteria === 0 ? (
                   <SectionHint stage="criteria">{t("huReview.criteriaHint")}</SectionHint>
                 ) : (
@@ -986,6 +1392,7 @@ export function WorkItemReviewView() {
                     ) : undefined
                   }
                 />
+                <Provenance stage="tasks" />
                 {liveCounts.tasks === 0 ? (
                   <SectionHint stage="tasks">{t("huReview.tasksHint")}</SectionHint>
                 ) : (
@@ -997,13 +1404,20 @@ export function WorkItemReviewView() {
                 )}
               </section>
             </aside>
+
+            <PublishColumn />
           </div>
 
-          {/* 5 — the promise this screen makes, and the only way to undo the session */}
+          {/* 5 — the promise this screen makes, and the only way to undo the session.
+
+              The promise changed when the third column arrived: it used to be "nothing is written
+              back", which is no longer true and would have been the worst possible thing to keep
+              saying. What survives is the part that still holds — the reading and the proposing
+              change nothing, and the only writes are the ones the user staged and confirmed. */}
           <footer className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
             <ShieldCheck size={11} className="shrink-0 text-[var(--cf-success)]" />
-            <span className="min-w-0 truncate" title={t("huReview.localOnly")}>
-              {t("huReview.localOnly")}
+            <span className="min-w-0 truncate" title={t("huReview.stagedOnly")}>
+              {t("huReview.stagedOnly")}
             </span>
             <button
               type="button"

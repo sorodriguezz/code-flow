@@ -5,7 +5,7 @@ import { StoryBatchDetail } from "./StoryBatchDetail";
 import { StoryTargetPanel } from "./StoryTargetPanel";
 import { NewStoryBatchModal } from "./NewStoryBatchModal";
 import { WorkItemReviewView } from "./WorkItemReviewView";
-import { ActiveUnderline } from "../common/ActivePill";
+import { ActivePill } from "../common/ActivePill";
 import { StoriesHelpModal } from "./StoriesHelpModal";
 import { CARD } from "../api/panelChrome";
 import { EmptyState } from "../common/EmptyState";
@@ -98,24 +98,34 @@ export function StoriesView() {
   return (
     <>
       <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
-        {/* Both tabs stay mounted as buttons so the underline has something to slide between —
-            see `ActiveUnderline`. The panes below do not: the review keeps its session in its own
-            store, so switching away and back finds the work item still loaded. */}
-        <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2">
-          {MODES.map(({ id, labelKey, icon: Icon }) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setMode(id)}
-              className={`relative -mb-px flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] ${
-                mode === id ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-              }`}
-            >
-              {mode === id && <ActiveUnderline layoutId="cf-stories-mode-underline" />}
-              <Icon size={13} />
-              {t(labelKey)}
-            </button>
-          ))}
+        {/* A segmented control rather than a strip of underlined words.
+
+            These two are the top-level choice of the whole section — which direction you are
+            working in — and as 12px muted text under a hairline they read as a breadcrumb: present,
+            but not something you press. Given a track, a filled pill and real weight, the choice
+            looks like a choice. Every tab stays mounted as a button so the pill has something to
+            slide between (see `ActivePill`); the panes below do not, because each keeps its own
+            store and switching away and back has to find the work still there. */}
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5">
+          <div className="flex items-center gap-0.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg)] p-0.5">
+            {MODES.map(({ id, labelKey, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setMode(id)}
+                aria-pressed={mode === id}
+                className={`relative flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                  mode === id ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                }`}
+              >
+                {mode === id && <ActivePill layoutId="cf-stories-mode-pill" />}
+                <span className="relative flex items-center gap-1.5">
+                  <Icon size={14} />
+                  {t(labelKey)}
+                </span>
+              </button>
+            ))}
+          </div>
           {/* At the end of the strip rather than inside either tab: the manual covers both
               directions, and the limits that matter most — the review never writes to Azure, the
               session is not saved — belong to the workspace, not to whichever half is on screen. */}

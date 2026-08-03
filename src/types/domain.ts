@@ -871,3 +871,54 @@ export type WorkItemReview =
   | { stage: "analyze"; summary: string; invest: InvestVerdict[]; findings: ReviewFinding[] }
   | { stage: "criteria"; criteria: ProposedCriterion[] }
   | { stage: "tasks"; tasks: ProposedTask[] };
+
+/** A work item the app just wrote to or created. */
+export interface AdoWorkItemRef {
+  id: number;
+  /** The page a human opens, not the REST resource. */
+  url: string;
+}
+
+/** Where a published wiki page ended up. */
+export interface AdoWikiPageRef {
+  path: string;
+  url: string;
+  /** Whether the page existed already — "updated" rather than "created". */
+  updated: boolean;
+}
+
+/** What produced one stage's answer, kept next to the answer itself. */
+export interface ReviewProvenance {
+  /** The engine's display name — "Claude Code", "Codex", … */
+  engine: string;
+  /** The model that actually answered, as the CLI reported it. */
+  model: string;
+  /** The engine CLI's version. Empty for the HTTP engines, which have no CLI to ask. */
+  version: string;
+  /** Wall clock for the whole stage, including every repository it read. */
+  elapsed_ms: number;
+  /** How many repositories it was grounded in. `0` is the story judged on its text alone. */
+  repos_read: number;
+}
+
+export interface WorkItemReviewResult extends ReviewProvenance {
+  review: WorkItemReview;
+}
+
+/** One saved review session, as the history lists it. */
+export interface WorkItemReviewRow {
+  id: string;
+  workspace_id: string;
+  ado_org: string;
+  work_item_id: number;
+  work_item_type: string;
+  work_item_url: string;
+  title: string;
+  /** The session as JSON — see `ReviewSessionPayload` in the review store. */
+  payload: string;
+  engine: string;
+  model: string;
+  version: string;
+  created_at: string;
+  updated_at: string;
+}

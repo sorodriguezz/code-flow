@@ -6,9 +6,11 @@
 //! path encoding, the `{value: […]}` envelope) is shared from there, so both halves speak to the
 //! same server the same way.
 //!
-//! Nothing here edits or deletes anything that already exists on the host: wiki pages and work
-//! items are read, and work items are created. A story that is already on the board can be pulled
-//! in and reviewed, but whatever the review concludes goes back through the user's own hands.
+//! Nothing here **deletes**. Work items are read and created, never edited: a story already on the
+//! board can be pulled in and reviewed, but whatever the review concludes goes back through the
+//! user's own hands. Wiki pages are the one thing that can be written over — [`put_wiki_page`] is a
+//! conditional PUT, so a page edited by somebody else since it was read refuses the write instead
+//! of silently winning it.
 
 use std::collections::{HashMap, HashSet};
 
@@ -142,6 +144,131 @@ pub async fn get_wiki_page(
     );
     let page: RawWikiPage = get_json(&url, pat).await?;
     Ok(page.content.unwrap_or_default())
+}
+
+/// Where a published page ended up.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdoWikiPageRef {
+    /// The wiki-absolute path it was written to.
+    pub path: String,
+    /// A browser URL for the page.
+    pub url: String,
+    /// Whether the page existed already. The caller says "created" or "updated" from this rather
+    /// than guessing, because the two are genuinely different news to somebody publishing.
+    pub updated: bool,
+}
+
+#[derive(Deserialize)]
+struct RawPutPage {
+    #[serde(rename = "eTag", default)]
+    _etag: Option<String>,
+}
+
+/// The current version tag of a page, or `None` if it does not exist yet.
+///
+/// Azure's wiki write is a conditional PUT: creating wants no `If-Match`, and updating *requires*
+/// the page's current ETag — a PUT without one against an existing page is refused with 412 rather
+/// than overwriting it. That refusal is a feature (it is what stops this app clobbering an edit
+/// somebody made a minute ago), so the ETag is read immediately before the write, and a page that
+/// changed in between fails loudly instead of silently winning.
+async fn wiki_page_etag(
+    org_enc: &str,
+    project_enc: &str,
+    wiki_enc: &str,
+    path: &str,
+    pat: &str,
+) -> Result<Option<String>, String> {
+    let path_enc = encode_query(path);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/wiki/wikis/{wiki_enc}/pages\
+         ?path={path_enc}&api-version={API_VERSION}"
+    );
+    let res = client()
+        .get(&url)
+        .header("Authorization", auth_header(pat))
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {body}"));
+    }
+    // Azure quotes the tag and `If-Match` wants it back exactly as it was given, quotes included.
+    Ok(res
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string))
+}
+
+/// Creates or overwrites one wiki page.
+///
+/// The one thing in this module that changes a page somebody else may be reading, which is why it
+/// is conditional (see [`wiki_page_etag`]) and why the caller shows the user the target before it
+/// runs. Azure creates missing parent folders on its own, so `/Producto/Checkout/Errores` works
+/// without three round trips.
+pub async fn put_wiki_page(
+    org: &str,
+    project: &str,
+    wiki: &str,
+    path: &str,
+    content: &str,
+    pat: &str,
+) -> Result<AdoWikiPageRef, String> {
+    if path.trim().is_empty() || !path.starts_with('/') {
+        return Err("La ruta de la página tiene que empezar por «/»".to_string());
+    }
+
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let wiki_enc = encode_segment(wiki);
+    let etag = wiki_page_etag(&org_enc, &project_enc, &wiki_enc, path, pat).await?;
+
+    let path_enc = encode_query(path);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/wiki/wikis/{wiki_enc}/pages\
+         ?path={path_enc}&api-version={API_VERSION}"
+    );
+    let mut request = client()
+        .put(&url)
+        .header("Authorization", auth_header(pat))
+        .header("Content-Type", "application/json")
+        .body(serde_json::json!({ "content": content }).to_string());
+    if let Some(etag) = &etag {
+        request = request.header(reqwest::header::IF_MATCH, etag);
+    }
+
+    let res = request.send().await.map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(match status {
+            // The one failure worth translating: it means the page moved under us between the read
+            // and the write, and "412" tells the user nothing about what to do next.
+            reqwest::StatusCode::PRECONDITION_FAILED => {
+                "Esa página cambió en Azure DevOps mientras se publicaba. Vuelve a intentarlo para \
+                 escribir sobre la versión actual."
+                    .to_string()
+            }
+            _ => format!("Azure DevOps returned {status}: {body}"),
+        });
+    }
+    // The body is read and discarded: what the caller needs is "it landed", and the page URL is
+    // built from the path rather than from the response, which does not carry a browser link.
+    let _: RawPutPage = res.json().await.unwrap_or(RawPutPage { _etag: None });
+
+    Ok(AdoWikiPageRef {
+        url: format!(
+            "https://dev.azure.com/{org_enc}/{project_enc}/_wiki/wikis/{wiki_enc}?pagePath={path_enc}"
+        ),
+        path: path.to_string(),
+        updated: etag.is_some(),
+    })
 }
 
 /// Reads several pages and concatenates them under their own headings.
@@ -538,6 +665,168 @@ pub async fn create_work_item(
             format!("https://dev.azure.com/{org_enc}/{project_enc}/_workitems/edit/{}", created.id)
         });
     Ok(AdoWorkItemRef { id: created.id, url })
+}
+
+// ---------- writing back to a work item that already exists ----------
+
+/// What the review screen sends back to a story it has been editing.
+///
+/// Every field is optional and `None` means **leave it alone**, which is not the same as clearing
+/// it. The screen publishes in three steps and each one has to be able to write its own part
+/// without touching the others — an empty string is a real value here ("the user emptied this"),
+/// so absence has to be spelled separately from emptiness.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkItemEdit {
+    pub title: Option<String>,
+    /// Plain text; converted to the HTML Azure stores.
+    pub description: Option<String>,
+    /// A bug's steps, which live in their own field.
+    pub repro_steps: Option<String>,
+    /// One whole scenario per element.
+    pub acceptance_criteria: Option<Vec<String>>,
+}
+
+/// Applies an edit to a work item that already exists.
+///
+/// The counterpart to [`create_work_item`], and the first thing in this module that changes a work
+/// item somebody else may be looking at. Two consequences are deliberate:
+///
+/// - **`replace` on a field that may not exist yet.** Azure's JSON-Patch treats `add` on a field as
+///   "set it", so `add` is used throughout: `replace` fails on a story whose Acceptance Criteria
+///   field has never been filled in, which is exactly the story this screen exists to fix.
+/// - **The criteria are rewritten whole, never merged.** The user curated the list on screen; a
+///   merge would reintroduce what they deleted, and there is no identity on a criterion to merge by.
+pub async fn update_work_item(
+    org: &str,
+    id: i64,
+    edit: &WorkItemEdit,
+    pat: &str,
+) -> Result<AdoWorkItemRef, String> {
+    if id <= 0 {
+        return Err("Ese identificador de work item no es válido".to_string());
+    }
+
+    let mut fields: Vec<(&str, serde_json::Value)> = Vec::new();
+    if let Some(title) = &edit.title {
+        if title.trim().is_empty() {
+            return Err("El work item no puede quedarse sin título".to_string());
+        }
+        fields.push(("System.Title", serde_json::json!(title.trim())));
+    }
+    if let Some(description) = &edit.description {
+        fields.push(("System.Description", serde_json::json!(text_to_html(description))));
+    }
+    if let Some(steps) = &edit.repro_steps {
+        fields.push(("Microsoft.VSTS.TCM.ReproSteps", serde_json::json!(text_to_html(steps))));
+    }
+    if let Some(criteria) = &edit.acceptance_criteria {
+        fields.push((
+            "Microsoft.VSTS.Common.AcceptanceCriteria",
+            serde_json::json!(criteria_to_html(criteria)),
+        ));
+    }
+    if fields.is_empty() {
+        return Err("No hay nada que publicar".to_string());
+    }
+
+    let ops: Vec<serde_json::Value> = fields
+        .into_iter()
+        .map(|(field, value)| {
+            serde_json::json!({ "op": "add", "path": format!("/fields/{field}"), "value": value })
+        })
+        .collect();
+
+    let org_enc = encode_segment(&normalize_org(org));
+    let url =
+        format!("https://dev.azure.com/{org_enc}/_apis/wit/workitems/{id}?api-version={API_VERSION}");
+    let res = client()
+        .patch(&url)
+        .header("Authorization", auth_header(pat))
+        .header("Content-Type", "application/json-patch+json")
+        .body(serde_json::to_string(&ops).map_err(|e| e.to_string())?)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {body}"));
+    }
+
+    Ok(AdoWorkItemRef {
+        id,
+        url: format!("https://dev.azure.com/{org_enc}/_workitems/edit/{id}"),
+    })
+}
+
+/// Creates one child work item under an existing parent.
+///
+/// The parent link is part of the same create rather than a second call: a task that exists for a
+/// moment with no parent is a task somebody's board query can pick up as orphaned, and a failure
+/// between the two calls would leave exactly that behind permanently.
+pub async fn create_child_work_item(
+    org: &str,
+    project: &str,
+    parent_id: i64,
+    work_item_type: &str,
+    title: &str,
+    description: &str,
+    pat: &str,
+) -> Result<AdoWorkItemRef, String> {
+    if title.trim().is_empty() {
+        return Err("Esa tarea no tiene título".to_string());
+    }
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let type_enc = encode_segment(work_item_type);
+
+    let mut ops = vec![serde_json::json!({
+        "op": "add",
+        "path": "/fields/System.Title",
+        "value": title.trim(),
+    })];
+    if !description.trim().is_empty() {
+        ops.push(serde_json::json!({
+            "op": "add",
+            "path": "/fields/System.Description",
+            "value": text_to_html(description),
+        }));
+    }
+    // `Hierarchy-Reverse` points *up*: the relation is added to the child and names the parent.
+    ops.push(serde_json::json!({
+        "op": "add",
+        "path": "/relations/-",
+        "value": {
+            "rel": "System.LinkTypes.Hierarchy-Reverse",
+            "url": format!("https://dev.azure.com/{org_enc}/_apis/wit/workItems/{parent_id}"),
+        },
+    }));
+
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/wit/workitems/%24{type_enc}\
+         ?api-version={API_VERSION}"
+    );
+    let res = client()
+        .post(&url)
+        .header("Authorization", auth_header(pat))
+        .header("Content-Type", "application/json-patch+json")
+        .body(serde_json::to_string(&ops).map_err(|e| e.to_string())?)
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!("Azure DevOps returned {status}: {body}"));
+    }
+    let created: RawCreatedWorkItem =
+        res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
+    let html = created
+        .links
+        .and_then(|l| l.html)
+        .and_then(|h| h.href)
+        .unwrap_or_else(|| format!("https://dev.azure.com/{org_enc}/_workitems/edit/{}", created.id));
+    Ok(AdoWorkItemRef { id: created.id, url: html })
 }
 
 // ---------- reading a work item that already exists ----------

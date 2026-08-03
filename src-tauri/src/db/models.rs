@@ -182,6 +182,29 @@ pub struct StoryBatch {
     pub updated_at: String,
 }
 
+/// One saved review of a work item that already exists on the board.
+///
+/// A record of a session, not a live view of the item: the story on Azure moves on and this does
+/// not follow it. See the `work_item_reviews` table comment for why that is the point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkItemReviewRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub ado_org: String,
+    pub work_item_id: i64,
+    pub work_item_type: String,
+    pub work_item_url: String,
+    /// The title as the user last had it locally — not necessarily the one on the board.
+    pub title: String,
+    /// The whole session as JSON. Opaque here: its shape belongs to the screen that wrote it.
+    pub payload: String,
+    pub engine: String,
+    pub model: String,
+    pub version: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// One user story as it stands right now — the model's proposal plus every edit since, and the
 /// Azure Boards work item it became.
 #[derive(Debug, Clone, Serialize, Deserialize)]

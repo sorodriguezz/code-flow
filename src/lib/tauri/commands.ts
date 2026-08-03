@@ -58,9 +58,11 @@ import type {
   WorkspaceSkill,
   WorkItemKind,
   WorkItemRef,
-  WorkItemReview,
+  WorkItemReviewResult,
+  WorkItemReviewRow,
   WorkItemReviewStage,
 } from "../../types/domain";
+import type { AdoWikiPageRef, AdoWorkItemRef } from "../../types/domain";
 import type { FindingLocation } from "../parseAnalysis";
 
 // ---------- app lifecycle ----------
@@ -1328,21 +1330,79 @@ export const adoGetWorkItem = (org: string, id: number) =>
  */
 export const reviewWorkItem = (input: {
   workspaceId: string;
-  /** One or more. Each is read by its own engine run and the answers are merged in Rust. */
+  /** Zero or more. Each is read by its own engine run and the answers are merged in Rust; none
+   *  judges the story on its text alone. */
   projectIds: string[];
   stage: WorkItemReviewStage;
   kind: WorkItemKind;
   storyText: string;
+  /** Whether the workspace's review contexts travel with the story. */
+  useContext: boolean;
   runId: string;
   agent?: { provider: string; model: string };
 }) =>
-  invoke<WorkItemReview>("review_work_item", {
+  invoke<WorkItemReviewResult>("review_work_item", {
     workspaceId: input.workspaceId,
     projectIds: input.projectIds,
     stage: input.stage,
     kind: input.kind,
     storyText: input.storyText,
+    useContext: input.useContext,
     runId: input.runId,
     agentProvider: input.agent?.provider,
     agentModel: input.agent?.model,
   });
+
+/**
+ * Writes reviewed text back onto the work item it came from.
+ *
+ * Every field is optional and omitting one leaves it alone — which is not the same as sending an
+ * empty string, that being a real edit ("the user emptied this").
+ */
+export const adoUpdateWorkItem = (input: {
+  org: string;
+  id: number;
+  title?: string;
+  description?: string;
+  reproSteps?: string;
+  acceptanceCriteria?: string[];
+}) => invoke<AdoWorkItemRef>("ado_update_work_item", input);
+
+/** Creates the accepted tasks as children of the story, in order, stopping at the first failure. */
+export const adoCreateChildTasks = (input: {
+  org: string;
+  project: string;
+  parentId: number;
+  workItemType: string;
+  tasks: { title: string; detail: string }[];
+}) => invoke<AdoWorkItemRef[]>("ado_create_child_tasks", input);
+
+/** Publishes one page to a wiki. Azure DevOps today; a second host gets its own command. */
+export const adoPublishWikiPage = (input: {
+  org: string;
+  project: string;
+  wiki: string;
+  path: string;
+  content: string;
+}) => invoke<AdoWikiPageRef>("ado_publish_wiki_page", input);
+
+/** The workspace's saved review sessions, newest first. */
+export const listWorkItemReviews = (workspaceId: string) =>
+  invoke<WorkItemReviewRow[]>("list_work_item_reviews", { workspaceId });
+
+/** Saves a session under its own id, overwriting the previous save of that same session. */
+export const saveWorkItemReview = (input: {
+  id: string;
+  workspaceId: string;
+  org: string;
+  workItemId: number;
+  workItemType: string;
+  workItemUrl: string;
+  title: string;
+  payload: string;
+  engine: string;
+  model: string;
+  version: string;
+}) => invoke<void>("save_work_item_review", input);
+
+export const deleteWorkItemReview = (id: string) => invoke<void>("delete_work_item_review", { id });

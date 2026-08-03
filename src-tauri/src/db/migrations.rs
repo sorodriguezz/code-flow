@@ -384,6 +384,50 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_story_drafts_batch
             ON story_drafts(batch_id, seq);
 
+        -- One review session over a work item that already exists on the board.
+        --
+        -- The review reads Azure and writes nothing back, so before this table a session was worth
+        -- exactly what the user had copied out of it before closing the window — three AI runs and
+        -- several minutes of reading repositories, gone on a tab switch. What is kept is the review
+        -- *as the user left it*: the story text they edited, and the proposals that survived their
+        -- triage.
+        --
+        -- A row is one **session**, not one work item. Re-reviewing #4821 next sprint is a new row,
+        -- because the interesting question is what the review said *then* versus what it says now;
+        -- the three stages of a single sitting share one id and update in place, because they are
+        -- one review answering in three parts.
+        --
+        -- Deliberately a snapshot and deliberately not reconciled: the item on Azure moves under it
+        -- and this row does not follow. That is what makes it a record. The screen says so when it
+        -- reopens one, and reloading from Azure is one click away.
+        CREATE TABLE IF NOT EXISTS work_item_reviews (
+            id             TEXT PRIMARY KEY,
+            workspace_id   TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- Where the item lives, so a reopened session can go back for a fresh copy.
+            ado_org        TEXT NOT NULL DEFAULT '',
+            work_item_id   INTEGER NOT NULL DEFAULT 0,
+            work_item_type TEXT NOT NULL DEFAULT '',
+            work_item_url  TEXT NOT NULL DEFAULT '',
+            -- The title as the user last had it, which is what the history list shows. Not
+            -- necessarily Azure's: editing the local copy is the point of the screen.
+            title          TEXT NOT NULL DEFAULT '',
+            -- The whole session as JSON — story text, criteria, and each stage's proposals with
+            -- what was dismissed. One blob rather than a table per proposal kind: nothing queries
+            -- inside it, and the shape belongs to the screen that wrote it.
+            payload        TEXT NOT NULL DEFAULT '{}',
+            -- What produced it. Snapshotted like `story_batches.model` and for the same reason: a
+            -- judgement is worth what the engine behind it was, and re-reading today's routing
+            -- would rewrite the past.
+            engine         TEXT NOT NULL DEFAULT '',
+            model          TEXT NOT NULL DEFAULT '',
+            version        TEXT NOT NULL DEFAULT '',
+            created_at     TEXT NOT NULL,
+            updated_at     TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_work_item_reviews_workspace
+            ON work_item_reviews(workspace_id, updated_at DESC);
+
         -- MCP servers configured per workspace; written out as a --mcp-config JSON file for
         -- headless `claude -p` invocations against any project in the workspace.
         CREATE TABLE IF NOT EXISTS workspace_mcps (

@@ -62,6 +62,24 @@ pub async fn ado_wiki_pages_content(
     boards::get_wiki_pages_combined(&org, &project, &wiki, &paths, &pat).await
 }
 
+/// Publishes one page to a wiki the user picked.
+///
+/// The provider lives in the command name rather than in a parameter, matching how the rest of this
+/// module addresses Azure. When a second host arrives it gets its own command and the frontend
+/// dispatches on the target's `kind` — the same shape the VCS side already uses, and a cheaper
+/// change than a `provider: String` that every call site would have to start passing today.
+#[tauri::command]
+pub async fn ado_publish_wiki_page(
+    org: String,
+    project: String,
+    wiki: String,
+    path: String,
+    content: String,
+) -> Result<boards::AdoWikiPageRef, String> {
+    let pat = pat_for_org(&org)?;
+    boards::put_wiki_page(&org, &project, &wiki, &path, &content, &pat).await
+}
+
 // ---------- the Azure Boards target ----------
 
 #[tauri::command]
@@ -162,12 +180,35 @@ pub struct ProposedTask {
 
 /// What one stage of the review answered. Tagged by stage so the frontend reads the shape it asked
 /// for rather than guessing from which arrays came back non-empty.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "lowercase")]
 pub enum WorkItemReview {
     Analyze { summary: String, invest: Vec<InvestVerdict>, findings: Vec<ReviewFinding> },
     Criteria { criteria: Vec<ProposedCriterion> },
     Tasks { tasks: Vec<ProposedTask> },
+}
+
+/// One stage's answer, plus what produced it.
+///
+/// The provenance travels with the answer rather than in a side channel, because a review is a
+/// *judgement*: "Sonnet said this criterion is untestable" and "some model said it" are not the
+/// same claim, and the second is the one a refinement session cannot argue with. The elapsed time
+/// is here for the same reason a build prints its duration — it is how the user learns which of
+/// the three stages is the expensive one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkItemReviewResult {
+    pub review: WorkItemReview,
+    /// The engine's display name — "Claude Code", "Codex", …
+    pub engine: String,
+    /// The model that actually answered, as the CLI reported it, falling back to the configured id
+    /// when the CLI said nothing. Empty only if neither is known.
+    pub model: String,
+    /// The engine CLI's own version. Empty for the HTTP engines, which have no CLI to ask.
+    pub version: String,
+    /// Wall clock for the whole stage, including every repository it read and any repair pass.
+    pub elapsed_ms: u64,
+    /// How many repositories the answer was grounded in. `0` is the story judged on its text.
+    pub repos_read: usize,
 }
 
 #[derive(Deserialize)]
@@ -211,12 +252,65 @@ fn prefixed_title(kind: &str, title: &str) -> String {
     format!("[{marker}] {bare}")
 }
 
+/// Why one stage's answer could not be read.
+///
+/// Kept in parts rather than as one finished sentence because the two readers want different
+/// things: the user wants one line naming the problem, and the repair pass wants the parser's own
+/// message — which names the exact offset — next to the payload it choked on.
+struct ReviewParseError {
+    /// The parser's complaint.
+    detail: String,
+    /// What it choked on: the extracted JSON object, or the whole answer when there was none.
+    payload: String,
+    /// Whether there is a JSON object to hand to a repair pass at all. An answer that came back as
+    /// prose has no syntax to fix — it has to be asked again, and that is the user's call.
+    repairable: bool,
+}
+
+impl ReviewParseError {
+    /// The one sentence the user sees when nothing could rescue the run.
+    fn message(&self) -> String {
+        match self.repairable {
+            true => format!(
+                "El modelo devolvió un JSON que no se pudo leer ({}). Respondió:\n\n{}",
+                self.detail, self.payload
+            ),
+            false => format!("El modelo no devolvió JSON. Respondió:\n\n{}", self.payload),
+        }
+    }
+}
+
+/// The object each stage has to come back as.
+///
+/// The same line its prompt already shows the model, repeated here because the repair pass states
+/// the target shape on its own — re-sending the whole review prompt would invite a fresh review
+/// rather than a fix, and the review is exactly the work that must not be repeated.
+fn review_shape(stage: ai::WorkItemReviewStage) -> &'static str {
+    match stage {
+        ai::WorkItemReviewStage::Analyze => {
+            r#"{"summary":"","invest":[{"letter":"I","verdict":"ok","note":""}],"findings":[{"section":"titulo","severity":"media","issue":"","proposal":"","evidence":["ruta/archivo.ext:12"]}]}"#
+        }
+        ai::WorkItemReviewStage::Criteria => {
+            r#"{"criteria":[{"gherkin":"Dado ...\nCuando ...\nEntonces ...","rationale":"","evidence":[]}]}"#
+        }
+        ai::WorkItemReviewStage::Tasks => r#"{"tasks":[{"kind":"dev","title":"","detail":"","evidence":[]}]}"#,
+    }
+}
+
 /// Split out from the command so it is testable without an engine.
-fn parse_review(stage: ai::WorkItemReviewStage, text: &str) -> Result<WorkItemReview, String> {
-    let json = ai::extract_json_block(text)
-        .ok_or_else(|| format!("El modelo no devolvió JSON. Respondió:\n\n{}", text.trim()))?;
-    let unreadable =
-        |e: serde_json::Error| format!("El modelo devolvió un JSON que no se pudo leer ({e}). Respondió:\n\n{json}");
+fn parse_review(stage: ai::WorkItemReviewStage, text: &str) -> Result<WorkItemReview, ReviewParseError> {
+    let Some(json) = ai::extract_json_block(text) else {
+        return Err(ReviewParseError {
+            detail: "no hay ningún objeto JSON en la respuesta".to_string(),
+            payload: text.trim().to_string(),
+            repairable: false,
+        });
+    };
+    let unreadable = |e: serde_json::Error| ReviewParseError {
+        detail: e.to_string(),
+        payload: json.to_string(),
+        repairable: true,
+    };
 
     match stage {
         ai::WorkItemReviewStage::Analyze => {
@@ -330,11 +424,18 @@ fn empty_review(stage: ai::WorkItemReviewStage) -> WorkItemReview {
     }
 }
 
-/// Runs one stage of the review against one or more repositories.
+/// Runs one stage of the review against zero or more repositories.
 ///
 /// `story_text` is assembled by the frontend from the work item it fetched, because that is where
 /// Azure's HTML is turned into the text the user is looking at — sending anything else would judge
 /// a story the user never saw.
+///
+/// **Zero repositories is a real mode, not a missing argument.** A workspace is a *project*, and a
+/// story is often written before the code that satisfies it or against a system this app has no
+/// checkout of. Refusing to review it until a repository is attached made the screen useless for
+/// exactly the moment refinement happens. With none attached the run gets no working directory and
+/// no file tools, and is told so ([`ai::NO_REPO_NOTE`]) — the difference between "no evidence
+/// found" and "no evidence possible" has to reach the model, or it invents paths.
 ///
 /// **One engine run per repository, merged here.** The alternative — a single run pointed at several
 /// directories at once — only exists on some of the engines this app dispatches to (`--add-dir` on
@@ -346,6 +447,10 @@ fn empty_review(stage: ai::WorkItemReviewStage) -> WorkItemReview {
 ///
 /// Every repository is leased for the whole call. A story reviewed against a working copy another
 /// agent is editing would be judged against a tree that changes underneath it.
+///
+/// `use_context` decides whether the workspace's review contexts travel with the story. Opt-in
+/// rather than always-on: a team that wrote a page of architecture notes wants them read on a
+/// backend story and not on a copy change, and only the person running it knows which this is.
 #[tauri::command]
 pub async fn review_work_item(
     app: AppHandle,
@@ -355,14 +460,11 @@ pub async fn review_work_item(
     stage: ai::WorkItemReviewStage,
     kind: ai::WorkItemKind,
     story_text: String,
+    use_context: bool,
     run_id: Option<String>,
     agent_provider: Option<String>,
     agent_model: Option<String>,
-) -> Result<WorkItemReview, String> {
-    if project_ids.is_empty() {
-        return Err("Elige al menos un repositorio contra el que revisar la historia".to_string());
-    }
-
+) -> Result<WorkItemReviewResult, String> {
     let projects = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let mut found = Vec::with_capacity(project_ids.len());
@@ -406,18 +508,30 @@ pub async fn review_work_item(
         (contexts, mcps, skills, config, template)
     };
 
-    let enabled_contexts: Vec<(String, String)> =
-        contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)).collect();
+    let enabled_contexts: Vec<(String, String)> = match use_context {
+        true => contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)).collect(),
+        false => Vec::new(),
+    };
     let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
     let tag_repo = projects.len() > 1;
+    // Which model actually answered, as the last run reported it. Every run in this call shares one
+    // config, so they agree — this only exists because the *resolved* id is not knowable up front
+    // when no `--model` was forced and the CLI picked for itself.
+    let mut answered_by = String::new();
 
+    let started = std::time::Instant::now();
     // One scope for the whole call, so the run log reads as one review rather than as N runs the
     // user did not ask for, and so a single Stop halts all of it.
     let result: Result<WorkItemReview, String> = crate::ai_runs::scoped(app, run_id, async {
         let mut merged = empty_review(stage);
-        for project in &projects {
-            let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
-            let text = ai::review_work_item(
+        // No repositories still runs once, against nothing. `.max(1)` rather than a branch so the
+        // repair pass, the merge and the stamping below stay written once.
+        for at in 0..projects.len().max(1) {
+            let project = projects.get(at);
+            if let Some(project) = project {
+                let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
+            }
+            let run = ai::review_work_item(
                 &*config.engine,
                 &config.binary,
                 &config.model,
@@ -426,12 +540,47 @@ pub async fn review_work_item(
                 &story_text,
                 &enabled_contexts,
                 &config.tools,
-                &project.local_path,
+                project.map(|p| p.local_path.as_str()),
                 &template,
                 mcp_config_path.as_deref(),
             )
             .await?;
-            merge_review(&mut merged, parse_review(stage, &text)?, &project.name, tag_repo);
+            if let Some(model) = run.model {
+                answered_by = model;
+            }
+            let text = run.text;
+
+            // A malformed answer gets one repair pass before it costs the user the run.
+            //
+            // This is where the engines actually slip: six INVEST verdicts with real notes run to
+            // thousands of characters on one line, and a bracket closed a key too late fails the
+            // whole thing. Re-running the review would pay again for the minutes it spent reading
+            // the repository — and could slip again — while the answer itself is sitting right
+            // there, complete, in the text that would not parse.
+            let review = match parse_review(stage, &text) {
+                Ok(review) => review,
+                Err(first) if first.repairable => {
+                    match ai::repair_json(
+                        &*config.engine,
+                        &config.binary,
+                        &config.model,
+                        &first.payload,
+                        review_shape(stage),
+                        &first.detail,
+                    )
+                    .await
+                    {
+                        Ok(repaired) => parse_review(stage, &repaired).map_err(|_| first.message())?,
+                        // A stopped repair is the user stopping the review, and has to stay
+                        // distinguishable from one that failed. Any other reason to fail the
+                        // repair is less informative than what went wrong in the first place.
+                        Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER) => return Err(e),
+                        Err(_) => return Err(first.message()),
+                    }
+                }
+                Err(first) => return Err(first.message()),
+            };
+            merge_review(&mut merged, review, project.map_or("", |p| p.name.as_str()), tag_repo);
         }
         Ok(merged)
     })
@@ -440,7 +589,152 @@ pub async fn review_work_item(
     if matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
         return Err(result.unwrap_err());
     }
-    result
+    let review = result?;
+
+    Ok(WorkItemReviewResult {
+        review,
+        engine: config.engine.label().to_string(),
+        // The CLI's own answer when it gave one, the configured id otherwise. Both beat leaving
+        // the stamp blank, and the two only differ when no model was forced.
+        model: match answered_by.is_empty() {
+            true => config.model.clone(),
+            false => answered_by,
+        },
+        version: ai::engine_version(&*config.engine, &config.binary).await.unwrap_or_default(),
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        repos_read: projects.len(),
+    })
+}
+
+// ---------- publishing a review back to the board ----------
+
+/// Writes the reviewed text back onto the work item it came from.
+///
+/// Every field is optional and absent means "don't touch it": the screen publishes description,
+/// criteria and tasks as three separate decisions, and each has to be able to land without
+/// disturbing the other two.
+#[tauri::command]
+pub async fn ado_update_work_item(
+    org: String,
+    id: i64,
+    title: Option<String>,
+    description: Option<String>,
+    repro_steps: Option<String>,
+    acceptance_criteria: Option<Vec<String>>,
+) -> Result<boards::AdoWorkItemRef, String> {
+    let pat = pat_for_org(&org)?;
+    let edit = boards::WorkItemEdit { title, description, repro_steps, acceptance_criteria };
+    boards::update_work_item(&org, id, &edit, &pat).await
+}
+
+/// What one proposed task becomes on the board.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NewChildTask {
+    pub title: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+/// Creates the accepted tasks as children of the story, in the order the user arranged them.
+///
+/// Sequential rather than concurrent, and it stops at the first failure reporting what did land.
+/// Azure's rate limits are per-organisation and a burst of twelve creates is exactly the shape that
+/// trips them — and a partial publish the user can *see* is recoverable, while twelve half-created
+/// tasks in an unknown order is not.
+#[tauri::command]
+pub async fn ado_create_child_tasks(
+    org: String,
+    project: String,
+    parent_id: i64,
+    work_item_type: String,
+    tasks: Vec<NewChildTask>,
+) -> Result<Vec<boards::AdoWorkItemRef>, String> {
+    if tasks.is_empty() {
+        return Err("No hay tareas que publicar".to_string());
+    }
+    let pat = pat_for_org(&org)?;
+    let mut created = Vec::with_capacity(tasks.len());
+    for task in &tasks {
+        match boards::create_child_work_item(
+            &org,
+            &project,
+            parent_id,
+            &work_item_type,
+            &task.title,
+            &task.detail,
+            &pat,
+        )
+        .await
+        {
+            Ok(reference) => created.push(reference),
+            Err(e) => {
+                return Err(match created.len() {
+                    0 => e,
+                    done => format!(
+                        "Se crearon {done} tarea(s) y la siguiente falló: {e}. Quita las que ya \
+                         están y vuelve a publicar el resto."
+                    ),
+                })
+            }
+        }
+    }
+    Ok(created)
+}
+
+// ---------- review history ----------
+
+/// The workspace's saved reviews, newest first.
+#[tauri::command]
+pub fn list_work_item_reviews(
+    db: State<Db>,
+    workspace_id: String,
+) -> Result<Vec<crate::db::models::WorkItemReviewRow>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_work_item_reviews(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+/// Saves a review session under its own id, overwriting the previous save of that same session.
+///
+/// The id is minted by the screen when a work item is loaded, which is what makes the three stages
+/// of one sitting update a single row while a review run next sprint starts a new one.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn save_work_item_review(
+    db: State<Db>,
+    id: String,
+    workspace_id: String,
+    org: String,
+    work_item_id: i64,
+    work_item_type: String,
+    work_item_url: String,
+    title: String,
+    payload: String,
+    engine: String,
+    model: String,
+    version: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::save_work_item_review(
+        &conn,
+        &id,
+        &workspace_id,
+        &org,
+        work_item_id,
+        &work_item_type,
+        &work_item_url,
+        &title,
+        &payload,
+        &engine,
+        &model,
+        &version,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_work_item_review(db: State<Db>, id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::delete_work_item_review(&conn, &id).map_err(|e| e.to_string())
 }
 
 // ---------- batches ----------
@@ -1441,6 +1735,28 @@ mod tests {
             }
             _ => panic!("stage changed under the merge"),
         }
+    }
+
+    /// The shape the engines actually get wrong, verbatim: the `invest` array closed one key too
+    /// late, so `"findings"` is read as a seventh verdict. It has to come back as *repairable* —
+    /// the answer is all there, and failing the run here is what threw away minutes of work.
+    #[test]
+    fn a_bracket_closed_too_late_is_worth_repairing() {
+        let broken = r#"{"summary":"Le falta el camino de error.","invest":[{"letter":"I","verdict":"ok","note":"Independiente."},"findings":[{"section":"criterios","severity":"alta","issue":"x","proposal":"y","evidence":[]}]}"#;
+        let error = parse_review(ai::WorkItemReviewStage::Analyze, broken).unwrap_err();
+        assert!(error.repairable, "there is a JSON object here, just a malformed one");
+        assert!(error.detail.contains("InvestVerdict"), "the parser's own message names the offset");
+        assert!(error.message().contains("no se pudo leer"));
+    }
+
+    /// The other outcome, which no repair pass can help: the model answered in prose. There is no
+    /// syntax to fix, so it must not be sent round again — asking it afresh is the user's call.
+    #[test]
+    fn an_answer_with_no_json_at_all_is_not_repairable() {
+        let error = parse_review(ai::WorkItemReviewStage::Analyze, "La historia me parece correcta.")
+            .unwrap_err();
+        assert!(!error.repairable);
+        assert!(error.message().contains("no devolvió JSON"));
     }
 
     /// With several repositories each proposal has to say where it came from; with one, saying so
