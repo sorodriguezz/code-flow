@@ -5,6 +5,7 @@ import {
   ClipboardCheck,
   Copy,
   ExternalLink,
+  Link2,
   ListChecks,
   Plus,
   ScanSearch,
@@ -21,8 +22,13 @@ import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import type { ProposedTask, ReviewFinding, StorySection, WorkItemReviewStage } from "../../types/domain";
 
+/**
+ * Deliberately carries no width. A `w-full` baked in here loses to — or beats, depending on which
+ * Tailwind emits last — every `w-40` or `flex-1` a call site puts next to it, and two utilities
+ * fighting over one property is not a fight you can read off the class list. Width is the caller's.
+ */
 const FIELD =
-  "w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]";
+  "rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]";
 
 const SEVERITY: Record<ReviewFinding["severity"], string> = {
   alta: "text-[var(--cf-danger)]",
@@ -226,7 +232,10 @@ export function WorkItemReviewView({ onClose }: { onClose: () => void }) {
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-bg)]">
+    // On the panel surface, not on the page background: this replaces the three columns of the
+    // stories view, and those all sit on `CARD`. Left as page background it read as an empty
+    // desk with a toolbar floating on it.
+    <div className={`flex h-full min-h-0 flex-col overflow-hidden ${CARD}`}>
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
         <button
           type="button"
@@ -238,26 +247,35 @@ export function WorkItemReviewView({ onClose }: { onClose: () => void }) {
         </button>
         <span className="shrink-0 text-[13px] font-medium text-[var(--cf-text)]">{t("huReview.title")}</span>
 
-        <input
-          value={input}
-          onChange={(e) => store().setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") void store().load();
-          }}
-          placeholder={t("huReview.inputPlaceholder")}
-          className={`${FIELD} ml-2 max-w-md`}
-        />
+        {/* Bounded rather than free to grow: on a wide window a `flex-1` field becomes a 1500px
+            box for a forty-character link, which reads as a text editor rather than as a lookup. */}
+        <div className="relative ml-3 min-w-0 max-w-xl flex-1">
+          <Link2
+            size={12}
+            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+          />
+          <input
+            value={input}
+            onChange={(e) => store().setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void store().load();
+            }}
+            placeholder={t("huReview.inputPlaceholder")}
+            className={`${FIELD} w-full pl-6`}
+          />
+        </div>
         <input
           value={org}
           onChange={(e) => store().setOrg(e.target.value)}
           placeholder={t("huReview.orgPlaceholder")}
+          title={t("huReview.orgHint")}
           className={`${FIELD} w-40 shrink-0`}
         />
         <button
           type="button"
           disabled={loading || !input.trim()}
           onClick={() => void store().load()}
-          className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
         >
           {loading ? t("huReview.loading") : t("huReview.load")}
         </button>
@@ -271,15 +289,22 @@ export function WorkItemReviewView({ onClose }: { onClose: () => void }) {
       )}
 
       {!item ? (
-        <div className="flex min-h-0 flex-1 items-center justify-center px-6">
-          <p className="max-w-md text-center text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-8 text-center">
+          <ScanSearch size={28} className="mb-2 shrink-0 text-[var(--cf-text-muted)]" />
+          <p className="text-sm font-medium text-[var(--cf-text)]">{t("huReview.emptyTitle")}</p>
+          <p className="max-w-md text-[13px] leading-relaxed text-[var(--cf-text-muted)]">
             {t("huReview.empty")}
+          </p>
+          {/* The shape of the thing, not just a description of it — a link and a bare number side by
+              side answer "what exactly do I paste" faster than the sentence above ever will. */}
+          <p className="mt-2 max-w-md break-all rounded-md border border-dashed border-[var(--cf-border)] px-3 py-2 font-mono text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+            {t("huReview.emptyExample")}
           </p>
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 overflow-hidden">
           {/* The story, editable. Local only — see the component note. */}
-          <div className={`flex min-w-0 flex-1 flex-col overflow-y-auto px-3 py-3 ${CARD}`}>
+          <div className="flex min-w-0 flex-1 flex-col overflow-y-auto px-3 py-3">
             <div className="mb-2 flex items-center gap-2">
               <span className="rounded-full bg-black/[0.06] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-text-muted)] dark:bg-white/[0.1]">
                 {item.work_item_type} #{item.id}
