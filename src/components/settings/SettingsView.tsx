@@ -47,7 +47,7 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
   { id: "projects", labelKey: "settings.projects", icon: FolderGit2 },
   { id: "git", labelKey: "settings.git", icon: GitBranch },
   { id: "terminal", labelKey: "settings.terminal", icon: TerminalSquare },
-  { id: "azure", labelKey: "settings.gitHostingSection", icon: Cloud },
+  { id: "azure", labelKey: "settings.integrationsSection", icon: Cloud },
   { id: "claude", labelKey: "settings.aiSection", icon: Bot },
   { id: "api", labelKey: "api.settings.title", icon: Zap },
   // Last of the global list on purpose: it is the section you visit twice — once to set it up, and

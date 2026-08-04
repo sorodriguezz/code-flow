@@ -22,7 +22,7 @@ const HINT_KEYS: Record<HostingProvider, TranslationKey> = {
   monday: "settings.mondayHint",
 };
 
-/** The single hosting settings section — a provider switcher (Azure DevOps / GitHub / GitLab /
+/** The single "Integrations" settings section — a provider switcher (Azure DevOps / GitHub / GitLab /
  * Jira / monday.com) over whichever provider's credential form is active. Opens on the provider the caller
  * deep-linked to (e.g. a "needs a GitLab token" hint jumps straight here with GitLab selected).
  *
@@ -58,8 +58,8 @@ export function GitHostingSettings() {
 
   return (
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.gitHostingTitle")}</h3>
-      <p className="mb-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.gitHostingHint")}</p>
+      <h3 className="mb-1 text-sm font-semibold">{t("settings.integrationsTitle")}</h3>
+      <p className="mb-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.integrationsHint")}</p>
 
       <div ref={bodyRef} className="flex gap-4">
         {/* `layoutRoot` on a `motion.nav`, for the reason spelled out in `ApiSettingsBody`: the

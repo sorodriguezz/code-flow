@@ -1081,7 +1081,7 @@ export const translations = {
     "settings.terminalProfileArgs": "Arguments (optional)",
     "settings.terminalMissingCommand": "A profile with no command can't be opened — fill it in or remove it.",
     "settings.terminalRemoveConfirm": 'Delete the terminal profile "{name}"?',
-    "settings.gitHostingSection": "Git hosting",
+    "settings.integrationsSection": "Integrations",
     "settings.aiSection": "AI assistant",
     "settings.review": "PR review",
     "settings.context": "PR review context",
@@ -1177,8 +1177,8 @@ export const translations = {
     "settings.seconds": "seconds",
     "settings.autoFetchHint": "Minimum {n}s, to avoid hammering the remote.",
 
-    "settings.gitHostingTitle": "Git hosting",
-    "settings.gitHostingHint": "Choose which platform hosts your repositories and pull requests.",
+    "settings.integrationsTitle": "Integrations",
+    "settings.integrationsHint": "Connect the platforms you use: repositories, pull requests, and boards.",
     "settings.comingSoon": "Coming soon",
     "settings.azureTitle": "Azure DevOps",
     "settings.azureHint":
@@ -4203,7 +4203,7 @@ export const translations = {
     "settings.terminalProfileArgs": "Argumentos (opcional)",
     "settings.terminalMissingCommand": "Un perfil sin comando no se puede abrir — complétalo o elimínalo.",
     "settings.terminalRemoveConfirm": '¿Eliminar el perfil de terminal "{name}"?',
-    "settings.gitHostingSection": "Alojamiento Git",
+    "settings.integrationsSection": "Integraciones",
     "settings.aiSection": "Asistente de IA",
     "settings.review": "Revisión de PR",
     "settings.context": "Contexto de revisión de PR",
@@ -4299,8 +4299,8 @@ export const translations = {
     "settings.seconds": "segundos",
     "settings.autoFetchHint": "Mínimo {n}s, para no saturar el remoto.",
 
-    "settings.gitHostingTitle": "Alojamiento Git",
-    "settings.gitHostingHint": "Elige qué plataforma aloja tus repositorios y pull requests.",
+    "settings.integrationsTitle": "Integraciones",
+    "settings.integrationsHint": "Conecta las plataformas que usas: repositorios, pull requests y tableros.",
     "settings.comingSoon": "Próximamente",
     "settings.azureTitle": "Azure DevOps",
     "settings.azureHint":

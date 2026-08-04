@@ -81,7 +81,7 @@ export function GitLabSettings() {
   if (!loaded) return null;
 
   return (
-    // No heading or hint of its own: the Git hosting rail names the provider and its card already
+    // No heading or hint of its own: the Integrations rail names the provider and its card already
     // carries the hint, so repeating either here would say the same thing twice.
     <section>
       {connections.length > 0 && (

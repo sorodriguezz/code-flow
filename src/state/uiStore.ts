@@ -58,7 +58,7 @@ interface UiState {
    * it just reveals whatever was already showing underneath. */
   settingsOpen: boolean;
   settingsSection: SettingsSectionId;
-  /** Which provider tab the "Git hosting" settings section should open on — lets a "needs a
+  /** Which provider tab the "Integrations" settings section should open on — lets a "needs a
    * GitHub token" hint deep-link straight to the GitHub form instead of the default Azure one.
    * Wider than `VcsProvider` because Jira lives on that screen too without hosting any code. */
   settingsHostingProvider: HostingProvider;
