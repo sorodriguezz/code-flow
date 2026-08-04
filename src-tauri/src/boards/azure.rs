@@ -977,6 +977,18 @@ pub async fn update_work_item(
             serde_json::json!(criteria_to_html(criteria)),
         ));
     }
+    // Into the field the item already uses, read from the item itself rather than guessed from its
+    // type: `ESTIMATE_FIELDS` holds one name per process template, only one of which the type
+    // defines, and writing the wrong one is a 400 for the whole patch. An item that has never been
+    // estimated reports no field, so the ladder is walked and the first name is used — which is
+    // the Agile one, and the only one an Agile story would have accepted anyway.
+    if let Some(effort) = edit.effort {
+        let field = match edit.effort_field.trim() {
+            "" => ESTIMATE_FIELDS[0],
+            named => named,
+        };
+        fields.push((field, serde_json::json!(effort)));
+    }
     if fields.is_empty() {
         return Err("No hay nada que publicar".to_string());
     }
@@ -1017,6 +1029,27 @@ pub async fn update_work_item(
 /// The parent link is part of the same create rather than a second call: a task that exists for a
 /// moment with no parent is a task somebody's board query can pick up as orphaned, and a failure
 /// between the two calls would leave exactly that behind permanently.
+/// Where a work item is filed: its area, and the iteration that puts it in a sprint.
+///
+/// Read from the host rather than taken from whatever the screen last loaded, because those are
+/// exactly the two fields somebody moves on the board — dragging a story into the next sprint is
+/// the commonest edit there is, and a task created from a stale copy lands in the sprint the story
+/// used to be in, which is worse than landing nowhere.
+///
+/// Asks for the two fields by name, so this stays one small response however large the item is.
+pub async fn classification_of(org: &str, id: i64, pat: &str) -> Result<(String, String), String> {
+    let org_enc = encode_segment(&normalize_org(org));
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/_apis/wit/workitems/{id}\
+         ?fields=System.AreaPath,System.IterationPath&api-version={API_VERSION}"
+    );
+    let raw: RawWorkItem = get_json(&url, pat).await?;
+    Ok((
+        field_str(&raw.fields, "System.AreaPath"),
+        field_str(&raw.fields, "System.IterationPath"),
+    ))
+}
+
 /// `available_fields` plays the same part it does in [`create_work_item`], and one part more: the
 /// planning fields a task carries are the ones this screen is asked to fill, and which of them the
 /// type has — and what the team calls the one that holds "QA" — is only knowable from it. `None`
@@ -1091,6 +1124,14 @@ pub async fn create_child_work_item(
     }
     if task.remaining_work > 0.0 && has(REMAINING_WORK) {
         field(REMAINING_WORK, serde_json::json!(task.remaining_work));
+    }
+    // Blank means the parent had none, in which case Azure's own default for the project is a
+    // better answer than pinning the task to the root.
+    if !task.area_path.trim().is_empty() && has("System.AreaPath") {
+        field("System.AreaPath", serde_json::json!(task.area_path.trim()));
+    }
+    if !task.iteration_path.trim().is_empty() && has("System.IterationPath") {
+        field("System.IterationPath", serde_json::json!(task.iteration_path.trim()));
     }
 
     let url = format!(

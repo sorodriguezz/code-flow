@@ -473,6 +473,7 @@ async function settleStep(
     notify({
       source: "agents",
       titleKey: chain.status === "done" ? "notifications.chainDone" : "notifications.chainFailed",
+      target: { view: "agents", select: { kind: "chain", id: chain.id } },
       status: chain.status === "done" ? "success" : "error",
       detail: chain.title,
     });

@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "framer-motion";
-import { Bell, CircleAlert, CircleCheck, Info, Trash2, X } from "lucide-react";
+import { ArrowRight, Bell, CircleAlert, CircleCheck, Info, Trash2, X } from "lucide-react";
 import {
+  followNotification,
   NOTIFICATION_SOURCE_LABEL,
   useNotificationStore,
   type AppNotification,
 } from "../../state/notificationStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { pushErrorToast } from "../../state/toastStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 
 const PANEL_WIDTH = 340;
 
@@ -43,7 +46,16 @@ const STATUS_COLOR = {
 export function NotificationBell() {
   const t = useT();
   const locale = useLanguageStore((s) => (s.language === "es" ? "es-ES" : "en-US"));
-  const items = useNotificationStore((s) => s.items);
+  const all = useNotificationStore((s) => s.items);
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  /* This workspace's only. A notification is an invitation to come back to something, and a batch
+     or a task from another workspace is not somewhere this panel can take you — the stores hold
+     one workspace at a time. Filtered rather than dropped at push, so switching back brings the
+     entries back with you. */
+  const items = useMemo(
+    () => all.filter((item) => item.workspaceId === workspaceId),
+    [all, workspaceId],
+  );
   const remove = useNotificationStore((s) => s.remove);
   const clear = useNotificationStore((s) => s.clear);
   const markAllSeen = useNotificationStore((s) => s.markAllSeen);
@@ -203,7 +215,13 @@ export function NotificationBell() {
             ) : (
               <div className="min-h-0 flex-1 overflow-y-auto">
                 {items.map((item) => (
-                  <Row key={item.id} item={item} locale={locale} onRemove={() => remove(item.id)} />
+                  <Row
+                    key={item.id}
+                    item={item}
+                    locale={locale}
+                    onRemove={() => remove(item.id)}
+                    onFollowed={() => setOpen(false)}
+                  />
                 ))}
               </div>
             )}
@@ -224,10 +242,14 @@ function Row({
   item,
   locale,
   onRemove,
+  onFollowed,
 }: {
   item: AppNotification;
   locale: string;
   onRemove: () => void;
+  /** Closes the panel. Following a notification means going somewhere, and a panel left open over
+   *  the destination is one the user has to dismiss before they can look at what they came for. */
+  onFollowed: () => void;
 }) {
   const t = useT();
   const Icon = STATUS_ICON[item.status];
@@ -269,15 +291,31 @@ function Row({
         </p>
       </div>
 
-      <button
-        type="button"
-        onClick={onRemove}
-        title={t("notifications.remove")}
-        aria-label={t("notifications.remove")}
-        className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
-      >
-        <X size={12} />
-      </button>
+      <div className="flex shrink-0 items-center gap-0.5">
+        {item.target && (
+          <button
+            type="button"
+            onClick={() => {
+              onFollowed();
+              void followNotification(item.target!).catch((e: unknown) => pushErrorToast(String(e)));
+            }}
+            title={t("notifications.go")}
+            aria-label={t("notifications.go")}
+            className="rounded p-0.5 text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
+          >
+            <ArrowRight size={12} />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onRemove}
+          title={t("notifications.remove")}
+          aria-label={t("notifications.remove")}
+          className="rounded p-0.5 text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          <X size={12} />
+        </button>
+      </div>
     </div>
   );
 }

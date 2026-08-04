@@ -26,7 +26,9 @@ export type LayoutKey =
   | "wikiListWidth"
   | "wikiPublishWidth"
   | "huReviewSourceWidth"
-  | "huReviewPublishWidth";
+  | "huReviewPublishWidth"
+  | "huReviewDraftDescWidth"
+  | "huReviewDraftCriteriaWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -54,6 +56,8 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   wikiPublishWidth: "layout_wiki_publish_width",
   huReviewSourceWidth: "layout_hu_review_source_width",
   huReviewPublishWidth: "layout_hu_review_publish_width",
+  huReviewDraftDescWidth: "layout_hu_review_draft_desc_width",
+  huReviewDraftCriteriaWidth: "layout_hu_review_draft_criteria_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -87,6 +91,11 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // up to the window — and a window resize would have to arbitrate between them.
   huReviewSourceWidth: 360,
   huReviewPublishWidth: 304,
+  // The draft board's first two columns; the tasks pane takes whatever is left, for the same
+  // reason the review's middle pane does — three stored widths would have to keep adding up to
+  // the window, and a window resize would have to arbitrate between them.
+  huReviewDraftDescWidth: 420,
+  huReviewDraftCriteriaWidth: 460,
 };
 
 interface LayoutState {

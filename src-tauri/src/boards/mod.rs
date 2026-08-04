@@ -200,6 +200,11 @@ pub struct NewChildItem<'a> {
     pub priority: i64,
     pub original_estimate: f64,
     pub remaining_work: f64,
+    /// Where the parent is filed. Copied onto the child so a task shows up in the same sprint as
+    /// the story it belongs to — Azure does not inherit either through the parent link, and a task
+    /// left on the project root is one that never appears on the board anybody is working from.
+    pub area_path: &'a str,
+    pub iteration_path: &'a str,
 }
 
 /// A work item that now exists, as little of it as the caller needs to record and link to.
@@ -232,6 +237,15 @@ pub struct WorkItemEdit {
     pub repro_steps: Option<String>,
     /// One whole scenario per element.
     pub acceptance_criteria: Option<Vec<String>>,
+    /// The estimate, in whatever unit the item's own process names it — story points on Agile,
+    /// effort on Scrum, size on CMMI. Written to the field the item *already* reports using, so a
+    /// value typed on the review screen lands where the board shows it rather than in a second
+    /// field the team never looks at. `Some(0.0)` clears it.
+    pub effort: Option<f64>,
+    /// The reference name of the field the estimate lives in on *this* item, as the item reported
+    /// it. Empty when it has never been estimated and the client has to pick. Azure only.
+    #[serde(default)]
+    pub effort_field: String,
     /// Whether the prose above is already HTML and must be written through untouched.
     ///
     /// The review screen edits the description in a Markdown editor, and Markdown put through
@@ -488,15 +502,43 @@ pub(crate) fn text_to_html(text: &str) -> String {
     md_blocks(text, true)
 }
 
+/// Strips the bullet from a criterion whose whole body is one bulleted line.
+///
+/// A criterion is already an item of the criteria list, so a list *inside* it that holds a single
+/// entry is a bullet drawn under a number for one sentence — the host indents it and the reader
+/// gets two markers for one requirement. Two or more lines are a real checklist and keep theirs.
+///
+/// The title line, if there is one, is not part of the count: `**Título**` followed by one bullet
+/// is still one bullet.
+fn unwrap_lone_bullet(criterion: &str) -> String {
+    let lines: Vec<&str> = criterion.lines().collect();
+    let bullets = lines.iter().filter(|line| list_item(line).is_some()).count();
+    if bullets != 1 {
+        return criterion.to_string();
+    }
+    lines
+        .iter()
+        .map(|line| match list_item(line) {
+            Some((_, rest)) => rest,
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The acceptance criteria as an ordered list. One `<li>` per criterion; a criterion written in
 /// Gherkin keeps its Dado/Cuando/Entonces on their own lines inside its own item, and one written
 /// as a checklist becomes a real nested list rather than lines that start with a dash.
+///
+/// A criterion may open with a bold title line (`**Fijación del destino**`), which the review
+/// screen writes and reads back. Nothing here treats it specially — it is Markdown like the rest,
+/// and it renders as the lead-in it looks like.
 pub(crate) fn criteria_to_html(criteria: &[String]) -> String {
     let items: Vec<String> = criteria
         .iter()
         .map(|c| c.trim())
         .filter(|c| !c.is_empty())
-        .map(|c| format!("<li>{}</li>", md_blocks(c, false)))
+        .map(|c| format!("<li>{}</li>", md_blocks(&unwrap_lone_bullet(c), false)))
         .collect();
     if items.is_empty() {
         return String::new();
@@ -781,6 +823,23 @@ mod tests {
             text_to_html("Pon **el total** en `precio_neto` y un 3 * 4"),
             "<p>Pon <strong>el total</strong> en <code>precio_neto</code> y un 3 * 4</p>"
         );
+    }
+
+    /// A title is a bold lead-in, and a criterion whose whole body is one bullet loses it — the
+    /// criterion is already an item of the list around it, so the bullet would be a second marker
+    /// for one requirement.
+    #[test]
+    fn a_titled_criterion_leads_with_its_name_and_drops_a_lone_bullet() {
+        let html = criteria_to_html(&[
+            "**Fijación del destino**\n- El tipo de destino se fija a Hospital del Trabajador"
+                .to_string(),
+        ]);
+        assert_eq!(
+            html,
+            "<ol><li><strong>Fijación del destino</strong><br>\
+             El tipo de destino se fija a Hospital del Trabajador</li></ol>"
+        );
+        assert!(!html.contains("<ul>"), "one bullet is not a list: {html}");
     }
 
     /// A criterion written as a checklist is a list *inside* its own numbered item — one bullet

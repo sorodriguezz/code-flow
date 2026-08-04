@@ -273,10 +273,25 @@ async function theOneJiraSite(): Promise<string | null> {
 }
 
 /** Which text of an `ambos` proposal the user is sending. */
+/**
+ * What a proposal becomes once it is staged: its title as a bold first line, then its text.
+ *
+ * The title lives inside the one string because that is all a criterion ever is — the board has a
+ * single field for the whole list, and anything stored beside it would be lost the first time the
+ * story was read back. Markdown carries it in both directions: it publishes as a `<strong>`
+ * lead-in and comes back as `**…**` (see `splitCriterion` in the review view).
+ */
 function textOf(criterion: CriterionProposal): string {
-  if (criterion.format === "checklist") return criterion.checklist;
-  if (criterion.format === "gherkin") return criterion.gherkin;
-  return criterion.pick === "checklist" ? criterion.checklist : criterion.gherkin;
+  const body =
+    criterion.format === "checklist"
+      ? criterion.checklist
+      : criterion.format === "gherkin"
+        ? criterion.gherkin
+        : criterion.pick === "checklist"
+          ? criterion.checklist
+          : criterion.gherkin;
+  const title = (criterion.title ?? "").trim();
+  return title ? `**${title}**\n${body.trim()}` : body;
 }
 
 interface WorkItemReviewState {
@@ -348,6 +363,15 @@ interface WorkItemReviewState {
 
   setInput: (input: string) => void;
   setOrg: (org: string) => void;
+  /**
+   * Writes the estimate to the board and reflects it on the item on screen.
+   *
+   * The one field this screen changes outside the draft, and deliberately so: an estimate is a
+   * number somebody says out loud in refinement, not a proposal to be staged, reviewed and
+   * published in three moves. It is also the only edit here that is not destructive — there is
+   * nothing to lose by getting it wrong, because typing it again fixes it.
+   */
+  setEffort: (effort: number) => Promise<void>;
   toggleProject: (projectId: string) => void;
   setUseContext: (useContext: boolean) => void;
   load: () => Promise<void>;
@@ -456,6 +480,35 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
   ...EMPTY,
 
   setInput: (input) => set({ input }),
+
+  setEffort: async (effort) => {
+    const s = get();
+    if (!s.item || !editable(s.status)) return;
+    const value = Number.isFinite(effort) ? Math.max(0, effort) : 0;
+    if (value === s.item.effort) return;
+    const container = s.item.container_id || s.item.team_project;
+    try {
+      await boardUpdateWorkItem({
+        provider: s.provider,
+        org: s.org,
+        project: container,
+        id: s.item.id,
+        key: s.itemKey,
+        effort: value,
+        // Where this item already keeps its estimate. Empty on one that has never been estimated,
+        // and the backend then picks the first field its process offers.
+        effortField: s.item.effort_field,
+      });
+    } catch (e: unknown) {
+      pushErrorToast(String(e));
+      return;
+    }
+    // Only after the write lands. The header reads `item.effort`, and moving it first would show
+    // the new number against a board that still holds the old one.
+    set((state) => (state.item ? { item: { ...state.item, effort: value } } : state));
+    useToastStore.getState().pushToast(translate("huReview.effortSaved"), "success");
+    void saveSoon();
+  },
   setOrg: (org) => set({ org }),
   toggleProject: (projectId) =>
     set((s) => ({
@@ -807,6 +860,7 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       notify({
         source: "review",
         titleKey: STAGE_NOTIFICATION[stage],
+        target: { view: "stories", storiesMode: "review" },
         params: { n: produced },
         status: "success",
         detail: get().title,
@@ -828,6 +882,7 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
         notify({
           source: "review",
           titleKey: "notifications.huFailed",
+        target: { view: "stories", storiesMode: "review" },
           status: "error",
           detail: get().title,
         });
@@ -1137,6 +1192,8 @@ function asCriterionProposal(criterion: ProposedCriterion | CriterionProposal): 
     replaces: criterion.replaces ?? 0,
     evidence: criterion.evidence ?? [],
     repo: criterion.repo ?? "",
+    // Absent on a run from a build before criteria were titled, and on a model that skipped it.
+    title: (criterion.title ?? "").trim(),
     id: crypto.randomUUID(),
     pick:
       "pick" in criterion && criterion.pick

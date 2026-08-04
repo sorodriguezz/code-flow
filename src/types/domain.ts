@@ -1018,6 +1018,9 @@ export interface ReviewFinding {
 export type CriterionFormat = "gherkin" | "checklist" | "ambos";
 
 export interface ProposedCriterion {
+  /** A few words naming what the criterion is about. Published as a bold first line inside it,
+   *  which is what the draft pane collapses each criterion down to. Empty is allowed. */
+  title: string;
   format: CriterionFormat;
   /** One whole Gherkin scenario. Empty when `format` is `checklist`. */
   gherkin: string;

@@ -294,6 +294,7 @@ export const useDocsStore = create<DocsState>((set, get) => ({
       notify({
         source: "docs",
         titleKey: "notifications.docsGenerated",
+        target: { view: "stories", storiesMode: "wiki", select: { kind: "docPage", id: page.id } },
         status: "success",
         detail: page.title,
       });
@@ -304,6 +305,7 @@ export const useDocsStore = create<DocsState>((set, get) => ({
         notify({
           source: "docs",
           titleKey: "notifications.docsGenerateFailed",
+        target: { view: "stories", storiesMode: "wiki", select: { kind: "docPage", id: page.id } },
           status: "error",
           detail: page.title,
         });

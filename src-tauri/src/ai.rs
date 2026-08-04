@@ -1336,7 +1336,7 @@ Tu tarea: proponer los criterios de aceptación que faltan, y corregir los que e
 === ELIGE EL FORMATO DE CADA CRITERIO ===
 No todo criterio quiere ser Gherkin. Decide uno por uno:
 - `gherkin` cuando hay un flujo con disparador y resultado observable: algo pasa, el sistema responde. `Dado ... Cuando ... Entonces ...`, con `Y` para pasos adicionales.
-- `checklist` cuando lo que se verifica es una lista de condiciones sin flujo: campos obligatorios, permisos por perfil, formatos aceptados, textos, límites. Una condición por línea, cada una empezando por `- `, redactada como algo que se puede marcar como cumplido o no.
+- `checklist` cuando lo que se verifica es una lista de condiciones sin flujo: campos obligatorios, permisos por perfil, formatos aceptados, textos, límites. Una condición por línea, cada una empezando por `- `, redactada como algo que se puede marcar como cumplido o no. Si solo se te ocurre UNA condición, no es una lista: escríbela como frase suelta, sin `- `.
 - `ambos` SOLO si de verdad no puedes decidir. En ese caso rellena `gherkin` Y `checklist` con la misma exigencia escrita de las dos formas, y el usuario elegirá cuál se queda.
 Elegir mal cuesta más que dudar: un flujo escrito como lista pierde el disparador, y una lista escrita como escenario acaba en `Dado que el usuario está en la aplicación`.
 
@@ -1355,6 +1355,7 @@ Lo que escribas se publica en el tablero (Azure DevOps, Jira, monday) y la aplic
 - Cubre el camino feliz, el de error y al menos un borde (vacío, límite, permiso denegado) cuando la historia lo admita.
 - Si corriges un criterio que la historia YA tiene, pon su número en `replaces` y escribe la versión corregida entera. Si es nuevo, `replaces` es 0.
 - NO repitas un criterio existente que ya esté bien. Cero criterios propuestos es una respuesta válida.
+- `title` son de tres a seis palabras que nombran de qué va el criterio ("Fijación del tipo de destino", "Reversibilidad al desmarcar"). Es lo único que se ve del criterio cuando está plegado, así que tiene que distinguirlo de sus hermanos: "Validación" o "Caso feliz" no sirven porque valen para todos.
 - `rationale` es una frase: por qué hace falta este criterio, o qué le arreglaste al que corriges.
 - La evidencia son rutas reales del repositorio con línea, relativas a la raíz. Sin evidencia, deja `evidence` vacío.
 - Escribe SIEMPRE en español.
@@ -1362,7 +1363,8 @@ Lo que escribas se publica en el tablero (Azure DevOps, Jira, monday) y la aplic
 === REGLAS ESTRICTAS DE SALIDA ===
 - Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
 - El objeto tiene exactamente esta forma:
-{"criteria":[{"format":"gherkin","gherkin":"Dado ...\nCuando ...\nEntonces ...","checklist":"","rationale":"","replaces":0,"evidence":[]}]}
+{"criteria":[{"title":"","format":"gherkin","gherkin":"Dado ...\nCuando ...\nEntonces ...","checklist":"","rationale":"","replaces":0,"evidence":[]}]}
+- `title` es una cadena corta, sin markdown dentro y sin punto final.
 - `format` es exactamente `gherkin`, `checklist` o `ambos`.
 - `gherkin` va relleno si `format` es `gherkin` o `ambos`; `checklist`, si es `checklist` o `ambos`. El otro queda vacío.
 - `replaces` es un número: el del criterio existente que esta versión sustituye, o 0 si es nuevo.

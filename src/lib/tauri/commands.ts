@@ -1471,6 +1471,11 @@ export const boardUpdateWorkItem = (input: {
   description?: string;
   reproSteps?: string;
   acceptanceCriteria?: string[];
+  /** The estimate, in the unit the item's own process names it. `0` clears it; omitting the field
+   *  leaves it alone. Send `effortField` with it — the item's own `effort_field` — so the value
+   *  lands in the field the board already shows rather than in a second one nobody looks at. */
+  effort?: number;
+  effortField?: string;
   /** Whether `description`/`reproSteps` are already HTML. The review screen edits them as Markdown
    *  and renders them here, where the parser is; without this the backend escapes the marks and the
    *  board shows a paragraph starting with two hash characters. */

@@ -400,6 +400,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
       notify({
         source: "stories",
         titleKey: "notifications.storiesGenerated",
+        target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
         params: { n: detail.stories.length },
         status: "success",
         detail: where,
@@ -412,6 +413,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
         notify({
           source: "stories",
           titleKey: "notifications.storiesGenerateFailed",
+        target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
           status: "error",
           detail: where,
         });
@@ -509,6 +511,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
       notify({
         source: "stories",
         titleKey: "notifications.storiesVerified",
+        target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
         status: "success",
         detail: where,
       });
@@ -518,6 +521,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
         notify({
           source: "stories",
           titleKey: "notifications.storiesVerifyFailed",
+        target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
           status: "error",
           detail: where,
         });

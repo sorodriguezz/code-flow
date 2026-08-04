@@ -305,6 +305,13 @@ pub struct ProposedCriterion {
     #[serde(default)]
     pub checklist: String,
     pub rationale: String,
+    /// A handful of words naming what this criterion is about — "Fijación del tipo de destino".
+    ///
+    /// Published as a bold first line inside the criterion, which is what lets a list of six be
+    /// read at a glance on the board and collapsed to one row each on the review screen. Empty is
+    /// allowed and means the criterion goes out as its text alone.
+    #[serde(default)]
+    pub title: String,
     /// The 1-based number of the existing criterion this rewrites, or `0` when it is new. What
     /// lets the screen colour a correction differently from an addition — a rewrite that looks
     /// like a new criterion is how a story ends up holding both wordings.
@@ -1428,6 +1435,8 @@ pub async fn board_update_work_item(
     description: Option<String>,
     repro_steps: Option<String>,
     acceptance_criteria: Option<Vec<String>>,
+    effort: Option<f64>,
+    effort_field: Option<String>,
     prose_is_html: Option<bool>,
 ) -> Result<boards::ItemRef, String> {
     let provider = BoardProvider::parse(provider.as_deref().unwrap_or_default());
@@ -1437,6 +1446,10 @@ pub async fn board_update_work_item(
         description,
         repro_steps,
         acceptance_criteria,
+        // Negative is a typo nobody wants published; `0` is the user clearing the estimate, which
+        // is a real thing to want and is not the same as not sending the field at all.
+        effort: effort.map(|value| if value.is_finite() { value.max(0.0) } else { 0.0 }),
+        effort_field: effort_field.unwrap_or_default(),
         prose_is_html: prose_is_html.unwrap_or(false),
     };
     boards::update_work_item(
@@ -1520,6 +1533,17 @@ pub async fn board_create_child_tasks(
         BoardProvider::Jira | BoardProvider::Monday => None,
     };
 
+    // Where the story is filed, so its tasks land in the same sprint. Azure inherits neither field
+    // through the parent link, and a task on the project root never shows on the board the team is
+    // standing in front of. Read once for the batch, and a failed read is not fatal: the tasks are
+    // still worth creating unfiled.
+    let (area_path, iteration_path) = match provider {
+        BoardProvider::Azure => azure::classification_of(&org, parent_id, &auth.secret)
+            .await
+            .unwrap_or_default(),
+        BoardProvider::Jira | BoardProvider::Monday => Default::default(),
+    };
+
     let mut created = Vec::with_capacity(tasks.len());
     for task in &tasks {
         let (activity, task_type) = task_kind_fields(&task.kind);
@@ -1533,6 +1557,8 @@ pub async fn board_create_child_tasks(
             // The same number at creation: nothing has been done yet, so everything estimated is
             // still to do. They part company on the board, as the person doing the work burns it down.
             remaining_work: task.estimate_hours,
+            area_path: &area_path,
+            iteration_path: &iteration_path,
         };
         match boards::create_child_work_item(
             provider,

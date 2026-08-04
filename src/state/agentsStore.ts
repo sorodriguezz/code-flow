@@ -496,6 +496,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         notify({
           source: "agents",
           titleKey: "notifications.agentDone",
+          target: { view: "agents", select: { kind: "agentTask", id: taskId } },
           status: "success",
           detail: task.title,
         });
@@ -569,6 +570,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
           notify({
             source: "agents",
             titleKey: "notifications.agentFailed",
+          target: { view: "agents", select: { kind: "agentTask", id: taskId } },
             status: "error",
             detail: task.title,
           });

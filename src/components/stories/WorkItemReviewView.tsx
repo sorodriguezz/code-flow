@@ -70,7 +70,12 @@ import { loadAdoConnections } from "../../lib/adoConnections";
 import { htmlToText } from "../../lib/workItemHtml";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
-import type { BoardWorkItemChild, CriterionFormat, WorkItemReviewStage } from "../../types/domain";
+import type {
+  BoardWorkItem,
+  BoardWorkItemChild,
+  CriterionFormat,
+  WorkItemReviewStage,
+} from "../../types/domain";
 
 /**
  * Deliberately carries no width. A `w-full` baked in here loses to — or beats, depending on which
@@ -280,7 +285,12 @@ function Pane({
         width ?? "flex-1"
       } ${tinted ? "bg-[var(--cf-bg)]" : "bg-[var(--cf-surface)]"}`}
     >
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+      {/* A fixed height, not `py-2`. What a header carries differs per pane — a count here, a
+          padlock there, a bin only once something is staged — and the tallest of those (a 24px
+          icon button) was setting the height on its own. The panes sit side by side, so a pane
+          with nothing on its right was 4px shorter than its neighbours and its title and its rule
+          both sat off the line they share. */}
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
         <IconChip icon={icon} />
         <h3 className="min-w-0 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">{label}</h3>
         {(count ?? 0) > 0 && (
@@ -1487,6 +1497,7 @@ function DraftPane({
   part,
   count,
   confirm,
+  width,
   children,
 }: {
   icon: typeof ScanSearch;
@@ -1494,6 +1505,8 @@ function DraftPane({
   part: PublishPart;
   count: number;
   confirm: string;
+  /** Omitted on the last pane, which takes whatever the two before it leave. */
+  width?: string;
   children: React.ReactNode;
 }) {
   const t = useT();
@@ -1507,6 +1520,7 @@ function DraftPane({
       icon={icon}
       label={label}
       count={count}
+      width={width}
       action={
         staged &&
         open && (
@@ -1622,6 +1636,82 @@ function BinNote({ icon: Icon, note, tone }: { icon: typeof CircleAlert; note: s
 }
 
 /**
+ * The story's own estimate, read at a glance and changed in place.
+ *
+ * In the header rather than in the story tab because that is where it is *missed* — "sin estimar"
+ * sitting next to the title is the thing somebody notices mid-refinement, and making them leave
+ * for the board and come back is how a story stays unestimated for a sprint.
+ *
+ * Confirmed with a tick, abandoned with a cross, and neither is decoration: this writes to a work
+ * item other people are looking at, so a field that saved on blur would publish every number the
+ * user typed on the way to the one they meant. Enter and Escape do the same two things, because a
+ * one-field form should not need the mouse.
+ */
+function EffortChip({ item, editable }: { item: BoardWorkItem; editable: boolean }) {
+  const t = useT();
+  const [draft, setDraft] = useState<string | null>(null);
+  const label = effortLabel(item) || t("huReview.effortUnset");
+
+  if (draft === null) {
+    return (
+      <button
+        type="button"
+        disabled={!editable}
+        onClick={() => setDraft(item.effort ? String(item.effort) : "")}
+        title={editable ? t("huReview.effortEdit") : undefined}
+        className="inline-flex items-center gap-1 rounded border border-transparent px-1 py-px transition-colors hover:border-[var(--cf-field-border)] hover:text-[var(--cf-text)] disabled:cursor-default disabled:hover:border-transparent disabled:hover:text-inherit"
+      >
+        <Gauge size={11} />
+        {label}
+      </button>
+    );
+  }
+
+  const commit = () => {
+    void store().setEffort(Number(draft) || 0);
+    setDraft(null);
+  };
+
+  return (
+    <span className="inline-flex items-center gap-1 rounded border border-[var(--cf-accent)] px-1 py-px">
+      <Gauge size={11} className="shrink-0" />
+      <input
+        autoFocus
+        type="number"
+        min={0}
+        step={0.5}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") setDraft(null);
+        }}
+        aria-label={t("huReview.effortEdit")}
+        className="w-12 border-0 bg-transparent p-0 text-right font-mono text-[11px] tabular-nums text-[var(--cf-text)] outline-none"
+      />
+      <button
+        type="button"
+        onClick={commit}
+        title={t("huReview.effortConfirm")}
+        aria-label={t("huReview.effortConfirm")}
+        className="flex h-4 w-4 items-center justify-center rounded hover:text-[var(--cf-success)]"
+      >
+        <Check size={11} />
+      </button>
+      <button
+        type="button"
+        onClick={() => setDraft(null)}
+        title={t("huReview.effortCancel")}
+        aria-label={t("huReview.effortCancel")}
+        className="flex h-4 w-4 items-center justify-center rounded hover:text-[var(--cf-danger)]"
+      >
+        <X size={11} />
+      </button>
+    </span>
+  );
+}
+
+/**
  * What the board plans a task with: how long, how urgent, and what kind of work it is.
  *
  * On the draft row rather than on the proposal card, because the draft is the last thing anyone
@@ -1649,46 +1739,34 @@ function PlanningRow({
   onHours: (value: number) => void;
 }) {
   const t = useT();
-  const field =
-    "w-14 rounded border border-transparent bg-transparent px-1 py-0.5 text-right font-mono text-[11px] tabular-nums text-[var(--cf-text)] outline-none hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent";
 
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--cf-border)] pt-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
-      <label className="flex items-center gap-1" title={t("huReview.estimateHint")}>
-        <Clock size={10} className="shrink-0" />
-        <span>{t("huReview.estimate")}</span>
-        <input
-          type="number"
-          min={0}
-          step={0.5}
-          readOnly={readOnly}
-          // Empty rather than a hard `0`: an estimate of zero is not a number anybody typed, it is
-          // the field being unset, and showing `0` invites publishing it as one.
-          value={hours > 0 ? hours : ""}
-          placeholder="—"
-          onChange={(e) => onHours(Math.max(0, Number(e.target.value) || 0))}
-          aria-label={t("huReview.estimate")}
-          className={field}
-        />
-        <span>{t("huReview.hoursShort")}</span>
-      </label>
-
-      <label className="flex items-center gap-1" title={t("huReview.priorityHint")}>
-        <Gauge size={10} className="shrink-0" />
-        <span>{t("stories.fieldPriority")}</span>
-        <input
-          type="number"
-          min={0}
-          max={4}
-          step={1}
-          readOnly={readOnly}
-          value={priority > 0 ? priority : ""}
-          placeholder="—"
-          onChange={(e) => onPriority(Math.min(4, Math.max(0, Math.round(Number(e.target.value) || 0))))}
-          aria-label={t("stories.fieldPriority")}
-          className={field}
-        />
-      </label>
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-[var(--cf-border)] pt-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+      {/* Value and unit as one word. They used to be an input and a separate `<span>` with a gap
+          between them, and since the input was a fixed width with its digits right-aligned, the
+          `h` floated a variable distance from the number it belongs to — "2,5    h" reads as two
+          things. The whole chip is the target now, and the border only appears when it is worth
+          pointing at. */}
+      <PlanField
+        icon={Clock}
+        label={t("huReview.estimate")}
+        hint={t("huReview.estimateHint")}
+        value={hours}
+        unit={t("huReview.hoursShort")}
+        step={0.5}
+        readOnly={readOnly}
+        onChange={(v) => onHours(Math.max(0, v))}
+      />
+      <PlanField
+        icon={Gauge}
+        label={t("stories.fieldPriority")}
+        hint={t("huReview.priorityHint")}
+        value={priority}
+        prefix="P"
+        step={1}
+        readOnly={readOnly}
+        onChange={(v) => onPriority(Math.min(4, Math.max(0, Math.round(v))))}
+      />
 
       <span
         title={t("huReview.activityHint")}
@@ -1700,16 +1778,208 @@ function PlanningRow({
   );
 }
 
+/**
+ * One planning number, as a chip that reads as a single value.
+ *
+ * The input is sized to its digits rather than to a column, so nothing it carries — the `P` in
+ * front, the `h` behind — drifts away from the number as the value changes. `0` shows as an
+ * em dash: zero is not a number anybody typed, it is the field being unset, and rendering it as
+ * `0` invites publishing it as one.
+ */
+function PlanField({
+  icon: Icon,
+  label,
+  hint,
+  value,
+  unit,
+  prefix,
+  step,
+  readOnly,
+  onChange,
+}: {
+  icon: typeof Clock;
+  label: string;
+  hint: string;
+  value: number;
+  unit?: string;
+  prefix?: string;
+  step: number;
+  readOnly: boolean;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label
+      title={hint}
+      className="inline-flex items-center gap-1 rounded border border-transparent px-1 py-0.5 font-mono text-[11px] tabular-nums text-[var(--cf-text)] transition-colors hover:border-[var(--cf-field-border)] focus-within:border-[var(--cf-accent)]"
+    >
+      <Icon size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
+      {prefix && <span className="text-[var(--cf-text-muted)]">{prefix}</span>}
+      <input
+        type="number"
+        min={0}
+        step={step}
+        readOnly={readOnly}
+        value={value > 0 ? value : ""}
+        placeholder="—"
+        onChange={(e) => onChange(Number(e.target.value) || 0)}
+        aria-label={label}
+        // `field-sizing` grows the box with its content where it is supported, and the width is the
+        // floor everywhere else — either way the unit stays against the digits.
+        className="w-[2.25rem] [field-sizing:content] min-w-[1.5rem] max-w-[3.5rem] border-0 bg-transparent p-0 text-right outline-none placeholder:text-[var(--cf-text-muted)]"
+      />
+      {unit && <span className="text-[var(--cf-text-muted)]">{unit}</span>}
+    </label>
+  );
+}
+
+/**
+ * A criterion's short title and its body, out of the one string both live in.
+ *
+ * The title is a bold first line — `**Título**\nDado que…` — and that spelling is doing real work
+ * rather than being a convention this screen invented. It is Markdown, so the publish turns it
+ * into a `<strong>` lead-in inside the criterion's own `<li>` and it reads as a heading on the
+ * board; and `htmlToText` brings that same `<strong>` back as `**…**`, so a story loaded from the
+ * board a sprint later arrives with its titles already on. Nothing has to be stored beside the
+ * criteria, and nothing is lost by a round trip through a field that only holds one string.
+ *
+ * A first line that is not bold is not a title — it is the first line of a criterion somebody else
+ * wrote, and claiming it would silently retitle their work.
+ */
+function splitCriterion(value: string): { title: string; body: string } {
+  const [first, ...rest] = value.split("\n");
+  const match = /^\s*\*\*(.+?)\*\*\s*$/.exec(first ?? "");
+  if (!match) return { title: "", body: value };
+  return { title: match[1].trim(), body: rest.join("\n").replace(/^\n+/, "") };
+}
+
+function joinCriterion(title: string, body: string): string {
+  const named = title.trim();
+  return named ? `**${named}**\n${body}` : body;
+}
+
+/** The narrowest either draft column may be dragged to, and the widest. */
+const DRAFT_MIN = 260;
+const DRAFT_MAX = 720;
+
+/**
+ * One staged criterion: a title you can read at a glance, and the text under it when you want it.
+ *
+ * Collapsed by default once it has a title, because the pane's job at publish time is "are these
+ * the six criteria I meant?" — six open Gherkin blocks is a wall you scroll rather than a list you
+ * check. Untitled ones stay open: a collapsed row with nothing but `#3` on it says nothing, and
+ * the first thing to do with such a criterion is give it a name.
+ */
+function DraftCriterion({
+  at,
+  value,
+  open,
+  onChange,
+  onRemove,
+}: {
+  at: number;
+  value: string;
+  open: boolean;
+  onChange: (value: string) => void;
+  onRemove: () => void;
+}) {
+  const t = useT();
+  const { title, body } = splitCriterion(value);
+  const [expanded, setExpanded] = useState(!title.trim());
+
+  return (
+    <article
+      style={riseDelay(at)}
+      className={`group rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] ${CARD_MOTION}`}
+    >
+      <div className="flex items-center gap-1.5 border-b border-[var(--cf-border)] px-2.5 py-1">
+        <button
+          type="button"
+          onClick={() => setExpanded((was) => !was)}
+          aria-expanded={expanded}
+          title={t(expanded ? "huReview.collapseCriterion" : "huReview.expandCriterion")}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        >
+          <ChevronRight size={12} className={`transition-transform duration-200 ${expanded ? "rotate-90" : ""}`} />
+        </button>
+        <span className="shrink-0 text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
+          #{at + 1}
+        </span>
+        {/* The title is the row when collapsed, so it is editable in place rather than behind the
+            chevron — renaming six criteria should not mean opening and closing six cards. */}
+        <input
+          value={title}
+          readOnly={!open}
+          onChange={(e) => onChange(joinCriterion(e.target.value, body))}
+          placeholder={t("huReview.criterionTitlePlaceholder")}
+          aria-label={t("huReview.criterionTitle")}
+          className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-[11.5px] font-medium text-[var(--cf-text)] outline-none placeholder:font-normal placeholder:italic placeholder:text-[var(--cf-text-muted)] hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
+        />
+        {open && (
+          <div className="flex shrink-0 items-center gap-0.5">
+            <BinNote icon={TriangleAlert} note={t("huReview.binNoteCriteria")} tone="text-[var(--cf-warning)]" />
+            <button
+              type="button"
+              onClick={onRemove}
+              title={t("stories.removeCriterion")}
+              aria-label={t("stories.removeCriterion")}
+              className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+            >
+              <Trash2 size={11} />
+            </button>
+          </div>
+        )}
+      </div>
+      {expanded && (
+        <textarea
+          value={body}
+          readOnly={!open}
+          rows={Math.max(3, body.split("\n").length)}
+          onChange={(e) => onChange(joinCriterion(title, e.target.value))}
+          className="cf-fade-in w-full resize-y bg-transparent px-2.5 py-2 font-mono text-[11.5px] leading-relaxed outline-none read-only:cursor-default"
+        />
+      )}
+    </article>
+  );
+}
+
+/* Widths through CSS variables rather than through the class string, because Tailwind compiles
+   the classes it can see in the source — a `lg:w-[${n}px]` built at runtime names a class that
+   was never generated, and the pane silently keeps whatever width it had. The variables are set
+   as an inline style on the row that holds the panes; see `--cf-hu-source-w` beside them. */
+const DRAFT_DESC_WIDTH = "w-full shrink-0 lg:w-[var(--cf-hu-draft-desc-w)]";
+const DRAFT_CRIT_WIDTH = "w-full shrink-0 lg:w-[var(--cf-hu-draft-crit-w)]";
+
 function DraftTab() {
   const t = useT();
   const item = useWorkItemReviewStore((s) => s.item);
   const draft = useWorkItemReviewStore((s) => s.draft);
   const open = useWorkItemReviewStore((s) => s.status === "open");
+  const descWidth = useLayoutStore((s) => s.sizes.huReviewDraftDescWidth);
+  const criteriaWidth = useLayoutStore((s) => s.sizes.huReviewDraftCriteriaWidth);
+  const setSize = useLayoutStore((s) => s.setSize);
+  const commitSize = useLayoutStore((s) => s.commitSize);
   if (!item) return null;
 
   const isBug = kindOf(item.work_item_type) === "bug";
   const criteria = draft.criteria ?? [];
   const tasks = draft.tasks ?? [];
+
+  /* Two seams for three panes: the first two carry a width and the tasks pane takes what is left.
+     Storing a third number would mean three that have to keep adding up to the window, and a
+     window resize would have to decide which of them gives. Hidden below `lg`, where the panes
+     stack and there is no horizontal seam to drag. */
+  const seam = (key: "huReviewDraftDescWidth" | "huReviewDraftCriteriaWidth", value: number) => (
+    <span className="contents max-lg:hidden">
+      <ResizeHandle
+        axis="x"
+        value={value}
+        min={DRAFT_MIN}
+        max={DRAFT_MAX}
+        onChange={(next) => setSize(key, next)}
+        onCommit={(next) => commitSize(key, next)}
+      />
+    </span>
+  );
 
   return (
     <>
@@ -1718,6 +1988,7 @@ function DraftTab() {
         label={isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription")}
         part="description"
         count={draft.description === null ? 0 : 1}
+        width={DRAFT_DESC_WIDTH}
         confirm={t("huReview.confirmDescription")}
       >
         <div className="h-full min-h-0">
@@ -1732,49 +2003,26 @@ function DraftTab() {
         </div>
       </DraftPane>
 
+      {seam("huReviewDraftDescWidth", descWidth)}
+
       <DraftPane
         icon={ListChecks}
         label={t("stories.fieldCriteria")}
         part="criteria"
         count={criteria.length}
+        width={DRAFT_CRIT_WIDTH}
         confirm={t("huReview.confirmCriteria").replace("{n}", String(criteria.filter((c) => c.trim()).length))}
       >
         <div className="space-y-1.5">
           {criteria.map((criterion, at) => (
-            <article
+            <DraftCriterion
               key={at}
-              style={riseDelay(at)}
-              className={`group rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] ${CARD_MOTION}`}
-            >
-              <div className="flex items-center gap-1.5 border-b border-[var(--cf-border)] px-2.5 py-1">
-                <span className="text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">#{at + 1}</span>
-                {open && (
-                  <div className="ml-auto flex items-center gap-0.5">
-                    <BinNote
-                      icon={TriangleAlert}
-                      note={t("huReview.binNoteCriteria")}
-                      tone="text-[var(--cf-warning)]"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => store().removeDraftCriterion(at)}
-                      title={t("stories.removeCriterion")}
-                      aria-label={t("stories.removeCriterion")}
-                      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
-                    >
-                      <Trash2 size={11} />
-                    </button>
-                  </div>
-                )}
-              </div>
-              <textarea
-                value={criterion}
-                readOnly={!open}
-                rows={Math.max(3, criterion.split("\n").length)}
-                onChange={(e) => store().setDraftCriterion(at, e.target.value)}
-                className="w-full resize-y bg-transparent px-2.5 py-2 font-mono text-[11.5px] leading-relaxed outline-none read-only:cursor-default"
-              />
-            </article>
+              at={at}
+              value={criterion}
+              open={open}
+              onChange={(next) => store().setDraftCriterion(at, next)}
+              onRemove={() => store().removeDraftCriterion(at)}
+            />
           ))}
           {open && (
             <button
@@ -1788,6 +2036,8 @@ function DraftTab() {
           )}
         </div>
       </DraftPane>
+
+      {seam("huReviewDraftCriteriaWidth", criteriaWidth)}
 
       <DraftPane
         icon={ClipboardCheck}
@@ -2211,6 +2461,10 @@ export function WorkItemReviewView() {
   const draft = useWorkItemReviewStore((s) => s.draft);
   const tab = useWorkItemReviewStore((s) => s.tab);
   const sourceWidth = useLayoutStore((s) => s.sizes.huReviewSourceWidth);
+  // Read here as well as in `DraftTab`: the panes are its children but the custom properties have
+  // to be declared on the row that lays them out, which is this one.
+  const draftDescWidth = useLayoutStore((s) => s.sizes.huReviewDraftDescWidth);
+  const draftCriteriaWidth = useLayoutStore((s) => s.sizes.huReviewDraftCriteriaWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
 
@@ -2415,10 +2669,7 @@ export function WorkItemReviewView() {
                   </span>
                 )}
                 <span aria-hidden>·</span>
-                <span className="inline-flex items-center gap-1">
-                  <Gauge size={11} />
-                  {effortLabel(item) || t("huReview.effortUnset")}
-                </span>
+                <EffortChip item={item} editable={open} />
                 {item.team_project && (
                   <>
                     <span aria-hidden>·</span>
@@ -2508,7 +2759,13 @@ export function WorkItemReviewView() {
             className={`cf-fade-in flex min-h-0 flex-1 flex-col divide-y divide-[var(--cf-border)] overflow-hidden lg:flex-row lg:divide-y-0 ${
               tab === "draft" ? "lg:divide-x" : ""
             }`}
-            style={{ "--cf-hu-source-w": `${sourceWidth}px` } as React.CSSProperties}
+            style={
+              {
+                "--cf-hu-source-w": `${sourceWidth}px`,
+                "--cf-hu-draft-desc-w": `${draftDescWidth}px`,
+                "--cf-hu-draft-crit-w": `${draftCriteriaWidth}px`,
+              } as React.CSSProperties
+            }
           >
             {tab === "story" && <StoryTab key="story" />}
             {tab === "description" && <DescriptionTab key="description" width={SOURCE_WIDTH} seam={seam} />}

@@ -11,6 +11,9 @@ import type { ShortcutGroup } from "../lib/shortcuts";
  * menu rather than from the tab bar. */
 export type MainView = "graph" | "changes" | "editor" | "api" | "agents" | "stories";
 
+/** The three directions the stories section works in. Its own sub-tab, one level under the view. */
+export type StoriesMode = "batches" | "review" | "wiki";
+
 export type SettingsSectionId =
   | "appearance"
   | "general"
@@ -42,6 +45,15 @@ export type PaletteScope = "all" | "workspaces" | "projects";
 interface UiState {
   sidebarCollapsed: boolean;
   activeView: MainView;
+  /**
+   * Which stories sub-tab is showing.
+   *
+   * Here rather than in the view's own `useState` because something outside it has to be able to
+   * open it: a notification saying the wiki page finished has to land the user *on the wiki*, and
+   * a completion that drops you on whichever tab you happened to leave open is a completion you
+   * have to go looking for.
+   */
+  storiesMode: StoriesMode;
   /** Settings is a modal overlaid on top of the current view, not a view itself — closing
    * it just reveals whatever was already showing underneath. */
   settingsOpen: boolean;
@@ -86,6 +98,9 @@ interface UiState {
   apiWorkspace: ApiWorkspace;
   toggleSidebar: () => void;
   setActiveView: (view: MainView) => void;
+  setStoriesMode: (mode: StoriesMode) => void;
+  /** Opens the stories section on a given sub-tab, in one move. */
+  openStories: (mode: StoriesMode) => void;
   openSettings: (section: SettingsSectionId, hostingProvider?: HostingProvider) => void;
   /**
    * Opens the settings window on the API client's section, optionally on one of its sub-tabs.
@@ -123,6 +138,7 @@ interface UiState {
 export const useUiStore = create<UiState>((set) => ({
   sidebarCollapsed: false,
   activeView: "graph",
+  storiesMode: "batches",
   settingsOpen: false,
   settingsSection: "appearance",
   settingsHostingProvider: "azure",
@@ -139,6 +155,10 @@ export const useUiStore = create<UiState>((set) => ({
   prLinkModalOpen: false,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setActiveView: (view) => set({ activeView: view, settingsOpen: false }),
+  setStoriesMode: (mode) => set({ storiesMode: mode }),
+  // Settings closed too: it covers the whole app, and landing behind it looks like nothing
+  // happened. Same reason `setActiveView` does it.
+  openStories: (mode) => set({ activeView: "stories", storiesMode: mode, settingsOpen: false }),
   openSettings: (section, hostingProvider) =>
     set((s) => ({
       settingsOpen: true,

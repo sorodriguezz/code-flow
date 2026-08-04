@@ -274,6 +274,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         notify({
           source: "chat",
           titleKey: "notifications.chatDone",
+            target: { view: "graph", openAiPanel: true },
           status: "success",
           detail: base.title || liveTitle(trimmed),
         });
@@ -337,6 +338,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           notify({
             source: "chat",
             titleKey: "notifications.chatFailed",
+            target: { view: "graph", openAiPanel: true },
             status: "error",
             detail: base.title || liveTitle(trimmed),
           });

@@ -64,7 +64,9 @@ export function StoriesView() {
   const commitSize = useLayoutStore((s) => s.commitSize);
 
   const [composing, setComposing] = useState(false);
-  const [mode, setMode] = useState<(typeof MODES)[number]["id"]>("batches");
+  // In `uiStore` rather than here, so a notification can open the tab its run belongs to.
+  const mode = useUiStore((s) => s.storiesMode);
+  const setMode = useUiStore((s) => s.setStoriesMode);
   const [helpOpen, setHelpOpen] = useState(false);
 
   useEffect(() => {
