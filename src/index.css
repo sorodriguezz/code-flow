@@ -282,39 +282,72 @@ body {
   }
 }
 
-/* "Thinking" orb — a living, morphing gradient blob standing in for a plain spinner
-   wherever Claude is actually working (chat, PR review, pre-commit analysis). Pure CSS
-   (transform/filter only, no canvas/JS loop) to stay consistent with the animations above. */
+/* "Thinking" reactor — what stands in for a spinner wherever an engine is actually working
+   (agent turns, story generation, the review stages, the wiki write).
+
+   Two counter-rotating arcs, three particles falling into a beating core. The parts are chosen
+   for what they say rather than for decoration: an agent is a thing that *takes context in and
+   burns it*, and the particles are that — entering from a different angle every time, because
+   the three carriers turn at 2.4s, 3.1s and 1.8s and share no divisor. A ring rotating on its
+   own is what every "loading" in every app looks like; the falling is what makes this one read
+   as an agent working rather than as a file downloading.
+
+   Everything here is `transform` and `opacity`, which the compositor moves without repainting.
+   That is deliberate, and it is half of why this replaced what was here before: the old orb
+   blurred two full-size layers with `filter`, so a task list showing seventeen at once paid for
+   seventeen live blurs every frame. The other half is that its opacity pulse read as a flicker
+   at 14px, which is the size it is used at almost everywhere.
+
+   Sizes scale off `--cf-orb-size` alone — every offset below is a fraction of it, so a fourth
+   size would be one line and nothing else. The two companion hues are literal because a conic
+   gradient has no way to derive a second and third hue from the accent; they sit here as
+   variables so a theme that wants its own can say so in one place. */
 @keyframes cf-orb-spin {
   to {
     transform: rotate(360deg);
   }
 }
-@keyframes cf-orb-morph {
-  0%,
-  100% {
-    border-radius: 42% 58% 63% 37% / 41% 44% 56% 59%;
-  }
-  33% {
-    border-radius: 58% 42% 39% 61% / 59% 52% 48% 41%;
-  }
-  66% {
-    border-radius: 63% 37% 54% 46% / 38% 62% 38% 62%;
+@keyframes cf-orb-spin-back {
+  to {
+    transform: rotate(-360deg);
   }
 }
-@keyframes cf-orb-pulse {
+/* The core, out of step with everything around it on purpose. */
+@keyframes cf-orb-beat {
   0%,
   100% {
-    transform: scale(0.92);
+    transform: scale(0.5);
+    opacity: 0.6;
   }
   50% {
-    transform: scale(1.06);
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+/* Rim to core. It fades in after the start and out before the end, so a particle is never seen
+   appearing out of nothing at the edge, nor stopping dead in the middle. */
+@keyframes cf-orb-feed {
+  0% {
+    transform: translateY(0) scale(1);
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(var(--cf-orb-travel)) scale(0.2);
+    opacity: 0;
   }
 }
 
 .cf-orb {
   --cf-orb-size: 22px;
-  --cf-orb-gradient: conic-gradient(from 0deg, var(--cf-accent), #d946ef, #22d3ee, var(--cf-accent));
+  /* Ring thickness, fall distance and particle diameter, all as fractions of the whole. */
+  --cf-orb-stroke: calc(var(--cf-orb-size) * 0.13);
+  --cf-orb-travel: calc(var(--cf-orb-size) * 0.36);
+  --cf-orb-dot: calc(var(--cf-orb-size) * 0.17);
+  --cf-orb-c2: #22d3ee;
+  --cf-orb-c3: #d946ef;
   position: relative;
   display: inline-block;
   width: var(--cf-orb-size);
@@ -330,30 +363,92 @@ body {
 .cf-orb-lg {
   --cf-orb-size: 44px;
 }
-.cf-orb-glow,
-.cf-orb-core {
+
+/* An arc, not a circle: the mask cuts the disc down to a ring, and the gradient's transparent
+   stops cut that ring down to an arc whose tail fades out instead of ending. */
+.cf-orb-ring {
   position: absolute;
   inset: 0;
-  border-radius: 42% 58% 63% 37% / 41% 44% 56% 59%;
-  background: var(--cf-orb-gradient);
-  transform-origin: center;
-  animation:
-    cf-orb-spin 3.6s linear infinite,
-    cf-orb-morph 5s ease-in-out infinite,
-    cf-orb-pulse 2.2s ease-in-out infinite;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    var(--cf-orb-c2) 100deg,
+    var(--cf-orb-c3) 250deg,
+    transparent 340deg
+  );
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - var(--cf-orb-stroke)), #000 0);
+  mask: radial-gradient(farthest-side, transparent calc(100% - var(--cf-orb-stroke)), #000 0);
+  animation: cf-orb-spin 0.8s linear infinite;
 }
-.cf-orb-glow {
-  filter: blur(calc(var(--cf-orb-size) * 0.45));
-  opacity: 0.6;
+
+/* Inside, thinner, slower and the other way round — which is what stops the two reading as one
+   thick ring, and what gives the thing depth at 14px, where there is no room for anything else. */
+.cf-orb-ring-inner {
+  --cf-orb-stroke: calc(var(--cf-orb-size) * 0.1);
+  inset: calc(var(--cf-orb-size) * 0.25);
+  background: conic-gradient(from 180deg, transparent 0deg, var(--cf-accent) 140deg, transparent 300deg);
+  animation: cf-orb-spin-back 1.9s linear infinite;
 }
+
+/* The carrier turns, the particle on it falls. Two elements and not one, because an element
+   cannot run two `transform` animations at once — the second would simply replace the first. */
+.cf-orb-feed {
+  position: absolute;
+  inset: 0;
+  display: block;
+  animation: cf-orb-spin 2.4s linear infinite;
+}
+.cf-orb-feed::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: var(--cf-orb-dot);
+  height: var(--cf-orb-dot);
+  margin-left: calc(var(--cf-orb-dot) / -2);
+  border-radius: 50%;
+  background: var(--cf-orb-c2);
+  animation: cf-orb-feed 1.6s ease-in infinite;
+}
+.cf-orb-feed-2 {
+  animation-duration: 3.1s;
+  animation-direction: reverse;
+}
+.cf-orb-feed-2::after {
+  background: var(--cf-orb-c3);
+  animation-delay: 0.5s;
+}
+.cf-orb-feed-3 {
+  animation-duration: 1.8s;
+}
+.cf-orb-feed-3::after {
+  background: var(--cf-accent);
+  animation-delay: 1s;
+}
+
 .cf-orb-core {
-  filter: saturate(1.2);
-  box-shadow: 0 0 calc(var(--cf-orb-size) * 0.25) color-mix(in oklab, var(--cf-accent) 55%, transparent);
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: calc(var(--cf-orb-size) * 0.28);
+  height: calc(var(--cf-orb-size) * 0.28);
+  margin: calc(var(--cf-orb-size) * -0.14) 0 0 calc(var(--cf-orb-size) * -0.14);
+  border-radius: 50%;
+  background: var(--cf-orb-c3);
+  animation: cf-orb-beat 1.1s ease-in-out infinite;
 }
+
+/* Stopped, not blanked. The two arcs and the core still say "something is working", which is the
+   one thing this exists to say. The particles go entirely: frozen, all three stack up at the top
+   of the ring, which reads as a rendering fault rather than as a still frame. */
 @media (prefers-reduced-motion: reduce) {
-  .cf-orb-glow,
+  .cf-orb-ring,
   .cf-orb-core {
     animation: none;
+  }
+  .cf-orb-feed {
+    display: none;
   }
 }
 
