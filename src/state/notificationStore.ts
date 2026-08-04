@@ -7,7 +7,15 @@ import type { TranslationKey } from "../lib/i18n/translations";
  * A closed set rather than a free string: every entry has to name its origin in the panel, and a
  * new source must add its label here instead of quietly rendering a blank chip.
  */
-export type NotificationSource = "git" | "stories" | "agents" | "review" | "changes" | "docs";
+export type NotificationSource =
+  | "git"
+  | "stories"
+  | "agents"
+  | "review"
+  | "changes"
+  | "docs"
+  | "chat"
+  | "editor";
 
 /**
  * The menu each source is called in the rest of the app.
@@ -22,6 +30,8 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   review: "stories.tabReview",
   changes: "tabbar.changes",
   docs: "stories.wiki",
+  chat: "notifications.sourceChat",
+  editor: "tabbar.editor",
 };
 
 export interface AppNotification {

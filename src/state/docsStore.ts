@@ -57,6 +57,9 @@ interface DocsState {
   draft: string | null;
   saving: boolean;
 
+  /** The workspace whose pages are loaded. Held so a switch can be told from a remount: the view
+   *  calls `setWorkspace` every time it mounts, and only a real change should close what is open. */
+  workspaceId: string | null;
   setWorkspace: (workspaceId: string | null) => Promise<void>;
   select: (id: string | null) => void;
   toggleProject: (projectId: string) => void;
@@ -98,6 +101,7 @@ interface DocsState {
 
 export const useDocsStore = create<DocsState>((set, get) => ({
   pages: [],
+  workspaceId: null,
   selectedId: null,
   loading: false,
   projectIds: [],
@@ -109,11 +113,18 @@ export const useDocsStore = create<DocsState>((set, get) => ({
   saving: false,
 
   setWorkspace: async (workspaceId) => {
+    if (get().workspaceId === workspaceId) return;
+    // Before anything is dropped, and while `selectedId` and `pages` still point at the workspace
+    // the text was written in: the editor's buffer is the one thing on this screen that lives only
+    // in memory, and a workspace switch used to throw it away without asking. Silent because the
+    // user did not press save — they changed workspace, and a toast about a page they are no
+    // longer looking at is noise.
+    await get().save({ silent: true });
     if (!workspaceId) {
-      set({ pages: [], selectedId: null, draft: null });
+      set({ workspaceId, pages: [], selectedId: null, draft: null });
       return;
     }
-    set({ loading: true });
+    set({ workspaceId, loading: true });
     try {
       const pages = await listDocPages(workspaceId);
       set((s) => {
@@ -346,3 +357,17 @@ function activeWorkspaceId(): string | null {
   if (!id) pushErrorToast(translate("docs.noWorkspace"));
   return id;
 }
+
+/**
+ * A document belongs to the workspace it was written in, so switching workspace puts it down.
+ *
+ * At module scope rather than in the view's effect, for the reason `chainStore` does the same: the
+ * wiki is one sub-tab of three and unmounts as soon as the user looks at another, so an effect
+ * would not run for the case that matters — the page left open, the tab changed, the workspace
+ * changed, and an editor buffer still only in memory. `setWorkspace` writes it before it lets go.
+ */
+useWorkspaceStore.subscribe((state, previous) => {
+  if (state.activeWorkspaceId !== previous.activeWorkspaceId) {
+    void useDocsStore.getState().setWorkspace(state.activeWorkspaceId);
+  }
+});

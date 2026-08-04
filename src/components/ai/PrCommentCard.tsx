@@ -5,6 +5,7 @@ import { Skeleton } from "../common/Skeleton";
 import { draftPrCommentReply } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { notify } from "../../state/notificationStore";
 import { useT } from "../../state/languageStore";
 import { InlineMarkdown, ResolveWithAiButton, ResolvedChip, useResolveWithAi } from "./FindingCard";
 
@@ -84,10 +85,14 @@ export function PrCommentCard({
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
+  // Which conversation a notification is about. The file and line is what identifies a thread to
+  // the person reading it; a thread with no location falls back to the first thing it says.
+  const threadLabel = locationLabel(thread) ?? thread.comments[0]?.content.slice(0, 80);
   const { resolving, resolution, resolve, clearResolution, runId, runStartedAt } = useResolveWithAi(
     projectId,
     prSourceBranch,
     resolutionKey,
+    threadLabel,
   );
   const [closingThread, setClosingThread] = useState(false);
   // Whether the "close this conversation" composer is open, and what it has in it. A comment thread
@@ -118,8 +123,12 @@ export function PrCommentCard({
     try {
       const text = await draftPrCommentReply(threadAsText(thread), replyBody.trim() || null, id);
       setReplyBody(text.trim());
+      notify({ source: "review", titleKey: "notifications.draftDone", status: "success", detail: threadLabel });
     } catch (e) {
-      if (!isCancellation(e)) pushErrorToast(String(e));
+      if (!isCancellation(e)) {
+        pushErrorToast(String(e));
+        notify({ source: "review", titleKey: "notifications.draftFailed", status: "error", detail: threadLabel });
+      }
     } finally {
       useAiRunStore.getState().finish(id);
       setDrafting(false);

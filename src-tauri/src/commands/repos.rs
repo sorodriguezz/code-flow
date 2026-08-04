@@ -76,6 +76,13 @@ pub fn list_projects(db: State<Db>, workspace_id: String) -> Result<Vec<Project>
     queries::list_projects(&conn, &workspace_id).map_err(|e| e.to_string())
 }
 
+/// Writes the order the repositories are shown in, for one workspace. `ids` is the whole list.
+#[tauri::command]
+pub fn reorder_projects(db: State<Db>, workspace_id: String, ids: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::reorder_projects(&conn, &workspace_id, &ids).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn get_project(db: State<Db>, id: String) -> Result<Option<Project>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;

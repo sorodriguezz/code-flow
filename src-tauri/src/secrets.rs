@@ -88,6 +88,25 @@ pub fn gitlab_token_key(host: &str) -> String {
     format!("gitlab-token:{host}")
 }
 
+/// Jira's API token, keyed per site, so a work account and a personal one can be connected at once.
+///
+/// Only the token lives here. Jira Cloud authenticates it against the account **e-mail**, and that
+/// address is not a credential — it sits with the rest of the connection in `app_settings`, the same
+/// split the Azure DevOps organisation list already uses.
+pub fn jira_token_key(site: &str) -> String {
+    format!("jira-token:{site}")
+}
+
+/// monday.com's personal API token, keyed by account slug.
+///
+/// Unlike the four above there is no host to key by — every monday customer is served from the same
+/// API endpoint, so the token *is* the identity of the connection. The slug is read back from the
+/// host when the token is saved rather than typed, which is what stops two accounts colliding under
+/// a name the user invented.
+pub fn monday_token_key(slug: &str) -> String {
+    format!("monday-token:{slug}")
+}
+
 /// API key for an HTTP AI provider (OpenAI and any OpenAI-compatible endpoint). Keyed per
 /// provider id so several can be configured side by side, and kept in the OS credential store
 /// rather than `app_settings` — unlike a binary path or a model id, this is a real credential.

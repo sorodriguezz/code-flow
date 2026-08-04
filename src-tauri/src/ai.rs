@@ -1340,6 +1340,15 @@ No todo criterio quiere ser Gherkin. Decide uno por uno:
 - `ambos` SOLO si de verdad no puedes decidir. En ese caso rellena `gherkin` Y `checklist` con la misma exigencia escrita de las dos formas, y el usuario elegirá cuál se queda.
 Elegir mal cuesta más que dudar: un flujo escrito como lista pierde el disparador, y una lista escrita como escenario acaba en `Dado que el usuario está en la aplicación`.
 
+=== FORMATO DEL TEXTO (Markdown) ===
+Lo que escribas se publica en el tablero (Azure DevOps, Jira, monday) y la aplicación convierte tu Markdown al HTML que esos visores dibujan. Escribe Markdown, y solo este subconjunto:
+- Una lista es una línea que EMPIEZA por `- `. El visor dibuja la viñeta él mismo, así que el `- ` es la marca y no parte del texto.
+- Un guion en medio de una línea no abre una lista: si quieres varios puntos, van en líneas distintas.
+- `**negrita**` para resaltar un dato concreto, con moderación.
+- Comillas invertidas para nombres de campo, rutas y valores literales: `estado`, `src/checkout.ts`, `HTTP 409`.
+- NO uses títulos (`#`), tablas, imágenes, enlaces ni bloques de código con ```.
+- NO numeres los criterios a mano: la aplicación los numera al publicarlos.
+
 === REGLAS ===
 - NO modifiques, crees ni borres ningún archivo.
 - Cada paso o condición describe algo OBSERVABLE. Nada de "Entonces el sistema funciona correctamente": di qué se ve, qué se guarda o qué se responde.
@@ -1380,6 +1389,15 @@ Tu tarea: proponer las tareas de desarrollo que faltan para completar la histori
 - `why` — ¿Para qué? Qué criterio de aceptación o qué comportamiento del sistema queda cubierto cuando esta tarea esté hecha. Si no puedes contestarla, la tarea sobra.
 Las tres son técnicas y las tres son obligatorias.
 
+=== FORMATO DEL TEXTO (Markdown) ===
+`what`, `how` y `why` se publican en la descripción de la tarea, y la aplicación convierte tu Markdown al HTML que el tablero dibuja. Escribe Markdown, y solo este subconjunto:
+- Una lista es una línea que EMPIEZA por `- `. El visor dibuja la viñeta él mismo, así que el `- ` es la marca y no parte del texto.
+- Un guion en medio de una línea no abre una lista: si quieres enumerar archivos o pasos, van en líneas distintas (`\n- `).
+- Comillas invertidas para rutas, funciones y valores literales: `src/checkout/validator.ts`, `applyCoupon()`.
+- `**negrita**` solo para lo que de verdad hay que no perder de vista.
+- NO uses títulos (`#`), tablas, imágenes ni bloques de código con ```.
+- NO repitas la etiqueta (`¿Qué?`, `¿Cómo?`, `¿Para qué?`) dentro del texto: la pone la aplicación.
+
 === REGLAS ===
 - NO modifiques, crees ni borres ningún archivo.
 - `kind` es siempre `dev` en esta ejecución.
@@ -1387,6 +1405,8 @@ Las tres son técnicas y las tres son obligatorias.
 - El título es una acción concreta y corta, empezando por un verbo. Nada de "Trabajar en el checkout".
 - NO repitas una tarea que ya existe en la lista recibida. Si una existente se queda corta, propón la que falta y dilo en `what`.
 - Parte por unidades que una persona pueda terminar: si una tarea toca la base de datos, la API y la interfaz, son tres.
+- `estimate_hours` son las horas que esa tarea suele llevarle a una persona con el contexto ya cargado: incluye escribir el código y sus pruebas, no incluye reuniones ni esperas. Medias horas permitidas (1.5, 3, 6). Si una tarea te sale por encima de 16 h, es que había que partirla en dos: pártela.
+- `priority` es la escala de Azure: 1 crítica (bloquea al resto), 2 normal, 3 puede esperar, 4 opcional. La mayoría son 2. Si todo te sale 1, no has priorizado.
 - La evidencia son rutas reales del repositorio con línea, relativas a la raíz. Sin evidencia, deja `evidence` vacío.
 - Cero tareas propuestas es una respuesta válida cuando la historia ya está cubierta por las que tiene.
 - Escribe SIEMPRE en español.
@@ -1394,7 +1414,8 @@ Las tres son técnicas y las tres son obligatorias.
 === REGLAS ESTRICTAS DE SALIDA ===
 - Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
 - El objeto tiene exactamente esta forma:
-{"tasks":[{"kind":"dev","title":"","what":"","how":"","why":"","evidence":[]}]}
+{"tasks":[{"kind":"dev","title":"","what":"","how":"","why":"","evidence":[],"estimate_hours":0,"priority":2}]}
+- `estimate_hours` es un número en horas (no texto, no "4h") y `priority` un entero de 1 a 4.
 - No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
 
 /// The QA ladder, which is a fixed five-step shape rather than a question for the model.
@@ -1430,16 +1451,27 @@ Tu tarea: devolver EXACTAMENTE estas cinco tareas de QA, en este orden y con est
 - `why` es qué queda garantizado cuando ese paso está hecho.
 - Si la historia no tiene criterios de aceptación, dilo en `how` de la primera tarea en lugar de inventarlos.
 
+=== FORMATO DEL TEXTO (Markdown) ===
+`how` y `why` se publican en la descripción de la tarea, y la aplicación convierte tu Markdown al HTML que el tablero dibuja. Escribe Markdown, y solo este subconjunto:
+- Una lista es una línea que EMPIEZA por `- `. El visor dibuja la viñeta él mismo, así que el `- ` es la marca y no parte del texto.
+- Cuando enumeres criterios o escenarios borde, uno por línea con `- `. Nada de meterlos todos en una frase separados por guiones.
+- Comillas invertidas para valores literales y nombres de campo.
+- NO uses títulos (`#`), tablas, imágenes ni bloques de código con ```.
+- `what` es la descripción base literal: no le añadas marcas de ningún tipo.
+
 === REGLAS ===
 - NO modifiques, crees ni borres ningún archivo.
 - `kind` es siempre `qa` en esta ejecución.
 - Las cinco van siempre, aunque la historia ya tenga tareas de QA parecidas: el usuario decide en pantalla cuáles se queda.
+- `estimate_hours` son las horas que ese paso lleva para ESTA historia: un diseño de casos de una historia con doce criterios no dura lo que el de una con dos. Medias horas permitidas.
+- `priority` es la escala de Azure: 1 crítica, 2 normal, 3 puede esperar, 4 opcional. Los pasos de QA suelen ser 2, y el que bloquea al resto del equipo si no se hace, 1.
 - Escribe SIEMPRE en español.
 
 === REGLAS ESTRICTAS DE SALIDA ===
 - Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
 - El objeto tiene exactamente esta forma:
-{"tasks":[{"kind":"qa","title":"","what":"","how":"","why":"","evidence":[]}]}
+{"tasks":[{"kind":"qa","title":"","what":"","how":"","why":"","evidence":[],"estimate_hours":0,"priority":2}]}
+- `estimate_hours` es un número en horas (no texto, no "4h") y `priority` un entero de 1 a 4.
 - No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
 
 pub const DEFAULT_RESOLVE_CONFLICT_TEMPLATE: &str =

@@ -6,10 +6,11 @@
 
 ### Tu cliente de Git de escritorio, con la IA que tú elijas.
 
-Gestiona repositorios, revisa pull requests y deja que la IA escriba tus commits,
-encuentre errores y resuelva conflictos — todo en una app rápida y nativa. Y cuando
-termines, prueba el endpoint que acabas de cambiar y consulta la base de datos que hay
-detrás sin salir de la ventana. **Y decides qué modelo hace cada cosa.**
+Gestiona repositorios, revisa pull requests, convierte una especificación en backlog listo
+y deja que la IA escriba tus commits, encuentre errores y resuelva conflictos — todo en una
+app rápida y nativa. Y cuando termines, prueba el endpoint que acabas de cambiar y consulta
+la base de datos que hay detrás sin salir de la ventana. **Y decides qué modelo hace cada
+cosa.**
 
 ![versión](https://img.shields.io/badge/versión-1.12.1-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
@@ -22,10 +23,11 @@ detrás sin salir de la ventana. **Y decides qué modelo hace cada cosa.**
 
 ---
 
-CodeFlow reúne en un mismo lugar lo que normalmente está repartido entre tu cliente de
-Git, la web de GitHub/Azure DevOps, un cliente REST, una herramienta de base de datos y
-una terminal aparte. Ves tu historial, preparas y confirmas cambios, abres y revisas pull
-requests, y tienes un asistente de IA que entiende tu repositorio y trabaja contigo.
+CodeFlow reúne en un mismo lugar lo que normalmente está repartido entre tu cliente de Git,
+la web de GitHub/GitLab/Azure DevOps, tu tablero de Jira, monday o Azure, un cliente REST,
+una herramienta de base de datos y una terminal aparte. Ves tu historial, preparas y confirmas cambios, abres
+y revisas pull requests, escribes el backlog de lo que viene después, y tienes un asistente
+de IA que entiende tu repositorio y trabaja contigo.
 
 **Lo que no vas a encontrar en otro cliente:** no te casa con un proveedor de IA. Usa
 varios a la vez y asigna cada tarea al modelo que mejor le va — incluido uno **local**,
@@ -118,6 +120,31 @@ Todo lo que lanza la IA vive en segundo plano, no en la pantalla que lo lanzó.
 - **El cronómetro dice la verdad**: cuenta desde que arrancó la tarea, no desde que
   volviste a mirarla.
 
+## 🤖 Agentes que siguen trabajando cuando tú no
+
+Un agente es un **rol con su propio motor**: nombre, modelo e instrucciones fijas, escritas
+una vez y reutilizadas. El documentador en un modelo barato, el revisor en el mejor que
+tengas — sin tocar los ajustes globales. Es la misma lista que usa el selector de agente del
+chat, así que no hay dos plantillas que mantener.
+
+- **Tareas** — le das a un agente un objetivo y un repositorio, y te vas. Sigue corriendo
+  aunque cambies de vista o de espacio de trabajo, y espera en **Te toca** cuando necesita
+  algo de ti.
+- **Cadenas** — varios agentes uno detrás de otro, cada uno recibiendo el trabajo del
+  anterior: arquitecto → implementador → revisor. Pon una **compuerta** en cualquier paso y
+  la cadena se detiene a enseñarte el mensaje exacto que va a mandar, que puedes editar antes
+  de que salga.
+- **Revisa lo que hizo** contra el diff real de ese repositorio, igual que revisarías tu
+  propio trabajo.
+- **Sube de modelo a mitad de la conversación** cuando la cosa resulta más difícil de lo que
+  parecía.
+- Si un paso falla, la cadena **para y espera**: reintentar, saltar o abortar. Nunca hace
+  bucles ni reintentos por su cuenta.
+
+> ⚠️ Los agentes editan tu copia de trabajo **de verdad**. Cada turno toma un punto de
+> restauración antes de empezar, y solo corre un agente por repositorio a la vez — pero son
+> tus archivos, no una caja de arena. Para trabajar en paralelo, reparte por repositorios.
+
 ## 🌳 Git, de forma visual
 
 - **Grafo de commits** con ramas, para leer el historial de un vistazo.
@@ -130,7 +157,8 @@ Todo lo que lanza la IA vive en segundo plano, no en la pantalla que lo lanzó.
 
 ## 🔀 Pull requests, sin salir de la app
 
-- Conecta **GitHub** y **Azure DevOps** — ambos a la vez, si hace falta.
+- Conecta **GitHub**, **GitLab** y **Azure DevOps** — todos a la vez, si hace falta. Y varias
+  cuentas por host.
 - **Revisa un PR pegando solo su enlace** (⇧⌘L): CodeFlow averigua a cuál de tus repos pertenece
   — aunque esté en otro workspace — y lanza la revisión.
 - ¿El repo no está en tu máquina? **Revísalo igual, sin clonar**: el diff se lee de la API del host.
@@ -139,6 +167,64 @@ Todo lo que lanza la IA vive en segundo plano, no en la pantalla que lo lanzó.
 - **Lista, revisa y comenta** PRs; **aprueba, pide cambios o ciérralos**.
 - **Crea un PR** con título y descripción por IA, también como borrador.
 - Publica los comentarios de la **revisión de IA** directamente en el pull request.
+
+## 📝 De un documento a un backlog
+
+La parte del trabajo que normalmente se come una reunión: convertir una especificación que
+nadie ha leído en historias que alguien pueda construir. Funciona en tres direcciones, y las
+tres comparten tu espacio de trabajo, tu conexión al tablero y tus repositorios.
+
+### Redactar
+
+Apúntalo a una página de wiki, a una carpeta de archivos Markdown o a texto que pegues, y
+recibes un conjunto de historias de usuario — narrativa, criterios de aceptación en
+**Gherkin** listos para Cucumber, estimación, etiquetas y las preguntas que la documentación
+dejó sin responder.
+
+- **Cada historia se puntúa en local, sin modelo de por medio.** Que la narrativa tenga sus
+  tres partes, que ningún escenario tenga dos «Cuando», que todo criterio sea comprobable,
+  que la estimación esté en la serie de Fibonacci. Es una comprobación en la que se puede
+  confiar justamente porque da lo mismo siempre — no es una opinión que cambia en la
+  siguiente corrida.
+- **Verifica contra tu código.** Cada criterio recibe un veredicto — cumple, no cumple,
+  parcial, no se sabe — con el archivo y la línea que lo demuestran. Así te enteras de lo que
+  ya está construido antes de volver a planificarlo.
+- **Exporta un archivo `.feature`** dentro del repositorio, para que QA ejecute los criterios
+  en vez de leerlos.
+- **Publica** las historias que elijas en **Azure Boards**, **Jira** o **monday.com** — todos
+  conectados a la vez, con un tablero elegido por conjunto. En Azure llevan su área, iteración y
+  etiquetas; en Jira sus labels y su estimación; en monday, las columnas que tu tablero tenga de
+  verdad — y el panel te dice cuáles emparejó antes de publicar.
+- Todo es editable antes de eso: corrige un título, reescribe un escenario, tira una historia.
+  Los cambios se guardan al salir del campo.
+
+### Revisar
+
+Para una historia, un bug o un elemento que **ya existe** en el tablero. Pega su enlace — un work
+item de Azure, un `PROJ-123` de Jira, un elemento de monday — elige los repositorios que toca, y descubre qué le falta — en tres pasadas que lanzas
+tú:
+
+1. **Analizar** — qué le falta a la historia, medido con INVEST y testabilidad. Para un bug la
+   vara es otra: reproducible, esperado, obtenido, alcance.
+2. **Criterios** — los escenarios Gherkin que nadie escribió, sobre la historia *tal como está
+   en ese momento*, incluidas tus ediciones del paso anterior.
+3. **Tareas** — el desglose en trabajo de desarrollo y de QA, sabiendo qué tareas ya tiene
+   para no proponerlas dos veces.
+
+Nada llega al tablero por su cuenta. Lo que quieras mandar va a una columna de publicación y
+lo confirmas campo por campo, viendo exactamente qué va a cambiar antes de que cambie.
+
+### Wiki
+
+La dirección contraria: lee el código y escribe la documentación técnica que las otras dos
+pestañas dan por hecho que alguien redactó.
+
+- **Por repositorio** — cómo se construye, se configura, se levanta en local y se despliega,
+  con sus variables de entorno, integraciones y base de datos.
+- **Por espacio de trabajo** — cómo encajan varios repositorios como sistema: quién llama a
+  quién, los contratos entre ellos y dónde están acoplados.
+
+Sale como Markdown editable, y se publica en tu wiki cuando dice lo que quieres decir.
 
 ## 🛰️ Un cliente de API, incorporado
 
@@ -182,8 +268,11 @@ La consulta que necesitas comprobar está a una pestaña de la migración que ac
 
 - Temas **claro, oscuro o del sistema**, con color de acento a elegir.
 - Interfaz en **español e inglés**.
-- **Plantillas de prompt** para commit, análisis, revisión, descripción de PR y conflictos.
+- **Plantillas de prompt** para commit, análisis, revisión, descripción de PR y conflictos —
+  y para redactar historias, verificarlas y generar documentación, para que el backlog salga
+  con el estilo de tu equipo.
 - Por espacio de trabajo: **contexto de revisión**, **instrucciones (.md)** y **Skills**.
+- **Agentes reutilizables** con su propio modelo e instrucciones fijas.
 - **Historial completo** de lo que ha hecho la IA — incluidos los fallos, para que mañana sepas qué pasó.
 
 ## ⚙️ Puesta en marcha
@@ -203,8 +292,10 @@ En **Modelo por tarea** asigna un motor distinto a cada acción. Todo empieza en
 «heredar», así que solo tocas lo que quieras cambiar.
 
 **4. Conecta tu plataforma (opcional)**
-En **Ajustes › Alojamiento Git** conecta **GitHub** o **Azure DevOps** para ver y revisar
-pull requests. El token se guarda en el llavero de tu sistema operativo.
+En **Ajustes › Alojamiento Git** conecta **GitHub**, **GitLab** o **Azure DevOps** para ver y
+revisar pull requests — y, en Azure DevOps, para leer wikis. **Jira** y **monday.com** se conectan en
+la misma pantalla: como no alojan código, aparecen para tu backlog y no para los pull requests. Los
+tokens se guardan en el llavero de tu sistema operativo, nunca en la base de datos de la app.
 
 > 💡 ¿Quieres probarlo sin instalar ningún CLI? Instala [Ollama](https://ollama.com),
 > ejecuta `ollama pull qwen2.5-coder` y selecciónalo en Ajustes. Sin cuentas ni claves.

@@ -81,25 +81,48 @@ async function mayLeaveOpenDocument(): Promise<boolean> {
   return confirmAction(translate("docs.discardConfirm"));
 }
 
+function decode(text: string): string {
+  try {
+    return decodeURIComponent(text.replace(/\+/g, " "));
+  } catch {
+    return text;
+  }
+}
+
 /**
  * A wiki page's path out of whatever the user had on the clipboard.
  *
- * People copy the address bar, not the path — and the address bar carries the path already, in
- * `?pagePath=`. Reading it out is the difference between "paste it and it works" and an error
- * message about a leading slash. Anything else is passed through as typed: a path is what this
- * field is for, and silently reshaping one would be worse than refusing it.
+ * People copy the address bar, not the path, and Azure writes that address two different ways:
+ *
+ * - `…/_wiki/wikis/My.wiki?pagePath=%2FGuías` — the query form, which carries the path outright.
+ * - `…/_wiki/wikis/My.wiki/71978/Transporte` — the friendly form, and the one that used to come out
+ *   wrong. That `71978` is the page's **id**, not a folder: the path is `/Transporte`, and sending
+ *   `/71978/Transporte` gets a 404 naming a page nobody was looking for.
+ *
+ * Anything that is not a wiki URL is passed through as typed — a path is what this field is for,
+ * and silently reshaping one would be worse than refusing it.
+ *
+ * One thing is deliberately *not* undone: Azure spells a space in the friendly form as `-`, and a
+ * page whose name really does contain a hyphen spells that `-` too. Turning them all back into
+ * spaces would break the second case as surely as leaving them breaks the first, so the segments
+ * come back as they were written and the field stays editable. Pages without spaces in their names
+ * — the ordinary case — land exactly right.
  */
 function wikiPathFrom(input: string): string {
   const raw = input.trim();
   if (!raw) return "";
-  const at = raw.indexOf("pagePath=");
-  if (at === -1) return raw;
-  const rest = raw.slice(at + "pagePath=".length).split("&")[0];
-  try {
-    return decodeURIComponent(rest.replace(/\+/g, " "));
-  } catch {
-    return rest;
-  }
+
+  const query = raw.indexOf("pagePath=");
+  if (query !== -1) return decode(raw.slice(query + "pagePath=".length).split("&")[0]);
+
+  // `/_wiki/wikis/` is the marker, on dev.azure.com and on the older `{org}.visualstudio.com` alike.
+  const wikis = raw.split(/\/_wiki\/wikis\//i)[1];
+  if (wikis === undefined) return raw;
+
+  const segments = wikis.split("?")[0].split("#")[0].split("/").filter(Boolean);
+  // [0] is the wiki itself; a page id follows it when the URL names one page rather than the wiki.
+  const rest = /^\d+$/.test(segments[1] ?? "") ? segments.slice(2) : segments.slice(1);
+  return rest.length > 0 ? `/${rest.map(decode).join("/")}` : "";
 }
 
 /**
@@ -1031,7 +1054,7 @@ function PublishPanel({ page, body, width }: { page: DocPage; body: string; widt
               <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("docs.pagePath")}</span>
               <input
                 value={page.page_path}
-                onChange={(e) => save({ pagePath: e.target.value })}
+                onChange={(e) => save({ pagePath: wikiPathFrom(e.target.value) })}
                 placeholder="/Servicios/Checkout API"
                 aria-label={t("docs.pagePath")}
                 className={`${FIELD} font-mono`}

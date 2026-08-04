@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
+import { pushErrorToast } from "./toastStore";
 import type { NewProject, Project, Workspace } from "../types/domain";
 
 const LAST_WORKSPACE_KEY = "last_active_workspace_id";
@@ -26,6 +27,10 @@ interface WorkspaceState {
   removeProject: (id: string, workspaceId: string) => Promise<void>;
   setProjectColor: (id: string, workspaceId: string, color: string) => Promise<void>;
   moveProject: (id: string, fromWorkspaceId: string, toWorkspaceId: string) => Promise<void>;
+  /** Moves one repository to a new position in its workspace's list. Optimistic: the row is where
+   *  the user dropped it before the write goes out, because a list that snaps back for a moment
+   *  reads as a failed drag. */
+  reorderProject: (workspaceId: string, id: string, toIndex: number) => Promise<void>;
   setActiveWorkspace: (id: string) => void;
   setActiveProject: (id: string) => void;
   /** Brings a project into focus from anywhere, crossing workspaces if it lives in another one —
@@ -171,6 +176,29 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
           [toWorkspaceId]: [...(s.projectsByWorkspace[toWorkspaceId] ?? []), moved],
         },
       };
+    });
+  },
+
+  reorderProject: async (workspaceId, id, toIndex) => {
+    const current = get().projectsByWorkspace[workspaceId];
+    if (!current) return;
+    const from = current.findIndex((p) => p.id === id);
+    if (from === -1) return;
+    // `toIndex` is a gap in the list *as it is now*, with the dragged row still in it. Taking the
+    // row out shifts every gap after it down by one, so a drop below the row's own position has to
+    // come down with them — without this, dragging A into the A|B gap of [A,B,C] lands it after C.
+    const target = from < toIndex ? toIndex - 1 : toIndex;
+    const next = [...current];
+    const [moved] = next.splice(from, 1);
+    // Clamped, so a drop past the end lands on the end rather than nowhere.
+    next.splice(Math.max(0, Math.min(target, next.length)), 0, moved);
+    if (next.every((p, at) => p.id === current[at].id)) return;
+
+    set((s) => ({ projectsByWorkspace: { ...s.projectsByWorkspace, [workspaceId]: next } }));
+    await api.reorderProjects(workspaceId, next.map((p) => p.id)).catch((e: unknown) => {
+      pushErrorToast(String(e));
+      // Back to what the database still holds — the optimistic list is now a lie.
+      set((s) => ({ projectsByWorkspace: { ...s.projectsByWorkspace, [workspaceId]: current } }));
     });
   },
 

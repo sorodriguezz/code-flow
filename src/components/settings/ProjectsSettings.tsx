@@ -1,10 +1,71 @@
-import { useEffect, useState } from "react";
-import { Briefcase, Check, ChevronDown, ChevronRight, Pencil, Plus, Trash2, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  Briefcase,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  GripVertical,
+  Pencil,
+  Plus,
+  Trash2,
+  X,
+} from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
 import { useToastStore } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
+
+/** The repository being dragged, and where it would land if the pointer were released now. */
+interface RowDrag {
+  workspaceId: string;
+  id: string;
+  /** Index in the workspace's list the row would take. `null` while the pointer is over nothing
+   *  this drag can land on — another workspace's list, or off the panel entirely. */
+  overIndex: number | null;
+}
+
+/**
+ * The index a drop at `y` lands on, from the rows the list rendered.
+ *
+ * Measured off the DOM rather than tracked per row, because the answer is "above or below the
+ * midpoint of whichever row you are over" and that needs the geometry either way. Rows are tagged
+ * with `data-project-row` so this can find them without threading refs through every one.
+ */
+function dropIndexAt(list: HTMLElement | null, y: number): number | null {
+  if (!list) return null;
+  const rows = [...list.querySelectorAll<HTMLElement>("[data-project-row]")];
+  if (rows.length === 0) return null;
+  const box = list.getBoundingClientRect();
+  // A pointer well outside the list is not hovering a gap in it.
+  if (y < box.top - 24 || y > box.bottom + 24) return null;
+  for (const [at, row] of rows.entries()) {
+    const rect = row.getBoundingClientRect();
+    if (y < rect.top + rect.height / 2) return at;
+  }
+  return rows.length;
+}
+
+/**
+ * The line that says where the row would land, as classes for the row it is drawn against.
+ *
+ * Above the row whose gap is targeted; below the last one for a drop at the end, which has no row
+ * after it to hang a top line on. Nothing is drawn against the row being dragged — it is already
+ * marked by being faded, and a line touching it would point at the gap it is currently filling.
+ */
+function insertionLine(
+  drag: RowDrag | null,
+  workspaceId: string,
+  id: string,
+  at: number,
+  count: number,
+): string {
+  if (drag?.workspaceId !== workspaceId || drag.overIndex === null || drag.id === id) return "";
+  if (drag.overIndex === at) return "shadow-[0_-2px_0_0_var(--cf-accent)]";
+  if (drag.overIndex >= count && at === count - 1) return "shadow-[0_2px_0_0_var(--cf-accent)]";
+  return "";
+}
 
 export function ProjectsSettings() {
   const t = useT();
@@ -23,6 +84,50 @@ export function ProjectsSettings() {
   // second row's field closes the first rather than leaving two drafts on screen.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
+  const reorderProject = useWorkspaceStore((s) => s.reorderProject);
+  const [drag, setDrag] = useState<RowDrag | null>(null);
+  /** One entry per workspace, so a drag can measure the list it started in. */
+  const listRefs = useRef<Record<string, HTMLDivElement | null>>({});
+
+  /**
+   * The whole reorder gesture, on `window` so it keeps tracking when the pointer leaves the row.
+   *
+   * Pointer events and not HTML5 drag-and-drop, for the reason the editor tabs and the file tree
+   * are the same: Tauri's native drag handler on the webview swallows those events before the page
+   * sees them (see `lib/pointerDrag.ts`). A press that never travels `DRAG_THRESHOLD` is not a
+   * drag, so a click on the handle does nothing rather than reordering by a pixel of jitter.
+   */
+  const beginDrag = (e: React.PointerEvent, workspaceId: string, id: string) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const from = { x: e.clientX, y: e.clientY };
+    let started = false;
+
+    const onMove = (ev: PointerEvent) => {
+      if (!started) {
+        if (Math.hypot(ev.clientX - from.x, ev.clientY - from.y) < DRAG_THRESHOLD) return;
+        started = true;
+        setDragCursor(true);
+      }
+      setDrag({ workspaceId, id, overIndex: dropIndexAt(listRefs.current[workspaceId], ev.clientY) });
+    };
+
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      if (!started) return;
+      setDragCursor(false);
+      setDrag(null);
+      const to = dropIndexAt(listRefs.current[workspaceId], ev.clientY);
+      // Dropped on nothing — the row stays where it was, like every list that does this.
+      if (to !== null) void reorderProject(workspaceId, id, to);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
 
   const startRename = (id: string, name: string) => {
     setRenamingId(id);
@@ -172,10 +277,34 @@ export function ProjectsSettings() {
               </div>
 
               {expanded && (
-                <div className="space-y-1.5">
-                  {projects.map((p) => (
-                    <div key={p.id} className="rounded-md border border-[var(--cf-border)] px-2.5 py-1.5">
+                <div
+                  ref={(el) => {
+                    listRefs.current[ws.id] = el;
+                  }}
+                  className="space-y-1.5"
+                >
+                  {projects.map((p, at) => (
+                    <div
+                      key={p.id}
+                      data-project-row
+                      className={`rounded-md border px-2.5 py-1.5 transition-colors ${
+                        drag?.id === p.id
+                          ? "border-[var(--cf-accent)] opacity-40"
+                          : "border-[var(--cf-border)]"
+                      } ${insertionLine(drag, ws.id, p.id, at, projects.length)}`}
+                    >
                       <div className="flex items-center gap-2 text-[12px]">
+                        {/* A handle rather than the whole row: the row carries a colour picker, a
+                            bin and a copy-the-path button, and a press anywhere on it that might
+                            turn into a drag makes all three feel unreliable. */}
+                        <span
+                          onPointerDown={(e) => beginDrag(e, ws.id, p.id)}
+                          title={t("settings.reorderProject")}
+                          aria-label={t("settings.reorderProject")}
+                          className="-ml-1 shrink-0 cursor-grab touch-none text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] active:cursor-grabbing"
+                        >
+                          <GripVertical size={13} />
+                        </span>
                         <ColorSwatchPicker value={p.color} onChange={(color) => setProjectColor(p.id, ws.id, color)} />
                         <span className="flex-1 truncate font-medium">{p.name}</span>
                         <button

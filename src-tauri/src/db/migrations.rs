@@ -338,11 +338,22 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             prompt_template     TEXT NOT NULL DEFAULT '',
             prompt_instructions TEXT NOT NULL DEFAULT '',
             generated_at        TEXT NOT NULL DEFAULT '',
-            -- The Azure Boards target. Empty until the user picks one; every story of the batch
-            -- publishes against it, which is what makes "publish selected" a single decision.
+            -- The board target. Empty until the user picks one; every story of the batch publishes
+            -- against it, which is what makes "publish selected" a single decision.
+            --
+            -- '' | 'azure' | 'jira'. Empty reads as Azure, which is what every set predating Jira
+            -- was, so no backfill exists or is needed.
+            board_provider  TEXT NOT NULL DEFAULT '',
+            -- Three opaque strings the host interprets: on Azure the organisation, the project and
+            -- the work item type; on Jira the site, the project key and the issue type id. Named for
+            -- Azure because that is who defined them first, and shared rather than duplicated
+            -- because two parallel sets of columns would leave two ways to say where a set
+            -- publishes, one of which is always stale.
             ado_org         TEXT NOT NULL DEFAULT '',
             ado_project     TEXT NOT NULL DEFAULT '',
             work_item_type  TEXT NOT NULL DEFAULT '',
+            -- Azure only. Jira has no equivalent, so these stay empty on a Jira target and the
+            -- panel doesn't offer them.
             area_path       TEXT NOT NULL DEFAULT '',
             iteration_path  TEXT NOT NULL DEFAULT '',
             tags            TEXT NOT NULL DEFAULT '',
@@ -385,12 +396,12 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             ON story_batches(workspace_id, updated_at DESC);
 
         -- One user story: what the model proposed, as the user has since edited it, plus where it
-        -- ended up on Azure Boards.
+        -- ended up on the board.
         --
         -- `work_item_id` is the whole point of keeping these rows after a publish: it is what stops
         -- a second click on "publish" creating a duplicate work item, and what lets the card link
         -- to the real thing. A published story is deliberately still editable here — the edit just
-        -- no longer travels to Azure, and the card says so.
+        -- no longer travels to the board, and the card says so.
         CREATE TABLE IF NOT EXISTS story_drafts (
             id            TEXT PRIMARY KEY,
             batch_id      TEXT NOT NULL REFERENCES story_batches(id) ON DELETE CASCADE,
@@ -407,8 +418,13 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             story_points  REAL NOT NULL DEFAULT 0,
             tags          TEXT NOT NULL DEFAULT '',
             notes         TEXT NOT NULL DEFAULT '',
-            -- 0 until published; the Azure work item id afterwards.
+            -- 0 until published; the host's numeric id afterwards. Jira issues have one of these
+            -- as well as their key, which is what let this column stay an integer — and what keeps
+            -- `work_item_id = 0` meaning "not published yet" on both boards.
             work_item_id  INTEGER NOT NULL DEFAULT 0,
+            -- What the board calls it out loud: Jira's 'PROJ-123'. Empty on Azure, where the id is
+            -- the name, and the card falls back to '#id'.
+            work_item_key TEXT NOT NULL DEFAULT '',
             work_item_url TEXT NOT NULL DEFAULT '',
             -- What the last "check this against the code" run concluded for this story.
             -- '' (never checked) | 'pass' | 'partial' | 'fail' | 'unknown'. Rolled up from the
@@ -926,8 +942,36 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_multi_repo_verification_to_story_batches(conn)?;
     add_question_answers_to_story_batches(conn)?;
     add_verification_to_story_drafts(conn)?;
+    add_original_estimate_to_story_drafts(conn)?;
+    add_board_provider_to_stories(conn)?;
     add_grouping_to_agent_tasks(conn)?;
     add_grouping_to_agent_chains(conn)?;
+    Ok(())
+}
+
+/// A story set gained the board it publishes to, and a published story gained the name that board
+/// calls it by.
+///
+/// Both default to the empty string, and that is the whole migration: an empty `board_provider`
+/// reads as Azure — which is what every existing set was — and an empty `work_item_key` reads as "no
+/// key", which is true of every Azure work item, since there the id *is* the name.
+///
+/// Deliberately no new columns for the target itself. `ado_org`, `ado_project` and `work_item_type`
+/// already hold three opaque strings the host interprets, and Jira's site, project key and issue
+/// type are three opaque strings in exactly the same positions; adding a parallel set would leave
+/// two ways to say where a set publishes and one of them wrong. The Azure-only pair (`area_path`,
+/// `iteration_path`) simply stays empty on a Jira target, and the panel doesn't offer it.
+fn add_board_provider_to_stories(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "story_batches")? && !has_column(conn, "story_batches", "board_provider")? {
+        conn.execute_batch(
+            "ALTER TABLE story_batches ADD COLUMN board_provider TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
+    if table_exists(conn, "story_drafts")? && !has_column(conn, "story_drafts", "work_item_key")? {
+        conn.execute_batch(
+            "ALTER TABLE story_drafts ADD COLUMN work_item_key TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
     Ok(())
 }
 
@@ -1117,6 +1161,22 @@ fn add_verification_to_story_drafts(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Stories gained an estimate in *hours*, next to the points they already carried.
+///
+/// Not a replacement for `story_points`: the two answer different questions and Azure keeps both,
+/// points for relative sizing on the backlog and Original Estimate for the hours a sprint plans
+/// against. `0` — what every existing row gets — is what the publish reads as "leave the field
+/// alone", so nothing already written changes shape.
+fn add_original_estimate_to_story_drafts(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "story_drafts")? || has_column(conn, "story_drafts", "original_estimate")?
+    {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "ALTER TABLE story_drafts ADD COLUMN original_estimate REAL NOT NULL DEFAULT 0;",
+    )
 }
 
 /// Shares created before a project could differ per share. They are all on whatever project was

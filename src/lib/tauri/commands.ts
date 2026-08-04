@@ -3,7 +3,7 @@ import type {
   ActivityLogEntry,
   AdoProject,
   AdoRepo,
-  AdoWorkItem,
+  BoardWorkItem,
   AgentChain,
   AgentProject,
   AgentTask,
@@ -42,7 +42,9 @@ import type {
   StashInfo,
   AdoWiki,
   AdoWikiPage,
-  AdoWorkItemType,
+  BoardItemType,
+  BoardProvider,
+  MondayBoardSchema,
   AdoClassificationNode,
   QuestionAnswer,
   StoryBatch,
@@ -68,7 +70,7 @@ import type {
 import type {
   AdoWikiPageDetail,
   AdoWikiPageRef,
-  AdoWorkItemRef,
+  BoardItemRef,
   DocPage,
   DocResult,
   DocScope,
@@ -107,6 +109,10 @@ export const listProjects = (workspaceId: string) =>
 export const getProject = (id: string) => invoke<Project | null>("get_project", { id });
 
 export const deleteProject = (id: string) => invoke<void>("delete_project", { id });
+
+/** Writes the order the workspace's repositories are shown in. `ids` is the whole list, in order. */
+export const reorderProjects = (workspaceId: string, ids: string[]) =>
+  invoke<void>("reorder_projects", { workspaceId, ids });
 
 export const moveProjectToWorkspace = (id: string, workspaceId: string) =>
   invoke<void>("move_project_to_workspace", { id, workspaceId });
@@ -1197,12 +1203,43 @@ export const adoListWikiPages = (org: string, project: string, wiki: string) =>
 export const adoWikiPagesContent = (org: string, project: string, wiki: string, paths: string[]) =>
   invoke<string>("ado_wiki_pages_content", { org, project, wiki, paths });
 
-// ---------- user stories: the Azure Boards target ----------
+// ---------- user stories: the board target ----------
 
-/** The work item types the project's process actually defines. Read from the host: "User Story"
- * exists on Agile, "Product Backlog Item" on Scrum, "Issue" on Basic. */
-export const adoListWorkItemTypes = (org: string, project: string) =>
-  invoke<AdoWorkItemType[]>("ado_list_work_item_types", { org, project });
+/** The kinds of work item the target project offers. Read from the host in both cases: which types
+ * exist depends on the Azure process ("User Story" on Agile, "Product Backlog Item" on Scrum) or on
+ * the Jira issue-type scheme, and neither is knowable from here. */
+export const boardListItemTypes = (provider: BoardProvider, org: string, project: string) =>
+  invoke<BoardItemType[]>("board_list_item_types", { provider, org, project });
+
+/** The Jira projects the saved account can see. Azure's equivalent is `adoListProjects`, which the
+ * pull-request side already had. */
+export const jiraListProjects = (site: string) =>
+  invoke<{ key: string; name: string }[]>("jira_list_projects", { site });
+
+export const setJiraToken = (site: string, token: string) =>
+  invoke<void>("set_jira_token", { site, token });
+
+export const getJiraToken = (site: string) => invoke<string | null>("get_jira_token", { site });
+
+export const deleteJiraToken = (site: string) => invoke<void>("delete_jira_token", { site });
+
+/** Who a monday.com token belongs to. The connect step: monday has one API host for everyone, so
+ * the token is the whole identity and the slug it resolves to is what everything else is keyed by. */
+export const mondayWhoami = (token: string) =>
+  invoke<{ slug: string; name: string }>("monday_whoami", { token });
+
+export const mondayListBoards = (slug: string) =>
+  invoke<{ id: string; name: string }[]>("monday_list_boards", { slug });
+
+/** Which of a board's columns were matched to a story's parts. Shown in the target panel, because a
+ * detection the user can't see is one they can't correct. */
+export const mondayBoardSchema = (slug: string, boardId: string) =>
+  invoke<MondayBoardSchema>("monday_board_schema", { slug, boardId });
+
+export const setMondayToken = (slug: string, token: string) =>
+  invoke<void>("set_monday_token", { slug, token });
+
+export const deleteMondayToken = (slug: string) => invoke<void>("delete_monday_token", { slug });
 
 /** The project's area or iteration tree, flattened, with each node's path already in the form the
  * work item field takes. */
@@ -1245,6 +1282,7 @@ export const renameStoryBatch = (id: string, title: string) =>
  * decision, not one dropdown per card. */
 export const setStoryBatchTarget = (
   id: string,
+  boardProvider: BoardProvider,
   adoOrg: string,
   adoProject: string,
   workItemType: string,
@@ -1254,6 +1292,7 @@ export const setStoryBatchTarget = (
 ) =>
   invoke<void>("set_story_batch_target", {
     id,
+    boardProvider,
     adoOrg,
     adoProject,
     workItemType,
@@ -1321,6 +1360,9 @@ export const saveStoryDraft = (
     acceptanceCriteria: string[];
     priority: number;
     storyPoints: number;
+    /** Hours, next to the points rather than instead of them — Azure keeps both. `0` publishes
+     *  the story without an Original Estimate. */
+    originalEstimate: number;
     tags: string;
     notes: string;
   },
@@ -1333,6 +1375,7 @@ export const saveStoryDraft = (
     acceptanceCriteria: fields.acceptanceCriteria,
     priority: fields.priority,
     storyPoints: fields.storyPoints,
+    originalEstimate: fields.originalEstimate,
     tags: fields.tags,
     notes: fields.notes,
   });
@@ -1369,12 +1412,15 @@ export const publishStories = (batchId: string, storyIds: string[]) =>
 
 // ---------- reviewing a work item that is already on the board ----------
 
-/** Resolves a pasted link or a bare id into the organisation, project and id it names. */
-export const adoParseWorkItemRef = (input: string) =>
-  invoke<WorkItemRef>("ado_parse_work_item_ref", { input });
+/** Resolves whatever was pasted — an Azure link or id, a Jira link or `PROJ-123` — into the host,
+ * the project and the identifier it names, along with which board can act on it. */
+export const boardParseItemRef = (input: string) =>
+  invoke<WorkItemRef>("board_parse_item_ref", { input });
 
-export const adoGetWorkItem = (org: string, id: number) =>
-  invoke<AdoWorkItem>("ado_get_work_item", { org, id });
+/** One work item and the children it already has. Both identifiers travel because the two boards
+ * address an item differently: Azure by number, Jira by key. */
+export const boardGetWorkItem = (provider: BoardProvider, org: string, id: number, key?: string) =>
+  invoke<BoardWorkItem>("board_get_work_item", { provider, org, id, key });
 
 /**
  * Runs one stage of the review against a repository.
@@ -1413,9 +1459,14 @@ export const reviewWorkItem = (input: {
  * Every field is optional and omitting one leaves it alone — which is not the same as sending an
  * empty string, that being a real edit ("the user emptied this").
  */
-export const adoUpdateWorkItem = (input: {
+export const boardUpdateWorkItem = (input: {
+  provider: BoardProvider;
   org: string;
+  /** The container the item lives in, as the host addresses it. Only monday needs it — a column
+   *  write there is addressed by board *and* item — but it travels for all three. */
+  project?: string;
   id: number;
+  key?: string;
   title?: string;
   description?: string;
   reproSteps?: string;
@@ -1424,16 +1475,27 @@ export const adoUpdateWorkItem = (input: {
    *  and renders them here, where the parser is; without this the backend escapes the marks and the
    *  board shows a paragraph starting with two hash characters. */
   proseIsHtml?: boolean;
-}) => invoke<AdoWorkItemRef>("ado_update_work_item", input);
+}) => invoke<BoardItemRef>("board_update_work_item", input);
 
 /** Creates the accepted tasks as children of the story, in order, stopping at the first failure. */
-export const adoCreateChildTasks = (input: {
+export const boardCreateChildTasks = (input: {
+  provider: BoardProvider;
   org: string;
   project: string;
   parentId: number;
+  parentKey?: string;
   workItemType: string;
-  tasks: { title: string; detail: string }[];
-}) => invoke<AdoWorkItemRef[]>("ado_create_child_tasks", input);
+  /** `kind` picks the fields that say what kind of work it is (Azure's Activity, and the team's
+   *  own "task type" field where the project has one). The planning numbers are whatever the user
+   *  left on the card; `0` publishes without that field. */
+  tasks: {
+    title: string;
+    detail: string;
+    kind: "dev" | "qa";
+    priority: number;
+    estimateHours: number;
+  }[];
+}) => invoke<BoardItemRef[]>("board_create_child_tasks", input);
 
 // ---------- technical documentation ----------
 

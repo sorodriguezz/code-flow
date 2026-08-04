@@ -14,6 +14,7 @@ import {
   FileText,
   FlaskConical,
   FolderGit2,
+  Clock,
   Gauge,
   History,
   Layers,
@@ -69,7 +70,7 @@ import { loadAdoConnections } from "../../lib/adoConnections";
 import { htmlToText } from "../../lib/workItemHtml";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
-import type { AdoWorkItemChild, CriterionFormat, WorkItemReviewStage } from "../../types/domain";
+import type { BoardWorkItemChild, CriterionFormat, WorkItemReviewStage } from "../../types/domain";
 
 /**
  * Deliberately carries no width. A `w-full` baked in here loses to — or beats, depending on which
@@ -602,7 +603,7 @@ function StoryBlock({ label, text, empty }: { label: string; text: string; empty
  * with the title in the same batch read, so the chevron opens it here; the browser link stays for
  * editing, which this screen deliberately does not do.
  */
-function ChildTaskRow({ child, at }: { child: AdoWorkItemChild; at: number }) {
+function ChildTaskRow({ child, at }: { child: BoardWorkItemChild; at: number }) {
   const t = useT();
   const isBugChild = kindOf(child.work_item_type) === "bug";
   const content = htmlToText(child.description_html);
@@ -1242,7 +1243,13 @@ function TaskCard({ proposal, at }: { proposal: TaskProposal; at: number }) {
   const open = useWorkItemReviewStore((s) => s.status === "open");
   const [editing, setEditing] = useState(false);
 
-  /** Edits keep `detail` in step with the parts, because `detail` is what gets published. */
+  /**
+   * Edits keep `detail` in step with the parts, because `detail` is what gets published.
+   *
+   * The same Markdown the backend composes in `compose_task_detail` — label bold on its own line,
+   * answer under it — so a task the user edited by hand publishes looking like one that came back
+   * from a run. Both spellings have to move together.
+   */
   const patch = (part: "what" | "how" | "why", value: string) => {
     const next = { ...proposal, [part]: value };
     store().editTaskProposal(proposal.id, {
@@ -1253,7 +1260,7 @@ function TaskCard({ proposal, at }: { proposal: TaskProposal; at: number }) {
         ["¿Para qué?", next.why],
       ]
         .filter(([, text]) => text.trim())
-        .map(([label, text]) => `${label}: ${text.trim()}`)
+        .map(([label, text]) => `**${label}**\n${text.trim()}`)
         .join("\n\n"),
     } as Partial<TaskProposal>);
   };
@@ -1614,6 +1621,85 @@ function BinNote({ icon: Icon, note, tone }: { icon: typeof CircleAlert; note: s
   );
 }
 
+/**
+ * What the board plans a task with: how long, how urgent, and what kind of work it is.
+ *
+ * On the draft row rather than on the proposal card, because the draft is the last thing anyone
+ * looks at before the task exists — an estimate corrected on a proposal that was then sent to the
+ * draft is an edit in the wrong place, and this is the one place that is always the truth.
+ *
+ * The kind is shown, not edited. It comes from which run produced the task, it is already written
+ * into the title as `[DEV]`/`[QA]`, and it is what decides the two fields the board files the task
+ * under — a dropdown here would be a third spelling of the same fact, free to disagree with the
+ * other two.
+ */
+function PlanningRow({
+  priority,
+  hours,
+  kind,
+  readOnly,
+  onPriority,
+  onHours,
+}: {
+  priority: number;
+  hours: number;
+  kind: "dev" | "qa";
+  readOnly: boolean;
+  onPriority: (value: number) => void;
+  onHours: (value: number) => void;
+}) {
+  const t = useT();
+  const field =
+    "w-14 rounded border border-transparent bg-transparent px-1 py-0.5 text-right font-mono text-[11px] tabular-nums text-[var(--cf-text)] outline-none hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent";
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-[var(--cf-border)] pt-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+      <label className="flex items-center gap-1" title={t("huReview.estimateHint")}>
+        <Clock size={10} className="shrink-0" />
+        <span>{t("huReview.estimate")}</span>
+        <input
+          type="number"
+          min={0}
+          step={0.5}
+          readOnly={readOnly}
+          // Empty rather than a hard `0`: an estimate of zero is not a number anybody typed, it is
+          // the field being unset, and showing `0` invites publishing it as one.
+          value={hours > 0 ? hours : ""}
+          placeholder="—"
+          onChange={(e) => onHours(Math.max(0, Number(e.target.value) || 0))}
+          aria-label={t("huReview.estimate")}
+          className={field}
+        />
+        <span>{t("huReview.hoursShort")}</span>
+      </label>
+
+      <label className="flex items-center gap-1" title={t("huReview.priorityHint")}>
+        <Gauge size={10} className="shrink-0" />
+        <span>{t("stories.fieldPriority")}</span>
+        <input
+          type="number"
+          min={0}
+          max={4}
+          step={1}
+          readOnly={readOnly}
+          value={priority > 0 ? priority : ""}
+          placeholder="—"
+          onChange={(e) => onPriority(Math.min(4, Math.max(0, Math.round(Number(e.target.value) || 0))))}
+          aria-label={t("stories.fieldPriority")}
+          className={field}
+        />
+      </label>
+
+      <span
+        title={t("huReview.activityHint")}
+        className="ml-auto shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 py-px font-mono text-[10px]"
+      >
+        {kind === "qa" ? "Testing · QA" : "Development · DEV"}
+      </span>
+    </div>
+  );
+}
+
 function DraftTab() {
   const t = useT();
   const item = useWorkItemReviewStore((s) => s.item);
@@ -1718,7 +1804,7 @@ function DraftTab() {
               className={`group rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
             >
               <div className="flex items-center gap-1.5">
-                <KindChip kind={/^\s*\[qa\]/i.test(task.title) ? "qa" : "dev"} />
+                <KindChip kind={task.kind} />
                 <input
                   value={task.title}
                   readOnly={!open}
@@ -1752,6 +1838,14 @@ function DraftTab() {
                 rows={Math.max(2, task.detail.split("\n").length)}
                 onChange={(e) => store().setDraftTask(at, { detail: e.target.value })}
                 className="mt-1 w-full resize-y bg-transparent text-[11px] leading-snug text-[var(--cf-text-muted)] outline-none read-only:cursor-default"
+              />
+              <PlanningRow
+                priority={task.priority}
+                hours={task.estimateHours}
+                kind={task.kind}
+                readOnly={!open}
+                onPriority={(priority) => store().setDraftTask(at, { priority })}
+                onHours={(estimateHours) => store().setDraftTask(at, { estimateHours })}
               />
             </article>
           ))}
@@ -1890,6 +1984,23 @@ function statusOf(payload: string): string {
 }
 
 /**
+ * What the board calls the reviewed item, when the saved session recorded it.
+ *
+ * Read out of the payload rather than off the row: the history table stores a numeric id, which is
+ * the whole address on Azure and a number nobody recognises on Jira. Empty for an Azure row and for
+ * any row written before sessions carried a key, and the caller falls back to `#id` for both.
+ */
+function keyOf(payload: string): string {
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    const key = (parsed as { item?: { key?: unknown } })?.item?.key;
+    return typeof key === "string" ? key : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Every review this workspace has saved.
  *
  * A dialog rather than the dropdown it used to be. The list is the workspace's record of what has
@@ -1936,7 +2047,9 @@ function HistoryModal({ onClose }: { onClose: () => void }) {
                 >
                   <p className="flex flex-wrap items-center gap-1.5 text-[12.5px] text-[var(--cf-text)]">
                     <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
-                      #{row.work_item_id}
+                      {/* The board's own label when the saved session carries one — a Jira row's
+                          numeric id is real but nobody recognises it. */}
+                      {keyOf(row.payload) || `#${row.work_item_id}`}
                     </span>
                     <span className="min-w-0 truncate font-medium">{row.title}</span>
                     <StatusChip status={statusOf(row.payload)} />
@@ -2278,7 +2391,20 @@ export function WorkItemReviewView() {
                 {title}
               </h2>
               <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-[11px] text-[var(--cf-text-muted)]">
-                <span className="font-mono">#{item.id}</span>
+                {/* The id is what gets pasted into a branch name, a commit message or a chat —
+                    often enough that reading it off the screen and retyping it was the friction.
+                    A button rather than selectable text: the `#` is decoration, not part of the
+                    identifier, and a double-click selection takes it along. */}
+                <button
+                  type="button"
+                  onClick={() => copy(String(item.id), t("huReview.copied"))}
+                  title={t("huReview.copyId")}
+                  aria-label={t("huReview.copyId")}
+                  className="group/id inline-flex items-center gap-1 rounded font-mono transition-colors hover:text-[var(--cf-accent)]"
+                >
+                  #{item.id}
+                  <Copy size={9} className="opacity-0 transition-opacity group-hover/id:opacity-100" />
+                </button>
                 <span>{item.work_item_type}</span>
                 {/* Only when the item actually carries one. A session reopened from an old history
                     row has no state to show, and an empty capsule is a chip that says nothing while

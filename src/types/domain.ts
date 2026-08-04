@@ -689,14 +689,26 @@ export interface AdoWikiPage {
   has_children: boolean;
 }
 
-/** A work item type the project's process defines — "User Story" on Agile, "Product Backlog Item"
- * on Scrum, "Issue" on Basic. Read from the host, never assumed. */
-export interface AdoWorkItemType {
+/**
+ * Which board a story set publishes to, or a review session reads from.
+ *
+ * `""` is a saved target that predates the others and means Azure — the backend applies the same
+ * rule, so an older row and a newer one land on the same client rather than on none.
+ */
+export type BoardProvider = "azure" | "jira" | "monday";
+
+/** Where inside the container a published story lands — "User Story" on Azure Agile, "Story" on
+ * Jira, a group on monday. Read from the host, never assumed. */
+export interface BoardItemType {
   name: string;
+  /** What the create call actually sends: Azure's reference name, Jira's issue type id, monday's
+   * group id. */
   reference_name: string;
   description: string;
-  /** Hex without the leading `#`, as Azure reports it. */
+  /** Hex without the leading `#`. Empty on the hosts that don't colour these. */
   color: string;
+  /** Jira sub-task types, which cannot be created at the top level. Always false elsewhere. */
+  subtask: boolean;
 }
 
 /** One node of the area or iteration tree. `path` is already in the form the work item field
@@ -705,6 +717,29 @@ export interface AdoClassificationNode {
   path: string;
   name: string;
   depth: number;
+}
+
+/**
+ * Which of a monday.com board's columns this app matched to a story's parts.
+ *
+ * Only monday has this, and that is the difference between it and the other two boards rather than
+ * a quirk: Azure has `System.Description` and Jira has `description`, but a monday board has only
+ * the columns somebody made, with ids that are per-board. So the mapping is detected by column
+ * **type** and reported here — a story published into a mapping the user never saw is one they
+ * cannot check.
+ */
+export interface MondayBoardSchema {
+  /** Where the narrative, description and criteria go. `null` means this board cannot hold a story
+   * at all, which the panel says outright rather than discovering at publish time. */
+  text_column: MondayColumn | null;
+  /** Where the estimate goes. `null` publishes stories without their points rather than not at all. */
+  numbers_column: MondayColumn | null;
+}
+
+export interface MondayColumn {
+  id: string;
+  /** The column's own title, so the panel can name which one it picked. */
+  title: string;
 }
 
 /** Where a batch's documentation came from. */
@@ -736,9 +771,15 @@ export interface StoryBatch {
   prompt_template: string;
   prompt_instructions: string;
   generated_at: string;
+  /** Which board this set publishes to. `""` is a set that predates the others and means Azure. */
+  board_provider: BoardProvider | "";
+  /** The target, as three strings the board interprets: on Azure the organisation, the project and
+   * the work item type; on Jira the site, the project key and the issue type id; on monday the
+   * account slug, the board id and the group id. */
   ado_org: string;
   ado_project: string;
   work_item_type: string;
+  /** Azure only — neither of the others has an equivalent, so both stay empty there. */
   area_path: string;
   iteration_path: string;
   /** Applied to every story of the batch, on top of the story's own. */
@@ -821,10 +862,17 @@ export interface StoryDraft {
   priority: number;
   /** `0` leaves the estimate alone. */
   story_points: number;
+  /** Hours, which is a different question from the points above: points size the story against
+   * the rest of the backlog, hours are what a sprint's capacity is planned against. Azure keeps
+   * both. `0` leaves the field alone. */
+  original_estimate: number;
   tags: string;
   notes: string;
-  /** `0` until published; the work item id afterwards, which is what stops a duplicate. */
+  /** `0` until published; the host's numeric id afterwards, which is what stops a duplicate. */
   work_item_id: number;
+  /** What the board calls it out loud — Jira's `PROJ-123`. Empty on Azure, where the card falls
+   * back to `#id`. */
+  work_item_key: string;
   work_item_url: string;
   /** What the last check against the code concluded. `""` means never checked. Rolled up from
    * `verify_criteria`, so it can never disagree with the criteria underneath it. */
@@ -856,17 +904,28 @@ export interface StoryPublishOutcome {
 
 // ---------- reviewing a work item that is already on the board ----------
 
-/** What a pasted work-item reference resolved to. `org`/`project` are null for a bare id. */
+/**
+ * What a pasted work-item reference resolved to. `org`/`project` are null for a bare id or key.
+ *
+ * `id` is `0` on Jira until the issue is fetched: a Jira URL carries `PROJ-123` and never the
+ * numeric id, so the key is the identifier the screen has to hold on to.
+ */
 export interface WorkItemRef {
+  /** The Azure organisation, or the Jira site. */
   org: string | null;
   project: string | null;
   id: number;
+  /** Jira's `PROJ-123`. Empty on the other two, where the numeric id is the whole address. */
+  key: string;
+  provider: BoardProvider;
 }
 
 /** A child of a user story — the tasks it already has. */
-export interface AdoWorkItemChild {
+export interface BoardWorkItemChild {
   id: number;
   url: string;
+  /** Jira's `PROJ-123`; empty on Azure. */
+  key: string;
   work_item_type: string;
   title: string;
   state: string;
@@ -877,21 +936,28 @@ export interface AdoWorkItemChild {
 }
 
 /**
- * One work item as Azure stores it. The prose fields arrive as HTML and are turned into text by
- * `workItemHtml`, which is also what gets sent to the review — so the story that was judged is the
- * one on screen.
+ * One work item, whichever board it came from. The prose fields arrive as HTML — Azure stores them
+ * that way and the Jira client converts on the way out — and are turned into text by `workItemHtml`,
+ * which is also what gets sent to the review, so the story that was judged is the one on screen.
  */
-export interface AdoWorkItem {
+export interface BoardWorkItem {
   id: number;
   url: string;
+  /** Jira's `PROJ-123`; empty on Azure. */
+  key: string;
   work_item_type: string;
   title: string;
   state: string;
   team_project: string;
+  /** The same container, by whatever identifier a write to it takes: Azure's project name, Jira's
+   * project key, monday's numeric board id. Empty falls back to `team_project`, which is what the
+   * first two use for both. */
+  container_id: string;
   description_html: string;
-  /** Where a **Bug** actually keeps its prose — the Agile and Scrum bug forms have no description. */
+  /** Where an Azure **Bug** actually keeps its prose — the Agile and Scrum bug forms have no
+   *  description. Always empty on the other two, which have no such field. */
   repro_steps_html: string;
-  /** Environment, version, OS. Half the context of a bug report lives here. */
+  /** Environment, version, OS. Azure only. */
   system_info_html: string;
   acceptance_criteria_html: string;
   /** `0` means "not estimated", which for a Basic-process item is the only possible answer. */
@@ -899,9 +965,10 @@ export interface AdoWorkItem {
   /** The field the estimate came out of, so the UI can name it instead of inventing one. */
   effort_field: string;
   tags: string;
+  /** Azure only; empty on the other two. */
   area_path: string;
   iteration_path: string;
-  children: AdoWorkItemChild[];
+  children: BoardWorkItemChild[];
 }
 
 /**
@@ -977,6 +1044,15 @@ export interface ProposedTask {
   why: string;
   evidence: string[];
   repo: string;
+  /**
+   * How long the task should take, in hours, and how urgent it is on Azure's 1-4 scale.
+   *
+   * Proposed by the run and editable on the card: what publishes is what is on screen when the
+   * user hits publish. `0` on either means "unset", which publishes the task without the field
+   * rather than with a number nobody stands behind.
+   */
+  estimate_hours: number;
+  priority: number;
 }
 
 /** Tagged by stage, so the caller reads the shape it asked for. */
@@ -1028,10 +1104,12 @@ export interface DocResult {
 }
 
 /** A work item the app just wrote to or created. */
-export interface AdoWorkItemRef {
+export interface BoardItemRef {
   id: number;
   /** The page a human opens, not the REST resource. */
   url: string;
+  /** Jira's `PROJ-123`; empty on Azure. */
+  key: string;
 }
 
 /** Where a published wiki page ended up. */

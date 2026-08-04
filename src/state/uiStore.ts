@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { VcsProvider } from "../types/domain";
+import type { HostingProvider } from "../lib/vcsProviders";
 import type { ApiSettingsTab } from "./apiModalStore";
 // Type-only, so this does not close the loop with `lib/shortcuts`, which imports this store to run
 // its commands. Erased at compile time; there is no runtime cycle.
@@ -47,8 +47,9 @@ interface UiState {
   settingsOpen: boolean;
   settingsSection: SettingsSectionId;
   /** Which provider tab the "Git hosting" settings section should open on — lets a "needs a
-   * GitHub token" hint deep-link straight to the GitHub form instead of the default Azure one. */
-  settingsHostingProvider: VcsProvider;
+   * GitHub token" hint deep-link straight to the GitHub form instead of the default Azure one.
+   * Wider than `VcsProvider` because Jira lives on that screen too without hosting any code. */
+  settingsHostingProvider: HostingProvider;
   /** Repo-relative path the Editor tab should jump to open next; consumed once then cleared. */
   pendingEditorPath: string | null;
   /** 1-based line to reveal in that file — set when the jump came from a search hit, so the
@@ -85,7 +86,7 @@ interface UiState {
   apiWorkspace: ApiWorkspace;
   toggleSidebar: () => void;
   setActiveView: (view: MainView) => void;
-  openSettings: (section: SettingsSectionId, hostingProvider?: VcsProvider) => void;
+  openSettings: (section: SettingsSectionId, hostingProvider?: HostingProvider) => void;
   /**
    * Opens the settings window on the API client's section, optionally on one of its sub-tabs.
    *

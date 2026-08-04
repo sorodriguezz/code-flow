@@ -6,10 +6,10 @@
 
 ### Your desktop Git client, with the AI you choose.
 
-Manage repositories, review pull requests, and let AI write your commits, find bugs and
-resolve conflicts — all in a fast, native app. And when you're done, test the endpoint
-you just changed and query the database behind it without leaving the window.
-**You decide which model does what.**
+Manage repositories, review pull requests, turn a specification into a ready backlog, and
+let AI write your commits, find bugs and resolve conflicts — all in a fast, native app.
+And when you're done, test the endpoint you just changed and query the database behind it
+without leaving the window. **You decide which model does what.**
 
 ![version](https://img.shields.io/badge/version-1.12.1-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
@@ -23,9 +23,10 @@ you just changed and query the database behind it without leaving the window.
 ---
 
 CodeFlow gathers in one place what is normally split between your Git client, the
-GitHub/Azure DevOps website, a REST client, a database tool and a separate terminal. You
-read your history, stage and commit changes, open and review pull requests, and work with
-an AI assistant that understands your repository.
+GitHub/GitLab/Azure DevOps website, your Jira, monday or Azure board, a REST client, a
+database tool and a separate terminal. You read your history, stage and commit changes, open and review pull
+requests, write the backlog for what comes next, and work with an AI assistant that
+understands your repository.
 
 **What you won't find in another client:** it doesn't marry you to one AI provider. Use
 several at once and give each task to the model that suits it — including a **local** one,
@@ -117,6 +118,28 @@ Everything the AI starts lives in the background, not in the screen that started
 - **The timer tells the truth**: it counts from when the task started, not from when you
   looked back at it.
 
+## 🤖 Agents that keep working while you don't
+
+An agent is a **role with its own engine**: a name, a model and standing instructions,
+written once and reused. The documenter on a cheap model, the reviewer on the best one you
+have — without touching your global settings. It's the same roster the chat's agent picker
+uses, so there aren't two lists to keep in step.
+
+- **Tasks** — hand an agent a goal and a repository, then walk away. It keeps running while
+  you switch views or workspaces, and waits at **Your turn** when it needs an answer from you.
+- **Chains** — several agents in a row, each handed the previous one's work: architect →
+  implementer → reviewer. Put a **gate** on any step and the chain stops to show you the exact
+  message it's about to send, which you can edit before it goes.
+- **Review what it did** against the real diff of that repository, the same way you'd review
+  your own work.
+- **Move up a model mid-conversation** when the job turns out harder than it looked.
+- If a step fails the chain **stops and waits**: retry, skip or abort. It never quietly
+  loops or reruns on its own.
+
+> ⚠️ Agents edit your working copy **for real**. Every turn takes a restore point before it
+> starts, and only one agent runs per repository at a time — but these are your files, not a
+> sandbox. To work in parallel, split the work across repositories.
+
 ## 🌳 Git, visually
 
 - **Commit graph** with branches, to read history at a glance.
@@ -129,7 +152,8 @@ Everything the AI starts lives in the background, not in the screen that started
 
 ## 🔀 Pull requests, without leaving the app
 
-- Connect **GitHub** and **Azure DevOps** — both at once, if you need to.
+- Connect **GitHub**, **GitLab** and **Azure DevOps** — all at once, if you need to. Several
+  accounts per host, too.
 - **Review a PR by pasting only its link** (⇧⌘L): CodeFlow works out which of your repos it belongs to
   — even one in another workspace — and starts the review.
 - Repo not on your machine? **Review it anyway, without cloning**: the diff is read from the host's API.
@@ -138,6 +162,61 @@ Everything the AI starts lives in the background, not in the screen that started
 - **List, review and comment** on PRs; **approve, request changes or close** them.
 - **Create a PR** with an AI title and description, as a draft too.
 - Publish the **AI review's** comments straight onto the pull request.
+
+## 📝 From a document to a backlog
+
+The part of the job that usually eats a meeting: turning a specification nobody has read
+into stories somebody can actually build. It works in three directions, and all three share
+your workspace, your board connection and your repositories.
+
+### Write
+
+Point it at a wiki page, a folder of Markdown files or text you paste, and get a set of user
+stories back — narrative, acceptance criteria in **Gherkin** ready for Cucumber, an estimate,
+tags, and the questions the documentation left unanswered.
+
+- **Every story is scored locally, with no model involved.** The narrative has its three
+  parts, no scenario has two "When", every criterion is testable, the estimate is on the
+  Fibonacci scale. It's a check worth trusting precisely because it's the same every time —
+  not an opinion that changes on the next run.
+- **Verify against your code.** Each criterion gets a verdict — met, not met, partial,
+  unknown — backed by the file and line that proves it. That's how you find out what's
+  already built before planning it a second time.
+- **Export a `.feature` file** into the repository, so QA runs the criteria instead of
+  reading them.
+- **Publish** the stories you pick onto **Azure Boards**, **Jira** or **monday.com** — all connected
+  at once, one board chosen per set. On Azure they carry their area, iteration and tags; on Jira
+  their labels and estimate; on monday, whichever columns your board actually has, and the panel
+  tells you which ones it matched before you publish.
+- Everything is editable before any of that: fix a title, rewrite a scenario, drop a story.
+  Edits save as you leave the field.
+
+### Review
+
+For a story, bug or item that **already exists** on the board. Paste its link — an Azure work item,
+a Jira `PROJ-123`, a monday item — pick the repositories it touches, and find out what's missing — in three passes you launch yourself:
+
+1. **Analyse** — what the story lacks, judged on INVEST and testability. For a bug the bar is
+   different: reproducible, expected, actual, scope.
+2. **Criteria** — the Gherkin scenarios nobody wrote, based on the story *as it stands right
+   now*, including your edits from the previous step.
+3. **Tasks** — the breakdown into development and QA work, aware of the tasks it already has
+   so it doesn't propose them twice.
+
+Nothing reaches the board on its own. What you want to send goes into a publish column and
+you confirm it field by field, seeing exactly what will change before it changes.
+
+### Wiki
+
+The opposite direction: it reads the code and writes the technical documentation the other
+two tabs assume somebody wrote.
+
+- **Per repository** — how it's built, configured, run locally and deployed, including its
+  environment variables, integrations and database.
+- **Per workspace** — how several repositories fit together as a system: who calls whom, the
+  contracts between them and where they're coupled.
+
+It comes out as editable Markdown, and publishes to your wiki when it says what you mean.
 
 ## 🛰️ An API client, built in
 
@@ -181,8 +260,11 @@ The query you need to check is one tab away from the migration you just wrote.
 
 - **Light, dark or system** themes, with an accent color of your choosing.
 - Interface in **English and Spanish**.
-- **Prompt templates** for commit, analysis, review, PR description and conflicts.
+- **Prompt templates** for commit, analysis, review, PR description and conflicts — and for
+  writing stories, verifying them and generating documentation, so the backlog comes out in
+  your team's house style.
 - Per workspace: **review context**, **instructions (.md)** and **Skills**.
+- **Reusable agents** with their own model and standing instructions.
 - **A full history** of what the AI has done — failures included, so tomorrow you know what happened.
 
 ## ⚙️ Getting started
@@ -201,8 +283,11 @@ Under **Model per task**, give each action a different engine. Everything starts
 "inherit", so you only touch what you want to change.
 
 **4. Connect your platform (optional)**
-Under **Settings › Git Hosting**, connect **GitHub** or **Azure DevOps** to see and review
-pull requests. The token is stored in your operating system's keychain.
+Under **Settings › Git Hosting**, connect **GitHub**, **GitLab** or **Azure DevOps** to see
+and review pull requests — and, on Azure DevOps, to read wikis. **Jira** and
+**monday.com** connect on the same screen — they host no code, so they appear for your backlog and
+not for pull requests. Tokens are stored in your operating system's keychain, never in the app's own
+database.
 
 > 💡 Want to try it without installing any CLI? Install [Ollama](https://ollama.com), run
 > `ollama pull qwen2.5-coder` and select it in Settings. No accounts, no keys.

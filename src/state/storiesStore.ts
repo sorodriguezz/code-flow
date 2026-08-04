@@ -24,6 +24,7 @@ import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { notify } from "./notificationStore";
 import type {
+  BoardProvider,
   CriterionVerdict,
   QuestionAnswer,
   StoryBatch,
@@ -91,6 +92,9 @@ export interface StoryEdits {
   acceptanceCriteria: string[];
   priority: number;
   storyPoints: number;
+  /** Hours. A different question from the points: points size the story against the backlog,
+   *  hours are what a sprint's capacity is planned against. `0` publishes without one. */
+  originalEstimate: number;
   tags: string;
   notes: string;
 }
@@ -103,6 +107,7 @@ export function editsFrom(story: StoryDraft): StoryEdits {
     acceptanceCriteria: parseCriteria(story.acceptance_criteria),
     priority: story.priority,
     storyPoints: story.story_points,
+    originalEstimate: story.original_estimate,
     tags: story.tags,
     notes: story.notes,
   };
@@ -111,16 +116,26 @@ export function editsFrom(story: StoryDraft): StoryEdits {
 /** What a batch publishes into. Held together because the four fields are read and written as one
  * decision — see `set_story_batch_target` on the backend. */
 export interface BoardsTarget {
+  provider: BoardProvider;
+  /** The Azure organization, or the Jira site. */
   org: string;
   project: string;
   workItemType: string;
+  /** Azure only. Both stay empty on a Jira target, which has no such concept. */
   areaPath: string;
   iterationPath: string;
   tags: string;
 }
 
+/** The board a batch publishes to. An empty column is a batch that predates Jira, and Azure is what
+ * it meant — the same rule the backend applies, so the two cannot disagree about an old row. */
+export function providerOf(batch: StoryBatch): BoardProvider {
+  return batch.board_provider === "jira" ? "jira" : "azure";
+}
+
 export function targetFrom(batch: StoryBatch): BoardsTarget {
   return {
+    provider: providerOf(batch),
     org: batch.ado_org,
     project: batch.ado_project,
     workItemType: batch.work_item_type,
@@ -130,8 +145,8 @@ export function targetFrom(batch: StoryBatch): BoardsTarget {
   };
 }
 
-/** A batch has a target once it names an organization, a project and a type — the three Azure
- * refuses to create a work item without. Area and iteration are genuinely optional: left blank,
+/** A batch has a target once it names a host, a project and a type — the three neither board will
+ * create a work item without. Area and iteration are genuinely optional even on Azure: left blank,
  * the project's own defaults apply, which is usually what a team wants. */
 export function isPublishable(batch: StoryBatch): boolean {
   return (
@@ -330,6 +345,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
         b.id === batchId
           ? {
               ...b,
+              board_provider: target.provider,
               ado_org: target.org,
               ado_project: target.project,
               work_item_type: target.workItemType,
@@ -342,6 +358,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     }));
     await setStoryBatchTarget(
       batchId,
+      target.provider,
       target.org,
       target.project,
       target.workItemType,

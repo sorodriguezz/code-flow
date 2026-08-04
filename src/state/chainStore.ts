@@ -24,6 +24,7 @@ import {
 import { onTurnSettled } from "./agentEvents";
 import { useAgentsStore } from "./agentsStore";
 import { newRunId, useAiRunStore } from "./aiRunStore";
+import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type {
   AgentChain,
@@ -463,6 +464,19 @@ async function settleStep(
   }
   if (chain) applyChain(chain, set);
   await get().refresh(chainId);
+  // The plan reaching its end, as opposed to one of its steps. Each turn already files its own
+  // "agent task finished" through `agentsStore`, but a ten-step chain is the longest-running thing
+  // in the app and "they are all done" is the only one of those eleven notifications the user was
+  // actually waiting for. `aborted` is the user's own stop, so it stays silent like every other
+  // cancelled run; `gated` and `paused` are still in flight and say nothing yet.
+  if (chain?.status === "done" || chain?.status === "failed") {
+    notify({
+      source: "agents",
+      titleKey: chain.status === "done" ? "notifications.chainDone" : "notifications.chainFailed",
+      status: chain.status === "done" ? "success" : "error",
+      detail: chain.title,
+    });
+  }
   // Only `queued` continues. A gate, a failure or a stop all wait for the user — nothing retries
   // by itself anywhere in this file.
   if (chain?.status === "queued") void get().pump(chainId);

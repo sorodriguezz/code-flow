@@ -13,6 +13,7 @@ import {
   Square,
   TriangleAlert,
   Upload,
+  X,
 } from "lucide-react";
 import { OpenQuestionsModal } from "./OpenQuestionsModal";
 import { StoryCard } from "./StoryCard";
@@ -168,6 +169,20 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
               ? t("stories.publishing")
               : t("stories.publishN", { n: selected.length })}
           </HeaderButton>
+          {/* Off the screen, not out of the record — the same gesture the review and the wiki both
+              have. The set exists in the database with every story and every edit in it; this only
+              deselects it, and the list on the left is where it is picked back up. No confirmation,
+              because there is nothing to lose: unlike the wiki's, which guards an unsaved editor
+              buffer, every field here was already written when it lost focus. */}
+          <button
+            type="button"
+            onClick={() => void useStoriesStore.getState().select(null)}
+            title={t("stories.closeBatchHint")}
+            aria-label={t("stories.closeBatch")}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+          >
+            <X size={14} />
+          </button>
         </div>
 
         {/* The exact text the model was given. Collapsed by default and one click away, because

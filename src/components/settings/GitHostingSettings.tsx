@@ -3,25 +3,32 @@ import { motion } from "framer-motion";
 import { AzureDevOpsSettings } from "./AzureDevOpsSettings";
 import { GitHubSettings } from "./GitHubSettings";
 import { GitLabSettings } from "./GitLabSettings";
+import { JiraSettings } from "./JiraSettings";
+import { MondaySettings } from "./MondaySettings";
 import { ActivePill } from "../common/ActivePill";
-import { VCS_PROVIDERS } from "../../lib/vcsProviders";
+import { HOSTING_PROVIDERS, type HostingProvider } from "../../lib/vcsProviders";
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
-import type { VcsProvider } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 /** One hint per provider, as a lookup rather than a ternary: a chain of `?:` silently falls
  * through to Azure for anything it doesn't name, which is exactly how a third provider ends up
  * describing itself as the first. A `Record<VcsProvider, …>` cannot compile with an arm missing. */
-const HINT_KEYS: Record<VcsProvider, TranslationKey> = {
+const HINT_KEYS: Record<HostingProvider, TranslationKey> = {
   azure: "settings.azureHint",
   github: "settings.githubHint",
   gitlab: "settings.gitlabHint",
+  jira: "settings.jiraHint",
+  monday: "settings.mondayHint",
 };
 
-/** The single "Git hosting" settings section — a provider switcher (Azure DevOps / GitHub /
- * GitLab) over whichever provider's credential form is active. Opens on the provider the caller
+/** The single hosting settings section — a provider switcher (Azure DevOps / GitHub / GitLab /
+ * Jira / monday.com) over whichever provider's credential form is active. Opens on the provider the caller
  * deep-linked to (e.g. a "needs a GitLab token" hint jumps straight here with GitLab selected).
+ *
+ * The two boards sit beside the three code hosts because this is where a user connects an external
+ * account, not because they host code — they host none, and nothing on the pull-request side offers
+ * them.
  *
  * Behind a side rail, the same shape as the AI assistant and API client sections down to the
  * sliding pill: one nested-nav idea across the window rather than a row of provider cards here
@@ -30,7 +37,7 @@ const HINT_KEYS: Record<VcsProvider, TranslationKey> = {
 export function GitHostingSettings() {
   const t = useT();
   const initialProvider = useUiStore((s) => s.settingsHostingProvider);
-  const [provider, setProvider] = useState<VcsProvider>(initialProvider);
+  const [provider, setProvider] = useState<HostingProvider>(initialProvider);
 
   // Initial state alone is only read on mount, so a caller that deep-links to a provider while
   // this section is already on screen would be silently ignored — same sync as `ApiSettingsBody`.
@@ -60,7 +67,7 @@ export function GitHostingSettings() {
             scroll position the arriving pane has just changed, and the slide would land as a jump.
             Measuring against the rail — which never moves — keeps it a slide. */}
         <motion.nav layoutRoot className="sticky top-0 w-[168px] shrink-0 self-start">
-          {VCS_PROVIDERS.map(({ id, label, icon: Icon, available }) => (
+          {HOSTING_PROVIDERS.map(({ id, label, icon: Icon, available }) => (
             <button
               key={id}
               disabled={!available}
@@ -104,6 +111,8 @@ export function GitHostingSettings() {
             {provider === "github" && <GitHubSettings />}
             {provider === "gitlab" && <GitLabSettings />}
             {provider === "azure" && <AzureDevOpsSettings />}
+            {provider === "jira" && <JiraSettings />}
+            {provider === "monday" && <MondaySettings />}
           </div>
         </div>
       </div>

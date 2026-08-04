@@ -95,10 +95,42 @@ export function htmlToText(html: string): string {
  * still a field with criteria in it.
  */
 export function splitCriteriaHtml(html: string): string[] {
-  const items = [...html.matchAll(/<li[^>]*>([\s\S]*?)<\/li\s*>/gi)]
-    .map((match) => htmlToText(match[1]))
+  const items = topLevelListItems(html)
+    .map((item) => htmlToText(item))
     .filter((item) => item.trim());
   return items.length > 0 ? items : splitCriteria(htmlToText(html));
+}
+
+/**
+ * The bodies of the outermost `<li>` elements, nested lists left inside them.
+ *
+ * A regex cannot do this, and the one that used to be here got it wrong the moment a criterion had
+ * a list of its own in it: `<li>…<ul><li>a</li><li>b</li></ul></li>` ends at the *inner* `</li>`
+ * for a non-greedy match, so one criterion came back as three fragments with a stray `<ul>` in the
+ * first. That input is the ordinary case now — a criterion written as a checklist is published as a
+ * real nested list, because a list flattened to lines beginning with a dash renders in Azure with
+ * the dash *and* a bullet the host draws in front of it.
+ *
+ * So: walk the item tags, counting depth, and cut only where the depth returns to zero.
+ */
+function topLevelListItems(html: string): string[] {
+  const items: string[] = [];
+  const tags = /<(\/?)li[^>]*>/gi;
+  let depth = 0;
+  let openedAt = 0;
+  for (let tag = tags.exec(html); tag; tag = tags.exec(html)) {
+    const closing = tag[1] === "/";
+    if (!closing) {
+      if (depth === 0) openedAt = tag.index + tag[0].length;
+      depth += 1;
+      continue;
+    }
+    // A stray `</li>` with nothing open is malformed markup, not the end of anything.
+    if (depth === 0) continue;
+    depth -= 1;
+    if (depth === 0) items.push(html.slice(openedAt, tag.index));
+  }
+  return items;
 }
 
 /**

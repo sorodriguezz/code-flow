@@ -420,6 +420,30 @@ pub fn list_projects(conn: &Connection, workspace_id: &str) -> rusqlite::Result<
     rows.collect()
 }
 
+/// Writes the order the user arranged the repositories in.
+///
+/// Scoped to the workspace, so a list from one cannot renumber another's — the ids come from a
+/// screen that shows every workspace at once, and one stale list would otherwise shuffle rows the
+/// user never touched. Ids that do not belong to `workspace_id` simply match nothing.
+///
+/// Positional, not relative: the caller sends the whole list in its new order and each row takes
+/// its index. Anything not in the list keeps the `sort_order` it had, which is why the list is
+/// expected to be the complete one.
+pub fn reorder_projects(
+    conn: &Connection,
+    workspace_id: &str,
+    ids: &[String],
+) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (index, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE projects SET sort_order = ?3 WHERE id = ?1 AND workspace_id = ?2",
+            params![id, workspace_id, index as i64],
+        )?;
+    }
+    tx.commit()
+}
+
 /// Every project in the app, across all workspaces — used to answer "which repo does this
 /// pull-request link belong to?", a question that isn't scoped to whatever workspace happens
 /// to be open.
@@ -2336,7 +2360,7 @@ const BATCH_COLUMNS: &str = "id, workspace_id, project_id, title, source_kind, s
     instructions, provider, model, ado_org, ado_project, work_item_type, area_path, iteration_path, \
     tags, open_questions, status, last_error, created_at, updated_at, \
     verify_provider, verify_model, verified_at, prompt_template, prompt_instructions, generated_at, \
-    verify_project_ids, feature_project_id, question_answers";
+    verify_project_ids, feature_project_id, question_answers, board_provider";
 
 fn map_batch(row: &rusqlite::Row) -> rusqlite::Result<StoryBatch> {
     Ok(StoryBatch {
@@ -2370,12 +2394,14 @@ fn map_batch(row: &rusqlite::Row) -> rusqlite::Result<StoryBatch> {
         verify_project_ids: row.get(27)?,
         feature_project_id: row.get(28)?,
         question_answers: row.get(29)?,
+        board_provider: row.get(30)?,
     })
 }
 
 const DRAFT_COLUMNS: &str = "id, batch_id, seq, title, narrative, description, acceptance_criteria, \
     priority, story_points, tags, notes, work_item_id, work_item_url, status, last_error, created_at, \
-    updated_at, verify_status, verify_summary, verify_criteria, verified_at";
+    updated_at, verify_status, verify_summary, verify_criteria, verified_at, work_item_key, \
+    original_estimate";
 
 fn map_draft(row: &rusqlite::Row) -> rusqlite::Result<StoryDraft> {
     Ok(StoryDraft {
@@ -2400,6 +2426,8 @@ fn map_draft(row: &rusqlite::Row) -> rusqlite::Result<StoryDraft> {
         verify_summary: row.get(18)?,
         verify_criteria: row.get(19)?,
         verified_at: row.get(20)?,
+        work_item_key: row.get(21)?,
+        original_estimate: row.get(22)?,
     })
 }
 
@@ -2735,6 +2763,7 @@ pub fn create_story_batch(
         prompt_template: String::new(),
         prompt_instructions: String::new(),
         generated_at: String::new(),
+        board_provider: String::new(),
         ado_org: String::new(),
         ado_project: String::new(),
         work_item_type: String::new(),
@@ -2782,6 +2811,7 @@ pub fn rename_story_batch(conn: &Connection, id: &str, title: &str) -> rusqlite:
 pub fn set_story_batch_target(
     conn: &Connection,
     id: &str,
+    board_provider: &str,
     ado_org: &str,
     ado_project: &str,
     work_item_type: &str,
@@ -2790,10 +2820,20 @@ pub fn set_story_batch_target(
     tags: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE story_batches SET ado_org = ?2, ado_project = ?3, work_item_type = ?4, area_path = ?5,
-            iteration_path = ?6, tags = ?7, updated_at = ?8
+        "UPDATE story_batches SET board_provider = ?2, ado_org = ?3, ado_project = ?4,
+            work_item_type = ?5, area_path = ?6, iteration_path = ?7, tags = ?8, updated_at = ?9
          WHERE id = ?1",
-        params![id, ado_org, ado_project, work_item_type, area_path, iteration_path, tags, now()],
+        params![
+            id,
+            board_provider,
+            ado_org,
+            ado_project,
+            work_item_type,
+            area_path,
+            iteration_path,
+            tags,
+            now()
+        ],
     )?;
     Ok(())
 }
@@ -2862,6 +2902,8 @@ pub struct NewStoryDraft {
     pub acceptance_criteria: String,
     pub priority: i64,
     pub story_points: f64,
+    /// Hours, alongside the points rather than instead of them. `0.0` is "not estimated".
+    pub original_estimate: f64,
     pub tags: String,
     pub notes: String,
 }
@@ -2908,9 +2950,11 @@ fn insert_story_draft(
         acceptance_criteria: story.acceptance_criteria.clone(),
         priority: story.priority,
         story_points: story.story_points,
+        original_estimate: story.original_estimate,
         tags: story.tags.clone(),
         notes: story.notes.clone(),
         work_item_id: 0,
+        work_item_key: String::new(),
         work_item_url: String::new(),
         verify_status: String::new(),
         verify_summary: String::new(),
@@ -2923,14 +2967,14 @@ fn insert_story_draft(
     };
     conn.execute(
         "INSERT INTO story_drafts (id, batch_id, seq, title, narrative, description, acceptance_criteria,
-            priority, story_points, tags, notes, work_item_id, work_item_url, status, last_error,
-            created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            priority, story_points, original_estimate, tags, notes, work_item_id, work_item_url, status,
+            last_error, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             draft.id, draft.batch_id, draft.seq, draft.title, draft.narrative, draft.description,
-            draft.acceptance_criteria, draft.priority, draft.story_points, draft.tags, draft.notes,
-            draft.work_item_id, draft.work_item_url, draft.status, draft.last_error, draft.created_at,
-            draft.updated_at,
+            draft.acceptance_criteria, draft.priority, draft.story_points, draft.original_estimate,
+            draft.tags, draft.notes, draft.work_item_id, draft.work_item_url, draft.status,
+            draft.last_error, draft.created_at, draft.updated_at,
         ],
     )?;
     Ok(draft)
@@ -2955,6 +2999,7 @@ pub fn add_story_draft(conn: &Connection, batch_id: &str) -> rusqlite::Result<St
             acceptance_criteria: "[]".to_string(),
             priority: 0,
             story_points: 0.0,
+            original_estimate: 0.0,
             tags: String::new(),
             notes: String::new(),
         },
@@ -2978,6 +3023,7 @@ pub fn save_story_draft(
     acceptance_criteria: &str,
     priority: i64,
     story_points: f64,
+    original_estimate: f64,
     tags: &str,
     notes: &str,
 ) -> rusqlite::Result<Option<StoryDraft>> {
@@ -2990,9 +3036,12 @@ pub fn save_story_draft(
         .optional()?;
     conn.execute(
         "UPDATE story_drafts SET title = ?2, narrative = ?3, description = ?4, acceptance_criteria = ?5,
-            priority = ?6, story_points = ?7, tags = ?8, notes = ?9, updated_at = ?10
+            priority = ?6, story_points = ?7, original_estimate = ?8, tags = ?9, notes = ?10, updated_at = ?11
          WHERE id = ?1",
-        params![id, title, narrative, description, acceptance_criteria, priority, story_points, tags, notes, now()],
+        params![
+            id, title, narrative, description, acceptance_criteria, priority, story_points,
+            original_estimate, tags, notes, now()
+        ],
     )?;
     if previous_criteria.as_deref().is_some_and(|before| before != acceptance_criteria) {
         clear_story_verification(conn, id)?;
@@ -3101,13 +3150,14 @@ pub fn mark_story_published(
     conn: &Connection,
     id: &str,
     work_item_id: i64,
+    work_item_key: &str,
     work_item_url: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE story_drafts SET work_item_id = ?2, work_item_url = ?3, status = 'published',
-            last_error = '', updated_at = ?4
+        "UPDATE story_drafts SET work_item_id = ?2, work_item_key = ?3, work_item_url = ?4,
+            status = 'published', last_error = '', updated_at = ?5
          WHERE id = ?1",
-        params![id, work_item_id, work_item_url, now()],
+        params![id, work_item_id, work_item_key, work_item_url, now()],
     )?;
     Ok(())
 }
@@ -3311,6 +3361,7 @@ mod tests {
             acceptance_criteria: r#"["Dado …\nCuando …\nEntonces …"]"#.to_string(),
             priority: 2,
             story_points: 3.0,
+            original_estimate: 4.0,
             tags: "checkout".to_string(),
             notes: String::new(),
         }
@@ -3325,7 +3376,8 @@ mod tests {
         let first = replace_story_drafts(&conn, &batch.id, &[proposal("Pagar"), proposal("Cancelar")]).unwrap();
         assert_eq!(first.len(), 2);
 
-        mark_story_published(&conn, &first[0].id, 4321, "https://dev.azure.com/x/_workitems/edit/4321").unwrap();
+        mark_story_published(&conn, &first[0].id, 4321, "", "https://dev.azure.com/x/_workitems/edit/4321")
+            .unwrap();
 
         let second = replace_story_drafts(&conn, &batch.id, &[proposal("Reembolsar")]).unwrap();
         assert_eq!(second.len(), 2, "the published story is kept, the unpublished one replaced");
@@ -3343,15 +3395,16 @@ mod tests {
     fn editing_a_published_story_keeps_its_work_item() {
         let (conn, batch) = story_fixture();
         let stories = replace_story_drafts(&conn, &batch.id, &[proposal("Pagar")]).unwrap();
-        mark_story_published(&conn, &stories[0].id, 99, "https://x/99").unwrap();
+        mark_story_published(&conn, &stories[0].id, 99, "", "https://x/99").unwrap();
 
         let saved = save_story_draft(
-            &conn, &stories[0].id, "Pagar con tarjeta", "Como usuario…", "otro contexto", "[]", 1, 5.0, "pagos", "",
+            &conn, &stories[0].id, "Pagar con tarjeta", "Como usuario…", "otro contexto", "[]", 1, 5.0, 6.0, "pagos", "",
         )
         .unwrap()
         .expect("the story still exists");
         assert_eq!(saved.title, "Pagar con tarjeta");
         assert_eq!(saved.story_points, 5.0);
+        assert_eq!(saved.original_estimate, 6.0);
         assert_eq!(saved.work_item_id, 99);
         assert_eq!(saved.status, "published");
     }
@@ -3371,7 +3424,7 @@ mod tests {
         // Same criteria, different title: the verification still describes what was checked.
         let renamed = save_story_draft(
             &conn, id, "Pagar con tarjeta", "Como usuario…", "contexto",
-            r#"["Dado …\nCuando …\nEntonces …"]"#, 2, 3.0, "checkout", "",
+            r#"["Dado …\nCuando …\nEntonces …"]"#, 2, 3.0, 4.0, "checkout", "",
         )
         .unwrap()
         .expect("the story still exists");
@@ -3381,7 +3434,7 @@ mod tests {
         // A criterion rewritten: every verdict on the row is now about text that no longer exists.
         let edited = save_story_draft(
             &conn, id, "Pagar con tarjeta", "Como usuario…", "contexto",
-            r#"["Escenario: otro\nDado …"]"#, 2, 3.0, "checkout", "",
+            r#"["Escenario: otro\nDado …"]"#, 2, 3.0, 4.0, "checkout", "",
         )
         .unwrap()
         .expect("the story still exists");

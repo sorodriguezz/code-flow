@@ -4,6 +4,7 @@ import { inlineEditWithAi } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { RunEngineChip } from "../ai/AiRunLog";
 import { pushErrorToast } from "../../state/toastStore";
+import { notify } from "../../state/notificationStore";
 import { useT } from "../../state/languageStore";
 
 /** Ctrl+I: describe the change in words, and the selected code is rewritten in place.
@@ -55,8 +56,25 @@ export function InlineEditWidget({
       const replacement = await inlineEditWithAi(filePath, fileContent, selection, text, runId);
       onApply(replacement);
       onClose();
+      // The shortest-lived run of the lot, and the one most likely to land while the user is still
+      // watching — but an edit over a large selection can take a while, and closing the widget on
+      // apply means there is nothing left on screen to say it worked.
+      notify({
+        source: "editor",
+        titleKey: "notifications.inlineEditDone",
+        status: "success",
+        detail: filePath,
+      });
     } catch (e) {
-      if (!isCancellation(e)) pushErrorToast(String(e));
+      if (!isCancellation(e)) {
+        pushErrorToast(String(e));
+        notify({
+          source: "editor",
+          titleKey: "notifications.inlineEditFailed",
+          status: "error",
+          detail: filePath,
+        });
+      }
     } finally {
       useAiRunStore.getState().finish(runId);
       setRunning(false);

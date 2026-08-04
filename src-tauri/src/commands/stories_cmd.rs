@@ -1,14 +1,15 @@
-//! The user-stories workspace: read documentation, derive a backlog, publish it to Azure Boards.
+//! The user-stories workspace: read documentation, derive a backlog, publish it to a board.
 //!
 //! Three concerns meet here and are deliberately kept apart:
 //!
-//! - **Reading** the source. An Azure DevOps wiki through [`crate::boards`]; local Markdown and
-//!   pasted text arrive already gathered from the frontend (which has the file reader and the
+//! - **Reading** the source. An Azure DevOps wiki through [`crate::boards::azure`]; local Markdown
+//!   and pasted text arrive already gathered from the frontend (which has the file reader and the
 //!   textarea), so this layer never has to know which one it was.
 //! - **Deriving** the stories. One text-in/JSON-out call through [`crate::ai`], routed like every
 //!   other AI action ([`AiTask::Stories`]) and cancellable like every other run.
-//! - **Publishing**. One work item per story, with the story's own row recording what it became —
-//!   which is what makes a second click on "publish" a no-op rather than a duplicate backlog.
+//! - **Publishing**. One work item per story, through [`crate::boards`] so the same button reaches
+//!   Azure Boards or Jira, with the story's own row recording what it became — which is what makes a
+//!   second click on "publish" a no-op rather than a duplicate backlog.
 //!
 //! Nothing here touches a repository. A requirement is written before the code that satisfies it,
 //! and the whole screen is usable in a workspace that has no project at all.
@@ -21,8 +22,9 @@ use tauri::{AppHandle, State};
 
 use crate::ai;
 use crate::ai_locks;
-use crate::boards;
-use crate::commands::ado_cmd::{pat_for_org};
+use crate::boards::{self, azure, BoardAuth, BoardProvider};
+use crate::commands::ado_cmd::pat_for_org;
+use crate::secrets;
 use crate::commands::claude_cmd::{load_ai_config, load_ai_config_for, AiTask};
 use crate::commands::skills_cmd::sync_skills_into_project;
 use crate::db::{
@@ -31,12 +33,122 @@ use crate::db::{
     Db,
 };
 
+// ---------- credentials for a board ----------
+
+/// One saved Jira connection. The token is not here — it lives in the OS keychain, keyed by site.
+#[derive(Debug, Clone, Deserialize)]
+struct JiraConnection {
+    site: String,
+    #[serde(default)]
+    email: String,
+}
+
+/// The account e-mail saved for a Jira site.
+///
+/// Jira Cloud authenticates `email:token`, and only the token half is a secret — so the e-mail rides
+/// with the rest of the connection in `app_settings` rather than in the keychain, which is the same
+/// split the Azure DevOps organisation list already uses. Matched case-insensitively and against the
+/// normalised site, so a connection saved as `https://acme.atlassian.net/` still answers for `acme`.
+fn jira_email(db: &State<Db>, site: &str) -> Result<String, String> {
+    let raw = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_setting(&conn, "jira_connections").map_err(|e| e.to_string())?
+    }
+    .unwrap_or_default();
+    let wanted = boards::jira::normalize_site(site);
+    let saved: Vec<JiraConnection> = serde_json::from_str(&raw).unwrap_or_default();
+    saved
+        .into_iter()
+        .find(|c| boards::jira::normalize_site(&c.site) == wanted)
+        .map(|c| c.email)
+        .ok_or_else(|| format!("No hay ninguna conexión de Jira guardada para \"{site}\" — conéctala en Ajustes"))
+}
+
+/// The credentials for one board, whichever product it is.
+///
+/// The one place that knows a PAT and an e-mail-plus-token are the same thing to a caller. Every
+/// board command goes through it, so a provider added later has exactly one place to be taught how
+/// it authenticates rather than one per command.
+fn board_auth(db: &State<Db>, provider: BoardProvider, org: &str) -> Result<BoardAuth, String> {
+    match provider {
+        BoardProvider::Azure => Ok(BoardAuth::pat(pat_for_org(org)?)),
+        // One API host for every customer, so the account slug is the key and nothing has to be
+        // resolved from a URL. The token is the whole credential.
+        BoardProvider::Monday => {
+            let slug = org.trim();
+            let token = secrets::get_secret(&secrets::monday_token_key(slug))?.ok_or_else(|| {
+                format!("No hay ningún token de monday.com guardado para \"{org}\" — conéctalo en Ajustes")
+            })?;
+            Ok(BoardAuth::raw(token))
+        }
+        BoardProvider::Jira => {
+            let site = boards::jira::normalize_site(org);
+            let token = secrets::get_secret(&secrets::jira_token_key(&site))?.ok_or_else(|| {
+                format!("No hay ningún token de Jira guardado para \"{org}\" — conéctalo en Ajustes")
+            })?;
+            Ok(BoardAuth::basic(jira_email(db, org)?, token))
+        }
+    }
+}
+
+/// Who a monday.com token belongs to.
+///
+/// The connect step, and the only command that takes a raw token as an argument: there is one API
+/// host for every customer, so the token is the whole identity and the account slug it resolves to
+/// is what everything afterwards is keyed by. Verifying it here means a token that cannot reach
+/// monday is rejected in the settings form rather than at the first publish.
+#[tauri::command]
+pub async fn monday_whoami(token: String) -> Result<boards::monday::MondayAccount, String> {
+    if token.trim().is_empty() {
+        return Err("Falta el token de monday.com".to_string());
+    }
+    boards::monday::whoami(&BoardAuth::raw(token.trim())).await
+}
+
+/// The monday.com boards the saved account can see.
+#[tauri::command]
+pub async fn monday_list_boards(
+    db: State<'_, Db>,
+    slug: String,
+) -> Result<Vec<boards::monday::MondayBoard>, String> {
+    let auth = board_auth(&db, BoardProvider::Monday, &slug)?;
+    boards::monday::list_boards(&auth).await
+}
+
+/// Which of a board's columns this app matched to a story's parts.
+///
+/// Surfaced to the panel on purpose. monday has no schema, so the mapping is detected by column
+/// type — and a detection the user cannot see is one they cannot correct. Showing "descripción →
+/// Notas" is what turns a guess into something checkable.
+#[tauri::command]
+pub async fn monday_board_schema(
+    db: State<'_, Db>,
+    slug: String,
+    board_id: String,
+) -> Result<boards::monday::BoardSchema, String> {
+    let auth = board_auth(&db, BoardProvider::Monday, &slug)?;
+    boards::monday::board_schema(&board_id, &auth).await
+}
+
+/// The Jira projects the saved account can see, for the target picker.
+///
+/// Azure's equivalent already exists as `ado_list_projects` on the pull-request side and is reused;
+/// this is the one list Jira needed of its own, because there is nothing on the VCS side to borrow.
+#[tauri::command]
+pub async fn jira_list_projects(
+    db: State<'_, Db>,
+    site: String,
+) -> Result<Vec<boards::jira::JiraProject>, String> {
+    let auth = board_auth(&db, BoardProvider::Jira, &site)?;
+    boards::jira::list_projects(&site, &auth).await
+}
+
 // ---------- reading the source ----------
 
 #[tauri::command]
-pub async fn ado_list_wikis(org: String, project: String) -> Result<Vec<boards::AdoWiki>, String> {
+pub async fn ado_list_wikis(org: String, project: String) -> Result<Vec<azure::AdoWiki>, String> {
     let pat = pat_for_org(&org)?;
-    boards::list_wikis(&org, &project, &pat).await
+    azure::list_wikis(&org, &project, &pat).await
 }
 
 #[tauri::command]
@@ -44,9 +156,9 @@ pub async fn ado_list_wiki_pages(
     org: String,
     project: String,
     wiki: String,
-) -> Result<Vec<boards::AdoWikiPage>, String> {
+) -> Result<Vec<azure::AdoWikiPage>, String> {
     let pat = pat_for_org(&org)?;
-    boards::list_wiki_pages(&org, &project, &wiki, &pat).await
+    azure::list_wiki_pages(&org, &project, &wiki, &pat).await
 }
 
 /// The selected pages' Markdown, concatenated under their own paths. One command rather than one
@@ -62,7 +174,7 @@ pub async fn ado_wiki_pages_content(
         return Err("No hay páginas seleccionadas".to_string());
     }
     let pat = pat_for_org(&org)?;
-    boards::get_wiki_pages_combined(&org, &project, &wiki, &paths, &pat).await
+    azure::get_wiki_pages_combined(&org, &project, &wiki, &paths, &pat).await
 }
 
 /// Publishes one page to a wiki the user picked.
@@ -78,20 +190,28 @@ pub async fn ado_publish_wiki_page(
     wiki: String,
     path: String,
     content: String,
-) -> Result<boards::AdoWikiPageRef, String> {
+) -> Result<azure::AdoWikiPageRef, String> {
     let pat = pat_for_org(&org)?;
-    boards::put_wiki_page(&org, &project, &wiki, &path, &content, &pat).await
+    azure::put_wiki_page(&org, &project, &wiki, &path, &content, &pat).await
 }
 
-// ---------- the Azure Boards target ----------
+// ---------- the board target ----------
 
+/// The kinds of work item the target project offers.
+///
+/// `provider` rather than a command per board: the picker is one control on one panel, and the two
+/// hosts answer the same question with the same shape. Absent means Azure, which is what every saved
+/// target meant before Jira existed here.
 #[tauri::command]
-pub async fn ado_list_work_item_types(
+pub async fn board_list_item_types(
+    db: State<'_, Db>,
+    provider: Option<String>,
     org: String,
     project: String,
-) -> Result<Vec<boards::AdoWorkItemType>, String> {
-    let pat = pat_for_org(&org)?;
-    boards::list_work_item_types(&org, &project, &pat).await
+) -> Result<Vec<boards::WorkItemType>, String> {
+    let provider = BoardProvider::parse(provider.as_deref().unwrap_or_default());
+    let auth = board_auth(&db, provider, &org)?;
+    boards::list_work_item_types(provider, &org, &project, &auth).await
 }
 
 /// `structure` is `areas` or `iterations`.
@@ -100,9 +220,9 @@ pub async fn ado_list_classification_nodes(
     org: String,
     project: String,
     structure: String,
-) -> Result<Vec<boards::AdoClassificationNode>, String> {
+) -> Result<Vec<azure::AdoClassificationNode>, String> {
     let pat = pat_for_org(&org)?;
-    boards::list_classification_nodes(&org, &project, &structure, &pat).await
+    azure::list_classification_nodes(&org, &project, &structure, &pat).await
 }
 
 // ---------- reviewing a story that is already on the board ----------
@@ -112,16 +232,29 @@ pub async fn ado_list_classification_nodes(
 /// Kept in Rust rather than done in the frontend so there is one answer to "what counts as a work
 /// item reference" — the same one that then has to fetch it.
 #[tauri::command]
-pub fn ado_parse_work_item_ref(input: String) -> Result<boards::WorkItemRef, String> {
-    boards::parse_work_item_ref(&input)
-        .ok_or_else(|| "Pega el enlace de un work item de Azure DevOps, o su número".to_string())
+pub fn board_parse_item_ref(input: String) -> Result<boards::WorkItemRef, String> {
+    boards::parse_work_item_ref(&input).ok_or_else(|| {
+        "Pega el enlace de un work item de Azure DevOps o de una incidencia de Jira, o su número o \
+         clave"
+            .to_string()
+    })
 }
 
 /// One work item and the children it already has, for the review screen to read.
+///
+/// Takes both an id and a key because the two boards address an item differently — Azure by number,
+/// Jira by `PROJ-123` — and the screen holds whichever one the pasted reference yielded.
 #[tauri::command]
-pub async fn ado_get_work_item(org: String, id: i64) -> Result<boards::AdoWorkItem, String> {
-    let pat = pat_for_org(&org)?;
-    boards::get_work_item(&org, id, &pat).await
+pub async fn board_get_work_item(
+    db: State<'_, Db>,
+    provider: Option<String>,
+    org: String,
+    id: i64,
+    key: Option<String>,
+) -> Result<boards::WorkItem, String> {
+    let provider = BoardProvider::parse(provider.as_deref().unwrap_or_default());
+    let auth = board_auth(&db, provider, &org)?;
+    boards::get_work_item(provider, &org, id, key.as_deref().unwrap_or_default(), &auth).await
 }
 
 /// One INVEST letter and how the story does on it.
@@ -212,17 +345,34 @@ pub struct ProposedTask {
     /// See [`ReviewFinding::repo`].
     #[serde(default)]
     pub repo: String,
+    /// How long the task should take, in hours, and how urgent it is on Azure's 1–4 scale.
+    ///
+    /// Proposed rather than decided: they go on screen as editable fields and publish as whatever
+    /// the user left them at. `0` is "the model didn't say", which publishes the task without the
+    /// field rather than with a number nobody stands behind.
+    #[serde(default)]
+    pub estimate_hours: f64,
+    #[serde(default)]
+    pub priority: i64,
 }
 
 /// The three questions as the one block of text a work item can hold.
 ///
 /// Only the parts that came back are printed: a QA task whose `how` the model left empty should
 /// publish as two labelled lines, not as three with a heading over nothing.
+///
+/// Markdown, and the label on a line of its own rather than inline: the boards store this field as
+/// HTML and CodeFlow renders the Markdown on the way out, so the label arrives as a bold lead-in
+/// and an answer written as a list arrives as a list. Inline (`**¿Cómo?** - a`) it would not — a
+/// bullet only opens a list at the start of a line.
+///
+/// The frontend composes the same string when the user edits a part by hand (`TaskCard`), so the
+/// two spellings have to stay identical or an edited task publishes differently from a generated one.
 pub fn compose_task_detail(what: &str, how: &str, why: &str) -> String {
     [("¿Qué?", what), ("¿Cómo?", how), ("¿Para qué?", why)]
         .into_iter()
         .filter(|(_, value)| !value.trim().is_empty())
-        .map(|(label, value)| format!("{label}: {}", value.trim()))
+        .map(|(label, value)| format!("**{label}**\n{}", value.trim()))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
@@ -318,6 +468,38 @@ struct RawTask {
     why: String,
     #[serde(default)]
     evidence: Vec<String>,
+    /// Accepted under either spelling: the prompt asks for `estimate_hours`, and a model that has
+    /// just been told to write in hours reaches for `hours` often enough to be worth catching
+    /// rather than dropping the estimate and making the user type it again.
+    #[serde(default, alias = "hours", alias = "estimate")]
+    estimate_hours: f64,
+    #[serde(default)]
+    priority: i64,
+}
+
+/// Azure's priority scale is 1 (highest) to 4 (lowest), and it refuses anything outside it — so a
+/// model that answered `0`, `5` or `P2` loses its answer here rather than the whole task at the
+/// server. `0` means "nothing usable was said", which publishes without the field.
+fn clamped_priority(value: i64) -> i64 {
+    match value {
+        1..=4 => value,
+        _ => 0,
+    }
+}
+
+/// An estimate in hours, or `0` when there is nothing worth publishing.
+///
+/// Bounded because the failure this guards against is not a model that is slightly optimistic but
+/// one that answered in minutes, or in days, or hallucinated a four-digit number — and a task that
+/// says 480 hours is worse than a task that says nothing, because somebody's sprint capacity adds
+/// it up. Half an hour is the smallest unit anyone plans in; a fortnight of solid work is past the
+/// point where the task should have been split.
+fn sane_estimate(hours: f64) -> f64 {
+    match hours.is_finite() && (0.5..=80.0).contains(&hours) {
+        // To the nearest half hour: the model's 3.7 is precision it does not have.
+        true => (hours * 2.0).round() / 2.0,
+        false => 0.0,
+    }
 }
 
 /// Puts the `[DEV]`/`[QA]` marker on, here rather than in the prompt.
@@ -513,6 +695,8 @@ fn parse_review(stage: ai::WorkItemReviewStage, text: &str) -> Result<WorkItemRe
                             evidence: t.evidence,
                             // Stamped by the merge once it knows whether more than one repository ran.
                             repo: String::new(),
+                            estimate_hours: sane_estimate(t.estimate_hours),
+                            priority: clamped_priority(t.priority),
                         }
                     })
                     .collect(),
@@ -881,9 +1065,9 @@ pub async fn ado_wiki_page_detail(
     project: String,
     wiki: String,
     path: String,
-) -> Result<boards::AdoWikiPageDetail, String> {
+) -> Result<azure::AdoWikiPageDetail, String> {
     let pat = pat_for_org(&org)?;
-    boards::get_wiki_page_detail(&org, &project, &wiki, &path, &pat).await
+    azure::get_wiki_page_detail(&org, &project, &wiki, &path, &pat).await
 }
 
 /// Brings a page that already exists in the wiki into the app as a document.
@@ -922,7 +1106,7 @@ pub async fn import_wiki_page(
     // Read before writing anything: a path that does not resolve should leave no half-made
     // document behind in the list.
     let pat = pat_for_org(&org)?;
-    let detail = boards::get_wiki_page_detail(&org, &project, &wiki_id, &path, &pat).await?;
+    let detail = azure::get_wiki_page_detail(&org, &project, &wiki_id, &path, &pat).await?;
     if detail.content.trim().is_empty() {
         return Err(
             "Esa ruta existe pero no tiene contenido — en Azure DevOps una página puede ser solo \
@@ -987,7 +1171,7 @@ pub fn delete_doc_page(db: State<Db>, id: String) -> Result<(), String> {
 pub async fn publish_doc_page(
     db: State<'_, Db>,
     id: String,
-) -> Result<boards::AdoWikiPageRef, String> {
+) -> Result<azure::AdoWikiPageRef, String> {
     let page = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::get_doc_page(&conn, &id).map_err(|e| e.to_string())?
@@ -1006,7 +1190,7 @@ pub async fn publish_doc_page(
     }
 
     let pat = pat_for_org(&page.ado_org)?;
-    let published = boards::put_wiki_page(
+    let published = azure::put_wiki_page(
         &page.ado_org,
         &page.ado_project,
         &page.wiki_id,
@@ -1229,16 +1413,25 @@ fn strip_code_fence(text: &str) -> String {
 /// criteria and tasks as three separate decisions, and each has to be able to land without
 /// disturbing the other two.
 #[tauri::command]
-pub async fn ado_update_work_item(
+#[allow(clippy::too_many_arguments)]
+pub async fn board_update_work_item(
+    db: State<'_, Db>,
+    provider: Option<String>,
     org: String,
+    // `project` is the container as the host addresses it. Only monday needs it — a column write
+    // there is addressed by board *and* item — but it travels for all three so the command has one
+    // shape.
+    project: Option<String>,
     id: i64,
+    key: Option<String>,
     title: Option<String>,
     description: Option<String>,
     repro_steps: Option<String>,
     acceptance_criteria: Option<Vec<String>>,
     prose_is_html: Option<bool>,
-) -> Result<boards::AdoWorkItemRef, String> {
-    let pat = pat_for_org(&org)?;
+) -> Result<boards::ItemRef, String> {
+    let provider = BoardProvider::parse(provider.as_deref().unwrap_or_default());
+    let auth = board_auth(&db, provider, &org)?;
     let edit = boards::WorkItemEdit {
         title,
         description,
@@ -1246,45 +1439,111 @@ pub async fn ado_update_work_item(
         acceptance_criteria,
         prose_is_html: prose_is_html.unwrap_or(false),
     };
-    boards::update_work_item(&org, id, &edit, &pat).await
+    boards::update_work_item(
+        provider,
+        &org,
+        project.as_deref().unwrap_or_default(),
+        id,
+        key.as_deref().unwrap_or_default(),
+        &edit,
+        &auth,
+    )
+    .await
 }
 
 /// What one proposed task becomes on the board.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// The planning fields arrive from the screen rather than being decided here: a run proposes them,
+/// the user overrides whichever they disagree with, and what publishes is what was on screen. All
+/// of them default, so a caller that sends only a title and a detail still publishes a task.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NewChildTask {
     pub title: String,
     #[serde(default)]
     pub detail: String,
+    /// `dev` | `qa` — which decides the two fields that say what kind of work this is, rather than
+    /// the screen having to know Azure's vocabulary for them.
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub priority: i64,
+    /// Hours. `0` publishes the task without an estimate rather than with a made-up one.
+    #[serde(default)]
+    pub estimate_hours: f64,
+}
+
+/// Azure's Activity picklist value for a kind of task, and the team's own word for the same thing.
+///
+/// The English values are Azure's own: Activity is a picklist and refuses anything else, whatever
+/// language the org's UI is in. The second half is free text on a custom field, and `QA` is what
+/// the tasks are labelled with everywhere else in this app — the `[QA]` on the title included.
+fn task_kind_fields(kind: &str) -> (&'static str, &'static str) {
+    match kind.eq_ignore_ascii_case("qa") {
+        true => ("Testing", "QA"),
+        false => ("Development", "DEV"),
+    }
 }
 
 /// Creates the accepted tasks as children of the story, in the order the user arranged them.
 ///
 /// Sequential rather than concurrent, and it stops at the first failure reporting what did land.
-/// Azure's rate limits are per-organisation and a burst of twelve creates is exactly the shape that
-/// trips them — and a partial publish the user can *see* is recoverable, while twelve half-created
-/// tasks in an unknown order is not.
+/// Both hosts rate-limit per account and a burst of twelve creates is exactly the shape that trips
+/// them — and a partial publish the user can *see* is recoverable, while twelve half-created tasks
+/// in an unknown order is not.
 #[tauri::command]
-pub async fn ado_create_child_tasks(
+#[allow(clippy::too_many_arguments)]
+pub async fn board_create_child_tasks(
+    db: State<'_, Db>,
+    provider: Option<String>,
     org: String,
     project: String,
     parent_id: i64,
+    parent_key: Option<String>,
     work_item_type: String,
     tasks: Vec<NewChildTask>,
-) -> Result<Vec<boards::AdoWorkItemRef>, String> {
+) -> Result<Vec<boards::ItemRef>, String> {
     if tasks.is_empty() {
         return Err("No hay tareas que publicar".to_string());
     }
-    let pat = pat_for_org(&org)?;
+    let provider = BoardProvider::parse(provider.as_deref().unwrap_or_default());
+    let auth = board_auth(&db, provider, &org)?;
+    let parent_key = parent_key.unwrap_or_default();
+
+    // One probe for the whole batch, exactly as the story publish does it: every task is the same
+    // type, so asking per task would be a wasted round trip each. A probe that fails is not fatal —
+    // the fields go out unfiltered and Azure gets to be the one that objects.
+    let available_fields = match provider {
+        BoardProvider::Azure => {
+            azure::work_item_type_fields(&org, &project, &work_item_type, &auth.secret).await.ok()
+        }
+        BoardProvider::Jira | BoardProvider::Monday => None,
+    };
+
     let mut created = Vec::with_capacity(tasks.len());
     for task in &tasks {
+        let (activity, task_type) = task_kind_fields(&task.kind);
+        let child = boards::NewChildItem {
+            title: &task.title,
+            detail: &task.detail,
+            activity,
+            task_type,
+            priority: task.priority,
+            original_estimate: task.estimate_hours,
+            // The same number at creation: nothing has been done yet, so everything estimated is
+            // still to do. They part company on the board, as the person doing the work burns it down.
+            remaining_work: task.estimate_hours,
+        };
         match boards::create_child_work_item(
+            provider,
             &org,
             &project,
             parent_id,
+            &parent_key,
             &work_item_type,
-            &task.title,
-            &task.detail,
-            &pat,
+            &child,
+            available_fields.as_ref(),
+            &auth,
         )
         .await
         {
@@ -1417,6 +1676,7 @@ pub fn rename_story_batch(db: State<Db>, id: String, title: String) -> Result<()
 pub fn set_story_batch_target(
     db: State<Db>,
     id: String,
+    board_provider: Option<String>,
     ado_org: String,
     ado_project: String,
     work_item_type: String,
@@ -1424,10 +1684,15 @@ pub fn set_story_batch_target(
     iteration_path: String,
     tags: String,
 ) -> Result<(), String> {
+    // Normalised through the enum rather than stored as typed, so a value the frontend has not
+    // heard of lands as Azure — the same rule the reader applies — instead of as a string no client
+    // will ever match.
+    let board_provider = BoardProvider::parse(board_provider.as_deref().unwrap_or_default());
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::set_story_batch_target(
         &conn,
         &id,
+        board_provider.as_str(),
         ado_org.trim(),
         ado_project.trim(),
         work_item_type.trim(),
@@ -1546,6 +1811,9 @@ struct GeneratedStory {
     priority: i64,
     #[serde(default)]
     story_points: f64,
+    /// Hours, under either spelling — see [`RawTask::estimate_hours`] for why the aliases.
+    #[serde(default, alias = "hours", alias = "estimate")]
+    estimate_hours: f64,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
@@ -1565,7 +1833,7 @@ struct GeneratedBatch {
 /// The same line its prompt already shows the model, repeated here because the repair states the
 /// target shape on its own — re-sending the whole generation prompt would invite a fresh backlog
 /// rather than a fix, and that backlog is exactly the work that must not be repeated.
-const GENERATED_SHAPE: &str = r#"{"stories":[{"title":"","narrative":"","description":"","acceptance_criteria":[""],"priority":0,"story_points":0,"tags":[""],"notes":""}],"open_questions":[""]}"#;
+const GENERATED_SHAPE: &str = r#"{"stories":[{"title":"","narrative":"","description":"","acceptance_criteria":[""],"priority":0,"story_points":0,"estimate_hours":0,"tags":[""],"notes":""}],"open_questions":[""]}"#;
 
 /// Turns the model's answer into rows.
 ///
@@ -1599,6 +1867,7 @@ fn parse_generated(text: &str) -> Result<(Vec<NewStoryDraft>, Vec<String>), Stri
             // and a negative estimate is a typo nobody wants published.
             priority: s.priority.clamp(0, 4),
             story_points: if s.story_points.is_finite() { s.story_points.max(0.0) } else { 0.0 },
+            original_estimate: sane_estimate(s.estimate_hours),
             tags: s
                 .tags
                 .iter()
@@ -1795,6 +2064,7 @@ pub fn save_story_draft(
     acceptance_criteria: Vec<String>,
     priority: i64,
     story_points: f64,
+    original_estimate: f64,
     tags: String,
     notes: String,
 ) -> Result<StoryDraft, String> {
@@ -1814,6 +2084,9 @@ pub fn save_story_draft(
         &criteria_json,
         priority.clamp(0, 4),
         if story_points.is_finite() { story_points.max(0.0) } else { 0.0 },
+        // Unbounded above, unlike the model's own answer: this number is the user's, typed on
+        // purpose, and a story they say is ninety hours is a story they meant to say that about.
+        if original_estimate.is_finite() { original_estimate.max(0.0) } else { 0.0 },
         tags.trim(),
         notes.trim(),
     )
@@ -2347,20 +2620,44 @@ pub async fn publish_stories(
         (detail.batch, detail.stories)
     };
 
+    let provider = BoardProvider::parse(&batch.board_provider);
     if batch.ado_org.trim().is_empty() || batch.ado_project.trim().is_empty() {
-        return Err("Elige la organización y el proyecto de Azure DevOps antes de publicar".to_string());
+        return Err(match provider {
+            BoardProvider::Azure => {
+                "Elige la organización y el proyecto de Azure DevOps antes de publicar".to_string()
+            }
+            BoardProvider::Jira => "Elige el sitio y el proyecto de Jira antes de publicar".to_string(),
+            BoardProvider::Monday => {
+                "Elige la cuenta y el tablero de monday.com antes de publicar".to_string()
+            }
+        });
     }
     if batch.work_item_type.trim().is_empty() {
-        return Err("Elige el tipo de work item antes de publicar".to_string());
+        return Err(match provider {
+            BoardProvider::Azure => "Elige el tipo de work item antes de publicar".to_string(),
+            BoardProvider::Jira => "Elige el tipo de incidencia antes de publicar".to_string(),
+            BoardProvider::Monday => "Elige el grupo del tablero antes de publicar".to_string(),
+        });
     }
-    let pat = pat_for_org(&batch.ado_org)?;
+    let auth = board_auth(&db, provider, &batch.ado_org)?;
 
     // One probe for the whole batch: every story publishes as the same type, so asking per story
     // would be one wasted round trip each. A probe that fails is not fatal — see `create_work_item`.
-    let available_fields =
-        boards::work_item_type_fields(&batch.ado_org, &batch.ado_project, &batch.work_item_type, &pat)
-            .await
-            .ok();
+    // Azure only: it is the one that rejects a patch naming a field its type doesn't define.
+    let available_fields = match provider {
+        BoardProvider::Azure => azure::work_item_type_fields(
+            &batch.ado_org,
+            &batch.ado_project,
+            &batch.work_item_type,
+            &auth.secret,
+        )
+        .await
+        .ok(),
+        // Neither of the others rejects a whole item over one field it doesn't define, so neither
+        // needs the probe: Jira ignores what it doesn't know, and monday is told which columns to
+        // write by its own detection pass.
+        BoardProvider::Jira | BoardProvider::Monday => None,
+    };
 
     let targets: Vec<&StoryDraft> = stories
         .iter()
@@ -2393,22 +2690,31 @@ pub async fn publish_stories(
             tags: &tags,
             priority: story.priority,
             story_points: story.story_points,
+            original_estimate: story.original_estimate,
+            remaining_work: story.original_estimate,
         };
         let created = boards::create_work_item(
+            provider,
             &batch.ado_org,
             &batch.ado_project,
             &batch.work_item_type,
             &item,
             available_fields.as_ref(),
-            &pat,
+            &auth,
         )
         .await;
 
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         match created {
             Ok(reference) => {
-                queries::mark_story_published(&conn, &story.id, reference.id, &reference.url)
-                    .map_err(|e| e.to_string())?;
+                queries::mark_story_published(
+                    &conn,
+                    &story.id,
+                    reference.id,
+                    &reference.key,
+                    &reference.url,
+                )
+                .map_err(|e| e.to_string())?;
                 published += 1;
             }
             Err(e) => {
@@ -2493,6 +2799,17 @@ mod tests {
         assert_eq!(normalize_verdict(""), "unknown");
     }
 
+    /// The two values `verify_stories` derives from a parsed story before writing the row. Spelled
+    /// out here rather than asserted on fields, because `ParsedVerification` stopped carrying them:
+    /// the roll-up and the JSON are computed at the write, so a test that reads them off the parse
+    /// would be asserting against a shape the production path no longer has.
+    fn rolled_up(parsed: &ParsedVerification) -> (&'static str, serde_json::Value) {
+        let status =
+            roll_up(&parsed.criteria.iter().map(|v| v.verdict.as_str()).collect::<Vec<_>>());
+        let json = serde_json::to_value(&parsed.criteria).unwrap();
+        (status, json)
+    }
+
     #[test]
     fn a_verification_answer_becomes_verdicts() {
         let text = r#"```json
@@ -2506,10 +2823,10 @@ mod tests {
         let parsed = parse_verification(text, &[2]).expect("parsed");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].story, 0);
+        let (status, verdicts) = rolled_up(&parsed[0]);
         // One failure drags the whole story down, regardless of what the summary claims.
-        assert_eq!(parsed[0].status, "fail");
+        assert_eq!(status, "fail");
         assert_eq!(parsed[0].summary, "Implementada salvo el límite");
-        let verdicts: serde_json::Value = serde_json::from_str(&parsed[0].criteria_json).unwrap();
         assert_eq!(verdicts[0]["verdict"], "pass");
         // Blank evidence entries are dropped rather than stored as empty citations.
         assert_eq!(verdicts[0]["evidence"], serde_json::json!(["src/pago.ts:12"]));
@@ -2529,13 +2846,13 @@ mod tests {
         let parsed = parse_verification(text, &[3]).expect("parsed");
         // Story 7 was never sent, so it is dropped rather than written onto some other row.
         assert_eq!(parsed.len(), 1);
-        let verdicts: serde_json::Value = serde_json::from_str(&parsed[0].criteria_json).unwrap();
+        let (status, verdicts) = rolled_up(&parsed[0]);
         assert_eq!(verdicts.as_array().unwrap().len(), 3);
         assert_eq!(verdicts[0]["verdict"], "pass");
         // Criteria 2 and 3 were never answered — nobody checked them, and that is what they say.
         assert_eq!(verdicts[1]["verdict"], "unknown");
         assert_eq!(verdicts[2]["verdict"], "unknown");
-        assert_eq!(parsed[0].status, "partial");
+        assert_eq!(status, "partial");
     }
 
     #[test]
@@ -2558,9 +2875,11 @@ mod tests {
             acceptance_criteria: r#"["Escenario: feliz\nDado …","Escenario: error\nDado …"]"#.into(),
             priority: 0,
             story_points: 0.0,
+            original_estimate: 0.0,
             tags: String::new(),
             notes: String::new(),
             work_item_id: 0,
+            work_item_key: String::new(),
             work_item_url: String::new(),
             verify_status: String::new(),
             verify_summary: String::new(),
@@ -2699,6 +3018,8 @@ mod tests {
                         why: String::new(),
                         evidence: vec![],
                         repo: String::new(),
+                        estimate_hours: 0.0,
+                        priority: 0,
                     }],
                 },
                 repo,
@@ -2748,9 +3069,12 @@ mod tests {
         ]}"#;
         match parse_review(ai::WorkItemReviewStage::Tasks, text).expect("parsed") {
             WorkItemReview::Tasks { tasks } => {
+                // Markdown, with the label on its own line: the boards render it, and an answer
+                // written as a list only *is* a list when its bullets start a line.
                 assert_eq!(
                     tasks[0].detail,
-                    "¿Qué?: El validador\n\n¿Cómo?: En checkout.ts\n\n¿Para qué?: Cubre el criterio 2"
+                    "**¿Qué?**\nEl validador\n\n**¿Cómo?**\nEn checkout.ts\n\n\
+                     **¿Para qué?**\nCubre el criterio 2"
                 );
                 assert_eq!(tasks[0].what, "El validador", "the parts survive for the editor");
                 assert!(!tasks[1].detail.contains("¿Cómo?"), "an empty part gets no heading");
@@ -2853,5 +3177,35 @@ mod tests {
         assert_eq!(prefixed_title("qa", "[Dev] Probar el alta"), "[QA] Probar el alta");
         assert_eq!(prefixed_title("dev", "[DEV] [QA] Mover"), "[DEV] Mover");
         assert_eq!(prefixed_title("cualquier-cosa", "Mover"), "[DEV] Mover", "unknown kinds are dev");
+    }
+
+    /// The `[QA]` on the title and the fields the board files the task under have to say the same
+    /// thing — they are the same fact, and a task labelled QA that lands under Development is one
+    /// nobody's testing query will ever find.
+    #[test]
+    fn a_qa_task_is_filed_as_testing_and_a_dev_task_is_not() {
+        assert_eq!(task_kind_fields("qa"), ("Testing", "QA"));
+        assert_eq!(task_kind_fields("QA"), ("Testing", "QA"));
+        assert_eq!(task_kind_fields("dev"), ("Development", "DEV"));
+        assert_eq!(task_kind_fields(""), ("Development", "DEV"), "unknown kinds are dev");
+    }
+
+    /// The estimate is the model's guess and the field is somebody's sprint capacity, so anything
+    /// that is not a number of hours a person could work has to lose its answer rather than the
+    /// board gain a wrong one.
+    #[test]
+    fn only_an_estimate_a_person_could_work_survives() {
+        assert_eq!(sane_estimate(4.0), 4.0);
+        assert_eq!(sane_estimate(3.7), 3.5, "rounded to the half hour it actually knows");
+        assert_eq!(sane_estimate(0.0), 0.0, "unset stays unset");
+        assert_eq!(sane_estimate(0.1), 0.0, "answered in minutes, or in days");
+        assert_eq!(sane_estimate(480.0), 0.0, "a number nobody plans a sprint with");
+        assert_eq!(sane_estimate(f64::NAN), 0.0);
+
+        assert_eq!(clamped_priority(1), 1);
+        assert_eq!(clamped_priority(4), 4);
+        assert_eq!(clamped_priority(0), 0);
+        assert_eq!(clamped_priority(5), 0, "outside Azure's scale is no answer at all");
+        assert_eq!(clamped_priority(-2), 0);
     }
 }

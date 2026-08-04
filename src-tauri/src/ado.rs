@@ -738,6 +738,10 @@ struct RawConnectionUser {
     provider_display_name: Option<String>,
     #[serde(rename = "customDisplayName", default)]
     custom_display_name: Option<String>,
+    /// The loose bag Azure puts the sign-in address in, as `Account: {"$type": …, "$value": …}`.
+    /// Untyped because the rest of the bag varies by account kind and none of it is wanted.
+    #[serde(default)]
+    properties: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// The signed-in user's Azure DevOps id (a GUID), needed to cast a reviewer vote — Azure votes
@@ -756,6 +760,39 @@ pub async fn authenticated_user_name(org: &str, pat: &str) -> Result<String, Str
         .or(user.provider_display_name)
         .filter(|name| !name.trim().is_empty())
         .ok_or_else(|| "Azure DevOps didn't report a display name for this account".to_string())
+}
+
+/// The signed-in user in the shape `System.AssignedTo` can resolve back to a person.
+///
+/// Azure resolves that field from a string, and which strings it accepts is not uniform: a display
+/// name alone is ambiguous the moment two people in the org share one, and an account name alone
+/// is what a Microsoft-account org has instead of a directory address. `Display Name <account>` is
+/// the form Azure itself hands back when you *read* the field, so it is the one form the server is
+/// certain to understand — the halves are only used alone when the account reports just the one.
+///
+/// Used to assign what this app creates to whoever the token belongs to; see
+/// [`crate::boards::azure::create_work_item`].
+pub async fn authenticated_identity(org: &str, pat: &str) -> Result<String, String> {
+    let user = connection_data(org, pat).await?.authenticated_user;
+    let name = user
+        .custom_display_name
+        .or(user.provider_display_name)
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty());
+    let account = user
+        .properties
+        .get("Account")
+        .and_then(|account| account.get("$value"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|account| !account.is_empty());
+
+    match (name, account) {
+        (Some(name), Some(account)) => Ok(format!("{name} <{account}>")),
+        (Some(name), None) => Ok(name),
+        (None, Some(account)) => Ok(account.to_string()),
+        (None, None) => Err("Azure DevOps didn't report who this token belongs to".to_string()),
+    }
 }
 
 async fn connection_data(org: &str, pat: &str) -> Result<ConnectionData, String> {

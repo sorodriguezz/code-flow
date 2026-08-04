@@ -1,23 +1,27 @@
 import { create } from "zustand";
 import {
-  adoCreateChildTasks,
-  adoGetWorkItem,
-  adoParseWorkItemRef,
-  adoUpdateWorkItem,
+  boardCreateChildTasks,
+  boardGetWorkItem,
+  boardParseItemRef,
+  boardUpdateWorkItem,
   deleteWorkItemReview,
   listWorkItemReviews,
   reviewWorkItem,
   saveWorkItemReview,
 } from "../lib/tauri/commands";
 import { parseClaudeError } from "../lib/claudeError";
+import { loadJiraConnections } from "../lib/jiraConnections";
 import { renderMarkdown } from "../lib/markdown";
 import { htmlToText, splitCriteriaHtml, storyPayload } from "../lib/workItemHtml";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
+import { notify } from "./notificationStore";
+import type { TranslationKey } from "../lib/i18n/translations";
 import { useWorkspaceStore } from "./workspaceStore";
 import type {
-  AdoWorkItem,
+  BoardProvider,
+  BoardWorkItem,
   InvestVerdict,
   ProposedCriterion,
   ProposedTask,
@@ -27,6 +31,21 @@ import type {
   WorkItemReviewRow,
   WorkItemReviewStage,
 } from "../types/domain";
+
+/**
+ * What each stage says when it lands in the notification centre.
+ *
+ * Per stage rather than one generic "review finished": these runs are minutes long and a user who
+ * fired the criteria and went to read code needs the panel to tell them *which* of the four came
+ * back, not merely that something did.
+ */
+const STAGE_NOTIFICATION: Record<WorkItemReviewStage, TranslationKey> = {
+  analyze: "notifications.huAnalyzed",
+  description: "notifications.huDescription",
+  criteria: "notifications.huCriteria",
+  tasks: "notifications.huTasks",
+  tasksqa: "notifications.huTasksQa",
+};
 
 /**
  * A review session over one story that is already on the board.
@@ -64,7 +83,7 @@ export function kindOf(workItemType: string): WorkItemKind {
 }
 
 /** The estimate as the process itself names it, or an empty string when nobody estimated it. */
-export function effortLabel(item: AdoWorkItem): string {
+export function effortLabel(item: BoardWorkItem): string {
   if (!item.effort) return "";
   const unit = item.effort_field.split(".").pop() ?? "";
   const name = unit === "StoryPoints" ? "story points" : unit === "Size" ? "size" : "effort";
@@ -158,13 +177,55 @@ export interface DescriptionProposal {
  * The tasks list is the opposite and for the opposite reason: tasks are *created* as children, so
  * what is staged is only ever the new ones.
  */
+/**
+ * One task in the draft, as it will be published.
+ *
+ * Everything on it is editable on the draft tab, which is the point: the run *proposes* an
+ * estimate and a priority, and the person who knows the team decides whether they are right
+ * before anything reaches the board. What publishes is what is on this object.
+ */
+export interface DraftTask {
+  title: string;
+  detail: string;
+  /** Decides the fields that say what kind of work it is — Azure's Activity, and the team's own
+   *  "task type" field where the project has one. Carried from the proposal it came from. */
+  kind: "dev" | "qa";
+  /** Azure's 1-4. `0` publishes without the field rather than with a guess. */
+  priority: number;
+  /** Hours. `0` publishes without an estimate. */
+  estimateHours: number;
+}
+
 export interface ReviewDraft {
   description: string | null;
   criteria: string[] | null;
-  tasks: { title: string; detail: string }[] | null;
+  tasks: DraftTask[] | null;
 }
 
 const EMPTY_DRAFT: ReviewDraft = { description: null, criteria: null, tasks: null };
+
+/**
+ * A saved draft's tasks, filled in.
+ *
+ * Sessions saved before tasks carried planning numbers have none of these fields, and a `priority`
+ * that reads `undefined` publishes as `NaN` rather than as "unset". Defaulting on the way in keeps
+ * every session that ever opened openable, which is the whole contract of the payload version.
+ */
+function draftFromPayload(draft: ReviewDraft | undefined): ReviewDraft {
+  if (!draft) return EMPTY_DRAFT;
+  if (!draft.tasks) return draft;
+  return {
+    ...draft,
+    tasks: draft.tasks.map((task) => ({
+      ...task,
+      title: task.title ?? "",
+      detail: task.detail ?? "",
+      kind: task.kind === "qa" ? "qa" : "dev",
+      priority: Number.isFinite(task.priority) ? task.priority : 0,
+      estimateHours: Number.isFinite(task.estimateHours) ? task.estimateHours : 0,
+    })),
+  };
+}
 
 /**
  * A session as it goes to the database and comes back.
@@ -182,7 +243,7 @@ export interface ReviewSessionPayload {
   reproSteps: string;
   criteria: string[];
   /** The item as fetched, so the story tab has its children, its state and its estimate. */
-  item: AdoWorkItem | null;
+  item: BoardWorkItem | null;
   /** Only ever read: written by builds that had a whole-story analysis stage. */
   analysis: StoryAnalysis | null;
   proposedDescription: DescriptionProposal | null;
@@ -199,6 +260,18 @@ export interface ReviewSessionPayload {
   provenance: Partial<Record<WorkItemReviewStage, ReviewProvenance>>;
 }
 
+/**
+ * The saved Jira site, when there is exactly one.
+ *
+ * `null` for none and for several — both mean the same thing here, which is that the app must not
+ * pick. Loading the wrong site's `WEB-12` is not an error the user would notice: it is a different
+ * team's issue with a plausible title.
+ */
+async function theOneJiraSite(): Promise<string | null> {
+  const connections = await loadJiraConnections().catch(() => []);
+  return connections.length === 1 ? connections[0].site : null;
+}
+
 /** Which text of an `ambos` proposal the user is sending. */
 function textOf(criterion: CriterionProposal): string {
   if (criterion.format === "checklist") return criterion.checklist;
@@ -207,10 +280,17 @@ function textOf(criterion: CriterionProposal): string {
 }
 
 interface WorkItemReviewState {
-  /** What the user pasted: a link, or a bare id. */
+  /** What the user pasted: a link, a bare id, or a Jira key. */
   input: string;
-  /** The organisation a bare id belongs to — filled from the last link, or from the batch target. */
+  /** The organisation or Jira site a bare reference belongs to — filled from the last link, or from
+   *  the batch target. */
   org: string;
+  /** Which board the loaded item came from. Derived from what was pasted, never chosen: the two
+   *  hosts address an item differently, and asking the user which one their own link is would be
+   *  asking them to repeat what the link already says. */
+  provider: BoardProvider;
+  /** Jira's `PROJ-123`. Empty on Azure, where `item.id` is the whole address. */
+  itemKey: string;
   /**
    * The repositories the review reads. A story usually lives across more than one — the API that
    * exposes it and the front that consumes it — and reviewing it against only one is how half its
@@ -224,7 +304,7 @@ interface WorkItemReviewState {
   useContext: boolean;
   loading: boolean;
   error: string;
-  item: AdoWorkItem | null;
+  item: BoardWorkItem | null;
 
   /** The story as text, seeded from the work item. Read-only on screen: the story tab is a record,
    *  and the one editable copy of the description lives in the description tab. */
@@ -253,6 +333,8 @@ interface WorkItemReviewState {
 
   /** This session's row id. Minted on load; empty means nothing is on screen to save. */
   sessionId: string;
+  /** The workspace the session belongs to — see the note on it in `EMPTY`. */
+  workspaceId: string | null;
   /** When the session on screen was taken, for one reopened out of the history. */
   openedFrom: { at: string; id: string } | null;
   history: WorkItemReviewRow[];
@@ -298,7 +380,7 @@ interface WorkItemReviewState {
   setDraftCriterion: (at: number, value: string) => void;
   removeDraftCriterion: (at: number) => void;
   addDraftCriterion: () => void;
-  setDraftTask: (at: number, patch: { title?: string; detail?: string }) => void;
+  setDraftTask: (at: number, patch: Partial<DraftTask>) => void;
   removeDraftTask: (at: number) => void;
   discardDraft: (part: PublishPart) => void;
 
@@ -343,6 +425,15 @@ const EMPTY = {
   publishing: null,
   status: "open" as ReviewStatus,
   sessionId: "",
+  /**
+   * The workspace the session belongs to.
+   *
+   * Held rather than read off `workspaceStore` at write time, because the one write that matters
+   * most happens *after* the switch: leaving a review open and changing workspace closes it, and
+   * closing it saves it. Reading the active workspace there would file the session under the one
+   * the user just moved to, where it would show up in a history it has nothing to do with.
+   */
+  workspaceId: null as string | null,
   openedFrom: null,
   dirty: false,
   saving: false,
@@ -357,6 +448,8 @@ function editable(status: ReviewStatus): boolean {
 export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => ({
   input: "",
   org: "",
+  provider: "azure",
+  itemKey: "",
   projectIds: [],
   useContext: false,
   history: [],
@@ -581,12 +674,30 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
     if (!input.trim() || get().loading) return;
     set({ loading: true, error: "" });
     try {
-      const ref = await adoParseWorkItemRef(input);
-      // A bare id carries no organisation, so it falls back to the one already on screen. Failing
+      const ref = await boardParseItemRef(input);
+      // A bare reference carries no host, so it falls back to what is already on screen. Failing
       // here rather than guessing: fetching the wrong org's item 4821 would look like it worked.
-      const resolved = ref.org ?? org.trim();
-      if (!resolved) throw new Error(translate("huReview.orgMissing"));
-      const item = await adoGetWorkItem(resolved, ref.id);
+      //
+      // The org box lists Azure organisations, so for a bare Jira key it holds the wrong kind of
+      // name entirely — `WEB-12` with "contoso" selected would be sent to contoso.atlassian.net.
+      // A single saved Jira site is unambiguous and used; anything else is asked for outright.
+      // A monday reference is only ever recognised from a link, and that link always carries the
+      // account in its subdomain — so monday never reaches the fallback at all, which is just as
+      // well: the org box holds Azure organisations and there would be nothing sensible to put
+      // there. Its message stays for the case the parser is ever loosened.
+      const resolved = ref.org ?? (ref.provider === "jira" ? await theOneJiraSite() : org.trim());
+      if (!resolved) {
+        throw new Error(
+          translate(
+            ref.provider === "jira"
+              ? "huReview.jiraSiteMissing"
+              : ref.provider === "monday"
+                ? "huReview.mondayLinkNeeded"
+                : "huReview.orgMissing",
+          ),
+        );
+      }
+      const item = await boardGetWorkItem(ref.provider, resolved, ref.id, ref.key);
       set({
         // Everything derived from the previous item goes with it — a review of story A must not
         // still be on screen under story B.
@@ -594,10 +705,15 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
         // A fresh id per load, which is what makes this sitting one history entry and a re-review
         // of the same item next sprint a second one.
         sessionId: crypto.randomUUID(),
+        workspaceId: useWorkspaceStore.getState().activeWorkspaceId,
         // The lookup is done: leaving the reference in the box makes Load look armed when what it
         // would do is fetch the item already on screen.
         input: "",
         org: resolved,
+        provider: ref.provider,
+        // Jira answers with the key the issue actually has, which is the one every later write has
+        // to address; `ref.key` is only what the user happened to type.
+        itemKey: item.key || ref.key,
         item,
         title: item.title,
         description: htmlToText(item.description_html),
@@ -655,8 +771,9 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       if (get().runByStage[stage] !== runId) return;
 
       const { review, ...provenance } = result;
+      let produced = 0;
       if (review.stage === "description") {
-        const produced = review.description.trim() ? 1 : 0;
+        produced = review.description.trim() ? 1 : 0;
         set((s) => ({
           proposedDescription: produced
             ? {
@@ -668,6 +785,7 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
           producedByStage: { ...s.producedByStage, description: produced },
         }));
       } else if (review.stage === "criteria") {
+        produced = review.criteria.length;
         set((s) => ({
           // Appended, not replaced: a second run against a story the user has since edited is a
           // second opinion, and throwing away the first would take the cards they were still
@@ -676,12 +794,23 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
           producedByStage: { ...s.producedByStage, criteria: review.criteria.length },
         }));
       } else if (review.stage === "tasks") {
+        produced = review.tasks.length;
         set((s) => ({
           proposedTasks: [...s.proposedTasks, ...review.tasks.map(asTaskProposal)],
           producedByStage: { ...s.producedByStage, [stage]: review.tasks.length },
         }));
       }
       set((s) => ({ provenance: { ...s.provenance, [stage]: provenance } }));
+      // Filed only past the guard above: a run whose answer was discarded because the session moved
+      // on has nothing for the user to come back to, and saying it finished would send them looking
+      // for cards that were never written.
+      notify({
+        source: "review",
+        titleKey: STAGE_NOTIFICATION[stage],
+        params: { n: produced },
+        status: "success",
+        detail: get().title,
+      });
       // Saved once the stage has landed in state, so what is written is what is on screen. A
       // failure to save is reported and no more: the review itself is still in front of the user,
       // and losing the copy is not a reason to also throw away the answer.
@@ -694,7 +823,15 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       //
       // Parsed rather than raw: a provider refusal arrives tagged with the quota marker, and
       // `String(e)` would put that machine prefix in front of the sentence the user reads.
-      if (!isCancellation(e)) pushErrorToast(parseClaudeError(String(e)).message);
+      if (!isCancellation(e)) {
+        pushErrorToast(parseClaudeError(String(e)).message);
+        notify({
+          source: "review",
+          titleKey: "notifications.huFailed",
+          status: "error",
+          detail: get().title,
+        });
+      }
     } finally {
       useAiRunStore.getState().finish(runId);
       set((s) => ({ runByStage: without(s.runByStage, stage) }));
@@ -823,7 +960,7 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
 
   persist: async () => {
     const s = get();
-    const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+    const workspaceId = s.workspaceId ?? useWorkspaceStore.getState().activeWorkspaceId;
     if (!s.item || !s.sessionId || !workspaceId) return;
     // The edit this write is about to cover. Anything typed while it is in flight bumps the counter
     // again, and the session stays dirty rather than being reported saved on the strength of a
@@ -928,6 +1065,8 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       item: payload.item ?? {
         id: row.work_item_id,
         url: row.work_item_url,
+        key: "",
+        container_id: "",
         work_item_type: row.work_item_type,
         title: payload.title ?? row.title,
         state: "",
@@ -957,8 +1096,10 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       provenance: payload.provenance ?? {},
       projectIds: payload.projectIds ?? [],
       useContext: payload.useContext ?? false,
-      draft: payload.draft ?? EMPTY_DRAFT,
+      draft: draftFromPayload(payload.draft),
       published: payload.published ?? {},
+      // The row came out of this workspace's history, so this is the workspace it goes back to.
+      workspaceId: useWorkspaceStore.getState().activeWorkspaceId,
     });
   },
 
@@ -1016,6 +1157,10 @@ function asTaskProposal(task: ProposedTask | TaskProposal): TaskProposal {
     why: task.why ?? "",
     evidence: task.evidence ?? [],
     repo: task.repo ?? "",
+    // A run from a build before tasks were estimated, or a model that skipped the field, leaves
+    // these absent — `0` is the "unset" both of them already mean everywhere downstream.
+    estimate_hours: Number.isFinite(task.estimate_hours) ? task.estimate_hours : 0,
+    priority: Number.isFinite(task.priority) ? task.priority : 0,
     id: crypto.randomUUID(),
   };
 }
@@ -1035,12 +1180,18 @@ function mergeCriterion(criteria: string[], proposal: CriterionProposal, text: s
 
 /** Matched on title, because that is the identity a user reads. Sending the same proposal twice is
  *  a double click, not a request for two tasks. */
-function appendTask(
-  tasks: { title: string; detail: string }[],
-  proposal: TaskProposal,
-): { title: string; detail: string }[] {
+function appendTask(tasks: DraftTask[], proposal: TaskProposal): DraftTask[] {
   if (tasks.some((held) => held.title === proposal.title)) return tasks;
-  return [...tasks, { title: proposal.title, detail: proposal.detail }];
+  return [
+    ...tasks,
+    {
+      title: proposal.title,
+      detail: proposal.detail,
+      kind: proposal.kind,
+      priority: proposal.priority,
+      estimateHours: proposal.estimate_hours,
+    },
+  ];
 }
 
 /** Whether the draft holds anything for this part. */
@@ -1064,6 +1215,12 @@ async function writePart(part: PublishPart): Promise<number | null> {
   const item = s.item;
   if (!item) return null;
   const org = s.org.trim();
+  const provider = s.provider;
+  // Jira addresses an issue by key, Azure by id, monday by board *and* item. All three identifiers
+  // travel on every write so the backend can use whichever its client needs, rather than each call
+  // site deciding. `container_id` falls back to the display name, which is what Azure addresses by.
+  const key = s.itemKey || item.key;
+  const container = item.container_id || item.team_project.trim();
 
   if (part === "description") {
     const text = s.draft.description;
@@ -1081,9 +1238,12 @@ async function writePart(part: PublishPart): Promise<number | null> {
     // its output through DOMPurify, so what leaves for the board carries no script or handler
     // even when the model wrote some.
     const html = renderMarkdown(text);
-    await adoUpdateWorkItem({
+    await boardUpdateWorkItem({
+      provider,
       org,
+      project: container,
       id: item.id,
+      key,
       title: s.title.trim() || undefined,
       proseIsHtml: true,
       ...(isBug ? { reproSteps: html } : { description: html }),
@@ -1100,21 +1260,33 @@ async function writePart(part: PublishPart): Promise<number | null> {
       pushErrorToast(translate("huReview.stageEmpty"));
       return null;
     }
-    await adoUpdateWorkItem({ org, id: item.id, acceptanceCriteria: criteria });
+    await boardUpdateWorkItem({
+      provider,
+      org,
+      project: container,
+      id: item.id,
+      key,
+      acceptanceCriteria: criteria,
+    });
     return criteria.length;
   }
 
   const tasks = s.draft.tasks;
   if (!tasks?.length) return null;
-  // The project the story lives in, because a child is created inside a project and the
-  // organisation alone does not name one.
-  const project = item.team_project.trim();
+  // The container the story lives in, because a child is created inside one and the host alone does
+  // not name it.
+  const project = container;
   if (!project) throw new Error(translate("huReview.noTeamProject"));
-  const created = await adoCreateChildTasks({
+  const created = await boardCreateChildTasks({
+    provider,
     org,
     project,
     parentId: item.id,
-    workItemType: "Task",
+    parentKey: key,
+    // Azure's hierarchy is a link, so any type can be a child and "Task" is the one that means it.
+    // Jira's is a property of the type, and its client resolves the real sub-task type against the
+    // project. monday's sub-items have no type at all, so anything sent here is ignored.
+    workItemType: provider === "jira" ? "Sub-task" : "Task",
     tasks,
   });
   return created.length;
@@ -1175,6 +1347,30 @@ async function stopEverything(): Promise<void> {
     await store.stop(stage).catch((e: unknown) => pushErrorToast(String(e)));
   }
 }
+
+/**
+ * A review belongs to the workspace it was opened in, so switching workspace puts it down.
+ *
+ * At module scope, and not in the view's effect, for two reasons. The review screen is one sub-tab
+ * of three and unmounts the moment the user looks at the wiki, so an effect would simply not run
+ * for the case this exists for. And a session holds unsaved work — a draft description, staged
+ * criteria, tasks with their estimates — which `dismiss` persists before clearing; leaving that to
+ * a remount would mean the switch happened with the write still owed.
+ *
+ * `dismiss` is exactly what the screen's own ✕ does: stops any run, writes the session, and clears
+ * the screen. Nothing is lost — the session is in the history of the workspace it belongs to, and
+ * that is where it is picked back up.
+ */
+useWorkspaceStore.subscribe((state, previous) => {
+  if (state.activeWorkspaceId === previous.activeWorkspaceId) return;
+  const store = useWorkItemReviewStore.getState();
+  void store
+    .dismiss()
+    // The list on the screen is the old workspace's until this lands, which is the one thing a
+    // dismissed session leaves visibly wrong.
+    .then(() => useWorkItemReviewStore.getState().loadHistory())
+    .catch((e: unknown) => pushErrorToast(String(e)));
+});
 
 /** What a criterion proposal sends to the draft, given the format the user settled on. */
 export function criterionText(criterion: CriterionProposal): string {

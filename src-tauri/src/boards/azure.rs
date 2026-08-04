@@ -6,16 +6,24 @@
 //! path encoding, the `{value: […]}` envelope) is shared from there, so both halves speak to the
 //! same server the same way.
 //!
-//! Nothing here **deletes**. Work items are read and created, never edited: a story already on the
-//! board can be pulled in and reviewed, but whatever the review concludes goes back through the
-//! user's own hands. Wiki pages are the one thing that can be written over — [`put_wiki_page`] is a
-//! conditional PUT, so a page edited by somebody else since it was read refuses the write instead
-//! of silently winning it.
+//! The board half of this module is reached through [`super`], which normalises it against Jira;
+//! the wiki half is called directly, because Jira has nothing to normalise it against. Everything
+//! whose name still begins with `Ado` is in that second group by definition — an Azure concept with
+//! no counterpart worth pretending to.
+//!
+//! Nothing here **deletes**. Work items are read, created and edited; whatever a review concludes
+//! goes back through the user's own hands. Wiki pages are the one thing that can be written over —
+//! [`put_wiki_page`] is a conditional PUT, so a page edited by somebody else since it was read
+//! refuses the write instead of silently winning it.
 
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::{
+    criteria_to_html, escape_html, text_to_html, BoardProvider, ItemRef, NewChildItem, NewWorkItem,
+    WorkItem, WorkItemChild, WorkItemEdit, WorkItemRef, WorkItemType,
+};
 use crate::ado::{auth_header, client, encode_segment, get_json, normalize_org, ListResponse, API_VERSION};
 
 /// Percent-encodes a value going into a *query string*. Same rule as a path segment — wiki page
@@ -485,15 +493,6 @@ pub async fn get_wiki_pages_combined(
 
 // ---------- work item types, areas and iterations ----------
 
-#[derive(Debug, Clone, Serialize)]
-pub struct AdoWorkItemType {
-    pub name: String,
-    pub reference_name: String,
-    pub description: String,
-    /// Hex without the leading `#`, as Azure reports it — the picker tints its dot with it.
-    pub color: String,
-}
-
 #[derive(Deserialize)]
 struct RawWorkItemType {
     name: String,
@@ -514,7 +513,7 @@ pub async fn list_work_item_types(
     org: &str,
     project: &str,
     pat: &str,
-) -> Result<Vec<AdoWorkItemType>, String> {
+) -> Result<Vec<WorkItemType>, String> {
     let org = encode_segment(&normalize_org(org));
     let project = encode_segment(project);
     let url =
@@ -524,11 +523,14 @@ pub async fn list_work_item_types(
         .value
         .into_iter()
         .filter(|t| !t.is_disabled)
-        .map(|t| AdoWorkItemType {
+        .map(|t| WorkItemType {
             name: t.name,
             reference_name: t.reference_name,
             description: t.description,
             color: t.color,
+            // Azure's hierarchy is a link between items, not a property of the type: any type can
+            // be a child of any other, so nothing here is a sub-task type the way Jira means it.
+            subtask: false,
         })
         .collect())
 }
@@ -537,20 +539,56 @@ pub async fn list_work_item_types(
 struct RawTypeField {
     #[serde(rename = "referenceName", default)]
     reference_name: String,
+    /// What the field is called on the work item form — "Activity", "Original Estimate", and on a
+    /// Spanish-language organisation the Spanish for both.
+    #[serde(default)]
+    name: String,
 }
 
-/// The reference names of every field this work item type actually has.
+/// Every field this work item type actually has: by reference name, and by the name a person sees.
 ///
-/// This is what keeps a publish from being rejected wholesale: a Basic-process "Issue" has no
-/// acceptance-criteria field and no story points, and Azure answers a patch naming a field the type
-/// doesn't define with a 400 for the *whole* work item. Knowing the field list up front means the
-/// story is created with whatever the type can hold instead of not being created at all.
+/// The reference names are what keeps a publish from being rejected wholesale: a Basic-process
+/// "Issue" has no acceptance-criteria field and no story points, and Azure answers a patch naming a
+/// field the type doesn't define with a 400 for the *whole* work item. Knowing the list up front
+/// means the story is created with whatever the type can hold instead of not being created at all.
+///
+/// The labels solve the other half of the same problem, the half a fixed reference name cannot.
+/// "Task Type" is not one field across Azure: it is `Microsoft.VSTS.CMMI.TaskType` on a CMMI
+/// project, absent from stock Agile and Scrum, and on a customised process a custom field whose
+/// reference name carries a GUID nobody could hard-code. What *is* stable is what the team calls
+/// it on the form, which is what [`TypeFields::by_any_label`] looks it up by.
+#[derive(Debug, Clone, Default)]
+pub struct TypeFields {
+    reference_names: HashSet<String>,
+    /// Lowercased display name → reference name.
+    by_label: HashMap<String, String>,
+}
+
+impl TypeFields {
+    /// Whether the type defines this field, by reference name.
+    pub fn has(&self, reference_name: &str) -> bool {
+        self.reference_names.contains(reference_name)
+    }
+
+    /// The reference name of the first of `labels` the type carries, matched case-insensitively.
+    ///
+    /// A list rather than one name because the same field answers to different words depending on
+    /// the organisation's language and on whoever named the custom one — passing "Task Type" and
+    /// "Tipo de tarea" is how one call covers both without the caller knowing which it will be.
+    pub fn by_any_label(&self, labels: &[&str]) -> Option<&str> {
+        labels
+            .iter()
+            .find_map(|label| self.by_label.get(&label.to_ascii_lowercase()))
+            .map(String::as_str)
+    }
+}
+
 pub async fn work_item_type_fields(
     org: &str,
     project: &str,
     work_item_type: &str,
     pat: &str,
-) -> Result<HashSet<String>, String> {
+) -> Result<TypeFields, String> {
     let org = encode_segment(&normalize_org(org));
     let project = encode_segment(project);
     let type_enc = encode_segment(work_item_type);
@@ -559,7 +597,16 @@ pub async fn work_item_type_fields(
          ?api-version={API_VERSION}"
     );
     let parsed: ListResponse<RawTypeField> = get_json(&url, pat).await?;
-    Ok(parsed.value.into_iter().map(|f| f.reference_name).collect())
+    let mut fields = TypeFields::default();
+    for field in parsed.value {
+        if !field.name.trim().is_empty() {
+            fields
+                .by_label
+                .insert(field.name.trim().to_ascii_lowercase(), field.reference_name.clone());
+        }
+        fields.reference_names.insert(field.reference_name);
+    }
+    Ok(fields)
 }
 
 /// One node of the area or iteration tree, as the path a work item field takes.
@@ -616,75 +663,6 @@ pub async fn list_classification_nodes(
 
 // ---------- creating a work item ----------
 
-/// The fields Azure DevOps stores as HTML rather than as Markdown. Everything a story carries is
-/// authored as plain text in the app, so it is escaped and wrapped here — pasting raw text into an
-/// HTML field renders every `<` as a broken tag and collapses every line break.
-fn escape_html(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Plain text → HTML paragraphs. A blank line starts a new paragraph, a single newline is a break,
-/// which is how the text reads in the editor it was written in.
-fn text_to_html(text: &str) -> String {
-    text.split("\n\n")
-        .map(str::trim)
-        .filter(|block| !block.is_empty())
-        .map(|block| format!("<p>{}</p>", escape_html(block).replace('\n', "<br>")))
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// The acceptance criteria as an ordered list. One `<li>` per criterion; a criterion written in
-/// Gherkin keeps its Dado/Cuando/Entonces on their own lines inside its own item.
-fn criteria_to_html(criteria: &[String]) -> String {
-    let items: Vec<String> = criteria
-        .iter()
-        .map(|c| c.trim())
-        .filter(|c| !c.is_empty())
-        .map(|c| format!("<li>{}</li>", escape_html(c).replace('\n', "<br>")))
-        .collect();
-    if items.is_empty() {
-        return String::new();
-    }
-    format!("<ol>{}</ol>", items.join(""))
-}
-
-/// Everything one story contributes to a work item. Assembled by the command layer from the stored
-/// draft, so this module never has to know what a draft row looks like.
-pub struct NewWorkItem<'a> {
-    pub title: &'a str,
-    /// The "Como … quiero … para …" line. Rendered above the description so the work item opens
-    /// with the story itself rather than with its context.
-    pub narrative: &'a str,
-    pub description: &'a str,
-    pub acceptance_criteria: &'a [String],
-    /// Empty means "leave the project default", which is what Azure applies when the field is absent.
-    pub area_path: &'a str,
-    pub iteration_path: &'a str,
-    /// Comma- or semicolon-separated, as Azure stores tags.
-    pub tags: &'a str,
-    /// `0` means unset for both — Azure's own defaults are better than a made-up number.
-    pub priority: i64,
-    pub story_points: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AdoWorkItemRef {
-    pub id: i64,
-    /// The page a human opens, not the REST resource.
-    pub url: String,
-}
-
 #[derive(Deserialize)]
 struct RawCreatedWorkItem {
     id: i64,
@@ -719,6 +697,140 @@ const ESTIMATE_FIELDS: [&str; 3] = [
     "Microsoft.VSTS.Scheduling.Size",
 ];
 
+// ---------- who new work items go to ----------
+
+/// The field a work item's owner lives in, on every process template Azure ships.
+const ASSIGNED_TO: &str = "System.AssignedTo";
+
+/// The two halves of an hours estimate. Both are on Task in every stock process, and on the
+/// backlog item types only in some — which is why every write of them is behind a `has`.
+const ORIGINAL_ESTIMATE: &str = "Microsoft.VSTS.Scheduling.OriginalEstimate";
+const REMAINING_WORK: &str = "Microsoft.VSTS.Scheduling.RemainingWork";
+
+/// What kind of work a task is, on the stock Agile and Scrum Task. A picklist: writing a value it
+/// does not offer is refused, so the values sent are Azure's own English ones.
+const ACTIVITY: &str = "Microsoft.VSTS.Common.Activity";
+
+/// The names a "task type" field answers to on the form, in the order they are tried. Stock Azure
+/// has no such field outside CMMI, so this is mostly for a customised process — a team that added
+/// one and calls it something else can be covered by adding the word here.
+const TASK_TYPE_LABELS: [&str; 4] =
+    ["Task Type", "Tipo de tarea", "Tipo de Tarea", "TaskType"];
+
+/// Whoever the token belongs to, remembered for the life of the process.
+///
+/// Everything this app creates is created *by* that person — it is their PAT — so it lands assigned
+/// to them rather than in the unassigned pile somebody has to triage afterwards. Azure has no `@Me`
+/// for a field write (the macro is a *query* one), so the person has to be resolved by name first.
+///
+/// Cached because that resolution is a round trip whose answer cannot change while the app runs: a
+/// publish of twenty stories would otherwise ask twenty times. Keyed by the token as well as the
+/// org, so a PAT swapped in Settings is a different question rather than a stale answer. Only a
+/// successful lookup is stored — a probe that failed because the network was down should be asked
+/// again, not remembered as "nobody".
+///
+/// `None` when the lookup fails, never an error: not knowing who to assign to is a reason to create
+/// the item unassigned, not a reason to refuse to create it.
+async fn assignee(org: &str, pat: &str) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    pat.hash(&mut hasher);
+    let key = format!("{}|{:x}", normalize_org(org), hasher.finish());
+
+    fn memo() -> &'static std::sync::Mutex<HashMap<String, String>> {
+        static MEMO: std::sync::OnceLock<std::sync::Mutex<HashMap<String, String>>> =
+            std::sync::OnceLock::new();
+        MEMO.get_or_init(Default::default)
+    }
+
+    if let Some(hit) = memo().lock().ok().and_then(|memo| memo.get(&key).cloned()) {
+        return Some(hit);
+    }
+    let identity = crate::ado::authenticated_identity(org, pat).await.ok()?;
+    if let Ok(mut memo) = memo().lock() {
+        memo.insert(key, identity.clone());
+    }
+    Some(identity)
+}
+
+/// Why a create came back without a work item.
+///
+/// The distinction exists for exactly one caller — [`create_assigned`] retries, and a retry is only
+/// safe when nothing was created the first time.
+struct CreateFailed {
+    message: String,
+    /// The server read the patch and refused it, so there is nothing on the board. A request that
+    /// never completed, or whose answer did not parse, is *not* this: the item may well exist, and
+    /// sending it again would leave two.
+    refused: bool,
+}
+
+async fn post_create(
+    url: &str,
+    ops: &[serde_json::Value],
+    pat: &str,
+) -> Result<RawCreatedWorkItem, CreateFailed> {
+    let unknown =
+        |message: String| CreateFailed { message, refused: false };
+    let res = client()
+        .post(url)
+        .header("Authorization", auth_header(pat))
+        .header("Content-Type", "application/json-patch+json")
+        .body(serde_json::to_string(ops).map_err(|e| unknown(e.to_string()))?)
+        .send()
+        .await
+        .map_err(|e| unknown(format!("couldn't reach Azure DevOps: {e}")))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(CreateFailed {
+            message: format!("Azure DevOps returned {status}: {body}"),
+            refused: true,
+        });
+    }
+    res.json().await.map_err(|e| unknown(format!("unexpected response from Azure DevOps: {e}")))
+}
+
+/// Sends a create, and if Azure refuses it, sends it again with only what the item cannot do
+/// without.
+///
+/// `optional` is everything the work item is *better* with and fine without — who it belongs to,
+/// what kind of work it is, how long it should take. Azure validates all of it server-side and
+/// rejects the whole patch over any one of them: an identity it cannot resolve, an Activity value
+/// a customised picklist does not offer, an estimate field the type turns out not to accept. None
+/// of that is worth losing the task over, and none of it is knowable from here without asking the
+/// server one question per field — so the second attempt asks the only question that matters, by
+/// sending the item stripped back to what the user actually typed.
+///
+/// The retry reports *its own* failure rather than the first one: by then the refusal can only be
+/// about the required half, which is the half the user can do something about.
+async fn create_item(
+    url: &str,
+    required: Vec<serde_json::Value>,
+    optional: Vec<serde_json::Value>,
+    org: &str,
+    pat: &str,
+) -> Result<RawCreatedWorkItem, String> {
+    let mut ops = required.clone();
+    ops.extend(optional);
+    if let Some(person) = assignee(org, pat).await {
+        ops.push(serde_json::json!({
+            "op": "add",
+            "path": format!("/fields/{ASSIGNED_TO}"),
+            "value": person,
+        }));
+    }
+
+    match post_create(url, &ops, pat).await {
+        Ok(created) => Ok(created),
+        Err(failed) if failed.refused && ops.len() > required.len() => {
+            post_create(url, &required, pat).await.map_err(|again| again.message)
+        }
+        Err(failed) => Err(failed.message),
+    }
+}
+
 /// Creates one work item.
 ///
 /// `available_fields` is the type's own field list; `None` means "don't filter" (the probe failed,
@@ -730,14 +842,14 @@ pub async fn create_work_item(
     project: &str,
     work_item_type: &str,
     item: &NewWorkItem<'_>,
-    available_fields: Option<&HashSet<String>>,
+    available_fields: Option<&TypeFields>,
     pat: &str,
-) -> Result<AdoWorkItemRef, String> {
+) -> Result<ItemRef, String> {
     if item.title.trim().is_empty() {
         return Err("La historia no tiene título".to_string());
     }
 
-    let has = |field: &str| available_fields.is_none_or(|fields| fields.contains(field));
+    let has = |field: &str| available_fields.is_none_or(|fields| fields.has(field));
 
     // The narrative and the description share one field: Azure has no separate "story" field, and
     // splitting them across Description and a comment would put half the story where nobody reads it.
@@ -780,6 +892,15 @@ pub async fn create_work_item(
             fields.push((field, serde_json::json!(item.story_points)));
         }
     }
+    // Hours, alongside the points rather than instead of them: they answer different questions, and
+    // a process template that carries both expects both. A type that carries neither — an Agile
+    // User Story does not have Original Estimate — drops them here rather than at the server.
+    if item.original_estimate > 0.0 && has(ORIGINAL_ESTIMATE) {
+        fields.push((ORIGINAL_ESTIMATE, serde_json::json!(item.original_estimate)));
+    }
+    if item.remaining_work > 0.0 && has(REMAINING_WORK) {
+        fields.push((REMAINING_WORK, serde_json::json!(item.remaining_work)));
+    }
 
     let ops: Vec<serde_json::Value> = fields
         .into_iter()
@@ -796,21 +917,9 @@ pub async fn create_work_item(
         "https://dev.azure.com/{org_enc}/{project_enc}/_apis/wit/workitems/%24{type_enc}\
          ?api-version={API_VERSION}"
     );
-    let res = client()
-        .post(&url)
-        .header("Authorization", auth_header(pat))
-        .header("Content-Type", "application/json-patch+json")
-        .body(serde_json::to_string(&ops).map_err(|e| e.to_string())?)
-        .send()
-        .await
-        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
-    let status = res.status();
-    if !status.is_success() {
-        let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
-    }
-    let created: RawCreatedWorkItem =
-        res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
+    // No `optional` half on this side: everything a story carries was typed by the user, and
+    // publishing it to the wrong area path silently would be worse than telling them it failed.
+    let created = create_item(&url, ops, Vec::new(), org, pat).await?;
     let url = created
         .links
         .and_then(|l| l.html)
@@ -818,36 +927,12 @@ pub async fn create_work_item(
         .unwrap_or_else(|| {
             format!("https://dev.azure.com/{org_enc}/{project_enc}/_workitems/edit/{}", created.id)
         });
-    Ok(AdoWorkItemRef { id: created.id, url })
+    // No `key`: on Azure the id is what people read out loud, and inventing a second name for it
+    // would put two different labels on the same item depending on which screen you were looking at.
+    Ok(ItemRef { id: created.id, url, key: String::new() })
 }
 
 // ---------- writing back to a work item that already exists ----------
-
-/// What the review screen sends back to a story it has been editing.
-///
-/// Every field is optional and `None` means **leave it alone**, which is not the same as clearing
-/// it. The screen publishes in three steps and each one has to be able to write its own part
-/// without touching the others — an empty string is a real value here ("the user emptied this"),
-/// so absence has to be spelled separately from emptiness.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct WorkItemEdit {
-    pub title: Option<String>,
-    /// Plain text; converted to the HTML Azure stores.
-    pub description: Option<String>,
-    /// A bug's steps, which live in their own field.
-    pub repro_steps: Option<String>,
-    /// One whole scenario per element.
-    pub acceptance_criteria: Option<Vec<String>>,
-    /// Whether the prose above is already HTML and must be written through untouched.
-    ///
-    /// The review screen edits the description in a Markdown editor, and Markdown put through
-    /// [`text_to_html`] arrives on the board as a paragraph beginning with two literal hash marks.
-    /// The rendering is done where the Markdown parser already lives — the frontend, which
-    /// sanitises its output before it leaves — and this flag is how that pre-rendered HTML gets
-    /// past the escaping that every other caller still needs.
-    #[serde(default)]
-    pub prose_is_html: bool,
-}
 
 /// Applies an edit to a work item that already exists.
 ///
@@ -864,7 +949,7 @@ pub async fn update_work_item(
     id: i64,
     edit: &WorkItemEdit,
     pat: &str,
-) -> Result<AdoWorkItemRef, String> {
+) -> Result<ItemRef, String> {
     if id <= 0 {
         return Err("Ese identificador de work item no es válido".to_string());
     }
@@ -920,9 +1005,10 @@ pub async fn update_work_item(
         return Err(format!("Azure DevOps returned {status}: {body}"));
     }
 
-    Ok(AdoWorkItemRef {
+    Ok(ItemRef {
         id,
         url: format!("https://dev.azure.com/{org_enc}/_workitems/edit/{id}"),
+        key: String::new(),
     })
 }
 
@@ -931,36 +1017,43 @@ pub async fn update_work_item(
 /// The parent link is part of the same create rather than a second call: a task that exists for a
 /// moment with no parent is a task somebody's board query can pick up as orphaned, and a failure
 /// between the two calls would leave exactly that behind permanently.
+/// `available_fields` plays the same part it does in [`create_work_item`], and one part more: the
+/// planning fields a task carries are the ones this screen is asked to fill, and which of them the
+/// type has — and what the team calls the one that holds "QA" — is only knowable from it. `None`
+/// means the probe failed, and the fields go out unfiltered rather than the task not being created.
 pub async fn create_child_work_item(
     org: &str,
     project: &str,
     parent_id: i64,
     work_item_type: &str,
-    title: &str,
-    description: &str,
+    task: &NewChildItem<'_>,
+    available_fields: Option<&TypeFields>,
     pat: &str,
-) -> Result<AdoWorkItemRef, String> {
-    if title.trim().is_empty() {
+) -> Result<ItemRef, String> {
+    if task.title.trim().is_empty() {
         return Err("Esa tarea no tiene título".to_string());
     }
     let org_enc = encode_segment(&normalize_org(org));
     let project_enc = encode_segment(project);
     let type_enc = encode_segment(work_item_type);
+    let has = |field: &str| available_fields.is_none_or(|fields| fields.has(field));
 
-    let mut ops = vec![serde_json::json!({
+    // What the task is: its words, and where it hangs. Nothing here is negotiable, so nothing here
+    // is dropped on a retry.
+    let mut required = vec![serde_json::json!({
         "op": "add",
         "path": "/fields/System.Title",
-        "value": title.trim(),
+        "value": task.title.trim(),
     })];
-    if !description.trim().is_empty() {
-        ops.push(serde_json::json!({
+    if !task.detail.trim().is_empty() {
+        required.push(serde_json::json!({
             "op": "add",
             "path": "/fields/System.Description",
-            "value": text_to_html(description),
+            "value": text_to_html(task.detail),
         }));
     }
     // `Hierarchy-Reverse` points *up*: the relation is added to the child and names the parent.
-    ops.push(serde_json::json!({
+    required.push(serde_json::json!({
         "op": "add",
         "path": "/relations/-",
         "value": {
@@ -969,91 +1062,51 @@ pub async fn create_child_work_item(
         },
     }));
 
+    // How the board plans it. Every one is filtered against the type's own field list first, and
+    // whatever survives that and is still refused is dropped by the retry — see [`create_item`].
+    let mut optional: Vec<serde_json::Value> = Vec::new();
+    let mut field = |name: &str, value: serde_json::Value| {
+        optional.push(serde_json::json!({
+            "op": "add",
+            "path": format!("/fields/{name}"),
+            "value": value,
+        }));
+    };
+    if !task.activity.trim().is_empty() && has(ACTIVITY) {
+        field(ACTIVITY, serde_json::json!(task.activity.trim()));
+    }
+    // Only where the project actually has such a field — stock Agile and Scrum do not, and naming a
+    // field the type has never heard of is a 400 for the whole task rather than one ignored value.
+    if !task.task_type.trim().is_empty() {
+        if let Some(name) = available_fields.and_then(|fields| fields.by_any_label(&TASK_TYPE_LABELS))
+        {
+            field(name, serde_json::json!(task.task_type.trim()));
+        }
+    }
+    if task.priority > 0 && has("Microsoft.VSTS.Common.Priority") {
+        field("Microsoft.VSTS.Common.Priority", serde_json::json!(task.priority));
+    }
+    if task.original_estimate > 0.0 && has(ORIGINAL_ESTIMATE) {
+        field(ORIGINAL_ESTIMATE, serde_json::json!(task.original_estimate));
+    }
+    if task.remaining_work > 0.0 && has(REMAINING_WORK) {
+        field(REMAINING_WORK, serde_json::json!(task.remaining_work));
+    }
+
     let url = format!(
         "https://dev.azure.com/{org_enc}/{project_enc}/_apis/wit/workitems/%24{type_enc}\
          ?api-version={API_VERSION}"
     );
-    let res = client()
-        .post(&url)
-        .header("Authorization", auth_header(pat))
-        .header("Content-Type", "application/json-patch+json")
-        .body(serde_json::to_string(&ops).map_err(|e| e.to_string())?)
-        .send()
-        .await
-        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
-    let status = res.status();
-    if !status.is_success() {
-        let body = res.text().await.unwrap_or_default();
-        return Err(format!("Azure DevOps returned {status}: {body}"));
-    }
-    let created: RawCreatedWorkItem =
-        res.json().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
+    let created = create_item(&url, required, optional, org, pat).await?;
     let html = created
         .links
         .and_then(|l| l.html)
         .and_then(|h| h.href)
         .unwrap_or_else(|| format!("https://dev.azure.com/{org_enc}/_workitems/edit/{}", created.id));
-    Ok(AdoWorkItemRef { id: created.id, url: html })
+    Ok(ItemRef { id: created.id, url: html, key: String::new() })
 }
 
 // ---------- reading a work item that already exists ----------
-
-/// A work item as the review screen needs it.
-///
-/// The prose arrives as the HTML Azure stores it in, unconverted. The review only reads it, and
-/// leaving one converter — the frontend's, which has to render the thing anyway — is what keeps the
-/// text the user is looking at and the text the analysis judged from drifting apart.
-#[derive(Debug, Clone, Serialize)]
-pub struct AdoWorkItem {
-    pub id: i64,
-    pub url: String,
-    pub work_item_type: String,
-    pub title: String,
-    pub state: String,
-    /// The project it lives in. Read rather than taken from the link: this is addressed by
-    /// organisation, and a link copied before the item was moved names the old one.
-    pub team_project: String,
-    pub description_html: String,
-    /// `Microsoft.VSTS.TCM.ReproSteps`, which is where a **Bug** actually keeps its prose.
-    ///
-    /// The Agile and Scrum bug forms have no Description box at all — the field exists on the type,
-    /// so the API returns it without complaint, and it is always empty. Reading only
-    /// `System.Description` is why a bug loaded with nothing to review.
-    pub repro_steps_html: String,
-    /// `Microsoft.VSTS.TCM.SystemInfo` — environment, version, OS. Half the context of a bug report
-    /// lives here rather than in the steps.
-    pub system_info_html: String,
-    /// Empty when the process template has no such field, which is not a failure: a Basic-process
-    /// "Issue" keeps its criteria inside the description.
-    pub acceptance_criteria_html: String,
-    /// The estimate, whatever this process calls it. `0.0` means "not estimated" — which for a
-    /// Basic-process item is the only possible answer, since Basic defines no estimate field.
-    pub effort: f64,
-    /// Which field the estimate came out of, so the UI can say "Story Points" or "Effort" rather
-    /// than inventing a name for a number whose meaning is per-process.
-    pub effort_field: String,
-    pub tags: String,
-    pub area_path: String,
-    pub iteration_path: String,
-    /// Hierarchy children — the tasks the story already has, which the review shows before
-    /// proposing any of its own.
-    pub children: Vec<AdoWorkItemChild>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AdoWorkItemChild {
-    pub id: i64,
-    pub url: String,
-    pub work_item_type: String,
-    pub title: String,
-    pub state: String,
-    /// What the task actually says — so the review screen can show it without a round trip to the
-    /// browser. Same field fallback as the parent: a Task keeps prose in Description, a Bug child
-    /// in Repro Steps.
-    pub description_html: String,
-    /// Who it is assigned to, by display name. Empty when nobody is.
-    pub assigned_to: String,
-}
 
 #[derive(Deserialize)]
 struct RawWorkItem {
@@ -1146,7 +1199,7 @@ const MAX_CHILDREN: usize = 200;
 ///
 /// Addressed by organisation rather than by project: the id is unique across the organisation, so
 /// this still resolves an item that has been moved since the link was copied.
-pub async fn get_work_item(org: &str, id: i64, pat: &str) -> Result<AdoWorkItem, String> {
+pub async fn get_work_item(org: &str, id: i64, pat: &str) -> Result<WorkItem, String> {
     if id <= 0 {
         return Err("Ese identificador de work item no es válido".to_string());
     }
@@ -1185,13 +1238,16 @@ pub async fn get_work_item(org: &str, id: i64, pat: &str) -> Result<AdoWorkItem,
     );
     let (effort, effort_field) = estimate_of(&raw.fields);
 
-    Ok(AdoWorkItem {
+    Ok(WorkItem {
         id: raw.id,
         url: html_url,
+        key: String::new(),
         work_item_type: field_str(&raw.fields, "System.WorkItemType"),
         title: field_str(&raw.fields, "System.Title"),
         state: field_str(&raw.fields, "System.State"),
         team_project: field_str(&raw.fields, "System.TeamProject"),
+        // Azure addresses a project by the same name it shows, so the two are one string here.
+        container_id: field_str(&raw.fields, "System.TeamProject"),
         description_html: field_str(&raw.fields, "System.Description"),
         repro_steps_html,
         system_info_html: field_str(&raw.fields, "Microsoft.VSTS.TCM.SystemInfo"),
@@ -1209,7 +1265,7 @@ async fn list_work_items(
     org_enc: &str,
     ids: &[i64],
     pat: &str,
-) -> Result<Vec<AdoWorkItemChild>, String> {
+) -> Result<Vec<WorkItemChild>, String> {
     let list = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
     // `errorPolicy=omit` returns the readable ones instead of failing the batch over a single item
     // the PAT can't see — and it reports those as nulls, hence the `Option` in the envelope.
@@ -1229,9 +1285,10 @@ async fn list_work_items(
                 &item.fields,
                 &["System.Description", "Microsoft.VSTS.TCM.ReproSteps", "Microsoft.VSTS.CMMI.Symptom"],
             );
-            AdoWorkItemChild {
+            WorkItemChild {
                 url: format!("https://dev.azure.com/{org_enc}/_workitems/edit/{}", item.id),
                 id: item.id,
+                key: String::new(),
                 work_item_type: field_str(&item.fields, "System.WorkItemType"),
                 title: field_str(&item.fields, "System.Title"),
                 state: field_str(&item.fields, "System.State"),
@@ -1240,18 +1297,6 @@ async fn list_work_items(
             }
         })
         .collect())
-}
-
-/// What a pasted work-item reference resolves to.
-///
-/// `org` and `project` are `None` for a bare id — the caller fills those in from the organisation
-/// the workspace is already pointed at, which is the common case for someone reading a number off
-/// a board they have open.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct WorkItemRef {
-    pub org: Option<String>,
-    pub project: Option<String>,
-    pub id: i64,
 }
 
 /// Enough of a percent-decoder for one path segment: project names travel as `%20`-style escapes
@@ -1289,7 +1334,13 @@ pub fn parse_work_item_ref(input: &str) -> Option<WorkItemRef> {
     // A bare id, with or without the `#` people put in front of it in chat.
     let bare = text.strip_prefix('#').unwrap_or(text);
     if let Ok(id) = bare.parse::<i64>() {
-        return (id > 0).then_some(WorkItemRef { org: None, project: None, id });
+        return (id > 0).then_some(WorkItemRef {
+            org: None,
+            project: None,
+            id,
+            key: String::new(),
+            provider: BoardProvider::Azure,
+        });
     }
 
     let without_scheme = text.split_once("://").map_or(text, |(_, rest)| rest);
@@ -1329,22 +1380,30 @@ pub fn parse_work_item_ref(input: &str) -> Option<WorkItemRef> {
         .filter(|_| marker.is_none_or(|at| project_at < at))
         .map(|segment| percent_decode(segment));
 
-    Some(WorkItemRef { org, project, id })
+    Some(WorkItemRef { org, project, id, key: String::new(), provider: BoardProvider::Azure })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The Azure half of a reference. `key` and `provider` are constant on this arm — spelling them
+    /// out in every expectation would bury the two fields each test is actually about.
+    fn azure_ref(org: Option<&str>, project: Option<&str>, id: i64) -> Option<WorkItemRef> {
+        Some(WorkItemRef {
+            org: org.map(str::to_string),
+            project: project.map(str::to_string),
+            id,
+            key: String::new(),
+            provider: BoardProvider::Azure,
+        })
+    }
+
     #[test]
     fn reads_a_work_item_out_of_an_edit_url() {
         assert_eq!(
             parse_work_item_ref("https://dev.azure.com/fabrikam/Web%20Store/_workitems/edit/4821"),
-            Some(WorkItemRef {
-                org: Some("fabrikam".to_string()),
-                project: Some("Web Store".to_string()),
-                id: 4821,
-            })
+            azure_ref(Some("fabrikam"), Some("Web Store"), 4821)
         );
     }
 
@@ -1354,11 +1413,7 @@ mod tests {
     fn the_visualstudio_host_keeps_its_org_in_the_subdomain() {
         assert_eq!(
             parse_work_item_ref("https://fabrikam.visualstudio.com/Checkout/_workitems/edit/12"),
-            Some(WorkItemRef {
-                org: Some("fabrikam".to_string()),
-                project: Some("Checkout".to_string()),
-                id: 12,
-            })
+            azure_ref(Some("fabrikam"), Some("Checkout"), 12)
         );
     }
 
@@ -1367,7 +1422,7 @@ mod tests {
     fn an_org_level_url_reports_no_project() {
         assert_eq!(
             parse_work_item_ref("https://dev.azure.com/fabrikam/_workitems/edit/7"),
-            Some(WorkItemRef { org: Some("fabrikam".to_string()), project: None, id: 7 })
+            azure_ref(Some("fabrikam"), None, 7)
         );
     }
 
@@ -1377,11 +1432,7 @@ mod tests {
     fn a_board_url_names_its_open_card_in_the_query() {
         assert_eq!(
             parse_work_item_ref("https://dev.azure.com/fabrikam/Checkout/_boards/board/t/Team/Stories/?workitem=903"),
-            Some(WorkItemRef {
-                org: Some("fabrikam".to_string()),
-                project: Some("Checkout".to_string()),
-                id: 903,
-            })
+            azure_ref(Some("fabrikam"), Some("Checkout"), 903)
         );
     }
 
@@ -1389,12 +1440,9 @@ mod tests {
     fn a_bare_id_carries_no_org_of_its_own() {
         assert_eq!(
             parse_work_item_ref("  #4821 "),
-            Some(WorkItemRef { org: None, project: None, id: 4821 })
+            azure_ref(None, None, 4821)
         );
-        assert_eq!(
-            parse_work_item_ref("4821"),
-            Some(WorkItemRef { org: None, project: None, id: 4821 })
-        );
+        assert_eq!(parse_work_item_ref("4821"), azure_ref(None, None, 4821));
     }
 
     #[test]
@@ -1457,6 +1505,34 @@ mod tests {
     #[test]
     fn an_unestimated_item_reports_zero_and_no_field() {
         assert_eq!(estimate_of(&fields_of(&[])), (0.0, String::new()));
+    }
+
+    fn type_fields(pairs: &[(&str, &str)]) -> TypeFields {
+        let mut fields = TypeFields::default();
+        for (label, reference) in pairs {
+            fields.by_label.insert(label.to_ascii_lowercase(), reference.to_string());
+            fields.reference_names.insert(reference.to_string());
+        }
+        fields
+    }
+
+    /// The point of looking a field up by its label: the reference name behind "Task Type" is a
+    /// GUID on a customised process and nothing at all on a stock Agile one, so the only stable
+    /// handle on it is what the team sees on the form.
+    #[test]
+    fn a_task_type_field_is_found_by_whatever_the_form_calls_it() {
+        let custom = type_fields(&[("Task Type", "Custom.a1b2c3.TaskType")]);
+        assert_eq!(custom.by_any_label(&TASK_TYPE_LABELS), Some("Custom.a1b2c3.TaskType"));
+
+        // Case is not the team's problem, and a Spanish-language organisation names it in Spanish.
+        let spanish = type_fields(&[("tipo de tarea", "Custom.Tipo")]);
+        assert_eq!(spanish.by_any_label(&TASK_TYPE_LABELS), Some("Custom.Tipo"));
+
+        // Stock Agile has no such field, and inventing one would fail the whole create.
+        let agile = type_fields(&[("Activity", ACTIVITY), ("Priority", "Microsoft.VSTS.Common.Priority")]);
+        assert_eq!(agile.by_any_label(&TASK_TYPE_LABELS), None);
+        assert!(agile.has(ACTIVITY));
+        assert!(!agile.has(ORIGINAL_ESTIMATE), "a type that has no such field must say so");
     }
 
     /// A relation points at the API route, not the page — the id is the last segment either way,

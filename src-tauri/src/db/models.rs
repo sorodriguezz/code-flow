@@ -187,9 +187,15 @@ pub struct StoryBatch {
     pub prompt_template: String,
     pub prompt_instructions: String,
     pub generated_at: String,
+    /// Which board this set publishes to: `""` | `azure` | `jira`. Empty reads as Azure, which is
+    /// what every set predating Jira was.
+    pub board_provider: String,
+    /// The target, as three strings whose meaning is the board's: on Azure the organisation, the
+    /// project and the work item type; on Jira the site, the project key and the issue type id.
     pub ado_org: String,
     pub ado_project: String,
     pub work_item_type: String,
+    /// Azure only — Jira has no equivalent, and leaves both empty.
     pub area_path: String,
     pub iteration_path: String,
     pub tags: String,
@@ -274,7 +280,7 @@ pub struct WorkItemReviewRow {
 }
 
 /// One user story as it stands right now — the model's proposal plus every edit since, and the
-/// Azure Boards work item it became.
+/// work item it became.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoryDraft {
     pub id: String,
@@ -290,10 +296,18 @@ pub struct StoryDraft {
     pub priority: i64,
     /// `0` leaves the estimate alone. Fractional on purpose — Azure accepts half points.
     pub story_points: f64,
+    /// Hours the story is expected to take, which is a different question from the points above:
+    /// points size it against the rest of the backlog, hours are what a sprint's capacity is
+    /// planned against. Azure keeps both, and so does this. `0` leaves the field alone.
+    #[serde(default)]
+    pub original_estimate: f64,
     pub tags: String,
     pub notes: String,
-    /// `0` until published; the work item id afterwards, which is what stops a duplicate.
+    /// `0` until published; the host's numeric id afterwards, which is what stops a duplicate.
     pub work_item_id: i64,
+    /// What the board calls it out loud — Jira's `PROJ-123`. Empty on Azure, where the id is the
+    /// name, and the card falls back to `#id`.
+    pub work_item_key: String,
     pub work_item_url: String,
     /// What the last check against the code concluded: `""` (never checked) | `pass` | `partial` |
     /// `fail` | `unknown`. Rolled up from `verify_criteria`, never taken from the model directly.

@@ -30,6 +30,7 @@ import { useRepoStore } from "../../state/repoStore";
 import { useResolutionsStore, resolutionRunKey, type RunningResolution } from "../../state/resolutionsStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { notify } from "../../state/notificationStore";
 import { useT } from "../../state/languageStore";
 import { useTaskProvider } from "../../state/aiProviderStore";
 import { isAgenticProvider } from "../../lib/aiProviders";
@@ -69,6 +70,10 @@ export function useResolveWithAi(
   projectId: string | undefined,
   prSourceBranch: string | undefined,
   resolutionKey?: string,
+  /** What the fix was for, as one line for the notification centre. A fix writes to the working
+   * tree and can take minutes, so it is exactly the kind of run the user walks away from — and
+   * "Fix proposed" with no subject is useless once two of them are in the list. */
+  label?: string,
 ) {
   const t = useT();
   const [localResolution, setLocalResolution] = useState<string | null>(null);
@@ -138,9 +143,13 @@ export function useResolveWithAi(
     try {
       const result = await resolveFindingWithAi(projectId, promptText, id);
       record(result);
+      notify({ source: "review", titleKey: "notifications.fixDone", status: "success", detail: label });
     } catch (e) {
       // Stopping is a decision, not a failure — no error toast for it.
-      if (!isCancellation(e)) pushErrorToast(String(e));
+      if (!isCancellation(e)) {
+        pushErrorToast(String(e));
+        notify({ source: "review", titleKey: "notifications.fixFailed", status: "error", detail: label });
+      }
     } finally {
       useAiRunStore.getState().finish(id);
       markRunning(null);
@@ -503,6 +512,7 @@ export function FindingCard({
     projectId,
     prSourceBranch,
     resolutionKey,
+    finding.subtitle,
   );
   const discarded = isDiscarded(mark);
 

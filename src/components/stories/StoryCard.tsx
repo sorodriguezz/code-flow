@@ -24,6 +24,7 @@ function sameEdits(a: StoryEdits, b: StoryEdits): boolean {
     a.description === b.description &&
     a.priority === b.priority &&
     a.storyPoints === b.storyPoints &&
+    a.originalEstimate === b.originalEstimate &&
     a.tags === b.tags &&
     a.notes === b.notes &&
     a.acceptanceCriteria.length === b.acceptanceCriteria.length &&
@@ -65,6 +66,10 @@ export function StoryCard({
   }, [story, open]);
 
   const published = story.work_item_id > 0;
+  // What the board calls it: Jira's key, or Azure's id with the `#` people put in front of it.
+  // Falling back on the id rather than on the key means a story published before this column
+  // existed still shows the label it always did.
+  const publishedLabel = story.work_item_key || `#${story.work_item_id}`;
   const { icon: StatusIcon, color } = STORY_STATUS[story.status];
 
   // Linted from what is on screen, not from what is saved: the whole value of a deterministic
@@ -80,6 +85,7 @@ export function StoryCard({
         acceptance_criteria: JSON.stringify(draft.acceptanceCriteria),
         priority: draft.priority,
         story_points: draft.storyPoints,
+        original_estimate: draft.originalEstimate,
         tags: draft.tags,
         notes: draft.notes,
       }),
@@ -167,10 +173,11 @@ export function StoryCard({
             <button
               type="button"
               onClick={() => void openExternalUrl(story.work_item_url).catch((e) => pushErrorToast(String(e)))}
-              title={t("stories.openWorkItem", { id: story.work_item_id })}
+              title={t("stories.openWorkItem", { id: publishedLabel })}
               className="flex items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-success)_14%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--cf-success)] hover:brightness-110"
             >
-              <ExternalLink size={9} />#{story.work_item_id}
+              <ExternalLink size={9} />
+              {publishedLabel}
             </button>
           ) : (
             <StatusIcon size={12} className={color} />
@@ -291,7 +298,7 @@ export function StoryCard({
             </div>
           </CardField>
 
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-4 gap-2">
             <CardField label={t("stories.fieldPriority")}>
               <Select
                 size="field"
@@ -319,6 +326,22 @@ export function StoryCard({
                   value: String(points),
                   label: points === 0 ? t("stories.pointsUnset") : String(points),
                 }))}
+              />
+            </CardField>
+            {/* Hours, next to the points rather than instead of them: Azure keeps both, and this
+                is the number a sprint's capacity is planned against. Typed rather than picked,
+                because unlike points there is no agreed ladder of them. */}
+            <CardField label={t("stories.fieldEstimate")} hint={t("stories.fieldEstimateHint")}>
+              <input
+                type="number"
+                min={0}
+                step={0.5}
+                value={draft.originalEstimate > 0 ? String(draft.originalEstimate) : ""}
+                placeholder={t("stories.pointsUnset")}
+                aria-label={t("stories.fieldEstimate")}
+                onChange={(e) => patch({ originalEstimate: Math.max(0, Number(e.target.value) || 0) })}
+                onBlur={commit}
+                className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] tabular-nums outline-none focus:border-[var(--cf-accent)]"
               />
             </CardField>
             <CardField label={t("stories.fieldTags")} hint={t("stories.fieldTagsHint")}>

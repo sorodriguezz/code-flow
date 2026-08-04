@@ -9,6 +9,7 @@ import { useChatHistoryStore } from "./activityStore";
 import { isCancellation, newRunId, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
+import { notify } from "./notificationStore";
 import { formatAgentLogLine } from "../lib/agentLog";
 
 /** The repository name the backend puts after its busy marker. */
@@ -268,6 +269,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
           persisted: true,
         }));
         void useChatHistoryStore.getState().load(projectId);
+        // This store is explicitly built around an answer arriving while the user is looking
+        // somewhere else (see `settle` above), which is exactly when nobody sees the reply land.
+        notify({
+          source: "chat",
+          titleKey: "notifications.chatDone",
+          status: "success",
+          detail: base.title || liveTitle(trimmed),
+        });
       })
       .catch((e) => {
         // Another run already owns this repository's working copy, so this turn never reached an
@@ -323,7 +332,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
           persisted: session.persisted || !cancelled,
         }));
         // The failed turn was logged server-side — pick it up so it shows in the activity list.
-        if (!cancelled) void useChatHistoryStore.getState().load(projectId);
+        if (!cancelled) {
+          void useChatHistoryStore.getState().load(projectId);
+          notify({
+            source: "chat",
+            titleKey: "notifications.chatFailed",
+            status: "error",
+            detail: base.title || liveTitle(trimmed),
+          });
+        }
       })
       .finally(() => useAiRunStore.getState().finish(runId));
   },
