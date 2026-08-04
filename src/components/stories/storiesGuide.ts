@@ -60,9 +60,13 @@ Lo generado es Markdown editable. Cuando esté como lo quieres, eliges organizac
 
 ## Límites — léelos
 
-**Revisar no escribe nada en Azure DevOps.** Ni la historia, ni sus criterios, ni sus tareas. Lo que te lleves sale por tus manos: insertado en la copia local o copiado al portapapeles. Esto es lo que hace seguro lanzarlo sobre un tablero donde trabaja más gente.
-
 **Revisar sí puede escribir en Azure DevOps, pero solo desde la tercera columna.** Leer y proponer no cambian nada. Lo único que sale de la app es lo que prepares en «Por publicar» y confirmes, paso a paso: descripción, criterios y tareas se publican por separado. Los criterios se **reemplazan** enteros, no se fusionan.
+
+**Criterios y tareas se publican al revés, y el borrador lo refleja.** Los criterios de aceptación son **un solo campo** en Azure: publicarlos reescribe el campo entero. Por eso, la primera vez que mandas un criterio al borrador, la lista se **siembra con los que la HU ya tenía** — lo que ves ahí no es «lo nuevo», es cómo va a quedar el campo. La consecuencia: si borras del borrador un criterio que ya existía y publicas, **ese criterio desaparece del work item**. Una propuesta que dice reescribir el criterio 3 aterriza *sobre* el 3, en su sitio; una que no nombra ninguno se agrega al final.
+
+Las **tareas** funcionan al contrario: se crean como work items **hijos**, así que el borrador solo lleva las nuevas. Quitar una de ahí significa que no se crea — no borra ninguna tarea que ya esté en el tablero.
+
+Y como la sesión es una foto del momento en que la abriste: si alguien edita los criterios en Azure mientras la tienes abierta, publicar pisa ese cambio. Recargar el work item está a un clic.
 
 **Las sesiones de revisión se guardan.** Cada etapa que produce algo guarda la sesión completa, y el **Historial** las lista. Una sesión guardada es una **foto**: no se sincroniza con el tablero, así que el work item puede haber cambiado desde entonces. La pantalla lo dice al abrir una, y volver a cargarlo desde Azure está a un clic.
 
@@ -130,6 +134,12 @@ What comes out is editable Markdown. When it says what you want, pick organisati
 ## Limits — read these
 
 **Review can write to Azure DevOps, but only from the third column.** Reading and proposing change nothing. The only thing that leaves the app is what you stage in "To publish" and confirm, step by step: description, criteria and tasks publish separately. The criteria are **replaced** whole, never merged.
+
+**Criteria and tasks publish in opposite ways, and the draft shows it.** Acceptance criteria are **one field** in Azure: publishing rewrites the whole of it. That is why the first criterion you stage **seeds the list with the ones the story already had** — what you see there is not "the new ones", it is what the field will look like. The consequence: delete an existing criterion from the draft and publish, and **that criterion is gone from the work item**. A proposal that says it rewrites criterion 3 lands *on* criterion 3, in place; one that names none is appended.
+
+**Tasks** are the other way round: they are created as **child** work items, so the draft only ever holds the new ones. Removing one there means it is not created — nothing already on the board is touched.
+
+And since the session is a snapshot of the moment you opened it: if somebody edits the criteria in Azure while you have it open, publishing tramples that edit. Reloading the work item is one click away.
 
 **Review sessions are saved.** Every stage that produces something saves the whole session, and **History** lists them. A saved session is a **snapshot**: it is not reconciled with the board, so the work item may have changed since. The screen says so when you open one, and reloading from Azure is one click away.
 

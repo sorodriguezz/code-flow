@@ -1,6 +1,22 @@
 import { useRef, useState } from "react";
-import { Bold, Code, Eye, Heading2, Italic, Link2, List, ListOrdered, PenLine, Quote } from "lucide-react";
+import {
+  Bold,
+  Code,
+  Eye,
+  Heading2,
+  Italic,
+  Link2,
+  List,
+  ListOrdered,
+  PenLine,
+  Quote,
+  Redo2,
+  Undo2,
+} from "lucide-react";
+import { chordLabel } from "../../lib/keys";
 import { renderMarkdown } from "../../lib/markdown";
+import { isMac } from "../../lib/platform";
+import { useTextHistory } from "../../lib/useTextHistory";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -25,6 +41,7 @@ export function MarkdownEditor({
   placeholder,
   readOnly = false,
   ariaLabel,
+  historyKey,
 }: {
   value: string;
   /** Absent only where `readOnly` is on — a field with no handler and no lock is a field that
@@ -33,6 +50,10 @@ export function MarkdownEditor({
   placeholder: string;
   readOnly?: boolean;
   ariaLabel: string;
+  /** What this field is editing — an item id, a field name. The undo history starts over when it
+   *  changes, because the same editor is reused for the next item without unmounting, and a step
+   *  back into the previous item's prose would be data loss wearing an undo's clothes. */
+  historyKey?: string | number;
 }) {
   const t = useT();
   const area = useRef<HTMLTextAreaElement>(null);
@@ -41,6 +62,13 @@ export function MarkdownEditor({
   // review closes and every editor on screen has to become a reader, not merely lose its toolbar.
   const preview = readOnly || wanted;
   const write = (next: string) => onChange?.(next);
+  const history = useTextHistory({
+    value,
+    write,
+    area,
+    enabled: !readOnly,
+    resetKey: historyKey,
+  });
 
   /**
    * Wraps or prefixes the selection, then puts the caret back where the user can carry on typing.
@@ -69,6 +97,8 @@ export function MarkdownEditor({
         .map((line, at) => `${marks.line === "1. " ? `${at + 1}. ` : marks.line}${line}`)
         .join("\n");
       const next = `${value.slice(0, from)}${replacement}${value.slice(to)}`;
+      // One press, one undo step: recorded whole rather than merged into whatever was being typed.
+      history.record({ value: next, start: from, end: from + replacement.length });
       write(next);
       queueMicrotask(() => {
         el.focus();
@@ -80,11 +110,14 @@ export function MarkdownEditor({
     const before = marks.before ?? "";
     const after = marks.after ?? "";
     replacement = `${before}${selected}${after}`;
-    write(`${value.slice(0, start)}${replacement}${value.slice(end)}`);
+    const next = `${value.slice(0, start)}${replacement}${value.slice(end)}`;
+    // Inside the marks when there was nothing selected, around the text when there was.
+    const caret = start + before.length;
+    history.record({ value: next, start: caret, end: caret + selected.length });
+    write(next);
     queueMicrotask(() => {
       el.focus();
-      // Inside the marks when there was nothing selected, around the text when there was.
-      el.setSelectionRange(start + before.length, start + before.length + selected.length);
+      el.setSelectionRange(caret, caret + selected.length);
     });
   };
 
@@ -99,6 +132,18 @@ export function MarkdownEditor({
     { icon: Link2, label: t("md.link"), run: () => apply({ before: "[", after: "](url)" }) },
   ];
 
+  const STEPS = [
+    { icon: Undo2, label: t("md.undo"), chord: "Mod+Z", run: history.undo, can: history.canUndo },
+    {
+      icon: Redo2,
+      label: t("md.redo"),
+      // Both are bound; the tooltip names the one the platform's own apps teach.
+      chord: isMac() ? "Mod+Shift+Z" : "Mod+Y",
+      run: history.redo,
+      can: history.canRedo,
+    },
+  ];
+
   const tool =
     "flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.07]";
 
@@ -107,6 +152,23 @@ export function MarkdownEditor({
       <div className="flex shrink-0 flex-wrap items-center gap-0.5 border-b border-[var(--cf-border)] px-1.5 py-1">
         {!readOnly && (
           <>
+            {/* Before the marks, in the order every editor puts them: the two buttons that answer
+                "that wasn't what I meant" belong at the start of the toolbar, not buried in it. */}
+            {STEPS.map(({ icon: Icon, label, chord, run, can }) => (
+              <button
+                key={label}
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={run}
+                disabled={preview || !can}
+                title={`${label} · ${chordLabel(chord)}`}
+                aria-label={label}
+                className={`${tool} disabled:cursor-not-allowed disabled:opacity-30`}
+              >
+                <Icon size={12} />
+              </button>
+            ))}
+            <span className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" aria-hidden />
             {TOOLS.map(({ icon: Icon, label, run }) => (
               <button
                 key={label}
@@ -170,7 +232,14 @@ export function MarkdownEditor({
           ref={area}
           value={value}
           readOnly={readOnly}
-          onChange={(e) => write(e.target.value)}
+          onChange={(e) => {
+            const el = e.currentTarget;
+            // `merge`: a keystroke joins the run of typing in progress rather than becoming a step
+            // of its own, so undo walks back words instead of letters.
+            history.record({ value: el.value, start: el.selectionStart, end: el.selectionEnd }, true);
+            write(el.value);
+          }}
+          onKeyDown={history.onKeyDown}
           placeholder={placeholder}
           aria-label={ariaLabel}
           spellCheck={false}

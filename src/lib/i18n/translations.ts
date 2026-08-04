@@ -1930,6 +1930,8 @@ export const translations = {
     "common.noProjectOpen": "No project open",
     "common.openProjectHint": "Open a local repository from the + button in the sidebar to get started.",
 
+    "md.undo": "Undo",
+    "md.redo": "Redo",
     "md.bold": "Bold",
     "md.italic": "Italic",
     "md.heading": "Heading",
@@ -2201,9 +2203,19 @@ export const translations = {
     "huReview.closedHint": "This review is closed. It is kept as a record: nothing here can be generated or edited.",
     "huReview.closedPublishedHint":
       "This review was published and closed. It is kept as a record: nothing here can be generated or edited.",
-    "huReview.statusOpen": "Open",
+    "huReview.statusOpen": "Draft",
     "huReview.statusClosed": "Closed",
     "huReview.statusPublished": "Published",
+    "huReview.closedToast": "Review closed. It stays in the history.",
+    "huReview.setAside": "Put away",
+    "huReview.setAsideHint":
+      "Takes the review off the screen without ending it. It is saved in the history as a draft, exactly as you leave it, and you pick it up again from there.",
+    "huReview.setAsideDone": "Saved in the history.",
+    "huReview.save": "Save",
+    "huReview.saving": "Saving…",
+    "huReview.saved": "Saved",
+    "huReview.saveHint": "The review saves itself as you work. Press to save right now.",
+    "huReview.savedAt": "Last saved at {at}",
     "huReview.storyColumn": "The story",
     "huReview.storyColumnHint": "What the work item says today, and how it scores.",
     "huReview.aiColumn": "What the AI proposes",
@@ -2229,6 +2241,10 @@ export const translations = {
     "huReview.stageHint": "Puts this into the publish column. It still does not leave the app.",
     "huReview.stageCurrent": "Stage what the story says now",
     "huReview.unstage": "Remove from the queue",
+    "huReview.binNoteCriteria":
+      "Careful: this list is the work item’s whole acceptance criteria field, seeded with the ones it already had. Publishing rewrites the field, so a criterion removed here is removed on the board too.",
+    "huReview.binNoteTasks":
+      "Tasks are created as new children, so this list only ever holds the new ones. Removing one here means it is not created — nothing already on the board is touched.",
     "huReview.clearStep": "Empty this step",
     "huReview.writesToAzure": "This step writes to Azure DevOps and other people will see it.",
     "huReview.confirmDescription": "Overwrite this work item\u2019s description on Azure DevOps with the staged text?",
@@ -4863,6 +4879,8 @@ export const translations = {
     "common.noProjectOpen": "No hay proyecto abierto",
     "common.openProjectHint": "Abre un repositorio local desde el botón + de la barra lateral para comenzar.",
 
+    "md.undo": "Deshacer",
+    "md.redo": "Rehacer",
     "md.bold": "Negrita",
     "md.italic": "Cursiva",
     "md.heading": "Título",
@@ -5138,9 +5156,19 @@ export const translations = {
     "huReview.closedHint": "Esta revisi\u00f3n est\u00e1 cerrada. Se conserva como registro: aqu\u00ed no se genera ni se edita nada.",
     "huReview.closedPublishedHint":
       "Esta revisi\u00f3n se public\u00f3 y se cerr\u00f3. Se conserva como registro: aqu\u00ed no se genera ni se edita nada.",
-    "huReview.statusOpen": "Abierta",
+    "huReview.statusOpen": "Borrador",
     "huReview.statusClosed": "Cerrada",
     "huReview.statusPublished": "Publicada",
+    "huReview.closedToast": "Revisión cerrada. Queda en el historial.",
+    "huReview.setAside": "Dejar para después",
+    "huReview.setAsideHint":
+      "Quita la revisión de la pantalla sin terminarla. Queda guardada en el historial como borrador, tal y como la dejas, y la retomas desde ahí.",
+    "huReview.setAsideDone": "Guardada en el historial.",
+    "huReview.save": "Guardar",
+    "huReview.saving": "Guardando…",
+    "huReview.saved": "Guardado",
+    "huReview.saveHint": "La revisión se guarda sola mientras trabajas. Pulsa para guardar ahora mismo.",
+    "huReview.savedAt": "Guardado por última vez a las {at}",
     "huReview.storyColumn": "La historia",
     "huReview.storyColumnHint": "Lo que dice el work item hoy, y c\u00f3mo puntu\u00f3.",
     "huReview.aiColumn": "Lo que propone la IA",
@@ -5166,6 +5194,10 @@ export const translations = {
     "huReview.stageHint": "Lo pone en la columna de publicaci\u00f3n. Sigue sin salir de la app.",
     "huReview.stageCurrent": "Preparar lo que dice la historia ahora",
     "huReview.unstage": "Quitar de la cola",
+    "huReview.binNoteCriteria":
+      "Ojo: esta lista es el campo completo de criterios de aceptación del work item, sembrado con los que ya tenía. Al publicar se reescribe el campo entero, así que un criterio que borres aquí se borra también en el tablero.",
+    "huReview.binNoteTasks":
+      "Las tareas se crean como hijos nuevos, así que esta lista solo lleva las nuevas. Quitar una aquí significa que no se crea — no se toca ninguna que ya esté en el tablero.",
     "huReview.clearStep": "Vaciar este paso",
     "huReview.writesToAzure": "Este paso escribe en Azure DevOps y lo ver\u00e1 el resto del equipo.",
     "huReview.confirmDescription": "\u00bfSobrescribir la descripci\u00f3n de este work item en Azure DevOps con el texto preparado?",

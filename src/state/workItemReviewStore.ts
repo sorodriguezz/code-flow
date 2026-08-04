@@ -257,6 +257,13 @@ interface WorkItemReviewState {
   openedFrom: { at: string; id: string } | null;
   history: WorkItemReviewRow[];
 
+  /** A change the last completed write did not cover. Drives the save button's wording. */
+  dirty: boolean;
+  /** A write in flight. */
+  saving: boolean;
+  /** When the last write landed, so the screen can say so rather than only imply it. */
+  savedAt: string | null;
+
   setInput: (input: string) => void;
   setOrg: (org: string) => void;
   toggleProject: (projectId: string) => void;
@@ -297,12 +304,16 @@ interface WorkItemReviewState {
 
   /** Writes one staged part to Azure DevOps. The only thing in this store that changes the board. */
   publish: (part: PublishPart) => Promise<void>;
-  /** Publishes everything staged, then ends the session as `published`. */
+  /** Publishes everything staged, ends the session as `published`, and clears the screen. */
   publishAll: () => Promise<void>;
-  /** Ends the session without publishing. The record keeps everything; the screen goes read-only. */
+  /** Ends the session without publishing and clears the screen. The record keeps everything. */
   close: () => Promise<void>;
+  /** Clears the screen without ending the session — it stays in the history as a draft. */
+  dismiss: () => Promise<void>;
   /** Writes the session as it stands. Called after every change; safe to call at any time. */
   persist: () => Promise<void>;
+  /** Writes now instead of when the typing stops. What the save button calls. */
+  saveNow: () => Promise<void>;
   loadHistory: () => Promise<void>;
   openFromHistory: (row: WorkItemReviewRow) => void;
   removeFromHistory: (id: string) => Promise<void>;
@@ -333,6 +344,9 @@ const EMPTY = {
   status: "open" as ReviewStatus,
   sessionId: "",
   openedFrom: null,
+  dirty: false,
+  saving: false,
+  savedAt: null as string | null,
 };
 
 /** A session that has ended takes no more changes — every mutator asks this first. */
@@ -763,24 +777,59 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       pushErrorToast(parseClaudeError(String(e)).message);
     } finally {
       set({ publishing: null });
-      void get()
+      // Awaited rather than fired off, because the screen is cleared next and a save that reads the
+      // state after that would find nothing to write.
+      await get()
         .persist()
         .catch((e: unknown) => pushErrorToast(String(e)));
+      // A published session is a record, and the place to read a record is the history. Leaving a
+      // read-only copy on screen only invites editing what is already on the board.
+      if (get().status === "published") set({ ...EMPTY });
     }
   },
 
   close: async () => {
     if (!get().item || !editable(get().status)) return;
     set({ status: "closed" });
+    await stopEverything();
+    cancelSave();
     await get()
       .persist()
       .catch((e: unknown) => pushErrorToast(String(e)));
+    set({ ...EMPTY });
+    useToastStore.getState().pushToast(translate("huReview.closedToast"), "success");
+  },
+
+  /**
+   * Takes the session off the screen without ending it.
+   *
+   * The counterpart to closing: the review is not finished, it is merely not what you are looking
+   * at right now. It stays in the history as a draft, with everything staged in it, and opening it
+   * from there puts it back exactly as it was.
+   *
+   * Saved before it is cleared: the write is debounced, so the last thing typed may still be in the
+   * air, and clearing first would leave that save with nothing to write.
+   */
+  dismiss: async () => {
+    if (!get().item) return;
+    await stopEverything();
+    cancelSave();
+    await get()
+      .persist()
+      .catch((e: unknown) => pushErrorToast(String(e)));
+    set({ ...EMPTY });
+    useToastStore.getState().pushToast(translate("huReview.setAsideDone"), "success");
   },
 
   persist: async () => {
     const s = get();
     const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
     if (!s.item || !s.sessionId || !workspaceId) return;
+    // The edit this write is about to cover. Anything typed while it is in flight bumps the counter
+    // again, and the session stays dirty rather than being reported saved on the strength of a
+    // write that went out before it.
+    const covering = edits;
+    set({ saving: true });
 
     const payload: ReviewSessionPayload = {
       version: 2,
@@ -805,20 +854,37 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
     // picking the newest keeps a row stamped rather than blank when only one has run.
     const stamped = Object.values(s.provenance);
     const latest: ReviewProvenance | undefined = stamped[stamped.length - 1];
-    await saveWorkItemReview({
-      id: s.sessionId,
-      workspaceId,
-      org: s.org,
-      workItemId: s.item.id,
-      workItemType: s.item.work_item_type,
-      workItemUrl: s.item.url,
-      title: s.title,
-      payload: JSON.stringify(payload),
-      engine: latest?.engine ?? "",
-      model: latest?.model ?? "",
-      version: latest?.version ?? "",
-    });
+    try {
+      await saveWorkItemReview({
+        id: s.sessionId,
+        workspaceId,
+        org: s.org,
+        workItemId: s.item.id,
+        workItemType: s.item.work_item_type,
+        workItemUrl: s.item.url,
+        title: s.title,
+        payload: JSON.stringify(payload),
+        engine: latest?.engine ?? "",
+        model: latest?.model ?? "",
+        version: latest?.version ?? "",
+      });
+      set({ saving: false, dirty: edits !== covering, savedAt: new Date().toISOString() });
+    } catch (e: unknown) {
+      // Left dirty on purpose. A write that failed is not a saved session, and a button that says
+      // "saved" anyway would be the only notice the user ever got of losing it.
+      set({ saving: false, dirty: true });
+      throw e;
+    }
     await get().loadHistory();
+  },
+
+  saveNow: async () => {
+    // The pending debounce is dropped rather than left to fire: it would write the same session a
+    // second time, and its landing after this one would stamp an older time on the row.
+    cancelSave();
+    await get()
+      .persist()
+      .catch((e: unknown) => pushErrorToast(String(e)));
   },
 
   loadHistory: async () => {
@@ -1075,7 +1141,13 @@ function activeWorkspaceId(): string | null {
  * coalesced: the last change within the window is the one that lands, and it lands whole.
  */
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
+/** Bumped by every change. What a write covers is the value it read when it started. */
+let edits = 0;
 function saveSoon() {
+  edits += 1;
+  // Said as soon as it is true, not when the write starts: the seconds between a keystroke and the
+  // save are exactly when the user wants to know there is something unsaved.
+  useWorkItemReviewStore.setState({ dirty: true });
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     saveTimer = null;
@@ -1084,6 +1156,24 @@ function saveSoon() {
       .persist()
       .catch((e: unknown) => pushErrorToast(String(e)));
   }, 800);
+}
+
+function cancelSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = null;
+}
+
+/**
+ * Stops whatever is still generating, for the two ways a session leaves the screen.
+ *
+ * Its answer had nowhere to land the moment the screen was cleared, and an engine left running is
+ * one still spending tokens on a review nobody is looking at.
+ */
+async function stopEverything(): Promise<void> {
+  const store = useWorkItemReviewStore.getState();
+  for (const stage of Object.keys(store.runByStage) as WorkItemReviewStage[]) {
+    await store.stop(stage).catch((e: unknown) => pushErrorToast(String(e)));
+  }
 }
 
 /** What a criterion proposal sends to the draft, given the format the user settled on. */

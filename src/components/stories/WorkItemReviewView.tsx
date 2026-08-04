@@ -23,6 +23,7 @@ import {
   Play,
   Plug,
   Plus,
+  Save,
   ScanSearch,
   Send,
   Sparkles,
@@ -30,6 +31,7 @@ import {
   Tag,
   Timer,
   Trash2,
+  TriangleAlert,
   UploadCloud,
   User,
   Wrench,
@@ -909,6 +911,7 @@ function DescriptionTab({ width, seam }: { width: string; seam: React.ReactNode 
             onChange={(value) => (isBug ? store().setReproSteps(value) : store().setDescription(value))}
             placeholder={t("huReview.noDescription")}
             ariaLabel={label}
+            historyKey={`${item.id}:${isBug ? "repro" : "description"}`}
           />
         </div>
       </Pane>
@@ -1543,6 +1546,73 @@ function DraftPane({
   );
 }
 
+/**
+ * The save button, which is mostly a status light.
+ *
+ * The session already saves itself — every edit, once the typing stops — so a plain Save would be a
+ * button that never has anything to do. What is actually missing is the sentence "your work is on
+ * disk", and a user who cannot see it says it to themselves by pressing something. So the same
+ * control does both: it reads *Saved* while there is nothing pending, turns into *Save* the moment
+ * there is, and writes immediately when pressed instead of waiting out the delay.
+ *
+ * Disabled while clean rather than hidden: a control that vanishes once it worked leaves the user
+ * looking for it, and its wording is the only place the last save time is written down.
+ */
+function SaveState() {
+  const t = useT();
+  const dirty = useWorkItemReviewStore((s) => s.dirty);
+  const saving = useWorkItemReviewStore((s) => s.saving);
+  const savedAt = useWorkItemReviewStore((s) => s.savedAt);
+
+  const label = saving ? t("huReview.saving") : dirty ? t("huReview.save") : t("huReview.saved");
+  const hint = dirty || saving || !savedAt
+    ? t("huReview.saveHint")
+    : `${t("huReview.savedAt").replace("{at}", new Date(savedAt).toLocaleTimeString())} · ${t("huReview.saveHint")}`;
+
+  return (
+    <button
+      type="button"
+      disabled={saving || !dirty}
+      onClick={() => void store().saveNow()}
+      title={hint}
+      className={`flex h-[30px] shrink-0 items-center gap-1.5 rounded-md border px-2 text-[11.5px] font-medium transition-colors ${
+        dirty && !saving
+          ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))] text-[var(--cf-accent)] hover:border-[var(--cf-accent)]"
+          : "border-[var(--cf-border)] text-[var(--cf-text-muted)] disabled:cursor-default"
+      }`}
+    >
+      {saving ? <ThinkingOrb size="sm" /> : dirty ? <Save size={12} /> : <Check size={12} />}
+      {label}
+    </button>
+  );
+}
+
+/**
+ * The note that rides next to a draft row's bin.
+ *
+ * The two lists are published in opposite ways and the bin looks identical in both: the criteria
+ * are one field that gets rewritten whole — seeded with the ones the work item already had, so the
+ * list holds other people's criteria as well as the new ones — while tasks are created as children
+ * and the list only ever holds what does not exist yet. So the same gesture deletes on the board in
+ * one pane and merely cancels in the other, which is not something a bin icon can say on its own.
+ *
+ * Revealed with the bin rather than always on: a warning that is only true when you are about to
+ * press something belongs where the pointer already is, and fifteen standing warning triangles on a
+ * list of criteria are read as decoration by the second one.
+ */
+function BinNote({ icon: Icon, note, tone }: { icon: typeof CircleAlert; note: string; tone: string }) {
+  return (
+    <span
+      role="img"
+      title={note}
+      aria-label={note}
+      className={`flex h-5 w-5 shrink-0 cursor-help items-center justify-center opacity-0 transition-opacity group-hover:opacity-100 ${tone}`}
+    >
+      <Icon size={11} />
+    </span>
+  );
+}
+
 function DraftTab() {
   const t = useT();
   const item = useWorkItemReviewStore((s) => s.item);
@@ -1570,6 +1640,7 @@ function DraftTab() {
             onChange={(value) => store().setDraftDescription(value)}
             placeholder={t("huReview.noDescription")}
             ariaLabel={t("stories.fieldDescription")}
+            historyKey={`${item.id}:draft`}
           />
         </div>
       </DraftPane>
@@ -1591,15 +1662,22 @@ function DraftTab() {
               <div className="flex items-center gap-1.5 border-b border-[var(--cf-border)] px-2.5 py-1">
                 <span className="text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">#{at + 1}</span>
                 {open && (
-                  <button
-                    type="button"
-                    onClick={() => store().removeDraftCriterion(at)}
-                    title={t("stories.removeCriterion")}
-                    aria-label={t("stories.removeCriterion")}
-                    className="ml-auto flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
-                  >
-                    <Trash2 size={11} />
-                  </button>
+                  <div className="ml-auto flex items-center gap-0.5">
+                    <BinNote
+                      icon={TriangleAlert}
+                      note={t("huReview.binNoteCriteria")}
+                      tone="text-[var(--cf-warning)]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => store().removeDraftCriterion(at)}
+                      title={t("stories.removeCriterion")}
+                      aria-label={t("stories.removeCriterion")}
+                      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </div>
                 )}
               </div>
               <textarea
@@ -1647,15 +1725,24 @@ function DraftTab() {
                   className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[11.5px] font-medium text-[var(--cf-text)] outline-none hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
                 />
                 {open && (
-                  <button
-                    type="button"
-                    onClick={() => store().removeDraftTask(at)}
-                    title={t("huReview.unstage")}
-                    aria-label={t("huReview.unstage")}
-                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
-                  >
-                    <Trash2 size={11} />
-                  </button>
+                  <>
+                    {/* Muted circle rather than the criteria's warning triangle: removing a task
+                        here cancels a creation, it does not delete anything anyone else can see. */}
+                    <BinNote
+                      icon={CircleAlert}
+                      note={t("huReview.binNoteTasks")}
+                      tone="text-[var(--cf-text-muted)]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => store().removeDraftTask(at)}
+                      title={t("huReview.unstage")}
+                      aria-label={t("huReview.unstage")}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+                    >
+                      <Trash2 size={11} />
+                    </button>
+                  </>
                 )}
               </div>
               <textarea
@@ -2192,9 +2279,14 @@ export function WorkItemReviewView() {
               <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-[11px] text-[var(--cf-text-muted)]">
                 <span className="font-mono">#{item.id}</span>
                 <span>{item.work_item_type}</span>
-                <span className={`rounded-full border px-1.5 py-px text-[10px] font-medium ${stateTone(item.state)}`}>
-                  {item.state}
-                </span>
+                {/* Only when the item actually carries one. A session reopened from an old history
+                    row has no state to show, and an empty capsule is a chip that says nothing while
+                    looking like it says something. */}
+                {item.state.trim() && (
+                  <span className={`rounded-full border px-1.5 py-px text-[10px] font-medium ${stateTone(item.state)}`}>
+                    {item.state}
+                  </span>
+                )}
                 <span aria-hidden>·</span>
                 <span className="inline-flex items-center gap-1">
                   <Gauge size={11} />
@@ -2214,6 +2306,7 @@ export function WorkItemReviewView() {
             <div className="mt-[2px] flex shrink-0 flex-wrap items-center justify-end gap-1.5">
               {open && <RepoPicker />}
               {open && <ContextToggle />}
+              {open && <SaveState />}
               <button
                 type="button"
                 onClick={() => void openExternalUrl(item.url).catch((e: unknown) => pushErrorToast(String(e)))}
@@ -2225,7 +2318,10 @@ export function WorkItemReviewView() {
               </button>
               {/* Ends the session without publishing. Not a discard: everything it holds stays in
                   the history, which is the whole point — "we looked at this and decided to leave
-                  it" is a result worth being able to read back. */}
+                  it" is a result worth being able to read back. The padlock rather than a cross,
+                  because that is what it does — the cross beside it is the one that only clears the
+                  screen, and two crosses meaning different things is how a session gets ended by
+                  somebody who meant to put it down. */}
               {open && (
                 <button
                   type="button"
@@ -2233,31 +2329,32 @@ export function WorkItemReviewView() {
                   title={t("huReview.closeReviewHint")}
                   className="flex h-[30px] shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 text-[11.5px] font-medium text-[var(--cf-text)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
                 >
-                  <X size={12} />
+                  <Lock size={12} />
                   {t("huReview.closeReview")}
                 </button>
               )}
+              {/* Off the screen, not out of the record: the session keeps its status and everything
+                  staged in it, and the history is where it is picked back up. No confirmation —
+                  there is nothing to lose, which is exactly what separates it from the padlock. */}
+              <button
+                type="button"
+                onClick={() => void store().dismiss()}
+                title={t("huReview.setAsideHint")}
+                aria-label={t("huReview.setAside")}
+                className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+              >
+                <X size={13} />
+              </button>
             </div>
           </div>
 
           {/* 3 — the tabs, and whatever belongs to the one on screen. */}
           <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5">
             <TabBar />
-            {anyRunning && (
-              <button
-                type="button"
-                onClick={() => {
-                  for (const stage of Object.keys(running) as WorkItemReviewStage[]) {
-                    void store().stop(stage);
-                  }
-                }}
-                title={t("huReview.stopHint")}
-                className="ml-auto flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11.5px] font-medium text-[var(--cf-text)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-              >
-                <Square size={10} />
-                {t("huReview.stop")}
-              </button>
-            )}
+            {/* No stop button here on purpose. A run is stopped from the pane that started it, where
+                the button sits next to the text it is producing — one that stopped every stage at
+                once, from a strip that says nothing about which are running, could only be read as
+                "stop something". */}
             {/* Publishes everything staged and ends the session, which is why it lives on the tab
                 strip rather than inside one of the three draft panes: it is about the review, not
                 about any one part of it. */}
