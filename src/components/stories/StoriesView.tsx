@@ -110,7 +110,11 @@ export function StoriesView() {
             looks like a choice. Every tab stays mounted as a button so the pill has something to
             slide between (see `ActivePill`); the panes below do not, because each keeps its own
             store and switching away and back has to find the work still there. */}
-        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5">
+        {/* On the surface, not the window background. All three panes below are `--cf-surface`, so
+            a strip that fell through to `--cf-bg` drew a grey band across the top of an otherwise
+            white column — read as a gap between two things rather than as the top of one. The
+            hairline under it is what separates the tabs from what they switch. */}
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1.5">
           <div className="flex items-center gap-0.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg)] p-0.5">
             {MODES.map(({ id, labelKey, icon: Icon }) => (
               <button

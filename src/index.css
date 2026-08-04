@@ -162,6 +162,14 @@ body {
   background: transparent;
 }
 
+/* The square where a vertical and a horizontal bar would meet. Left unstyled it is painted opaque
+   white by the engine — not inherited from anything, so a dark theme gets a lit 10px block in the
+   corner of every pane that scrolls both ways. Transparent like the track: the corner is a gap
+   between two bars, and a gap should show whatever is behind it. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 /* Dragging the window is left entirely to the `data-tauri-drag-region` attribute: Tauri's injected
    mousedown handler walks the event path and gives up as soon as it meets a button, link, input or
    anything with an interactive role, so the title bar's own controls keep their clicks.
