@@ -1,14 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Bug,
   ChevronDown,
   ClipboardCheck,
+  ClipboardList,
+  FileCode2,
   FileText,
   FlaskConical,
   GitCommit,
   GitMerge,
   ListChecks,
+  Network,
   RotateCcw,
   ScanSearch,
+  ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -77,47 +82,122 @@ const TEMPLATES: TemplateDef[] = [
   },
 ];
 
+interface WorkspacePromptDef {
+  kind: string;
+  /** The `AiTask` whose routing runs it — the row's second line names that engine. Two prompts in
+   *  one group can differ here: writing stories and checking them against code are not the same
+   *  job, and a team routinely points them at different models. */
+  task: string;
+  icon: LucideIcon;
+  labelKey: TranslationKey;
+  hintKey: TranslationKey;
+}
+
 /**
- * The prompts the work-item review runs on, one per tab of that screen.
+ * The per-workspace prompts, grouped by the tab of the stories section that runs them.
  *
  * Separate from `TEMPLATES` because they are stored per *workspace* rather than globally: how a
  * team writes acceptance criteria is a property of that team's backlog, not of this installation,
  * and two workspaces on one machine routinely disagree about it.
  *
- * They are here rather than only in the review screen because this is where somebody goes when the
- * output came out wrong. The defaults describe one way of working — Gherkin or a checklist, three
- * questions per development task, a five-step QA ladder — and a team whose process differs should
- * be changing the instruction rather than fighting its output card by card.
+ * They are here rather than only in the screens that run them because this is where somebody goes
+ * when the output came out wrong. The defaults describe one way of working — Gherkin or a
+ * checklist, a five-step QA ladder, a documentation page with eleven fixed sections — and a team
+ * whose process differs should be changing the instruction rather than fighting its output card by
+ * card.
  */
-const REVIEW_PROMPTS: {
-  kind: string;
-  icon: LucideIcon;
-  labelKey: TranslationKey;
+const WORKSPACE_PROMPT_GROUPS: {
+  titleKey: TranslationKey;
   hintKey: TranslationKey;
+  prompts: WorkspacePromptDef[];
 }[] = [
   {
-    kind: "work_item_description",
-    icon: FileText,
-    labelKey: "settings.wiPromptDescription",
-    hintKey: "settings.wiPromptDescriptionHint",
+    titleKey: "settings.storyPromptsTitle",
+    hintKey: "settings.storyPromptsHint",
+    prompts: [
+      {
+        kind: "user_stories",
+        task: "stories",
+        icon: ClipboardList,
+        labelKey: "settings.sPromptStories",
+        hintKey: "settings.sPromptStoriesHint",
+      },
+      {
+        kind: "story_verify",
+        task: "story_verify",
+        icon: ShieldCheck,
+        labelKey: "settings.sPromptVerify",
+        hintKey: "settings.sPromptVerifyHint",
+      },
+    ],
   },
   {
-    kind: "work_item_criteria",
-    icon: ListChecks,
-    labelKey: "settings.wiPromptCriteria",
-    hintKey: "settings.wiPromptCriteriaHint",
+    titleKey: "settings.reviewPromptsTitle",
+    hintKey: "settings.reviewPromptsHint",
+    prompts: [
+      {
+        kind: "work_item_analyze",
+        task: "work_item_review",
+        icon: ScanSearch,
+        labelKey: "settings.wiPromptAnalyze",
+        hintKey: "settings.wiPromptAnalyzeHint",
+      },
+      {
+        kind: "work_item_bug_analyze",
+        task: "work_item_review",
+        icon: Bug,
+        labelKey: "settings.wiPromptBugAnalyze",
+        hintKey: "settings.wiPromptBugAnalyzeHint",
+      },
+      {
+        kind: "work_item_description",
+        task: "work_item_review",
+        icon: FileText,
+        labelKey: "settings.wiPromptDescription",
+        hintKey: "settings.wiPromptDescriptionHint",
+      },
+      {
+        kind: "work_item_criteria",
+        task: "work_item_review",
+        icon: ListChecks,
+        labelKey: "settings.wiPromptCriteria",
+        hintKey: "settings.wiPromptCriteriaHint",
+      },
+      {
+        kind: "work_item_tasks",
+        task: "work_item_review",
+        icon: ClipboardCheck,
+        labelKey: "settings.wiPromptTasks",
+        hintKey: "settings.wiPromptTasksHint",
+      },
+      {
+        kind: "work_item_tasks_qa",
+        task: "work_item_review",
+        icon: FlaskConical,
+        labelKey: "settings.wiPromptTasksQa",
+        hintKey: "settings.wiPromptTasksQaHint",
+      },
+    ],
   },
   {
-    kind: "work_item_tasks",
-    icon: ClipboardCheck,
-    labelKey: "settings.wiPromptTasks",
-    hintKey: "settings.wiPromptTasksHint",
-  },
-  {
-    kind: "work_item_tasks_qa",
-    icon: FlaskConical,
-    labelKey: "settings.wiPromptTasksQa",
-    hintKey: "settings.wiPromptTasksQaHint",
+    titleKey: "settings.wikiPromptsTitle",
+    hintKey: "settings.wikiPromptsHint",
+    prompts: [
+      {
+        kind: "repo_doc",
+        task: "wiki",
+        icon: FileCode2,
+        labelKey: "settings.wikiPromptRepo",
+        hintKey: "settings.wikiPromptRepoHint",
+      },
+      {
+        kind: "workspace_doc",
+        task: "wiki",
+        icon: Network,
+        labelKey: "settings.wikiPromptWorkspace",
+        hintKey: "settings.wikiPromptWorkspaceHint",
+      },
+    ],
   },
 ];
 
@@ -465,25 +545,24 @@ export function PromptTemplates() {
       {/* Per workspace, and said so: the rows above apply to this installation, and these to the
           backlog of whichever workspace is open. Without the line saying which, a team that
           rewrote its criteria prompt and then switched workspace would find it gone. */}
-      <div className="pt-3">
-        <h4 className="text-[12.5px] font-semibold text-[var(--cf-text)]">{t("settings.reviewPromptsTitle")}</h4>
-        <p className="mb-2 mt-0.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-          {t("settings.reviewPromptsHint")}
-        </p>
-        <div className="space-y-2">
-          {REVIEW_PROMPTS.map((prompt) => (
-            <WorkspacePromptRow
-              key={prompt.kind}
-              kind={prompt.kind}
-              icon={prompt.icon}
-              label={t(prompt.labelKey)}
-              hint={t(prompt.hintKey)}
-              // The review runs route with the verification task, in Rust and here alike.
-              engine={engineFor("story_verify")}
-            />
-          ))}
+      {WORKSPACE_PROMPT_GROUPS.map((group) => (
+        <div key={group.titleKey} className="pt-3">
+          <h4 className="text-[12.5px] font-semibold text-[var(--cf-text)]">{t(group.titleKey)}</h4>
+          <p className="mb-2 mt-0.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">{t(group.hintKey)}</p>
+          <div className="space-y-2">
+            {group.prompts.map((prompt) => (
+              <WorkspacePromptRow
+                key={prompt.kind}
+                kind={prompt.kind}
+                icon={prompt.icon}
+                label={t(prompt.labelKey)}
+                hint={t(prompt.hintKey)}
+                engine={engineFor(prompt.task)}
+              />
+            ))}
+          </div>
         </div>
-      </div>
+      ))}
     </div>
   );
 }

@@ -44,8 +44,10 @@ import type {
   AdoWikiPage,
   AdoWorkItemType,
   AdoClassificationNode,
+  QuestionAnswer,
   StoryBatch,
   StoryBatchDetail,
+  StoryBatchPrompt,
   StoryDraft,
   StoryPublishOutcome,
   StorySourceKind,
@@ -56,7 +58,6 @@ import type {
   Workspace,
   WorkspaceActivityEntry,
   WorkspaceAgent,
-  WorkspaceMcp,
   WorkspaceSkill,
   WorkItemKind,
   WorkItemRef,
@@ -64,7 +65,14 @@ import type {
   WorkItemReviewRow,
   WorkItemReviewStage,
 } from "../../types/domain";
-import type { AdoWikiPageRef, AdoWorkItemRef, DocPage, DocResult, DocScope } from "../../types/domain";
+import type {
+  AdoWikiPageDetail,
+  AdoWikiPageRef,
+  AdoWorkItemRef,
+  DocPage,
+  DocResult,
+  DocScope,
+} from "../../types/domain";
 import type { FindingLocation } from "../parseAnalysis";
 
 // ---------- app lifecycle ----------
@@ -677,31 +685,6 @@ export const writeSkillFile = (workspaceId: string, skillName: string, relPath: 
 export const deleteSkillFile = (workspaceId: string, skillName: string, relPath: string) =>
   invoke<void>("delete_skill_file", { workspaceId, skillName, relPath });
 
-// ---------- workspace MCP servers ----------
-
-export const listWorkspaceMcps = (workspaceId: string) =>
-  invoke<WorkspaceMcp[]>("list_workspace_mcps", { workspaceId });
-
-export const upsertWorkspaceMcp = (
-  id: string | undefined,
-  workspaceId: string,
-  name: string,
-  command: string,
-  args: string,
-  env: string,
-  enabled: boolean,
-) =>
-  invoke<WorkspaceMcp>("upsert_workspace_mcp", {
-    id: id ?? null,
-    workspaceId,
-    name,
-    command,
-    args,
-    env,
-    enabled,
-  });
-
-export const deleteWorkspaceMcp = (id: string) => invoke<void>("delete_workspace_mcp", { id });
 
 // ---------- secrets ----------
 
@@ -1284,11 +1267,23 @@ export const setStoryBatchTarget = (
 export const setStoryBatchInstructions = (id: string, instructions: string) =>
   invoke<void>("set_story_batch_instructions", { id, instructions });
 
-/** The repository whose code this set's acceptance criteria are checked against. `null` clears it.
- * Not the same as the set's source repository: a backlog derived from a product wiki is routinely
- * verified against the service that implements it. */
-export const setStoryBatchVerifyProject = (id: string, projectId: string | null) =>
-  invoke<void>("set_story_batch_verify_project", { id, projectId });
+/** The answers to the set's open questions. The whole list is written at once — it is a form, and
+ * half-saved forms are how two answers end up contradicting each other. Answers whose question has
+ * since disappeared are kept: the documentation was still missing that fact. */
+export const setStoryBatchAnswers = (id: string, answers: QuestionAnswer[]) =>
+  invoke<void>("set_story_batch_answers", { id, answers });
+
+/** The repositories whose code this set's acceptance criteria are checked against. An empty list
+ * clears them. Not the same as the set's source repository: a backlog derived from a product wiki is
+ * routinely verified against the services that implement it — plural, because one capability is
+ * normally split across several of them. */
+export const setStoryBatchVerifyProjects = (id: string, projectIds: string[]) =>
+  invoke<void>("set_story_batch_verify_projects", { id, projectIds });
+
+/** Which of those repositories the `.feature` file is written into. `null` falls back to the first
+ * of the set. */
+export const setStoryBatchFeatureProject = (id: string, projectId: string | null) =>
+  invoke<void>("set_story_batch_feature_project", { id, projectId });
 
 export const deleteStoryBatch = (id: string) => invoke<void>("delete_story_batch", { id });
 
@@ -1297,16 +1292,19 @@ export const deleteStoryBatch = (id: string) => invoke<void>("delete_story_batch
 export const generateStories = (
   batchId: string,
   runId: string,
-  count: number,
   agent?: { provider: string; model: string },
 ) =>
   invoke<StoryBatchDetail>("generate_stories", {
     batchId,
     runId,
-    count,
     agentProvider: agent?.provider ?? null,
     agentModel: agent?.model ?? null,
   });
+
+/** Exactly what the last generation sent to the model, rebuilt from the snapshot taken when it ran.
+ * Falls back to today's template for sets generated before that snapshot existed, and says so. */
+export const storyBatchPrompt = (id: string) =>
+  invoke<StoryBatchPrompt>("story_batch_prompt", { id });
 
 // ---------- user stories: one story ----------
 
@@ -1448,6 +1446,33 @@ export const createDocPage = (input: {
   scope: DocScope;
   title: string;
 }) => invoke<DocPage>("create_doc_page", input);
+
+/**
+ * Brings a page that already exists in the wiki into the app as a document.
+ *
+ * It lands with its target pointing back at where it came from, so the round trip works: read it,
+ * edit it (or have the model rewrite it), publish it back over the same path. Nothing is written
+ * to Azure here.
+ */
+export const importWikiPage = (input: {
+  workspaceId: string;
+  /** The repository the page is about; omit for a workspace-scope document. */
+  projectId?: string;
+  scope: DocScope;
+  org: string;
+  project: string;
+  wikiId: string;
+  wikiName: string;
+  /** Wiki-absolute, starting with «/» — the exact path, as the wiki spells it. */
+  path: string;
+  /** Overrides the title taken from the last path segment. */
+  title?: string;
+}) => invoke<DocPage>("import_wiki_page", input);
+
+/** One wiki page as Azure holds it right now — its Markdown and, when the host will give it up,
+ *  who wrote it and when it last changed. */
+export const adoWikiPageDetail = (org: string, project: string, wiki: string, path: string) =>
+  invoke<AdoWikiPageDetail>("ado_wiki_page_detail", { org, project, wiki, path });
 
 export const setDocPageContent = (id: string, content: string) =>
   invoke<void>("set_doc_page_content", { id, content });

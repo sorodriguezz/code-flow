@@ -349,10 +349,15 @@ pub struct AiInvocation<'a> {
     pub allowed_tools: &'a [String],
     /// Working directory to run in.
     pub cwd: Option<&'a str>,
-    /// Path to a `--mcp-config`-style JSON file, if the workspace has MCP servers enabled.
-    pub mcp_config_path: Option<&'a str>,
     /// Data piped to the process's stdin (the diff, PR context, the finding to fix, …).
     pub stdin_content: &'a str,
+    /// The workspace's skills, described for an engine that won't go looking for them.
+    ///
+    /// Claude Code discovers `<repo>/.claude/skills` by itself, so this stays empty for it. Every
+    /// other engine is blind to that directory, and a skill nobody knows about is a skill that was
+    /// copied onto disk for nothing. Filled in by [`run`] from what is actually there, so it can
+    /// never advertise a skill the sync failed to write.
+    pub skills_note: String,
     /// Session id to resume, for multi-turn chat.
     pub resume_session_id: Option<&'a str>,
     /// Semantic "auto-approve file create/edit tools" flag. Each engine maps it to its own
@@ -372,8 +377,8 @@ impl<'a> AiInvocation<'a> {
             model: "",
             allowed_tools: &[],
             cwd: None,
-            mcp_config_path: None,
             stdin_content,
+            skills_note: String::new(),
             resume_session_id: None,
             auto_approve_edits: false,
         }
@@ -465,7 +470,16 @@ pub trait AiEngine: Send + Sync {
     /// safely receive a multi-line argument (npm `.cmd` shims reject them) overrides this to send
     /// the whole brief — system prompt, ask and data — down the pipe instead.
     fn stdin_payload(&self, inv: &AiInvocation) -> String {
-        inv.stdin_content.to_string()
+        format!("{}{}", inv.skills_note, inv.stdin_content)
+    }
+
+    /// Whether the engine finds `<cwd>/.claude/skills` on its own.
+    ///
+    /// Only Claude Code does. For everyone else [`run`] describes the synced skills in the payload
+    /// instead — the files are on disk either way, and an engine with file tools can open them once
+    /// it knows they exist.
+    fn reads_claude_skills(&self) -> bool {
+        false
     }
 
     /// Whether the engine carries a conversation forward on its own side between turns (the CLIs'
@@ -688,7 +702,122 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
 /// pipes `stdin_content` in, streams its output while it runs, and hands the result back to the
 /// engine to interpret. Cancellable at any point when the caller wrapped this in
 /// [`ai_runs::scoped`].
-async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Result<AiRun, String> {
+/// How much of the skills is worth inlining for an engine that cannot open a file.
+///
+/// Only spent on the transports with no tools at all. A CLI gets a list of paths instead, which
+/// costs a line each; this budget exists because for a completion API the alternative to spending
+/// it is the skill not existing.
+const MAX_INLINE_SKILL_CHARS: usize = 24_000;
+
+/// Describes the skills sitting in `<cwd>/.claude/skills` for an engine that doesn't look there.
+///
+/// Two shapes, because "use this skill" means two different things depending on what the engine
+/// can do. A CLI agent gets **pointers** — name, one-line description, path — and opens what it
+/// needs with its own file tools; a skill is a directory of instructions, references and sometimes
+/// scripts, and pasting all of that into every payload would cost more context than the task. A
+/// completion API has no file tools, so a pointer would name something it can never reach: there
+/// the body is inlined, up to [`MAX_INLINE_SKILL_CHARS`], because a skill it cannot read is a skill
+/// it does not have.
+fn skills_note(cwd: &str, inline: bool) -> String {
+    let root = std::path::Path::new(cwd).join(".claude").join("skills");
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return String::new();
+    };
+
+    let mut found: Vec<(String, String)> = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let body = std::fs::read_to_string(entry.path().join("SKILL.md")).unwrap_or_default();
+        found.push((name, body));
+    }
+    if found.is_empty() {
+        return String::new();
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if !inline {
+        let mut out = String::from(
+            "=== SKILLS DISPONIBLES ===\n\
+             Instrucciones reutilizables ya presentes en este repositorio. Si alguna aplica a lo que \
+             se te pide, ábrela y síguela antes de improvisar.\n\n",
+        );
+        for (name, body) in found {
+            out.push_str(&format!(".claude/skills/{name}/SKILL.md"));
+            if let Some(description) = skill_description(&body) {
+                out.push_str(&format!(" — {description}"));
+            }
+            out.push('\n');
+        }
+        out.push('\n');
+        return out;
+    }
+
+    let mut out = String::from(
+        "=== SKILLS DISPONIBLES ===\n\
+         Instrucciones reutilizables del equipo, incluidas aquí enteras. Si alguna aplica a lo que \
+         se te pide, síguela antes de improvisar.\n\n",
+    );
+    let mut budget = MAX_INLINE_SKILL_CHARS;
+    let mut skipped: Vec<String> = Vec::new();
+    for (name, body) in found {
+        let body = body.trim();
+        // Whole or not at all: half a procedure read as if it were the whole one is worse than
+        // knowing the skill was left out.
+        if body.is_empty() || body.chars().count() > budget {
+            skipped.push(name);
+            continue;
+        }
+        budget -= body.chars().count();
+        out.push_str(&format!("--- SKILL: {name} ---\n{body}\n\n"));
+    }
+    if !skipped.is_empty() {
+        out.push_str(&format!(
+            "(No caben en este envío, y por tanto no las tienes: {}.)\n\n",
+            skipped.join(", ")
+        ));
+    }
+    out
+}
+
+/// The `description:` line of a SKILL.md front-matter block, if it has one.
+///
+/// Deliberately a scan for the key rather than a YAML parse: the front matter is written by hand,
+/// this runs on every invocation, and a skill whose header is malformed should lose its one-line
+/// summary, not its listing.
+fn skill_description(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            return None;
+        }
+        if let Some(value) = trimmed.strip_prefix("description:") {
+            let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+            return (!value.is_empty()).then(|| value.to_string());
+        }
+    }
+    None
+}
+
+async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> Result<AiRun, String> {
+    // Derived here, from the directory rather than from what a caller believes it synced: this is
+    // the one place every engine passes through, so a skill added to the note is one that is
+    // provably on disk, and no flow can forget to mention them.
+    if !engine.reads_claude_skills() {
+        if let Some(cwd) = inv.cwd {
+            // A transport with no subprocess is a completion API: no file tools, so the skills have
+            // to arrive in the payload or not at all.
+            let inline = !matches!(engine.transport(), Transport::Subprocess);
+            inv.skills_note = skills_note(cwd, inline);
+        }
+    }
+
     let ctx = ai_runs::current();
     let mut cancel = ctx.as_ref().and_then(|c| ai_runs::subscribe(&c.run_id));
 
@@ -951,6 +1080,13 @@ Tu tarea: derivar historias de usuario listas para el backlog cuyos criterios de
 4. Los límites, cuando haya un umbral numérico o temporal (el valor justo dentro y el justo fuera).
 5. Los permisos, cuando la documentación distinga quién puede hacer qué.
 Los requisitos no funcionales (rendimiento, auditoría, seguridad, accesibilidad) van como escenario propio con su umbral medible, o como historia aparte si tienen entidad suficiente.
+
+=== CUÁNTAS HISTORIAS ===
+No hay número objetivo, ni mínimo ni máximo: lo decide la documentación, no una cifra. Saca UNA historia por cada capacidad que la documentación describa, y ninguna más.
+- Una documentación corta que describe tres capacidades da tres historias. Rellenar hasta un número redondo partiendo una capacidad en trozos que no se pueden entregar por separado, o inventando una funcionalidad plausible, es peor que entregar tres: cada historia de relleno es trabajo que alguien va a planificar.
+- Una documentación larga da las que hagan falta, aunque sean veinte. No agrupes dos capacidades en una historia para acortar la lista; eso rompe "Pequeña" y "Independiente" a la vez, y el equipo se encuentra la división a medio sprint.
+- Ante la duda de si algo es una historia o un escenario más de otra: si se puede entregar y probar por separado y tiene valor por sí solo, es una historia; si no, es un escenario.
+- Repasa antes de responder: ¿queda alguna capacidad de la documentación sin historia? ¿hay alguna historia que no puedas señalar en la documentación?
 
 === CONTENIDO ===
 - `narrative` sigue exactamente "Como <rol>, quiero <capacidad>, para <beneficio>". El rol es concreto ("cajero", "cliente registrado", "administrador de la tienda"); no escribas "usuario" a secas si la documentación distingue roles.
@@ -1490,6 +1626,68 @@ pub async fn generate_pr_description(
     Ok(run.text)
 }
 
+/// Everything the user added on top of the documentation: their free-text instructions, and the
+/// answers to the questions an earlier run could not resolve.
+///
+/// The answers get their own labelled block rather than being folded into the instructions, because
+/// they are a different kind of statement. An instruction is a preference about how to write the
+/// backlog; an answer is a *requirement the documentation was missing*, and the block says so, so
+/// the model stops re-asking what has already been settled.
+pub fn user_stories_preamble(instructions: &str, answers: &[(String, String)]) -> String {
+    let mut out = String::new();
+    if !instructions.trim().is_empty() {
+        out.push_str(&format!(
+            "INSTRUCCIONES ADICIONALES DEL USUARIO:\n{}\n\n",
+            instructions.trim()
+        ));
+    }
+
+    let answered: Vec<&(String, String)> = answers
+        .iter()
+        .filter(|(question, answer)| !question.trim().is_empty() && !answer.trim().is_empty())
+        .collect();
+    if !answered.is_empty() {
+        out.push_str("=== RESPUESTAS A PREGUNTAS ABIERTAS ===\n");
+        out.push_str(
+            "Lo que la documentación no decía, contestado por el equipo. Trátalo como requisito \
+             confirmado, al mismo nivel que la documentación, y no lo vuelvas a listar como duda.\n\n",
+        );
+        for (question, answer) in answered {
+            out.push_str(&format!("P: {}\nR: {}\n\n", question.trim(), answer.trim()));
+        }
+    }
+    out
+}
+
+/// The stdin half of a story generation: what the user added, then the documentation.
+///
+/// Split out of [`generate_user_stories`] so "what prompt did this set come out of?" can rebuild
+/// the payload byte for byte instead of approximating it. An approximation that drifts from the
+/// real thing is worse than no answer at all, because this is what a user reads precisely when the
+/// output surprised them.
+///
+/// No target number of stories is sent, and that is the design rather than an omission. A count in
+/// the payload is a quota: documentation that describes three capabilities came back as eight
+/// stories because eight was asked for. How many stories a document is worth is a property of the
+/// document, and INVEST already decides it — one capability per story, split at six scenarios. The
+/// prompt says so; see the "CUÁNTAS HISTORIAS" block in the default template.
+pub fn user_stories_stdin(source_text: &str, preamble: &str) -> String {
+    let truncated: String = source_text.chars().take(MAX_STORIES_SOURCE_CHARS).collect();
+    let mut stdin_payload = String::from(preamble);
+    stdin_payload.push_str(&format!("=== DOCUMENTACIÓN ===\n{truncated}"));
+    stdin_payload
+}
+
+/// The template a generation actually runs with: the workspace's, or the built-in one when the
+/// override is blank (which is how "restore default" is stored).
+pub fn user_stories_prompt(prompt_template: &str) -> &str {
+    if prompt_template.trim().is_empty() {
+        DEFAULT_USER_STORIES_TEMPLATE
+    } else {
+        prompt_template
+    }
+}
+
 /// Derives user stories with acceptance criteria from documentation.
 ///
 /// Text-in / text-out with no tools and no working directory, like [`inline_edit`] and unlike the
@@ -1505,35 +1703,15 @@ pub async fn generate_user_stories(
     binary: &str,
     model: &str,
     source_text: &str,
-    instructions: &str,
-    count_hint: i64,
+    preamble: &str,
     prompt_template: &str,
 ) -> Result<String, String> {
     if source_text.trim().is_empty() {
         return Err("No hay documentación de la que derivar historias".to_string());
     }
 
-    let truncated: String = source_text.chars().take(MAX_STORIES_SOURCE_CHARS).collect();
-    let mut stdin_payload = String::new();
-    // The count is a hint, not a rule: documentation that describes three things should not be
-    // padded to ten, and the prompt says so rather than the number being sent alone.
-    if count_hint > 0 {
-        stdin_payload.push_str(&format!(
-            "NÚMERO ORIENTATIVO DE HISTORIAS: {count_hint} (aproximado; prioriza la cobertura real \
-             de la documentación sobre alcanzar esta cifra)\n\n"
-        ));
-    }
-    match instructions.trim() {
-        "" => {}
-        extra => stdin_payload.push_str(&format!("INSTRUCCIONES ADICIONALES DEL USUARIO:\n{extra}\n\n")),
-    }
-    stdin_payload.push_str(&format!("=== DOCUMENTACIÓN ===\n{truncated}"));
-
-    let prompt = if prompt_template.trim().is_empty() {
-        DEFAULT_USER_STORIES_TEMPLATE
-    } else {
-        prompt_template
-    };
+    let stdin_payload = user_stories_stdin(source_text, preamble);
+    let prompt = user_stories_prompt(prompt_template);
 
     let mut inv = AiInvocation::new(prompt, &stdin_payload);
     inv.model = model;
@@ -1561,7 +1739,6 @@ pub async fn verify_stories_against_code(
     allowed_tools: &[String],
     cwd: &str,
     prompt_template: &str,
-    mcp_config_path: Option<&str>,
 ) -> Result<String, String> {
     if stories_text.trim().is_empty() {
         return Err("No hay criterios de aceptación que verificar".to_string());
@@ -1589,7 +1766,6 @@ pub async fn verify_stories_against_code(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
-    inv.mcp_config_path = mcp_config_path;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }
@@ -1622,7 +1798,6 @@ pub async fn review_work_item(
     allowed_tools: &[String],
     cwd: Option<&str>,
     prompt_template: &str,
-    mcp_config_path: Option<&str>,
 ) -> Result<AiRun, String> {
     if story_text.trim().is_empty() {
         return Err("Esa historia no tiene texto que revisar".to_string());
@@ -1671,7 +1846,6 @@ pub async fn review_work_item(
         None => &[],
     };
     inv.cwd = cwd;
-    inv.mcp_config_path = mcp_config_path;
     // The whole run, not just its text: the caller stamps the answer with the model that actually
     // produced it, which is the only place the CLI's own choice is reported when none was forced.
     run(engine, binary, inv).await
@@ -1962,7 +2136,6 @@ pub async fn generate_repo_doc(
     allowed_tools: &[String],
     cwd: &str,
     prompt_template: &str,
-    mcp_config_path: Option<&str>,
 ) -> Result<AiRun, String> {
     let mut stdin_payload = format!("REPOSITORIO A DOCUMENTAR: {repo_name}\n\n");
     if !contexts.is_empty() {
@@ -1989,7 +2162,6 @@ pub async fn generate_repo_doc(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
-    inv.mcp_config_path = mcp_config_path;
     run(engine, binary, inv).await
 }
 
@@ -2490,7 +2662,6 @@ pub async fn review_pull_request(
     cwd: &str,
     prompt_template: &str,
     level: &str,
-    mcp_config_path: Option<&str>,
 ) -> Result<String, String> {
     if diff_text.trim().is_empty() {
         return Err("This pull request has no changes to review".to_string());
@@ -2527,7 +2698,6 @@ pub async fn review_pull_request(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
-    inv.mcp_config_path = mcp_config_path;
     let run = run(engine, binary, inv).await?;
     // Prefer what the CLI reports it actually ran over what was configured — they differ
     // whenever `model` is empty and the CLI picked its own default.
@@ -2546,7 +2716,6 @@ pub async fn analyze_changes(
     allowed_tools: &[String],
     cwd: &str,
     prompt_template: &str,
-    mcp_config_path: Option<&str>,
 ) -> Result<String, String> {
     if diff_text.trim().is_empty() {
         return Err("No hay cambios sin commitear para analizar".to_string());
@@ -2575,7 +2744,6 @@ pub async fn analyze_changes(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
-    inv.mcp_config_path = mcp_config_path;
     let run = run(engine, binary, inv).await?;
     Ok(stamp_footer(&run.text, "análisis pre-commit", engine.label(), run.model.as_deref().unwrap_or(model)))
 }
@@ -2593,7 +2761,6 @@ pub async fn chat_with_repo(
     session_id: Option<&str>,
     allowed_tools: &[String],
     cwd: &str,
-    mcp_config_path: Option<&str>,
 ) -> Result<AiRun, String> {
     // Project context and the system prompt only need to be established once — a resumed session
     // already carries the earlier turns forward. `-p` carries the user's actual message; stdin
@@ -2615,7 +2782,6 @@ pub async fn chat_with_repo(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
-    inv.mcp_config_path = mcp_config_path;
     inv.resume_session_id = session_id;
     // The chat is meant to help work on the repo, so let it create/edit files without an
     // (unanswerable, headless) permission prompt. Running commands still needs the shell tool

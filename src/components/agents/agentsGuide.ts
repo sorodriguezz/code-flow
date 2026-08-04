@@ -1,7 +1,7 @@
 /**
  * Static, read-only manual for the Agents view — what it does, how to work with it, and what it
  * cannot do. Not editable and not stored per workspace; it's orientation content, picked by the
- * app's language, the same shape as the SDD section's guide.
+ * app's language.
  *
  * The limits section is not a disclaimer to skim past. Everything in it is a real property of how
  * this feature is built, and each one is the answer to a question a user would otherwise have to
@@ -16,13 +16,13 @@ Esta vista tiene tres piezas: los **agentes** (quién trabaja), las **tareas** (
 
 Un agente es un **rol con su propio motor**: nombre, proveedor, modelo e instrucciones. Se define una vez y se reutiliza.
 
-Ábrelos con el botón de personas de la cabecera. Es **la misma plantilla** que Ajustes → SDD y que el selector de agente del chat de IA — no hay dos listas que mantener.
+Ábrelos con el botón de personas de la cabecera. Es **la misma plantilla** que usa el selector de agente del chat de IA — no hay dos listas que mantener.
 
 Qué ganas frente a escribir el prompt cada vez:
 
 - **Enrutado por rol.** El documentador en un modelo barato, el revisor en uno caro, sin tocar los ajustes globales.
 - **Instrucciones fijas.** "Eres un revisor meticuloso, no reformatees lo que no toques" se escribe una vez.
-- **Identidad.** Puedes agrupar las tareas por agente y saber quién hizo qué semanas después.
+- **Identidad.** Cada tarea lleva el nombre del agente que la ejecutó, así sabes quién hizo qué semanas después.
 
 > Un agente **sin modelo no usa su motor**: la app cae al enrutado normal del chat y el agente respondería en un motor distinto al que dice. La vista lo marca en naranja; arréglalo antes de usarlo.
 
@@ -77,13 +77,13 @@ This view has three pieces: **agents** (who does the work), **tasks** (one assig
 
 An agent is a **role with its own engine**: name, provider, model and instructions. Defined once, reused.
 
-Open them with the people button in the header. It is **the same roster** as Settings → SDD and the AI chat's agent picker — there are not two lists to keep in step.
+Open them with the people button in the header. It is **the same roster** the AI chat's agent picker uses — there are not two lists to keep in step.
 
 What you gain over retyping the prompt every time:
 
 - **Routing per role.** The documenter on a cheap model, the reviewer on an expensive one, without touching global settings.
 - **Standing instructions.** "You are a meticulous reviewer, don't reformat what you don't touch" is written once.
-- **Identity.** Group tasks by agent and know who did what weeks later.
+- **Identity.** Every task carries the name of the agent that ran it, so you know who did what weeks later.
 
 > An agent **with no model does not use its engine**: the app falls back to the normal chat routing, so it would answer on a different engine than the one it names. The view flags it in orange; fix it before using it.
 

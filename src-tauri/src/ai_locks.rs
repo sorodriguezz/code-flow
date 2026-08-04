@@ -3,7 +3,7 @@
 //! Every agentic turn runs with edits auto-approved against a real checkout, wrapped in a
 //! `checkpoint_before`/`checkpoint_after` pair. Two of them on one folder is not a slow path, it is
 //! a wrong one: they edit the same files while each takes a restore point over the other's writes,
-//! they race on the per-workspace MCP config file the CLI is pointed at, and
+//! they race on the skills directory the app syncs into each of them, and
 //! `sync_skills_into_project` deletes and recreates `<repo>/.claude/skills` underneath both. There
 //! is no queue anywhere below this point, so this is the choke point.
 //!

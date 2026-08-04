@@ -22,9 +22,7 @@ export type SettingsSectionId =
   | "claude"
   | "backup"
   | "review"
-  | "sdd"
   | "skills"
-  | "mcps"
   | "api";
 
 /**

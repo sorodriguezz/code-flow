@@ -13,13 +13,16 @@
 //! Nothing here touches a repository. A requirement is written before the code that satisfies it,
 //! and the whole screen is usable in a workspace that has no project at all.
 
+use std::collections::btree_map::Entry;
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::ai;
 use crate::ai_locks;
 use crate::boards;
-use crate::commands::ado_cmd::{build_mcp_config, pat_for_org};
+use crate::commands::ado_cmd::{pat_for_org};
 use crate::commands::claude_cmd::{load_ai_config, load_ai_config_for, AiTask};
 use crate::commands::skills_cmd::sync_skills_into_project;
 use crate::db::{
@@ -703,29 +706,25 @@ pub async fn review_work_item(
         (ai::WorkItemReviewStage::TasksQa, _) => "work_item_tasks_qa",
     };
 
-    let (contexts, mcps, skills, config, template) = {
+    let (contexts, skills, config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
                 load_ai_config_for(&conn, p, m)?
             }
-            // Same routing as the verification run: both read code to judge a requirement, so a
-            // team that picked a model for one meant it for the other.
-            _ => load_ai_config(&conn, AiTask::StoryVerify)?,
+            _ => load_ai_config(&conn, AiTask::WorkItemReview)?,
         };
         let template =
             queries::get_workspace_prompt(&conn, &workspace_id, prompt_kind).map_err(|e| e.to_string())?;
-        (contexts, mcps, skills, config, template)
+        (contexts, skills, config, template)
     };
 
     let enabled_contexts: Vec<(String, String)> = match use_context {
         true => contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)).collect(),
         false => Vec::new(),
     };
-    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
     let tag_repo = projects.len() > 1;
     // Which model actually answered, as the last run reported it. Every run in this call shares one
     // config, so they agree — this only exists because the *resolved* id is not knowable up front
@@ -755,8 +754,7 @@ pub async fn review_work_item(
                 &config.tools,
                 project.map(|p| p.local_path.as_str()),
                 &template,
-                mcp_config_path.as_deref(),
-            )
+                )
             .await?;
             if let Some(model) = run.model {
                 answered_by = model;
@@ -870,6 +868,84 @@ pub fn create_doc_page(
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::create_doc_page(&conn, &workspace_id, project_id.as_deref(), &scope, &title)
         .map_err(|e| e.to_string())
+}
+
+/// Reads one wiki page by its exact path, content and history alike.
+///
+/// Used twice, for the same reason both times: before importing a page, so the user can see they
+/// pasted the path they meant; and behind a document that already has a target, so "this page was
+/// last changed by somebody else on Tuesday" is on screen *before* the publish that overwrites it.
+#[tauri::command]
+pub async fn ado_wiki_page_detail(
+    org: String,
+    project: String,
+    wiki: String,
+    path: String,
+) -> Result<boards::AdoWikiPageDetail, String> {
+    let pat = pat_for_org(&org)?;
+    boards::get_wiki_page_detail(&org, &project, &wiki, &path, &pat).await
+}
+
+/// Brings a page that already exists in the wiki into the app as a document.
+///
+/// The page comes in whole and lands with its target already pointing back at where it came from,
+/// which is what makes the round trip work: read it here, edit it (or have the model rewrite it),
+/// publish it back over the same path. Nothing is written to Azure by this command.
+///
+/// Scope follows what the caller passes, exactly as [`create_doc_page`] enforces it: a page tied to
+/// one repository can be regenerated against that checkout, and one that isn't stays a workspace
+/// document whose regeneration reads whatever the user ticks.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn import_wiki_page(
+    db: State<'_, Db>,
+    workspace_id: String,
+    project_id: Option<String>,
+    scope: String,
+    org: String,
+    project: String,
+    wiki_id: String,
+    wiki_name: String,
+    path: String,
+    title: Option<String>,
+) -> Result<crate::db::models::DocPage, String> {
+    let project_id = match scope.as_str() {
+        "repo" => Some(
+            project_id
+                .filter(|id| !id.trim().is_empty())
+                .ok_or_else(|| "Un documento de repositorio tiene que decir cuál".to_string())?,
+        ),
+        "workspace" => None,
+        other => return Err(format!("Alcance de documento desconocido: {other}")),
+    };
+
+    // Read before writing anything: a path that does not resolve should leave no half-made
+    // document behind in the list.
+    let pat = pat_for_org(&org)?;
+    let detail = boards::get_wiki_page_detail(&org, &project, &wiki_id, &path, &pat).await?;
+    if detail.content.trim().is_empty() {
+        return Err(
+            "Esa ruta existe pero no tiene contenido — en Azure DevOps una página puede ser solo \
+             una carpeta. Comprueba la ruta exacta."
+                .to_string(),
+        );
+    }
+
+    let title = title
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| detail.title.clone());
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let page = queries::create_doc_page(&conn, &workspace_id, project_id.as_deref(), &scope, &title)
+        .map_err(|e| e.to_string())?;
+    queries::set_doc_page_content(&conn, &page.id, &detail.content, "ready", "")
+        .map_err(|e| e.to_string())?;
+    queries::set_doc_page_target(&conn, &page.id, &org, &project, &wiki_id, &wiki_name, &detail.path)
+        .map_err(|e| e.to_string())?;
+    queries::get_doc_page(&conn, &page.id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "El documento importado desapareció al crearlo".to_string())
 }
 
 #[tauri::command]
@@ -1001,30 +1077,27 @@ pub async fn generate_doc_page(
     let _repo_leases = ai_locks::acquire_all(&paths)
         .map_err(|at| format!("{}{}", ai_locks::BUSY_MARKER, projects[at].name))?;
 
-    let (contexts, mcps, skills, config, repo_template, workspace_template) = {
+    let (contexts, skills, config, repo_template, workspace_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
                 load_ai_config_for(&conn, p, m)?
             }
-            // Same routing as the review: both read a whole repository to say something about it.
-            _ => load_ai_config(&conn, AiTask::StoryVerify)?,
+            _ => load_ai_config(&conn, AiTask::Wiki)?,
         };
         let repo_template =
             queries::get_workspace_prompt(&conn, &workspace_id, "repo_doc").map_err(|e| e.to_string())?;
         let workspace_template = queries::get_workspace_prompt(&conn, &workspace_id, "workspace_doc")
             .map_err(|e| e.to_string())?;
-        (contexts, mcps, skills, config, repo_template, workspace_template)
+        (contexts, skills, config, repo_template, workspace_template)
     };
 
     let enabled_contexts: Vec<(String, String)> = match use_context {
         true => contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)).collect(),
         false => Vec::new(),
     };
-    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
     // Status only — emphatically not the content. Blanking the body here and restoring it in the
     // failure arm was the first shape of this, and it meant stopping a regeneration replaced a
@@ -1050,8 +1123,7 @@ pub async fn generate_doc_page(
                 &config.tools,
                 &project.local_path,
                 &repo_template,
-                mcp_config_path.as_deref(),
-            )
+                )
             .await?;
             if let Some(model) = run.model {
                 answered_by = model;
@@ -1375,20 +1447,78 @@ pub fn set_story_batch_instructions(db: State<Db>, id: String, instructions: Str
     queries::set_story_batch_instructions(&conn, &id, instructions.trim()).map_err(|e| e.to_string())
 }
 
-/// The repository whose code this batch's criteria are checked against. `None` clears it.
+/// The repositories whose code this batch's criteria are checked against. An empty list clears them.
 ///
 /// Deliberately not the same field as the batch's `project_id`: that one records where the source
 /// Markdown was read from, and a backlog derived from a product wiki is routinely verified against
-/// a service repository that had nothing to do with writing it.
+/// service repositories that had nothing to do with writing it. Several of them, because one
+/// capability is normally split across a service, its BFF and its scheduled jobs — checked against
+/// only one of those, a criterion comes back failing for the wrong reason.
 #[tauri::command]
-pub fn set_story_batch_verify_project(
+pub fn set_story_batch_verify_projects(
+    db: State<Db>,
+    id: String,
+    project_ids: Vec<String>,
+) -> Result<(), String> {
+    let ids: Vec<String> = project_ids
+        .into_iter()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let json = serde_json::to_string(&ids).map_err(|e| e.to_string())?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_story_batch_verify_projects(&conn, &id, &json).map_err(|e| e.to_string())?;
+
+    // A destination that just left the set stops being one. Enforced here rather than in the view
+    // so the rule survives the next caller: the export would otherwise keep writing into a
+    // repository this batch no longer claims to have anything to do with.
+    let detail = queries::get_story_batch(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Ese conjunto de historias ya no existe".to_string())?;
+    if let Some(current) = detail.batch.feature_project_id.filter(|p| !p.trim().is_empty()) {
+        if !ids.contains(&current) {
+            queries::set_story_batch_feature_project(&conn, &id, None).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// Which of those repositories the `.feature` file is written into. `None` clears it, and the export
+/// then falls back to the first of the set — so a batch that never touches this still exports.
+#[tauri::command]
+pub fn set_story_batch_feature_project(
     db: State<Db>,
     id: String,
     project_id: Option<String>,
 ) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let project_id = project_id.filter(|p| !p.trim().is_empty());
-    queries::set_story_batch_verify_project(&conn, &id, project_id.as_deref()).map_err(|e| e.to_string())
+    queries::set_story_batch_feature_project(&conn, &id, project_id.as_deref()).map_err(|e| e.to_string())
+}
+
+/// The answers to this batch's open questions, as the modal edits them.
+///
+/// The whole list is written at once rather than one answer at a time: what the user is editing is
+/// a form, and half-saved forms are how two answers end up contradicting each other. Answers to
+/// questions that no longer appear in `open_questions` are kept — the documentation was still
+/// missing that fact, and the next generation deserves it as much as this one did.
+#[tauri::command]
+pub fn set_story_batch_answers(
+    db: State<Db>,
+    id: String,
+    answers: Vec<QuestionAnswer>,
+) -> Result<(), String> {
+    let kept: Vec<QuestionAnswer> = answers
+        .into_iter()
+        .map(|qa| QuestionAnswer {
+            question: qa.question.trim().to_string(),
+            answer: qa.answer.trim().to_string(),
+        })
+        .filter(|qa| !qa.question.is_empty() && !qa.answer.is_empty())
+        .collect();
+    let json = serde_json::to_string(&kept).map_err(|e| e.to_string())?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_story_batch_answers(&conn, &id, &json).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1503,7 +1633,6 @@ pub async fn generate_stories(
     db: State<'_, Db>,
     batch_id: String,
     run_id: Option<String>,
-    count: i64,
     agent_provider: Option<String>,
     agent_model: Option<String>,
 ) -> Result<StoryBatchDetail, String> {
@@ -1528,6 +1657,10 @@ pub async fn generate_stories(
         queries::set_story_batch_status(&conn, &batch_id, "generating", "").map_err(|e| e.to_string())?;
     }
 
+    // Built once and reused for the snapshot below, so what gets recorded is what actually ran
+    // rather than a second composition of the same pieces.
+    let preamble = ai::user_stories_preamble(&batch.instructions, &answers_of(&batch.question_answers));
+
     // The parse and its repair live inside the scope, not after it: a repair outside would be a
     // second engine run the Stop button could not reach.
     let result = crate::ai_runs::scoped(app, run_id, async {
@@ -1536,8 +1669,7 @@ pub async fn generate_stories(
             &config.binary,
             &config.model,
             &batch.source_text,
-            &batch.instructions,
-            count,
+            &preamble,
             &template,
         )
         .await?;
@@ -1560,8 +1692,20 @@ pub async fn generate_stories(
         Ok((stories, questions)) => {
             queries::replace_story_drafts(&conn, &batch_id, &stories).map_err(|e| e.to_string())?;
             let questions_json = serde_json::to_string(&questions).unwrap_or_else(|_| "[]".to_string());
-            queries::set_story_batch_run(&conn, &batch_id, &config.provider, &config.model, &questions_json)
-                .map_err(|e| e.to_string())?;
+            // The prompt is frozen alongside the answer, and the *resolved* template is what gets
+            // stored: a workspace whose override is blank runs on the built-in one, and recording
+            // the blank would leave the snapshot pointing at a default that a later release can
+            // change underneath it.
+            queries::set_story_batch_run(
+                &conn,
+                &batch_id,
+                &config.provider,
+                &config.model,
+                &questions_json,
+                ai::user_stories_prompt(&template),
+                &preamble,
+            )
+            .map_err(|e| e.to_string())?;
             queries::set_story_batch_status(&conn, &batch_id, "ready", "").map_err(|e| e.to_string())?;
         }
         Err(e) => {
@@ -1574,6 +1718,62 @@ pub async fn generate_stories(
     queries::get_story_batch(&conn, &batch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Ese conjunto de historias ya no existe".to_string())
+}
+
+/// Exactly what a generation sent to the model, rebuilt for reading.
+///
+/// Two fields rather than one blob because they travel on two different channels and mean different
+/// things: `prompt` is the CLI's `-p` argument (the standing instructions), `stdin` is this set's
+/// own payload. Flattening them would misrepresent the run for every CLI engine.
+#[derive(Debug, Clone, Serialize)]
+pub struct StoryBatchPrompt {
+    pub prompt: String,
+    pub stdin: String,
+    /// `true` when these are the pieces the run actually used, `false` when the batch predates the
+    /// snapshot (or has never generated) and this is today's template and today's instructions —
+    /// a reconstruction the screen has to label as such.
+    pub from_snapshot: bool,
+    pub generated_at: String,
+    pub provider: String,
+    pub model: String,
+    /// The documentation was longer than one payload and got cut at the ceiling.
+    pub truncated: bool,
+}
+
+/// The prompt a set's stories came out of.
+///
+/// Reads the snapshot taken by [`generate_stories`], and falls back to composing today's pieces for
+/// sets generated before that snapshot existed — marked `from_snapshot: false`, because the whole
+/// value of this view is that it is trustworthy. Built through the same [`ai`] helpers the run
+/// itself uses, so the two cannot drift.
+#[tauri::command]
+pub fn story_batch_prompt(db: State<Db>, id: String) -> Result<StoryBatchPrompt, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let batch = queries::get_story_batch(&conn, &id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Ese conjunto de historias ya no existe".to_string())?
+        .batch;
+
+    let from_snapshot = !batch.prompt_template.trim().is_empty();
+    let (template, preamble) = if from_snapshot {
+        (batch.prompt_template.clone(), batch.prompt_instructions.clone())
+    } else {
+        let current = queries::get_workspace_prompt(&conn, &batch.workspace_id, "user_stories")
+            .map_err(|e| e.to_string())?;
+        let preamble =
+            ai::user_stories_preamble(&batch.instructions, &answers_of(&batch.question_answers));
+        (current, preamble)
+    };
+
+    Ok(StoryBatchPrompt {
+        prompt: ai::user_stories_prompt(&template).to_string(),
+        stdin: ai::user_stories_stdin(&batch.source_text, &preamble),
+        from_snapshot,
+        generated_at: batch.generated_at,
+        provider: batch.provider,
+        model: batch.model,
+        truncated: batch.source_text.chars().count() > ai::MAX_STORIES_SOURCE_CHARS,
+    })
 }
 
 // ---------- editing one story ----------
@@ -1633,6 +1833,35 @@ pub fn delete_story_draft(db: State<Db>, id: String) -> Result<(), String> {
 /// than failing the run: one corrupt story must not cost the other nine their verification.
 fn criteria_of(story: &StoryDraft) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(&story.acceptance_criteria).unwrap_or_default()
+}
+
+/// One open question and what the team answered. Crosses the wire in both directions: the view
+/// edits a list of these and hands the whole list back.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    pub question: String,
+    pub answer: String,
+}
+
+/// The batch's answered questions, decoded. An unreadable column yields none rather than failing the
+/// generation: answers are an enrichment, and losing them must not cost the run.
+fn answers_of(raw: &str) -> Vec<(String, String)> {
+    serde_json::from_str::<Vec<QuestionAnswer>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|qa| (qa.question, qa.answer))
+        .collect()
+}
+
+/// The repositories a batch is checked against, decoded from its JSON column. Unreadable or empty
+/// both mean "none chosen", which the caller turns into the same message either way.
+fn parse_project_ids(raw: &str) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(raw)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .collect()
 }
 
 /// The stories as the model is asked to read them: numbered from 1, criteria numbered from 1
@@ -1740,14 +1969,51 @@ fn roll_up(verdicts: &[&str]) -> &'static str {
     }
 }
 
-/// One story's verdicts, ready to be written to its row.
+/// One story's verdicts from one repository, before they are folded together.
 struct ParsedVerification {
     /// Zero-based index into the list of stories that were sent.
     story: usize,
-    status: &'static str,
     summary: String,
-    /// JSON array, exactly one entry per criterion of that story.
-    criteria_json: String,
+    /// Exactly one entry per criterion of that story.
+    criteria: Vec<CriterionVerdict>,
+}
+
+/// How much a verdict claims, for picking between what two repositories said about one criterion.
+///
+/// `pass` outranks `fail` rather than the other way round, which is the whole reason the set exists:
+/// a repository that doesn't implement a capability honestly reports `fail`, and letting that
+/// outvote the repository that *does* implement it would make every criterion fail as soon as the
+/// set had more than one member.
+fn verdict_rank(verdict: &str) -> u8 {
+    match verdict {
+        "pass" => 3,
+        "partial" => 2,
+        "fail" => 1,
+        _ => 0,
+    }
+}
+
+/// Folds one repository's answer for a criterion into the running one.
+///
+/// A stronger verdict replaces what is there, evidence and all: the `fail` from the repository that
+/// was never going to contain the behaviour is noise once another one has been shown to implement
+/// it. Two repositories that agree keep both sets of evidence, because "implemented in both" is
+/// something QA needs to see.
+fn merge_verdict(into: &mut CriterionVerdict, found: CriterionVerdict) {
+    let rank_found = verdict_rank(&found.verdict);
+    let rank_into = verdict_rank(&into.verdict);
+    if rank_found > rank_into {
+        *into = found;
+        return;
+    }
+    if rank_found < rank_into {
+        return;
+    }
+    into.evidence.extend(found.evidence);
+    into.covered_by_test |= found.covered_by_test;
+    if into.note.is_empty() {
+        into.note = found.note;
+    }
 }
 
 /// The object the verification stage has to come back as, for the repair pass. See
@@ -1800,12 +2066,10 @@ fn parse_verification(text: &str, criteria_counts: &[usize]) -> Result<Vec<Parse
                 covered_by_test: criterion.covered_by_test,
             };
         }
-        let status = roll_up(&verdicts.iter().map(|v| v.verdict.as_str()).collect::<Vec<_>>());
         out.push(ParsedVerification {
             story: index,
-            status,
             summary: reported.summary.trim().to_string(),
-            criteria_json: serde_json::to_string(&verdicts).unwrap_or_else(|_| "[]".to_string()),
+            criteria: verdicts,
         });
     }
 
@@ -1815,12 +2079,17 @@ fn parse_verification(text: &str, criteria_counts: &[usize]) -> Result<Vec<Parse
     Ok(out)
 }
 
-/// Checks the batch's acceptance criteria against the code of the repository it points at.
+/// Checks the batch's acceptance criteria against the code of every repository it points at.
 ///
-/// Read-only: the engine is pointed at the working copy to *look*. It still takes the repository's
-/// AI lease like every other engine run against that folder — skills are synced into
+/// Read-only: the engine is pointed at each working copy to *look*. It still takes that
+/// repository's AI lease like every other engine run against the folder — skills are synced into
 /// `<repo>/.claude/skills` here too, and an agent turn on the same folder would delete and recreate
 /// them underneath this run.
+///
+/// One run per repository, folded into a single verdict per criterion. The alternative — asking the
+/// user to pick the one repository a criterion lives in — is a question they cannot answer before
+/// the check: which of a service, its BFF and its jobs implements a given behaviour is exactly what
+/// is being looked up. See [`merge_verdict`] for why `pass` beats `fail` when they disagree.
 ///
 /// `story_ids` narrows the run; empty means "every story that has criteria". Stories with no
 /// criteria are skipped either way — there is nothing to verify, and sending them would invite the
@@ -1843,16 +2112,21 @@ pub async fn verify_stories(
         (detail.batch, detail.stories)
     };
 
-    let project_id = batch
-        .verify_project_id
-        .clone()
-        .filter(|id| !id.trim().is_empty())
-        .ok_or_else(|| "Elige el repositorio contra el que verificar los criterios".to_string())?;
-    let project = {
+    let project_ids = parse_project_ids(&batch.verify_project_ids);
+    if project_ids.is_empty() {
+        return Err("Elige al menos un repositorio contra el que verificar los criterios".to_string());
+    }
+    let projects = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::get_project(&conn, &project_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Ese repositorio ya no existe en este espacio de trabajo".to_string())?
+        let mut resolved = Vec::with_capacity(project_ids.len());
+        for project_id in &project_ids {
+            resolved.push(
+                queries::get_project(&conn, project_id)
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| "Ese repositorio ya no existe en este espacio de trabajo".to_string())?,
+            );
+        }
+        resolved
     };
 
     let targets: Vec<&StoryDraft> = stories
@@ -1864,13 +2138,9 @@ pub async fn verify_stories(
         return Err("No hay criterios de aceptación que verificar".to_string());
     }
 
-    let _repo_lease = ai_locks::acquire(&project.local_path)
-        .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
-
-    let (contexts, mcps, skills, config, template) = {
+    let (contexts, skills, config, template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &batch.workspace_id).map_err(|e| e.to_string())?;
-        let mcps = queries::list_workspace_mcps(&conn, &batch.workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &batch.workspace_id).map_err(|e| e.to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
@@ -1880,40 +2150,88 @@ pub async fn verify_stories(
         };
         let template = queries::get_workspace_prompt(&conn, &batch.workspace_id, "story_verify")
             .map_err(|e| e.to_string())?;
-        (contexts, mcps, skills, config, template)
+        (contexts, skills, config, template)
     };
-
-    // Best-effort, like the analysis path: an unwritable skills directory shouldn't block a run
-    // whose actual job is to read source files.
-    let _ = sync_skills_into_project(&skills, &batch.workspace_id, &project.local_path);
 
     let enabled_contexts: Vec<(String, String)> = contexts
         .into_iter()
         .filter(|c| c.enabled)
         .map(|c| (c.name, c.content))
         .collect();
-    let mcp_config_path = build_mcp_config(&mcps, &batch.workspace_id)?;
     let payload = build_verification_payload(&targets);
     let criteria_counts: Vec<usize> = targets.iter().map(|s| criteria_of(s).len()).collect();
     let target_ids: Vec<String> = targets.iter().map(|s| s.id.clone()).collect();
+    // Evidence comes back relative to the repository root, which is ambiguous the moment there are
+    // two roots — so with a set, and only with a set, each path is stamped with the repo it is in.
+    let label_repos = projects.len() > 1;
 
+    // One run per repository, inside the scope so Stop reaches all of them. Sequential rather than
+    // concurrent on purpose: each run takes that repository's AI lease and reads it with an engine,
+    // and two engines answering at once would interleave into one log nobody can follow.
     let result = crate::ai_runs::scoped(app, run_id, async {
-        let text = ai::verify_stories_against_code(
-            &*config.engine,
-            &config.binary,
-            &config.model,
-            &payload,
-            &enabled_contexts,
-            &config.tools,
-            &project.local_path,
-            &template,
-            mcp_config_path.as_deref(),
-        )
-        .await?;
-        parse_or_repair(&config, &text, VERIFY_SHAPE, |answer| {
-            parse_verification(answer, &criteria_counts)
-        })
-        .await
+        let mut merged: BTreeMap<usize, ParsedVerification> = BTreeMap::new();
+        for project in &projects {
+            let _repo_lease = ai_locks::acquire(&project.local_path)
+                .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
+            // Best-effort, like the analysis path: an unwritable skills directory shouldn't block a
+            // run whose actual job is to read source files.
+            let _ = sync_skills_into_project(&skills, &batch.workspace_id, &project.local_path);
+
+            let text = ai::verify_stories_against_code(
+                &*config.engine,
+                &config.binary,
+                &config.model,
+                &payload,
+                &enabled_contexts,
+                &config.tools,
+                &project.local_path,
+                &template,
+                )
+            .await?;
+            let parsed = parse_or_repair(&config, &text, VERIFY_SHAPE, |answer| {
+                parse_verification(answer, &criteria_counts)
+            })
+            .await?;
+
+            for mut one in parsed {
+                if label_repos {
+                    for criterion in &mut one.criteria {
+                        criterion.evidence = criterion
+                            .evidence
+                            .iter()
+                            .map(|e| format!("{}/{}", project.name, e))
+                            .collect();
+                    }
+                }
+                let summary = match (label_repos, one.summary.trim()) {
+                    (_, "") => String::new(),
+                    (true, text) => format!("{}: {}", project.name, text),
+                    (false, text) => text.to_string(),
+                };
+                match merged.entry(one.story) {
+                    Entry::Vacant(slot) => {
+                        slot.insert(ParsedVerification {
+                            story: one.story,
+                            summary,
+                            criteria: one.criteria,
+                        });
+                    }
+                    Entry::Occupied(entry) => {
+                        let running = entry.into_mut();
+                        for (slot, found) in running.criteria.iter_mut().zip(one.criteria) {
+                            merge_verdict(slot, found);
+                        }
+                        if !summary.is_empty() {
+                            if !running.summary.is_empty() {
+                                running.summary.push('\n');
+                            }
+                            running.summary.push_str(&summary);
+                        }
+                    }
+                }
+            }
+        }
+        Ok::<Vec<ParsedVerification>, String>(merged.into_values().collect())
     })
     .await;
 
@@ -1922,12 +2240,17 @@ pub async fn verify_stories(
     let parsed = result?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     for verification in parsed {
+        let status = roll_up(
+            &verification.criteria.iter().map(|v| v.verdict.as_str()).collect::<Vec<_>>(),
+        );
+        let criteria_json =
+            serde_json::to_string(&verification.criteria).unwrap_or_else(|_| "[]".to_string());
         queries::save_story_verification(
             &conn,
             &target_ids[verification.story],
-            verification.status,
+            status,
             &verification.summary,
-            &verification.criteria_json,
+            &criteria_json,
         )
         .map_err(|e| e.to_string())?;
     }
@@ -1940,7 +2263,7 @@ pub async fn verify_stories(
 
 // ---------- exporting the criteria as a Cucumber feature ----------
 
-/// Writes the batch's `.feature` file into the repository it is verified against.
+/// Writes the batch's `.feature` file into the one repository chosen to hold it.
 ///
 /// The Gherkin itself is assembled on the frontend (where it is also previewed and copied), so this
 /// command only decides *where* it may land: inside `<repo>/features`, under a name with no path in
@@ -1970,11 +2293,15 @@ pub fn write_story_feature_file(
         let detail = queries::get_story_batch(&conn, &batch_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "Ese conjunto de historias ya no existe".to_string())?;
+        // The explicit choice, or the first repository of the verification set when there is none:
+        // a set of one has no interesting decision to make, and making the user repeat it there
+        // would be a second dropdown that only ever has one option.
         let project_id = detail
             .batch
-            .verify_project_id
+            .feature_project_id
             .clone()
             .filter(|id| !id.trim().is_empty())
+            .or_else(|| parse_project_ids(&detail.batch.verify_project_ids).into_iter().next())
             .ok_or_else(|| "Elige el repositorio en el que guardar el .feature".to_string())?;
         queries::get_project(&conn, &project_id)
             .map_err(|e| e.to_string())?

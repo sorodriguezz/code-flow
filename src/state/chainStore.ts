@@ -101,12 +101,15 @@ interface ChainState {
   forgetProject: (agentProjectId: string) => void;
 
   reloadTemplates: () => Promise<void>;
+  /** Returns the saved template, or `null` when there is no workspace to save it into. Callers need
+   * the id back: without it, a second save from the same dialog creates a second template rather
+   * than overwriting the one it just made. */
   saveTemplate: (input: {
     id?: string;
     name: string;
     description: string;
     steps: NewChainStep[];
-  }) => Promise<void>;
+  }) => Promise<ChainTemplate | null>;
   removeTemplate: (id: string) => Promise<void>;
   /** Seeds a chain from a finished task: step 1 is that task, already done. */
   continueFrom: (input: {
@@ -370,9 +373,10 @@ export const useChainStore = create<ChainState>((set, get) => ({
 
   saveTemplate: async ({ id, name, description, steps }) => {
     const workspaceId = get().workspaceId;
-    if (!workspaceId) return;
-    await upsertChainTemplate(id, workspaceId, name, description, steps);
+    if (!workspaceId) return null;
+    const saved = await upsertChainTemplate(id, workspaceId, name, description, steps);
     await get().reloadTemplates();
+    return saved;
   },
 
   removeTemplate: async (id) => {

@@ -179,6 +179,14 @@ pub struct StoryBatch {
     pub instructions: String,
     pub provider: String,
     pub model: String,
+    /// The prompt the last successful generation ran with, frozen at the moment it ran: the
+    /// resolved template, and the preamble that was actually sent (instructions plus answered
+    /// questions). `instructions` above is the value the *next* run will use, and the template is
+    /// shared and editable, so neither can answer "what did this set come out of?" later. Empty
+    /// until a generation has succeeded.
+    pub prompt_template: String,
+    pub prompt_instructions: String,
+    pub generated_at: String,
     pub ado_org: String,
     pub ado_project: String,
     pub work_item_type: String,
@@ -187,9 +195,17 @@ pub struct StoryBatch {
     pub tags: String,
     /// JSON array of strings: what the documentation left ambiguous.
     pub open_questions: String,
-    /// The repository whose code the acceptance criteria are checked against. `None` until the
-    /// user picks one — deliberately not `project_id`, which records where the source came from.
-    pub verify_project_id: Option<String>,
+    /// JSON array of `{question, answer}`: those questions once the team answered them. They
+    /// accumulate rather than being consumed — an answer is a requirement the documentation was
+    /// missing, and it stays true after the question stops being asked.
+    pub question_answers: String,
+    /// JSON array of project ids: the repositories the acceptance criteria are checked against.
+    /// Deliberately not `project_id`, which records where the source came from. Several because one
+    /// capability is routinely split across a service, its BFF and its jobs.
+    pub verify_project_ids: String,
+    /// Where the `.feature` file is written — one repository out of the set above, because a spec
+    /// copied into each would be several files drifting apart. `None` until the user picks one.
+    pub feature_project_id: Option<String>,
     /// What the last verification ran on, and when. Empty until one has run.
     pub verify_provider: String,
     pub verify_model: String,
@@ -520,20 +536,6 @@ pub struct ChatConversationSummary {
     pub turn_count: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkspaceMcp {
-    pub id: String,
-    pub workspace_id: String,
-    pub name: String,
-    pub command: String,
-    /// Space-separated args, same convention as the shell — kept as plain text rather than
-    /// a JSON array so the settings UI can just be a single text input.
-    pub args: String,
-    /// `KEY=value` pairs, one per line.
-    pub env: String,
-    pub enabled: bool,
-    pub created_at: String,
-}
 
 // ===================== API client (per workspace) =====================
 //

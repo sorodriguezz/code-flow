@@ -587,34 +587,8 @@ pub fn delete_review_context(db: State<Db>, id: String) -> Result<(), String> {
     queries::delete_review_context(&conn, &id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn list_workspace_mcps(db: State<Db>, workspace_id: String) -> Result<Vec<WorkspaceMcp>, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())
-}
 
-#[tauri::command]
-#[allow(clippy::too_many_arguments)]
-pub fn upsert_workspace_mcp(
-    db: State<Db>,
-    id: Option<String>,
-    workspace_id: String,
-    name: String,
-    command: String,
-    args: String,
-    env: String,
-    enabled: bool,
-) -> Result<WorkspaceMcp, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::upsert_workspace_mcp(&conn, id, &workspace_id, &name, &command, &args, &env, enabled)
-        .map_err(|e| e.to_string())
-}
 
-#[tauri::command]
-pub fn delete_workspace_mcp(db: State<Db>, id: String) -> Result<(), String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::delete_workspace_mcp(&conn, &id).map_err(|e| e.to_string())
-}
 
 #[cfg(test)]
 mod tests {

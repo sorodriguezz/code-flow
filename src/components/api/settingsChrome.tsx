@@ -1,5 +1,5 @@
-import { ExternalLink, Info, TriangleAlert, type LucideIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { ChevronDown, ChevronRight, ExternalLink, Info, TriangleAlert, type LucideIcon } from "lucide-react";
+import { useState, type ReactNode } from "react";
 import { pushErrorToast } from "../../state/toastStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
 
@@ -16,14 +16,51 @@ export function Panel({ children }: { children: ReactNode }) {
   return <div className="rounded-lg border border-[var(--cf-border)] px-3 py-2">{children}</div>;
 }
 
-/** A titled block inside a panel — the backup and collaboration tabs are each several of these. */
-export function Group({ title, children }: { title: string; children: ReactNode }) {
+/** A titled block inside a panel — the backup and collaboration tabs are each several of these.
+ *
+ * `collapsible` is opt-in so the settings panes, where every group is meant to be read at once, keep
+ * behaving as they did. It earns its keep in a narrow rail holding several groups, where the one
+ * being configured is worth more room than the ones already set. */
+export function Group({
+  title,
+  children,
+  collapsible = false,
+  defaultOpen = true,
+}: {
+  title: string;
+  children: ReactNode;
+  collapsible?: boolean;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  const frame = "mt-3 border-t border-[var(--cf-border)] pt-2.5 first:mt-0 first:border-0 first:pt-0";
+  const heading = "truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]";
+
+  if (!collapsible) {
+    return (
+      <section className={frame}>
+        <h4 className={`mb-1.5 ${heading}`}>{title}</h4>
+        {children}
+      </section>
+    );
+  }
+
   return (
-    <section className="mt-3 border-t border-[var(--cf-border)] pt-2.5 first:mt-0 first:border-0 first:pt-0">
-      <h4 className="mb-1.5 truncate text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {title}
-      </h4>
-      {children}
+    <section className={frame}>
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        className={`flex w-full items-center gap-1.5 text-left hover:text-[var(--cf-text)] ${open ? "mb-1.5" : ""}`}
+      >
+        {open ? (
+          <ChevronDown size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+        ) : (
+          <ChevronRight size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+        )}
+        <span className={heading}>{title}</span>
+      </button>
+      {open && children}
     </section>
   );
 }

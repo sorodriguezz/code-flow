@@ -10,7 +10,7 @@
 //! the one every other provider implements — compatibility beats access to OpenAI-only extras here.
 //!
 //! Shape-wise this is Ollama's sibling: [`Transport::OpenAiCompatible`] instead of a subprocess,
-//! and non-agentic (a plain completion endpoint has no tool loop), so "fix with AI" and MCP are
+//! and non-agentic (a plain completion endpoint has no tool loop), so "fix with AI" is
 //! hidden for it in the UI. Unlike Ollama, the key is a real credential and lives in the OS
 //! keyring — `crate::ai::engine_for` reads it and hands it over via the transport.
 
@@ -119,8 +119,9 @@ pub async fn complete(base_url: &str, api_key: &str, inv: &AiInvocation<'_>) -> 
         }
     }
     let mut user = String::from(inv.prompt);
-    if !inv.stdin_content.trim().is_empty() {
+    if !inv.stdin_content.trim().is_empty() || !inv.skills_note.is_empty() {
         user.push_str("\n\n");
+        user.push_str(&inv.skills_note);
         user.push_str(inv.stdin_content);
     }
     messages.push(serde_json::json!({ "role": "user", "content": user }));

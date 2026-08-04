@@ -65,7 +65,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
  *
  * That move is the point of the feature: what used to travel was one workspace's collections; what
  * travels now is the install — every workspace, project, collection, database connection, prompt,
- * agent, MCP server and setting, plus every credential in the OS store. Restore it on another
+ * agent and setting, plus every credential in the OS store. Restore it on another
  * computer and that computer *is* this one, minus the history (see `backup/snapshot.rs` for the
  * table-by-table reasoning behind that line).
  *

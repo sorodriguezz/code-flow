@@ -43,7 +43,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 const GROUPINGS: { id: TaskGrouping; labelKey: TranslationKey }[] = [
   { id: "tree", labelKey: "agents.groupTree" },
   { id: "status", labelKey: "agents.groupStatus" },
-  { id: "agent", labelKey: "agents.groupAgent" },
+  { id: "templates", labelKey: "agents.sectionTemplates" },
 ];
 
 interface Group {
@@ -130,14 +130,6 @@ export function AgentTaskList({
         label: t(AGENT_STATUS[status].labelKey),
         tasks: filtered.filter((task) => task.status === status),
       })).filter((group) => group.tasks.length > 0);
-    }
-    if (groupBy === "agent") {
-      const names = [...new Set(filtered.map((task) => task.agent_name))].sort((a, b) => a.localeCompare(b));
-      return names.map((name) => ({
-        key: name,
-        label: name || t("settings.sddNewAgent"),
-        tasks: filtered.filter((task) => task.agent_name === name),
-      }));
     }
     return [];
   }, [filtered, groupBy, t]);
@@ -273,7 +265,22 @@ export function AgentTaskList({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
-        {loading ? null : nothingYet ? (
+        {loading ? null : groupBy === "templates" ? (
+          // Ahead of the "nothing yet" branch on purpose: that one counts tasks and chains, and a
+          // workspace with saved plans but no work started yet would otherwise show an empty state
+          // on top of a tab that has something in it.
+          <TaskTree
+            view="templates"
+            tasks={filtered}
+            query={query}
+            onNewTask={onNewTask}
+            onNewChain={onNewChain}
+            onNewProject={onNewProject}
+            onEditProject={onEditProject}
+            onContinueWith={setContinuing}
+            onUseTemplate={onUseTemplate}
+          />
+        ) : nothingYet ? (
           // Two different nothings, and they need two different ways out: with no agents defined
           // there is nobody to hand a task to yet, so offering "new task" first would open a dialog
           // with an empty picker.

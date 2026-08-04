@@ -6,7 +6,7 @@ use super::models::{
     ActivityLogEntry, AgentChain, AgentChainStep, AgentProject, AgentTask, ChainClaim, ChainDetail,
     ChainStepBrief, ChainTemplate, ChainTemplateStep, ChatConversationSummary, DocPage, JobHistoryEntry,
     NewChainStep, NewProject, Project, ReviewContext, ReviewRunDetail, ReviewRunSummary, StoryBatch,
-    StoryBatchDetail, StoryDraft, Workspace, WorkspaceActivityEntry, WorkspaceAgent, WorkspaceMcp,
+    StoryBatchDetail, StoryDraft, Workspace, WorkspaceActivityEntry, WorkspaceAgent,
     WorkspaceSkill, WorkItemReviewRow,
 };
 
@@ -274,9 +274,6 @@ pub fn workspace_prompt_default(kind: &str) -> &'static str {
         "work_item_tasks_qa" => crate::ai::DEFAULT_WORK_ITEM_TASKS_QA_TEMPLATE,
         "repo_doc" => crate::ai::DEFAULT_REPO_DOC_TEMPLATE,
         "workspace_doc" => crate::ai::DEFAULT_WORKSPACE_DOC_TEMPLATE,
-        // The SDD/Harness pipeline stages reuse this per-workspace text store; they start empty
-        // (no preconfig — the user defines them). The guide is static frontend content, not stored.
-        "sdd_stages" => "",
         // review_standard and anything unexpected fall back to the review methodology.
         _ => crate::ai::DEFAULT_PR_REVIEW_STANDARD,
     }
@@ -1919,60 +1916,8 @@ pub fn delete_chain_template(conn: &Connection, id: &str) -> rusqlite::Result<()
 
 // ---------- workspace MCP servers ----------
 
-pub fn upsert_workspace_mcp(
-    conn: &Connection,
-    id: Option<String>,
-    workspace_id: &str,
-    name: &str,
-    command: &str,
-    args: &str,
-    env: &str,
-    enabled: bool,
-) -> rusqlite::Result<WorkspaceMcp> {
-    let mcp = WorkspaceMcp {
-        id: id.unwrap_or_else(|| Uuid::new_v4().to_string()),
-        workspace_id: workspace_id.to_string(),
-        name: name.to_string(),
-        command: command.to_string(),
-        args: args.to_string(),
-        env: env.to_string(),
-        enabled,
-        created_at: now(),
-    };
-    conn.execute(
-        "INSERT INTO workspace_mcps (id, workspace_id, name, command, args, env, enabled, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, command = excluded.command,
-            args = excluded.args, env = excluded.env, enabled = excluded.enabled",
-        params![mcp.id, mcp.workspace_id, mcp.name, mcp.command, mcp.args, mcp.env, mcp.enabled, mcp.created_at],
-    )?;
-    Ok(mcp)
-}
 
-pub fn list_workspace_mcps(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceMcp>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, name, command, args, env, enabled, created_at
-         FROM workspace_mcps WHERE workspace_id = ?1 ORDER BY created_at",
-    )?;
-    let rows = stmt.query_map(params![workspace_id], |row| {
-        Ok(WorkspaceMcp {
-            id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            name: row.get(2)?,
-            command: row.get(3)?,
-            args: row.get(4)?,
-            env: row.get(5)?,
-            enabled: row.get(6)?,
-            created_at: row.get(7)?,
-        })
-    })?;
-    rows.collect()
-}
 
-pub fn delete_workspace_mcp(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM workspace_mcps WHERE id = ?1", params![id])?;
-    Ok(())
-}
 
 // ---------- activity log (AI chat history / conversations) ----------
 
@@ -2389,8 +2334,9 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
 
 const BATCH_COLUMNS: &str = "id, workspace_id, project_id, title, source_kind, source_ref, source_text, \
     instructions, provider, model, ado_org, ado_project, work_item_type, area_path, iteration_path, \
-    tags, open_questions, status, last_error, created_at, updated_at, verify_project_id, \
-    verify_provider, verify_model, verified_at";
+    tags, open_questions, status, last_error, created_at, updated_at, \
+    verify_provider, verify_model, verified_at, prompt_template, prompt_instructions, generated_at, \
+    verify_project_ids, feature_project_id, question_answers";
 
 fn map_batch(row: &rusqlite::Row) -> rusqlite::Result<StoryBatch> {
     Ok(StoryBatch {
@@ -2415,10 +2361,15 @@ fn map_batch(row: &rusqlite::Row) -> rusqlite::Result<StoryBatch> {
         last_error: row.get(18)?,
         created_at: row.get(19)?,
         updated_at: row.get(20)?,
-        verify_project_id: row.get(21)?,
-        verify_provider: row.get(22)?,
-        verify_model: row.get(23)?,
-        verified_at: row.get(24)?,
+        verify_provider: row.get(21)?,
+        verify_model: row.get(22)?,
+        verified_at: row.get(23)?,
+        prompt_template: row.get(24)?,
+        prompt_instructions: row.get(25)?,
+        generated_at: row.get(26)?,
+        verify_project_ids: row.get(27)?,
+        feature_project_id: row.get(28)?,
+        question_answers: row.get(29)?,
     })
 }
 
@@ -2781,6 +2732,9 @@ pub fn create_story_batch(
         instructions: instructions.to_string(),
         provider: String::new(),
         model: String::new(),
+        prompt_template: String::new(),
+        prompt_instructions: String::new(),
+        generated_at: String::new(),
         ado_org: String::new(),
         ado_project: String::new(),
         work_item_type: String::new(),
@@ -2788,7 +2742,9 @@ pub fn create_story_batch(
         iteration_path: String::new(),
         tags: String::new(),
         open_questions: "[]".to_string(),
-        verify_project_id: None,
+        question_answers: "[]".to_string(),
+        verify_project_ids: "[]".to_string(),
+        feature_project_id: None,
         verify_provider: String::new(),
         verify_model: String::new(),
         verified_at: String::new(),
@@ -2866,18 +2822,27 @@ pub fn set_story_batch_status(
     Ok(())
 }
 
-/// Records what a finished generation ran on, and what it couldn't answer.
+/// Records what a finished generation ran on, what it couldn't answer, and the prompt it used.
+///
+/// The prompt is snapshotted here rather than read back later because both of its halves are
+/// mutable elsewhere: the template is one shared row per workspace with no history, and the batch's
+/// `instructions` field is overwritten by the rail as soon as the user edits it for the next run.
+/// `generated_at` shares the timestamp with `updated_at` so the two can never disagree about when
+/// this run landed.
 pub fn set_story_batch_run(
     conn: &Connection,
     id: &str,
     provider: &str,
     model: &str,
     open_questions: &str,
+    prompt_template: &str,
+    prompt_instructions: &str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE story_batches SET provider = ?2, model = ?3, open_questions = ?4, updated_at = ?5
+        "UPDATE story_batches SET provider = ?2, model = ?3, open_questions = ?4,
+            prompt_template = ?5, prompt_instructions = ?6, generated_at = ?7, updated_at = ?7
          WHERE id = ?1",
-        params![id, provider, model, open_questions, now()],
+        params![id, provider, model, open_questions, prompt_template, prompt_instructions, now()],
     )?;
     Ok(())
 }
@@ -3040,15 +3005,43 @@ pub fn save_story_draft(
     .optional()
 }
 
-/// The repository a batch's criteria are checked against. `None` clears it — a batch with no
-/// repository simply can't run the check, and the button says so rather than guessing a repo.
-pub fn set_story_batch_verify_project(
+/// The repositories a batch's criteria are checked against, as a JSON array of project ids. An empty
+/// array clears them — a batch with no repository simply can't run the check, and the button says so
+/// rather than guessing one.
+pub fn set_story_batch_verify_projects(
+    conn: &Connection,
+    id: &str,
+    project_ids_json: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_batches SET verify_project_ids = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, project_ids_json, now()],
+    )?;
+    Ok(())
+}
+
+/// The answers the team has given to the batch's open questions.
+///
+/// Deliberately not merged into `instructions`: that field is the user's preferences about *how* to
+/// write the backlog and is rewritten wholesale from a textarea, while these are requirements the
+/// documentation was missing and have to survive being edited one at a time.
+pub fn set_story_batch_answers(conn: &Connection, id: &str, answers_json: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE story_batches SET question_answers = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, answers_json, now()],
+    )?;
+    Ok(())
+}
+
+/// Where the batch's `.feature` file is written. `None` clears it, which leaves the export falling
+/// back to the first repository of the verification set.
+pub fn set_story_batch_feature_project(
     conn: &Connection,
     id: &str,
     project_id: Option<&str>,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE story_batches SET verify_project_id = ?2, updated_at = ?3 WHERE id = ?1",
+        "UPDATE story_batches SET feature_project_id = ?2, updated_at = ?3 WHERE id = ?1",
         params![id, project_id, now()],
     )?;
     Ok(())

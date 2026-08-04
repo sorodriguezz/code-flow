@@ -14,22 +14,24 @@ import {
   TriangleAlert,
   Upload,
 } from "lucide-react";
+import { OpenQuestionsModal } from "./OpenQuestionsModal";
 import { StoryCard } from "./StoryCard";
 import { SOURCE_KIND } from "./storyStatus";
 import { CARD } from "../api/panelChrome";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
 import { ThinkingOrb } from "../common/ThinkingOrb";
-import { isPublishable, parseOpenQuestions, useStoriesStore } from "../../state/storiesStore";
+import {
+  isPublishable,
+  parseOpenQuestions,
+  parseVerifyProjectIds,
+  useStoriesStore,
+} from "../../state/storiesStore";
 import { confirmAction } from "../../state/confirmStore";
 import { featureFileName, lintBatch, parseCriteria, toFeatureFile } from "../../lib/gherkin";
 import { useT } from "../../state/languageStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
-
-/** How many stories a re-generation asks for. A hint, not a rule — the prompt says so, and the
- * model is told to prioritise covering the documentation over hitting the number. */
-const DEFAULT_COUNT = 8;
 
 /**
  * The open batch: what it was derived from, the stories in it, and the two buttons that matter —
@@ -48,6 +50,7 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
   const verifying = useStoriesStore((s) => s.verifyRunByBatch[batchId] !== undefined);
   const publishing = useStoriesStore((s) => s.publishingBatchId === batchId);
   const [showSource, setShowSource] = useState(false);
+  const [answering, setAnswering] = useState(false);
 
   const openQuestions = useMemo(
     () => (batch ? parseOpenQuestions(batch.open_questions) : []),
@@ -65,12 +68,13 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
   const selected = selection ?? [];
   const publishableCount = list.filter((story) => story.work_item_id === 0).length;
   const targetReady = isPublishable(batch);
+  const verifyRepos = parseVerifyProjectIds(batch.verify_project_ids);
   const canVerify =
-    Boolean(batch.verify_project_id) &&
+    verifyRepos.length > 0 &&
     list.some((story) => parseCriteria(story.acceptance_criteria).length > 0);
   const { icon: SourceIcon } = SOURCE_KIND[batch.source_kind];
 
-  const generate = () => void useStoriesStore.getState().generate(batchId, DEFAULT_COUNT);
+  const generate = () => void useStoriesStore.getState().generate(batchId);
 
   const copyFeature = () => {
     void navigator.clipboard
@@ -223,8 +227,8 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
           <ToolbarButton
             onClick={saveFeature}
             icon={FileCode}
-            disabled={!batch.verify_project_id}
-            title={batch.verify_project_id ? t("qa.saveFeatureHint") : t("qa.verifyNoRepo")}
+            disabled={verifyRepos.length === 0}
+            title={verifyRepos.length > 0 ? t("qa.saveFeatureHint") : t("qa.verifyNoRepo")}
           >
             {t("qa.saveFeature")}
           </ToolbarButton>
@@ -240,6 +244,15 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
             <h4 className="mb-1 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-warning)]">
               <CircleHelp size={12} />
               {t("stories.openQuestions")}
+              {/* The way out of the box, next to the thing it is a way out of. Reading the questions
+                  and answering them is one movement, and the rail is too far from here for it. */}
+              <button
+                type="button"
+                onClick={() => setAnswering(true)}
+                className="ml-auto rounded-md border border-[color-mix(in_oklab,var(--cf-warning)_45%,transparent)] px-2 py-0.5 text-[11px] font-medium normal-case tracking-normal text-[var(--cf-warning)] hover:bg-[color-mix(in_oklab,var(--cf-warning)_14%,transparent)]"
+              >
+                {t("stories.answerThem")}
+              </button>
             </h4>
             <ul className="list-disc space-y-0.5 pl-4 text-[12px] leading-snug text-[var(--cf-text)]">
               {openQuestions.map((question, i) => (
@@ -305,6 +318,8 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
           </button>
         </footer>
       )}
+
+      {answering && <OpenQuestionsModal batchId={batchId} onClose={() => setAnswering(false)} />}
     </div>
   );
 }

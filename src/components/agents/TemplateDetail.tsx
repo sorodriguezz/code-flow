@@ -43,7 +43,8 @@ export function TemplateDetail({
 
   return (
     <>
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+      {/* Same 29px as the rails either side — see the note on the task header. */}
+      <div className="flex h-[29px] shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
         <Bookmark size={14} className="shrink-0 text-[var(--cf-accent)]" />
         <span className="min-w-0 flex-1 truncate text-[13px] font-semibold" title={template.description || template.name}>
           {template.name}

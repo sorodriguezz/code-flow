@@ -330,6 +330,14 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- workspace's routing next month must not rewrite what this batch says it used.
             provider      TEXT NOT NULL DEFAULT '',
             model         TEXT NOT NULL DEFAULT '',
+            -- The prompt that produced the stories, frozen for the same reason `source_text` is.
+            -- The template lives in `workspace_prompts` with one row per workspace and no history,
+            -- and `instructions` above is whatever the rail holds *now* for the next run; neither
+            -- can answer "what did this set come out of?" after the fact. Empty means never
+            -- generated, or generated before this column existed.
+            prompt_template     TEXT NOT NULL DEFAULT '',
+            prompt_instructions TEXT NOT NULL DEFAULT '',
+            generated_at        TEXT NOT NULL DEFAULT '',
             -- The Azure Boards target. Empty until the user picks one; every story of the batch
             -- publishes against it, which is what makes "publish selected" a single decision.
             ado_org         TEXT NOT NULL DEFAULT '',
@@ -341,10 +349,23 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- What the model couldn't answer from the documentation. Kept on the batch rather than
             -- on a story because an ambiguity usually spans several of them.
             open_questions  TEXT NOT NULL DEFAULT '[]',
-            -- The repository the acceptance criteria are checked against ("does the code already
-            -- do this?"). Deliberately NOT `project_id`: that one records where the source Markdown
-            -- was read from, and a backlog derived from a wiki is routinely validated against a
-            -- repo that had nothing to do with writing it.
+            -- Those questions once somebody answered them: [{"question","answer"}]. Requirements the
+            -- documentation was missing, so they accumulate rather than being consumed — every later
+            -- generation is given them again, and an answer outlives the question that prompted it.
+            question_answers TEXT NOT NULL DEFAULT '[]',
+            -- The repositories the acceptance criteria are checked against ("does the code already
+            -- do this?"), as a JSON array of project ids. Deliberately NOT `project_id`: that one
+            -- records where the source Markdown was read from, and a backlog derived from a wiki is
+            -- routinely validated against repos that had nothing to do with writing it. Several,
+            -- because one capability is routinely split across a service, its BFF and its jobs, and
+            -- a criterion checked against only one of them comes back failing for the wrong reason.
+            verify_project_ids TEXT NOT NULL DEFAULT '[]',
+            -- Where the `.feature` file is written. One repository, not the set above: the criteria
+            -- may live in several places, but a spec file copied into each would be several files
+            -- drifting apart.
+            feature_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
+            -- Superseded by `verify_project_ids`; kept so an older build reading this database still
+            -- finds the column it expects. Nothing writes it any more.
             verify_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
             -- What the last verification ran on, and when. Snapshotted like `provider`/`model`
             -- above: a verdict is only worth as much as the engine and the moment that produced it,
@@ -901,6 +922,9 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_collection_id_to_tombstones(conn)?;
     add_project_url_to_shared_collections(conn)?;
     add_verification_to_story_batches(conn)?;
+    add_prompt_snapshot_to_story_batches(conn)?;
+    add_multi_repo_verification_to_story_batches(conn)?;
+    add_question_answers_to_story_batches(conn)?;
     add_verification_to_story_drafts(conn)?;
     add_grouping_to_agent_tasks(conn)?;
     add_grouping_to_agent_chains(conn)?;
@@ -969,6 +993,106 @@ fn add_verification_to_story_batches(conn: &Connection) -> rusqlite::Result<()> 
                 "ALTER TABLE story_batches ADD COLUMN {column} TEXT NOT NULL DEFAULT '';"
             ))?;
         }
+    }
+    Ok(())
+}
+
+/// Story batches gained a snapshot of the prompt their last generation actually ran with.
+///
+/// Neither half of that prompt could be recovered before: the template lives in `workspace_prompts`
+/// as a single row per workspace and kind, so tuning the house style — or hitting "restore default",
+/// which stores a blank — silently rewrites the provenance of every set already produced with it;
+/// and `instructions` is saved on blur from the rail, making it the value the *next* run will use
+/// rather than the one the last did.
+///
+/// Only the two mutable pieces are frozen. The documentation is already immutable in `source_text`,
+/// so copying it again would double the largest column in the table (60k characters a batch) to
+/// store what is provably identical. Existing rows default to `''` — never snapshotted — and the
+/// screen says so instead of passing today's template off as the one that ran.
+fn add_prompt_snapshot_to_story_batches(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "story_batches")? {
+        return Ok(());
+    }
+    for column in ["prompt_template", "prompt_instructions", "generated_at"] {
+        if !has_column(conn, "story_batches", column)? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE story_batches ADD COLUMN {column} TEXT NOT NULL DEFAULT '';"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
+/// Verification went from one repository to a set of them, and the `.feature` destination became its
+/// own choice.
+///
+/// One capability is routinely spread across a service, its BFF and its scheduled jobs, so a
+/// criterion checked against a single repository came back `fail` for the wrong reason — the code
+/// existed, just not there. The spec file did not follow: a `.feature` copied into every repository
+/// of the set is several files that drift, so it keeps pointing at exactly one.
+///
+/// The old column is left in place rather than dropped. Dropping it would rewrite the table, and a
+/// user who opens an older build against the same database would find it missing; migrating the
+/// value forward and leaving the column alone costs one unused column and no risk.
+fn add_multi_repo_verification_to_story_batches(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "story_batches")? {
+        return Ok(());
+    }
+    if !has_column(conn, "story_batches", "verify_project_ids")? {
+        conn.execute_batch(
+            "ALTER TABLE story_batches ADD COLUMN verify_project_ids TEXT NOT NULL DEFAULT '[]';",
+        )?;
+    }
+    // Nullable with a NULL default, which is what SQLite requires of an added column carrying a
+    // REFERENCES clause.
+    if !has_column(conn, "story_batches", "feature_project_id")? {
+        conn.execute_batch(
+            "ALTER TABLE story_batches ADD COLUMN feature_project_id TEXT REFERENCES projects(id) ON DELETE SET NULL;",
+        )?;
+    }
+    if !has_column(conn, "story_batches", "verify_project_id")? {
+        return Ok(());
+    }
+
+    // Carry the single repository forward as both the one-repository set and the feature
+    // destination, which is exactly what it meant. Built in Rust rather than in SQL so the id goes
+    // through `serde_json` instead of through string concatenation.
+    let rows: Vec<(String, String)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, verify_project_id FROM story_batches
+             WHERE verify_project_id IS NOT NULL AND verify_project_id <> '' AND verify_project_ids = '[]'",
+        )?;
+        let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (batch_id, project_id) in rows {
+        let ids = serde_json::to_string(&vec![project_id.clone()]).unwrap_or_else(|_| "[]".to_string());
+        conn.execute(
+            "UPDATE story_batches SET verify_project_ids = ?2, feature_project_id = ?3 WHERE id = ?1",
+            rusqlite::params![batch_id, ids, project_id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Open questions gained answers.
+///
+/// They were a terminal notice before: the model listed what the documentation left ambiguous, and
+/// the only way to act on it was to retype the answer into the free-text instructions box, where
+/// nothing recorded which question it settled. Storing the pairs makes the answers part of what the
+/// batch knows — every later generation is handed them, and an answer survives the question
+/// disappearing from the next run's list.
+///
+/// Existing rows default to `'[]'`, which is exactly what a batch nobody has answered anything for
+/// has.
+fn add_question_answers_to_story_batches(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "story_batches")? {
+        return Ok(());
+    }
+    if !has_column(conn, "story_batches", "question_answers")? {
+        conn.execute_batch(
+            "ALTER TABLE story_batches ADD COLUMN question_answers TEXT NOT NULL DEFAULT '[]';",
+        )?;
     }
     Ok(())
 }

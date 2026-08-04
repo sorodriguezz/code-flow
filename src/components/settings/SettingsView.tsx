@@ -9,10 +9,8 @@ import {
   Keyboard,
   PackagePlus,
   Palette,
-  Plug,
   ShieldCheck,
   TerminalSquare,
-  Workflow,
   X,
   Zap,
 } from "lucide-react";
@@ -21,9 +19,7 @@ import { ProjectsSettings } from "./ProjectsSettings";
 import { GitHostingSettings } from "./GitHostingSettings";
 import { ClaudeSettings } from "./ClaudeSettings";
 import { ReviewSettings } from "./ReviewSettings";
-import { SddSettings } from "./SddSettings";
 import { SkillsSettings } from "./SkillsSettings";
-import { McpSettings } from "./McpSettings";
 import { GitSettings } from "./GitSettings";
 import { TerminalSettings } from "./TerminalSettings";
 import { GeneralSettings } from "./GeneralSettings";
@@ -42,7 +38,7 @@ const NAV_MIN = 160;
 const NAV_MAX = 320;
 
 // Global settings apply across every workspace/project. Workspace settings — everything
-// Claude reads when reviewing a PR (context, instructions, skills, MCP servers) — apply
+// Claude reads when reviewing a PR (context, instructions, skills) — apply
 // only to whichever workspace is currently active, per the user's explicit scoping model.
 const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
   { id: "general", labelKey: "settings.general", icon: Globe },
@@ -71,9 +67,7 @@ const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>(["claude"]);
 
 const WORKSPACE_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
   { id: "review", labelKey: "settings.review", icon: ShieldCheck },
-  { id: "sdd", labelKey: "settings.sdd", icon: Workflow },
   { id: "skills", labelKey: "settings.skills", icon: PackagePlus },
-  { id: "mcps", labelKey: "settings.mcps", icon: Plug },
 ];
 
 /**
@@ -234,9 +228,7 @@ export function SettingsView() {
               {section === "api" && <ApiSettingsBody />}
               {section === "backup" && <BackupSettings />}
               {section === "review" && <ReviewSettings />}
-              {section === "sdd" && <SddSettings />}
               {section === "skills" && <SkillsSettings />}
-              {section === "mcps" && <McpSettings />}
             </div>
           </div>
         </div>

@@ -128,7 +128,12 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
 
   return (
     <>
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+      {/* 29px to the pixel, like every other panel header in the app (`px-2 py-1` around a 20px
+          toolbar button): the three columns of this view sit in one flex row, so a middle bar that
+          sizes itself off its own title lands its text and its bottom rule several pixels below the
+          rails either side of it. Height fixed rather than padded, because the tallest thing in here
+          is the 24px repository picker, which a 20px content box would squash. */}
+      <div className="flex h-[29px] shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3">
         <Bot size={14} className="shrink-0 text-[var(--cf-accent)]" />
 
         {renaming !== null ? (
@@ -402,7 +407,7 @@ function AgentMessage({ message }: { message: ChatMessage }) {
       <div
         className={`group relative rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
           message.role === "user"
-            ? "ml-auto max-w-[85%] whitespace-pre-wrap bg-[var(--cf-accent)] text-white"
+            ? "ml-auto max-w-[85%] whitespace-pre-wrap border border-[color-mix(in_oklab,var(--cf-accent)_30%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_14%,var(--cf-surface))] text-[var(--cf-text)]"
             : "mr-auto max-w-[85%] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] text-[var(--cf-text)]"
         }`}
       >

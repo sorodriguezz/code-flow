@@ -381,12 +381,13 @@ function ModelTag() {
   const taskModels = useAiProviderStore((s) => s.taskModels);
   const defaultProvider = useAiProviderStore((s) => s.providerId);
 
-  // The same task the review runs route to in Rust (`AiTask::StoryVerify`): both read code to
-  // judge a requirement, so a team that picked a model for one meant it for the other.
-  const providerId = taskProviders["story_verify"]?.trim() || defaultProvider;
+  // The task these runs route to in Rust (`AiTask::WorkItemReview`). It has to stay that one: this
+  // tag is the only place the screen says which engine is about to rewrite a sprint's backlog, and
+  // naming a task it does not run on would be worse than not showing it.
+  const providerId = taskProviders["work_item_review"]?.trim() || defaultProvider;
   const provider = AI_PROVIDERS.find((p) => p.id === providerId);
   const engine = provider ? (provider.label ?? (provider.labelKey ? t(provider.labelKey) : providerId)) : providerId;
-  const model = modelDisplayLabel(providerId, taskModels["story_verify"] ?? "", t);
+  const model = modelDisplayLabel(providerId, taskModels["work_item_review"] ?? "", t);
 
   return (
     <span

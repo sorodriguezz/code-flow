@@ -6,7 +6,7 @@ use crate::ai;
 use crate::commands::claude_cmd::{load_ai_config, AiTask};
 use crate::commands::skills_cmd;
 use crate::db::{
-    models::{Project, WorkspaceMcp},
+    models::Project,
     queries, Db,
 };
 use crate::git;
@@ -177,39 +177,6 @@ fn detectable_hosts(canonical: &str, connected: &[String]) -> Vec<String> {
     hosts
 }
 
-/// Builds a `--mcp-config` JSON file for whichever of a workspace's MCP servers are
-/// enabled — persisted under the workspace's own CodeFlow folder rather than a tempfile so
-/// it's easy to find/inspect, and gets overwritten on every review anyway.
-pub(crate) fn build_mcp_config(mcps: &[WorkspaceMcp], workspace_id: &str) -> Result<Option<String>, String> {
-    let enabled: Vec<&WorkspaceMcp> = mcps.iter().filter(|m| m.enabled).collect();
-    if enabled.is_empty() {
-        return Ok(None);
-    }
-
-    let mut servers = serde_json::Map::new();
-    for mcp in enabled {
-        let args: Vec<String> = mcp.args.split_whitespace().map(|s| s.to_string()).collect();
-        let mut env = serde_json::Map::new();
-        for line in mcp.env.lines() {
-            if let Some((key, value)) = line.split_once('=') {
-                env.insert(key.trim().to_string(), serde_json::Value::String(value.trim().to_string()));
-            }
-        }
-        servers.insert(
-            mcp.name.clone(),
-            serde_json::json!({ "command": mcp.command, "args": args, "env": env }),
-        );
-    }
-
-    let config = serde_json::json!({ "mcpServers": servers });
-    let path = paths::base_dir().join("workspaces").join(workspace_id).join("mcp.json");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    Ok(Some(path.to_string_lossy().to_string()))
-}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status")]
@@ -882,10 +849,9 @@ pub async fn review_pr_from_link(
 ) -> Result<String, String> {
     let (target, credential) = link_credentials(&db, &url)?;
 
-    let (contexts, mcps, skills, config, review_template) = {
+    let (contexts, skills, config, review_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
             (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
@@ -895,7 +861,7 @@ pub async fn review_pr_from_link(
         };
         let review_template = queries::get_workspace_prompt(&conn, &workspace_id, "review_standard")
             .map_err(|e| e.to_string())?;
-        (contexts, mcps, skills, config, review_template)
+        (contexts, skills, config, review_template)
     };
 
     let LinkPr { pr, diff: diff_text, repo_label, clone_url } = fetch_pr_and_diff(&target, &credential).await?;
@@ -932,7 +898,6 @@ pub async fn review_pr_from_link(
         enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
     }
 
-    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
     let result = crate::ai_runs::scoped(app, Some(job_id.clone()), async {
         ai::review_pull_request(
@@ -947,7 +912,6 @@ pub async fn review_pr_from_link(
             &cwd,
             &review_template,
             &level,
-            mcp_config_path.as_deref(),
         )
         .await
     })
@@ -1712,10 +1676,9 @@ pub async fn review_pull_request(
     let repo = repo_key(&link);
     let workspace_id = project.workspace_id.clone();
 
-    let (contexts, mcps, skills, config, review_template) = {
+    let (contexts, skills, config, review_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         // An active agent reviews on its own provider + model; otherwise the Review task routing.
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
@@ -1729,7 +1692,7 @@ pub async fn review_pull_request(
         // default), so it's the prompt directly; project-specific rules ride along in `contexts`.
         let review_template = queries::get_workspace_prompt(&conn, &workspace_id, "review_standard")
             .map_err(|e| e.to_string())?;
-        (contexts, mcps, skills, config, review_template)
+        (contexts, skills, config, review_template)
     };
 
     let prs = match &link {
@@ -1903,7 +1866,6 @@ pub async fn review_pull_request(
         enabled_contexts.push(("Falsos positivos conocidos de este repositorio".to_string(), block));
     }
 
-    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
     // Same identity for the job row and the run, so the row can stream its own output and stop it.
     let result = crate::ai_runs::scoped(app.clone(), Some(job_id.clone()), async {
@@ -1919,7 +1881,6 @@ pub async fn review_pull_request(
             &project.local_path,
             &review_template,
             &level,
-            mcp_config_path.as_deref(),
         )
         .await
     })

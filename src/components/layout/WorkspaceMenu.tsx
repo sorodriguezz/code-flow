@@ -80,7 +80,6 @@ const TOOLS: WorkspaceTool[] = [
     icon: ClipboardList,
     labelKey: "tabbar.stories",
     descriptionKey: "tabbar.storiesDescription",
-    beta: true,
   },
 ];
 

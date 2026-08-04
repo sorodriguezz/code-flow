@@ -11,7 +11,7 @@ resolve conflicts — all in a fast, native app. And when you're done, test the 
 you just changed and query the database behind it without leaving the window.
 **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-1.11.2-6C5CE7)
+![version](https://img.shields.io/badge/version-1.12.0-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -100,7 +100,7 @@ the chat itself, without going through Settings.
 
 > 🔒 **Code that can't leave the company?** Set Ollama as your provider and everything
 > above runs on your machine, offline and with no cost per token.
-> *(Features that edit files — fixing findings, MCP — need an engine with tools, meaning
+> *(Features that edit files — fixing findings — need an engine with tools, meaning
 > one of the five CLIs; the app says so and hides what doesn't apply.)*
 
 ### Nothing is lost by looking away
@@ -182,7 +182,7 @@ The query you need to check is one tab away from the migration you just wrote.
 - **Light, dark or system** themes, with an accent color of your choosing.
 - Interface in **English and Spanish**.
 - **Prompt templates** for commit, analysis, review, PR description and conflicts.
-- Per workspace: **review context**, **instructions (.md)**, **Skills** and **MCP servers**.
+- Per workspace: **review context**, **instructions (.md)** and **Skills**.
 - **A full history** of what the AI has done — failures included, so tomorrow you know what happened.
 
 ## ⚙️ Getting started

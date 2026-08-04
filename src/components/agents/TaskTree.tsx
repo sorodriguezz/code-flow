@@ -30,7 +30,13 @@ import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import type { AgentChain, AgentProject, AgentTask, ChainStepBrief } from "../../types/domain";
+import type {
+  AgentChain,
+  AgentProject,
+  AgentTask,
+  ChainStepBrief,
+  ChainTemplate,
+} from "../../types/domain";
 
 /**
  * A row of the tree, before it is drawn.
@@ -78,6 +84,7 @@ export function TaskTree({
   onEditProject,
   onContinueWith,
   onUseTemplate,
+  view = "tasks",
 }: {
   /** Already filtered by the search box above. */
   tasks: AgentTask[];
@@ -91,6 +98,10 @@ export function TaskTree({
   onEditProject: (project: AgentProject) => void;
   onContinueWith: (taskId: string) => void;
   onUseTemplate: (templateId: string) => void;
+  /** Which tab is asking. `templates` draws the saved plans alone; everything else about this
+   * component — the context menu, the inline rename — is shared, which is why it is a mode rather
+   * than a second component. */
+  view?: "tasks" | "templates";
 }) {
   const t = useT();
   const projects = useAgentsStore((s) => s.projects);
@@ -218,7 +229,104 @@ export function TaskTree({
       />
     );
 
-  // A search that found nothing says so once, rather than drawing four headings and a row of empty
+  /** One saved plan, as a row or as the inline rename it is in the middle of. Lives here rather than
+   * inside the templates branch so it keeps sharing this component's context menu and rename state —
+   * the tab moved, the machinery behind it did not. */
+  const renderTemplate = (template: ChainTemplate) =>
+    renaming?.kind === "template" && renaming.id === template.id ? (
+      <RenameRow
+        key={template.id}
+        value={template.name}
+        onCancel={() => setRenaming(null)}
+        onCommit={(name) => {
+          if (name.trim()) {
+            void useChainStore
+              .getState()
+              .saveTemplate({
+                id: template.id,
+                name: name.trim(),
+                description: template.description,
+                steps: template.steps.map(({ agent_id, instruction, gate }) => ({ agent_id, instruction, gate })),
+              })
+              .catch((e: unknown) => pushErrorToast(String(e)));
+          }
+          setRenaming(null);
+        }}
+      />
+    ) : (
+      <TemplateRow
+        key={template.id}
+        templateId={template.id}
+        name={template.name}
+        description={template.description}
+        steps={template.steps.length}
+        onMenu={(x, y) => setMenu({ x, y, kind: "template", id: template.id })}
+      />
+    );
+
+  /** Templates are their own tab rather than a fourth section of the tree: they are not work in
+   * progress, they are the plans work gets started from, and a collapsed section is where they went
+   * unnoticed. The search box above stays honest here by filtering them too — a box that visibly
+   * does nothing on one tab reads as broken. */
+  if (view === "templates") {
+    const matches = needle
+      ? templates.filter(
+          (template) =>
+            template.name.toLowerCase().includes(needle) ||
+            template.description.toLowerCase().includes(needle),
+        )
+      : templates;
+    return (
+      <>
+        <div className="flex items-center gap-1.5 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+          <span className="truncate">{t("agents.sectionTemplates")}</span>
+          {matches.length > 0 && (
+            <span className="shrink-0 rounded-full bg-black/[0.06] px-1.5 text-[10px] font-semibold dark:bg-white/[0.1]">
+              {matches.length}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={() => onNewChain("")}
+            title={t("agents.newTemplate")}
+            aria-label={t("agents.newTemplate")}
+            className="ml-auto flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.06] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.1]"
+          >
+            <Plus size={12} />
+          </button>
+        </div>
+        <div className="px-1.5 pb-1">
+          {matches.length === 0 ? (
+            <Hint>{t(needle ? "agents.noMatches" : "agents.templatesEmptyHint")}</Hint>
+          ) : (
+            matches.map(renderTemplate)
+          )}
+        </div>
+
+        {menu && (
+          <ContextMenu
+            x={menu.x}
+            y={menu.y}
+            items={menuItemsFor(menu, {
+              t,
+              projects,
+              chainOfTask,
+              onContinueWith,
+              onUseTemplate,
+              onEditProject,
+              onNewTask,
+              onNewChain,
+              startRename: (kind, id) => setRenaming({ kind, id }),
+              startMove: (kind, id) => setMove({ x: menu.x, y: menu.y, kind, id }),
+            })}
+            onClose={() => setMenu(null)}
+          />
+        )}
+      </>
+    );
+  }
+
+  // A search that found nothing says so once, rather than drawing three headings and a row of empty
   // hints that each look like an answer.
   if (needle !== "" && items.length === 0) {
     return <p className="px-2 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">{t("agents.noMatches")}</p>;
@@ -318,51 +426,6 @@ export function TaskTree({
         onToggle={() => toggleOpen("sec:tasks")}
       >
         {loose.length === 0 ? <Hint>{t("agents.treeEmpty")}</Hint> : loose.map((item) => renderItem(item, 0))}
-      </Section>
-
-      <Section
-        label={t("agents.sectionTemplates")}
-        count={templates.length}
-        expanded={isOpen("sec:templates")}
-        onToggle={() => toggleOpen("sec:templates")}
-        action={{ icon: Plus, label: t("agents.newTemplate"), onClick: () => onNewChain("") }}
-      >
-        {templates.length === 0 ? (
-          <Hint>{t("agents.templatesEmptyHint")}</Hint>
-        ) : (
-          templates.map((template) =>
-            renaming?.kind === "template" && renaming.id === template.id ? (
-              <RenameRow
-                key={template.id}
-                value={template.name}
-                onCancel={() => setRenaming(null)}
-                onCommit={(name) => {
-                  if (name.trim()) {
-                    void useChainStore
-                      .getState()
-                      .saveTemplate({
-                        id: template.id,
-                        name: name.trim(),
-                        description: template.description,
-                        steps: template.steps.map(({ agent_id, instruction, gate }) => ({ agent_id, instruction, gate })),
-                      })
-                      .catch((e: unknown) => pushErrorToast(String(e)));
-                  }
-                  setRenaming(null);
-                }}
-              />
-            ) : (
-              <TemplateRow
-                key={template.id}
-                templateId={template.id}
-                name={template.name}
-                description={template.description}
-                steps={template.steps.length}
-                onMenu={(x, y) => setMenu({ x, y, kind: "template", id: template.id })}
-              />
-            ),
-          )
-        )}
       </Section>
 
       {menu && (

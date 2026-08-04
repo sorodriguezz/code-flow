@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { BookText, ClipboardList, FileText, FolderGit2, Search, Sparkles } from "lucide-react";
+import { BookText, ClipboardList, FileText, FolderGit2, ListChecks, Search, Sparkles } from "lucide-react";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { Note } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
@@ -25,10 +25,6 @@ const SOURCES: { id: StorySourceKind; icon: typeof BookText; labelKey: Translati
   { id: "files", icon: FolderGit2, labelKey: "stories.sourceFiles" },
   { id: "text", icon: FileText, labelKey: "stories.sourceText" },
 ];
-
-/** How many stories the first generation asks for. Orientative — the prompt tells the model to
- * prioritise covering the documentation over hitting the number. */
-const COUNTS = [5, 8, 12, 20];
 
 /** Markdown is what a specification is written in; everything else in a repo is code. */
 const DOC_EXTENSIONS = [".md", ".markdown", ".mdx", ".txt"];
@@ -59,7 +55,6 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
   const [kind, setKind] = useState<StorySourceKind>("wiki");
   const [title, setTitle] = useState("");
   const [instructions, setInstructions] = useState("");
-  const [count, setCount] = useState(8);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -200,7 +195,7 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
         instructions,
       });
       // Fire-and-forget: the generation runs for a while and the dialog has nothing left to add.
-      void useStoriesStore.getState().generate(batch.id, count);
+      void useStoriesStore.getState().generate(batch.id);
       onClose();
     } catch (e: unknown) {
       setError(String(e));
@@ -410,25 +405,14 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
           </Field>
         )}
 
-        <div className="grid grid-cols-[1fr_auto] gap-2">
-          <Field label={t("stories.batchName")} hint={t("stories.batchNameHint")}>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder={t("stories.batchNamePlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
-            />
-          </Field>
-          <Field label={t("stories.count")} hint={t("stories.countHint")}>
-            <Select
-              size="field"
-              value={String(count)}
-              ariaLabel={t("stories.count")}
-              onChange={(value) => setCount(Number(value))}
-              options={COUNTS.map((n) => ({ value: String(n), label: String(n) }))}
-            />
-          </Field>
-        </div>
+        <Field label={t("stories.batchName")} hint={t("stories.batchNameHint")}>
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder={t("stories.batchNamePlaceholder")}
+            className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          />
+        </Field>
 
         <Field label={t("stories.instructions")} hint={t("stories.instructionsHint")}>
           <textarea
@@ -441,6 +425,13 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
         </Field>
 
         {error && <Note tone="warning">{error}</Note>}
+        {/* Where the "how many stories" picker used to be, and saying what replaced it. A number
+            here was a quota: documentation describing three capabilities came back padded to
+            eight because eight was what somebody guessed. */}
+        <p className="flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          <ListChecks size={11} className="mt-[2px] shrink-0" />
+          <span>{t("stories.howManyNote")}</span>
+        </p>
         <p className="flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
           <Sparkles size={11} className="mt-[2px] shrink-0" />
           <span>{t("stories.newBatchNote")}</span>

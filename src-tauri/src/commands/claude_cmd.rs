@@ -12,7 +12,6 @@ use tauri::{AppHandle, State};
 use crate::ai::{self, AiEngine};
 use crate::ai_locks;
 use crate::ai_runs;
-use crate::commands::ado_cmd::build_mcp_config;
 use crate::commands::skills_cmd::sync_skills_into_project;
 use crate::db::{queries, Db};
 use crate::git;
@@ -80,6 +79,16 @@ pub(crate) enum AiTask {
     /// engine with tools — a text-only local model would answer from the criteria alone, which is
     /// exactly the confident-and-wrong verdict the whole feature exists to avoid.
     StoryVerify,
+    /// Reviewing a work item that already exists — analysis, description, criteria, tasks. Split
+    /// from [`AiTask::StoryVerify`], which it used to share, because the two are different jobs at
+    /// different lengths: one judges a handful of criteria, this one rewrites a whole work item
+    /// four times over, and a team routinely wants the cheaper engine for one of them. Reads the
+    /// repository, so it needs tools.
+    WorkItemReview,
+    /// Writing a repository's or a workspace's technical documentation by reading the code. Its
+    /// own route rather than the verification's: this is the longest single run in the app, and
+    /// which engine writes documentation is a decision a team makes on its own terms.
+    Wiki,
 }
 
 impl AiTask {
@@ -98,6 +107,8 @@ impl AiTask {
             AiTask::Inline => "inline",
             AiTask::Stories => "stories",
             AiTask::StoryVerify => "story_verify",
+            AiTask::WorkItemReview => "work_item_review",
+            AiTask::Wiki => "wiki",
         }
     }
 }
@@ -412,10 +423,9 @@ pub async fn analyze_working_changes(
     let _repo_lease = ai_locks::acquire(&project.local_path)
         .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
 
-    let (contexts, mcps, skills, config, analyze_template) = {
+    let (contexts, skills, config, analyze_template) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         // An active agent analyzes on its own provider + model; otherwise the Analyze routing.
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
@@ -423,7 +433,7 @@ pub async fn analyze_working_changes(
             _ => load_ai_config(&conn, AiTask::Analyze)?,
         };
         let analyze_template = shared_template(&conn, "analyze_template", "claude_analyze_template")?;
-        (contexts, mcps, skills, config, analyze_template)
+        (contexts, skills, config, analyze_template)
     };
 
     // Best-effort, same as the PR review path — a missing/unwritable skills dir shouldn't
@@ -442,7 +452,6 @@ pub async fn analyze_working_changes(
         enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
     }
 
-    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
     // The job id doubles as the run id: the job row the UI already renders is exactly the thing
     // that should show this run's live output and its stop button.
@@ -456,7 +465,6 @@ pub async fn analyze_working_changes(
             &config.tools,
             &project.local_path,
             &analyze_template,
-            mcp_config_path.as_deref(),
         )
         .await
     })
@@ -589,10 +597,9 @@ pub async fn send_chat_message(
     let _repo_lease = ai_locks::acquire(&project.local_path)
         .ok_or_else(|| format!("{}{}", ai_locks::BUSY_MARKER, project.name))?;
 
-    let (contexts, mcps, skills, config, session_id) = {
+    let (contexts, skills, config, session_id) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
-        let mcps = queries::list_workspace_mcps(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         // An active agent runs on its own provider + model; otherwise the normal chat routing.
         let config = match (agent_provider.as_deref(), agent_model.as_deref()) {
@@ -603,7 +610,7 @@ pub async fn send_chat_message(
         // turn is recorded against the session it actually ran under.
         let session_id =
             session_for_provider(&conn, &project_id, conversation_id.as_deref(), session_id, &config.provider);
-        (contexts, mcps, skills, config, session_id)
+        (contexts, skills, config, session_id)
     };
 
     let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
@@ -618,7 +625,6 @@ pub async fn send_chat_message(
         enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
     }
 
-    let mcp_config_path = build_mcp_config(&mcps, &workspace_id)?;
 
     // Timed around the engine call only, so it reflects how long the model actually took —
     // not the surrounding DB reads or IPC.
@@ -636,7 +642,6 @@ pub async fn send_chat_message(
             session_id.as_deref(),
             &config.tools,
             &project.local_path,
-            mcp_config_path.as_deref(),
         )
         .await
     })

@@ -7,10 +7,10 @@ import { useLanguageStore, useT } from "../../state/languageStore";
 /**
  * What this view does, how to work with it, and — the part worth the space — what it cannot do.
  *
- * A read-only manual rather than tooltips scattered over the chrome, for the same reason the SDD
- * section has one: the limits only make sense together. "One agent per repository" and "nothing
- * starts on its own" and "the chain cannot tell whether a step succeeded" are three answers to the
- * same question, and a user who meets them one popover at a time never assembles the picture.
+ * A read-only manual rather than tooltips scattered over the chrome: the limits only make sense
+ * together. "One agent per repository" and "nothing starts on its own" and "the chain cannot tell
+ * whether a step succeeded" are three answers to the same question, and a user who meets them one
+ * popover at a time never assembles the picture.
  */
 export function AgentsHelpModal({ onClose }: { onClose: () => void }) {
   const t = useT();

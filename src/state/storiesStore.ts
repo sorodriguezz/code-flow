@@ -10,9 +10,11 @@ import {
   publishStories,
   renameStoryBatch,
   saveStoryDraft,
+  setStoryBatchAnswers,
   setStoryBatchInstructions,
   setStoryBatchTarget,
-  setStoryBatchVerifyProject,
+  setStoryBatchFeatureProject,
+  setStoryBatchVerifyProjects,
   verifyStories,
   writeStoryFeatureFile,
 } from "../lib/tauri/commands";
@@ -20,7 +22,13 @@ import { featureFileName, parseCriteria, toFeatureFile } from "../lib/gherkin";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
-import type { CriterionVerdict, StoryBatch, StoryDraft, StorySourceKind } from "../types/domain";
+import type {
+  CriterionVerdict,
+  QuestionAnswer,
+  StoryBatch,
+  StoryDraft,
+  StorySourceKind,
+} from "../types/domain";
 
 /** How much of the source names a batch until the user renames it. */
 const TITLE_MAX = 64;
@@ -37,6 +45,28 @@ export { parseCriteria };
 
 /** The batch's open questions, same encoding. */
 export const parseOpenQuestions = parseCriteria;
+
+/** The repositories the batch's criteria are checked against, same encoding. */
+export const parseVerifyProjectIds = parseCriteria;
+
+/** The answers given to the batch's open questions. Tolerant like the rest: a row that can't be read
+ * yields none, because a corrupt answer is worth exactly as much as no answer and must not take the
+ * screen down with it. */
+export function parseQuestionAnswers(raw: string): QuestionAnswer[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (entry): entry is QuestionAnswer =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof (entry as QuestionAnswer).question === "string" &&
+        typeof (entry as QuestionAnswer).answer === "string",
+    );
+  } catch {
+    return [];
+  }
+}
 
 /** The per-criterion verdicts of the last check against the code, positionally aligned with the
  * story's criteria. An unreadable row yields none rather than throwing: a corrupt verdict is worth
@@ -148,8 +178,14 @@ interface StoriesState {
   remove: (batchId: string) => Promise<void>;
   setTarget: (batchId: string, target: BoardsTarget) => Promise<void>;
   setInstructions: (batchId: string, instructions: string) => Promise<void>;
-  setVerifyProject: (batchId: string, projectId: string | null) => Promise<void>;
-  generate: (batchId: string, count: number, agent?: { provider: string; model: string }) => Promise<void>;
+  /** The whole answer sheet at once. Blank answers are dropped rather than stored empty. */
+  setAnswers: (batchId: string, answers: QuestionAnswer[]) => Promise<void>;
+  setVerifyProjects: (batchId: string, projectIds: string[]) => Promise<void>;
+  /** `null` leaves the export falling back to the first repository of the set. */
+  setFeatureProject: (batchId: string, projectId: string | null) => Promise<void>;
+  /** How many stories come out is the documentation's business, not the caller's — see the
+   *  "CUÁNTAS HISTORIAS" block in the prompt. There is deliberately no count to pass. */
+  generate: (batchId: string, agent?: { provider: string; model: string }) => Promise<void>;
   stop: (batchId: string) => Promise<void>;
   verify: (batchId: string, storyIds?: string[]) => Promise<void>;
   stopVerify: (batchId: string) => Promise<void>;
@@ -314,7 +350,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     await setStoryBatchInstructions(batchId, instructions).catch((e: unknown) => pushErrorToast(String(e)));
   },
 
-  generate: async (batchId, count, agent) => {
+  generate: async (batchId, agent) => {
     if (get().runByBatch[batchId]) return;
     const runId = newRunId("stories");
     // Before the invoke, or the first lines the engine prints have nowhere to land.
@@ -327,7 +363,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     }));
 
     try {
-      const detail = await generateStories(batchId, runId, count, agent);
+      const detail = await generateStories(batchId, runId, agent);
       set((s) => ({
         batches: s.batches.map((b) => (b.id === batchId ? detail.batch : b)),
         storiesByBatch: { ...s.storiesByBatch, [batchId]: detail.stories },
@@ -364,11 +400,39 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     await useAiRunStore.getState().cancel(runId);
   },
 
-  setVerifyProject: async (batchId, projectId) => {
+  setAnswers: async (batchId, answers) => {
+    const kept = answers
+      .map((qa) => ({ question: qa.question.trim(), answer: qa.answer.trim() }))
+      .filter((qa) => qa.question !== "" && qa.answer !== "");
     set((s) => ({
-      batches: s.batches.map((b) => (b.id === batchId ? { ...b, verify_project_id: projectId } : b)),
+      batches: s.batches.map((b) =>
+        b.id === batchId ? { ...b, question_answers: JSON.stringify(kept) } : b,
+      ),
     }));
-    await setStoryBatchVerifyProject(batchId, projectId).catch((e: unknown) => pushErrorToast(String(e)));
+    await setStoryBatchAnswers(batchId, kept).catch((e: unknown) => pushErrorToast(String(e)));
+  },
+
+  setVerifyProjects: async (batchId, projectIds) => {
+    const json = JSON.stringify(projectIds);
+    set((s) => ({
+      batches: s.batches.map((b) => {
+        if (b.id !== batchId) return b;
+        // A destination that just left the set stops being one: keeping it would write the
+        // `.feature` into a repository the user can no longer see listed here.
+        const feature = b.feature_project_id && projectIds.includes(b.feature_project_id)
+          ? b.feature_project_id
+          : null;
+        return { ...b, verify_project_ids: json, feature_project_id: feature };
+      }),
+    }));
+    await setStoryBatchVerifyProjects(batchId, projectIds).catch((e: unknown) => pushErrorToast(String(e)));
+  },
+
+  setFeatureProject: async (batchId, projectId) => {
+    set((s) => ({
+      batches: s.batches.map((b) => (b.id === batchId ? { ...b, feature_project_id: projectId } : b)),
+    }));
+    await setStoryBatchFeatureProject(batchId, projectId).catch((e: unknown) => pushErrorToast(String(e)));
   },
 
   /**

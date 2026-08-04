@@ -1123,7 +1123,7 @@ async function writePart(part: PublishPart): Promise<number | null> {
 /**
  * The active workspace, read at call time rather than held in this store.
  *
- * The run uses that workspace's prompts, MCP config and skills, so reading it as the run starts is
+ * The run uses that workspace's prompts and skills, so reading it as the run starts is
  * what keeps a session opened before a workspace switch from running against the old one.
  */
 function activeWorkspaceId(): string | null {

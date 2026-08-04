@@ -34,6 +34,10 @@ pub struct AdoWiki {
     /// its pages are addressed exactly like a project wiki's, so the distinction is only ever
     /// shown to the user.
     pub kind: String,
+    /// The Git repository behind the wiki. Every wiki has one — a project wiki gets a hidden repo
+    /// created with it — and it is the only place the page's history lives: the pages API answers
+    /// content, never who wrote it. Empty if the host stopped sending it.
+    pub repository_id: String,
 }
 
 #[derive(Deserialize)]
@@ -42,6 +46,8 @@ struct RawWiki {
     name: String,
     #[serde(rename = "type", default)]
     kind: String,
+    #[serde(rename = "repositoryId", default)]
+    repository_id: String,
 }
 
 pub async fn list_wikis(org: &str, project: &str, pat: &str) -> Result<Vec<AdoWiki>, String> {
@@ -52,7 +58,7 @@ pub async fn list_wikis(org: &str, project: &str, pat: &str) -> Result<Vec<AdoWi
     Ok(parsed
         .value
         .into_iter()
-        .map(|w| AdoWiki { id: w.id, name: w.name, kind: w.kind })
+        .map(|w| AdoWiki { id: w.id, name: w.name, kind: w.kind, repository_id: w.repository_id })
         .collect())
 }
 
@@ -79,6 +85,11 @@ struct RawWikiPage {
     sub_pages: Vec<RawWikiPage>,
     #[serde(default)]
     content: Option<String>,
+    /// Where the page's Markdown lives inside the wiki's Git repository — the key its history is
+    /// filed under, and not derivable from `path` (spaces become dashes, and a page with children
+    /// is a file *and* a folder).
+    #[serde(rename = "gitItemPath", default)]
+    git_item_path: Option<String>,
 }
 
 fn page_title(path: &str) -> String {
@@ -144,6 +155,149 @@ pub async fn get_wiki_page(
     );
     let page: RawWikiPage = get_json(&url, pat).await?;
     Ok(page.content.unwrap_or_default())
+}
+
+/// One wiki page as Azure holds it right now: its Markdown, and who has touched it.
+///
+/// The history is the reason this exists next to [`get_wiki_page`]. Somebody bringing an existing
+/// page into the app is about to edit — and eventually overwrite — a page other people wrote, and
+/// "last changed by Marta three days ago" is the one fact that decides whether that is a good idea.
+#[derive(Debug, Clone, Serialize)]
+pub struct AdoWikiPageDetail {
+    /// The wiki-absolute path, exactly as asked for.
+    pub path: String,
+    /// The last segment, readable — what the wiki shows as the page's name.
+    pub title: String,
+    pub content: String,
+    /// A browser URL for the page.
+    pub url: String,
+    /// Who first committed the page, and when (ISO-8601). Empty when unknown — see
+    /// `history_truncated`, and note a PAT that can read pages cannot always read the repository
+    /// they live in. Never a guess: an empty string means the app does not know.
+    pub created_by: String,
+    pub created_at: String,
+    /// Who last changed it, and when. The pair that matters before overwriting.
+    pub modified_by: String,
+    pub modified_at: String,
+    /// Commits that touched this page, up to [`MAX_PAGE_COMMITS`]. `0` when the history could not
+    /// be read at all.
+    pub revisions: i64,
+    /// Whether the page has more history than was read. When true the creation is genuinely
+    /// unknown rather than merely old, and `created_*` stay empty instead of naming whichever
+    /// commit happened to be last in the window.
+    pub history_truncated: bool,
+}
+
+/// How far back the page history is read. Ten years of a wiki page is a handful of commits; the
+/// cap only exists so a page somebody rewrites daily can't turn one import into a long download.
+const MAX_PAGE_COMMITS: usize = 200;
+
+#[derive(Deserialize)]
+struct RawCommit {
+    #[serde(default)]
+    author: Option<RawCommitAuthor>,
+}
+
+#[derive(Deserialize)]
+struct RawCommitAuthor {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    date: String,
+}
+
+/// The commits that touched one path in the wiki's repository, newest first.
+///
+/// Best effort by contract: the caller wants the page either way, so every failure here — no
+/// repository id, a PAT without code-read scope, a wiki whose repo was rewritten — comes back as
+/// an empty list rather than an error that would take the content down with it.
+async fn wiki_page_commits(
+    org_enc: &str,
+    project_enc: &str,
+    repository_id: &str,
+    git_item_path: &str,
+    pat: &str,
+) -> Vec<RawCommit> {
+    if repository_id.is_empty() || git_item_path.is_empty() {
+        return Vec::new();
+    }
+    let repo_enc = encode_segment(repository_id);
+    let item_enc = encode_query(git_item_path);
+    let top = MAX_PAGE_COMMITS;
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/git/repositories/{repo_enc}/commits\
+         ?searchCriteria.itemPath={item_enc}&searchCriteria.$top={top}&api-version={API_VERSION}"
+    );
+    match get_json::<ListResponse<RawCommit>>(&url, pat).await {
+        Ok(parsed) => parsed.value,
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Reads one page by its exact path, with whatever history the host will give up.
+///
+/// `wiki` is the identifier the rest of this module uses — an id or a name — and it is resolved
+/// against the project's wikis here, because the repository the history lives in is only on that
+/// listing. A wiki that does not resolve still returns the page: the content is the point, the
+/// history is the bonus.
+pub async fn get_wiki_page_detail(
+    org: &str,
+    project: &str,
+    wiki: &str,
+    path: &str,
+    pat: &str,
+) -> Result<AdoWikiPageDetail, String> {
+    if path.trim().is_empty() || !path.starts_with('/') {
+        return Err("La ruta de la página tiene que empezar por «/»".to_string());
+    }
+
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    let wiki_enc = encode_segment(wiki);
+    let path_enc = encode_query(path);
+    let url = format!(
+        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/wiki/wikis/{wiki_enc}/pages\
+         ?path={path_enc}&includeContent=true&api-version={API_VERSION}"
+    );
+    let page: RawWikiPage = get_json(&url, pat).await?;
+
+    let repository_id = list_wikis(org, project, pat)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|w| w.id == wiki || w.name == wiki)
+        .map(|w| w.repository_id)
+        .unwrap_or_default();
+    let git_item_path = page.git_item_path.unwrap_or_default();
+    let commits = wiki_page_commits(&org_enc, &project_enc, &repository_id, &git_item_path, pat).await;
+
+    let truncated = commits.len() >= MAX_PAGE_COMMITS;
+    let author_of = |commit: Option<&RawCommit>| -> (String, String) {
+        match commit.and_then(|c| c.author.as_ref()) {
+            Some(a) => (a.name.clone(), a.date.clone()),
+            None => (String::new(), String::new()),
+        }
+    };
+    let (modified_by, modified_at) = author_of(commits.first());
+    let (created_by, created_at) = match truncated {
+        true => (String::new(), String::new()),
+        false => author_of(commits.last()),
+    };
+
+    Ok(AdoWikiPageDetail {
+        title: page_title(path),
+        content: page.content.unwrap_or_default(),
+        url: format!(
+            "https://dev.azure.com/{org_enc}/{project_enc}/_wiki/wikis/{wiki_enc}?pagePath={path_enc}"
+        ),
+        path: path.to_string(),
+        created_by,
+        created_at,
+        modified_by,
+        modified_at,
+        revisions: commits.len() as i64,
+        history_truncated: truncated,
+    })
 }
 
 /// Where a published page ended up.
@@ -1341,12 +1495,15 @@ mod tests {
         let root = RawWikiPage {
             path: Some("/".to_string()),
             content: None,
+            git_item_path: None,
             sub_pages: vec![RawWikiPage {
                 path: Some("/Producto".to_string()),
                 content: None,
+                git_item_path: None,
                 sub_pages: vec![RawWikiPage {
                     path: Some("/Producto/Checkout-web".to_string()),
                     content: None,
+                    git_item_path: None,
                     sub_pages: vec![],
                 }],
             }],

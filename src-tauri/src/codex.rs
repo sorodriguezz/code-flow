@@ -72,6 +72,10 @@ impl AiEngine for CodexEngine {
             }
         }
         brief.push_str(inv.prompt);
+        if !inv.skills_note.is_empty() {
+            brief.push_str("\n\n");
+            brief.push_str(&inv.skills_note);
+        }
         if !inv.stdin_content.trim().is_empty() {
             brief.push_str("\n\n----- INPUT -----\n\n");
             brief.push_str(inv.stdin_content);

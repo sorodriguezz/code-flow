@@ -77,9 +77,11 @@ const EMPTY_LIVE: AgentTaskLive = {
   loaded: false,
 };
 
-/** How the list is arranged. `tree` is the folders-and-pins view and the only one that shows a
- * chain as a chain; the other two are flat questions about tasks alone. */
-export type TaskGrouping = "tree" | "status" | "agent";
+/** Which tab of the list panel is showing. `tree` is the folders-and-pins arrangement of work in
+ * progress and the only one that draws a chain as a chain; `status` is a flat cut across it; and
+ * `templates` is not work at all, but the saved plans work gets started from — a tab rather than a
+ * fourth section of the tree, which is where they sat collapsed and unnoticed. */
+export type TaskGrouping = "tree" | "status" | "templates";
 
 /** The order `list_agent_projects` returns — the user's own arrangement, name as the tie-break.
  * Local edits are re-sorted through it so a renamed folder sits where the next load will put it. */
@@ -344,7 +346,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     if (!task) return;
     if ((get().live[taskId] ?? EMPTY_LIVE).sending) return;
     // One agent at a time per repository. Two runs on one working copy would edit the same files
-    // with independent restore points and race over the per-workspace MCP config the CLI reads.
+    // with independent restore points and race over the skills directory the app syncs in.
     // The backend takes a real lease on the folder, which is what actually enforces this; refusing
     // here as well is what keeps the user from watching a send bounce.
     if (get().runningInProject(task.project_id, taskId)) return;

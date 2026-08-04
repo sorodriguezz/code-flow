@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, BookmarkPlus, Link2, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, BookmarkPlus, Check, Link2, Plus, Trash2 } from "lucide-react";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { Note } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
@@ -81,6 +81,11 @@ export function NewChainModal({
   const [goal, setGoal] = useState("");
   const [steps, setSteps] = useState<DraftStep[]>(() => [draft(""), draft("")]);
   const [busy, setBusy] = useState(false);
+  /** The template this dialog is bound to — the prop is only the starting value. Saving binds it,
+   * so pressing the button again updates that template instead of creating another one. */
+  const [savedTemplateId, setSavedTemplateId] = useState<string | null>(templateId);
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const [savedFlash, setSavedFlash] = useState(false);
 
   useEffect(() => {
     if (Object.keys(statuses).length === 0) void checkAll();
@@ -145,18 +150,41 @@ export function NewChainModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /** Saves the form as a reusable plan, and *remembers what it saved*.
+   *
+   * The id is state rather than the prop it starts from, because the second press of this button
+   * has to mean "update the one I just made". Reading the prop instead left it null for a dialog
+   * opened as a new chain, so every press minted another template — the list filled up with
+   * identical copies of the same plan, since nothing deduplicates by name and nothing should.
+   *
+   * The button says so too: after the first save it becomes "update", which is the honest label for
+   * what the next press now does. */
   const saveAsTemplate = async () => {
     const name = title.trim();
     if (!name) return;
-    await useChainStore.getState().saveTemplate({
-      id: templateId ?? undefined,
-      name,
-      description: goal.trim(),
-      steps: steps.map(({ agent_id, instruction, gate }) => ({ agent_id, instruction, gate })),
-    });
-    useToastStore
-      .getState()
-      .pushToast(t(templateId ? "agents.templateUpdated" : "agents.templateSaved"), "success");
+    setSavingTemplate(true);
+    try {
+      const saved = await useChainStore.getState().saveTemplate({
+        id: savedTemplateId ?? undefined,
+        name,
+        description: goal.trim(),
+        steps: steps.map(({ agent_id, instruction, gate }) => ({ agent_id, instruction, gate })),
+      });
+      // `null` means the store had no workspace to save into — announcing success there would be a
+      // lie the user only discovers when the template is missing.
+      if (!saved) return;
+      const updated = savedTemplateId !== null;
+      setSavedTemplateId(saved.id);
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 1400);
+      useToastStore
+        .getState()
+        .pushToast(t(updated ? "agents.templateUpdated" : "agents.templateSaved"), "success");
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setSavingTemplate(false);
+    }
   };
 
   const submit = async (start: boolean) => {
@@ -199,11 +227,17 @@ export function NewChainModal({
           </GhostButton>
           <GhostButton
             onClick={() => void saveAsTemplate()}
-            disabled={busy || !canStart || !title.trim()}
+            disabled={busy || savingTemplate || !canStart || !title.trim()}
             title={t("agents.saveTemplateHint")}
           >
-            <BookmarkPlus size={13} />
-            {t(templateId ? "agents.updateTemplate" : "agents.saveTemplate")}
+            {savedFlash ? (
+              <Check size={13} className="text-[var(--cf-success)]" />
+            ) : (
+              <BookmarkPlus size={13} />
+            )}
+            {savedFlash
+              ? t("settings.saved")
+              : t(savedTemplateId ? "agents.updateTemplate" : "agents.saveTemplate")}
           </GhostButton>
           <span className="ml-auto flex items-center gap-2">
             <GhostButton onClick={onClose} disabled={busy}>

@@ -15,8 +15,8 @@ import type { WorkspaceAgent } from "../../types/domain";
 /**
  * Create or edit one agent.
  *
- * The reason this exists rather than deep-linking to Settings → SDD is the model field. There the
- * model is a free-text input — the one model surface in the app that isn't — and a typo, or a
+ * The reason this exists as its own dialog is the model field. Everywhere else the model is
+ * picked from a list; here it is free text — the one model surface in the app that isn't — and a typo, or a
  * blank, produces an agent that still *runs*: the backend only honours an agent's routing when
  * both its provider and its model are set, and otherwise falls back to the ordinary chat routing.
  * The result is a role that quietly answers on a different engine than the one it names. Here the

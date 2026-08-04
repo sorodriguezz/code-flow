@@ -456,16 +456,6 @@ export interface WorkspaceSkill {
   installed_at: string;
 }
 
-export interface WorkspaceMcp {
-  id: string;
-  workspace_id: string;
-  name: string;
-  command: string;
-  args: string;
-  env: string;
-  enabled: boolean;
-  created_at: string;
-}
 
 export interface ActivityLogEntry {
   id: string;
@@ -664,6 +654,29 @@ export interface AdoWiki {
   id: string;
   name: string;
   kind: string;
+  /** The Git repository behind the wiki — where a page's history lives. Empty when the host did
+   *  not report one. */
+  repository_id: string;
+}
+
+/** One wiki page as Azure holds it right now: its Markdown, and who has touched it.
+ *
+ * The history fields are best effort and are empty when unknown — a PAT that can read pages cannot
+ * always read the repository they live in. An empty string means "the app does not know", never
+ * "nobody". */
+export interface AdoWikiPageDetail {
+  path: string;
+  title: string;
+  content: string;
+  url: string;
+  created_by: string;
+  created_at: string;
+  modified_by: string;
+  modified_at: string;
+  /** Commits that touched this page, capped by the backend. `0` when the history is unreadable. */
+  revisions: number;
+  /** Whether there is more history than was read — with it, the creation is genuinely unknown. */
+  history_truncated: boolean;
 }
 
 /** One page of a wiki, flattened out of the tree the API answers with — `depth` is what lets the
@@ -717,6 +730,12 @@ export interface StoryBatch {
   instructions: string;
   provider: string;
   model: string;
+  /** The prompt the last successful generation ran with, frozen at the moment it ran. `instructions`
+   * above is what the *next* run will use, and the template is shared and editable, so neither can
+   * answer "what did this set come out of?" afterwards. Empty until a generation has succeeded. */
+  prompt_template: string;
+  prompt_instructions: string;
+  generated_at: string;
   ado_org: string;
   ado_project: string;
   work_item_type: string;
@@ -726,9 +745,17 @@ export interface StoryBatch {
   tags: string;
   /** JSON array of strings: what the documentation left ambiguous. */
   open_questions: string;
-  /** The repository whose code the acceptance criteria are checked against. `null` until picked —
-   * deliberately not `project_id`, which records where the documentation came from. */
-  verify_project_id: string | null;
+  /** JSON array of `{question, answer}`: those questions once the team answered them. They
+   * accumulate rather than being consumed — an answer is a requirement the documentation was
+   * missing, and it stays true after the question stops being asked. */
+  question_answers: string;
+  /** JSON array of project ids: the repositories the acceptance criteria are checked against.
+   * Deliberately not `project_id`, which records where the documentation came from. Several,
+   * because one capability is routinely split across a service, its BFF and its jobs. */
+  verify_project_ids: string;
+  /** Where the `.feature` file is written — one of the repositories above. `null` falls back to the
+   * first of the set. */
+  feature_project_id: string | null;
   /** What the last verification ran on, and when. Empty until one has run. */
   verify_provider: string;
   verify_model: string;
@@ -737,6 +764,29 @@ export interface StoryBatch {
   last_error: string;
   created_at: string;
   updated_at: string;
+}
+
+/** One open question and what the team answered — a requirement the documentation was missing. */
+export interface QuestionAnswer {
+  question: string;
+  answer: string;
+}
+
+/** Exactly what a generation sent to the model, rebuilt for reading.
+ *
+ * Two fields rather than one blob because they travel on two different channels: `prompt` is the
+ * engine's prompt argument (the standing instructions), `stdin` is this set's own payload. */
+export interface StoryBatchPrompt {
+  prompt: string;
+  stdin: string;
+  /** `true` when these are the pieces the run actually used; `false` when the set predates the
+   * snapshot and this is a reconstruction from today's template and today's instructions. */
+  from_snapshot: boolean;
+  generated_at: string;
+  provider: string;
+  model: string;
+  /** The documentation was longer than one payload and got cut at the ceiling. */
+  truncated: boolean;
 }
 
 /** What checking a criterion against the code concluded. `unknown` is a real answer, not a

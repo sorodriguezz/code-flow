@@ -1041,7 +1041,6 @@ export const translations = {
     "settings.review": "PR review",
     "settings.context": "PR review context",
     "settings.skills": "Skills",
-    "settings.mcps": "MCPs",
     "settings.globalGroup": "Global",
     "settings.workspaceGroup": "Workspace — {name}",
     "settings.workspaceGroupGeneric": "Workspace",
@@ -1177,9 +1176,33 @@ export const translations = {
     "settings.templateDefault": "Default",
     "settings.templateReset": "Restore default",
     "settings.templateAutosave": "Changes save automatically.",
+    "settings.storyPromptsTitle": "Write",
+    "settings.storyPromptsHint":
+      "The two prompts behind the Write tab, saved with the open workspace. One turns documentation into a backlog; the other checks that backlog against the code.",
+    "settings.sPromptStories": "Write · user stories",
+    "settings.sPromptStoriesHint":
+      "The house style of the generated stories: INVEST wording, Gherkin or a checklist, which language, how many criteria each. The answer is read as JSON — keep the output rules if you rewrite it.",
+    "settings.sPromptVerify": "Write · verify criteria",
+    "settings.sPromptVerifyHint":
+      "Checks each acceptance criterion against the repository and says whether the code satisfies it, citing where. It reads source files, so it runs on an engine with tools.",
+    "settings.wikiPromptsTitle": "Wiki",
+    "settings.wikiPromptsHint":
+      "How documentation gets written, saved with the open workspace. Both are published as the body of a wiki page, so their output rules — no level-1 heading, no preamble — are what keeps the page clean.",
+    "settings.wikiPromptRepo": "Wiki · repository document",
+    "settings.wikiPromptRepoHint":
+      "Reads one checkout and writes how to run, configure and deploy it: environment variables, local development, integrations, database. Every claim has to cite a file, which is what stops it describing a project it has not read.",
+    "settings.wikiPromptWorkspace": "Wiki · architecture document",
+    "settings.wikiPromptWorkspaceHint":
+      "Reads the repository documents already generated and writes how they fit together — components, integrations with their confidence level, and the Mermaid map. This run sees no code, only those documents.",
     "settings.reviewPromptsTitle": "Work item review",
     "settings.reviewPromptsHint":
       "One prompt per tab of the review screen, saved with the open workspace — how a team writes criteria and breaks down work belongs to its backlog, not to this installation. Each says what to read, what to answer and in what shape; keep the output rules if you rewrite one.",
+    "settings.wiPromptAnalyze": "Review · story analysis",
+    "settings.wiPromptAnalyzeHint":
+      "The first pass over a user story: what it is missing, what is ambiguous, and what the code says about it. Everything the other three tabs propose is written from this.",
+    "settings.wiPromptBugAnalyze": "Review · bug analysis",
+    "settings.wiPromptBugAnalyzeHint":
+      "The same first pass for a bug, which is a different question: steps to reproduce, expected versus actual, and what the code suggests the cause is.",
     "settings.wiPromptDescription": "Review · description",
     "settings.wiPromptDescriptionHint":
       "Rewrites the work item's description whole. It is told to return an empty description when the current one is already fine — which is what the screen reports as nothing to propose.",
@@ -1248,19 +1271,23 @@ export const translations = {
     "task.conflictHint": "Proposes a merged version of a conflicted file.",
     "task.inline": "Inline edit",
     "task.inlineHint": "Rewrites the selected code in the editor (Ctrl+I). A fast local model fits well here.",
-    "task.stories": "User stories",
+    "task.stories": "Write · user stories",
     "task.storiesHint":
       "Derives stories and acceptance criteria from documentation. Text only and no repository, so it routes anywhere.",
-    "task.storyVerify": "Verify criteria",
+    "task.storyVerify": "Write · verify criteria",
     "task.storyVerifyHint":
       "Checks acceptance criteria against the repository's code. It reads source files, so it needs an engine with tools.",
+    "task.workItemReview": "Review · work items",
+    "task.workItemReviewHint":
+      "Analyses a work item and rewrites its description, criteria and tasks against the code. It reads source files, so it needs an engine with tools.",
+    "task.wiki": "Wiki · documentation",
+    "task.wikiHint":
+      "Reads a repository and writes its technical documentation. The longest run in the app, and it needs an engine with tools.",
     "settings.ollamaEndpointLabel": "Ollama endpoint",
     "settings.ollamaEndpointHint":
       "URL of your local Ollama server. Start it with `ollama serve` and pull a model with `ollama pull <model>`.",
     "settings.localProviderNote":
-      "Local models handle commit messages, PR descriptions, analysis, review and conflict resolution. Agentic features (Fix with AI, MCP) need Claude, Gemini or Open Code.",
-    "settings.mcpsNotAgentic":
-      "MCP servers only apply to agentic providers (Claude, Gemini, Open Code). They're ignored while a local model is the active provider.",
+      "Local models handle commit messages, PR descriptions, analysis, review and conflict resolution. Anything that needs to run tools (Fix with AI, MCP) needs a CLI engine.",
     "settings.baseModel": "Base model",
     "settings.baseModelHint": "Used by chat, and the default for the tasks below.",
     "settings.localModel": "Local model",
@@ -1320,25 +1347,13 @@ export const translations = {
     "settings.reviewTabPrDesc": "PR description",
     "settings.reviewTabMemories": "Memory",
 
-    "settings.sdd": "SDD / Harness",
-    "settings.sddSelectWorkspace": "Select a workspace to configure its SDD / Harness.",
-    "settings.sddTitleForProject": "SDD / Harness — {name}",
-    "settings.sddTabGuide": "Guide",
-    "settings.sddTabAgents": "Agents",
-    "settings.sddTabStages": "Stages",
-    "settings.sddAgentsHint": "Your SDD/Harness roles — define each with its model. Empty by default; nothing is preset.",
-    "settings.sddAddAgent": "Add agent",
     "settings.sddNewAgent": "New agent",
-    "settings.sddNoAgents": "No agents yet — add your roles (e.g. spec-author, implementer, reviewer).",
     "settings.sddRemoveAgentConfirm": 'Remove agent "{name}"?',
     "settings.sddAgentNamePlaceholder": "Name (e.g. reviewer)",
     "settings.sddAgentModelPlaceholder": "Model",
     "settings.sddAgentProviderDefault": "Provider…",
     "settings.sddAgentRolePlaceholder": "Role — one line on what this agent does",
     "settings.sddAgentPromptPlaceholder": "Prompt / instructions for this agent (optional)…",
-    "settings.sddStagesHint": "Your pipeline stages, one per line (e.g. Intake, Spec, Implement, Review, Done). Empty by default.",
-    "settings.sddStagesPlaceholder": "Intake\nSpec\nImplement\nReview\nDone",
-    "settings.sddStagesResetConfirm": "Clear the pipeline stages back to empty?",
 
     "settings.prDescHint":
       "The prompt used to draft a PR title + description from the branch diff, per workspace. Provider-independent — it applies to whatever model the \"PR description\" task routes to.",
@@ -1403,16 +1418,6 @@ export const translations = {
     "settings.enabled": "Enabled",
     "settings.disabled": "Off",
 
-    "settings.mcpsTitle": "MCPs",
-    "settings.mcpsSelectWorkspace": "Select a workspace to manage its MCP servers.",
-    "settings.mcpsHint":
-      "MCP servers made available to the AI while reviewing PRs for any project in this workspace.",
-    "settings.addMcp": "Add server",
-    "settings.removeMcpConfirm": 'Remove MCP server "{name}"?',
-    "settings.newMcpName": "New server",
-    "settings.mcpCommandPlaceholder": "Command (e.g. npx)",
-    "settings.mcpArgsPlaceholder": "Args (space-separated)",
-    "settings.mcpEnvPlaceholder": "KEY=value (one per line)",
     "settings.noMcps": "No MCP servers configured yet for this workspace.",
 
     "settings.skillsTitle": "Skills",
@@ -2002,6 +2007,20 @@ export const translations = {
     "stories.selectedOf": "{n} of {total} selected",
     "stories.addStory": "Add story",
     "stories.openQuestions": "Open questions",
+    "stories.answerThem": "Answer them",
+    "stories.answerTitle": "What the documentation didn't say",
+    "stories.answerSubtitle": "Answer here and the next generation is given your answers",
+    "stories.answerHint":
+      "Your answers are kept on the set and sent with every later generation, as confirmed requirements rather than as a one-off note. An empty box is simply not sent.",
+    "stories.answerRegenerateWarning":
+      "Generating again rewrites the backlog from the same documentation: unpublished stories are replaced, along with any edits made to them. Stories already published survive.",
+    "stories.answerPlaceholder": "Three cars, fixed. A collision costs two seconds and neither car is removed.",
+    "stories.answerCount": "{n} of {total} answered",
+    "stories.answerRegenerate": "Save and generate again",
+    "stories.answerNone": "Nothing to answer — the last generation had no open questions.",
+    "stories.answerSettled": "Already answered",
+    "stories.answerSettledHint":
+      "The model has stopped asking these, but the answers still travel with every generation. Clear one to drop it.",
     "stories.generatingTitle": "Writing the stories…",
     "stories.generatingHint": "The model is reading the documentation. This takes a moment.",
     "stories.noStories": "No stories yet",
@@ -2083,6 +2102,7 @@ export const translations = {
     "huReview.stagedOnly": "Reading and reviewing change nothing. The only thing written to Azure DevOps is what you stage in the third column and confirm.",
     "docs.documents": "Documents",
     "docs.new": "New document",
+    "docs.newSubtitle": "What the document is about — fixed when it is created",
     "docs.create": "Create",
     "docs.empty": "No documents yet. Create one to have the model read the code and write it.",
     "docs.selectTitle": "No document open",
@@ -2114,8 +2134,32 @@ export const translations = {
     "docs.statusError": "failed",
     "docs.delete": "Delete document",
     "docs.deleteConfirm": "Delete this document? Nothing published to the wiki is removed.",
+    "docs.rename": "Rename",
+    "docs.close": "Close document",
+    "docs.closeHint": "Closes it and leaves this screen empty. Nothing is deleted.",
+    "docs.saveHint": "Saves what you wrote. Publishing sends what is saved.",
+    "docs.unsaved": "Unsaved",
+    "docs.saved": "Document saved",
+    "docs.discardConfirm": "This document has unsaved changes. Leave it and lose them?",
+    "docs.import": "Import from the wiki",
+    "docs.importSubtitle": "Bring a page that already exists in here, by its exact path",
+    "docs.importAction": "Import",
+    "docs.importing": "Reading the page…",
+    "docs.importPathHint":
+      "Wiki-absolute, starting with «/» — or paste the page's URL and the path is taken out of it.",
+    "docs.importAbout": "Which repository is it about?",
+    "docs.importAboutHint":
+      "Only decides what a later regeneration reads. Leave it blank and it stays a workspace document, which reads whichever repositories you tick.",
+    "docs.importAboutNone": "None — workspace document",
+    "docs.pageExists": "This page exists in the wiki",
+    "docs.pageCreated": "Created by {who} · {when}",
+    "docs.pageModified": "Last changed by {who} · {when}",
+    "docs.pageRevisions": "{n} versions",
+    "docs.pageRevisionsMany": "More than {n} versions",
+    "docs.pageHistoryUnknown": "History unreadable — the token can read pages but not the wiki's repository.",
+    "docs.openInWiki": "Open in the wiki",
     "docs.target": "Publish to",
-    "docs.targetHint": "The wiki this page goes to. Azure DevOps today.",
+    "docs.targetHint": "The wiki this page goes to.",
     "docs.org": "Organisation",
     "docs.project": "Project",
     "docs.wiki": "Wiki",
@@ -2364,8 +2408,8 @@ export const translations = {
     "stories.batchName": "Set name",
     "stories.batchNameHint": "Optional — taken from the source when left blank.",
     "stories.batchNamePlaceholder": "Checkout",
-    "stories.count": "Stories",
-    "stories.countHint": "A hint, not a rule.",
+    "stories.howManyNote":
+      "How many stories come out is decided by the documentation, not by a number you pick: one per capability it describes, split at six scenarios. No filler, and nothing left out.",
     "stories.editPrompt": "Edit the generator prompt",
     "stories.promptTitle": "How stories are written",
     "stories.promptSubtitle": "Per workspace, shared by every set",
@@ -2375,19 +2419,40 @@ export const translations = {
     "stories.promptResetConfirm": "Restore the built-in prompt? Your changes to this text are lost.",
     "stories.promptContract":
       "Keep the output rules: the answer is parsed as JSON, and a prompt that stops asking for it produces sets that fail to read.",
+    "stories.usedPrompt": "See the prompt used",
+    "stories.usedPromptTitle": "The prompt this set came out of",
+    "stories.usedPromptRanOn": "Generated on {at} with {provider} · {model}",
+    "stories.usedPromptNeverRan": "This set has not been generated yet",
+    "stories.usedPromptLoading": "Rebuilding the prompt…",
+    "stories.usedPromptInstructions": "Instructions (prompt)",
+    "stories.usedPromptInstructionsHint":
+      "The template the run followed, frozen as it was that day. Editing the workspace prompt now does not change this text.",
+    "stories.usedPromptPayload": "Payload (stdin)",
+    "stories.usedPromptPayloadHint":
+      "The extra instructions and the documentation, exactly as the model received them.",
+    "stories.usedPromptStale":
+      "This set was generated before the prompt started being saved: what you see below is today's template and today's extra instructions, which may not be the ones that ran. Generating again records the real one.",
+    "stories.usedPromptTruncated":
+      "The documentation was longer than one payload and was cut — the model only saw the text shown here.",
+    "stories.usedPromptChars": "{n} characters",
+    "stories.usedPromptCopy": "Copy this block",
+    "stories.usedPromptCopyAll": "Copy everything",
+    "stories.usedPromptCopied": "Prompt copied to the clipboard",
 
     // ---------------- Story quality: INVEST, Gherkin, and checking against the code ----------------
     "qa.group": "QA",
     "qa.groupHint":
-      "The repository the criteria are checked against, and where the .feature file is written. Not the same as the Azure target: one is where the backlog is filed, this one is where the behaviour should already exist.",
-    "qa.repository": "Repository",
-    "qa.repositoryHint": "Read only. Nothing is modified in the working copy.",
-    "qa.pickRepository": "Pick a repository",
-    "qa.noRepository": "None",
+      "The repositories the criteria are checked against, and where the .feature file is written. Not the same as the Azure target: one is where the backlog is filed, these are where the behaviour should already exist.",
+    "qa.repositories": "Repositories",
+    "qa.repositoriesHint":
+      "Read only — nothing is modified in the working copies. Tick every repository the behaviour could live in: a criterion implemented in the BFF comes back failing if only the service was looked at.",
+    "qa.featureRepository": "Where the .feature is saved",
+    "qa.featureRepositoryHint":
+      "One of the repositories above. The criteria are checked in all of them, but the spec file belongs in a single place.",
     "qa.noRepos": "This workspace has no repository yet.",
     "qa.verify": "Verify",
     "qa.verifyHint": "Check every criterion against the code and record the evidence behind each verdict.",
-    "qa.verifyNoRepo": "Pick the repository to check the criteria against first",
+    "qa.verifyNoRepo": "Pick at least one repository to check the criteria against first",
     "qa.lastVerified": "Verified {at} · {provider} · {model}",
     "qa.verifiedAt": "Verified {at}",
     "qa.verdictPass": "Met",
@@ -2490,7 +2555,6 @@ export const translations = {
     "agents.searchPlaceholder": "Search tasks…",
     "agents.groupTree": "Tasks",
     "agents.groupStatus": "Status",
-    "agents.groupAgent": "Agent",
     "agents.statusDraft": "Not started",
     "agents.statusRunning": "Running",
     "agents.statusIdle": "Your turn",
@@ -3989,7 +4053,6 @@ export const translations = {
     "settings.review": "Revisión de PR",
     "settings.context": "Contexto de revisión de PR",
     "settings.skills": "Skills",
-    "settings.mcps": "MCPs",
     "settings.globalGroup": "Global",
     "settings.workspaceGroup": "Workspace — {name}",
     "settings.workspaceGroupGeneric": "Workspace",
@@ -4125,9 +4188,33 @@ export const translations = {
     "settings.templateDefault": "Por defecto",
     "settings.templateReset": "Restaurar la original",
     "settings.templateAutosave": "Los cambios se guardan solos.",
+    "settings.storyPromptsTitle": "Redactar",
+    "settings.storyPromptsHint":
+      "Los dos prompts detrás de la pestaña Redactar, guardados con el espacio de trabajo abierto. Uno convierte documentación en backlog; el otro contrasta ese backlog con el código.",
+    "settings.sPromptStories": "Redactar · historias de usuario",
+    "settings.sPromptStoriesHint":
+      "El estilo de las historias generadas: redacción INVEST, Gherkin o lista de verificación, en qué idioma, cuántos criterios cada una. La respuesta se lee como JSON — si lo reescribes, conserva sus reglas de salida.",
+    "settings.sPromptVerify": "Redactar · verificar criterios",
+    "settings.sPromptVerifyHint":
+      "Contrasta cada criterio de aceptación con el repositorio y dice si el código lo cumple, citando dónde. Lee archivos, así que se ejecuta en un motor con herramientas.",
+    "settings.wikiPromptsTitle": "Wiki",
+    "settings.wikiPromptsHint":
+      "Cómo se escribe la documentación, guardado con el espacio de trabajo abierto. Los dos se publican como cuerpo de una página de wiki, así que sus reglas de salida — sin título de nivel 1, sin preámbulo — son lo que mantiene la página limpia.",
+    "settings.wikiPromptRepo": "Wiki · documento de repositorio",
+    "settings.wikiPromptRepoHint":
+      "Lee un repositorio y escribe cómo levantarlo, configurarlo y desplegarlo: variables de entorno, desarrollo local, integraciones, base de datos. Cada afirmación tiene que citar un archivo, que es lo que impide que describa un proyecto que no ha leído.",
+    "settings.wikiPromptWorkspace": "Wiki · documento de arquitectura",
+    "settings.wikiPromptWorkspaceHint":
+      "Lee los documentos de repositorio ya generados y escribe cómo encajan entre sí — componentes, integraciones con su nivel de confianza y el mapa Mermaid. Esta ejecución no ve código, solo esos documentos.",
     "settings.reviewPromptsTitle": "Revisión de work items",
     "settings.reviewPromptsHint":
       "Un prompt por pestaña de la pantalla de revisión, guardado con el espacio de trabajo abierto — cómo escribe criterios y desglosa el trabajo un equipo pertenece a su backlog, no a esta instalación. Cada uno dice qué leer, qué responder y con qué forma; si reescribes alguno, conserva sus reglas de salida.",
+    "settings.wiPromptAnalyze": "Revisión · análisis de historia",
+    "settings.wiPromptAnalyzeHint":
+      "La primera pasada sobre una historia de usuario: qué le falta, qué es ambiguo y qué dice el código al respecto. Todo lo que proponen las otras tres pestañas se escribe a partir de esto.",
+    "settings.wiPromptBugAnalyze": "Revisión · análisis de bug",
+    "settings.wiPromptBugAnalyzeHint":
+      "La misma primera pasada para un bug, que es otra pregunta: pasos para reproducir, esperado frente a obtenido, y qué apunta el código como causa.",
     "settings.wiPromptDescription": "Revisión · descripción",
     "settings.wiPromptDescriptionHint":
       "Reescribe entera la descripción del work item. Se le pide devolver la descripción vacía cuando la actual ya está bien — que es lo que la pantalla muestra como que no hay nada que proponer.",
@@ -4196,19 +4283,23 @@ export const translations = {
     "task.conflictHint": "Propone la versión fusionada de un archivo en conflicto.",
     "task.inline": "Edición inline",
     "task.inlineHint": "Reescribe el código seleccionado en el editor (Ctrl+I). Aquí encaja bien un modelo local rápido.",
-    "task.stories": "Historias de usuario",
+    "task.stories": "Redactar · historias de usuario",
     "task.storiesHint":
       "Deriva historias y criterios de aceptación a partir de documentación. Solo texto y sin repositorio, así que puede ir a cualquier proveedor.",
-    "task.storyVerify": "Verificar criterios",
+    "task.storyVerify": "Redactar · verificar criterios",
     "task.storyVerifyHint":
       "Comprueba los criterios de aceptación contra el código del repositorio. Lee archivos, así que necesita un motor con herramientas.",
+    "task.workItemReview": "Revisar · work items",
+    "task.workItemReviewHint":
+      "Analiza un work item y reescribe su descripción, criterios y tareas contra el código. Lee archivos, así que necesita un motor con herramientas.",
+    "task.wiki": "Wiki · documentación",
+    "task.wikiHint":
+      "Lee un repositorio y escribe su documentación técnica. Es la ejecución más larga de la app, y necesita un motor con herramientas.",
     "settings.ollamaEndpointLabel": "Endpoint de Ollama",
     "settings.ollamaEndpointHint":
       "URL de tu servidor Ollama local. Arráncalo con `ollama serve` y descarga un modelo con `ollama pull <modelo>`.",
     "settings.localProviderNote":
-      "Los modelos locales cubren mensajes de commit, descripciones de PR, análisis, review y resolución de conflictos. Las funciones agénticas (Corregir con IA, MCP) requieren Claude, Gemini u Open Code.",
-    "settings.mcpsNotAgentic":
-      "Los servidores MCP solo aplican a proveedores agénticos (Claude, Gemini, Open Code). Se ignoran mientras el proveedor activo sea un modelo local.",
+      "Los modelos locales cubren mensajes de commit, descripciones de PR, análisis, review y resolución de conflictos. Todo lo que necesite ejecutar herramientas (Corregir con IA, MCP) requiere un motor de línea de comandos.",
     "settings.baseModel": "Modelo base",
     "settings.baseModelHint": "Lo usa el chat y es el valor por defecto de las tareas de abajo.",
     "settings.localModel": "Modelo local",
@@ -4269,25 +4360,13 @@ export const translations = {
     "settings.reviewTabPrDesc": "Descripción PR",
     "settings.reviewTabMemories": "Memorias",
 
-    "settings.sdd": "SDD / Harness",
-    "settings.sddSelectWorkspace": "Selecciona un workspace para configurar su SDD / Harness.",
-    "settings.sddTitleForProject": "SDD / Harness — {name}",
-    "settings.sddTabGuide": "Guía",
-    "settings.sddTabAgents": "Agentes",
-    "settings.sddTabStages": "Etapas",
-    "settings.sddAgentsHint": "Tus roles de SDD/Harness — define cada uno con su modelo. Vacío por defecto; nada viene preconfigurado.",
-    "settings.sddAddAgent": "Agregar agente",
     "settings.sddNewAgent": "Nuevo agente",
-    "settings.sddNoAgents": "Aún no hay agentes — agrega tus roles (p. ej. spec-author, implementer, reviewer).",
     "settings.sddRemoveAgentConfirm": '¿Eliminar el agente "{name}"?',
     "settings.sddAgentNamePlaceholder": "Nombre (p. ej. reviewer)",
     "settings.sddAgentModelPlaceholder": "Modelo",
     "settings.sddAgentProviderDefault": "Proveedor…",
     "settings.sddAgentRolePlaceholder": "Rol — una línea de qué hace este agente",
     "settings.sddAgentPromptPlaceholder": "Prompt / instrucciones para este agente (opcional)…",
-    "settings.sddStagesHint": "Tus etapas del pipeline, una por línea (p. ej. Intake, Spec, Implementar, Review, Done). Vacío por defecto.",
-    "settings.sddStagesPlaceholder": "Intake\nSpec\nImplementar\nReview\nDone",
-    "settings.sddStagesResetConfirm": "¿Vaciar las etapas del pipeline?",
 
     "settings.prDescHint":
       "El prompt que redacta el título + descripción del PR desde el diff de la rama, por workspace. Independiente del proveedor — aplica al modelo al que se enrute la tarea de \"descripción de PR\".",
@@ -4352,16 +4431,6 @@ export const translations = {
     "settings.disabled": "Off",
 
 
-    "settings.mcpsTitle": "MCPs",
-    "settings.mcpsSelectWorkspace": "Selecciona un workspace para gestionar sus servidores MCP.",
-    "settings.mcpsHint":
-      "Servidores MCP disponibles para la IA al revisar PRs de cualquier proyecto de este workspace.",
-    "settings.addMcp": "Agregar servidor",
-    "settings.removeMcpConfirm": '¿Eliminar el servidor MCP "{name}"?',
-    "settings.newMcpName": "Nuevo servidor",
-    "settings.mcpCommandPlaceholder": "Comando (ej. npx)",
-    "settings.mcpArgsPlaceholder": "Argumentos (separados por espacio)",
-    "settings.mcpEnvPlaceholder": "CLAVE=valor (uno por línea)",
     "settings.noMcps": "Aún no hay servidores MCP configurados para este workspace.",
 
     "settings.skillsTitle": "Skills",
@@ -4953,6 +5022,20 @@ export const translations = {
     "stories.selectedOf": "{n} de {total} seleccionadas",
     "stories.addStory": "Añadir historia",
     "stories.openQuestions": "Preguntas abiertas",
+    "stories.answerThem": "Responderlas",
+    "stories.answerTitle": "Lo que la documentación no decía",
+    "stories.answerSubtitle": "Contesta aquí y la próxima generación recibe tus respuestas",
+    "stories.answerSettled": "Ya respondidas",
+    "stories.answerHint":
+      "Tus respuestas se guardan en el conjunto y se envían en cada generación posterior, como requisitos confirmados y no como una nota de una sola vez. Una caja vacía sencillamente no se envía.",
+    "stories.answerRegenerateWarning":
+      "Generar de nuevo reescribe el backlog a partir de la misma documentación: las historias sin publicar se reemplazan, con las ediciones que les hayas hecho. Las ya publicadas sobreviven.",
+    "stories.answerPlaceholder": "Tres autos, fijo. Un choque cuesta dos segundos y no elimina a ninguno.",
+    "stories.answerCount": "{n} de {total} respondidas",
+    "stories.answerRegenerate": "Guardar y generar de nuevo",
+    "stories.answerNone": "Nada que responder: la última generación no dejó preguntas abiertas.",
+    "stories.answerSettledHint":
+      "El modelo ya no las pregunta, pero las respuestas siguen viajando en cada generación. Vacía una para descartarla.",
     "stories.generatingTitle": "Escribiendo las historias…",
     "stories.generatingHint": "El modelo está leyendo la documentación. Esto tarda un momento.",
     "stories.noStories": "Todavía no hay historias",
@@ -5035,6 +5118,7 @@ export const translations = {
     "huReview.stagedOnly": "Leer y revisar no cambia nada. Lo \u00fanico que se escribe en Azure DevOps es lo que prepares en la tercera columna y confirmes.",
     "docs.documents": "Documentos",
     "docs.new": "Nuevo documento",
+    "docs.newSubtitle": "Sobre qué es el documento — queda fijado al crearlo",
     "docs.create": "Crear",
     "docs.empty": "Todav\u00eda no hay documentos. Crea uno para que el modelo lea el c\u00f3digo y lo escriba.",
     "docs.selectTitle": "Ning\u00fan documento abierto",
@@ -5066,8 +5150,32 @@ export const translations = {
     "docs.statusError": "fall\u00f3",
     "docs.delete": "Borrar documento",
     "docs.deleteConfirm": "\u00bfBorrar este documento? No se quita nada de lo ya publicado en la wiki.",
+    "docs.rename": "Renombrar",
+    "docs.close": "Cerrar documento",
+    "docs.closeHint": "Lo cierra y deja esta pantalla vac\u00eda. No se borra nada.",
+    "docs.saveHint": "Guarda lo que escribiste. Al publicar se env\u00eda lo guardado.",
+    "docs.unsaved": "Sin guardar",
+    "docs.saved": "Documento guardado",
+    "docs.discardConfirm": "Este documento tiene cambios sin guardar. \u00bfSalir y perderlos?",
+    "docs.import": "Importar de la wiki",
+    "docs.importSubtitle": "Trae aqu\u00ed una p\u00e1gina que ya existe, por su ruta exacta",
+    "docs.importAction": "Importar",
+    "docs.importing": "Leyendo la p\u00e1gina\u2026",
+    "docs.importPathHint":
+      "Absoluta en la wiki, empezando por \u00ab/\u00bb \u2014 o pega la URL de la p\u00e1gina y se saca la ruta de ah\u00ed.",
+    "docs.importAbout": "\u00bfDe qu\u00e9 repositorio habla?",
+    "docs.importAboutHint":
+      "Solo decide qu\u00e9 lee una regeneraci\u00f3n posterior. Si lo dejas vac\u00edo queda como documento de workspace, que lee los repositorios que marques.",
+    "docs.importAboutNone": "Ninguno \u2014 documento de workspace",
+    "docs.pageExists": "Esta p\u00e1gina ya existe en la wiki",
+    "docs.pageCreated": "Creada por {who} \u00b7 {when}",
+    "docs.pageModified": "\u00daltima modificaci\u00f3n de {who} \u00b7 {when}",
+    "docs.pageRevisions": "{n} versiones",
+    "docs.pageRevisionsMany": "M\u00e1s de {n} versiones",
+    "docs.pageHistoryUnknown": "Sin historial legible \u2014 el token lee p\u00e1ginas pero no el repositorio de la wiki.",
+    "docs.openInWiki": "Abrir en la wiki",
     "docs.target": "Publicar en",
-    "docs.targetHint": "La wiki a la que va esta p\u00e1gina. Por ahora Azure DevOps.",
+    "docs.targetHint": "La wiki a la que va esta p\u00e1gina.",
     "docs.org": "Organizaci\u00f3n",
     "docs.project": "Proyecto",
     "docs.wiki": "Wiki",
@@ -5317,8 +5425,8 @@ export const translations = {
     "stories.batchName": "Nombre del conjunto",
     "stories.batchNameHint": "Opcional — si lo dejas vacío se toma de la fuente.",
     "stories.batchNamePlaceholder": "Checkout",
-    "stories.count": "Historias",
-    "stories.countHint": "Una orientación, no una regla.",
+    "stories.howManyNote":
+      "Cuántas historias salen lo decide la documentación, no un número que elijas: una por cada capacidad que describa, y se parten a los seis escenarios. Ni relleno, ni nada que se quede fuera.",
     "stories.editPrompt": "Editar el prompt del generador",
     "stories.promptTitle": "Cómo se escriben las historias",
     "stories.promptSubtitle": "Por espacio de trabajo, compartido por todos los conjuntos",
@@ -5328,19 +5436,40 @@ export const translations = {
     "stories.promptResetConfirm": "¿Restaurar el prompt integrado? Se pierden tus cambios en este texto.",
     "stories.promptContract":
       "Conserva las reglas de salida: la respuesta se lee como JSON, y un prompt que deje de pedirlo produce conjuntos que no se pueden leer.",
+    "stories.usedPrompt": "Ver el prompt usado",
+    "stories.usedPromptTitle": "El prompt del que salió este conjunto",
+    "stories.usedPromptRanOn": "Generado el {at} con {provider} · {model}",
+    "stories.usedPromptNeverRan": "Este conjunto todavía no se ha generado",
+    "stories.usedPromptLoading": "Reconstruyendo el prompt…",
+    "stories.usedPromptInstructions": "Instrucciones (prompt)",
+    "stories.usedPromptInstructionsHint":
+      "La plantilla que siguió la corrida, congelada tal como estaba ese día. Editar ahora el prompt del espacio de trabajo no cambia este texto.",
+    "stories.usedPromptPayload": "Payload (stdin)",
+    "stories.usedPromptPayloadHint":
+      "Las instrucciones extra y la documentación, exactamente como las recibió el modelo.",
+    "stories.usedPromptStale":
+      "Este conjunto se generó antes de que el prompt se guardara: lo que ves abajo es la plantilla de hoy y las instrucciones extra de hoy, que pueden no ser las que corrieron. Al generar de nuevo se registra el real.",
+    "stories.usedPromptTruncated":
+      "La documentación era más larga de lo que cabe en un envío y se cortó — el modelo solo vio el texto que aparece aquí.",
+    "stories.usedPromptChars": "{n} caracteres",
+    "stories.usedPromptCopy": "Copiar este bloque",
+    "stories.usedPromptCopyAll": "Copiar todo",
+    "stories.usedPromptCopied": "Prompt copiado al portapapeles",
 
     // ---------------- Calidad de historias: INVEST, Gherkin y verificación contra el código ----------------
     "qa.group": "QA",
     "qa.groupHint":
-      "El repositorio contra el que se comprueban los criterios, y donde se escribe el .feature. No es el destino de Azure: aquel dice dónde se archiva el backlog, este dice dónde debería existir ya el comportamiento.",
-    "qa.repository": "Repositorio",
-    "qa.repositoryHint": "Solo lectura. No se modifica nada en la copia de trabajo.",
-    "qa.pickRepository": "Elige un repositorio",
-    "qa.noRepository": "Ninguno",
+      "Los repositorios contra los que se comprueban los criterios, y dónde se escribe el .feature. No es el destino de Azure: aquel dice dónde se archiva el backlog, estos dicen dónde debería existir ya el comportamiento.",
+    "qa.repositories": "Repositorios",
+    "qa.repositoriesHint":
+      "Solo lectura — no se modifica nada en las copias de trabajo. Marca todos los repositorios en los que podría vivir el comportamiento: un criterio implementado en el BFF sale como incumplido si solo se mira el servicio.",
+    "qa.featureRepository": "Dónde se guarda el .feature",
+    "qa.featureRepositoryHint":
+      "Uno de los repositorios de arriba. Los criterios se comprueban en todos, pero el archivo de especificación va en un solo sitio.",
     "qa.noRepos": "Este espacio de trabajo todavía no tiene ningún repositorio.",
     "qa.verify": "Verificar",
     "qa.verifyHint": "Comprueba cada criterio contra el código y guarda la evidencia de cada veredicto.",
-    "qa.verifyNoRepo": "Elige antes el repositorio contra el que comprobar los criterios",
+    "qa.verifyNoRepo": "Elige antes al menos un repositorio contra el que comprobar los criterios",
     "qa.lastVerified": "Verificado el {at} · {provider} · {model}",
     "qa.verifiedAt": "Verificado el {at}",
     "qa.verdictPass": "Cumple",
@@ -5446,7 +5575,6 @@ export const translations = {
     "agents.searchPlaceholder": "Buscar tareas…",
     "agents.groupTree": "Tareas",
     "agents.groupStatus": "Estado",
-    "agents.groupAgent": "Agente",
     "agents.statusDraft": "Sin empezar",
     "agents.statusRunning": "En marcha",
     "agents.statusIdle": "Te toca",

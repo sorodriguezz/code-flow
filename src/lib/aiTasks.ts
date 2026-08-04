@@ -26,6 +26,16 @@ export const AI_TASKS: AiTaskDef[] = [
   // would answer from the criteria alone, which is the confident-and-wrong verdict this whole
   // feature exists to avoid.
   { key: "story_verify", labelKey: "task.storyVerify", hintKey: "task.storyVerifyHint", agenticOnly: true },
+  // The other two tabs of that same section. They used to ride on `story_verify`, which meant one
+  // model choice for three jobs of very different length — and the one that reads a whole
+  // repository to write its documentation is not the one that judges four acceptance criteria.
+  {
+    key: "work_item_review",
+    labelKey: "task.workItemReview",
+    hintKey: "task.workItemReviewHint",
+    agenticOnly: true,
+  },
+  { key: "wiki", labelKey: "task.wiki", hintKey: "task.wikiHint", agenticOnly: true },
 ];
 
 export const AI_TASK_KEYS = AI_TASKS.map((t) => t.key);

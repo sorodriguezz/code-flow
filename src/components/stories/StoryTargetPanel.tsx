@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { CircleAlert, Plug, RefreshCw, SquarePen } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CircleAlert, FileSearch, Plug, RefreshCw, SquarePen } from "lucide-react";
 import { StoryPromptModal } from "./StoryPromptModal";
+import { StoryRunPromptModal } from "./StoryRunPromptModal";
 import { StoryVerifyPromptModal } from "./StoryVerifyPromptModal";
 import { CARD } from "../api/panelChrome";
 import { Group, Note } from "../api/settingsChrome";
+import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { Field } from "../settings/modelPicker";
 import { loadAdoConnections } from "../../lib/adoConnections";
@@ -12,7 +14,12 @@ import {
   adoListProjects,
   adoListWorkItemTypes,
 } from "../../lib/tauri/commands";
-import { targetFrom, useStoriesStore, type BoardsTarget } from "../../state/storiesStore";
+import {
+  parseVerifyProjectIds,
+  targetFrom,
+  useStoriesStore,
+  type BoardsTarget,
+} from "../../state/storiesStore";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import { useActiveProjects } from "../../state/workspaceStore";
@@ -56,11 +63,16 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
   const [instructions, setInstructions] = useState(batch?.instructions ?? "");
   const [tags, setTags] = useState(batch?.tags ?? "");
   const [editingPrompt, setEditingPrompt] = useState(false);
+  const [showingRunPrompt, setShowingRunPrompt] = useState(false);
   const [editingVerifyPrompt, setEditingVerifyPrompt] = useState(false);
 
   const target = batch ? targetFrom(batch) : null;
   const org = target?.org ?? "";
   const project = target?.project ?? "";
+  const verifyIds = useMemo(
+    () => (batch ? parseVerifyProjectIds(batch.verify_project_ids) : []),
+    [batch],
+  );
 
   // The batch can be swapped underneath this panel (it is keyed on the batch, so in practice it
   // remounts) — following the row keeps the textarea honest if that ever stops being true.
@@ -292,7 +304,9 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
           )}
         </Group>
 
-        <Group title={t("stories.generation")}>
+        {/* Both closed to start: the Azure target above is what a new set needs first, and these two
+            are read again only when a generation came out wrong or QA is about to run. */}
+        <Group title={t("stories.generation")} collapsible defaultOpen={false}>
           <Field label={t("stories.instructions")} hint={t("stories.instructionsRailHint")}>
             <textarea
               value={instructions}
@@ -313,6 +327,16 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
             </p>
           )}
           <Note>{t("stories.promptHint")}</Note>
+          {/* Two prompts, and the order says which is which: what this set already ran with (a
+              record, above) and what the next one will run with (an editor, below). */}
+          <button
+            type="button"
+            onClick={() => setShowingRunPrompt(true)}
+            className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+          >
+            <FileSearch size={12} />
+            {t("stories.usedPrompt")}
+          </button>
           <button
             type="button"
             onClick={() => setEditingPrompt(true)}
@@ -326,25 +350,57 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
         {/* QA: which repository the criteria are checked against, and where the .feature lands.
             A separate choice from the Azure target above — one says where the backlog is filed,
             this one says where the behaviour is supposed to already exist. */}
-        <Group title={t("qa.group")}>
+        <Group title={t("qa.group")} collapsible defaultOpen={false}>
           {repos.length === 0 ? (
             <Note tone="warning">{t("qa.noRepos")}</Note>
           ) : (
-            <Field label={t("qa.repository")} hint={t("qa.repositoryHint")}>
-              <Select
-                size="field"
-                value={batch.verify_project_id ?? ""}
-                placeholder={t("qa.pickRepository")}
-                ariaLabel={t("qa.repository")}
-                onChange={(value) =>
-                  void useStoriesStore.getState().setVerifyProject(batchId, value || null)
-                }
-                options={[
-                  { value: "", label: t("qa.noRepository") },
-                  ...repos.map((repo) => ({ value: repo.id, label: repo.name })),
-                ]}
-              />
-            </Field>
+            <>
+              {/* Checkboxes rather than a multi-select: the list is the workspace's repositories,
+                  short enough to read at a glance, and which ones are ticked is the whole question
+                  this group answers. */}
+              <Field label={t("qa.repositories")} hint={t("qa.repositoriesHint")}>
+                <div className="space-y-1 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5">
+                  {repos.map((repo) => (
+                    <label
+                      key={repo.id}
+                      className="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text)]"
+                    >
+                      <Checkbox
+                        checked={verifyIds.includes(repo.id)}
+                        onChange={(on) =>
+                          void useStoriesStore
+                            .getState()
+                            .setVerifyProjects(
+                              batchId,
+                              on ? [...verifyIds, repo.id] : verifyIds.filter((id) => id !== repo.id),
+                            )
+                        }
+                      />
+                      <span className="min-w-0 truncate">{repo.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </Field>
+
+              {/* Only once there is a choice to make. With one repository the export already lands
+                  there, and a dropdown with a single option is a question with one answer. */}
+              {verifyIds.length > 1 && (
+                <Field label={t("qa.featureRepository")} hint={t("qa.featureRepositoryHint")}>
+                  <Select
+                    size="field"
+                    value={batch.feature_project_id ?? verifyIds[0]}
+                    ariaLabel={t("qa.featureRepository")}
+                    onChange={(value) =>
+                      void useStoriesStore.getState().setFeatureProject(batchId, value || null)
+                    }
+                    options={verifyIds.map((id) => ({
+                      value: id,
+                      label: repos.find((repo) => repo.id === id)?.name ?? id,
+                    }))}
+                  />
+                </Field>
+              )}
+            </>
           )}
           <Note>{t("qa.groupHint")}</Note>
           {batch.verified_at && (
@@ -368,6 +424,9 @@ export function StoryTargetPanel({ batchId, width }: { batchId: string; width: n
       </div>
 
       {editingPrompt && <StoryPromptModal onClose={() => setEditingPrompt(false)} />}
+      {showingRunPrompt && (
+        <StoryRunPromptModal batchId={batchId} onClose={() => setShowingRunPrompt(false)} />
+      )}
       {editingVerifyPrompt && <StoryVerifyPromptModal onClose={() => setEditingVerifyPrompt(false)} />}
     </aside>
   );

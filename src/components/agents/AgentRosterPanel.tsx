@@ -15,7 +15,7 @@ import type { WorkspaceAgent } from "../../types/domain";
 /**
  * The workspace's agent roster — the "manage agents" half of this view.
  *
- * It is the *same* roster the AI chat's agent picker and Settings → SDD read, not a second one:
+ * It is the *same* roster the AI chat's agent picker reads, not a second one:
  * an agent is a role with a provider, a model and instructions, and having two places that each
  * hold half of them is how a role ends up meaning one thing in the chat and another here. What
  * this panel adds is the model picker — Settings only offers a free-text field — which is also why

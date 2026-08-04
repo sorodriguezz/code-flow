@@ -3,33 +3,48 @@ import {
   BookText,
   Boxes,
   CircleAlert,
+  CloudDownload,
   ExternalLink,
   FileCode2,
   FolderGit2,
+  History,
+  MoreHorizontal,
   Network,
+  Pencil,
   Play,
   Plug,
   Plus,
+  Save,
   Square,
   Trash2,
   UploadCloud,
+  X,
 } from "lucide-react";
+import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
+import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
+import { MarkdownEditor } from "../common/MarkdownEditor";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
+import { Skeleton } from "../common/Skeleton";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { confirmAction } from "../../state/confirmStore";
 import { useDocsStore } from "../../state/docsStore";
 import { useLayoutStore } from "../../state/layoutStore";
-import { useT } from "../../state/languageStore";
+import { translate, useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { loadAdoConnections } from "../../lib/adoConnections";
-import { adoListProjects, adoListWikis, openExternalUrl } from "../../lib/tauri/commands";
+import {
+  adoListProjects,
+  adoListWikis,
+  adoWikiPageDetail,
+  openExternalUrl,
+} from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
-import type { AdoProject, AdoWiki, DocPage, DocScope } from "../../types/domain";
+import type { AdoProject, AdoWiki, AdoWikiPageDetail, DocPage, DocScope } from "../../types/domain";
 
 const FIELD =
   "w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]";
@@ -47,6 +62,193 @@ const PUBLISH_MAX = 460;
 /** The two kinds of document, as the sidebar and the composer both draw them. */
 const SCOPE_ICON: Record<DocScope, typeof BookText> = { repo: FileCode2, workspace: Network };
 
+/** The open document's body as the user sees it: the draft while there is one, the row otherwise. */
+function bodyOf(page: DocPage, draft: string | null): string {
+  return draft ?? page.content;
+}
+
+/**
+ * Whether it is all right to leave the open document behind — closing it, opening another, deleting
+ * it. Nothing unsaved, or the user was asked and said so.
+ *
+ * Read from the store rather than taken as arguments because every caller is a click handler on a
+ * different component, and the one thing they all need to know is a fact about the whole screen.
+ */
+async function mayLeaveOpenDocument(): Promise<boolean> {
+  const { draft, pages, selectedId } = useDocsStore.getState();
+  const page = pages.find((p) => p.id === selectedId);
+  if (draft === null || !page || draft === page.content) return true;
+  return confirmAction(translate("docs.discardConfirm"));
+}
+
+/**
+ * A wiki page's path out of whatever the user had on the clipboard.
+ *
+ * People copy the address bar, not the path — and the address bar carries the path already, in
+ * `?pagePath=`. Reading it out is the difference between "paste it and it works" and an error
+ * message about a leading slash. Anything else is passed through as typed: a path is what this
+ * field is for, and silently reshaping one would be worse than refusing it.
+ */
+function wikiPathFrom(input: string): string {
+  const raw = input.trim();
+  if (!raw) return "";
+  const at = raw.indexOf("pagePath=");
+  if (at === -1) return raw;
+  const rest = raw.slice(at + "pagePath=".length).split("&")[0];
+  try {
+    return decodeURIComponent(rest.replace(/\+/g, " "));
+  } catch {
+    return rest;
+  }
+}
+
+/**
+ * The three dependent lists a wiki target is chosen from, read from the host rather than typed.
+ *
+ * Shared by the publish panel and the import dialog because they are the same question asked in
+ * opposite directions — where does this go / where did this come from — and a wiki that appears in
+ * one and not the other would only ever be a bug.
+ */
+function useWikiTargets(org: string, project: string) {
+  const [orgs, setOrgs] = useState<string[]>([]);
+  const [projects, setProjects] = useState<AdoProject[]>([]);
+  const [wikis, setWikis] = useState<AdoWiki[]>([]);
+
+  useEffect(() => {
+    void loadAdoConnections()
+      .then((connections) => setOrgs(connections.map((c) => c.org)))
+      .catch(() => setOrgs([]));
+  }, []);
+
+  useEffect(() => {
+    if (!org) {
+      setProjects([]);
+      return;
+    }
+    void adoListProjects(org)
+      .then(setProjects)
+      .catch((e: unknown) => {
+        setProjects([]);
+        pushErrorToast(String(e));
+      });
+  }, [org]);
+
+  useEffect(() => {
+    if (!org || !project) {
+      setWikis([]);
+      return;
+    }
+    void adoListWikis(org, project)
+      .then(setWikis)
+      .catch((e: unknown) => {
+        setWikis([]);
+        pushErrorToast(String(e));
+      });
+  }, [org, project]);
+
+  return { orgs, projects, wikis };
+}
+
+/**
+ * What the wiki says about a page: who wrote it, when it last changed, how many times.
+ *
+ * The point of showing it is the publish that comes later. "Last changed by Marta on Tuesday" is
+ * the fact that decides whether overwriting this page is fine or rude, and it is worth more on
+ * screen while the document is being edited than in the confirmation dialog at the end.
+ *
+ * Every field is allowed to be missing — a token that can read pages cannot always read the
+ * repository their history lives in — and a missing field says so rather than showing a blank.
+ */
+function WikiPageFacts({ detail, loading }: { detail: AdoWikiPageDetail | null; loading: boolean }) {
+  const t = useT();
+  if (loading) return <Skeleton className="h-16 w-full" />;
+  if (!detail) return null;
+
+  const when = (iso: string) => (iso ? new Date(iso).toLocaleString() : "");
+  const rows = [
+    detail.modified_by || detail.modified_at
+      ? t("docs.pageModified", { who: detail.modified_by || "—", when: when(detail.modified_at) || "—" })
+      : null,
+    detail.created_by || detail.created_at
+      ? t("docs.pageCreated", { who: detail.created_by || "—", when: when(detail.created_at) || "—" })
+      : null,
+    detail.revisions > 0
+      ? detail.history_truncated
+        ? t("docs.pageRevisionsMany", { n: detail.revisions })
+        : t("docs.pageRevisions", { n: detail.revisions })
+      : t("docs.pageHistoryUnknown"),
+  ].filter(Boolean);
+
+  return (
+    <div className="space-y-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1.5">
+      <p className="flex items-center gap-1.5 text-[11px] font-medium text-[var(--cf-text)]">
+        <History size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+        {t("docs.pageExists")}
+      </p>
+      {rows.map((row) => (
+        <p key={row} className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+          {row}
+        </p>
+      ))}
+      <button
+        type="button"
+        onClick={() => void openExternalUrl(detail.url).catch((e: unknown) => pushErrorToast(String(e)))}
+        className="flex items-center gap-1 text-[10.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+      >
+        <ExternalLink size={10} className="shrink-0" />
+        {t("docs.openInWiki")}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Reads one wiki page by path, a moment after the user stops typing it.
+ *
+ * Debounced because the path is a field somebody types into character by character, and each
+ * keystroke would otherwise be three requests to Azure. `null` while nothing resolves — including
+ * while a request is in flight for a path that has since changed, which is what stops the panel
+ * describing the page you were halfway through typing.
+ */
+function useWikiPageDetail(org: string, project: string, wiki: string, path: string) {
+  const [detail, setDetail] = useState<AdoWikiPageDetail | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!org || !project || !wiki || !path.startsWith("/") || path.length < 2) {
+      setDetail(null);
+      setError("");
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    const timer = setTimeout(() => {
+      void adoWikiPageDetail(org, project, wiki, path)
+        .then((found) => {
+          if (cancelled) return;
+          setDetail(found);
+          setError("");
+        })
+        .catch((e: unknown) => {
+          if (cancelled) return;
+          setDetail(null);
+          setError(String(e));
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false);
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [org, project, wiki, path]);
+
+  return { detail, loading, error };
+}
+
 /** A tinted square, the same shape the review screen uses for its section headings. */
 function IconChip({ icon: Icon }: { icon: typeof BookText }) {
   return (
@@ -63,8 +265,12 @@ function IconChip({ icon: Icon }: { icon: typeof BookText }) {
  * must describe the same thing, not whatever happens to be ticked in a picker. A workspace document
  * has no single subject — it is about what happens between the repositories — so it takes its
  * repository set at generation time instead.
+ *
+ * A dialog rather than a panel that unfolds inside the sidebar: the choice needs both descriptions
+ * side by side to be a choice at all, and at the width of the rail they stack into a column of
+ * eight lines that pushes the document list off the screen.
  */
-function NewDocument({ onClose }: { onClose: () => void }) {
+function NewDocumentModal({ onClose }: { onClose: () => void }) {
   const t = useT();
   const repos = useActiveProjects();
   const [scope, setScope] = useState<DocScope>("repo");
@@ -74,89 +280,313 @@ function NewDocument({ onClose }: { onClose: () => void }) {
   const repo = repos.find((r) => r.id === projectId);
   const suggested = scope === "repo" ? (repo?.name ?? "") : t("docs.workspaceDocTitle");
 
+  // Creating opens what it created, which is leaving the open document — so the same question the
+  // list asks before switching gets asked here too, or an unsaved draft would vanish behind a
+  // brand-new empty document.
   const create = () => {
     const finalTitle = title.trim() || suggested;
     if (!finalTitle) return;
-    void store().create(scope, finalTitle, scope === "repo" ? projectId : undefined);
-    onClose();
+    void mayLeaveOpenDocument().then((ok) => {
+      if (!ok) return;
+      void store().create(scope, finalTitle, scope === "repo" ? projectId : undefined);
+      onClose();
+    });
   };
 
   return (
-    <div className="cf-fade-in space-y-2.5 border-b border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-3">
-      <div className="grid grid-cols-2 gap-1.5">
-        {(["repo", "workspace"] as const).map((option) => {
-          const Icon = SCOPE_ICON[option];
-          const on = scope === option;
-          return (
-            <button
-              key={option}
-              type="button"
-              onClick={() => setScope(option)}
-              aria-pressed={on}
-              className={`flex flex-col items-start gap-1 rounded-md border px-2.5 py-2 text-left transition-colors ${
-                on
-                  ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[var(--cf-accent-soft)]"
-                  : "border-[var(--cf-border)] hover:border-[var(--cf-accent)]"
-              }`}
-            >
-              <span
-                className={`flex items-center gap-1.5 text-[12px] font-medium ${
-                  on ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
+    <ApiModal
+      icon={BookText}
+      title={t("docs.new")}
+      subtitle={t("docs.newSubtitle")}
+      width="max-w-lg"
+      dismissOnBackdrop={false}
+      onClose={onClose}
+      footer={
+        <span className="ml-auto flex items-center gap-2">
+          <GhostButton onClick={onClose}>{t("common.cancel")}</GhostButton>
+          <PrimaryButton onClick={create} disabled={scope === "repo" && !projectId}>
+            {t("docs.create")}
+          </PrimaryButton>
+        </span>
+      }
+    >
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+        <div className="grid grid-cols-2 gap-2">
+          {(["repo", "workspace"] as const).map((option) => {
+            const Icon = SCOPE_ICON[option];
+            const on = scope === option;
+            return (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setScope(option)}
+                aria-pressed={on}
+                className={`flex flex-col items-start gap-1 rounded-md border px-2.5 py-2 text-left transition-colors ${
+                  on
+                    ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[var(--cf-accent-soft)]"
+                    : "border-[var(--cf-border)] hover:border-[var(--cf-accent)]"
                 }`}
               >
-                <Icon size={12} />
-                {t(option === "repo" ? "docs.scopeRepo" : "docs.scopeWorkspace")}
-              </span>
-              <span className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
-                {t(option === "repo" ? "docs.scopeRepoHint" : "docs.scopeWorkspaceHint")}
-              </span>
-            </button>
-          );
-        })}
+                <span
+                  className={`flex items-center gap-1.5 text-[12.5px] font-medium ${
+                    on ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
+                  }`}
+                >
+                  <Icon size={13} />
+                  {t(option === "repo" ? "docs.scopeRepo" : "docs.scopeWorkspace")}
+                </span>
+                <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                  {t(option === "repo" ? "docs.scopeRepoHint" : "docs.scopeWorkspaceHint")}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+        {scope === "repo" && (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("docs.whichRepo")}</span>
+            <Select
+              size="field"
+              value={projectId}
+              ariaLabel={t("docs.whichRepo")}
+              placeholder={t("docs.whichRepo")}
+              onChange={setProjectId}
+              options={repos.map((r) => ({ value: r.id, label: r.name }))}
+            />
+          </label>
+        )}
+
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("docs.titlePlaceholder")}</span>
+          <input
+            autoFocus
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") create();
+            }}
+            placeholder={suggested || t("docs.titlePlaceholder")}
+            aria-label={t("docs.titlePlaceholder")}
+            className={FIELD}
+          />
+        </label>
+
+        {scope === "repo" && (
+          <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("docs.repoSubjectHint")}</p>
+        )}
       </div>
-
-      {scope === "repo" && (
-        <Select
-          size="field"
-          value={projectId}
-          ariaLabel={t("docs.whichRepo")}
-          placeholder={t("docs.whichRepo")}
-          onChange={setProjectId}
-          options={repos.map((r) => ({ value: r.id, label: r.name }))}
-        />
-      )}
-
-      <input
-        value={title}
-        onChange={(e) => setTitle(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") create();
-        }}
-        placeholder={suggested || t("docs.titlePlaceholder")}
-        aria-label={t("docs.titlePlaceholder")}
-        className={FIELD}
-      />
-
-      <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={create}
-          disabled={scope === "repo" && !projectId}
-          className="flex-1 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {t("docs.create")}
-        </button>
-        <button
-          type="button"
-          onClick={onClose}
-          className="rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)]"
-        >
-          {t("common.cancel")}
-        </button>
-      </div>
-    </div>
+    </ApiModal>
   );
 }
+
+/**
+ * Bringing a page that already exists in the wiki in, by its exact path.
+ *
+ * The other direction of this screen, and the one a team with a wiki already written starts from:
+ * paste the path, see who wrote it and when it last moved, and it opens here as a document — to
+ * edit by hand, or to hand to the model and have rewritten. It keeps pointing at where it came
+ * from, so publishing later goes back over the same page rather than making a second copy of it.
+ *
+ * The repository is optional and only decides what a later *regeneration* reads: a page about one
+ * checkout can be rewritten from that checkout, and one about none of them stays a workspace
+ * document. Getting it wrong costs nothing today — it is a question the Generate button asks again.
+ */
+function ImportWikiModal({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  const repos = useActiveProjects();
+  const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
+
+  const [org, setOrg] = useState("");
+  const [project, setProject] = useState("");
+  const [wikiId, setWikiId] = useState("");
+  const [path, setPath] = useState("");
+  const [title, setTitle] = useState("");
+  const [projectId, setProjectId] = useState(activeProjectId ?? "");
+  const [importing, setImporting] = useState(false);
+  const [failure, setFailure] = useState("");
+
+  const { orgs, projects, wikis } = useWikiTargets(org, project);
+  const wikiName = wikis.find((w) => w.id === wikiId)?.name ?? "";
+  const { detail, loading, error } = useWikiPageDetail(org, project, wikiId, path);
+
+  // One organisation is the common case, and making somebody choose from a list of one is a step
+  // that only exists to be got through.
+  useEffect(() => {
+    if (!org && orgs.length === 1) setOrg(orgs[0]);
+  }, [org, orgs]);
+
+  const ready = Boolean(detail && detail.content.trim() && !importing);
+
+  const run = async () => {
+    if (!detail) return;
+    // The imported page opens straight away, so whatever is open now is being left behind.
+    if (!(await mayLeaveOpenDocument())) return;
+    setImporting(true);
+    setFailure("");
+    try {
+      await store().importFromWiki({
+        scope: projectId ? "repo" : "workspace",
+        projectId: projectId || undefined,
+        org,
+        project,
+        wikiId,
+        wikiName,
+        path: detail.path,
+        title: title.trim() || undefined,
+      });
+      onClose();
+    } catch (e: unknown) {
+      setFailure(String(e));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <ApiModal
+      icon={CloudDownload}
+      title={t("docs.import")}
+      subtitle={t("docs.importSubtitle")}
+      width="max-w-lg"
+      busy={importing}
+      dismissOnBackdrop={false}
+      onClose={onClose}
+      footer={
+        <span className="ml-auto flex items-center gap-2">
+          <GhostButton onClick={onClose} disabled={importing}>
+            {t("common.cancel")}
+          </GhostButton>
+          <PrimaryButton onClick={() => void run()} disabled={!ready}>
+            {importing ? t("docs.importing") : t("docs.importAction")}
+          </PrimaryButton>
+        </span>
+      }
+    >
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+        {orgs.length === 0 ? (
+          <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">{t("huReview.connectAzure")}</p>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="block space-y-1">
+                <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("docs.org")}</span>
+                <Select
+                  size="field"
+                  value={org}
+                  placeholder={t("huReview.orgPlaceholder")}
+                  ariaLabel={t("docs.org")}
+                  onChange={(next) => {
+                    setOrg(next);
+                    setProject("");
+                    setWikiId("");
+                  }}
+                  options={orgs.map((o) => ({ value: o, label: o }))}
+                />
+              </label>
+              <label className="block space-y-1">
+                <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("docs.project")}</span>
+                <Select
+                  size="field"
+                  value={project}
+                  placeholder={t("docs.project")}
+                  ariaLabel={t("docs.project")}
+                  onChange={(next) => {
+                    setProject(next);
+                    setWikiId("");
+                  }}
+                  options={projects.map((p) => ({ value: p.name, label: p.name }))}
+                />
+              </label>
+            </div>
+
+            <label className="block space-y-1">
+              <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("docs.wiki")}</span>
+              <Select
+                size="field"
+                value={wikiId}
+                placeholder={t("docs.wiki")}
+                ariaLabel={t("docs.wiki")}
+                onChange={setWikiId}
+                options={wikis.map((w) => ({ value: w.id, label: w.name }))}
+              />
+            </label>
+
+            <label className="block space-y-1">
+              <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("docs.pagePath")}</span>
+              <input
+                autoFocus
+                value={path}
+                onChange={(e) => setPath(wikiPathFrom(e.target.value))}
+                placeholder="/Servicios/Checkout API"
+                aria-label={t("docs.pagePath")}
+                className={`${FIELD} font-mono`}
+              />
+              <span className="block text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+                {t("docs.importPathHint")}
+              </span>
+            </label>
+
+            {error ? (
+              <p className="flex items-start gap-1.5 rounded-md border border-[color-mix(in_oklab,var(--cf-danger)_35%,transparent)] px-2 py-1.5 text-[11px] leading-snug text-[var(--cf-danger)]">
+                <CircleAlert size={11} className="mt-[2px] shrink-0" />
+                <span className="min-w-0 break-words">{error}</span>
+              </p>
+            ) : (
+              <WikiPageFacts detail={detail} loading={loading} />
+            )}
+
+            {detail && (
+              <>
+                <label className="block space-y-1">
+                  <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">
+                    {t("docs.titlePlaceholder")}
+                  </span>
+                  <input
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    placeholder={detail.title}
+                    aria-label={t("docs.titlePlaceholder")}
+                    className={FIELD}
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <span className="text-[11px] font-medium text-[var(--cf-text-muted)]">{t("docs.importAbout")}</span>
+                  <Select
+                    size="field"
+                    value={projectId}
+                    placeholder={t("docs.importAboutNone")}
+                    ariaLabel={t("docs.importAbout")}
+                    onChange={setProjectId}
+                    options={[
+                      { value: "", label: t("docs.importAboutNone") },
+                      ...repos.map((r) => ({ value: r.id, label: r.name })),
+                    ]}
+                  />
+                  <span className="block text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("docs.importAboutHint")}
+                  </span>
+                </label>
+              </>
+            )}
+
+            {failure && (
+              <p className="flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-danger)]">
+                <CircleAlert size={11} className="mt-[2px] shrink-0" />
+                <span className="min-w-0 break-words">{failure}</span>
+              </p>
+            )}
+          </>
+        )}
+      </div>
+    </ApiModal>
+  );
+}
+
+/** Where a row's menu was asked for. Only the id is kept — a generation landing replaces the row
+ * object, and a menu built from the copy captured on right-click would act on a stale one. */
+type RowMenu = { x: number; y: number; id: string };
 
 /** The documents this workspace has, newest first. */
 function DocumentList({ width }: { width: number }) {
@@ -164,6 +594,36 @@ function DocumentList({ width }: { width: number }) {
   const pages = useDocsStore((s) => s.pages);
   const selectedId = useDocsStore((s) => s.selectedId);
   const [composing, setComposing] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [menu, setMenu] = useState<RowMenu | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+
+  const menuPage = menu ? (pages.find((p) => p.id === menu.id) ?? null) : null;
+
+  const menuItems = (page: DocPage): MenuItem[] => [
+    { label: t("docs.rename"), icon: Pencil, onClick: () => setRenamingId(page.id) },
+    {
+      label: t("docs.delete"),
+      icon: Trash2,
+      danger: true,
+      separated: true,
+      onClick: () => {
+        void (async () => {
+          // The open document's unsaved edits are about to go with it, and "delete" is not the
+          // answer to "you have unsaved changes" — so that question comes first.
+          if (page.id === selectedId && !(await mayLeaveOpenDocument())) return;
+          if (await confirmAction(t("docs.deleteConfirm"))) void store().remove(page.id);
+        })();
+      },
+    },
+  ];
+
+  const open = (id: string) => {
+    if (id === selectedId) return;
+    void mayLeaveOpenDocument().then((ok) => {
+      if (ok) store().select(id);
+    });
+  };
 
   return (
     <div
@@ -173,18 +633,27 @@ function DocumentList({ width }: { width: number }) {
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
         <IconChip icon={BookText} />
         <h2 className="text-[13px] font-semibold text-[var(--cf-text)]">{t("docs.documents")}</h2>
+        {/* Both ways in, side by side: a document is either written here from the code, or it is
+            already in the wiki and comes in whole. */}
         <button
           type="button"
-          onClick={() => setComposing((was) => !was)}
+          onClick={() => setImporting(true)}
+          title={t("docs.importSubtitle")}
+          aria-label={t("docs.import")}
+          className="ml-auto flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
+        >
+          <CloudDownload size={14} />
+        </button>
+        <button
+          type="button"
+          onClick={() => setComposing(true)}
           title={t("docs.new")}
           aria-label={t("docs.new")}
-          className="ml-auto flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
+          className="flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
         >
           <Plus size={14} />
         </button>
       </div>
-
-      {composing && <NewDocument onClose={() => setComposing(false)} />}
 
       <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
         {pages.length === 0 ? (
@@ -193,60 +662,155 @@ function DocumentList({ width }: { width: number }) {
           </p>
         ) : (
           <div className="space-y-1">
-            {pages.map((page, at) => {
-              const Icon = SCOPE_ICON[page.scope] ?? FileCode2;
-              const active = page.id === selectedId;
-              return (
-                <button
+            {pages.map((page, at) =>
+              renamingId === page.id ? (
+                <RenameRow
                   key={page.id}
-                  type="button"
-                  onClick={() => store().select(page.id)}
-                  style={{ "--cf-rise-delay": `${Math.min(at, 8) * 45}ms` } as React.CSSProperties}
-                  className={`cf-rise flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors ${
-                    active
-                      ? "bg-[var(--cf-accent-soft)]"
-                      : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                  }`}
-                >
-                  <span className="mt-[2px] shrink-0 text-[var(--cf-text-muted)]">
-                    {page.status === "generating" ? <ThinkingOrb size="sm" /> : <Icon size={13} />}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span
-                      className={`block truncate text-[12.5px] font-medium ${
-                        active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
-                      }`}
-                    >
-                      {page.title}
-                    </span>
-                    <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
-                      <span>{t(page.scope === "repo" ? "docs.scopeRepo" : "docs.scopeWorkspace")}</span>
-                      {page.published_at && (
-                        <>
-                          <span aria-hidden>·</span>
-                          <span className="text-[var(--cf-success)]">{t("docs.publishedShort")}</span>
-                        </>
-                      )}
-                      {page.status === "error" && (
-                        <>
-                          <span aria-hidden>·</span>
-                          <span className="text-[var(--cf-danger)]">{t("docs.statusError")}</span>
-                        </>
-                      )}
-                    </span>
-                  </span>
-                </button>
-              );
-            })}
+                  value={page.title}
+                  onCancel={() => setRenamingId(null)}
+                  onCommit={(name) => {
+                    const next = name.trim();
+                    if (next && next !== page.title) void store().rename(page.id, next);
+                    setRenamingId(null);
+                  }}
+                />
+              ) : (
+                <DocumentRow
+                  key={page.id}
+                  page={page}
+                  at={at}
+                  active={page.id === selectedId}
+                  onOpen={() => open(page.id)}
+                  onMenu={(x, y) => setMenu({ x, y, id: page.id })}
+                />
+              ),
+            )}
           </div>
         )}
       </div>
+
+      {menu && menuPage && (
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems(menuPage)} onClose={() => setMenu(null)} />
+      )}
+      {composing && <NewDocumentModal onClose={() => setComposing(false)} />}
+      {importing && <ImportWikiModal onClose={() => setImporting(false)} />}
+    </div>
+  );
+}
+
+/** One document in the rail. Right-click — or the «…» for a pointer that has no second button —
+ * is where rename and delete live: they are actions on a document, not on the one that is open. */
+function DocumentRow({
+  page,
+  at,
+  active,
+  onOpen,
+  onMenu,
+}: {
+  page: DocPage;
+  at: number;
+  active: boolean;
+  onOpen: () => void;
+  onMenu: (x: number, y: number) => void;
+}) {
+  const t = useT();
+  const Icon = SCOPE_ICON[page.scope] ?? FileCode2;
+
+  return (
+    <div
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onMenu(e.clientX, e.clientY);
+      }}
+      style={{ "--cf-rise-delay": `${Math.min(at, 8) * 45}ms` } as React.CSSProperties}
+      className={`cf-rise group relative flex w-full items-start rounded-md transition-colors ${
+        active ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={onOpen}
+        aria-current={active ? "page" : undefined}
+        className="flex min-w-0 flex-1 items-start gap-2 rounded-md py-1.5 pl-2 text-left"
+      >
+        <span className="mt-[2px] shrink-0 text-[var(--cf-text-muted)]">
+          {page.status === "generating" ? <ThinkingOrb size="sm" /> : <Icon size={13} />}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span
+            className={`block truncate text-[12.5px] font-medium ${
+              active ? "text-[var(--cf-accent)]" : "text-[var(--cf-text)]"
+            }`}
+          >
+            {page.title}
+          </span>
+          <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+            <span>{t(page.scope === "repo" ? "docs.scopeRepo" : "docs.scopeWorkspace")}</span>
+            {page.published_at && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="text-[var(--cf-success)]">{t("docs.publishedShort")}</span>
+              </>
+            )}
+            {page.status === "error" && (
+              <>
+                <span aria-hidden>·</span>
+                <span className="text-[var(--cf-danger)]">{t("docs.statusError")}</span>
+              </>
+            )}
+          </span>
+        </span>
+      </button>
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-label={t("api.moreActions")}
+        title={t("api.moreActions")}
+        onClick={(e) => {
+          const rect = e.currentTarget.getBoundingClientRect();
+          onMenu(rect.right - 4, rect.bottom + 2);
+        }}
+        className="flex w-6 shrink-0 items-center justify-center self-stretch rounded-r-md text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] focus-visible:opacity-100 group-hover:opacity-100"
+      >
+        <MoreHorizontal size={14} />
+      </button>
+    </div>
+  );
+}
+
+function RenameRow({
+  value,
+  onCommit,
+  onCancel,
+}: {
+  value: string;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  return (
+    <div className="flex w-full items-center gap-2 rounded-md py-1.5 pl-2 pr-1">
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+        <Pencil size={12} className="text-[var(--cf-text-muted)]" />
+      </span>
+      <input
+        autoFocus
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => onCommit(draft)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") onCommit(draft);
+          if (e.key === "Escape") onCancel();
+        }}
+        className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-transparent px-1 py-0.5 text-[12px] text-[var(--cf-text)] outline-none"
+      />
     </div>
   );
 }
 
 /** What the generation reads, and the button that starts it. */
-function GenerationBar({ page }: { page: DocPage }) {
+function GenerationBar({ page, body }: { page: DocPage; body: string }) {
   const t = useT();
   const repos = useActiveProjects();
   const picked = useDocsStore((s) => s.projectIds);
@@ -347,7 +911,7 @@ function GenerationBar({ page }: { page: DocPage }) {
           }
           // Regenerating replaces the body outright, and nothing keeps the previous version — so
           // a document that already says something has to ask first. An empty one does not.
-          if (!page.content.trim()) {
+          if (!body.trim()) {
             void store().generate();
             return;
           }
@@ -363,7 +927,7 @@ function GenerationBar({ page }: { page: DocPage }) {
         }`}
       >
         {running ? <Square size={11} /> : <Play size={11} />}
-        {running ? t("docs.stop") : page.content.trim() ? t("docs.regenerate") : t("docs.generate")}
+        {running ? t("docs.stop") : body.trim() ? t("docs.regenerate") : t("docs.generate")}
       </button>
     </div>
   );
@@ -376,46 +940,16 @@ function GenerationBar({ page }: { page: DocPage }) {
  * because a wiki that does not exist is a publish that fails at the last step. The three are
  * dependent, so changing one clears what was chosen below it.
  */
-function PublishPanel({ page, width }: { page: DocPage; width: number }) {
+function PublishPanel({ page, body, width }: { page: DocPage; body: string; width: number }) {
   const t = useT();
   const openSettings = useUiStore((s) => s.openSettings);
   const publishing = useDocsStore((s) => s.publishing);
 
-  const [orgs, setOrgs] = useState<string[]>([]);
-  const [projects, setProjects] = useState<AdoProject[]>([]);
-  const [wikis, setWikis] = useState<AdoWiki[]>([]);
-
-  useEffect(() => {
-    void loadAdoConnections()
-      .then((connections) => setOrgs(connections.map((c) => c.org)))
-      .catch(() => setOrgs([]));
-  }, []);
-
-  useEffect(() => {
-    if (!page.ado_org) {
-      setProjects([]);
-      return;
-    }
-    void adoListProjects(page.ado_org)
-      .then(setProjects)
-      .catch((e: unknown) => {
-        setProjects([]);
-        pushErrorToast(String(e));
-      });
-  }, [page.ado_org]);
-
-  useEffect(() => {
-    if (!page.ado_org || !page.ado_project) {
-      setWikis([]);
-      return;
-    }
-    void adoListWikis(page.ado_org, page.ado_project)
-      .then(setWikis)
-      .catch((e: unknown) => {
-        setWikis([]);
-        pushErrorToast(String(e));
-      });
-  }, [page.ado_org, page.ado_project]);
+  const { orgs, projects, wikis } = useWikiTargets(page.ado_org, page.ado_project);
+  // What is at the other end right now. Read while the document is being edited rather than only
+  // in the confirmation dialog: knowing somebody else changed this page yesterday is worth more
+  // before you write over it than half a second before.
+  const { detail, loading } = useWikiPageDetail(page.ado_org, page.ado_project, page.wiki_id, page.page_path);
 
   const save = (patch: Partial<Record<"org" | "project" | "wikiId" | "wikiName" | "pagePath", string>>) => {
     void store().setTarget({
@@ -506,6 +1040,8 @@ function PublishPanel({ page, width }: { page: DocPage; width: number }) {
                 {t("docs.pagePathHint")}
               </span>
             </label>
+
+            <WikiPageFacts detail={detail} loading={loading} />
           </>
         )}
 
@@ -527,7 +1063,9 @@ function PublishPanel({ page, width }: { page: DocPage; width: number }) {
         <p className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]">{t("docs.overwriteWarning")}</p>
         <button
           type="button"
-          disabled={!ready || publishing || !page.content.trim()}
+          // Enabled on what is on screen, not on what is stored: publishing saves the draft first,
+          // so a document typed and published without pressing Save still goes up whole.
+          disabled={!ready || publishing || !body.trim()}
           onClick={() => {
             void confirmAction(
               t("docs.confirmPublish").replace("{path}", page.page_path).replace("{wiki}", page.wiki_name),
@@ -550,7 +1088,8 @@ function PublishPanel({ page, width }: { page: DocPage; width: number }) {
  * to a wiki.
  *
  * Three regions, the same shape as the rest of this section — the documents on the left, the one
- * open in the middle, and where it publishes on the right.
+ * open in the middle, and where it publishes on the right. The right one only exists while a
+ * document is open: "publish to" with nothing to publish is a form about nothing.
  */
 export function WikiView() {
   const t = useT();
@@ -558,6 +1097,8 @@ export function WikiView() {
   const pages = useDocsStore((s) => s.pages);
   const selectedId = useDocsStore((s) => s.selectedId);
   const runId = useDocsStore((s) => s.runId);
+  const draft = useDocsStore((s) => s.draft);
+  const saving = useDocsStore((s) => s.saving);
   const listWidth = useLayoutStore((s) => s.sizes.wikiListWidth);
   const publishWidth = useLayoutStore((s) => s.sizes.wikiPublishWidth);
   const setSize = useLayoutStore((s) => s.setSize);
@@ -568,6 +1109,22 @@ export function WikiView() {
   }, [workspaceId]);
 
   const page = useMemo(() => pages.find((p) => p.id === selectedId) ?? null, [pages, selectedId]);
+  const body = page ? bodyOf(page, draft) : "";
+  const dirty = Boolean(page && draft !== null && draft !== page.content);
+
+  // Mod+S, because this is now a field you save rather than one that saves itself. Bound while
+  // this view is mounted — it unmounts when the section switches tab, so nothing else on screen
+  // has to be asked whether the chord was meant for it.
+  useEffect(() => {
+    if (!dirty) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== "s") return;
+      e.preventDefault();
+      void store().save();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [dirty]);
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden bg-[var(--cf-surface)]">
@@ -600,24 +1157,45 @@ export function WikiView() {
                 className="min-w-0 flex-1 rounded-md border border-transparent bg-transparent px-1 py-0.5 text-[14px] font-semibold leading-tight text-[var(--cf-text)] outline-none hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] focus:bg-[var(--cf-field)]"
               />
               {page.model && (
-                <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">{page.model}</span>
+                <span className="hidden shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)] lg:inline">
+                  {page.model}
+                </span>
+              )}
+              {dirty && (
+                <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--cf-accent)]">
+                  {t("docs.unsaved")}
+                </span>
               )}
               <button
                 type="button"
+                onClick={() => void store().save()}
+                disabled={!dirty || saving}
+                title={t("docs.saveHint")}
+                className={`flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors disabled:cursor-not-allowed ${
+                  dirty
+                    ? "bg-[var(--cf-accent)] text-white hover:brightness-110"
+                    : "border border-[var(--cf-border)] text-[var(--cf-text-muted)] opacity-60"
+                }`}
+              >
+                {saving ? <ThinkingOrb size="sm" /> : <Save size={12} />}
+                {t("common.save")}
+              </button>
+              <button
+                type="button"
                 onClick={() => {
-                  void confirmAction(t("docs.deleteConfirm")).then((ok) => {
-                    if (ok) void store().remove(page.id);
+                  void mayLeaveOpenDocument().then((ok) => {
+                    if (ok) store().select(null);
                   });
                 }}
-                title={t("docs.delete")}
-                aria-label={t("docs.delete")}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                title={t("docs.closeHint")}
+                aria-label={t("docs.close")}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
               >
-                <Trash2 size={12} />
+                <X size={14} />
               </button>
             </div>
 
-            <GenerationBar page={page} />
+            <GenerationBar page={page} body={body} />
 
             {page.status === "error" && page.last_error && (
               <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-danger)_7%,transparent)] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-danger)]">
@@ -635,13 +1213,15 @@ export function WikiView() {
                   </p>
                 </div>
               ) : (
-                <textarea
-                  value={page.content}
-                  onChange={(e) => void store().edit(page.id, e.target.value)}
+                <MarkdownEditor
+                  value={body}
+                  onChange={(next) => store().editDraft(next)}
                   placeholder={t("docs.contentPlaceholder")}
-                  aria-label={t("docs.contentPlaceholder")}
-                  spellCheck={false}
-                  className="h-full w-full resize-none rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] p-3 font-mono text-[12px] leading-relaxed text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
+                  ariaLabel={t("docs.contentPlaceholder")}
+                  // A run about to replace this text is not a text to type into — and the editor
+                  // reads its own lock as "show me what it says", which is what you want to watch.
+                  readOnly={Boolean(runId)}
+                  historyKey={page.id}
                 />
               )}
             </div>
@@ -656,7 +1236,7 @@ export function WikiView() {
             onChange={(value) => setSize("wikiPublishWidth", value)}
             onCommit={(value) => commitSize("wikiPublishWidth", value)}
           />
-          <PublishPanel page={page} width={publishWidth} />
+          <PublishPanel page={page} body={body} width={publishWidth} />
         </>
       )}
     </div>

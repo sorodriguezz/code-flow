@@ -28,7 +28,7 @@ export interface LinkPrSession {
   repoLabel: string;
   /** Offered as "clone it after all" from inside the session. */
   cloneUrl: string;
-  /** Whose review standard, contexts and MCP servers the review runs under. */
+  /** Whose review standard, contexts and skills the review runs under. */
   workspaceId: string;
 }
 

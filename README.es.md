@@ -11,7 +11,7 @@ encuentre errores y resuelva conflictos — todo en una app rápida y nativa. Y 
 termines, prueba el endpoint que acabas de cambiar y consulta la base de datos que hay
 detrás sin salir de la ventana. **Y decides qué modelo hace cada cosa.**
 
-![versión](https://img.shields.io/badge/versión-1.11.2-6C5CE7)
+![versión](https://img.shields.io/badge/versión-1.12.0-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-ES%20%7C%20EN-0984E3)
@@ -100,7 +100,7 @@ clics**, sin pasar por Ajustes.
 
 > 🔒 **¿Tu código no puede salir de la empresa?** Pon Ollama como proveedor y todo lo
 > anterior corre en tu máquina, sin conexión y sin coste por token.
-> *(Las funciones que editan archivos —corregir hallazgos, MCP— necesitan un motor con
+> *(Las funciones que editan archivos —corregir hallazgos— necesitan un motor con
 > herramientas, es decir uno de los cinco CLI; la app te lo indica y oculta lo que no
 > aplica.)*
 
@@ -183,7 +183,7 @@ La consulta que necesitas comprobar está a una pestaña de la migración que ac
 - Temas **claro, oscuro o del sistema**, con color de acento a elegir.
 - Interfaz en **español e inglés**.
 - **Plantillas de prompt** para commit, análisis, revisión, descripción de PR y conflictos.
-- Por espacio de trabajo: **contexto de revisión**, **instrucciones (.md)**, **Skills** y **servidores MCP**.
+- Por espacio de trabajo: **contexto de revisión**, **instrucciones (.md)** y **Skills**.
 - **Historial completo** de lo que ha hecho la IA — incluidos los fallos, para que mañana sepas qué pasó.
 
 ## ⚙️ Puesta en marcha

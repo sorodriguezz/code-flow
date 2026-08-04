@@ -9,7 +9,7 @@
 //!
 //! What it's good for: the one-shot text operations — commit messages, PR descriptions, pre-commit
 //! analysis, PR review, conflict resolution. What it can't do: agentic tool loops ("fix with AI")
-//! and MCP, because a plain completion model has no write tools — [`agentic`] returns false so the
+//! because a plain completion model has no write tools — [`agentic`] returns false so the
 //! UI hides those features rather than offering something that wouldn't work.
 
 use serde::Deserialize;
@@ -93,8 +93,9 @@ pub async fn complete(base_url: &str, inv: &AiInvocation<'_>) -> Result<AiRun, S
         }
     }
     let mut user = String::from(inv.prompt);
-    if !inv.stdin_content.trim().is_empty() {
+    if !inv.stdin_content.trim().is_empty() || !inv.skills_note.is_empty() {
         user.push_str("\n\n");
+        user.push_str(&inv.skills_note);
         user.push_str(inv.stdin_content);
     }
     messages.push(serde_json::json!({ "role": "user", "content": user }));

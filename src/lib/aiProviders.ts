@@ -12,9 +12,9 @@ export interface AiProviderOption {
   /** Default binary name shown in Settings when the user hasn't set a path — mirrors each
    * engine's `default_binary()` on the Rust side. For Ollama this is the HTTP endpoint. */
   defaultBinary?: string;
-  /** Whether this provider can run an agentic tool loop (edit/write files, MCP). A local
-   * completion model (Ollama) can't, so the "fix with AI" buttons, tool settings and MCP notes
-   * key off this. Absent → treated as `true` (every CLI engine is agentic). */
+  /** Whether this provider can run an agentic tool loop (edit/write files, read a skill). A local
+   * completion model (Ollama) can't, so the "fix with AI" buttons and tool settings key off this.
+   * Absent → treated as `true` (every CLI engine is agentic). */
   agentic?: boolean;
   /** Authenticates with an API key (stored in the OS keyring) rather than a CLI login, so Settings
    * shows a key field for it. */
@@ -108,7 +108,7 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     defaultBinary: "opencode",
     setup: { url: "https://opencode.ai/docs/" },
   },
-  // Local models via Ollama (HTTP, not a CLI). Non-agentic: no tool use / MCP, so those features
+  // Local models via Ollama (HTTP, not a CLI). Non-agentic: no tool use, so those features
   // are hidden when it's active. `defaultBinary` is the endpoint. See `ollama.rs`.
   {
     id: "ollama",

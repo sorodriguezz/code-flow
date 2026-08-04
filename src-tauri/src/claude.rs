@@ -17,6 +17,12 @@ const COMMIT_MESSAGE_MODEL: &str = "claude-haiku-4-5-20251001";
 pub struct ClaudeEngine;
 
 impl AiEngine for ClaudeEngine {
+    /// The only engine that does: it reads `<cwd>/.claude/skills` itself, so describing them in the
+    /// payload would be telling it something it already knows.
+    fn reads_claude_skills(&self) -> bool {
+        true
+    }
+
     fn label(&self) -> &'static str {
         "Claude Code"
     }
@@ -53,9 +59,6 @@ impl AiEngine for ClaudeEngine {
         }
         if inv.auto_approve_edits {
             cmd.arg("--permission-mode").arg("acceptEdits");
-        }
-        if let Some(path) = inv.mcp_config_path {
-            cmd.arg("--mcp-config").arg(path).arg("--strict-mcp-config");
         }
         if let Some(id) = inv.resume_session_id {
             cmd.arg("--resume").arg(id);

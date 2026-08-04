@@ -3,6 +3,7 @@ import {
   createDocPage,
   deleteDocPage,
   generateDocPage,
+  importWikiPage,
   listDocPages,
   publishDocPage,
   setDocPageContent,
@@ -45,6 +46,16 @@ interface DocsState {
   runId: string | null;
   publishing: boolean;
 
+  /**
+   * The open document's body as it is being typed, before it is saved. `null` when there is
+   * nothing unsaved, and the editor then shows what the row holds.
+   *
+   * Always about `selectedId` — closing a document or opening another drops it, so there is never
+   * a draft floating about that belongs to a page nobody is looking at.
+   */
+  draft: string | null;
+  saving: boolean;
+
   setWorkspace: (workspaceId: string | null) => Promise<void>;
   select: (id: string | null) => void;
   toggleProject: (projectId: string) => void;
@@ -52,8 +63,23 @@ interface DocsState {
   setUseContext: (useContext: boolean) => void;
 
   create: (scope: DocScope, title: string, projectId?: string) => Promise<void>;
+  /** Brings a page that already exists in the wiki in as a document, target included. Throws on a
+   *  path that does not resolve — the caller is a form and shows it in place. */
+  importFromWiki: (input: {
+    scope: DocScope;
+    projectId?: string;
+    org: string;
+    project: string;
+    wikiId: string;
+    wikiName: string;
+    path: string;
+    title?: string;
+  }) => Promise<void>;
   rename: (id: string, title: string) => Promise<void>;
-  edit: (id: string, content: string) => Promise<void>;
+  editDraft: (content: string) => void;
+  /** `silent` for the save that publishing does on the user's behalf — one "saved" toast in front
+   *  of the "published" one only reports plumbing. */
+  save: (options?: { silent?: boolean }) => Promise<void>;
   remove: (id: string) => Promise<void>;
   setTarget: (input: {
     id: string;
@@ -78,21 +104,27 @@ export const useDocsStore = create<DocsState>((set, get) => ({
   useContext: false,
   runId: null,
   publishing: false,
+  draft: null,
+  saving: false,
 
   setWorkspace: async (workspaceId) => {
     if (!workspaceId) {
-      set({ pages: [], selectedId: null });
+      set({ pages: [], selectedId: null, draft: null });
       return;
     }
     set({ loading: true });
     try {
       const pages = await listDocPages(workspaceId);
-      set((s) => ({
-        pages,
+      set((s) => {
         // A selection that survived a workspace switch would point at a document the new one
         // cannot show. Keeping it only when it is still in the list is the cheap correct rule.
-        selectedId: pages.some((p) => p.id === s.selectedId) ? s.selectedId : (pages[0]?.id ?? null),
-      }));
+        //
+        // Nothing is opened in its place: the screen with no document open is a real state — no
+        // publish panel, no editor — and auto-opening the newest page would mean the user could
+        // close a document and have it come back the next time this view was mounted.
+        const kept = pages.some((p) => p.id === s.selectedId);
+        return { pages, selectedId: kept ? s.selectedId : null, draft: kept ? s.draft : null };
+      });
     } catch (e: unknown) {
       pushErrorToast(String(e));
     } finally {
@@ -100,7 +132,9 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     }
   },
 
-  select: (id) => set({ selectedId: id }),
+  // Re-selecting the open document keeps its draft; anything else is leaving it behind, and the
+  // caller has already asked the user about unsaved work by the time this runs.
+  select: (id) => set((s) => (s.selectedId === id ? {} : { selectedId: id, draft: null })),
   setInstructions: (instructions) => set({ instructions }),
   setUseContext: (useContext) => set({ useContext }),
   toggleProject: (projectId) =>
@@ -115,10 +149,20 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     if (!workspaceId) return;
     try {
       const page = await createDocPage({ workspaceId, projectId, scope, title });
-      set((s) => ({ pages: [page, ...s.pages], selectedId: page.id }));
+      set((s) => ({ pages: [page, ...s.pages], selectedId: page.id, draft: null }));
     } catch (e: unknown) {
       pushErrorToast(String(e));
     }
+  },
+
+  importFromWiki: async (input) => {
+    const workspaceId = activeWorkspaceId();
+    if (!workspaceId) throw new Error(translate("docs.noWorkspace"));
+    // Not caught here on purpose: the failures worth reporting — a path that is not a page, a wiki
+    // the PAT cannot read — are answers to what the user just typed, and belong in the form that
+    // asked rather than in a toast that outlives it.
+    const page = await importWikiPage({ workspaceId, ...input });
+    set((s) => ({ pages: [page, ...s.pages], selectedId: page.id, draft: null }));
   },
 
   rename: async (id, title) => {
@@ -126,16 +170,43 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     await setDocPageTitle(id, title).catch((e: unknown) => pushErrorToast(String(e)));
   },
 
-  edit: async (id, content) => {
-    set((s) => ({ pages: s.pages.map((p) => (p.id === id ? { ...p, content, status: "ready" } : p)) }));
-    await setDocPageContent(id, content).catch((e: unknown) => pushErrorToast(String(e)));
+  // Typing is not saving. The body is what gets published, and what gets published is what the
+  // row holds — so an edit stays local until Save, and the screen can say which of the two the
+  // user is looking at.
+  editDraft: (content) => set({ draft: content }),
+
+  save: async (options) => {
+    const s = get();
+    const page = s.pages.find((p) => p.id === s.selectedId);
+    if (!page || s.draft === null || s.saving) return;
+    const content = s.draft;
+    if (content === page.content) {
+      set({ draft: null });
+      return;
+    }
+    set({ saving: true });
+    try {
+      await setDocPageContent(page.id, content);
+      set((state) => ({
+        pages: state.pages.map((p) => (p.id === page.id ? { ...p, content, status: "ready" } : p)),
+        // Only when the draft is still what was written: a keystroke that landed while the write
+        // was in flight is unsaved work, and clearing it here would show it as saved.
+        draft: state.draft === content ? null : state.draft,
+      }));
+      if (!options?.silent) useToastStore.getState().pushToast(translate("docs.saved"), "success");
+    } catch (e: unknown) {
+      pushErrorToast(String(e));
+    } finally {
+      set({ saving: false });
+    }
   },
 
   remove: async (id) => {
     await deleteDocPage(id).catch((e: unknown) => pushErrorToast(String(e)));
     set((s) => {
       const pages = s.pages.filter((p) => p.id !== id);
-      return { pages, selectedId: s.selectedId === id ? (pages[0]?.id ?? null) : s.selectedId };
+      const open = s.selectedId === id;
+      return { pages, selectedId: open ? null : s.selectedId, draft: open ? null : s.draft };
     });
   },
 
@@ -175,7 +246,9 @@ export const useDocsStore = create<DocsState>((set, get) => ({
 
     const runId = newRunId("docs");
     useAiRunStore.getState().start(runId);
-    set({ runId });
+    // The run replaces the body outright — the user was warned and said yes — so an unsaved draft
+    // of the text being replaced goes with it rather than reappearing over the new document.
+    set({ runId, draft: null });
     set((state) => ({
       pages: state.pages.map((p) => (p.id === page.id ? { ...p, status: "generating" } : p)),
     }));
@@ -223,9 +296,14 @@ export const useDocsStore = create<DocsState>((set, get) => ({
   },
 
   publish: async () => {
+    // What travels to the wiki is the stored body, read back in Rust from the row — so an unsaved
+    // draft has to land first, or the user watches their newest paragraph not arrive. A save that
+    // failed already said so; publishing the older text over it would be the wrong repair.
+    await get().save({ silent: true });
     const s = get();
     const page = s.pages.find((p) => p.id === s.selectedId);
     if (!page || s.publishing) return;
+    if (s.draft !== null && s.draft !== page.content) return;
     set({ publishing: true });
     try {
       const published = await publishDocPage(page.id);

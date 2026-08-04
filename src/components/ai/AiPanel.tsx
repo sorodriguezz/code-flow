@@ -1403,7 +1403,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
       <div
         className={`group relative rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
           message.role === "user"
-            ? "ml-auto max-w-[85%] whitespace-pre-wrap bg-[var(--cf-accent)] text-white"
+            ? "ml-auto max-w-[85%] whitespace-pre-wrap border border-[color-mix(in_oklab,var(--cf-accent)_30%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_14%,var(--cf-surface))] text-[var(--cf-text)]"
             : "mr-auto max-w-[85%] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] text-[var(--cf-text)]"
         }`}
       >
@@ -1566,7 +1566,7 @@ export function AiPanel() {
   const selectedPr = usePrStore((s) => s.selectedPr);
   const openLinkPr = usePrStore((s) => s.linkPr);
   // A link review is a review *of this workspace* — it runs under its review standard, contexts
-  // and MCP servers, and it's filed in its Activity. Moving to another workspace therefore takes
+  // and skills, and it's filed in its Activity. Moving to another workspace therefore takes
   // it off screen, exactly as it takes that workspace's Activity off screen. The session isn't
   // dropped, only hidden: coming back shows it again.
   const linkPr = openLinkPr?.workspaceId === activeWorkspaceId ? openLinkPr : null;
