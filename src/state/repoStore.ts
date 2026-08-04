@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import * as api from "../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "./toastStore";
+import { notify } from "./notificationStore";
 import { confirmAction, confirmFlow } from "./confirmStore";
 import { useLanguageStore } from "./languageStore";
 import { translations, type TranslationKey } from "../lib/i18n/translations";
@@ -88,17 +89,38 @@ interface RepoState {
   push: (setUpstream?: boolean) => Promise<void>;
 }
 
-async function guarded(set: (partial: Partial<RepoState>) => void, fn: () => Promise<void>) {
+/** Returns whether `fn` got through. Almost every caller ignores it — the toast and `error` are
+ * the report — but the remote operations need to know, because they also file a notification and
+ * "Push finished" on a failed push would be a lie. */
+async function guarded(
+  set: (partial: Partial<RepoState>) => void,
+  fn: () => Promise<void>,
+): Promise<boolean> {
   set({ busy: true, error: null });
   try {
     await fn();
+    return true;
   } catch (e) {
     const message = describeError(e);
     set({ error: message });
     pushErrorToast(message);
+    return false;
   } finally {
     set({ busy: false });
   }
+}
+
+/**
+ * "repo · branch" for a remote operation's notification line.
+ *
+ * Read *before* the operation runs, not after: an auto-fetch can finish long after the user has
+ * switched projects, and a notification that named the repository they happen to be looking at now
+ * would be pointing at the wrong one.
+ */
+function notificationDetail(state: Pick<RepoState, "repoPath" | "status">): string {
+  const repo = state.repoPath?.split(/[/\\]/).filter(Boolean).pop() ?? "";
+  const branch = state.status?.current_branch ?? "";
+  return [repo, branch].filter(Boolean).join(" · ");
 }
 
 /** Translates outside of React (this store isn't a component) using whatever language is
@@ -621,13 +643,18 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const { repoPath, remoteOp } = get();
     if (!repoPath || remoteOp) return;
     set({ remoteOp: "fetch" });
+    // Captured before the work: a fetch is the one remote op that also runs on a timer, so by the
+    // time it lands the user may well be looking at a different repository than the one it was for.
+    const where = notificationDetail(get());
     try {
       await api.gitFetch(repoPath);
       await get().refreshBranches();
+      notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail: where });
     } catch (e) {
       const message = String(e);
       set({ error: message });
       pushErrorToast(message);
+      notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail: where });
     } finally {
       set({ remoteOp: null });
     }
@@ -637,10 +664,17 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const { repoPath, remoteOp } = get();
     if (!repoPath || remoteOp) return;
     set({ remoteOp: "pull" });
+    const where = notificationDetail(get());
     try {
-      await guarded(set, async () => {
+      const ok = await guarded(set, async () => {
         await api.gitPull(repoPath);
         await get().refreshAll();
+      });
+      notify({
+        source: "git",
+        titleKey: ok ? "notifications.gitPulled" : "notifications.gitPullFailed",
+        status: ok ? "success" : "error",
+        detail: where,
       });
     } finally {
       set({ remoteOp: null });
@@ -651,10 +685,25 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const { repoPath, remoteOp } = get();
     if (!repoPath || remoteOp) return;
     set({ remoteOp: "push" });
+    const where = notificationDetail(get());
     try {
-      await guarded(set, async () => {
+      const ok = await guarded(set, async () => {
         await api.gitPush(repoPath, setUpstream);
         await Promise.all([get().refreshBranches(), get().refreshUnpushedCommits()]);
+      });
+      // Publishing a branch and pushing to one it already tracks are different enough events that
+      // the notification names them differently — the first created something upstream.
+      notify({
+        source: "git",
+        titleKey: setUpstream
+          ? ok
+            ? "notifications.gitPublished"
+            : "notifications.gitPublishFailed"
+          : ok
+            ? "notifications.gitPushed"
+            : "notifications.gitPushFailed",
+        status: ok ? "success" : "error",
+        detail: where,
       });
     } finally {
       set({ remoteOp: null });

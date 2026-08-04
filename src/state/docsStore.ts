@@ -14,6 +14,7 @@ import { parseClaudeError } from "../lib/claudeError";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
+import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type { DocPage, DocScope } from "../types/domain";
 
@@ -279,8 +280,23 @@ export const useDocsStore = create<DocsState>((set, get) => ({
         ),
       }));
       useToastStore.getState().pushToast(translate("docs.generated"), "success");
+      notify({
+        source: "docs",
+        titleKey: "notifications.docsGenerated",
+        status: "success",
+        detail: page.title,
+      });
     } catch (e: unknown) {
-      if (!isCancellation(e)) pushErrorToast(parseClaudeError(String(e)).message);
+      // A stopped run is not news — see the same guard in `storiesStore`.
+      if (!isCancellation(e)) {
+        pushErrorToast(parseClaudeError(String(e)).message);
+        notify({
+          source: "docs",
+          titleKey: "notifications.docsGenerateFailed",
+          status: "error",
+          detail: page.title,
+        });
+      }
       // The row's own status was already written by the backend; re-reading it is what keeps a
       // failed run's error message on screen instead of a stale "generating".
       await get().setWorkspace(workspaceId);

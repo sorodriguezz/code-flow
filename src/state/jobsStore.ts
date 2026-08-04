@@ -12,6 +12,7 @@ import { isWorkspaceBucket, workspaceIdFromBucket } from "../lib/prTarget";
 import type { JobHistoryEntry, WorkspaceActivityEntry } from "../types/domain";
 import { useLanguageStore } from "./languageStore";
 import { isCancellation, useAiRunStore } from "./aiRunStore";
+import { notify } from "./notificationStore";
 import { translations } from "../lib/i18n/translations";
 
 /** `pr-action` is the odd one out: it isn't something that *ran*, it's a decision that was taken
@@ -148,6 +149,30 @@ function toJob(projectId: string, row: ActivityRow): Job {
   };
 }
 
+/**
+ * Files a finished job in the notification centre.
+ *
+ * `pr-action` is skipped: it is a decision the user just made (approve, close), not work that ran
+ * while they were elsewhere, and it settles in the same instant they click. Telling them it
+ * happened would be telling them what they did.
+ */
+function notifyJobSettled(kind: JobKind, label: string, ok: boolean): void {
+  if (kind === "pr-action") return;
+  const analyzing = kind === "analyze-changes";
+  notify({
+    source: analyzing ? "changes" : "review",
+    titleKey: analyzing
+      ? ok
+        ? "notifications.analyzeDone"
+        : "notifications.analyzeFailed"
+      : ok
+        ? "notifications.reviewDone"
+        : "notifications.reviewFailed",
+    status: ok ? "success" : "error",
+    detail: label,
+  });
+}
+
 export const useJobsStore = create<JobsState>((set, get) => ({
   byProject: {},
   loaded: {},
@@ -184,14 +209,19 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     useAiRunStore.getState().start(id);
 
     void task(id)
-      .then((result) => settle({ status: "done", result, finishedAt: Date.now() }))
-      .catch((e) =>
+      .then((result) => {
+        settle({ status: "done", result, finishedAt: Date.now() });
+        notifyJobSettled(kind, label, true);
+      })
+      .catch((e) => {
+        const cancelled = isCancellation(e);
         settle(
-          isCancellation(e)
+          cancelled
             ? { status: "cancelled", finishedAt: Date.now() }
             : { status: "error", error: parseClaudeError(String(e)), finishedAt: Date.now() },
-        ),
-      )
+        );
+        if (!cancelled) notifyJobSettled(kind, label, false);
+      })
       .finally(() => useAiRunStore.getState().finish(id));
 
     return id;

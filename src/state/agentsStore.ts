@@ -23,6 +23,7 @@ import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { parseTrace, type ChatMessage } from "./chatStore";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
+import { notify } from "./notificationStore";
 import type { AgentProject, AgentTask, AgentTaskStatus, WorkspaceAgent } from "../types/domain";
 
 /** The repository name the backend put after its busy marker, for the "not now" message. */
@@ -490,6 +491,14 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
           model: reply.model,
           createdAt: reply.created_at,
         });
+        // The reason this whole panel exists: an agent turn is the longest-running thing the app
+        // does, and the user is usually somewhere else by the time it lands.
+        notify({
+          source: "agents",
+          titleKey: "notifications.agentDone",
+          status: "success",
+          detail: task.title,
+        });
       })
       .catch((e: unknown) => {
         const cancelled = isCancellation(e);
@@ -555,6 +564,15 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
         opts?.onSettle?.(
           cancelled ? { kind: "cancelled" } : { kind: "error", message: String(e), busy: false },
         );
+        // Same rule as everywhere else: a stopped turn is the user's own doing, not news.
+        if (!cancelled) {
+          notify({
+            source: "agents",
+            titleKey: "notifications.agentFailed",
+            status: "error",
+            detail: task.title,
+          });
+        }
       })
       .finally(() => {
         useAiRunStore.getState().finish(runId);

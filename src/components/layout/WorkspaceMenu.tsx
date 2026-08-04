@@ -16,7 +16,6 @@ import {
   ChevronDown,
   ClipboardList,
   Database,
-  Info,
   Layers,
   Send,
   type LucideIcon,
@@ -140,7 +139,7 @@ const ROW_VARIANTS: Variants = {
  * you discover when the API tab "fails" to change.
  *
  * Rows are cards (tile, name, description, status slot) so the list still reads as a set of tools
- * at six entries; the footer spells out the scope once, for the first-time user.
+ * at six entries; the scope itself is spelled out in the trigger's tooltip.
  */
 export function WorkspaceMenu() {
   const activeView = useUiStore((s) => s.activeView);
@@ -167,9 +166,9 @@ export function WorkspaceMenu() {
     TOOLS.find(
       (tool) => tool.id === activeView && (tool.workspace ?? apiWorkspace) === apiWorkspace,
     ) ?? null;
-  // The one sentence that explains the scope. It is the trigger's `title` and the panel's footer;
-  // the `aria-label` stays just the control's name, since gluing the two together would put
-  // separator punctuation outside i18n.
+  // The one sentence that explains the scope, carried by the trigger's `title`. The `aria-label`
+  // stays just the control's name, since gluing the two together would put separator punctuation
+  // outside i18n.
   const scopeHint = workspace
     ? t("tabbar.scopeWorkspaceHint", { name: workspace.name })
     : t("tabbar.scopeWorkspaceNone");
@@ -480,10 +479,6 @@ export function WorkspaceMenu() {
                 )}
               </div>
 
-              <div className="flex shrink-0 items-start gap-2 border-t border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 py-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                <Info size={12} className="mt-[2px] shrink-0" />
-                <span>{scopeHint}</span>
-              </div>
             </motion.div>
           )}
         </AnimatePresence>,

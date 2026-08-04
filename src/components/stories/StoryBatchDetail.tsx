@@ -17,6 +17,7 @@ import {
 import { OpenQuestionsModal } from "./OpenQuestionsModal";
 import { StoryCard } from "./StoryCard";
 import { SOURCE_KIND } from "./storyStatus";
+import { AiRunLog } from "../ai/AiRunLog";
 import { CARD } from "../api/panelChrome";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
@@ -46,11 +47,16 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
   const batch = useStoriesStore((s) => s.batches.find((b) => b.id === batchId) ?? null);
   const stories = useStoriesStore((s) => s.storiesByBatch[batchId]);
   const selection = useStoriesStore((s) => s.selectionByBatch[batchId]);
-  const generating = useStoriesStore((s) => s.runByBatch[batchId] !== undefined);
-  const verifying = useStoriesStore((s) => s.verifyRunByBatch[batchId] !== undefined);
+  const runId = useStoriesStore((s) => s.runByBatch[batchId]);
+  const verifyRunId = useStoriesStore((s) => s.verifyRunByBatch[batchId]);
+  const runStartedAt = useStoriesStore((s) => s.runStartedAt);
+  const generating = runId !== undefined;
+  const verifying = verifyRunId !== undefined;
   const publishing = useStoriesStore((s) => s.publishingBatchId === batchId);
   const [showSource, setShowSource] = useState(false);
   const [answering, setAnswering] = useState(false);
+  const [runLogOpen, setRunLogOpen] = useState(false);
+  const [verifyLogOpen, setVerifyLogOpen] = useState(false);
 
   const openQuestions = useMemo(
     () => (batch ? parseOpenQuestions(batch.open_questions) : []),
@@ -187,6 +193,40 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
         )}
       </header>
 
+      {/* What the run is actually doing, while it does it. The header's orb says *that* something is
+          happening and nothing more — which is enough on a first generation, where the empty list
+          below is already an explanation, but not on a regeneration: there the stories stay on
+          screen unchanged, so a spinning glyph in the corner is the only difference between "the
+          model is rewriting these" and "nothing happened". This card is the same one the AI panel
+          uses, so the answer to "which engine and model" comes from the run's own announcement
+          rather than from Settings — per-task routing means those two can differ. */}
+      {(generating || verifying) && (
+        <div className="shrink-0 space-y-1.5 border-b border-[var(--cf-border)] px-3 py-2">
+          {generating && (
+            <AiRunLog
+              runId={runId}
+              running
+              startedAt={runId ? (runStartedAt[runId] ?? null) : null}
+              label={t(list.length === 0 ? "stories.generatingTitle" : "stories.regeneratingTitle")}
+              expanded={runLogOpen}
+              onToggle={() => setRunLogOpen((open) => !open)}
+            />
+          )}
+          {/* Verification is its own run, so it gets its own card rather than sharing one — the two
+              can be in flight together and a single card would have to pick a winner. */}
+          {verifying && (
+            <AiRunLog
+              runId={verifyRunId}
+              running
+              startedAt={verifyRunId ? (runStartedAt[verifyRunId] ?? null) : null}
+              label={t("stories.verifyingTitle")}
+              expanded={verifyLogOpen}
+              onToggle={() => setVerifyLogOpen((open) => !open)}
+            />
+          )}
+        </div>
+      )}
+
       {list.length > 0 && (
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5">
           <label className="flex cursor-pointer items-center gap-2 text-[11px] text-[var(--cf-text-muted)]">
@@ -262,23 +302,26 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
           </section>
         )}
 
-        {list.length === 0 ? (
+        {/* Nothing here while a generation runs: the run card above is already saying what is
+            happening, with the model and the elapsed time behind it. This used to carry its own
+            centred "Writing the stories…", which put the same sentence on screen twice. */}
+        {list.length === 0 && generating ? null : list.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2">
             <EmptyState
               icon={Sparkles}
-              title={t(generating ? "stories.generatingTitle" : "stories.noStories")}
-              subtitle={t(generating ? "stories.generatingHint" : "stories.noStoriesHint")}
+              title={t("stories.noStories")}
+              subtitle={t("stories.noStoriesHint")}
             />
-            {!generating && (
-              <button
-                type="button"
-                onClick={generate}
-                className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-              >
-                <Sparkles size={13} />
-                {t("stories.generate")}
-              </button>
-            )}
+            {/* Unconditional now: this branch is only reached when the list is empty *and* nothing
+                is generating — the generating case returned null above. */}
+            <button
+              type="button"
+              onClick={generate}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+            >
+              <Sparkles size={13} />
+              {t("stories.generate")}
+            </button>
           </div>
         ) : (
           <div className="space-y-2">

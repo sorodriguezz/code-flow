@@ -22,6 +22,7 @@ import { featureFileName, parseCriteria, toFeatureFile } from "../lib/gherkin";
 import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
+import { notify } from "./notificationStore";
 import type {
   CriterionVerdict,
   QuestionAnswer,
@@ -155,6 +156,11 @@ interface StoriesState {
    * are genuinely independent runs with their own buttons: they touch different things (one reads
    * documentation, the other a working copy) and neither has any reason to block the other. */
   verifyRunByBatch: Record<string, string>;
+  /** When each run in flight began, keyed by run id rather than by batch so a generation and a
+   * verification of the same batch don't overwrite each other. Runs outlive the view that started
+   * them — see `setWorkspace` — so without this the elapsed time restarted from zero every time the
+   * batch was reopened, which reads as a stalled run rather than a long one. */
+  runStartedAt: Record<string, number>;
   publishingBatchId: string | null;
   selectedId: string | null;
   query: string;
@@ -222,6 +228,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
   selectionByBatch: {},
   runByBatch: {},
   verifyRunByBatch: {},
+  runStartedAt: {},
   publishingBatchId: null,
   selectedId: null,
   query: "",
@@ -239,6 +246,7 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
       selectionByBatch: {},
       runByBatch: s.runByBatch,
       verifyRunByBatch: s.verifyRunByBatch,
+      runStartedAt: s.runStartedAt,
       selectedId: null,
       query: "",
       loading: id !== null,
@@ -357,10 +365,13 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     useAiRunStore.getState().start(runId);
     set((s) => ({
       runByBatch: { ...s.runByBatch, [batchId]: runId },
+      runStartedAt: { ...s.runStartedAt, [runId]: Date.now() },
       batches: s.batches.map((b) =>
         b.id === batchId ? { ...b, status: "generating" as const, last_error: "" } : b,
       ),
     }));
+
+    const where = get().batches.find((b) => b.id === batchId)?.title ?? "";
 
     try {
       const detail = await generateStories(batchId, runId, agent);
@@ -369,8 +380,25 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
         storiesByBatch: { ...s.storiesByBatch, [batchId]: detail.stories },
         selectionByBatch: { ...s.selectionByBatch, [batchId]: publishableIds(detail.stories) },
       }));
+      notify({
+        source: "stories",
+        titleKey: "notifications.storiesGenerated",
+        params: { n: detail.stories.length },
+        status: "success",
+        detail: where,
+      });
     } catch (e: unknown) {
       const cancelled = isCancellation(e);
+      // A run the user stopped is not news — they were there, they stopped it. Only a genuine
+      // failure is worth finding in the panel afterwards.
+      if (!cancelled) {
+        notify({
+          source: "stories",
+          titleKey: "notifications.storiesGenerateFailed",
+          status: "error",
+          detail: where,
+        });
+      }
       set((s) => ({
         batches: s.batches.map((b) =>
           b.id === batchId
@@ -389,7 +417,8 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
       useAiRunStore.getState().finish(runId);
       set((s) => {
         const { [batchId]: _done, ...runByBatch } = s.runByBatch;
-        return { runByBatch };
+        const { [runId]: _started, ...runStartedAt } = s.runStartedAt;
+        return { runByBatch, runStartedAt };
       });
     }
   },
@@ -447,7 +476,12 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     if (get().verifyRunByBatch[batchId]) return;
     const runId = newRunId("story-verify");
     useAiRunStore.getState().start(runId);
-    set((s) => ({ verifyRunByBatch: { ...s.verifyRunByBatch, [batchId]: runId } }));
+    set((s) => ({
+      verifyRunByBatch: { ...s.verifyRunByBatch, [batchId]: runId },
+      runStartedAt: { ...s.runStartedAt, [runId]: Date.now() },
+    }));
+
+    const where = get().batches.find((b) => b.id === batchId)?.title ?? "";
 
     try {
       const detail = await verifyStories(batchId, runId, storyIds);
@@ -455,13 +489,28 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
         batches: s.batches.map((b) => (b.id === batchId ? detail.batch : b)),
         storiesByBatch: { ...s.storiesByBatch, [batchId]: detail.stories },
       }));
+      notify({
+        source: "stories",
+        titleKey: "notifications.storiesVerified",
+        status: "success",
+        detail: where,
+      });
     } catch (e: unknown) {
-      if (!isCancellation(e)) pushErrorToast(String(e));
+      if (!isCancellation(e)) {
+        pushErrorToast(String(e));
+        notify({
+          source: "stories",
+          titleKey: "notifications.storiesVerifyFailed",
+          status: "error",
+          detail: where,
+        });
+      }
     } finally {
       useAiRunStore.getState().finish(runId);
       set((s) => {
         const { [batchId]: _done, ...verifyRunByBatch } = s.verifyRunByBatch;
-        return { verifyRunByBatch };
+        const { [runId]: _started, ...runStartedAt } = s.runStartedAt;
+        return { verifyRunByBatch, runStartedAt };
       });
     }
   },

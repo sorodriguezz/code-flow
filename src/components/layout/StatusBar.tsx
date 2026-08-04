@@ -1,4 +1,5 @@
 import { ArrowDown, ArrowUp, ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, Lock, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
+import { NotificationBell } from "./NotificationBell";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
@@ -67,6 +68,11 @@ export function StatusBar() {
         {terminalButton}
         {aiPanelButton}
         <span>{t("statusbar.openProject")}</span>
+        {/* Also here, with no project open: agent runs, generations and API work are scoped to the
+            workspace, not to a repository, so they can finish while this bar is in its empty state. */}
+        <div className="ml-auto flex items-center">
+          <NotificationBell />
+        </div>
       </footer>
     );
   }
@@ -197,6 +203,8 @@ export function StatusBar() {
             </button>
           </>
         )}
+
+        <NotificationBell />
       </div>
     </footer>
   );
