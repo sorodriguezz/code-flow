@@ -39,12 +39,20 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { loadAdoConnections } from "../../lib/adoConnections";
 import {
   adoListProjects,
+  adoListWikiPages,
   adoListWikis,
   adoWikiPageDetail,
   openExternalUrl,
 } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
-import type { AdoProject, AdoWiki, AdoWikiPageDetail, DocPage, DocScope } from "../../types/domain";
+import type {
+  AdoProject,
+  AdoWiki,
+  AdoWikiPage,
+  AdoWikiPageDetail,
+  DocPage,
+  DocScope,
+} from "../../types/domain";
 
 const FIELD =
   "w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]";
@@ -108,6 +116,28 @@ function decode(text: string): string {
  * come back as they were written and the field stays editable. Pages without spaces in their names
  * — the ordinary case — land exactly right.
  */
+/**
+ * The key two wiki paths are *the same page* under.
+ *
+ * Everything above is why this exists: the address bar spells a space `-`, the REST API wants the
+ * space, and neither spelling can be turned into the other without guessing. So nothing is
+ * rewritten — this key only decides whether a page the wiki *itself just listed* is the one that
+ * was asked for, and the real path is then taken from that listing rather than invented here.
+ *
+ * Accents are composed because a path copied on macOS arrives decomposed (`e` + U+0301) where the
+ * wiki holds it composed: the same word to everyone except a byte comparison, and a second way for
+ * this field to 404 on a path that looks right on screen.
+ */
+function wikiPathKey(path: string): string {
+  return path
+    .normalize("NFC")
+    .replace(/-/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\/+$/, "")
+    .toLocaleLowerCase();
+}
+
 function wikiPathFrom(input: string): string {
   const raw = input.trim();
   if (!raw) return "";
@@ -272,6 +302,66 @@ function useWikiPageDetail(org: string, project: string, wiki: string, path: str
   return { detail, loading, error };
 }
 
+/**
+ * The pages of the chosen wiki that are plausibly the one asked for, once the exact path has
+ * already failed.
+ *
+ * The commonest way to fill that field is to paste the address bar, and the address bar is not
+ * quite a path: Azure writes a space as `-` there, so the page *Documentación técnica* is asked for
+ * as `/Documentación-técnica` and comes back 404 — naming the path, which reads as "this page does
+ * not exist" rather than "that dash is a space". Rather than guess which dashes were spaces, the
+ * wiki is asked for its own page list and the typed path matched against it: everything offered is
+ * a path the host spelled itself, so clicking one cannot miss.
+ *
+ * Only fetched after a failure and once per wiki — a wiki with hundreds of pages should not be
+ * downloaded on the way to a path that was right the first time.
+ */
+function useWikiPathCandidates(
+  org: string,
+  project: string,
+  wiki: string,
+  path: string,
+  enabled: boolean,
+): string[] {
+  const [listing, setListing] = useState<{ key: string; pages: AdoWikiPage[] }>({ key: "", pages: [] });
+  const wikiKey = `${org} ${project} ${wiki}`;
+
+  useEffect(() => {
+    if (!enabled || !org || !project || !wiki || listing.key === wikiKey) return;
+    let cancelled = false;
+    // Best effort by contract: the 404 is already on screen and is the real answer. A listing that
+    // cannot be read just means no suggestions, never a second error on top of the first.
+    void adoListWikiPages(org, project, wiki)
+      .then((pages) => {
+        if (!cancelled) setListing({ key: wikiKey, pages });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled, org, project, wiki, wikiKey, listing.key]);
+
+  return useMemo(() => {
+    if (!enabled || listing.key !== wikiKey) return [];
+    const want = wikiPathKey(path);
+    if (want.length < 2) return [];
+
+    const matches = (candidate: string) => wikiPathKey(candidate) === want;
+    const exact = listing.pages.filter((p) => matches(p.path) && p.path !== path);
+    if (exact.length > 0) return exact.map((p) => p.path);
+
+    // Nothing matched whole, so fall back to the last segment: somebody who typed the page's name
+    // rather than pasting its URL has the leaf right and the folders missing, which is the other
+    // half of the paths this field rejects.
+    const leaf = want.slice(want.lastIndexOf("/") + 1);
+    if (!leaf) return [];
+    return listing.pages
+      .filter((p) => p.path !== path && wikiPathKey(p.path).endsWith(`/${leaf}`))
+      .map((p) => p.path)
+      .slice(0, 5);
+  }, [enabled, listing, wikiKey, path]);
+}
+
 /** A tinted square, the same shape the review screen uses for its section headings. */
 function IconChip({ icon: Icon }: { icon: typeof BookText }) {
   return (
@@ -432,6 +522,7 @@ function ImportWikiModal({ onClose }: { onClose: () => void }) {
   const { orgs, projects, wikis } = useWikiTargets(org, project);
   const wikiName = wikis.find((w) => w.id === wikiId)?.name ?? "";
   const { detail, loading, error } = useWikiPageDetail(org, project, wikiId, path);
+  const candidates = useWikiPathCandidates(org, project, wikiId, path, Boolean(error));
 
   // One organisation is the common case, and making somebody choose from a list of one is a step
   // that only exists to be got through.
@@ -551,10 +642,31 @@ function ImportWikiModal({ onClose }: { onClose: () => void }) {
             </label>
 
             {error ? (
-              <p className="flex items-start gap-1.5 rounded-md border border-[color-mix(in_oklab,var(--cf-danger)_35%,transparent)] px-2 py-1.5 text-[11px] leading-snug text-[var(--cf-danger)]">
-                <CircleAlert size={11} className="mt-[2px] shrink-0" />
-                <span className="min-w-0 break-words">{error}</span>
-              </p>
+              <div className="space-y-1.5">
+                <p className="flex items-start gap-1.5 rounded-md border border-[color-mix(in_oklab,var(--cf-danger)_35%,transparent)] px-2 py-1.5 text-[11px] leading-snug text-[var(--cf-danger)]">
+                  <CircleAlert size={11} className="mt-[2px] shrink-0" />
+                  <span className="min-w-0 break-words">{error}</span>
+                </p>
+                {/* The path the wiki itself spells, one click away — see `useWikiPathCandidates`
+                    for why a 404 here is usually a dash that was meant to be a space. */}
+                {candidates.length > 0 && (
+                  <div className="space-y-1">
+                    <p className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+                      {t("docs.importDidYouMean")}
+                    </p>
+                    {candidates.map((candidate) => (
+                      <button
+                        key={candidate}
+                        onClick={() => setPath(candidate)}
+                        title={candidate}
+                        className="block w-full truncate rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2 py-1 text-left font-mono text-[11px] text-[var(--cf-accent)] transition-colors hover:border-[var(--cf-accent)]"
+                      >
+                        {candidate}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
             ) : (
               <WikiPageFacts detail={detail} loading={loading} />
             )}

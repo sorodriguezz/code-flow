@@ -2208,6 +2208,8 @@ export const translations = {
     "docs.importing": "Reading the page…",
     "docs.importPathHint":
       "Wiki-absolute, starting with «/» — or paste the page's URL and the path is taken out of it.",
+    "docs.importDidYouMean":
+      "Did you mean one of these? Azure's page URLs spell a space as «-», so a path pasted from the address bar often needs the space back.",
     "docs.importAbout": "Which repository is it about?",
     "docs.importAboutHint":
       "Only decides what a later regeneration reads. Leave it blank and it stays a workspace document, which reads whichever repositories you tick.",
@@ -5334,6 +5336,8 @@ export const translations = {
     "docs.importing": "Leyendo la p\u00e1gina\u2026",
     "docs.importPathHint":
       "Absoluta en la wiki, empezando por \u00ab/\u00bb \u2014 o pega la URL de la p\u00e1gina y se saca la ruta de ah\u00ed.",
+    "docs.importDidYouMean":
+      "\u00bfQuisiste decir alguna de estas? En la URL de Azure un espacio se escribe \u00ab-\u00bb, as\u00ed que una ruta copiada de la barra de direcciones suele necesitar el espacio de vuelta.",
     "docs.importAbout": "\u00bfDe qu\u00e9 repositorio habla?",
     "docs.importAboutHint":
       "Solo decide qu\u00e9 lee una regeneraci\u00f3n posterior. Si lo dejas vac\u00edo queda como documento de workspace, que lee los repositorios que marques.",
