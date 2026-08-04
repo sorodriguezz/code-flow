@@ -1422,6 +1422,10 @@ export const adoUpdateWorkItem = (input: {
   description?: string;
   reproSteps?: string;
   acceptanceCriteria?: string[];
+  /** Whether `description`/`reproSteps` are already HTML. The review screen edits them as Markdown
+   *  and renders them here, where the parser is; without this the backend escapes the marks and the
+   *  board shows a paragraph starting with two hash characters. */
+  proseIsHtml?: boolean;
 }) => invoke<AdoWorkItemRef>("ado_update_work_item", input);
 
 /** Creates the accepted tasks as children of the story, in order, stopping at the first failure. */

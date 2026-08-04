@@ -16,53 +16,58 @@ import {
   FolderGit2,
   Gauge,
   History,
-  Info,
-  Link2,
+  Layers,
   ListChecks,
+  Lock,
+  Pencil,
   Play,
   Plug,
   Plus,
   ScanSearch,
-  ShieldCheck,
+  Send,
   Sparkles,
   Square,
+  Tag,
   Timer,
   Trash2,
-  TriangleAlert,
   UploadCloud,
   User,
   Wrench,
+  X,
 } from "lucide-react";
+import { ApiModal } from "../api/ApiModal";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
+import { MarkdownEditor } from "../common/MarkdownEditor";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { confirmAction } from "../../state/confirmStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import {
-  REVIEW_STEPS,
-  STAGE_OF_STEP,
+  REVIEW_TABS,
+  STAGE_OF_TAB,
+  criterionText,
+  draftIsEmpty,
   effortLabel,
+  isRewrite,
   kindOf,
   useWorkItemReviewStore,
-  type PublishStep,
-  type ReviewStep,
+  type CriterionProposal,
+  type PublishPart,
+  type ReviewTab,
+  type TaskProposal,
 } from "../../state/workItemReviewStore";
 import { useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
+import { useAiProviderStore } from "../../state/aiProviderStore";
+import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
 import { useUiStore } from "../../state/uiStore";
 import { loadAdoConnections } from "../../lib/adoConnections";
 import { htmlToText } from "../../lib/workItemHtml";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
-import type {
-  AdoWorkItemChild,
-  ProposedTask,
-  ReviewFinding,
-  StorySection,
-  WorkItemReviewStage,
-} from "../../types/domain";
+import type { AdoWorkItemChild, CriterionFormat, WorkItemReviewStage } from "../../types/domain";
 
 /**
  * Deliberately carries no width. A `w-full` baked in here loses to — or beats, depending on which
@@ -73,37 +78,6 @@ const FIELD =
   "rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]";
 /** The common case, spelled once: a field that owns its row. */
 const FIELD_FULL = `${FIELD} w-full`;
-
-/** Severity as a shape on the card's edge, not only as a coloured word too small to compare.
- * The hover repeat is load-bearing: `CARD_MOTION`'s hover tint is the `border-color` shorthand,
- * which at hover specificity resets this longhand too — without the repeat, pointing at a card
- * is exactly when its severity colour would fade out. */
-const SEVERITY_RAIL: Record<ReviewFinding["severity"], string> = {
-  alta: "border-l-[var(--cf-danger)] hover:border-l-[var(--cf-danger)]",
-  media: "border-l-[var(--cf-warning)] hover:border-l-[var(--cf-warning)]",
-  baja: "border-l-[var(--cf-border)] hover:border-l-[var(--cf-border)]",
-};
-const SEVERITY_TEXT: Record<ReviewFinding["severity"], string> = {
-  alta: "text-[var(--cf-danger)]",
-  media: "text-[var(--cf-warning)]",
-  baja: "text-[var(--cf-text-muted)]",
-};
-const SEVERITY_ICON = { alta: TriangleAlert, media: CircleAlert, baja: Info } as const;
-
-/** Six cells of one size, so the row reads as a gauge rather than as six words. */
-const INVEST_CELL = {
-  ok: "border-[var(--cf-border)] text-[var(--cf-success)]",
-  weak: "border-[color-mix(in_oklab,var(--cf-warning)_50%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] text-[var(--cf-warning)]",
-  missing:
-    "border-[color-mix(in_oklab,var(--cf-danger)_50%,transparent)] bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] text-[var(--cf-danger)]",
-} as const;
-
-/** The same severity, as a wash over the whole card — faint enough to rank, not to shout. */
-const SEVERITY_CARD: Record<ReviewFinding["severity"], string> = {
-  alta: "bg-[color-mix(in_oklab,var(--cf-danger)_4%,var(--cf-surface))]",
-  media: "bg-[color-mix(in_oklab,var(--cf-warning)_4%,var(--cf-surface))]",
-  baja: "bg-[var(--cf-surface)]",
-};
 
 /**
  * Every proposal card moves the same way: rises in when it arrives, lifts a shadow under the
@@ -118,24 +92,23 @@ function riseDelay(at: number): React.CSSProperties {
 }
 
 /**
- * The two outer columns' widths, read from a custom property the board sets rather than from an
- * inline style of their own.
+ * The left column's width, read from a custom property the board sets rather than from an inline
+ * style of its own.
  *
- * The board is three columns side by side only from `lg` up — below that it stacks, and a stacked
- * column wants the full width. An inline `style={{ width }}` cannot be told about a breakpoint, so
- * the number travels as a variable and the breakpoint stays where every other one in this file is:
- * in the class list.
+ * The panes are side by side only from `lg` up — below that they stack, and a stacked column wants
+ * the full width. An inline `style={{ width }}` cannot be told about a breakpoint, so the number
+ * travels as a variable and the breakpoint stays where every other one in this file is: in the
+ * class list.
  */
 const SOURCE_WIDTH = "w-full shrink-0 lg:w-[var(--cf-hu-source-w)]";
-const PUBLISH_WIDTH = "w-full shrink-0 lg:w-[var(--cf-hu-publish-w)]";
+const SOURCE_MIN = 280;
+const SOURCE_MAX = 720;
 
-/** What the two seams may drag between. The floors are the point at which each column's own
- * content — a work-item field on the left, a confirm button and its warning on the right — starts
- * wrapping into something unreadable. */
-const SOURCE_MIN = 260;
-const SOURCE_MAX = 560;
-const PUBLISH_MIN = 240;
-const PUBLISH_MAX = 520;
+const PRIMARY_ACTION =
+  "flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-0.5 text-[11px] font-medium text-[var(--cf-accent)] transition-colors hover:border-[var(--cf-accent)] disabled:cursor-not-allowed disabled:opacity-40";
+
+const ICON_ACTION =
+  "flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]";
 
 /**
  * How a child task's state is coloured. Azure states are free strings per process template — and
@@ -188,28 +161,6 @@ function RepoChip({ repo }: { repo: string }) {
 }
 
 /**
- * Moves something into the publish column.
- *
- * Deliberately quiet — a link, not a button. Staging is not the commitment; it is the step *before*
- * the commitment, and dressing it as a primary action would put the same visual weight on "I might
- * send this" as the publish button puts on "send it".
- */
-function StageButton({ onStage }: { onStage: () => void }) {
-  const t = useT();
-  return (
-    <button
-      type="button"
-      onClick={onStage}
-      title={t("huReview.stageHint")}
-      className="flex items-center gap-1 text-[11px] text-[var(--cf-accent)] hover:underline"
-    >
-      <UploadCloud size={11} />
-      {t("huReview.stage")}
-    </button>
-  );
-}
-
-/**
  * Gherkin as something you can read at a glance rather than parse.
  *
  * Only the keyword is coloured, and only at the start of a line. Highlighting the whole line would
@@ -233,7 +184,7 @@ function GherkinText({ text }: { text: string }) {
                 {line.slice(match[0].length)}
               </>
             ) : (
-              line || " "
+              line || " "
             )}
           </span>
         );
@@ -243,209 +194,400 @@ function GherkinText({ text }: { text: string }) {
 }
 
 /**
- * Text that reads as text until you want to change it.
+ * Which shape a criterion off the board is in, since Azure does not record it.
  *
- * The story used to live in textareas that were always open, which is what made the left column a
- * stack of grey boxes: a border, a scrollbar and a fixed height per field, whether or not anybody
- * was editing. Reading is what this column is for ninety per cent of the time, so reading is the
- * resting state and the editor arrives on click — same text, same position, no dialog.
- *
- * Focus is taken on mount so the click that opens it also lands the caret; blur closes it. There is
- * no save button because there is nothing to save to: the value is already in the store.
+ * A proposal knows its own format because the model was asked for it; a criterion the story
+ * already had is just text. Every non-empty line being a bullet is the only signal there is, and
+ * it is a good one — a Gherkin scenario has at most its first line bulleted, from the `<li>` it
+ * was stored in.
  */
-function EditableText({
-  value,
-  onChange,
-  placeholder,
-  gherkin = false,
-  minRows = 3,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  placeholder: string;
-  gherkin?: boolean;
-  minRows?: number;
-}) {
-  const t = useT();
-  const [editing, setEditing] = useState(false);
-  const editLabel = t("huReview.clickToEdit");
+function looksLikeChecklist(text: string): boolean {
+  const lines = text.split("\n").filter((line) => line.trim());
+  return lines.length > 1 && lines.every((line) => /^\s*[-*]\s+/.test(line));
+}
 
-  if (editing) {
+/**
+ * A criterion's text, drawn as whatever it is.
+ *
+ * A checklist rendered with the Gherkin highlighter lights up every line starting with "Y", and a
+ * scenario rendered as a flat block loses the one thing that makes it scannable. One component, one
+ * decision, taken from the criterion's own format.
+ */
+function CriterionText({ text, format }: { text: string; format: CriterionFormat | "checklist" | "gherkin" }) {
+  if (format === "checklist") {
     return (
-      <textarea
-        autoFocus
-        value={value}
-        rows={Math.max(minRows, value.split("\n").length + 1)}
-        onChange={(e) => onChange(e.target.value)}
-        onBlur={() => setEditing(false)}
-        className={`w-full resize-y rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-2.5 py-2 text-[12px] leading-relaxed outline-none ${
-          gherkin ? "font-mono text-[11.5px]" : ""
-        }`}
-      />
+      <ul className="space-y-0.5">
+        {text
+          .split("\n")
+          .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
+          .filter(Boolean)
+          .map((line, at) => (
+            <li key={at} className="flex gap-1.5 text-[12px] leading-relaxed text-[var(--cf-text)]">
+              <span className="mt-[5px] h-[5px] w-[5px] shrink-0 rounded-[1px] border border-[var(--cf-text-muted)]" />
+              <span className="min-w-0 break-words">{line}</span>
+            </li>
+          ))}
+      </ul>
     );
   }
+  return (
+    <p className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-[var(--cf-text)]">
+      <GherkinText text={text} />
+    </p>
+  );
+}
 
-  // A button, not a `role="textbox"` div. There is no editable region here until the click lands,
-  // and announcing one that does not exist strands a screen-reader user on a control that ignores
-  // every key they press. `aria-label` says what pressing it does.
+// ---------- chrome ----------
+
+/**
+ * One pane's chrome: a heading with its icon, whatever the tab put in it, and a footer.
+ *
+ * The footer is the reason this component still exists rather than being three divs at each call
+ * site. Only the AI pane has something to say down there — which model answered, how long it took —
+ * and when only one pane in a row draws a bottom bar, that row has one panel whose content stops
+ * 34px above its neighbours'. It read as a misaligned column and it was one. Every pane in a row
+ * now reserves the same strip, so the bottom edges line up whether or not there is anything in it.
+ */
+function Pane({
+  icon,
+  label,
+  badge,
+  count,
+  action,
+  footer,
+  width,
+  tinted = false,
+  children,
+}: {
+  icon: typeof ScanSearch;
+  label: string;
+  badge?: React.ReactNode;
+  count?: number;
+  action?: React.ReactNode;
+  /** `undefined` draws no strip at all; `null` draws an empty one, which is how a plain pane keeps
+   *  its bottom edge level with the AI pane beside it. */
+  footer?: React.ReactNode | null;
+  width?: string;
+  tinted?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      className={`flex min-h-0 min-w-0 flex-col overflow-hidden border-[var(--cf-border)] ${
+        width ?? "flex-1"
+      } ${tinted ? "bg-[var(--cf-bg)]" : "bg-[var(--cf-surface)]"}`}
+    >
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+        <IconChip icon={icon} />
+        <h3 className="min-w-0 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">{label}</h3>
+        {(count ?? 0) > 0 && (
+          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
+            {count}
+          </span>
+        )}
+        {badge}
+        {action && <span className="ml-auto flex shrink-0 items-center gap-1.5">{action}</span>}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">{children}</div>
+      {footer !== undefined && (
+        <div className="flex min-h-[34px] shrink-0 items-center border-t border-[var(--cf-border)] px-3 py-1.5">
+          {footer}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Nothing here yet, and the one thing that would change that. */
+function PaneEmpty({ icon: Icon, children }: { icon: typeof ScanSearch; children: React.ReactNode }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
+      <Icon size={20} className="text-[var(--cf-border)]" />
+      <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{children}</p>
+    </div>
+  );
+}
+
+/**
+ * The model said this part is already fine.
+ *
+ * Deliberately not the same as an empty pane. "Nothing here yet" and "I read it and there is
+ * nothing to propose" are different facts, and showing the first when the second is true is how a
+ * user pays for a run three times looking for output that was never coming. There is no send
+ * button under it because there is nothing to send.
+ */
+function NothingToPropose({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="cf-rise flex h-full flex-col items-center justify-center gap-2 px-5 text-center">
+      <span className="flex h-9 w-9 items-center justify-center rounded-full bg-[color-mix(in_oklab,var(--cf-success)_14%,transparent)] text-[var(--cf-success)]">
+        <Check size={18} />
+      </span>
+      <p className="text-[12px] leading-snug text-[var(--cf-text)]">{children}</p>
+    </div>
+  );
+}
+
+/**
+ * What produced this pane's answer, in the one line it deserves.
+ *
+ * Takes several stages because one pane can be fed by more than one run — the tasks pane holds a
+ * DEV answer and a QA answer at once — and the stamp that describes what is on screen is the last
+ * of them that actually ran.
+ */
+function Provenance({ stages }: { stages: WorkItemReviewStage[] }) {
+  const t = useT();
+  const provenance = useWorkItemReviewStore((s) => s.provenance);
+  const at = [...stages].reverse().map((stage) => provenance[stage]).find(Boolean);
+  if (!at) return null;
+
+  const seconds = at.elapsed_ms / 1000;
+  const took = seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+  const grounding =
+    at.repos_read > 0 ? t("huReview.groundedIn").replace("{n}", String(at.repos_read)) : t("huReview.groundedInNone");
+
+  return (
+    <p className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-[var(--cf-text-muted)]">
+      <Cpu size={10} className="shrink-0" />
+      <span className="font-mono">{at.model || at.engine}</span>
+      {at.version && (
+        <span className="font-mono opacity-70">
+          {at.engine} {at.version}
+        </span>
+      )}
+      <span aria-hidden>·</span>
+      <span className="inline-flex items-center gap-1">
+        <Timer size={10} />
+        {took}
+      </span>
+      <span aria-hidden>·</span>
+      <span>{grounding}</span>
+    </p>
+  );
+}
+
+/**
+ * Which model is about to answer, next to the pane that will hold its answer.
+ *
+ * Routing lives three screens away in Settings, and a review is a judgement whose weight depends
+ * entirely on who made it. Saying so *before* the run — rather than only in the provenance line
+ * afterwards — is what lets someone notice they are about to refine a sprint's backlog on the
+ * cheap model they picked for commit messages.
+ */
+function ModelTag() {
+  const t = useT();
+  const taskProviders = useAiProviderStore((s) => s.taskProviders);
+  const taskModels = useAiProviderStore((s) => s.taskModels);
+  const defaultProvider = useAiProviderStore((s) => s.providerId);
+
+  // The same task the review runs route to in Rust (`AiTask::StoryVerify`): both read code to
+  // judge a requirement, so a team that picked a model for one meant it for the other.
+  const providerId = taskProviders["story_verify"]?.trim() || defaultProvider;
+  const provider = AI_PROVIDERS.find((p) => p.id === providerId);
+  const engine = provider ? (provider.label ?? (provider.labelKey ? t(provider.labelKey) : providerId)) : providerId;
+  const model = modelDisplayLabel(providerId, taskModels["story_verify"] ?? "", t);
+
+  return (
+    <span
+      title={t("huReview.modelTagHint")}
+      className="inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-px text-[10px] text-[var(--cf-text-muted)]"
+    >
+      <Cpu size={9} className="shrink-0" />
+      <span className="min-w-0 truncate font-mono">{model}</span>
+      <span className="shrink-0 opacity-60">{engine}</span>
+    </span>
+  );
+}
+
+/** The button that runs one tab's AI stage, sitting in the pane whose content it produces. */
+function RunStage({ stage, label }: { stage: WorkItemReviewStage; label: string }) {
+  const t = useT();
+  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage[stage]));
+  const ready = useWorkItemReviewStore((s) => Boolean(s.item) && s.status === "open");
+
   return (
     <button
       type="button"
-      onMouseDown={(e) => {
-        e.preventDefault();
-        setEditing(true);
-      }}
-      onClick={() => setEditing(true)}
-      aria-label={editLabel}
-      className={`block w-full cursor-text whitespace-pre-wrap break-words rounded-md border border-transparent px-2.5 py-2 text-left text-[12px] leading-relaxed text-[var(--cf-text)] transition-colors hover:border-[var(--cf-field-border)] hover:bg-[var(--cf-field)] focus:border-[var(--cf-accent)] focus:outline-none ${
-        gherkin ? "font-mono text-[11.5px]" : ""
+      disabled={!ready && !running}
+      title={running ? t("huReview.stopHint") : label}
+      onClick={() => void (running ? store().stop(stage) : store().run(stage))}
+      className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-medium transition-[filter,border-color,color] disabled:cursor-not-allowed disabled:opacity-40 ${
+        running
+          ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
+          : "bg-[var(--cf-accent)] text-white hover:brightness-110"
       }`}
     >
-      {value.trim() ? (
-        gherkin ? (
-          <GherkinText text={value} />
-        ) : (
-          value
-        )
-      ) : (
-        <span className="italic text-[var(--cf-text-muted)]">{placeholder}</span>
-      )}
+      {running ? <Square size={10} /> : <Play size={10} />}
+      {running ? t("huReview.stop") : label}
     </button>
   );
 }
 
-/** Copy / discard: the two actions every card has, at the weight of neither. */
-function CardActions({ onCopy, onDismiss }: { onCopy: () => void; onDismiss: () => void }) {
+/**
+ * The tasks tab's Generate, which is three buttons pretending to be one.
+ *
+ * DEV and QA are separate runs against separate prompts, and which of them a refinement session
+ * wants is genuinely open: a story whose development is already broken down still needs its QA
+ * ladder, and a spike needs the opposite. Offering only "generate tasks" would mean always paying
+ * for both.
+ */
+function RunTasksMenu() {
   const t = useT();
-  const icon =
-    "flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]";
-  return (
-    <>
-      <button type="button" onClick={onCopy} title={t("huReview.copy")} aria-label={t("huReview.copy")} className={icon}>
-        <Copy size={12} />
-      </button>
+  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage.tasks || s.runByStage.tasksqa));
+  const ready = useWorkItemReviewStore((s) => Boolean(s.item) && s.status === "open");
+  const [open, setOpen] = useState(false);
+
+  if (running) {
+    return (
       <button
         type="button"
-        onClick={onDismiss}
-        title={t("huReview.discard")}
-        aria-label={t("huReview.discard")}
-        className={`ml-auto ${icon} hover:text-[var(--cf-danger)]`}
+        onClick={() => {
+          void store().stop("tasks");
+          void store().stop("tasksqa");
+        }}
+        title={t("huReview.stopHint")}
+        className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11.5px] font-medium text-[var(--cf-text)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
       >
-        <Trash2 size={12} />
+        <Square size={10} />
+        {t("huReview.stop")}
       </button>
-    </>
-  );
-}
+    );
+  }
 
-const PRIMARY_ACTION =
-  "rounded-md border border-[var(--cf-border)] px-2 py-0.5 text-[11px] font-medium text-[var(--cf-accent)] hover:border-[var(--cf-accent)]";
-
-function FindingRow({ finding, at }: { finding: ReviewFinding; at: number }) {
-  const t = useT();
-  const key = `finding:${at}`;
-  const dismissed = useWorkItemReviewStore((s) => Boolean(s.dismissed[key]));
-  if (dismissed) return null;
-
-  const Icon = SEVERITY_ICON[finding.severity] ?? Info;
-  const insert = () => {
-    const text = finding.proposal.trim();
-    if (!text) return;
-    // Appends rather than replaces, except for the title where there is only one line to hold: the
-    // proposal is one move in an argument the user is having with their own story, and overwriting
-    // what they wrote would be the review editing the story after all.
-    const target: StorySection = finding.section;
-    const current = store();
-    if (target === "titulo") current.setTitle(text);
-    else if (target === "criterios") current.addCriterion(text);
-    else {
-      // Where a work item of this type keeps its prose. A bug keeps it in Repro Steps — appending
-      // to Description would put the proposal in a box the bug form does not show and that
-      // publishing never sends, so the user would watch it vanish.
-      const isBug = current.item ? kindOf(current.item.work_item_type) === "bug" : false;
-      const held = isBug ? current.reproSteps : current.description;
-      const merged = `${held}${held ? "\n\n" : ""}${text}`;
-      if (isBug) current.setReproSteps(merged);
-      else current.setDescription(merged);
-    }
-    current.dismiss(key);
-  };
+  const OPTIONS = [
+    { scope: "dev" as const, icon: Wrench, label: t("huReview.tasksScopeDev"), hint: t("huReview.tasksScopeDevHint") },
+    { scope: "qa" as const, icon: FlaskConical, label: t("huReview.tasksScopeQa"), hint: t("huReview.tasksScopeQaHint") },
+    { scope: "both" as const, icon: Layers, label: t("huReview.tasksScopeBoth"), hint: t("huReview.tasksScopeBothHint") },
+  ];
 
   return (
-    <article
-      style={riseDelay(at)}
-      className={`rounded-md border border-l-2 border-[var(--cf-border)] px-2.5 py-2 ${SEVERITY_RAIL[finding.severity] ?? SEVERITY_RAIL.baja} ${SEVERITY_CARD[finding.severity] ?? SEVERITY_CARD.baja} ${CARD_MOTION}`}
-    >
-      <div className="flex flex-wrap items-center gap-1.5">
-        <Icon size={11} className={`shrink-0 ${SEVERITY_TEXT[finding.severity] ?? SEVERITY_TEXT.baja}`} />
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-          {t(`huReview.section.${finding.section}`)}
-        </span>
-        <RepoChip repo={finding.repo} />
-      </div>
-      <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--cf-text)]">{finding.issue}</p>
-      {finding.proposal.trim() && (
-        <p className="mt-1.5 whitespace-pre-wrap break-words rounded-md border border-dashed border-[var(--cf-border)] px-2 py-1.5 text-[13px] leading-relaxed text-[var(--cf-text)]">
-          {finding.proposal}
-        </p>
-      )}
-      {finding.evidence.length > 0 && (
-        <p className="mt-1 break-words font-mono text-[10.5px] text-[var(--cf-text-muted)]">
-          {finding.evidence.join(" · ")}
-        </p>
-      )}
-      <div className="mt-2 flex items-center gap-1">
-        {finding.proposal.trim() && (
-          <button type="button" onClick={insert} title={t("huReview.insertHint")} className={PRIMARY_ACTION}>
-            {t("huReview.insert")}
-          </button>
-        )}
-        <CardActions onCopy={() => copy(finding.proposal, t("huReview.copied"))} onDismiss={() => store().dismiss(key)} />
-      </div>
-    </article>
-  );
-}
-
-function TaskRow({ task, at }: { task: ProposedTask; at: number }) {
-  const t = useT();
-  const key = `task:${at}`;
-  const dismissed = useWorkItemReviewStore((s) => Boolean(s.dismissed[key]));
-  if (dismissed) return null;
-
-  return (
-    <article
-      style={riseDelay(at)}
-      className={`flex gap-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
-    >
-      <span
-        title={task.kind === "qa" ? t("huReview.qaTask") : t("huReview.devTask")}
-        className={`mt-[3px] flex h-5 w-5 shrink-0 items-center justify-center rounded ${
-          task.kind === "qa"
-            ? "bg-[color-mix(in_oklab,var(--cf-warning)_14%,transparent)] text-[var(--cf-warning)]"
-            : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-        }`}
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        disabled={!ready}
+        onClick={() => setOpen((was) => !was)}
+        aria-expanded={open}
+        title={t("huReview.generateTasksHint")}
+        className="flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[11.5px] font-medium text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
       >
-        {task.kind === "qa" ? <FlaskConical size={11} /> : <Wrench size={11} />}
-      </span>
-      <div className="min-w-0 flex-1">
-        <p className="break-words font-mono text-[12px] font-medium text-[var(--cf-text)]">{task.title}</p>
-        {task.detail && (
-          <p className="mt-1 break-words text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{task.detail}</p>
-        )}
-        {(task.evidence.length > 0 || task.repo) && (
-          <p className="mt-1 flex flex-wrap items-center gap-1.5 break-words font-mono text-[10.5px] text-[var(--cf-text-muted)]">
-            <RepoChip repo={task.repo} />
-            {task.evidence.join(" · ")}
-          </p>
-        )}
-        <div className="mt-2 flex items-center gap-2">
-          <StageButton onStage={() => store().stageTask({ title: task.title, detail: task.detail })} />
-          <CardActions
-            onCopy={() => copy(`${task.title}\n\n${task.detail}`, t("huReview.copied"))}
-            onDismiss={() => store().dismiss(key)}
+        <Play size={10} />
+        {t("huReview.generateTasks")}
+        <ChevronDown size={11} />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <div className="cf-fade-in absolute right-0 top-full z-20 mt-1 w-64 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
+            {OPTIONS.map(({ scope, icon: Icon, label, hint }) => (
+              <button
+                key={scope}
+                type="button"
+                onClick={() => {
+                  setOpen(false);
+                  void store().runTasks(scope);
+                }}
+                className="flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              >
+                <Icon size={12} className="mt-[3px] shrink-0 text-[var(--cf-accent)]" />
+                <span className="min-w-0">
+                  <span className="block text-[12px] font-medium text-[var(--cf-text)]">{label}</span>
+                  <span className="block text-[10.5px] leading-snug text-[var(--cf-text-muted)]">{hint}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The pane's body while its stage is in flight. */
+function Thinking() {
+  const t = useT();
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2">
+      <ThinkingOrb size="lg" />
+      <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("huReview.running")}</p>
+    </div>
+  );
+}
+
+/**
+ * A card that opens.
+ *
+ * The same shape everywhere something is a list of things whose contents are long: the story's
+ * criteria, its child tasks, and every proposal. Collapsed you can count them and scan their
+ * titles; open you read one. A screen that showed all of them expanded was a scroll where the
+ * only way to find the third criterion was to read the first two.
+ */
+function Collapsible({
+  at,
+  head,
+  actions,
+  defaultOpen = false,
+  tone,
+  children,
+}: {
+  at: number;
+  head: React.ReactNode;
+  actions?: React.ReactNode;
+  defaultOpen?: boolean;
+  /** An extra border colour, for the cards that mean something other than "new". */
+  tone?: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <article
+      style={riseDelay(at)}
+      className={`overflow-hidden rounded-lg border bg-[var(--cf-surface)] ${tone ?? "border-[var(--cf-border)]"} ${CARD_MOTION}`}
+    >
+      <div className="flex items-center gap-1 py-1 pl-1.5 pr-1">
+        <button
+          type="button"
+          onClick={() => setOpen((was) => !was)}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        >
+          <ChevronRight
+            size={12}
+            className={`shrink-0 text-[var(--cf-text-muted)] transition-transform duration-200 ${open ? "rotate-90" : ""}`}
           />
+          {head}
+        </button>
+        {actions}
+      </div>
+      {/* 0fr→1fr is the height animation CSS can do without measuring. The animated `visibility` is
+          what makes the collapse true for assistive tech as well — overflow clipping alone leaves
+          the text in the accessibility tree under a button that says `aria-expanded=false`. */}
+      <div
+        className={`grid transition-[grid-template-rows] duration-200 ease-out ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
+      >
+        <div className={`min-h-0 overflow-hidden transition-[visibility] duration-200 ${open ? "visible" : "invisible"}`}>
+          <div className="border-t border-[var(--cf-border)] px-3 py-2">{children}</div>
         </div>
       </div>
     </article>
+  );
+}
+
+// ---------- tab 1: the story ----------
+
+/** A read-only block of the work item, boxed so it reads as a quotation rather than as a field. */
+function StoryBlock({ label, text, empty }: { label: string; text: string; empty: string }) {
+  return (
+    <div>
+      <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
+      {/* The border says "there is something here and it goes on past the fold". Faint on purpose:
+          it is a mark, not a field — nothing inside it can be typed into. */}
+      <div className="max-h-72 overflow-y-auto rounded-lg border border-[var(--cf-field-border)] bg-[color-mix(in_oklab,var(--cf-field)_45%,transparent)] px-3 py-2">
+        {text.trim() ? (
+          <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-[var(--cf-text)]">{text}</p>
+        ) : (
+          <p className="text-[11.5px] italic text-[var(--cf-text-muted)]">{empty}</p>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -453,94 +595,1310 @@ function TaskRow({ task, at }: { task: ProposedTask; at: number }) {
  * One task the story already has, readable in place.
  *
  * The row used to be nothing but a link to the browser, which made the board the only place the
- * task's text could be read — mid-review, that is a context switch per task. The content now
- * arrives with the title in the same batch read, so the chevron opens it here; the browser link
- * stays for editing, which this screen deliberately does not do.
+ * task's text could be read — mid-review, that is a context switch per task. The content arrives
+ * with the title in the same batch read, so the chevron opens it here; the browser link stays for
+ * editing, which this screen deliberately does not do.
  */
 function ChildTaskRow({ child, at }: { child: AdoWorkItemChild; at: number }) {
   const t = useT();
-  const [open, setOpen] = useState(false);
   const isBugChild = kindOf(child.work_item_type) === "bug";
   const content = htmlToText(child.description_html);
 
   return (
-    <article
-      style={riseDelay(at)}
-      className={`overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] ${CARD_MOTION}`}
-    >
-      <div className="flex items-center gap-1.5 py-1 pl-1.5 pr-1">
-        <button
-          type="button"
-          onClick={() => setOpen((was) => !was)}
-          aria-expanded={open}
-          aria-controls={`hu-child-${child.id}`}
-          title={open ? t("huReview.hideTaskContent") : t("huReview.showTaskContent")}
-          className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-        >
-          <ChevronRight
-            size={12}
-            className={`shrink-0 text-[var(--cf-text-muted)] transition-transform duration-200 ${open ? "rotate-90" : ""}`}
-          />
+    <Collapsible
+      at={at}
+      head={
+        <>
           <span title={child.work_item_type}>
             <IconChip icon={isBugChild ? Bug : ClipboardCheck} tone={isBugChild ? "danger" : "accent"} />
           </span>
           <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">#{child.id}</span>
           <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">{child.title}</span>
-          <span
-            className={`shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium ${stateTone(child.state)}`}
-          >
+          <span className={`shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium ${stateTone(child.state)}`}>
             {child.state}
           </span>
-        </button>
+        </>
+      }
+      actions={
         <button
           type="button"
           onClick={() => void openExternalUrl(child.url).catch((e: unknown) => pushErrorToast(String(e)))}
           title={t("huReview.openChildHint")}
           aria-label={t("huReview.openChildHint")}
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
+          className={`shrink-0 ${ICON_ACTION} hover:text-[var(--cf-accent)]`}
         >
           <ExternalLink size={12} />
         </button>
-      </div>
-      {/* 0fr→1fr is the height animation CSS can do without measuring: the row grows to whatever
-          the task says, and a paragraph of it stays one smooth open instead of a jump. The
-          animated `visibility` is what makes the collapse true for assistive tech as well —
-          overflow clipping alone leaves the text in the accessibility tree under a button that
-          says `aria-expanded=false`. Transitioned with the same duration so it flips to hidden
-          only once the row has finished closing. */}
-      <div
-        id={`hu-child-${child.id}`}
-        className={`grid transition-[grid-template-rows] duration-200 ease-out ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}
-      >
-        <div
-          className={`min-h-0 overflow-hidden transition-[visibility] duration-200 ${open ? "visible" : "invisible"}`}
-        >
-          <div className="border-t border-[var(--cf-border)] px-3 py-2">
-            <p className="flex items-center gap-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
-              <User size={10} className="shrink-0" />
-              {child.assigned_to || t("huReview.unassigned")}
-            </p>
-            {content ? (
-              <p className="mt-1.5 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-[var(--cf-text)]">
-                {content}
-              </p>
-            ) : (
-              <p className="mt-1.5 text-[11.5px] italic text-[var(--cf-text-muted)]">{t("huReview.taskNoContent")}</p>
-            )}
-          </div>
-        </div>
-      </div>
-    </article>
+      }
+    >
+      <p className="flex items-center gap-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+        <User size={10} className="shrink-0" />
+        {child.assigned_to || t("huReview.unassigned")}
+      </p>
+      {content ? (
+        <p className="mt-1.5 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-[var(--cf-text)]">
+          {content}
+        </p>
+      ) : (
+        <p className="mt-1.5 text-[11.5px] italic text-[var(--cf-text-muted)]">{t("huReview.taskNoContent")}</p>
+      )}
+    </Collapsible>
   );
 }
+
+/** A heading with a count that folds the list under it away. */
+function StorySection({
+  icon,
+  label,
+  count,
+  defaultOpen = false,
+  children,
+}: {
+  icon: typeof ScanSearch;
+  label: string;
+  count?: number;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((was) => !was)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 rounded-md px-1 py-1.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+      >
+        <ChevronRight
+          size={12}
+          className={`shrink-0 text-[var(--cf-text-muted)] transition-transform duration-200 ${open ? "rotate-90" : ""}`}
+        />
+        <IconChip icon={icon} />
+        <span className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">{label}</span>
+        {count !== undefined && (
+          <span className="shrink-0 rounded-full bg-[var(--cf-border)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
+            {count}
+          </span>
+        )}
+      </button>
+      {open && <div className="cf-fade-in px-1 pb-2 pt-1">{children}</div>}
+    </section>
+  );
+}
+
+/**
+ * The work item, whole and read-only.
+ *
+ * The one tab that is a *record* rather than a workspace: no proposals, no draft, nothing to type
+ * into. Everything else on this screen is a copy the user is changing, and having one place that
+ * says what the board actually holds is what makes "did I already publish that?" answerable
+ * without opening a browser.
+ *
+ * Everything folds except the description, because the description is what a refinement session
+ * reads first and the criteria and tasks are what it counts.
+ */
+function StoryTab() {
+  const t = useT();
+  const item = useWorkItemReviewStore((s) => s.item);
+  const description = useWorkItemReviewStore((s) => s.description);
+  const reproSteps = useWorkItemReviewStore((s) => s.reproSteps);
+  const criteria = useWorkItemReviewStore((s) => s.criteria);
+  if (!item) return null;
+
+  const isBug = kindOf(item.work_item_type) === "bug";
+  const systemInfo = htmlToText(item.system_info_html);
+
+  return (
+    <Pane
+      icon={FileText}
+      label={t("huReview.storyColumn")}
+      badge={
+        <span
+          title={t("huReview.readOnlyHint")}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10px] font-medium text-[var(--cf-text-muted)]"
+        >
+          <Lock size={9} />
+          {t("huReview.readOnly")}
+        </span>
+      }
+    >
+      <div className="space-y-1">
+        <div className="pb-2">
+          <StoryBlock
+            label={isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription")}
+            text={isBug ? reproSteps : description}
+            empty={t("huReview.noDescription")}
+          />
+        </div>
+
+        {/* A bug carries both fields: the steps are its prose, but somebody may also have filled in
+            the Description box that the bug form does not show. Hiding it would drop text the
+            review is judged against. */}
+        {isBug && description.trim() && (
+          <StorySection icon={FileText} label={t("stories.fieldDescription")}>
+            <StoryBlock label={t("stories.fieldDescription")} text={description} empty={t("huReview.noDescription")} />
+          </StorySection>
+        )}
+
+        {isBug && systemInfo.trim() && (
+          <StorySection icon={Cpu} label={t("huReview.fieldSystemInfo")}>
+            <StoryBlock label={t("huReview.fieldSystemInfo")} text={systemInfo} empty={t("huReview.noDescription")} />
+          </StorySection>
+        )}
+
+        <StorySection icon={ListChecks} label={t("stories.fieldCriteria")} count={criteria.length}>
+          {criteria.length === 0 ? (
+            <p className="px-1 text-[11.5px] italic text-[var(--cf-text-muted)]">{t("huReview.noCriteria")}</p>
+          ) : (
+            <div className="space-y-1.5">
+              {criteria.map((criterion, at) => (
+                <Collapsible
+                  key={at}
+                  at={at}
+                  head={
+                    <>
+                      <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">#{at + 1}</span>
+                      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
+                        {criterion.split("\n")[0]}
+                      </span>
+                    </>
+                  }
+                  actions={
+                    <button
+                      type="button"
+                      onClick={() => copy(criterion, t("huReview.copied"))}
+                      title={t("huReview.copy")}
+                      aria-label={t("huReview.copy")}
+                      className={`shrink-0 ${ICON_ACTION}`}
+                    >
+                      <Copy size={12} />
+                    </button>
+                  }
+                >
+                  <CriterionText text={criterion} format={looksLikeChecklist(criterion) ? "checklist" : "gherkin"} />
+                </Collapsible>
+              ))}
+            </div>
+          )}
+        </StorySection>
+
+        <StorySection icon={ClipboardCheck} label={t("huReview.existingTasks")} count={item.children.length}>
+          {item.children.length === 0 ? (
+            <p className="px-1 text-[11.5px] italic text-[var(--cf-text-muted)]">{t("huReview.noTasks")}</p>
+          ) : (
+            <div className="space-y-1.5">
+              {item.children.map((child, at) => (
+                <ChildTaskRow key={child.id} child={child} at={at} />
+              ))}
+            </div>
+          )}
+        </StorySection>
+
+        <StorySection icon={Tag} label={t("huReview.fieldDetails")}>
+          <dl className="space-y-1 px-1 text-[11.5px]">
+            {[
+              [t("huReview.fieldState"), item.state],
+              [t("huReview.fieldType"), item.work_item_type],
+              [t("huReview.fieldEffort"), effortLabel(item) || t("huReview.effortUnset")],
+              [t("huReview.fieldProject"), item.team_project],
+              [t("huReview.fieldArea"), item.area_path],
+              [t("huReview.fieldIteration"), item.iteration_path],
+              [t("huReview.fieldTags"), item.tags],
+            ]
+              .filter(([, value]) => value)
+              .map(([label, value]) => (
+                <div key={label} className="flex gap-2">
+                  <dt className="w-28 shrink-0 text-[var(--cf-text-muted)]">{label}</dt>
+                  <dd className="min-w-0 break-words text-[var(--cf-text)]">{value}</dd>
+                </div>
+              ))}
+          </dl>
+        </StorySection>
+      </div>
+    </Pane>
+  );
+}
+
+// ---------- tab 2: the description ----------
+
+function DescriptionTab({ width, seam }: { width: string; seam: React.ReactNode }) {
+  const t = useT();
+  const item = useWorkItemReviewStore((s) => s.item);
+  const description = useWorkItemReviewStore((s) => s.description);
+  const reproSteps = useWorkItemReviewStore((s) => s.reproSteps);
+  const proposal = useWorkItemReviewStore((s) => s.proposedDescription);
+  const produced = useWorkItemReviewStore((s) => s.producedByStage.description);
+  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage.description));
+  const open = useWorkItemReviewStore((s) => s.status === "open");
+  if (!item) return null;
+
+  const isBug = kindOf(item.work_item_type) === "bug";
+  const prose = isBug ? reproSteps : description;
+  const label = isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription");
+
+  const body = () => {
+    if (running) return <Thinking />;
+    // Ran, and came back with nothing — which is an answer about the description, not an empty pane.
+    if (produced === 0 && !proposal) return <NothingToPropose>{t("huReview.nothingDescription")}</NothingToPropose>;
+    if (!proposal) return <PaneEmpty icon={Sparkles}>{t("huReview.descriptionAiHint")}</PaneEmpty>;
+
+    return (
+      <div className="flex h-full min-h-0 flex-col gap-2">
+        {proposal.rationale && (
+          <p className="shrink-0 rounded-md border border-dashed border-[var(--cf-border)] px-2 py-1.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+            {proposal.rationale}
+          </p>
+        )}
+        <div className="min-h-0 flex-1">
+          <MarkdownEditor
+            value={proposal.description}
+            readOnly
+            placeholder={t("huReview.noDescription")}
+            ariaLabel={t("huReview.aiColumn")}
+          />
+        </div>
+        {proposal.evidence.length > 0 && (
+          <p className="shrink-0 break-words font-mono text-[10.5px] text-[var(--cf-text-muted)]">
+            {proposal.evidence.join(" · ")}
+          </p>
+        )}
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            type="button"
+            disabled={!open}
+            onClick={() => store().sendDescriptionToDraft()}
+            title={t("huReview.sendToDraftHint")}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <Send size={12} />
+            {t("huReview.sendToDraft")}
+          </button>
+          <button
+            type="button"
+            onClick={() => copy(proposal.description, t("huReview.copied"))}
+            title={t("huReview.copy")}
+            aria-label={t("huReview.copy")}
+            className={`shrink-0 h-[30px] w-[30px] ${ICON_ACTION} border border-[var(--cf-border)]`}
+          >
+            <Copy size={12} />
+          </button>
+          <button
+            type="button"
+            disabled={!open}
+            onClick={() => store().clearDescriptionProposal()}
+            title={t("huReview.clearPanel")}
+            aria-label={t("huReview.clearPanel")}
+            className={`shrink-0 h-[30px] w-[30px] ${ICON_ACTION} border border-[var(--cf-border)] hover:text-[var(--cf-danger)] disabled:cursor-not-allowed disabled:opacity-40`}
+          >
+            <Eraser size={12} />
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <>
+      <Pane icon={FileText} label={label} width={width} footer={null}>
+        {/* Fills the pane top to bottom: the description is the tab's subject, and a field that
+            stops a third of the way down leaves two thirds of the panel saying nothing. */}
+        <div className="h-full min-h-0">
+          <MarkdownEditor
+            value={prose}
+            readOnly={!open}
+            onChange={(value) => (isBug ? store().setReproSteps(value) : store().setDescription(value))}
+            placeholder={t("huReview.noDescription")}
+            ariaLabel={label}
+          />
+        </div>
+      </Pane>
+      {seam}
+      <ProposalPane
+        stages={["description"]}
+        action={open && <RunStage stage="description" label={t("huReview.generateDescription")} />}
+      >
+        {body()}
+      </ProposalPane>
+    </>
+  );
+}
+
+/** The right-hand pane of the three working tabs: same heading, same model tag, same footer. */
+function ProposalPane({
+  stages,
+  count,
+  action,
+  children,
+}: {
+  stages: WorkItemReviewStage[];
+  count?: number;
+  action?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const t = useT();
+  return (
+    <Pane
+      icon={Sparkles}
+      label={t("huReview.aiColumn")}
+      count={count}
+      badge={<ModelTag />}
+      action={action}
+      footer={<Provenance stages={stages} />}
+      tinted
+    >
+      {children}
+    </Pane>
+  );
+}
+
+// ---------- tab 3: the criteria ----------
+
+/** One AI-proposed criterion: collapsed, editable, and colour-coded by whether it rewrites one. */
+function CriterionCard({ proposal, at }: { proposal: CriterionProposal; at: number }) {
+  const t = useT();
+  const criteriaCount = useWorkItemReviewStore((s) => s.criteria.length);
+  const open = useWorkItemReviewStore((s) => s.status === "open");
+  const [editing, setEditing] = useState(false);
+  const rewrite = isRewrite(proposal, criteriaCount);
+  const shown = proposal.format === "ambos" ? proposal.pick : proposal.format;
+  const text = criterionText(proposal);
+
+  const FORMAT_LABEL: Record<string, string> = {
+    gherkin: t("huReview.formatGherkin"),
+    checklist: t("huReview.formatChecklist"),
+  };
+
+  return (
+    <Collapsible
+      at={at}
+      // A rewrite is not a new criterion and must not look like one: the two together in one list
+      // are how a story ends up holding the old wording and its correction side by side.
+      tone={
+        rewrite
+          ? "border-[color-mix(in_oklab,var(--cf-warning)_55%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_4%,var(--cf-surface))]"
+          : undefined
+      }
+      head={
+        <>
+          <span
+            className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold ${
+              rewrite
+                ? "bg-[color-mix(in_oklab,var(--cf-warning)_16%,transparent)] text-[var(--cf-warning)]"
+                : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+            }`}
+          >
+            {rewrite ? t("huReview.rewriteOf").replace("{n}", String(proposal.replaces)) : t("huReview.newCriterion")}
+          </span>
+          <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10px] text-[var(--cf-text-muted)]">
+            {proposal.format === "ambos" ? t("huReview.formatBoth") : FORMAT_LABEL[proposal.format]}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{text.split("\n")[0]}</span>
+          <RepoChip repo={proposal.repo} />
+        </>
+      }
+      actions={
+        <>
+          <button
+            type="button"
+            onClick={() => copy(text, t("huReview.copied"))}
+            title={t("huReview.copy")}
+            aria-label={t("huReview.copy")}
+            className={`shrink-0 ${ICON_ACTION}`}
+          >
+            <Copy size={12} />
+          </button>
+          <button
+            type="button"
+            disabled={!open}
+            onClick={() => store().removeCriterionProposal(proposal.id)}
+            title={t("huReview.discard")}
+            aria-label={t("huReview.discard")}
+            className={`shrink-0 ${ICON_ACTION} hover:text-[var(--cf-danger)] disabled:opacity-30`}
+          >
+            <Trash2 size={12} />
+          </button>
+        </>
+      }
+    >
+      {/* When the model could not decide, the user does — and the choice is the first thing in the
+          card, because it decides what the text under it even is. */}
+      {proposal.format === "ambos" && (
+        <div className="mb-2 flex flex-wrap items-center gap-1.5">
+          <span className="text-[10.5px] text-[var(--cf-text-muted)]">{t("huReview.pickFormat")}</span>
+          {(["gherkin", "checklist"] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              disabled={!open}
+              onClick={() => store().editCriterionProposal(proposal.id, { pick: option })}
+              className={`rounded-full border px-2 py-px text-[10.5px] font-medium transition-colors disabled:opacity-40 ${
+                proposal.pick === option
+                  ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)]"
+              }`}
+            >
+              {FORMAT_LABEL[option]}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {editing ? (
+        <textarea
+          autoFocus
+          value={text}
+          rows={Math.max(4, text.split("\n").length + 1)}
+          onChange={(e) =>
+            store().editCriterionProposal(proposal.id, { [shown]: e.target.value } as Partial<CriterionProposal>)
+          }
+          onBlur={() => setEditing(false)}
+          className="w-full resize-y rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-2.5 py-2 font-mono text-[11.5px] leading-relaxed outline-none"
+        />
+      ) : (
+        <CriterionText text={text} format={shown} />
+      )}
+
+      {proposal.rationale && (
+        <p className="mt-1.5 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{proposal.rationale}</p>
+      )}
+      {proposal.evidence.length > 0 && (
+        <p className="mt-1 break-words font-mono text-[10.5px] text-[var(--cf-text-muted)]">
+          {proposal.evidence.join(" · ")}
+        </p>
+      )}
+
+      <div className="mt-2 flex items-center gap-1.5">
+        <button
+          type="button"
+          disabled={!open}
+          onClick={() => store().sendCriterionToDraft(proposal.id)}
+          title={t("huReview.sendToDraftHint")}
+          className={PRIMARY_ACTION}
+        >
+          <Send size={10} />
+          {t("huReview.sendToDraft")}
+        </button>
+        <button
+          type="button"
+          disabled={!open}
+          onClick={() => setEditing((was) => !was)}
+          className={`${PRIMARY_ACTION} text-[var(--cf-text-muted)]`}
+        >
+          <Pencil size={10} />
+          {editing ? t("huReview.doneEditing") : t("huReview.edit")}
+        </button>
+      </div>
+    </Collapsible>
+  );
+}
+
+function CriteriaTab({ width, seam }: { width: string; seam: React.ReactNode }) {
+  const t = useT();
+  const criteria = useWorkItemReviewStore((s) => s.criteria);
+  const proposals = useWorkItemReviewStore((s) => s.proposedCriteria);
+  const produced = useWorkItemReviewStore((s) => s.producedByStage.criteria);
+  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage.criteria));
+  const open = useWorkItemReviewStore((s) => s.status === "open");
+
+  const body = () => {
+    if (running) return <Thinking />;
+    if (proposals.length === 0 && produced === 0) {
+      return <NothingToPropose>{t("huReview.nothingCriteria")}</NothingToPropose>;
+    }
+    if (proposals.length === 0) return <PaneEmpty icon={ListChecks}>{t("huReview.criteriaAiHint")}</PaneEmpty>;
+    return (
+      <div className="space-y-1.5">
+        {proposals.map((proposal, at) => (
+          <CriterionCard key={proposal.id} proposal={proposal} at={at} />
+        ))}
+      </div>
+    );
+  };
+
+  return (
+    <>
+      <Pane icon={ListChecks} label={t("stories.fieldCriteria")} count={criteria.length} width={width} footer={null}>
+        {criteria.length === 0 ? (
+          <PaneEmpty icon={ListChecks}>{t("huReview.noCriteria")}</PaneEmpty>
+        ) : (
+          <div className="space-y-1.5">
+            {criteria.map((criterion, at) => (
+              // No delete here on purpose. This pane is what the item says today; removing a
+              // criterion from it would look like removing it from the story, and the place a
+              // criterion actually stops existing is the draft.
+              <article
+                key={at}
+                style={riseDelay(at)}
+                className={`rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
+              >
+                <div className="mb-1 flex items-center gap-1.5">
+                  <span className="text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">#{at + 1}</span>
+                  <button
+                    type="button"
+                    onClick={() => copy(criterion, t("huReview.copied"))}
+                    title={t("huReview.copy")}
+                    aria-label={t("huReview.copy")}
+                    className={`ml-auto ${ICON_ACTION}`}
+                  >
+                    <Copy size={11} />
+                  </button>
+                </div>
+                <CriterionText text={criterion} format={looksLikeChecklist(criterion) ? "checklist" : "gherkin"} />
+              </article>
+            ))}
+          </div>
+        )}
+      </Pane>
+      {seam}
+      <ProposalPane
+        stages={["criteria"]}
+        count={proposals.length}
+        action={
+          <>
+            {open && proposals.length > 0 && (
+              <>
+                <button type="button" onClick={() => store().sendAllCriteriaToDraft()} className={PRIMARY_ACTION}>
+                  <Send size={10} />
+                  {t("huReview.sendAllToDraft")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => store().clearCriterionProposals()}
+                  title={t("huReview.clearPanel")}
+                  aria-label={t("huReview.clearPanel")}
+                  className={`${ICON_ACTION} hover:text-[var(--cf-danger)]`}
+                >
+                  <Eraser size={12} />
+                </button>
+              </>
+            )}
+            {open && <RunStage stage="criteria" label={t("huReview.generateCriteria")} />}
+          </>
+        }
+      >
+        {body()}
+      </ProposalPane>
+    </>
+  );
+}
+
+// ---------- tab 4: the tasks ----------
+
+/** The DEV/QA marker, one shape wherever a task is drawn. */
+function KindChip({ kind }: { kind: "dev" | "qa" }) {
+  const t = useT();
+  return (
+    <span
+      title={kind === "qa" ? t("huReview.qaTask") : t("huReview.devTask")}
+      className={`flex h-5 w-5 shrink-0 items-center justify-center rounded ${
+        kind === "qa"
+          ? "bg-[color-mix(in_oklab,var(--cf-warning)_14%,transparent)] text-[var(--cf-warning)]"
+          : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+      }`}
+    >
+      {kind === "qa" ? <FlaskConical size={11} /> : <Wrench size={11} />}
+    </span>
+  );
+}
+
+/** One field of a generated task, labelled with the question it answers. */
+function TaskField({
+  label,
+  value,
+  editing,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  editing: boolean;
+  onChange: (value: string) => void;
+}) {
+  if (!editing && !value.trim()) return null;
+  return (
+    <div className="mt-1.5">
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
+      {editing ? (
+        <textarea
+          value={value}
+          rows={Math.max(2, value.split("\n").length)}
+          onChange={(e) => onChange(e.target.value)}
+          className="mt-0.5 w-full resize-y rounded-md border border-[var(--cf-accent)] bg-[var(--cf-field)] px-2 py-1.5 text-[11.5px] leading-relaxed outline-none"
+        />
+      ) : (
+        <p className="mt-0.5 whitespace-pre-wrap break-words text-[11.5px] leading-snug text-[var(--cf-text)]">
+          {value}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function TaskCard({ proposal, at }: { proposal: TaskProposal; at: number }) {
+  const t = useT();
+  const open = useWorkItemReviewStore((s) => s.status === "open");
+  const [editing, setEditing] = useState(false);
+
+  /** Edits keep `detail` in step with the parts, because `detail` is what gets published. */
+  const patch = (part: "what" | "how" | "why", value: string) => {
+    const next = { ...proposal, [part]: value };
+    store().editTaskProposal(proposal.id, {
+      [part]: value,
+      detail: [
+        ["¿Qué?", next.what],
+        ["¿Cómo?", next.how],
+        ["¿Para qué?", next.why],
+      ]
+        .filter(([, text]) => text.trim())
+        .map(([label, text]) => `${label}: ${text.trim()}`)
+        .join("\n\n"),
+    } as Partial<TaskProposal>);
+  };
+
+  return (
+    <Collapsible
+      at={at}
+      head={
+        <>
+          <KindChip kind={proposal.kind} />
+          <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] font-medium text-[var(--cf-text)]">
+            {proposal.title}
+          </span>
+          <RepoChip repo={proposal.repo} />
+        </>
+      }
+      actions={
+        <>
+          <button
+            type="button"
+            onClick={() => copy(`${proposal.title}\n\n${proposal.detail}`, t("huReview.copied"))}
+            title={t("huReview.copy")}
+            aria-label={t("huReview.copy")}
+            className={`shrink-0 ${ICON_ACTION}`}
+          >
+            <Copy size={12} />
+          </button>
+          <button
+            type="button"
+            disabled={!open}
+            onClick={() => store().removeTaskProposal(proposal.id)}
+            title={t("huReview.discard")}
+            aria-label={t("huReview.discard")}
+            className={`shrink-0 ${ICON_ACTION} hover:text-[var(--cf-danger)] disabled:opacity-30`}
+          >
+            <Trash2 size={12} />
+          </button>
+        </>
+      }
+    >
+      {editing && (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            {t("stories.fieldTitle")}
+          </p>
+          <input
+            value={proposal.title}
+            onChange={(e) => store().editTaskProposal(proposal.id, { title: e.target.value })}
+            className={`${FIELD_FULL} mt-0.5 font-mono`}
+          />
+        </div>
+      )}
+      <TaskField label="¿Qué?" value={proposal.what} editing={editing} onChange={(v) => patch("what", v)} />
+      <TaskField label="¿Cómo?" value={proposal.how} editing={editing} onChange={(v) => patch("how", v)} />
+      <TaskField label="¿Para qué?" value={proposal.why} editing={editing} onChange={(v) => patch("why", v)} />
+      {/* A customised prompt is allowed to answer in one block rather than in three parts; when it
+          does, that block is the whole content of the task and has to be shown. */}
+      {!proposal.what && !proposal.how && !proposal.why && proposal.detail && (
+        <p className="mt-1.5 whitespace-pre-wrap break-words text-[11.5px] leading-snug text-[var(--cf-text)]">
+          {proposal.detail}
+        </p>
+      )}
+      {proposal.evidence.length > 0 && (
+        <p className="mt-1.5 break-words font-mono text-[10.5px] text-[var(--cf-text-muted)]">
+          {proposal.evidence.join(" · ")}
+        </p>
+      )}
+
+      <div className="mt-2 flex items-center gap-1.5">
+        <button
+          type="button"
+          disabled={!open}
+          onClick={() => store().sendTaskToDraft(proposal.id)}
+          title={t("huReview.sendToDraftHint")}
+          className={PRIMARY_ACTION}
+        >
+          <Send size={10} />
+          {t("huReview.sendToDraft")}
+        </button>
+        <button
+          type="button"
+          disabled={!open}
+          onClick={() => setEditing((was) => !was)}
+          className={`${PRIMARY_ACTION} text-[var(--cf-text-muted)]`}
+        >
+          <Pencil size={10} />
+          {editing ? t("huReview.doneEditing") : t("huReview.edit")}
+        </button>
+      </div>
+    </Collapsible>
+  );
+}
+
+/** A DEV or QA heading over the cards that belong to it. */
+function TaskGroup({ kind, label, children }: { kind: "dev" | "qa"; label: string; children: React.ReactNode }) {
+  return (
+    <section className="space-y-1.5">
+      <p className="flex items-center gap-1.5 px-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        <KindChip kind={kind} />
+        {label}
+      </p>
+      {children}
+    </section>
+  );
+}
+
+function TasksTab({ width, seam }: { width: string; seam: React.ReactNode }) {
+  const t = useT();
+  const item = useWorkItemReviewStore((s) => s.item);
+  const proposals = useWorkItemReviewStore((s) => s.proposedTasks);
+  const producedDev = useWorkItemReviewStore((s) => s.producedByStage.tasks);
+  const producedQa = useWorkItemReviewStore((s) => s.producedByStage.tasksqa);
+  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage.tasks || s.runByStage.tasksqa));
+  const open = useWorkItemReviewStore((s) => s.status === "open");
+  if (!item) return null;
+
+  const children = item.children;
+  // The board's own tasks, split the same way the generated ones are: the `[QA]` marker is the
+  // convention this screen puts on, so it is also how it reads them back.
+  const existingQa = children.filter((child) => /^\s*\[qa\]/i.test(child.title));
+  const existingDev = children.filter((child) => !/^\s*\[qa\]/i.test(child.title));
+  const dev = proposals.filter((task) => task.kind === "dev");
+  const qa = proposals.filter((task) => task.kind === "qa");
+
+  const body = () => {
+    if (running) return <Thinking />;
+    // Something ran and the two runs between them produced nothing — which is an answer about the
+    // breakdown, and different from a pane nobody has asked anything of yet.
+    const ran = producedDev !== undefined || producedQa !== undefined;
+    if (proposals.length === 0 && ran && (producedDev ?? 0) + (producedQa ?? 0) === 0) {
+      return <NothingToPropose>{t("huReview.nothingTasks")}</NothingToPropose>;
+    }
+    if (proposals.length === 0) return <PaneEmpty icon={ClipboardCheck}>{t("huReview.tasksAiHint")}</PaneEmpty>;
+    return (
+      <div className="space-y-3">
+        {dev.length > 0 && (
+          <TaskGroup kind="dev" label={t("huReview.generatedDevTasks")}>
+            {dev.map((proposal, at) => (
+              <TaskCard key={proposal.id} proposal={proposal} at={at} />
+            ))}
+          </TaskGroup>
+        )}
+        {qa.length > 0 && (
+          <TaskGroup kind="qa" label={t("huReview.generatedQaTasks")}>
+            {qa.map((proposal, at) => (
+              <TaskCard key={proposal.id} proposal={proposal} at={at} />
+            ))}
+          </TaskGroup>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <>
+      <Pane icon={ClipboardCheck} label={t("huReview.existingTasks")} count={children.length} width={width} footer={null}>
+        {children.length === 0 ? (
+          <PaneEmpty icon={ClipboardCheck}>{t("huReview.noTasks")}</PaneEmpty>
+        ) : (
+          <div className="space-y-3">
+            {existingDev.length > 0 && (
+              <TaskGroup kind="dev" label={t("huReview.existingDevTasks")}>
+                {existingDev.map((child, at) => (
+                  <ChildTaskRow key={child.id} child={child} at={at} />
+                ))}
+              </TaskGroup>
+            )}
+            {existingQa.length > 0 && (
+              <TaskGroup kind="qa" label={t("huReview.existingQaTasks")}>
+                {existingQa.map((child, at) => (
+                  <ChildTaskRow key={child.id} child={child} at={at} />
+                ))}
+              </TaskGroup>
+            )}
+          </div>
+        )}
+      </Pane>
+      {seam}
+      <ProposalPane
+        // Both, in the order they run: the stamp shown is the QA one when QA ran, and the DEV one
+        // otherwise, which is what `Provenance` picks from a list.
+        stages={["tasks", "tasksqa"]}
+        count={proposals.length}
+        action={
+          <>
+            {open && proposals.length > 0 && (
+              <>
+                <button type="button" onClick={() => store().sendAllTasksToDraft()} className={PRIMARY_ACTION}>
+                  <Send size={10} />
+                  {t("huReview.sendAllToDraft")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => store().clearTaskProposals()}
+                  title={t("huReview.clearPanel")}
+                  aria-label={t("huReview.clearPanel")}
+                  className={`${ICON_ACTION} hover:text-[var(--cf-danger)]`}
+                >
+                  <Eraser size={12} />
+                </button>
+              </>
+            )}
+            {open && <RunTasksMenu />}
+          </>
+        }
+      >
+        {body()}
+      </ProposalPane>
+    </>
+  );
+}
+
+// ---------- tab 5: the draft ----------
+
+/**
+ * One part of the draft, with the two decisions it carries.
+ *
+ * Discard and Publish sit together at the bottom because they are the same question answered two
+ * ways, and separating them is how a screen ends up with a Publish button and no way back.
+ */
+function DraftPane({
+  icon,
+  label,
+  part,
+  count,
+  confirm,
+  children,
+}: {
+  icon: typeof ScanSearch;
+  label: string;
+  part: PublishPart;
+  count: number;
+  confirm: string;
+  children: React.ReactNode;
+}) {
+  const t = useT();
+  const staged = useWorkItemReviewStore((s) => (part === "tasks" ? (s.draft.tasks?.length ?? 0) > 0 : s.draft[part] !== null));
+  const done = useWorkItemReviewStore((s) => s.published[part]);
+  const busy = useWorkItemReviewStore((s) => s.publishing === part);
+  const open = useWorkItemReviewStore((s) => s.status === "open");
+
+  return (
+    <Pane
+      icon={icon}
+      label={label}
+      count={count}
+      action={
+        staged &&
+        open && (
+          <button
+            type="button"
+            onClick={() => store().discardDraft(part)}
+            title={t("huReview.discardPartHint")}
+            className={`${ICON_ACTION} hover:text-[var(--cf-danger)]`}
+            aria-label={t("huReview.discardPart")}
+          >
+            <Trash2 size={12} />
+          </button>
+        )
+      }
+      footer={
+        <div className="flex w-full items-center gap-2">
+          {done && (
+            <span className="flex min-w-0 items-center gap-1 text-[10.5px] text-[var(--cf-success)]">
+              <Check size={11} className="shrink-0" />
+              <span className="min-w-0 truncate">
+                {t("huReview.publishedAt")
+                  .replace("{at}", new Date(done.at).toLocaleTimeString())
+                  .replace("{n}", String(done.count))}
+              </span>
+            </span>
+          )}
+          <button
+            type="button"
+            disabled={!staged || busy || !open}
+            onClick={() => {
+              void confirmAction(confirm).then((ok) => {
+                if (ok) void store().publish(part);
+              });
+            }}
+            className="ml-auto flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11.5px] font-medium text-white transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busy ? <ThinkingOrb size="sm" /> : <UploadCloud size={11} />}
+            {t(`huReview.publish_${part}` as "huReview.publish_description")}
+          </button>
+        </div>
+      }
+    >
+      {staged ? children : <PaneEmpty icon={icon}>{t("huReview.draftPartEmpty")}</PaneEmpty>}
+    </Pane>
+  );
+}
+
+function DraftTab() {
+  const t = useT();
+  const item = useWorkItemReviewStore((s) => s.item);
+  const draft = useWorkItemReviewStore((s) => s.draft);
+  const open = useWorkItemReviewStore((s) => s.status === "open");
+  if (!item) return null;
+
+  const isBug = kindOf(item.work_item_type) === "bug";
+  const criteria = draft.criteria ?? [];
+  const tasks = draft.tasks ?? [];
+
+  return (
+    <>
+      <DraftPane
+        icon={FileText}
+        label={isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription")}
+        part="description"
+        count={draft.description === null ? 0 : 1}
+        confirm={t("huReview.confirmDescription")}
+      >
+        <div className="h-full min-h-0">
+          <MarkdownEditor
+            value={draft.description ?? ""}
+            readOnly={!open}
+            onChange={(value) => store().setDraftDescription(value)}
+            placeholder={t("huReview.noDescription")}
+            ariaLabel={t("stories.fieldDescription")}
+          />
+        </div>
+      </DraftPane>
+
+      <DraftPane
+        icon={ListChecks}
+        label={t("stories.fieldCriteria")}
+        part="criteria"
+        count={criteria.length}
+        confirm={t("huReview.confirmCriteria").replace("{n}", String(criteria.filter((c) => c.trim()).length))}
+      >
+        <div className="space-y-1.5">
+          {criteria.map((criterion, at) => (
+            <article
+              key={at}
+              style={riseDelay(at)}
+              className={`group rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] ${CARD_MOTION}`}
+            >
+              <div className="flex items-center gap-1.5 border-b border-[var(--cf-border)] px-2.5 py-1">
+                <span className="text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">#{at + 1}</span>
+                {open && (
+                  <button
+                    type="button"
+                    onClick={() => store().removeDraftCriterion(at)}
+                    title={t("stories.removeCriterion")}
+                    aria-label={t("stories.removeCriterion")}
+                    className="ml-auto flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                )}
+              </div>
+              <textarea
+                value={criterion}
+                readOnly={!open}
+                rows={Math.max(3, criterion.split("\n").length)}
+                onChange={(e) => store().setDraftCriterion(at, e.target.value)}
+                className="w-full resize-y bg-transparent px-2.5 py-2 font-mono text-[11.5px] leading-relaxed outline-none read-only:cursor-default"
+              />
+            </article>
+          ))}
+          {open && (
+            <button
+              type="button"
+              onClick={() => store().addDraftCriterion()}
+              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] py-1.5 text-[11.5px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+            >
+              <Plus size={12} />
+              {t("stories.addCriterion")}
+            </button>
+          )}
+        </div>
+      </DraftPane>
+
+      <DraftPane
+        icon={ClipboardCheck}
+        label={t("huReview.stepTasks")}
+        part="tasks"
+        count={tasks.length}
+        confirm={t("huReview.confirmTasks").replace("{n}", String(tasks.length))}
+      >
+        <div className="space-y-1.5">
+          {tasks.map((task, at) => (
+            <article
+              key={at}
+              style={riseDelay(at)}
+              className={`group rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
+            >
+              <div className="flex items-center gap-1.5">
+                <KindChip kind={/^\s*\[qa\]/i.test(task.title) ? "qa" : "dev"} />
+                <input
+                  value={task.title}
+                  readOnly={!open}
+                  onChange={(e) => store().setDraftTask(at, { title: e.target.value })}
+                  className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[11.5px] font-medium text-[var(--cf-text)] outline-none hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
+                />
+                {open && (
+                  <button
+                    type="button"
+                    onClick={() => store().removeDraftTask(at)}
+                    title={t("huReview.unstage")}
+                    aria-label={t("huReview.unstage")}
+                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                )}
+              </div>
+              <textarea
+                value={task.detail}
+                readOnly={!open}
+                rows={Math.max(2, task.detail.split("\n").length)}
+                onChange={(e) => store().setDraftTask(at, { detail: e.target.value })}
+                className="mt-1 w-full resize-y bg-transparent text-[11px] leading-snug text-[var(--cf-text-muted)] outline-none read-only:cursor-default"
+              />
+            </article>
+          ))}
+        </div>
+      </DraftPane>
+    </>
+  );
+}
+
+// ---------- the tab strip ----------
+
+const TAB_ICON: Record<ReviewTab, typeof ScanSearch> = {
+  story: FileText,
+  description: FileText,
+  criteria: ListChecks,
+  tasks: ClipboardCheck,
+  draft: UploadCloud,
+};
+
+function TabBar() {
+  const t = useT();
+  const tab = useWorkItemReviewStore((s) => s.tab);
+  const draft = useWorkItemReviewStore((s) => s.draft);
+  const published = useWorkItemReviewStore((s) => s.published);
+  const criteria = useWorkItemReviewStore((s) => s.criteria);
+  const item = useWorkItemReviewStore((s) => s.item);
+  const proposedDescription = useWorkItemReviewStore((s) => s.proposedDescription);
+  const proposedCriteria = useWorkItemReviewStore((s) => s.proposedCriteria);
+  const proposedTasks = useWorkItemReviewStore((s) => s.proposedTasks);
+  const running = useWorkItemReviewStore((s) => s.runByStage);
+
+  const draftEmpty = draftIsEmpty(draft);
+  // What each tab is holding, so the strip carries the counts and nobody has to open a tab to find
+  // out whether there is anything in it.
+  const counts: Record<ReviewTab, number> = {
+    story: criteria.length + (item?.children.length ?? 0),
+    description: proposedDescription ? 1 : 0,
+    criteria: proposedCriteria.length,
+    tasks: proposedTasks.length,
+    draft:
+      (draft.description === null ? 0 : 1) + (draft.criteria?.length ?? 0) + (draft.tasks?.length ?? 0),
+  };
+
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
+      {REVIEW_TABS.map((at, index) => {
+        const Icon = TAB_ICON[at];
+        const active = tab === at;
+        // The draft is not a place you can go before anything was sent there: an empty tab with a
+        // dead Publish button reads as broken rather than as not-yet. Except when you are already
+        // standing in it — discarding the last part empties the draft, and greying out the tab the
+        // user is looking at would strand them on a tab the strip says does not exist.
+        const disabled = at === "draft" && draftEmpty && tab !== "draft";
+        const stage = STAGE_OF_TAB[at];
+        const busy = Boolean(
+          (stage && running[stage]) || (at === "tasks" && (running.tasks || running.tasksqa)),
+        );
+        const done = at === "draft" && Object.keys(published).length > 0;
+        return (
+          <div key={at} className="flex shrink-0 items-center gap-0.5">
+            {index > 0 && <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />}
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => store().setTab(at)}
+              aria-current={active ? "page" : undefined}
+              className={`relative flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                active
+                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+              }`}
+            >
+              <span className={`tabular-nums text-[11px] ${active ? "opacity-70" : "opacity-50"}`}>{index + 1}</span>
+              {busy ? (
+                <ThinkingOrb size="sm" />
+              ) : done ? (
+                <Check size={13} className="text-[var(--cf-success)]" />
+              ) : (
+                <Icon size={13} />
+              )}
+              {t(`huReview.tab_${at}` as "huReview.tab_story")}
+              {counts[at] > 0 && (
+                <span
+                  className={`rounded-full px-1.5 text-[10px] font-semibold tabular-nums ${
+                    active ? "bg-[var(--cf-accent)] text-white" : "bg-[var(--cf-border)] text-[var(--cf-text-muted)]"
+                  }`}
+                >
+                  {counts[at]}
+                </span>
+              )}
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------- the history ----------
+
+/** What a saved session says about how it ended, at a glance. */
+function StatusChip({ status }: { status: string }) {
+  const t = useT();
+  if (status === "published") {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[color-mix(in_oklab,var(--cf-success)_45%,transparent)] bg-[color-mix(in_oklab,var(--cf-success)_10%,transparent)] px-1.5 py-px text-[10px] font-medium text-[var(--cf-success)]">
+        <UploadCloud size={9} />
+        {t("huReview.statusPublished")}
+      </span>
+    );
+  }
+  if (status === "closed") {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10px] font-medium text-[var(--cf-text-muted)]">
+        <Lock size={9} />
+        {t("huReview.statusClosed")}
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] px-1.5 py-px text-[10px] font-medium text-[var(--cf-accent)]">
+      {t("huReview.statusOpen")}
+    </span>
+  );
+}
+
+/** The status a saved row ended in, read out of its payload without trusting its shape. */
+function statusOf(payload: string): string {
+  try {
+    const parsed: unknown = JSON.parse(payload);
+    const status = (parsed as { status?: unknown })?.status;
+    return typeof status === "string" ? status : "open";
+  } catch {
+    return "open";
+  }
+}
+
+/**
+ * Every review this workspace has saved.
+ *
+ * A dialog rather than the dropdown it used to be. The list is the workspace's record of what has
+ * been refined and how it ended — a popover 26rem wide that closes when the pointer strays is a
+ * place you glance at, not one you read, and half of what is worth knowing (status, when, which
+ * model) did not fit in it.
+ */
+function HistoryModal({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  const history = useWorkItemReviewStore((s) => s.history);
+  const openId = useWorkItemReviewStore((s) => s.sessionId);
+
+  return (
+    <ApiModal
+      icon={History}
+      title={t("huReview.history")}
+      subtitle={t("huReview.historyHint")}
+      width="max-w-2xl"
+      height="h-[70vh]"
+      onClose={onClose}
+    >
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+        {history.length === 0 ? (
+          <p className="px-2 py-8 text-center text-[12px] text-[var(--cf-text-muted)]">{t("huReview.historyEmpty")}</p>
+        ) : (
+          <div className="space-y-1">
+            {history.map((row, at) => (
+              <div
+                key={row.id}
+                style={riseDelay(at)}
+                className={`cf-rise group flex items-center gap-1 rounded-lg border ${
+                  row.id === openId
+                    ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]"
+                    : "border-[var(--cf-border)] hover:border-[color-mix(in_oklab,var(--cf-accent)_40%,var(--cf-border))]"
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    store().openFromHistory(row);
+                    onClose();
+                  }}
+                  className="min-w-0 flex-1 px-2.5 py-2 text-left"
+                >
+                  <p className="flex flex-wrap items-center gap-1.5 text-[12.5px] text-[var(--cf-text)]">
+                    <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
+                      #{row.work_item_id}
+                    </span>
+                    <span className="min-w-0 truncate font-medium">{row.title}</span>
+                    <StatusChip status={statusOf(row.payload)} />
+                  </p>
+                  <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+                    <span>{new Date(row.updated_at).toLocaleString()}</span>
+                    {row.work_item_type && (
+                      <>
+                        <span aria-hidden>·</span>
+                        <span>{row.work_item_type}</span>
+                      </>
+                    )}
+                    {row.model && (
+                      <>
+                        <span aria-hidden>·</span>
+                        <span className="min-w-0 truncate font-mono">{row.model}</span>
+                      </>
+                    )}
+                  </p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void confirmAction(t("huReview.historyDeleteConfirm")).then((ok) => {
+                      if (ok) void store().removeFromHistory(row.id);
+                    });
+                  }}
+                  title={t("huReview.historyDelete")}
+                  aria-label={t("huReview.historyDelete")}
+                  className={`mr-1.5 shrink-0 ${ICON_ACTION} opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100`}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </ApiModal>
+  );
+}
+
+// ---------- the run settings ----------
 
 /**
  * What the review is read against — none, some, or all of the workspace's repositories.
  *
  * Zero is a first-class answer and is labelled as one. A workspace is a project, and a story is
  * routinely written before the code that satisfies it; the picker that *required* a repository made
- * the screen unusable at exactly the moment refinement happens. The empty state therefore says
- * "sin repositorio" as a choice rather than "elige uno" as an instruction.
+ * the screen unusable at exactly the moment refinement happens.
  */
 function RepoPicker() {
   const t = useT();
@@ -573,7 +1931,7 @@ function RepoPicker() {
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="cf-fade-in absolute left-0 top-full z-20 mt-1 max-h-72 w-72 overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
+          <div className="cf-fade-in absolute right-0 top-full z-20 mt-1 max-h-72 w-72 overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
             <p className="px-2 py-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
               {t("huReview.reposOptional")}
             </p>
@@ -618,828 +1976,23 @@ function ContextToggle() {
   );
 }
 
-/** What produced one stage's answer, in the one line it deserves. */
-function Provenance({ stage }: { stage: WorkItemReviewStage }) {
-  const t = useT();
-  const at = useWorkItemReviewStore((s) => s.provenance[stage]);
-  if (!at) return null;
-
-  const seconds = at.elapsed_ms / 1000;
-  const took = seconds < 60 ? `${seconds.toFixed(1)}s` : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
-  const grounding =
-    at.repos_read > 0 ? t("huReview.groundedIn").replace("{n}", String(at.repos_read)) : t("huReview.groundedInNone");
-
-  return (
-    <p className="mt-1.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10.5px] text-[var(--cf-text-muted)]">
-      <Cpu size={10} className="shrink-0" />
-      <span className="font-mono">{at.model || at.engine}</span>
-      {at.version && <span className="font-mono opacity-70">{at.engine} {at.version}</span>}
-      <span aria-hidden>·</span>
-      <span className="inline-flex items-center gap-1">
-        <Timer size={10} />
-        {took}
-      </span>
-      <span aria-hidden>·</span>
-      <span>{grounding}</span>
-    </p>
-  );
-}
-
-const STEP_ICON: Record<ReviewStep, typeof ScanSearch> = {
-  analysis: ScanSearch,
-  description: FileText,
-  criteria: ListChecks,
-  tasks: ClipboardCheck,
-};
-
-/**
- * The order the three decisions are taken in, and where the user is in it.
- *
- * A marker, not a gate: nothing stops someone publishing tasks before the description, because a
- * team that has already agreed the description elsewhere should not have to click through it. What
- * the bar does is say what the recommended order *is*, and colour the step whose work is on screen.
- */
-function StepBar() {
-  const t = useT();
-  const step = useWorkItemReviewStore((s) => s.step);
-  const queue = useWorkItemReviewStore((s) => s.queue);
-  const analysis = useWorkItemReviewStore((s) => s.analysis);
-  const dismissed = useWorkItemReviewStore((s) => s.dismissed);
-  const proposedCriteria = useWorkItemReviewStore((s) => s.proposedCriteria);
-  const proposedTasks = useWorkItemReviewStore((s) => s.proposedTasks);
-  const running = useWorkItemReviewStore((s) => s.runByStage);
-
-  // What each step has produced, so the bar carries the counts the old AI-stage chips used to and
-  // the user never has to look in two places to know where the work is.
-  const liveFindings = (analysis?.findings ?? [])
-    .map((finding, at) => ({ finding, at }))
-    .filter(({ at }) => !dismissed[`finding:${at}`]);
-  const produced: Record<ReviewStep, number> = {
-    analysis: liveFindings.length,
-    // The same filter the description column applies, so the chip and the column can never
-    // disagree about how much work is waiting in that step.
-    description: liveFindings.filter(({ finding }) => finding.section !== "criterios").length,
-    criteria: proposedCriteria.filter((_, at) => !dismissed[`criterion:${at}`]).length,
-    tasks: proposedTasks.filter((_, at) => !dismissed[`task:${at}`]).length,
-  };
-  const staged = (at: ReviewStep) =>
-    at === "analysis" ? false : at === "tasks" ? (queue.tasks?.length ?? 0) > 0 : queue[at] !== null;
-
-  return (
-    <div className="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
-      {REVIEW_STEPS.map((at, index) => {
-        const Icon = STEP_ICON[at];
-        const active = step === at;
-        const published = at !== "analysis" && Boolean(queue.published[at as PublishStep]);
-        const busy = Boolean(running[STAGE_OF_STEP[at] as WorkItemReviewStage]);
-        return (
-          <div key={at} className="flex shrink-0 items-center gap-0.5">
-            {index > 0 && <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />}
-            <button
-              type="button"
-              onClick={() => store().setStep(at)}
-              aria-current={active ? "step" : undefined}
-              className={`relative flex shrink-0 items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium transition-colors ${
-                active
-                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
-              }`}
-            >
-              <span className={`tabular-nums text-[11px] ${active ? "opacity-70" : "opacity-50"}`}>{index + 1}</span>
-              {busy ? (
-                <ThinkingOrb size="sm" />
-              ) : published ? (
-                <Check size={13} className="text-[var(--cf-success)]" />
-              ) : (
-                <Icon size={13} />
-              )}
-              {t(`huReview.step_${at}` as "huReview.step_analysis")}
-              {produced[at] > 0 && (
-                <span
-                  className={`rounded-full px-1.5 text-[10px] font-semibold tabular-nums ${
-                    active ? "bg-[var(--cf-accent)] text-white" : "bg-[var(--cf-border)] text-[var(--cf-text-muted)]"
-                  }`}
-                >
-                  {produced[at]}
-                </span>
-              )}
-              {staged(at) && !published && (
-                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent)]" aria-hidden />
-              )}
-            </button>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-/**
- * The third column: what goes back to the board, and the only place it leaves from.
- *
- * Everything else on this screen is local — the left column is the item as it stands, the middle is
- * what a model proposed. This is the one that writes, so it is the one that asks: each step
- * confirms separately, names what it is about to overwrite, and afterwards says what it did rather
- * than quietly resetting.
- */
-/** One column's chrome: a heading with its icon, and whatever the step put in it. */
-function Column({
-  icon,
-  label,
-  hint,
-  count,
-  action,
-  footer,
-  width,
-  tinted = false,
-  children,
-}: {
-  icon: typeof ScanSearch;
-  label: string;
-  hint?: string;
-  count?: number;
-  action?: React.ReactNode;
-  footer?: React.ReactNode;
-  width?: string;
-  tinted?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <section
-      className={`flex min-h-0 min-w-0 flex-col overflow-hidden border-[var(--cf-border)] ${
-        width ?? "flex-1"
-      } ${tinted ? "bg-[var(--cf-bg)]" : "bg-[var(--cf-surface)]"}`}
-    >
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
-        <IconChip icon={icon} />
-        <h3 className="min-w-0 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">{label}</h3>
-        {(count ?? 0) > 0 && (
-          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
-            {count}
-          </span>
-        )}
-        {action && <span className="ml-auto shrink-0">{action}</span>}
-      </div>
-      {hint && (
-        <p className="shrink-0 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-          {hint}
-        </p>
-      )}
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">{children}</div>
-      {footer && <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-2.5">{footer}</div>}
-    </section>
-  );
-}
-
-/** Nothing here yet, and the one thing that would change that. */
-function ColumnEmpty({ icon: Icon, children }: { icon: typeof ScanSearch; children: React.ReactNode }) {
-  return (
-    <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center">
-      <Icon size={20} className="text-[var(--cf-border)]" />
-      <p className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{children}</p>
-    </div>
-  );
-}
-
-/** The button that runs this step's AI stage, sitting in the column whose content it produces. */
-function RunStage({ stage }: { stage: WorkItemReviewStage }) {
-  const t = useT();
-  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage[stage]));
-  const ready = useWorkItemReviewStore((s) => Boolean(s.item));
-  const label = running ? t("huReview.stop") : t(`huReview.run.${stage}`);
-
-  return (
-    <button
-      type="button"
-      disabled={!ready && !running}
-      title={running ? t("huReview.stopHint") : t(`huReview.what.${stage}`)}
-      onClick={() => void (running ? store().stop(stage) : store().run(stage))}
-      className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11.5px] font-medium transition-[filter,border-color,color] disabled:cursor-not-allowed disabled:opacity-40 ${
-        running
-          ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-          : "bg-[var(--cf-accent)] text-white hover:brightness-110"
-      }`}
-    >
-      {running ? <Square size={10} /> : <Play size={10} />}
-      {label}
-    </button>
-  );
-}
-
-/**
- * The story, filtered to the step on screen.
- *
- * Showing description, criteria and child tasks all at once was the old shape and it is what made
- * the column a scroll: two thirds of it was always about something the user was not looking at,
- * while the publish column next to it sat empty. One step, one subject, three columns that agree.
- */
-function StoryColumn({ step }: { step: ReviewStep }) {
-  const t = useT();
-  const item = useWorkItemReviewStore((s) => s.item);
-  const description = useWorkItemReviewStore((s) => s.description);
-  const reproSteps = useWorkItemReviewStore((s) => s.reproSteps);
-  const criteria = useWorkItemReviewStore((s) => s.criteria);
-  const analysis = useWorkItemReviewStore((s) => s.analysis);
-  if (!item) return null;
-
-  const isBug = kindOf(item.work_item_type) === "bug";
-  const prose = isBug ? reproSteps : description;
-
-  if (step === "analysis") {
-    return (
-      <Column
-        icon={FileText}
-        label={t("huReview.storyColumn")}
-        hint={t("huReview.storyColumnHint")}
-        width={SOURCE_WIDTH}
-      >
-        <div className="space-y-3">
-          {analysis?.invest?.length ? (
-            <div className="rounded-lg border border-[var(--cf-border)] p-2.5">
-              <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                {isBug ? t("huReview.bugGauge") : "INVEST"}
-              </p>
-              <div className="flex flex-wrap items-center gap-1">
-                {analysis.invest.map((letter) => (
-                  <span
-                    key={letter.letter}
-                    title={letter.note}
-                    aria-label={`${letter.letter}: ${letter.note}`}
-                    className={`inline-flex h-6 w-6 items-center justify-center rounded-md border text-[11px] font-semibold ${
-                      INVEST_CELL[letter.verdict] ?? INVEST_CELL.ok
-                    }`}
-                  >
-                    {letter.letter}
-                  </span>
-                ))}
-                <span className="ml-1 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
-                  {analysis.invest.filter((l) => l.verdict === "ok").length}/{analysis.invest.length}
-                </span>
-              </div>
-            </div>
-          ) : null}
-
-          <div>
-            <p className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription")}
-            </p>
-            <p className="max-h-64 overflow-y-auto whitespace-pre-wrap break-words px-2.5 text-[12px] leading-relaxed text-[var(--cf-text)]">
-              {prose.trim() || <span className="italic text-[var(--cf-text-muted)]">{t("huReview.noDescription")}</span>}
-            </p>
-          </div>
-
-          <div>
-            <p className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("stories.fieldCriteria")} · {criteria.length}
-            </p>
-            {criteria.length === 0 ? (
-              <p className="px-2.5 text-[11.5px] italic text-[var(--cf-text-muted)]">{t("huReview.noCriteria")}</p>
-            ) : (
-              <p className="px-2.5 text-[11.5px] text-[var(--cf-text-muted)]">{t("huReview.criteriaCountHint")}</p>
-            )}
-          </div>
-        </div>
-      </Column>
-    );
-  }
-
-  if (step === "description") {
-    return (
-      <Column
-        icon={FileText}
-        label={isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription")}
-        hint={t("huReview.clickToEdit")}
-        action={<StageButton onStage={() => store().stageDescription(prose)} />}
-      >
-        <EditableText
-          value={prose}
-          onChange={(value) => (isBug ? store().setReproSteps(value) : store().setDescription(value))}
-          placeholder={t("huReview.noDescription")}
-          minRows={10}
-        />
-
-        {/* A bug carries both fields: the steps are its prose, but somebody may also have filled in
-            the Description box that the bug form does not show. Hiding it would silently drop text
-            the review is about to be asked to judge. It stays editable — the review reads it — but
-            publishing this step writes the steps, not this, and the note under it says so. */}
-        {isBug && description.trim() && (
-          <div className="mt-4 border-t border-[var(--cf-border)] pt-3">
-            <p className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("stories.fieldDescription")}
-            </p>
-            <p className="mb-1 px-2.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-              {t("huReview.bugDescriptionNotPublished")}
-            </p>
-            <EditableText
-              value={description}
-              onChange={(value) => store().setDescription(value)}
-              placeholder={t("huReview.noDescription")}
-              minRows={4}
-            />
-          </div>
-        )}
-      </Column>
-    );
-  }
-
-  if (step === "criteria") {
-    return (
-      <Column
-        icon={ListChecks}
-        label={t("stories.fieldCriteria")}
-        count={criteria.length}
-        action={
-          <span className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => store().addCriterion("")}
-              title={t("huReview.addCriterionHint")}
-              aria-label={t("stories.addCriterion")}
-              className="flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
-            >
-              <Plus size={13} />
-            </button>
-            <StageButton onStage={() => store().stageCriteria(criteria.filter((c) => c.trim()))} />
-          </span>
-        }
-      >
-        {criteria.length === 0 ? (
-          <ColumnEmpty icon={ListChecks}>{t("huReview.noCriteria")}</ColumnEmpty>
-        ) : (
-          <div className="space-y-1.5">
-            {criteria.map((criterion, at) => (
-              <article
-                key={at}
-                style={riseDelay(at)}
-                className={`group rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] ${CARD_MOTION}`}
-              >
-                <div className="flex items-center gap-1.5 border-b border-[var(--cf-border)] px-2.5 py-1">
-                  <span className="text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">
-                    #{at + 1}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => store().removeCriterion(at)}
-                    title={t("stories.removeCriterion")}
-                    aria-label={t("stories.removeCriterion")}
-                    className="ml-auto flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
-                  >
-                    <Trash2 size={11} />
-                  </button>
-                </div>
-                <EditableText
-                  value={criterion}
-                  onChange={(value) => store().setCriterion(at, value)}
-                  placeholder={t("huReview.emptyCriterion")}
-                  gherkin
-                />
-              </article>
-            ))}
-          </div>
-        )}
-      </Column>
-    );
-  }
-
-  return (
-    <Column icon={ClipboardCheck} label={t("huReview.existingTasks")} count={item.children.length}>
-      {item.children.length === 0 ? (
-        <ColumnEmpty icon={ClipboardCheck}>{t("huReview.noTasks")}</ColumnEmpty>
-      ) : (
-        <div className="space-y-1.5">
-          {item.children.map((child, at) => (
-            <ChildTaskRow key={child.id} child={child} at={at} />
-          ))}
-        </div>
-      )}
-    </Column>
-  );
-}
-
-/**
- * What the AI proposes for this step, and the button that produces it.
- *
- * The run button lives here rather than in a strip of its own: "generar criterios" belongs to the
- * criteria the run produces, and putting it anywhere else is what created a second sequence of
- * steps competing with the real one.
- */
-function ProposalColumn({ step }: { step: ReviewStep }) {
-  const t = useT();
-  const analysis = useWorkItemReviewStore((s) => s.analysis);
-  const proposedCriteria = useWorkItemReviewStore((s) => s.proposedCriteria);
-  const proposedTasks = useWorkItemReviewStore((s) => s.proposedTasks);
-  const dismissed = useWorkItemReviewStore((s) => s.dismissed);
-  const stage = STAGE_OF_STEP[step];
-  const running = useWorkItemReviewStore((s) => (stage ? Boolean(s.runByStage[stage]) : false));
-
-  const alive = <T,>(items: T[], prefix: string) => items.filter((_, at) => !dismissed[`${prefix}:${at}`]);
-
-  // The description step has no run of its own: what it works from are the analysis findings that
-  // point at the story's prose, which is exactly what "arreglar la descripción" means here.
-  const proseFindings = (analysis?.findings ?? [])
-    .map((finding, at) => ({ finding, at }))
-    .filter(({ finding }) => finding.section !== "criterios")
-    .filter(({ at }) => !dismissed[`finding:${at}`]);
-
-  const body = () => {
-    if (running) {
-      return (
-        <div className="flex h-full flex-col items-center justify-center gap-2">
-          <ThinkingOrb size="lg" />
-          <p className="text-[11.5px] text-[var(--cf-text-muted)]">{t("huReview.running")}</p>
-        </div>
-      );
-    }
-
-    if (step === "analysis") {
-      if (!analysis) return <ColumnEmpty icon={ScanSearch}>{t("huReview.analysisHint")}</ColumnEmpty>;
-      return (
-        <div className="space-y-2">
-          {analysis.summary && (
-            <p className="rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 text-[12px] leading-relaxed text-[var(--cf-text)]">
-              {analysis.summary}
-            </p>
-          )}
-          {analysis.findings.map((finding, at) => (
-            <FindingRow key={at} finding={finding} at={at} />
-          ))}
-        </div>
-      );
-    }
-
-    if (step === "description") {
-      if (proseFindings.length === 0) {
-        return <ColumnEmpty icon={FileText}>{t("huReview.noProseFindings")}</ColumnEmpty>;
-      }
-      return (
-        <div className="space-y-2">
-          {proseFindings.map(({ finding, at }) => (
-            <FindingRow key={at} finding={finding} at={at} />
-          ))}
-        </div>
-      );
-    }
-
-    if (step === "criteria") {
-      if (alive(proposedCriteria, "criterion").length === 0) {
-        return <ColumnEmpty icon={ListChecks}>{t("huReview.criteriaHint")}</ColumnEmpty>;
-      }
-      return (
-        <div className="space-y-2">
-          {proposedCriteria.map((criterion, at) =>
-            dismissed[`criterion:${at}`] ? null : (
-              <article
-                key={at}
-                style={riseDelay(at)}
-                className={`rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
-              >
-                <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                  <ListChecks size={11} className="text-[var(--cf-success)]" />
-                  {t("huReview.gherkin")}
-                  <span className="tabular-nums">#{at + 1}</span>
-                  <RepoChip repo={criterion.repo} />
-                </div>
-                <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-[var(--cf-text)]">
-                  <GherkinText text={criterion.gherkin} />
-                </p>
-                {criterion.rationale && (
-                  <p className="mt-1 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{criterion.rationale}</p>
-                )}
-                <div className="mt-2 flex items-center gap-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      store().addCriterion(criterion.gherkin);
-                      store().dismiss(`criterion:${at}`);
-                    }}
-                    title={t("huReview.addToStoryHint")}
-                    className={PRIMARY_ACTION}
-                  >
-                    {t("huReview.addToStory")}
-                  </button>
-                  <CardActions
-                    onCopy={() => copy(criterion.gherkin, t("huReview.copied"))}
-                    onDismiss={() => store().dismiss(`criterion:${at}`)}
-                  />
-                </div>
-              </article>
-            ),
-          )}
-        </div>
-      );
-    }
-
-    if (alive(proposedTasks, "task").length === 0) {
-      return <ColumnEmpty icon={ClipboardCheck}>{t("huReview.tasksHint")}</ColumnEmpty>;
-    }
-    return (
-      <div className="space-y-2">
-        {proposedTasks.map((task, at) => (
-          <TaskRow key={at} task={task} at={at} />
-        ))}
-      </div>
-    );
-  };
-
-  const count =
-    step === "analysis"
-      ? alive(analysis?.findings ?? [], "finding").length
-      : step === "description"
-        ? proseFindings.length
-        : step === "criteria"
-          ? alive(proposedCriteria, "criterion").length
-          : alive(proposedTasks, "task").length;
-
-  const aliveTasks = alive(proposedTasks, "task");
-  // The description step shows the analysis findings, so the analysis is what produced them.
-  const provenanceStage: WorkItemReviewStage = stage ?? "analyze";
-  const hasProvenance = useWorkItemReviewStore((s) => Boolean(s.provenance[provenanceStage]));
-
-  return (
-    <Column
-      icon={Sparkles}
-      label={t("huReview.aiColumn")}
-      count={count}
-      action={
-        <span className="flex items-center gap-1.5">
-          {step === "tasks" && aliveTasks.length > 0 && (
-            <button
-              type="button"
-              onClick={() => copy(aliveTasks.map((task) => task.title).join("\n"), t("huReview.copied"))}
-              title={t("huReview.copyAllTasksHint")}
-              aria-label={t("huReview.copyAllTasks")}
-              className="flex h-6 w-6 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.06]"
-            >
-              <Copy size={12} />
-            </button>
-          )}
-          {stage && <RunStage stage={stage} />}
-        </span>
-      }
-      footer={hasProvenance ? <Provenance stage={provenanceStage} /> : undefined}
-      tinted
-    >
-      {body()}
-    </Column>
-  );
-}
-
-/**
- * The third column: what goes back to the board, and the only place it leaves from.
- *
- * Everything else on this screen is local — the first column is the item as it stands, the second is
- * what a model proposed. This is the one that writes, so it is the one that asks: each step confirms
- * separately, names what it is about to overwrite, and afterwards says what it did rather than
- * quietly resetting.
- *
- * On the analysis step there is nothing to publish — a judgement has no field on the board — so the
- * column says what the step is for instead of showing an empty queue with a dead button.
- */
-function PublishColumn({ step }: { step: ReviewStep }) {
-  const t = useT();
-  const queue = useWorkItemReviewStore((s) => s.queue);
-  const publishing = useWorkItemReviewStore((s) => s.publishing);
-  const item = useWorkItemReviewStore((s) => s.item);
-  const isBug = item ? kindOf(item.work_item_type) === "bug" : false;
-
-  if (step === "analysis") {
-    return (
-      <Column icon={UploadCloud} label={t("huReview.publishColumn")} width={PUBLISH_WIDTH}>
-        <ColumnEmpty icon={UploadCloud}>{t("huReview.publishNotInAnalysis")}</ColumnEmpty>
-      </Column>
-    );
-  }
-
-  const publishStep = step as PublishStep;
-  const done = queue.published[publishStep];
-  const busy = publishing === publishStep;
-  const tasks = queue.tasks ?? [];
-  const criteria = queue.criteria ?? [];
-  const ready =
-    publishStep === "tasks"
-      ? tasks.length > 0
-      : publishStep === "criteria"
-        ? queue.criteria !== null
-        : queue.description !== null;
-  const count = publishStep === "tasks" ? tasks.length : publishStep === "criteria" ? criteria.length : ready ? 1 : 0;
-
-  const confirmText = () => {
-    if (publishStep === "description") return t("huReview.confirmDescription");
-    if (publishStep === "criteria") return t("huReview.confirmCriteria").replace("{n}", String(criteria.length));
-    return t("huReview.confirmTasks").replace("{n}", String(tasks.length));
-  };
-
-  return (
-    <Column
-      icon={UploadCloud}
-      label={t("huReview.publishColumn")}
-      count={count}
-      width={PUBLISH_WIDTH}
-      footer={
-        <div className="space-y-1.5">
-          <p className="flex items-start gap-1.5 text-[10.5px] leading-snug text-[var(--cf-warning)]">
-            <TriangleAlert size={10} className="mt-[2px] shrink-0" />
-            <span className="min-w-0">{t("huReview.writesToAzure")}</span>
-          </p>
-          {done && (
-            <p className="flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-success)]">
-              <Check size={11} className="mt-[2px] shrink-0" />
-              <span className="min-w-0 break-words">
-                {t("huReview.publishedAt")
-                  .replace("{at}", new Date(done.at).toLocaleTimeString())
-                  .replace("{n}", String(done.count))}
-              </span>
-            </p>
-          )}
-          <div className="flex items-center gap-1.5">
-            <button
-              type="button"
-              disabled={!ready || busy}
-              onClick={() => {
-                void confirmAction(confirmText()).then((ok) => {
-                  if (ok) void store().publish(publishStep);
-                });
-              }}
-              className="flex flex-1 items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1.5 text-[12px] font-medium text-white transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {busy ? <ThinkingOrb size="sm" /> : <UploadCloud size={12} />}
-              {busy ? t("huReview.publishing") : done ? t("huReview.publishAgain") : t("huReview.publish")}
-            </button>
-            {ready && (
-              <button
-                type="button"
-                onClick={() => store().clearStep(publishStep)}
-                title={t("huReview.clearStep")}
-                aria-label={t("huReview.clearStep")}
-                className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-              >
-                <Eraser size={12} />
-              </button>
-            )}
-          </div>
-        </div>
-      }
-    >
-      {!ready ? (
-        <ColumnEmpty icon={UploadCloud}>{t("huReview.publishNothing")}</ColumnEmpty>
-      ) : publishStep === "description" ? (
-        <article className={`cf-rise rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}>
-          <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-            {isBug ? t("huReview.fieldRepro") : t("stories.fieldDescription")}
-          </p>
-          <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-[var(--cf-text)]">
-            {queue.description}
-          </p>
-        </article>
-      ) : publishStep === "criteria" ? (
-        <div className="space-y-2">
-          {criteria.map((criterion, at) => (
-            <article
-              key={at}
-              style={riseDelay(at)}
-              className={`rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
-            >
-              <p className="mb-1 text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">#{at + 1}</p>
-              <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-[var(--cf-text)]">
-                <GherkinText text={criterion} />
-              </p>
-            </article>
-          ))}
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {tasks.map((task, at) => (
-            <article
-              key={at}
-              style={riseDelay(at)}
-              className={`flex gap-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
-            >
-              <div className="min-w-0 flex-1">
-                <p className="break-words font-mono text-[11.5px] font-medium text-[var(--cf-text)]">{task.title}</p>
-                {task.detail && (
-                  <p className="mt-1 break-words text-[11px] leading-snug text-[var(--cf-text-muted)]">{task.detail}</p>
-                )}
-              </div>
-              <button
-                type="button"
-                onClick={() => store().unstageTask(at)}
-                title={t("huReview.unstage")}
-                aria-label={t("huReview.unstage")}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-              >
-                <Trash2 size={12} />
-              </button>
-            </article>
-          ))}
-        </div>
-      )}
-    </Column>
-  );
-}
-
-/** Reviews saved in this workspace, and the way back into one. */
-function HistoryPicker() {
-  const t = useT();
-  const history = useWorkItemReviewStore((s) => s.history);
-  const openId = useWorkItemReviewStore((s) => s.sessionId);
-  const [open, setOpen] = useState(false);
-
-  useEffect(() => {
-    void store().loadHistory();
-  }, []);
-
-  return (
-    <div className="relative shrink-0">
-      <button
-        type="button"
-        onClick={() => setOpen((wasOpen) => !wasOpen)}
-        aria-expanded={open}
-        title={t("huReview.historyHint")}
-        className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-      >
-        <History size={12} className="shrink-0" />
-        {t("huReview.history")}
-        {history.length > 0 && (
-          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
-            {history.length}
-          </span>
-        )}
-      </button>
-
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="cf-fade-in absolute right-0 top-full z-20 mt-1 max-h-96 w-[26rem] overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
-            {history.length === 0 ? (
-              <p className="px-2 py-3 text-center text-[11.5px] text-[var(--cf-text-muted)]">
-                {t("huReview.historyEmpty")}
-              </p>
-            ) : (
-              history.map((row, at) => (
-                <div
-                  key={row.id}
-                  style={riseDelay(at)}
-                  className={`cf-rise group flex items-center gap-1 rounded-md ${
-                    row.id === openId ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                  }`}
-                >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      store().openFromHistory(row);
-                      setOpen(false);
-                    }}
-                    className="min-w-0 flex-1 px-2 py-1.5 text-left"
-                  >
-                    <p className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text)]">
-                      <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
-                        #{row.work_item_id}
-                      </span>
-                      <span className="min-w-0 truncate font-medium">{row.title}</span>
-                    </p>
-                    <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
-                      <span>{new Date(row.updated_at).toLocaleString()}</span>
-                      {row.model && (
-                        <>
-                          <span aria-hidden>·</span>
-                          <span className="min-w-0 truncate font-mono">{row.model}</span>
-                        </>
-                      )}
-                    </p>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void confirmAction(t("huReview.historyDeleteConfirm")).then((ok) => {
-                        if (ok) void store().removeFromHistory(row.id);
-                      });
-                    }}
-                    title={t("huReview.historyDelete")}
-                    aria-label={t("huReview.historyDelete")}
-                    className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
-                  >
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
+// ---------- the screen ----------
 
 /**
  * Reviewing a work item that is already written on the board.
  *
  * The opposite direction to the rest of this workspace: instead of deriving a backlog from
- * documentation, it takes one item that exists and asks what it is missing. The item sits on the
- * left, editable; what the AI proposes sits on the right, and moves left only when the user says so.
+ * documentation, it takes one item that exists and asks what it is missing.
  *
- * Nothing is written to Azure DevOps from this screen. Everything the review produces leaves through
- * the user's own hands — inserted into the local copy, or copied out — which is what makes it safe to
- * run against a board other people are working from.
+ * Five tabs, each owning its own subject. The story as it stands is a record. The description, the
+ * criteria and the tasks each hold the current value on the left and what a model proposes on the
+ * right, and each runs on its own — a session that only rewrites the description never asks for
+ * the other two. The draft is where decisions collect, and the only place anything leaves for
+ * Azure DevOps.
+ *
+ * A session ends in one of two ways, and both are recorded: closed, or published. Either way it
+ * goes read-only and stays in the history with everything it held, which is what makes "what did
+ * we decide about #4821 last sprint" a question with an answer.
  */
 export function WorkItemReviewView() {
   const t = useT();
@@ -1450,19 +2003,24 @@ export function WorkItemReviewView() {
   const error = useWorkItemReviewStore((s) => s.error);
   const item = useWorkItemReviewStore((s) => s.item);
   const title = useWorkItemReviewStore((s) => s.title);
+  const status = useWorkItemReviewStore((s) => s.status);
   const running = useWorkItemReviewStore((s) => s.runByStage);
   const openedFrom = useWorkItemReviewStore((s) => s.openedFrom);
-  const step = useWorkItemReviewStore((s) => s.step);
+  const publishing = useWorkItemReviewStore((s) => s.publishing);
+  const draft = useWorkItemReviewStore((s) => s.draft);
+  const tab = useWorkItemReviewStore((s) => s.tab);
   const sourceWidth = useLayoutStore((s) => s.sizes.huReviewSourceWidth);
-  const publishWidth = useLayoutStore((s) => s.sizes.huReviewPublishWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
 
   const [orgs, setOrgs] = useState<string[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const historyCount = useWorkItemReviewStore((s) => s.history.length);
   // Guards the auto-pick: the organisation must be chosen for the user only while they have not
   // chosen one, and only once — a second pass would overwrite what they picked.
   const seeded = useRef(false);
   useEffect(() => {
+    void store().loadHistory();
     void loadAdoConnections()
       .then((connections) => {
         const names = connections.map((connection) => connection.org);
@@ -1476,18 +2034,39 @@ export function WorkItemReviewView() {
   const isBug = item ? kindOf(item.work_item_type) === "bug" : false;
   const TypeIcon = isBug ? Bug : FileText;
   const anyRunning = Object.keys(running).length > 0;
+  const open = status === "open";
+  const draftReady = !draftIsEmpty(draft);
 
-  const clearSession = () => {
-    void confirmAction(t("huReview.discardSessionConfirm")).then((ok) => {
-      if (ok) store().reset();
+  const closeReview = () => {
+    void confirmAction(t("huReview.closeReviewConfirm")).then((ok) => {
+      if (ok) void store().close();
     });
   };
 
+  const publishEverything = () => {
+    void confirmAction(t("huReview.publishAllConfirm")).then((ok) => {
+      if (ok) void store().publishAll();
+    });
+  };
+
+  // The draggable seam of the two-pane tabs. Handed to each of them rather than drawn here,
+  // because it belongs *between* their two panes and the tab is what renders those. Hidden below
+  // `lg`, where the panes stack and there is no horizontal seam to drag.
+  const seam = (
+    <span className="contents max-lg:hidden">
+      <ResizeHandle
+        axis="x"
+        value={sourceWidth}
+        min={SOURCE_MIN}
+        max={SOURCE_MAX}
+        onChange={(value) => setSize("huReviewSourceWidth", value)}
+        onCommit={(value) => commitSize("huReviewSourceWidth", value)}
+      />
+    </span>
+  );
+
   return (
     // `flex-1`, not `h-full`: this is one child of the stories view's column, under the tab strip.
-    // A hundred percent of the parent would be the strip's height too much, and with the parent
-    // clipping its overflow the footer — the one place that says nothing is written to Azure — is
-    // exactly what would fall off the bottom.
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)]">
       {/* 1 — what to load */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
@@ -1516,7 +2095,7 @@ export function WorkItemReviewView() {
         {/* Bounded rather than free to grow: on a wide window a `flex-1` field becomes a 1500px box
             for a forty-character link, which reads as a text editor rather than as a lookup. */}
         <div className="relative min-w-[14rem] max-w-xl flex-1">
-          <Link2
+          <ScanSearch
             size={12}
             className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
           />
@@ -1532,6 +2111,8 @@ export function WorkItemReviewView() {
         </div>
         <button
           type="button"
+          // Armed only by something to look up. With the box cleared on a successful load, this is
+          // also what stops a second press re-fetching the item already on screen.
           disabled={loading || !input.trim()}
           title={t("huReview.loadHint")}
           onClick={() => void store().load()}
@@ -1539,7 +2120,24 @@ export function WorkItemReviewView() {
         >
           {loading ? t("huReview.loading") : t("huReview.load")}
         </button>
-        <HistoryPicker />
+        {/* Pushed to the far edge, away from the lookup it is not part of: the organisation, the
+            box and Load are one action read left to right, and the history is a different one —
+            somewhere to go rather than something to fill in. `ml-auto` rather than a spacer so it
+            still sits beside Load once the row wraps on a narrow window. */}
+        <button
+          type="button"
+          onClick={() => setHistoryOpen(true)}
+          title={t("huReview.historyHint")}
+          className="ml-auto flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1.5 text-[12px] text-[var(--cf-text)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+        >
+          <History size={12} className="shrink-0" />
+          {t("huReview.history")}
+          {historyCount > 0 && (
+            <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 text-[10px] font-semibold tabular-nums text-[var(--cf-accent)]">
+              {historyCount}
+            </span>
+          )}
+        </button>
       </div>
 
       {openedFrom && (
@@ -1547,6 +2145,15 @@ export function WorkItemReviewView() {
           <History size={11} className="mt-[2px] shrink-0" />
           <span className="min-w-0 break-words" title={t("huReview.snapshotHint")}>
             {t("huReview.snapshot").replace("{at}", new Date(openedFrom.at).toLocaleString())}
+          </span>
+        </p>
+      )}
+
+      {item && !open && (
+        <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-black/[0.03] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
+          <Lock size={11} className="mt-[2px] shrink-0" />
+          <span className="min-w-0 break-words">
+            {status === "published" ? t("huReview.closedPublishedHint") : t("huReview.closedHint")}
           </span>
         </p>
       )}
@@ -1567,8 +2174,7 @@ export function WorkItemReviewView() {
         </div>
       ) : (
         <>
-          {/* 2 — what is loaded. The title lives here, at the top of the type scale, instead of
-              inside a 12px field under a 10px label. */}
+          {/* 2 — what is loaded. */}
           <div className="cf-fade-in flex shrink-0 items-start gap-2.5 border-b border-[var(--cf-border)] px-4 py-2.5">
             <span
               className={`mt-[3px] flex h-7 w-7 shrink-0 items-center justify-center rounded-md ${
@@ -1580,12 +2186,9 @@ export function WorkItemReviewView() {
               {anyRunning ? <ThinkingOrb size="sm" /> : <TypeIcon size={14} />}
             </span>
             <div className="min-w-0 flex-1">
-              <input
-                value={title}
-                onChange={(e) => store().setTitle(e.target.value)}
-                aria-label={t("stories.fieldTitle")}
-                className="w-full rounded-md border border-transparent bg-transparent px-1 py-0.5 text-[15px] font-semibold leading-tight text-[var(--cf-text)] outline-none hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] focus:bg-[var(--cf-field)]"
-              />
+              <h2 className="break-words px-1 text-[15px] font-semibold leading-tight text-[var(--cf-text)]">
+                {title}
+              </h2>
               <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 px-1 text-[11px] text-[var(--cf-text-muted)]">
                 <span className="font-mono">#{item.id}</span>
                 <span>{item.work_item_type}</span>
@@ -1603,14 +2206,14 @@ export function WorkItemReviewView() {
                     <span className="min-w-0 truncate">{item.team_project}</span>
                   </>
                 )}
+                {!open && <StatusChip status={status} />}
               </div>
             </div>
-            {/* What the review reads against, on the item's own row rather than on a band of its
-                own: these two are settings for the runs, not a step, and giving them a strip made
-                the screen four horizontal bands deep before any content started. */}
-            <div className="mt-[2px] flex shrink-0 items-center gap-1.5">
-              <RepoPicker />
-              <ContextToggle />
+            {/* What the runs read against, on the item's own row rather than on a band of its own:
+                these are settings for the runs, not a step. */}
+            <div className="mt-[2px] flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+              {open && <RepoPicker />}
+              {open && <ContextToggle />}
               <button
                 type="button"
                 onClick={() => void openExternalUrl(item.url).catch((e: unknown) => pushErrorToast(String(e)))}
@@ -1620,14 +2223,26 @@ export function WorkItemReviewView() {
               >
                 <ExternalLink size={13} />
               </button>
+              {/* Ends the session without publishing. Not a discard: everything it holds stays in
+                  the history, which is the whole point — "we looked at this and decided to leave
+                  it" is a result worth being able to read back. */}
+              {open && (
+                <button
+                  type="button"
+                  onClick={closeReview}
+                  title={t("huReview.closeReviewHint")}
+                  className="flex h-[30px] shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 text-[11.5px] font-medium text-[var(--cf-text)] transition-colors hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
+                >
+                  <X size={12} />
+                  {t("huReview.closeReview")}
+                </button>
+              )}
             </div>
           </div>
 
-          {/* 3 — the one path. Nothing else lives on this band: the AI runs used to sit here as a
-              second, near-identical triad, and each now lives inside the column whose content it
-              produces. */}
+          {/* 3 — the tabs, and whatever belongs to the one on screen. */}
           <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5">
-            <StepBar />
+            <TabBar />
             {anyRunning && (
               <button
                 type="button"
@@ -1643,73 +2258,44 @@ export function WorkItemReviewView() {
                 {t("huReview.stop")}
               </button>
             )}
+            {/* Publishes everything staged and ends the session, which is why it lives on the tab
+                strip rather than inside one of the three draft panes: it is about the review, not
+                about any one part of it. */}
+            {!anyRunning && tab === "draft" && open && (
+              <button
+                type="button"
+                disabled={!draftReady || Boolean(publishing)}
+                onClick={publishEverything}
+                title={t("huReview.publishAllHint")}
+                className="ml-auto flex shrink-0 items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-2.5 py-1 text-[11.5px] font-medium text-white transition-[filter,opacity] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {publishing ? <ThinkingOrb size="sm" /> : <UploadCloud size={11} />}
+                {t("huReview.publishAll")}
+              </button>
+            )}
           </div>
 
-          {/* 4 — the three columns, all filtered to the step above.
-
-              The outer two are draggable and the middle one is what they leave, which is why only
-              two widths are stored. `lg:divide-x` is gone from here: from `lg` up the seams are the
-              handles themselves, and a divider plus a handle is two lines where the layout has one
-              edge. Below `lg` the board stacks, the handles are `display:none`, and `divide-y` goes
-              on drawing the horizontal seams it always did. */}
+          {/* 4 — the panes. Keyed on the tab so nothing local (an open card, an editor) survives a
+              switch into a pane it does not belong to. */}
           <div
-            className="cf-fade-in flex min-h-0 flex-1 flex-col divide-y divide-[var(--cf-border)] overflow-hidden lg:flex-row lg:divide-y-0"
-            style={
-              {
-                "--cf-hu-source-w": `${sourceWidth}px`,
-                "--cf-hu-publish-w": `${publishWidth}px`,
-              } as React.CSSProperties
-            }
+            // `lg:divide-x` only where there is no handle: the two-pane tabs draw their seam with
+            // the drag handle, and a divider plus a handle is two lines where the layout has one
+            // edge. Below `lg` everything stacks and `divide-y` draws the horizontal seams.
+            className={`cf-fade-in flex min-h-0 flex-1 flex-col divide-y divide-[var(--cf-border)] overflow-hidden lg:flex-row lg:divide-y-0 ${
+              tab === "draft" ? "lg:divide-x" : ""
+            }`}
+            style={{ "--cf-hu-source-w": `${sourceWidth}px` } as React.CSSProperties}
           >
-            <StoryColumn key={`story-${step}`} step={step} />
-            <span className="contents max-lg:hidden">
-              <ResizeHandle
-                axis="x"
-                value={sourceWidth}
-                min={SOURCE_MIN}
-                max={SOURCE_MAX}
-                onChange={(value) => setSize("huReviewSourceWidth", value)}
-                onCommit={(value) => commitSize("huReviewSourceWidth", value)}
-              />
-            </span>
-            <ProposalColumn key={`ai-${step}`} step={step} />
-            <span className="contents max-lg:hidden">
-              <ResizeHandle
-                axis="x"
-                value={publishWidth}
-                min={PUBLISH_MIN}
-                max={PUBLISH_MAX}
-                invert
-                onChange={(value) => setSize("huReviewPublishWidth", value)}
-                onCommit={(value) => commitSize("huReviewPublishWidth", value)}
-              />
-            </span>
-            <PublishColumn key={`publish-${step}`} step={step} />
+            {tab === "story" && <StoryTab key="story" />}
+            {tab === "description" && <DescriptionTab key="description" width={SOURCE_WIDTH} seam={seam} />}
+            {tab === "criteria" && <CriteriaTab key="criteria" width={SOURCE_WIDTH} seam={seam} />}
+            {tab === "tasks" && <TasksTab key="tasks" width={SOURCE_WIDTH} seam={seam} />}
+            {tab === "draft" && <DraftTab key="draft" />}
           </div>
-
-          {/* 5 — the promise this screen makes, and the only way to undo the session.
-
-              The promise changed when the third column arrived: it used to be "nothing is written
-              back", which is no longer true and would have been the worst possible thing to keep
-              saying. What survives is the part that still holds — the reading and the proposing
-              change nothing, and the only writes are the ones the user staged and confirmed. */}
-          <footer className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
-            <ShieldCheck size={11} className="shrink-0 text-[var(--cf-success)]" />
-            <span className="min-w-0 truncate" title={t("huReview.stagedOnly")}>
-              {t("huReview.stagedOnly")}
-            </span>
-            <button
-              type="button"
-              onClick={clearSession}
-              title={t("huReview.discardSessionHint")}
-              className="ml-auto flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 font-medium hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
-            >
-              <Eraser size={11} />
-              {t("huReview.discardSession")}
-            </button>
-          </footer>
         </>
       )}
+
+      {historyOpen && <HistoryModal onClose={() => setHistoryOpen(false)} />}
     </div>
   );
 }

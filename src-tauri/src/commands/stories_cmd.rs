@@ -154,14 +154,35 @@ pub struct ReviewFinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProposedCriterion {
-    /// One whole Gherkin scenario.
+    /// `gherkin` | `checklist` | `ambos` — which shape this criterion wants to be written in.
+    ///
+    /// The model's call, because the answer is a property of the behaviour: a flow with a trigger
+    /// and an observable result is a scenario, and a set of conditions with no flow is a list.
+    /// `ambos` is the honest "I cannot tell" — both texts come back filled and the user picks.
+    /// Defaulted for the rows saved before the field existed, which were all Gherkin.
+    #[serde(default = "default_criterion_format")]
+    pub format: String,
+    /// One whole Gherkin scenario. Empty when `format` is `checklist`.
     pub gherkin: String,
+    /// The same requirement as a verification list, one condition per line. Empty when `format`
+    /// is `gherkin`.
+    #[serde(default)]
+    pub checklist: String,
     pub rationale: String,
+    /// The 1-based number of the existing criterion this rewrites, or `0` when it is new. What
+    /// lets the screen colour a correction differently from an addition — a rewrite that looks
+    /// like a new criterion is how a story ends up holding both wordings.
+    #[serde(default)]
+    pub replaces: i64,
     #[serde(default)]
     pub evidence: Vec<String>,
     /// See [`ReviewFinding::repo`].
     #[serde(default)]
     pub repo: String,
+}
+
+fn default_criterion_format() -> String {
+    "gherkin".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,7 +191,19 @@ pub struct ProposedTask {
     pub kind: String,
     /// Already carries its `[DEV]` or `[QA]` prefix — see [`prefixed_title`].
     pub title: String,
+    /// The three questions as one block of prose — what actually gets published to the board,
+    /// since Azure has one description field and not three. Composed from the parts below when
+    /// the model answered in parts, which is what the current templates ask for.
     pub detail: String,
+    /// ¿Qué? — what is being built or changed.
+    #[serde(default)]
+    pub what: String,
+    /// ¿Cómo? — the approach, and in which files.
+    #[serde(default)]
+    pub how: String,
+    /// ¿Para qué? — which behaviour or criterion it covers.
+    #[serde(default)]
+    pub why: String,
     #[serde(default)]
     pub evidence: Vec<String>,
     /// See [`ReviewFinding::repo`].
@@ -178,12 +211,33 @@ pub struct ProposedTask {
     pub repo: String,
 }
 
+/// The three questions as the one block of text a work item can hold.
+///
+/// Only the parts that came back are printed: a QA task whose `how` the model left empty should
+/// publish as two labelled lines, not as three with a heading over nothing.
+pub fn compose_task_detail(what: &str, how: &str, why: &str) -> String {
+    [("¿Qué?", what), ("¿Cómo?", how), ("¿Para qué?", why)]
+        .into_iter()
+        .filter(|(_, value)| !value.trim().is_empty())
+        .map(|(label, value)| format!("{label}: {}", value.trim()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// What one stage of the review answered. Tagged by stage so the frontend reads the shape it asked
 /// for rather than guessing from which arrays came back non-empty.
+///
+/// `Tasks` covers both task stages: development and QA answer the same shape, and the `kind` on
+/// each task is what tells them apart — which is also what lets the screen merge a DEV run and a
+/// QA run into one panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "lowercase")]
 pub enum WorkItemReview {
     Analyze { summary: String, invest: Vec<InvestVerdict>, findings: Vec<ReviewFinding> },
+    /// The description rewritten whole. An empty `description` is the model saying the current one
+    /// is already fine — a first-class answer, and the one the screen reports as "nothing to
+    /// propose" rather than as an empty result.
+    Description { description: String, rationale: String, evidence: Vec<String> },
     Criteria { criteria: Vec<ProposedCriterion> },
     Tasks { tasks: Vec<ProposedTask> },
 }
@@ -222,6 +276,16 @@ struct RawAnalysis {
 }
 
 #[derive(Deserialize)]
+struct RawDescription {
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    rationale: String,
+    #[serde(default)]
+    evidence: Vec<String>,
+}
+
+#[derive(Deserialize)]
 struct RawCriteria {
     #[serde(default)]
     criteria: Vec<ProposedCriterion>,
@@ -230,7 +294,27 @@ struct RawCriteria {
 #[derive(Deserialize)]
 struct RawTasks {
     #[serde(default)]
-    tasks: Vec<ProposedTask>,
+    tasks: Vec<RawTask>,
+}
+
+/// One task as the model sends it: the three questions in parts, and `detail` still accepted for
+/// the engine — or the customised template — that answers in one block.
+#[derive(Deserialize)]
+struct RawTask {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    detail: String,
+    #[serde(default)]
+    what: String,
+    #[serde(default)]
+    how: String,
+    #[serde(default)]
+    why: String,
+    #[serde(default)]
+    evidence: Vec<String>,
 }
 
 /// Puts the `[DEV]`/`[QA]` marker on, here rather than in the prompt.
@@ -257,6 +341,7 @@ fn prefixed_title(kind: &str, title: &str) -> String {
 /// Kept in parts rather than as one finished sentence because the two readers want different
 /// things: the user wants one line naming the problem, and the repair pass wants the parser's own
 /// message — which names the exact offset — next to the payload it choked on.
+#[derive(Debug)]
 struct ReviewParseError {
     /// The parser's complaint.
     detail: String,
@@ -290,22 +375,68 @@ fn review_shape(stage: ai::WorkItemReviewStage) -> &'static str {
         ai::WorkItemReviewStage::Analyze => {
             r#"{"summary":"","invest":[{"letter":"I","verdict":"ok","note":""}],"findings":[{"section":"titulo","severity":"media","issue":"","proposal":"","evidence":["ruta/archivo.ext:12"]}]}"#
         }
-        ai::WorkItemReviewStage::Criteria => {
-            r#"{"criteria":[{"gherkin":"Dado ...\nCuando ...\nEntonces ...","rationale":"","evidence":[]}]}"#
+        ai::WorkItemReviewStage::Description => {
+            r#"{"description":"","rationale":"","evidence":["ruta/archivo.ext:12"]}"#
         }
-        ai::WorkItemReviewStage::Tasks => r#"{"tasks":[{"kind":"dev","title":"","detail":"","evidence":[]}]}"#,
+        ai::WorkItemReviewStage::Criteria => {
+            r#"{"criteria":[{"format":"gherkin","gherkin":"Dado ...\nCuando ...\nEntonces ...","checklist":"","rationale":"","replaces":0,"evidence":[]}]}"#
+        }
+        ai::WorkItemReviewStage::Tasks => {
+            r#"{"tasks":[{"kind":"dev","title":"","what":"","how":"","why":"","evidence":[]}]}"#
+        }
+        ai::WorkItemReviewStage::TasksQa => {
+            r#"{"tasks":[{"kind":"qa","title":"","what":"","how":"","why":"","evidence":[]}]}"#
+        }
+    }
+}
+
+/// A second chance for a stage whose answer would not parse, after the deterministic salvage in
+/// [`ai::json_answer`] has already had its go.
+///
+/// The same bargain the review has always made, extended to the two stages that never had it:
+/// generating a backlog reads a specification and verifying one reads a repository, and both are
+/// minutes of work that is already done and sitting in the text that would not parse. One cheap,
+/// tool-less call to close a bracket beats re-running either, and beats handing the user an error
+/// about a character offset they cannot see.
+///
+/// Only attempted when there is a JSON object to fix. An answer given in prose — "no he podido
+/// revisar el repositorio" — has no syntax to repair, and asking again is the user's call.
+async fn parse_or_repair<T>(
+    config: &crate::commands::claude_cmd::AiConfig,
+    text: &str,
+    shape: &str,
+    parse: impl Fn(&str) -> Result<T, String>,
+) -> Result<T, String> {
+    let first = match parse(text) {
+        Ok(value) => return Ok(value),
+        Err(reported) => reported,
+    };
+    let Some(json) = ai::json_answer(text) else { return Err(first) };
+
+    match ai::repair_json(&*config.engine, &config.binary, &config.model, &json, shape, &first).await {
+        // The repaired answer still has to satisfy the stage's own rules, and when it does not,
+        // what the user reads is the original complaint: the second failure is about a document
+        // they never saw.
+        Ok(repaired) => parse(&repaired).map_err(|_| first),
+        // A stopped repair is the user stopping the run, and has to stay distinguishable from one
+        // that failed.
+        Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER) => Err(e),
+        Err(_) => Err(first),
     }
 }
 
 /// Split out from the command so it is testable without an engine.
 fn parse_review(stage: ai::WorkItemReviewStage, text: &str) -> Result<WorkItemReview, ReviewParseError> {
-    let Some(json) = ai::extract_json_block(text) else {
+    // Repaired on the way in where it can be — an unescaped quote in a sentence or an answer cut
+    // off two keys from the end is not worth a round trip to a model, let alone a re-run.
+    let Some(json) = ai::json_answer(text) else {
         return Err(ReviewParseError {
             detail: "no hay ningún objeto JSON en la respuesta".to_string(),
             payload: text.trim().to_string(),
             repairable: false,
         });
     };
+    let json = json.as_ref();
     let unreadable = |e: serde_json::Error| ReviewParseError {
         detail: e.to_string(),
         payload: json.to_string(),
@@ -327,31 +458,87 @@ fn parse_review(stage: ai::WorkItemReviewStage, text: &str) -> Result<WorkItemRe
                     .collect(),
             })
         }
+        ai::WorkItemReviewStage::Description => {
+            let parsed: RawDescription = serde_json::from_str(json).map_err(unreadable)?;
+            Ok(WorkItemReview::Description {
+                description: parsed.description.trim().to_string(),
+                rationale: parsed.rationale.trim().to_string(),
+                evidence: parsed.evidence,
+            })
+        }
         ai::WorkItemReviewStage::Criteria => {
             let parsed: RawCriteria = serde_json::from_str(json).map_err(unreadable)?;
             Ok(WorkItemReview::Criteria {
-                criteria: parsed.criteria.into_iter().filter(|c| !c.gherkin.trim().is_empty()).collect(),
+                criteria: parsed
+                    .criteria
+                    .into_iter()
+                    .map(normalise_criterion)
+                    // Both texts empty is a criterion with nothing in it whichever format it
+                    // claimed — the same emptiness filter the old shape applied to `gherkin`.
+                    .filter(|c| !c.gherkin.trim().is_empty() || !c.checklist.trim().is_empty())
+                    .collect(),
             })
         }
-        ai::WorkItemReviewStage::Tasks => {
+        // Same shape either way: what makes a task a QA task is its `kind`, which the QA stage
+        // forces below rather than trusting the model to have remembered.
+        ai::WorkItemReviewStage::Tasks | ai::WorkItemReviewStage::TasksQa => {
             let parsed: RawTasks = serde_json::from_str(json).map_err(unreadable)?;
+            let forced_qa = matches!(stage, ai::WorkItemReviewStage::TasksQa);
             Ok(WorkItemReview::Tasks {
                 tasks: parsed
                     .tasks
                     .into_iter()
                     .filter(|t| !t.title.trim().is_empty())
-                    .map(|t| ProposedTask {
-                        title: prefixed_title(&t.kind, &t.title),
-                        kind: if t.kind.eq_ignore_ascii_case("qa") { "qa".to_string() } else { "dev".to_string() },
-                        detail: t.detail.trim().to_string(),
-                        evidence: t.evidence,
-                        // Stamped by the merge once it knows whether more than one repository ran.
-                        repo: String::new(),
+                    .map(|t| {
+                        let kind = match forced_qa || t.kind.eq_ignore_ascii_case("qa") {
+                            true => "qa",
+                            false => "dev",
+                        };
+                        let composed = compose_task_detail(&t.what, &t.how, &t.why);
+                        ProposedTask {
+                            title: prefixed_title(kind, &t.title),
+                            kind: kind.to_string(),
+                            // The composed block when the model answered in parts, its own prose
+                            // when it answered in one — a customised template is allowed to.
+                            detail: match composed.is_empty() {
+                                true => t.detail.trim().to_string(),
+                                false => composed,
+                            },
+                            what: t.what.trim().to_string(),
+                            how: t.how.trim().to_string(),
+                            why: t.why.trim().to_string(),
+                            evidence: t.evidence,
+                            // Stamped by the merge once it knows whether more than one repository ran.
+                            repo: String::new(),
+                        }
                     })
                     .collect(),
             })
         }
     }
+}
+
+/// One criterion with its format and its two texts made to agree.
+///
+/// The model is asked for `format` plus whichever text that format names, and it is the field it
+/// slips on most: `ambos` with only the scenario filled in, or `checklist` with the list written
+/// into `gherkin`. Rather than dropping the criterion — the text is right there and the user can
+/// read it — the format is re-derived from what actually came back.
+fn normalise_criterion(mut criterion: ProposedCriterion) -> ProposedCriterion {
+    let has_gherkin = !criterion.gherkin.trim().is_empty();
+    let has_checklist = !criterion.checklist.trim().is_empty();
+    criterion.format = match (has_gherkin, has_checklist) {
+        (true, true) => "ambos",
+        (false, true) => "checklist",
+        (true, false) => "gherkin",
+        // Nothing to go on; the emptiness filter drops it either way.
+        (false, false) => "gherkin",
+    }
+    .to_string();
+    if criterion.replaces < 0 {
+        criterion.replaces = 0;
+    }
+    criterion
 }
 
 /// How the six checklist verdicts of several repositories reconcile into one.
@@ -399,6 +586,23 @@ fn merge_review(into: &mut WorkItemReview, from: WorkItemReview, repo: &str, tag
             }
             findings.extend(next.into_iter().map(|f| ReviewFinding { repo: tag.to_string(), ..f }));
         }
+        (
+            WorkItemReview::Description { description, rationale, evidence },
+            WorkItemReview::Description { description: next, rationale: next_why, evidence: next_ev },
+        ) => {
+            // One field, N repositories, one answer: the first repository that had something to
+            // say about the prose wins. Concatenating would produce a description written twice,
+            // which is worse than a description grounded in one of the two repositories — and the
+            // rewrite is about the *story*, which does not change per checkout.
+            if description.trim().is_empty() && !next.trim().is_empty() {
+                *description = next;
+                *rationale = match tag_repo {
+                    true => format!("{repo}: {next_why}"),
+                    false => next_why,
+                };
+                *evidence = next_ev;
+            }
+        }
         (WorkItemReview::Criteria { criteria }, WorkItemReview::Criteria { criteria: next }) => {
             criteria
                 .extend(next.into_iter().map(|c| ProposedCriterion { repo: tag.to_string(), ..c }));
@@ -419,8 +623,15 @@ fn empty_review(stage: ai::WorkItemReviewStage) -> WorkItemReview {
             invest: Vec::new(),
             findings: Vec::new(),
         },
+        ai::WorkItemReviewStage::Description => WorkItemReview::Description {
+            description: String::new(),
+            rationale: String::new(),
+            evidence: Vec::new(),
+        },
         ai::WorkItemReviewStage::Criteria => WorkItemReview::Criteria { criteria: Vec::new() },
-        ai::WorkItemReviewStage::Tasks => WorkItemReview::Tasks { tasks: Vec::new() },
+        ai::WorkItemReviewStage::Tasks | ai::WorkItemReviewStage::TasksQa => {
+            WorkItemReview::Tasks { tasks: Vec::new() }
+        }
     }
 }
 
@@ -486,8 +697,10 @@ pub async fn review_work_item(
     let prompt_kind = match (stage, kind) {
         (ai::WorkItemReviewStage::Analyze, ai::WorkItemKind::Bug) => "work_item_bug_analyze",
         (ai::WorkItemReviewStage::Analyze, ai::WorkItemKind::Story) => "work_item_analyze",
+        (ai::WorkItemReviewStage::Description, _) => "work_item_description",
         (ai::WorkItemReviewStage::Criteria, _) => "work_item_criteria",
         (ai::WorkItemReviewStage::Tasks, _) => "work_item_tasks",
+        (ai::WorkItemReviewStage::TasksQa, _) => "work_item_tasks_qa",
     };
 
     let (contexts, mcps, skills, config, template) = {
@@ -951,9 +1164,16 @@ pub async fn ado_update_work_item(
     description: Option<String>,
     repro_steps: Option<String>,
     acceptance_criteria: Option<Vec<String>>,
+    prose_is_html: Option<bool>,
 ) -> Result<boards::AdoWorkItemRef, String> {
     let pat = pat_for_org(&org)?;
-    let edit = boards::WorkItemEdit { title, description, repro_steps, acceptance_criteria };
+    let edit = boards::WorkItemEdit {
+        title,
+        description,
+        repro_steps,
+        acceptance_criteria,
+        prose_is_html: prose_is_html.unwrap_or(false),
+    };
     boards::update_work_item(&org, id, &edit, &pat).await
 }
 
@@ -1210,15 +1430,22 @@ struct GeneratedBatch {
     open_questions: Vec<String>,
 }
 
+/// The object the generation stage has to come back as, for the repair pass.
+///
+/// The same line its prompt already shows the model, repeated here because the repair states the
+/// target shape on its own — re-sending the whole generation prompt would invite a fresh backlog
+/// rather than a fix, and that backlog is exactly the work that must not be repeated.
+const GENERATED_SHAPE: &str = r#"{"stories":[{"title":"","narrative":"","description":"","acceptance_criteria":[""],"priority":0,"story_points":0,"tags":[""],"notes":""}],"open_questions":[""]}"#;
+
 /// Turns the model's answer into rows.
 ///
 /// Split out from the command so it is testable without an engine: this is where a plausible-looking
 /// reply that is actually empty (`{"stories": []}`) has to be caught, because everything downstream
 /// would otherwise report a successful generation of nothing.
 fn parse_generated(text: &str) -> Result<(Vec<NewStoryDraft>, Vec<String>), String> {
-    let json = ai::extract_json_block(text)
+    let json = ai::json_answer(text)
         .ok_or_else(|| format!("El modelo no devolvió JSON. Respondió:\n\n{}", text.trim()))?;
-    let parsed: GeneratedBatch = serde_json::from_str(json)
+    let parsed: GeneratedBatch = serde_json::from_str(&json)
         .map_err(|e| format!("El modelo devolvió un JSON que no se pudo leer ({e}). Respondió:\n\n{json}"))?;
 
     let stories: Vec<NewStoryDraft> = parsed
@@ -1301,8 +1528,10 @@ pub async fn generate_stories(
         queries::set_story_batch_status(&conn, &batch_id, "generating", "").map_err(|e| e.to_string())?;
     }
 
+    // The parse and its repair live inside the scope, not after it: a repair outside would be a
+    // second engine run the Stop button could not reach.
     let result = crate::ai_runs::scoped(app, run_id, async {
-        ai::generate_user_stories(
+        let text = ai::generate_user_stories(
             &*config.engine,
             &config.binary,
             &config.model,
@@ -1311,18 +1540,21 @@ pub async fn generate_stories(
             count,
             &template,
         )
-        .await
+        .await?;
+        parse_or_repair(&config, &text, GENERATED_SHAPE, parse_generated).await
     })
     .await;
 
     // A stopped run leaves the batch exactly as it was, like every other cancellable run in the app.
-    if matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
-        let conn = db.0.lock().map_err(|e| e.to_string())?;
-        queries::set_story_batch_status(&conn, &batch_id, "draft", "").map_err(|e| e.to_string())?;
-        return Err(result.unwrap_err());
+    if let Err(stopped) = &result {
+        if stopped.starts_with(crate::ai_runs::CANCELLED_MARKER) {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            queries::set_story_batch_status(&conn, &batch_id, "draft", "").map_err(|e| e.to_string())?;
+            return Err(stopped.clone());
+        }
     }
 
-    let parsed = result.and_then(|text| parse_generated(&text));
+    let parsed = result;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     match parsed {
         Ok((stories, questions)) => {
@@ -1518,6 +1750,10 @@ struct ParsedVerification {
     criteria_json: String,
 }
 
+/// The object the verification stage has to come back as, for the repair pass. See
+/// [`GENERATED_SHAPE`] for why the shape is repeated rather than the prompt re-sent.
+const VERIFY_SHAPE: &str = r#"{"stories":[{"story":1,"summary":"","criteria":[{"criterion":1,"verdict":"pass","evidence":["ruta/archivo.ext:120"],"note":"","covered_by_test":false}]}]}"#;
+
 /// Turns the model's answer into rows.
 ///
 /// Split out from the command so it is testable without an engine, and defensive in the two ways
@@ -1525,9 +1761,9 @@ struct ParsedVerification {
 /// or criterion number outside what was actually sent is dropped rather than writing a verdict onto
 /// the wrong row.
 fn parse_verification(text: &str, criteria_counts: &[usize]) -> Result<Vec<ParsedVerification>, String> {
-    let json = ai::extract_json_block(text)
+    let json = ai::json_answer(text)
         .ok_or_else(|| format!("El modelo no devolvió JSON. Respondió:\n\n{}", text.trim()))?;
-    let parsed: ReportedVerification = serde_json::from_str(json)
+    let parsed: ReportedVerification = serde_json::from_str(&json)
         .map_err(|e| format!("El modelo devolvió un JSON que no se pudo leer ({e}). Respondió:\n\n{json}"))?;
 
     let mut out = Vec::new();
@@ -1662,7 +1898,7 @@ pub async fn verify_stories(
     let target_ids: Vec<String> = targets.iter().map(|s| s.id.clone()).collect();
 
     let result = crate::ai_runs::scoped(app, run_id, async {
-        ai::verify_stories_against_code(
+        let text = ai::verify_stories_against_code(
             &*config.engine,
             &config.binary,
             &config.model,
@@ -1673,16 +1909,17 @@ pub async fn verify_stories(
             &template,
             mcp_config_path.as_deref(),
         )
+        .await?;
+        parse_or_repair(&config, &text, VERIFY_SHAPE, |answer| {
+            parse_verification(answer, &criteria_counts)
+        })
         .await
     })
     .await;
 
     // A stopped run leaves every previous verdict exactly as it was — nothing has been written yet.
-    if matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
-        return Err(result.unwrap_err());
-    }
-
-    let parsed = result.and_then(|text| parse_verification(&text, &criteria_counts))?;
+    // `?` on the next line reports it the same way; the branch exists so the reason is named.
+    let parsed = result?;
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     for verification in parsed {
         queries::save_story_verification(
@@ -2130,6 +2367,9 @@ mod tests {
                         kind: "dev".to_string(),
                         title: format!("[DEV] tocar {repo}"),
                         detail: String::new(),
+                        what: String::new(),
+                        how: String::new(),
+                        why: String::new(),
                         evidence: vec![],
                         repo: String::new(),
                     }],
@@ -2145,6 +2385,136 @@ mod tests {
                 assert_eq!(tasks[1].repo, "back");
             }
             _ => panic!("stage changed under the merge"),
+        }
+    }
+
+    /// The format field is the one the engines slip on, and the slip is always the same: a format
+    /// that names a text the answer did not fill in. The text that *is* there decides.
+    #[test]
+    fn a_criterion_format_is_re_derived_from_the_text_that_came_back() {
+        let text = r#"{"criteria":[
+            {"format":"ambos","gherkin":"Dado …","checklist":"","rationale":"","replaces":2},
+            {"format":"gherkin","gherkin":"","checklist":"- El campo es obligatorio","rationale":""},
+            {"format":"checklist","gherkin":"Dado …","checklist":"- Otra cosa","rationale":""},
+            {"format":"gherkin","gherkin":"  ","checklist":"","rationale":"vacío"}
+        ]}"#;
+        match parse_review(ai::WorkItemReviewStage::Criteria, text).expect("parsed") {
+            WorkItemReview::Criteria { criteria } => {
+                assert_eq!(criteria.len(), 3, "the one with neither text is dropped");
+                assert_eq!(criteria[0].format, "gherkin", "`ambos` with only a scenario is a scenario");
+                assert_eq!(criteria[0].replaces, 2, "it rewrites the story's second criterion");
+                assert_eq!(criteria[1].format, "checklist");
+                assert_eq!(criteria[2].format, "ambos", "both texts filled is genuinely both");
+                assert_eq!(criteria[2].replaces, 0, "no number means a new criterion");
+            }
+            _ => panic!("stage changed under the parse"),
+        }
+    }
+
+    /// The three questions are what the task is *for*; the board has one field to put them in.
+    #[test]
+    fn the_three_questions_become_the_detail_that_gets_published() {
+        let text = r#"{"tasks":[
+            {"kind":"dev","title":"Validar el cupón","what":" El validador ","how":"En checkout.ts","why":"Cubre el criterio 2"},
+            {"kind":"dev","title":"Sin cómo","what":"Algo","how":"  ","why":"Por algo"},
+            {"kind":"dev","title":"A la antigua","detail":"Una frase suelta"}
+        ]}"#;
+        match parse_review(ai::WorkItemReviewStage::Tasks, text).expect("parsed") {
+            WorkItemReview::Tasks { tasks } => {
+                assert_eq!(
+                    tasks[0].detail,
+                    "¿Qué?: El validador\n\n¿Cómo?: En checkout.ts\n\n¿Para qué?: Cubre el criterio 2"
+                );
+                assert_eq!(tasks[0].what, "El validador", "the parts survive for the editor");
+                assert!(!tasks[1].detail.contains("¿Cómo?"), "an empty part gets no heading");
+                assert_eq!(tasks[2].detail, "Una frase suelta", "a one-block answer is still read");
+            }
+            _ => panic!("stage changed under the parse"),
+        }
+    }
+
+    /// The QA stage owns the `kind`. A model that answered `dev` on the QA run wrote a QA task and
+    /// mislabelled it — taking its word would file the ladder under development.
+    #[test]
+    fn the_qa_stage_forces_the_kind_whatever_the_model_said() {
+        let text = r#"{"tasks":[{"kind":"dev","title":"Diseñar casos de prueba","what":"x"}]}"#;
+        match parse_review(ai::WorkItemReviewStage::TasksQa, text).expect("parsed") {
+            WorkItemReview::Tasks { tasks } => {
+                assert_eq!(tasks[0].kind, "qa");
+                assert_eq!(tasks[0].title, "[QA] Diseñar casos de prueba");
+            }
+            _ => panic!("stage changed under the parse"),
+        }
+    }
+
+    /// "Nothing to propose" is an answer, not a failed run: the description stage is allowed to
+    /// come back empty and the screen says so rather than showing a blank panel.
+    #[test]
+    fn an_empty_description_parses_as_nothing_to_propose() {
+        let text = r#"{"description":"","rationale":"","evidence":[]}"#;
+        match parse_review(ai::WorkItemReviewStage::Description, text).expect("parsed") {
+            WorkItemReview::Description { description, .. } => assert!(description.is_empty()),
+            _ => panic!("stage changed under the parse"),
+        }
+    }
+
+    /// One field, N repositories: the first repository with something to say writes it, and the
+    /// second does not append a second description under the first.
+    #[test]
+    fn only_one_repository_gets_to_rewrite_the_description() {
+        let mut merged = empty_review(ai::WorkItemReviewStage::Description);
+        for (repo, text) in [("front", ""), ("back", "La descripción buena")] {
+            merge_review(
+                &mut merged,
+                WorkItemReview::Description {
+                    description: text.to_string(),
+                    rationale: "porque sí".to_string(),
+                    evidence: vec![],
+                },
+                repo,
+                true,
+            );
+        }
+        match merged {
+            WorkItemReview::Description { description, rationale, .. } => {
+                assert_eq!(description, "La descripción buena");
+                assert_eq!(rationale, "back: porque sí", "the repository that answered is named");
+            }
+            _ => panic!("stage changed under the merge"),
+        }
+    }
+
+    /// The answer that used to cost a whole review, end to end.
+    ///
+    /// Reported as "expected `,` or `}` at line 1 column 748" and thrown away entirely — minutes
+    /// of reading a repository, lost to a quote inside a sentence about two work-item states. It
+    /// has to come back through the ordinary parse now, with nothing asked of any model.
+    #[test]
+    fn the_answer_that_used_to_be_thrown_away_now_parses() {
+        let broken = "{\"criteria\":[{\"format\":\"gherkin\",\"gherkin\":\"Dado una OT \"Por planificar\"\nCuando se libera\nEntonces se asigna\",\"checklist\":\"\",\"rationale\":\"Falta el desempate cuando hay una \"Por planificar\" y otra \"Planificado\", y unificar qué es la \"hora de liberación\" vs la \"hora actual\"\",\"replaces\":0,\"evidence\":[]}]}";
+        match parse_review(ai::WorkItemReviewStage::Criteria, broken).expect("recovered") {
+            WorkItemReview::Criteria { criteria } => {
+                assert_eq!(criteria.len(), 1);
+                assert!(criteria[0].gherkin.contains("OT \"Por planificar\""));
+                assert!(criteria[0].gherkin.contains("\nCuando se libera"), "the newline survived too");
+                assert!(criteria[0].rationale.ends_with("vs la \"hora actual\""));
+            }
+            _ => panic!("stage changed under the parse"),
+        }
+    }
+
+    /// The other half of the same rescue: a run that hit the token limit keeps every task that
+    /// arrived instead of reporting that none did.
+    #[test]
+    fn a_truncated_task_list_keeps_the_tasks_that_arrived() {
+        let cut = r#"{"tasks":[{"kind":"dev","title":"Validar el cupón","what":"El validador","how":"En checkout.ts","why":"Cubre el 2"},{"kind":"dev","title":"Persistir el canje","what":"La tabla de can"#;
+        match parse_review(ai::WorkItemReviewStage::Tasks, cut).expect("recovered") {
+            WorkItemReview::Tasks { tasks } => {
+                assert_eq!(tasks.len(), 2);
+                assert_eq!(tasks[0].title, "[DEV] Validar el cupón");
+                assert_eq!(tasks[1].what, "La tabla de can", "the half-written task is kept as it stands");
+            }
+            _ => panic!("stage changed under the parse"),
         }
     }
 

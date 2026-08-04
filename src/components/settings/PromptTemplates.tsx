@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import {
   ChevronDown,
+  ClipboardCheck,
+  FileText,
+  FlaskConical,
   GitCommit,
   GitMerge,
+  ListChecks,
   RotateCcw,
   ScanSearch,
   type LucideIcon,
@@ -11,11 +15,15 @@ import {
   defaultAnalyzeTemplate,
   defaultCommitTemplate,
   defaultResolveConflictTemplate,
+  defaultWorkspacePrompt,
   getSetting,
+  getWorkspacePrompt,
   setSetting,
+  setWorkspacePrompt,
 } from "../../lib/tauri/commands";
 import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
 import { useAiProviderStore } from "../../state/aiProviderStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Skeleton } from "../common/Skeleton";
@@ -69,11 +77,236 @@ const TEMPLATES: TemplateDef[] = [
   },
 ];
 
+/**
+ * The prompts the work-item review runs on, one per tab of that screen.
+ *
+ * Separate from `TEMPLATES` because they are stored per *workspace* rather than globally: how a
+ * team writes acceptance criteria is a property of that team's backlog, not of this installation,
+ * and two workspaces on one machine routinely disagree about it.
+ *
+ * They are here rather than only in the review screen because this is where somebody goes when the
+ * output came out wrong. The defaults describe one way of working — Gherkin or a checklist, three
+ * questions per development task, a five-step QA ladder — and a team whose process differs should
+ * be changing the instruction rather than fighting its output card by card.
+ */
+const REVIEW_PROMPTS: {
+  kind: string;
+  icon: LucideIcon;
+  labelKey: TranslationKey;
+  hintKey: TranslationKey;
+}[] = [
+  {
+    kind: "work_item_description",
+    icon: FileText,
+    labelKey: "settings.wiPromptDescription",
+    hintKey: "settings.wiPromptDescriptionHint",
+  },
+  {
+    kind: "work_item_criteria",
+    icon: ListChecks,
+    labelKey: "settings.wiPromptCriteria",
+    hintKey: "settings.wiPromptCriteriaHint",
+  },
+  {
+    kind: "work_item_tasks",
+    icon: ClipboardCheck,
+    labelKey: "settings.wiPromptTasks",
+    hintKey: "settings.wiPromptTasksHint",
+  },
+  {
+    kind: "work_item_tasks_qa",
+    icon: FlaskConical,
+    labelKey: "settings.wiPromptTasksQa",
+    hintKey: "settings.wiPromptTasksQaHint",
+  },
+];
+
 interface Loaded {
   /** What's in the editor. */
   value: string;
   /** The built-in text, for the "customized?" comparison and the reset action. */
   fallback: string;
+}
+
+/** The shared shell of a template row: the summary line, its state chip, and the body it folds. */
+function TemplateRow({
+  icon: Icon,
+  label,
+  sublabel,
+  custom,
+  saved,
+  open,
+  onToggle,
+  children,
+}: {
+  icon: LucideIcon;
+  label: string;
+  sublabel: string;
+  custom: boolean;
+  saved: boolean;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  const t = useT();
+  return (
+    <div className="rounded-lg border border-[var(--cf-border)]">
+      <button type="button" onClick={onToggle} className="flex w-full items-center gap-2 p-2.5 text-left">
+        <ChevronDown
+          size={14}
+          className={`shrink-0 text-[var(--cf-text-muted)] transition-transform ${open ? "" : "-rotate-90"}`}
+        />
+        <Icon size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12.5px] font-medium text-[var(--cf-text)]">{label}</span>
+          <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{sublabel}</span>
+        </span>
+        {saved ? (
+          <span className="shrink-0 text-[10px] font-medium text-[var(--cf-success)]">{t("settings.saved")}</span>
+        ) : custom ? (
+          <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--cf-accent)]">
+            {t("settings.templateCustom")}
+          </span>
+        ) : (
+          <span className="shrink-0 rounded-full bg-black/[0.05] px-2 py-0.5 text-[10px] font-medium text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
+            {t("settings.templateDefault")}
+          </span>
+        )}
+      </button>
+      {open && <div className="border-t border-[var(--cf-border)] p-3">{children}</div>}
+    </div>
+  );
+}
+
+/**
+ * One per-workspace prompt, in the same row as the global ones.
+ *
+ * Its own loader rather than a shared one, because a workspace prompt has a different lifetime:
+ * switching workspace has to re-read it, and an unsaved edit has to be flushed before that read
+ * lands on top of it. Autosaves on blur like everything else on this screen.
+ */
+function WorkspacePromptRow({
+  kind,
+  icon,
+  label,
+  hint,
+  engine,
+}: {
+  kind: string;
+  icon: LucideIcon;
+  label: string;
+  hint: string;
+  engine: string;
+}) {
+  const t = useT();
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const [value, setValue] = useState<string | null>(null);
+  const [fallback, setFallback] = useState("");
+  const [open, setOpen] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const latest = useRef<string | null>(null);
+  const persisted = useRef("");
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!workspaceId) {
+      setValue(null);
+      return;
+    }
+    void (async () => {
+      const [content, def] = await Promise.all([
+        getWorkspacePrompt(workspaceId, kind).catch(() => null),
+        defaultWorkspacePrompt(kind).catch(() => ""),
+      ]);
+      if (cancelled) return;
+      const resolved = content ?? def;
+      setFallback(def);
+      setValue(resolved);
+      latest.current = resolved;
+      persisted.current = resolved;
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, kind]);
+
+  // Closing Settings right after typing wouldn't always fire a blur — flush anything unsaved.
+  useEffect(
+    () => () => {
+      if (!workspaceId) return;
+      const current = latest.current;
+      if (current !== null && current.trim() !== persisted.current.trim()) {
+        void setWorkspacePrompt(workspaceId, kind, current.trim());
+      }
+    },
+    [workspaceId, kind],
+  );
+
+  const persist = async () => {
+    const current = latest.current;
+    if (!workspaceId || current === null || current.trim() === persisted.current.trim()) return;
+    await setWorkspacePrompt(workspaceId, kind, current.trim());
+    persisted.current = current.trim();
+    setSaved(true);
+    setTimeout(() => setSaved(false), 1400);
+  };
+
+  const reset = async () => {
+    if (!workspaceId) return;
+    setValue(fallback);
+    latest.current = fallback;
+    // Blanked rather than overwritten with the default text: an empty override is what makes the
+    // backend fall back, so a later change to the built-in prompt still reaches this workspace.
+    await setWorkspacePrompt(workspaceId, kind, "");
+    persisted.current = fallback.trim();
+  };
+
+  const custom = value !== null && value.trim() !== fallback.trim();
+
+  return (
+    <TemplateRow
+      icon={icon}
+      label={label}
+      sublabel={engine}
+      custom={custom}
+      saved={saved}
+      open={open}
+      onToggle={() => setOpen((was) => !was)}
+    >
+      <p className="mb-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">{hint}</p>
+      {!workspaceId ? (
+        <p className="text-[12px] text-[var(--cf-text-muted)]">{t("settings.reviewSelectWorkspace")}</p>
+      ) : value === null ? (
+        <Skeleton className="h-40 w-full" />
+      ) : (
+        <>
+          <textarea
+            value={value}
+            onChange={(e) => {
+              setValue(e.target.value);
+              latest.current = e.target.value;
+            }}
+            onBlur={() => void persist()}
+            rows={16}
+            spellCheck={false}
+            className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
+          />
+          <div className="mt-1.5 flex items-center justify-between">
+            <span className="text-[10.5px] text-[var(--cf-text-muted)]">{t("settings.templateAutosave")}</span>
+            {custom && (
+              <button
+                onClick={() => void reset()}
+                className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+              >
+                <RotateCcw size={11} />
+                {t("settings.templateReset")}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </TemplateRow>
+  );
 }
 
 /**
@@ -186,43 +419,20 @@ export function PromptTemplates() {
         const entry = loaded[tpl.key];
         const isCustom = entry.value.trim() !== entry.fallback.trim();
         const isOpen = expanded === tpl.key;
-        const Icon = tpl.icon;
 
         return (
-          <div key={tpl.key} className="rounded-lg border border-[var(--cf-border)]">
-            <button
-              type="button"
-              onClick={() => setExpanded(isOpen ? null : tpl.key)}
-              className="flex w-full items-center gap-2 p-2.5 text-left"
-            >
-              <ChevronDown
-                size={14}
-                className={`shrink-0 text-[var(--cf-text-muted)] transition-transform ${isOpen ? "" : "-rotate-90"}`}
-              />
-              <Icon size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12.5px] font-medium text-[var(--cf-text)]">
-                  {t(tpl.labelKey)}
-                </span>
-                <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{engineFor(tpl.task)}</span>
-              </span>
-              {savedFlash === tpl.key ? (
-                <span className="shrink-0 text-[10px] font-medium text-[var(--cf-success)]">
-                  {t("settings.saved")}
-                </span>
-              ) : isCustom ? (
-                <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-2 py-0.5 text-[10px] font-medium text-[var(--cf-accent)]">
-                  {t("settings.templateCustom")}
-                </span>
-              ) : (
-                <span className="shrink-0 rounded-full bg-black/[0.05] px-2 py-0.5 text-[10px] font-medium text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-                  {t("settings.templateDefault")}
-                </span>
-              )}
-            </button>
-
-            {isOpen && (
-              <div className="border-t border-[var(--cf-border)] p-3">
+          <TemplateRow
+            key={tpl.key}
+            icon={tpl.icon}
+            label={t(tpl.labelKey)}
+            sublabel={engineFor(tpl.task)}
+            custom={isCustom}
+            saved={savedFlash === tpl.key}
+            open={isOpen}
+            onToggle={() => setExpanded(isOpen ? null : tpl.key)}
+          >
+            {
+              <>
                 <p className="mb-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">{t(tpl.hintKey)}</p>
                 <textarea
                   value={entry.value}
@@ -246,11 +456,34 @@ export function PromptTemplates() {
                     </button>
                   )}
                 </div>
-              </div>
-            )}
-          </div>
+              </>
+            }
+          </TemplateRow>
         );
       })}
+
+      {/* Per workspace, and said so: the rows above apply to this installation, and these to the
+          backlog of whichever workspace is open. Without the line saying which, a team that
+          rewrote its criteria prompt and then switched workspace would find it gone. */}
+      <div className="pt-3">
+        <h4 className="text-[12.5px] font-semibold text-[var(--cf-text)]">{t("settings.reviewPromptsTitle")}</h4>
+        <p className="mb-2 mt-0.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {t("settings.reviewPromptsHint")}
+        </p>
+        <div className="space-y-2">
+          {REVIEW_PROMPTS.map((prompt) => (
+            <WorkspacePromptRow
+              key={prompt.kind}
+              kind={prompt.kind}
+              icon={prompt.icon}
+              label={t(prompt.labelKey)}
+              hint={t(prompt.hintKey)}
+              // The review runs route with the verification task, in Rust and here alike.
+              engine={engineFor("story_verify")}
+            />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

@@ -862,7 +862,14 @@ export interface AdoWorkItem {
  */
 export type WorkItemKind = "story" | "bug";
 
-export type WorkItemReviewStage = "analyze" | "criteria" | "tasks";
+/**
+ * Which question one review run is asking.
+ *
+ * One per tab of the review screen, plus `tasksqa` — the QA ladder is its own run because it is
+ * its own prompt. `analyze` predates the tab split and is no longer run from anywhere; it stays
+ * because saved sessions carry its answer and still have to open.
+ */
+export type WorkItemReviewStage = "analyze" | "description" | "criteria" | "tasks" | "tasksqa";
 
 export interface InvestVerdict {
   letter: string;
@@ -884,9 +891,24 @@ export interface ReviewFinding {
   repo: string;
 }
 
+/**
+ * Which shape a criterion wants to be written in.
+ *
+ * Not a setting: a behaviour with a trigger and an observable result is a scenario, and a set of
+ * conditions with no flow is a list. The model decides per criterion, and `ambos` is its honest
+ * "I cannot tell" — both texts come back filled and the user picks which one goes to the draft.
+ */
+export type CriterionFormat = "gherkin" | "checklist" | "ambos";
+
 export interface ProposedCriterion {
+  format: CriterionFormat;
+  /** One whole Gherkin scenario. Empty when `format` is `checklist`. */
   gherkin: string;
+  /** The same requirement as a verification list, one condition per line. */
+  checklist: string;
   rationale: string;
+  /** The 1-based number of the story's criterion this rewrites, or `0` when it is new. */
+  replaces: number;
   evidence: string[];
   repo: string;
 }
@@ -895,7 +917,14 @@ export interface ProposedTask {
   kind: "dev" | "qa";
   /** Already carries its `[DEV]`/`[QA]` prefix — the backend puts it on. */
   title: string;
+  /** The three questions as the one block of prose the board has a field for. */
   detail: string;
+  /** ¿Qué? — what is being built or changed. */
+  what: string;
+  /** ¿Cómo? — the approach, and in which files. */
+  how: string;
+  /** ¿Para qué? — which behaviour or criterion it covers. */
+  why: string;
   evidence: string[];
   repo: string;
 }
@@ -903,6 +932,8 @@ export interface ProposedTask {
 /** Tagged by stage, so the caller reads the shape it asked for. */
 export type WorkItemReview =
   | { stage: "analyze"; summary: string; invest: InvestVerdict[]; findings: ReviewFinding[] }
+  /** An empty `description` is "the current one is already fine", not a failed run. */
+  | { stage: "description"; description: string; rationale: string; evidence: string[] }
   | { stage: "criteria"; criteria: ProposedCriterion[] }
   | { stage: "tasks"; tasks: ProposedTask[] };
 

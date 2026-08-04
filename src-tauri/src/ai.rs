@@ -1019,16 +1019,25 @@ pub const MAX_WORK_ITEM_REVIEW_CHARS: usize = 30_000;
 
 /// Which question the review is asking on this run.
 ///
-/// Three calls rather than one that answers everything: the criteria are written against the story
-/// *after* the user has taken or rejected what the analysis proposed, and the tasks against the
-/// story after that. Answering all three at once would be proposing tasks for a story nobody has
-/// agreed to yet — and the whole point of this screen is that the human decides in between.
+/// One call per part of the work item rather than one that answers everything, and — since the
+/// tabs were split — one part per tab. The user may run only the description, only the criteria,
+/// only the tasks, or any combination of the three: each tab owns its own run and its own answer,
+/// so nothing on this screen depends on a stage the user chose not to pay for.
+///
+/// `Analyze` predates the split and is kept because saved sessions still carry its answer. Nothing
+/// on the screen runs it any more.
+///
+/// `Tasks` and `TasksQa` are two stages rather than one with a parameter because they are two
+/// prompts a team edits separately: development work is derived from this story and this code, and
+/// the QA ladder is a fixed five-step shape a team either keeps or rewrites wholesale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkItemReviewStage {
     Analyze,
+    Description,
     Criteria,
     Tasks,
+    TasksQa,
 }
 
 /// What kind of thing is being reviewed, which decides what "well written" even means.
@@ -1124,55 +1133,177 @@ Tu tarea: decir qué le falta a este reporte para que alguien pueda arreglarlo y
 - `severity` es una de: `alta`, `media`, `baja`.
 - No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
 
+/// How much of the repository a review run is supposed to read.
+///
+/// Repeated verbatim into every review template because it is the instruction that decides what a
+/// run *costs*. Left unsaid, an agent told to "read the repository" reads the repository: hundreds
+/// of files for a story that touches two, several minutes of wall clock, and a context window
+/// spent on code that has nothing to do with the question. What the review actually needs is
+/// orientation — the shape of the project and the handful of files this story lands in.
+const REPO_READING_BUDGET: &str = r#"=== CUÁNTO CÓDIGO LEER ===
+- NO leas el repositorio entero. Necesitas orientarte, no auditarlo.
+- Empieza por lo que describe el proyecto: README, la documentación del repositorio y los archivos `.md` de contexto. Suelen bastar para saber de qué va.
+- Después busca SOLO lo que toca esta historia: los archivos que nombran sus entidades, su pantalla o su endpoint. Búsqueda dirigida, no recorrido exhaustivo.
+- Como referencia, entre 5 y 15 archivos abiertos son suficientes. Si has abierto más y sigues sin encontrar lo que buscabas, responde con lo que sepas y deja `evidence` vacío en lo que no puedas respaldar.
+- Es preferible una respuesta honesta sin evidencia que una lenta con evidencia inventada."#;
+
+/// "Rewrite this work item's description, and say nothing if it is already fine."
+///
+/// Its own stage since the tabs were split. It used to be the analysis findings filtered to the
+/// prose, which meant the description tab could only show something if the user had paid for a
+/// whole-story analysis first — and what it showed were remarks about the description rather than
+/// a description. What the tab wants is the field, rewritten, ready to replace what is there.
+pub const DEFAULT_WORK_ITEM_DESCRIPTION_TEMPLATE: &str = r#"Eres un analista funcional reescribiendo la DESCRIPCIÓN de un work item que ya está en Azure DevOps. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo.
+
+Por stdin recibes el work item: su tipo, su título, su descripción actual, sus criterios de aceptación y las tareas que ya tiene.
+
+Tu tarea: devolver la descripción completa, lista para reemplazar a la actual — no comentarios sobre ella.
+
+=== QUÉ TIENE QUE DECIR ===
+- Para una historia: quién lo pide, qué necesita y para qué; el comportamiento esperado, no solo el nombre de una pantalla; y las reglas de negocio que la condicionan.
+- Para un bug: qué pasa, qué debería pasar, en qué entorno y desde cuándo.
+- Lo que queda FUERA del alcance, cuando la descripción actual lo deja ambiguo.
+
+=== REGLAS ===
+- NO modifiques, crees ni borres ningún archivo. Esto es una lectura.
+- Devuelve Markdown: títulos con `##`, listas con `-`, negritas donde ayuden. Nada de HTML.
+- Conserva lo que la descripción actual ya dice bien. Reescribir por reescribir le hace perder al equipo el texto que había acordado.
+- NO inventes reglas de negocio que no estén ni en el texto ni en el código. Lo que falte y no puedas deducir, déjalo escrito como pregunta abierta al final.
+- **Si la descripción actual ya cumple con lo que se espera, devuelve `description` como cadena vacía.** Es una respuesta válida y es la correcta cuando no hay nada que mejorar: no reescribas para justificar la ejecución.
+- Escribe SIEMPRE en español.
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
+- El objeto tiene exactamente esta forma:
+{"description":"","rationale":"","evidence":["ruta/archivo.ext:12"]}
+- `description` es la descripción entera en una sola cadena, con sus saltos de línea escapados como \n. Vacía si no hay nada que proponer.
+- `rationale` es una frase diciendo qué cambiaste y por qué. Vacía si `description` lo está.
+- No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
+
 /// "Now write the acceptance criteria for the story as it stands."
-pub const DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE: &str = r#"Eres un QA técnico escribiendo criterios de aceptación en Gherkin para una historia de usuario. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo: úsalas, porque los criterios tienen que ser verificables contra este sistema.
+///
+/// Two things it asks for that the old one did not. **The format is the model's call**: a screen
+/// with a state machine behind it wants Gherkin, and "el botón exportar aparece para los perfiles
+/// A, B y C" is a checklist that Gherkin would only pad out. Forcing one shape on both is how a
+/// backlog fills with three-line scenarios whose `Dado` is "el usuario está en la aplicación".
+/// When it cannot tell, it says `ambos` and writes the criterion twice — the user picks on screen.
+///
+/// **And which existing criterion it replaces**, so the screen can colour a rewrite differently
+/// from a new one. A rewrite that arrives looking like a new criterion is how a story ends up with
+/// the old wording and the corrected one side by side.
+pub const DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE: &str = r#"Eres un QA técnico escribiendo criterios de aceptación para una historia de usuario. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo: úsalas, porque los criterios tienen que ser verificables contra este sistema.
 
-Por stdin recibes la historia ya revisada: título, descripción y los criterios que tenga hasta ahora.
+Por stdin recibes la historia: título, descripción y los criterios que tenga hasta ahora, numerados desde 1.
 
-Tu tarea: proponer los criterios de aceptación que faltan para que esta historia se pueda dar por terminada.
+Tu tarea: proponer los criterios de aceptación que faltan, y corregir los que estén mal escritos.
+
+=== ELIGE EL FORMATO DE CADA CRITERIO ===
+No todo criterio quiere ser Gherkin. Decide uno por uno:
+- `gherkin` cuando hay un flujo con disparador y resultado observable: algo pasa, el sistema responde. `Dado ... Cuando ... Entonces ...`, con `Y` para pasos adicionales.
+- `checklist` cuando lo que se verifica es una lista de condiciones sin flujo: campos obligatorios, permisos por perfil, formatos aceptados, textos, límites. Una condición por línea, cada una empezando por `- `, redactada como algo que se puede marcar como cumplido o no.
+- `ambos` SOLO si de verdad no puedes decidir. En ese caso rellena `gherkin` Y `checklist` con la misma exigencia escrita de las dos formas, y el usuario elegirá cuál se queda.
+Elegir mal cuesta más que dudar: un flujo escrito como lista pierde el disparador, y una lista escrita como escenario acaba en `Dado que el usuario está en la aplicación`.
 
 === REGLAS ===
 - NO modifiques, crees ni borres ningún archivo.
-- Cada criterio es UN escenario completo en Gherkin español: `Dado ...`, `Cuando ...`, `Entonces ...`, con `Y` para los pasos adicionales.
-- Cada paso describe algo observable. Nada de "Entonces el sistema funciona correctamente": di qué se ve, qué se guarda o qué se responde.
+- Cada paso o condición describe algo OBSERVABLE. Nada de "Entonces el sistema funciona correctamente": di qué se ve, qué se guarda o qué se responde.
 - Cubre el camino feliz, el de error y al menos un borde (vacío, límite, permiso denegado) cuando la historia lo admita.
-- NO repitas un criterio que la historia ya tiene. Si uno existente está mal escrito, propón la versión corregida y dilo en `rationale`.
-- `rationale` es una frase: por qué hace falta este escenario.
+- Si corriges un criterio que la historia YA tiene, pon su número en `replaces` y escribe la versión corregida entera. Si es nuevo, `replaces` es 0.
+- NO repitas un criterio existente que ya esté bien. Cero criterios propuestos es una respuesta válida.
+- `rationale` es una frase: por qué hace falta este criterio, o qué le arreglaste al que corriges.
 - La evidencia son rutas reales del repositorio con línea, relativas a la raíz. Sin evidencia, deja `evidence` vacío.
 - Escribe SIEMPRE en español.
 
 === REGLAS ESTRICTAS DE SALIDA ===
 - Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
 - El objeto tiene exactamente esta forma:
-{"criteria":[{"gherkin":"Dado ...\nCuando ...\nEntonces ...","rationale":"","evidence":[]}]}
-- Cada `gherkin` es un escenario entero en una sola cadena, con sus saltos de línea escapados como \n."#;
+{"criteria":[{"format":"gherkin","gherkin":"Dado ...\nCuando ...\nEntonces ...","checklist":"","rationale":"","replaces":0,"evidence":[]}]}
+- `format` es exactamente `gherkin`, `checklist` o `ambos`.
+- `gherkin` va relleno si `format` es `gherkin` o `ambos`; `checklist`, si es `checklist` o `ambos`. El otro queda vacío.
+- `replaces` es un número: el del criterio existente que esta versión sustituye, o 0 si es nuevo.
+- Cada texto va en una sola cadena, con sus saltos de línea escapados como \n."#;
 
-/// "And now the work it breaks down into."
+/// "And now the development work it breaks down into."
 ///
-/// The `[DEV]` / `[QA]` prefixes are deliberately *not* asked for here — CodeFlow puts them on when
-/// it builds the task, so the convention holds even on the run where the model forgets it.
-pub const DEFAULT_WORK_ITEM_TASKS_TEMPLATE: &str = r#"Eres un tech lead partiendo una historia de usuario en tareas de trabajo. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo: úsalas, porque las tareas tienen que hablar de este código y no de un sistema imaginario.
+/// The `[DEV]` prefix is deliberately *not* asked for here — CodeFlow puts it on when it builds the
+/// task, so the convention holds even on the run where the model forgets it.
+///
+/// The three questions are the point of this prompt. "Implementar el endpoint de pago" is a task
+/// title that survives refinement and then means something different to everyone who reads it in
+/// the sprint; ¿Qué? / ¿Cómo? / ¿Para qué? is the smallest shape that forces the writer to say
+/// which files, which approach, and what stops being broken afterwards.
+pub const DEFAULT_WORK_ITEM_TASKS_TEMPLATE: &str = r#"Eres un tech lead partiendo una historia de usuario en tareas de DESARROLLO. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo: úsalas, porque las tareas tienen que hablar de este código y no de un sistema imaginario.
 
 Por stdin recibes la historia con sus criterios de aceptación, y la lista de tareas que ya tiene (que puede venir vacía).
 
-Tu tarea: proponer las tareas que faltan para completar la historia.
+Tu tarea: proponer las tareas de desarrollo que faltan para completar la historia. SOLO desarrollo: las de QA las genera otra ejecución.
+
+=== CADA TAREA RESPONDE TRES PREGUNTAS, A NIVEL TÉCNICO ===
+- `what` — ¿Qué? Qué hay que construir o cambiar, nombrando el componente, la capa o el archivo. Concreto: "el validador de cupones del checkout", no "la lógica de negocio".
+- `how` — ¿Cómo? Con qué enfoque, en qué archivos y respetando qué patrón del repositorio. Cita rutas reales cuando las conozcas. Es la pregunta que evita que dos personas resuelvan lo mismo de dos formas.
+- `why` — ¿Para qué? Qué criterio de aceptación o qué comportamiento del sistema queda cubierto cuando esta tarea esté hecha. Si no puedes contestarla, la tarea sobra.
+Las tres son técnicas y las tres son obligatorias.
 
 === REGLAS ===
 - NO modifiques, crees ni borres ningún archivo.
-- Cada tarea es de desarrollo (`dev`) o de QA (`qa`). Las de QA son de prueba y verificación; las de desarrollo, de construcción.
-- NO pongas prefijos como [DEV] o [QA] en el título: los añade la aplicación.
+- `kind` es siempre `dev` en esta ejecución.
+- NO pongas prefijos como [DEV] en el título: los añade la aplicación.
 - El título es una acción concreta y corta, empezando por un verbo. Nada de "Trabajar en el checkout".
-- NO repitas una tarea que ya existe en la lista recibida. Si una existente se queda corta, propón la que falta y explícalo en `detail`.
-- Cada criterio de aceptación tiene que quedar cubierto por al menos una tarea de QA.
-- `detail` son una o dos frases: qué hay que hacer y dónde, citando rutas del repositorio cuando las conozcas.
+- NO repitas una tarea que ya existe en la lista recibida. Si una existente se queda corta, propón la que falta y dilo en `what`.
+- Parte por unidades que una persona pueda terminar: si una tarea toca la base de datos, la API y la interfaz, son tres.
 - La evidencia son rutas reales del repositorio con línea, relativas a la raíz. Sin evidencia, deja `evidence` vacío.
+- Cero tareas propuestas es una respuesta válida cuando la historia ya está cubierta por las que tiene.
 - Escribe SIEMPRE en español.
 
 === REGLAS ESTRICTAS DE SALIDA ===
 - Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
 - El objeto tiene exactamente esta forma:
-{"tasks":[{"kind":"dev","title":"","detail":"","evidence":[]}]}
-- `kind` es exactamente `dev` o `qa`.
+{"tasks":[{"kind":"dev","title":"","what":"","how":"","why":"","evidence":[]}]}
+- No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
+
+/// The QA ladder, which is a fixed five-step shape rather than a question for the model.
+///
+/// The titles are the team's convention and do not vary per story: designing the cases, agreeing
+/// them with the PO, writing them step by step, running them, and the last check with the
+/// business. What varies is which criteria and which edges each step is about, and that is the
+/// only thing this prompt asks the model to write.
+///
+/// It is a template like any other, so a team whose QA ladder has four steps or seven edits it
+/// here rather than living with somebody else's process.
+pub const DEFAULT_WORK_ITEM_TASKS_QA_TEMPLATE: &str = r#"Eres un QA lead generando las tareas de QA de una historia de usuario. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo.
+
+Por stdin recibes la historia con sus criterios de aceptación, y la lista de tareas que ya tiene.
+
+Tu tarea: devolver EXACTAMENTE estas cinco tareas de QA, en este orden y con estos títulos literales:
+
+1. Título: `Diseñar casos de prueba`
+   Descripción base: "Crear títulos de casos de prueba en base a los criterios de aceptación, ruta crítica y escenarios borde."
+2. Título: `Validar pruebas con PO`
+   Descripción base: "Instancia donde se le presenta al Product Owner los casos de prueba tentativos a ejecutar a nivel de título, generando espacio de feedback para agregar o modificar pruebas."
+3. Título: `Elaborar casos de prueba (paso a paso)`
+   Descripción base: "Abordar el paso a paso y resultado esperado de casos de prueba."
+4. Título: `Ejecutar casos de prueba`
+   Descripción base: "Inicio de la ejecución de casos de prueba creados previamente."
+5. Título: `Last check con negocio`
+   Descripción base: "Inicio de la ejecución de casos de prueba creados previamente."
+
+=== CÓMO RELLENARLAS ===
+- `title` es el título literal de la lista, sin prefijo: la aplicación le pone el `[QA]`.
+- `what` es la descripción base tal cual, palabra por palabra. No la reescribas.
+- `how` es lo único que adaptas a ESTA historia: qué criterios de aceptación cubre ese paso, qué ruta crítica y qué escenarios borde tiene esta historia en concreto. Nombra los criterios por su número.
+- `why` es qué queda garantizado cuando ese paso está hecho.
+- Si la historia no tiene criterios de aceptación, dilo en `how` de la primera tarea en lugar de inventarlos.
+
+=== REGLAS ===
+- NO modifiques, crees ni borres ningún archivo.
+- `kind` es siempre `qa` en esta ejecución.
+- Las cinco van siempre, aunque la historia ya tenga tareas de QA parecidas: el usuario decide en pantalla cuáles se queda.
+- Escribe SIEMPRE en español.
+
+=== REGLAS ESTRICTAS DE SALIDA ===
+- Responde ÚNICAMENTE con un objeto JSON válido. Nada antes, nada después, sin bloques de código markdown.
+- El objeto tiene exactamente esta forma:
+{"tasks":[{"kind":"qa","title":"","what":"","how":"","why":"","evidence":[]}]}
 - No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
 
 pub const DEFAULT_RESOLVE_CONFLICT_TEMPLATE: &str =
@@ -1499,8 +1630,15 @@ pub async fn review_work_item(
 
     let truncated: String = story_text.chars().take(MAX_WORK_ITEM_REVIEW_CHARS).collect();
     let mut stdin_payload = String::new();
-    if cwd.is_none() {
-        stdin_payload.push_str(NO_REPO_NOTE);
+    match cwd {
+        None => stdin_payload.push_str(NO_REPO_NOTE),
+        // On stdin rather than baked into each template, so it also governs the run of a team that
+        // has replaced the template with its own. The budget is about what a review costs, not
+        // about how this team words its prompts.
+        Some(_) => {
+            stdin_payload.push_str(REPO_READING_BUDGET);
+            stdin_payload.push_str("\n\n");
+        }
     }
     if !contexts.is_empty() {
         stdin_payload.push_str("CONTEXTO DEL PROYECTO:\n");
@@ -1517,8 +1655,10 @@ pub async fn review_work_item(
         true => match (stage, kind) {
             (WorkItemReviewStage::Analyze, WorkItemKind::Bug) => DEFAULT_WORK_ITEM_BUG_ANALYZE_TEMPLATE,
             (WorkItemReviewStage::Analyze, WorkItemKind::Story) => DEFAULT_WORK_ITEM_ANALYZE_TEMPLATE,
+            (WorkItemReviewStage::Description, _) => DEFAULT_WORK_ITEM_DESCRIPTION_TEMPLATE,
             (WorkItemReviewStage::Criteria, _) => DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE,
             (WorkItemReviewStage::Tasks, _) => DEFAULT_WORK_ITEM_TASKS_TEMPLATE,
+            (WorkItemReviewStage::TasksQa, _) => DEFAULT_WORK_ITEM_TASKS_QA_TEMPLATE,
         },
     };
 
@@ -1954,21 +2094,327 @@ pub async fn repair_json(
     Ok(run.text)
 }
 
-/// Pulls the JSON object out of a model's answer.
+/// The JSON object a model answered with, as text ready to parse — repaired if it has to be.
 ///
-/// Engines told "respond with JSON only" still wrap it in a ```json fence, prefix it with "Aquí
-/// tienes las historias:", or append a closing remark — often varying between runs of the same
-/// model. Slicing from the first `{` to the last `}` survives all three, and a response that has
-/// no object at all returns `None` so the caller can report the raw text rather than a parse error
-/// about a character offset the user can't see.
-pub fn extract_json_block(text: &str) -> Option<&str> {
+/// **Every stage that asks a model for JSON goes through here**, because the way engines fail at it
+/// is not specific to what was asked. The answer is right, the work behind it is done, and one
+/// character in eight hundred means none of it can be read: a quote inside a sentence the model
+/// forgot to escape, a literal newline in a string, a trailing comma, an answer cut off at the
+/// token limit two keys from the end. Re-running costs the minutes it spent reading the repository
+/// and can slip again on the next attempt.
+///
+/// It also does what the plain extraction always did, which is most of what a well-behaved answer
+/// needs: engines told "respond with JSON only" still wrap it in a ```json fence, prefix it with
+/// "Aquí tienes las historias:" or append a closing remark, and an answer with no object in it at
+/// all returns `None` so the caller reports the raw text rather than an offset nobody can see.
+///
+/// Three passes, cheapest first, and **the first one that yields valid JSON wins**:
+///
+/// 1. The slice as it stands. An answer that already parses is returned untouched — nothing below
+///    ever runs on a well-formed document, so nothing below can damage one.
+/// 2. [`repair_json_text`], which fixes the faults deterministically. No model, no round trip.
+/// 3. Failing both, the raw slice, so the caller reports what the model actually wrote and can
+///    still fall back to asking a model to repair it.
+///
+/// Several candidate slices are tried in turn because the two ways of finding the object disagree
+/// exactly when the object is malformed: brace matching stops early when an unescaped quote
+/// confuses it about where strings end, and first-`{`-to-last-`}` swallows any prose written after
+/// the object. Taking whichever one parses beats picking a rule and losing content to it.
+pub fn json_answer(text: &str) -> Option<std::borrow::Cow<'_, str>> {
     let trimmed = text.trim();
     let start = trimmed.find('{')?;
-    let end = trimmed.rfind('}')?;
-    if end <= start {
+    let rest = &trimmed[start..];
+
+    let mut candidates: Vec<&str> = Vec::with_capacity(3);
+    if let Some(end) = matching_brace(rest) {
+        candidates.push(&rest[..=end]);
+    }
+    if let Some(end) = rest.rfind('}') {
+        candidates.push(&rest[..=end]);
+    }
+    // The truncated case: an answer cut off mid-object has no closing brace anywhere, so neither
+    // rule above produces a candidate. Guarded on the object having at least one `"key":` in it —
+    // a stray `{` in a sentence is prose, and "repairing" it into `{}` would report an empty
+    // answer as a successful one.
+    if looks_like_object(rest) {
+        candidates.push(rest);
+    }
+    if candidates.is_empty() {
         return None;
     }
-    Some(&trimmed[start..=end])
+
+    // Narrowest first while looking for one that already parses: with two objects in the answer,
+    // or an object followed by prose, the brace-matched slice is the exact one and the wider
+    // candidates are the mistake.
+    for candidate in &candidates {
+        if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+            return Some(std::borrow::Cow::Borrowed(candidate));
+        }
+    }
+    // Widest first while repairing, and the order matters: in a truncated answer the last `}` is
+    // the end of some *earlier* element, so repairing that slice yields a perfectly valid document
+    // that has silently dropped everything after it. The longest candidate that can be made to
+    // parse is the one that kept the most of what the model actually said.
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.len()));
+    for candidate in &candidates {
+        let repaired = repair_json_text(candidate);
+        if serde_json::from_str::<serde_json::Value>(&repaired).is_ok() {
+            return Some(std::borrow::Cow::Owned(repaired));
+        }
+    }
+    // Nothing read. The widest candidate goes back — it is first after the sort — so the error
+    // quotes the whole answer rather than the fragment one of the rules happened to stop at.
+    Some(std::borrow::Cow::Borrowed(candidates.first()?))
+}
+
+/// The offset of the `}` closing the object that starts at 0, counting strings and escapes.
+///
+/// Unlike `rfind('}')` this stops at the object's own end, so prose appended after it — or a
+/// second object the model helpfully added — is not dragged in. Returns `None` when the braces
+/// never balance, which is both the truncated answer and the answer whose strings are broken
+/// enough that the scan lost track of them.
+fn matching_brace(source: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, c) in source.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Whether a slice starting at `{` actually began a JSON object, rather than being a brace that
+/// happened to appear in a sentence. One quoted key followed by its colon is enough.
+fn looks_like_object(source: &str) -> bool {
+    let mut chars = source.char_indices().skip(1).skip_while(|(_, c)| c.is_whitespace());
+    if !matches!(chars.next(), Some((_, '"'))) {
+        return false;
+    }
+    let rest = &source[chars.next().map_or(source.len(), |(at, _)| at)..];
+    rest.find('"').is_some_and(|close| rest[close + 1..].trim_start().starts_with(':'))
+}
+
+/// The faults models actually make in JSON, fixed without asking anyone.
+///
+/// Every rule here is one that has cost a real run, and each is narrow enough to be a no-op on a
+/// well-formed document — which is the only reason it is safe to run at all. Called only after the
+/// text has failed to parse, so a valid answer never reaches it.
+///
+/// - **A quote inside a sentence.** `"la opción "Guardar" del menú"` ends the string three words
+///   early and everything after it is garbage to the parser. Whether a `"` closes the string is
+///   decided by what comes next: only `:`, `}`, `]` and end-of-input can legitimately follow one,
+///   plus a `,` that is itself followed by the start of a key or value. Anything else is a quote
+///   inside prose and gets escaped.
+/// - **A literal newline in a string.** JSON has no such thing; models write them anyway when the
+///   text they are quoting had them.
+/// - **A trailing comma** before `}` or `]`.
+/// - **Comments.** `//` and `/* */` are JavaScript, not JSON.
+/// - **Truncation.** An answer cut off at the token limit ends mid-string, mid-array or on a
+///   dangling comma. Closing what is open loses the last element and keeps everything before it,
+///   which is the whole point: the alternative is losing all of it.
+fn repair_json_text(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len() + 16);
+    let mut stack: Vec<char> = Vec::new();
+    let mut in_string = false;
+    let mut at = 0usize;
+
+    while at < chars.len() {
+        let c = chars[at];
+        if in_string {
+            match c {
+                '\\' => {
+                    out.push('\\');
+                    match chars.get(at + 1) {
+                        Some(&next) => {
+                            out.push(next);
+                            at += 1;
+                        }
+                        // A backslash as the last character would otherwise escape the quote the
+                        // truncation fix is about to add, and take the string with it.
+                        None => out.push('\\'),
+                    }
+                }
+                '"' => match quote_role(&chars, at) {
+                    QuoteRole::Closes => {
+                        in_string = false;
+                        out.push('"');
+                    }
+                    QuoteRole::ClosesMissingComma => {
+                        in_string = false;
+                        out.push('"');
+                        out.push(',');
+                    }
+                    QuoteRole::Inner => out.push_str("\\\""),
+                },
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                _ => out.push(c),
+            }
+        } else {
+            match c {
+                '"' => {
+                    // A member starting where a comma should have been: `{"a":1 "b":2}`. The
+                    // string-side rule below catches the case where the previous member ended in a
+                    // string; this one catches every other kind of value.
+                    if needs_separator(&out) {
+                        out.push(',');
+                    }
+                    in_string = true;
+                    out.push('"');
+                }
+                '{' | '[' => {
+                    stack.push(c);
+                    out.push(c);
+                }
+                '}' | ']' => {
+                    drop_dangling_comma(&mut out);
+                    stack.pop();
+                    out.push(c);
+                }
+                '/' if chars.get(at + 1) == Some(&'/') => {
+                    while at < chars.len() && chars[at] != '\n' {
+                        at += 1;
+                    }
+                    continue;
+                }
+                '/' if chars.get(at + 1) == Some(&'*') => {
+                    at += 2;
+                    while at + 1 < chars.len() && !(chars[at] == '*' && chars[at + 1] == '/') {
+                        at += 1;
+                    }
+                    at += 2;
+                    continue;
+                }
+                _ => out.push(c),
+            }
+        }
+        at += 1;
+    }
+
+    if in_string {
+        out.push('"');
+    }
+    drop_dangling_comma(&mut out);
+    // A document that stopped on `"key":` is missing its value, and `null` is the honest one —
+    // the model never said what it was.
+    if out.trim_end().ends_with(':') {
+        out.push_str("null");
+    }
+    for open in stack.iter().rev() {
+        out.push(match open {
+            '[' => ']',
+            _ => '}',
+        });
+    }
+    out
+}
+
+/// What a `"` inside a string is doing there.
+enum QuoteRole {
+    /// It ends the string, as JSON intends.
+    Closes,
+    /// It ends the string *and* the model forgot the comma after it: `{"a":"x" "b":"y"}`.
+    ClosesMissingComma,
+    /// It is a quote in the prose that the model forgot to escape.
+    Inner,
+}
+
+/// Whether the `"` at `at` ends the string, ends it with a comma missing, or is prose.
+///
+/// Decided by what follows, because that is the only thing that distinguishes them:
+///
+/// - `:`, `}`, `]` or end of input — a closing quote, as written.
+/// - `,` — a closing quote only if the comma is itself followed by the start of a key or a value.
+///   `…", y se fue"` is prose; `…", "siguiente"` is not.
+/// - `"` — ambiguous, and resolved by looking past the next quoted run: a run followed by `:` is a
+///   **key**, which can only be there because the comma before it went missing. A run followed by
+///   anything else is prose, which is what `"dijo "hola""` is.
+/// - anything else — prose.
+///
+/// The array counterpart of the missing comma — `["a" "b"]` — is deliberately not inferred: with
+/// no `:` to key off, it is indistinguishable from prose, and guessing would corrupt the far more
+/// common case of a sentence with a quotation in it.
+fn quote_role(chars: &[char], at: usize) -> QuoteRole {
+    let skip_space = |mut from: usize| {
+        while matches!(chars.get(from), Some(c) if c.is_whitespace()) {
+            from += 1;
+        }
+        from
+    };
+
+    let next = skip_space(at + 1);
+    match chars.get(next) {
+        None | Some(':' | '}' | ']') => QuoteRole::Closes,
+        Some(',') => {
+            // Deliberately only the three that start a key, an object or an array. Numbers and
+            // booleans can follow a comma too, but only inside an array of them — which none of
+            // these schemas has — while prose after a comma starting with a digit is common
+            // enough that accepting one would break more answers than it fixed.
+            match chars.get(skip_space(next + 1)) {
+                None | Some('"' | '{' | '[') => QuoteRole::Closes,
+                _ => QuoteRole::Inner,
+            }
+        }
+        Some('"') => {
+            let mut scan = next + 1;
+            while let Some(&c) = chars.get(scan) {
+                match c {
+                    '\\' => scan += 2,
+                    '"' => break,
+                    _ => scan += 1,
+                }
+            }
+            match chars.get(skip_space(scan + 1)) {
+                Some(':') => QuoteRole::ClosesMissingComma,
+                _ => QuoteRole::Inner,
+            }
+        }
+        _ => QuoteRole::Inner,
+    }
+}
+
+/// Whether a member is about to start where JSON requires a comma first.
+///
+/// True when the last thing written was the end of a value rather than an opening brace, a comma
+/// or a colon — which is exactly the shape of `{"a":1 "b":2}`.
+fn needs_separator(out: &str) -> bool {
+    match out.trim_end().chars().next_back() {
+        None => false,
+        Some('{' | '[' | ',' | ':') => false,
+        Some(_) => true,
+    }
+}
+
+/// Trailing whitespace and the comma behind it, if there is one.
+fn drop_dangling_comma(out: &mut String) {
+    while out.ends_with(char::is_whitespace) {
+        out.pop();
+    }
+    if out.ends_with(',') {
+        out.pop();
+    }
 }
 
 /// Proposes a merged version of a conflicted file from its base/ours/theirs versions. Returns the
@@ -2281,14 +2727,138 @@ mod tests {
         assert!(!refusal_reply("error: unknown flag --nope"));
     }
 
-    /// Every wrapper a model has actually put around "respond with JSON only", plus the case where
-    /// there is no object at all — which has to read as "no answer" rather than as a parse error.
+    /// Every wrapper a model has actually put around "respond with JSON only".
     #[test]
     fn json_is_recovered_from_whatever_the_model_wrapped_it_in() {
         let fenced = "Aquí tienes las historias:\n```json\n{\"stories\": []}\n```\nEspero que sirva.";
-        assert_eq!(extract_json_block(fenced), Some("{\"stories\": []}"));
-        assert_eq!(extract_json_block("  {\"a\":{\"b\":1}}  "), Some("{\"a\":{\"b\":1}}"));
-        assert_eq!(extract_json_block("no pude generar historias"), None);
-        assert_eq!(extract_json_block("} desordenado {"), None);
+        assert_eq!(json_answer(fenced).as_deref(), Some("{\"stories\": []}"));
+        assert_eq!(json_answer("  {\"a\":{\"b\":1}}  ").as_deref(), Some("{\"a\":{\"b\":1}}"));
+    }
+
+    /// Reads a repaired answer the way the callers do, so a test that passes here is a stage that
+    /// would have kept its run.
+    fn parsed(text: &str) -> serde_json::Value {
+        let json = json_answer(text).expect("there is an object in this answer");
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("could not read {json}: {e}"))
+    }
+
+    /// A well-formed answer must come back byte for byte. Everything else in the salvage is only
+    /// safe because it never runs on one.
+    #[test]
+    fn a_valid_answer_is_returned_untouched() {
+        let good = r#"{"stories":[{"title":"Pagar","criteria":["Dado A\nCuando B"]}],"n":3,"ok":true}"#;
+        let wrapped = format!("Aquí tienes:\n```json\n{good}\n```\nEspero que sirva.");
+        let answer = json_answer(&wrapped).unwrap();
+        assert_eq!(answer.as_ref(), good);
+        assert!(matches!(answer, std::borrow::Cow::Borrowed(_)), "no copy is made of a valid answer");
+    }
+
+    /// The failure this whole path exists for, in the shape it arrives: a summary quoting the
+    /// states it is talking about, with the quotes escaped in some places and not in others.
+    #[test]
+    fn a_quote_the_model_forgot_to_escape_is_escaped() {
+        let broken = r#"{"summary":"Le falta el desempate cuando hay una "Por planificar" y otra "Planificado", y unificar qué es la "hora de liberación"","invest":[]}"#;
+        let value = parsed(broken);
+        let summary = value["summary"].as_str().expect("a summary survived");
+        assert!(summary.contains("una \"Por planificar\" y otra \"Planificado\""));
+        assert!(summary.ends_with("la \"hora de liberación\""), "the last quote closed the string");
+        assert!(value["invest"].is_array());
+    }
+
+    /// The other half of the same decision: a quote that really does end the string, followed by
+    /// the next key, must not be escaped into the value.
+    #[test]
+    fn a_quote_that_really_closes_the_string_is_left_alone() {
+        let broken = r#"{"a":"uno "dos"","b":"tres","c":["x "y"","z"]}"#;
+        let value = parsed(broken);
+        assert_eq!(value["a"], "uno \"dos\"");
+        assert_eq!(value["b"], "tres", "the key after the comma is still a key");
+        assert_eq!(value["c"][0], "x \"y\"");
+        assert_eq!(value["c"][1], "z", "the array did not lose its second element");
+    }
+
+    /// The comma between two members, dropped. Serde reports it as `expected ',' or '}'`, the same
+    /// complaint an unescaped quote produces — which is why both have to be handled to make that
+    /// message stop costing runs.
+    #[test]
+    fn a_missing_comma_between_members_is_put_back() {
+        // After a string value, and after a number: two different rules, same fault.
+        let value = parsed(r#"{"summary":"x" "invest":[] "n":1 "ok":true}"#);
+        assert_eq!(value["summary"], "x");
+        assert!(value["invest"].is_array(), "the second member was not swallowed by the first");
+        assert_eq!(value["n"], 1);
+        assert_eq!(value["ok"], true);
+    }
+
+    /// The other reading of the same two characters. A quoted phrase inside a sentence must stay
+    /// inside it rather than being promoted into a key.
+    #[test]
+    fn a_quotation_inside_a_sentence_is_not_mistaken_for_a_missing_comma() {
+        let value = parsed(r#"{"note":"el PO dijo "lo dejamos"","state":"listo"}"#);
+        assert_eq!(value["note"], "el PO dijo \"lo dejamos\"");
+        assert_eq!(value["state"], "listo");
+    }
+
+    /// Models write the newlines the text they are quoting had. JSON has no literal newline in a
+    /// string, and serde says so with a different message from the quote case.
+    #[test]
+    fn literal_newlines_and_tabs_inside_strings_are_escaped() {
+        let value = parsed("{\"gherkin\":\"Dado A\nCuando B\tEntonces C\"}");
+        assert_eq!(value["gherkin"], "Dado A\nCuando B\tEntonces C");
+    }
+
+    /// An answer cut off at the token limit. Everything before the cut is worth more than the
+    /// error the whole thing would otherwise become.
+    #[test]
+    fn a_truncated_answer_keeps_what_arrived() {
+        let value = parsed(r#"{"tasks":[{"title":"Uno","detail":"listo"},{"title":"Dos","detail":"a med"#);
+        assert_eq!(value["tasks"][0]["title"], "Uno");
+        assert_eq!(value["tasks"][1]["detail"], "a med", "the half-written value is kept as it stands");
+
+        // Cut on a dangling comma, and cut on a key with no value.
+        assert_eq!(parsed(r#"{"criteria":["a","b","#)["criteria"][1], "b");
+        assert!(parsed(r#"{"summary":"x","invest":"#)["invest"].is_null());
+    }
+
+    /// Trailing commas and JavaScript comments: neither is JSON, both turn up.
+    #[test]
+    fn trailing_commas_and_comments_are_dropped() {
+        let value = parsed(
+            "{\n  // el resumen\n  \"summary\": \"x\",\n  \"findings\": [1, 2,],\n}",
+        );
+        assert_eq!(value["summary"], "x");
+        assert_eq!(value["findings"].as_array().unwrap().len(), 2);
+    }
+
+    /// Prose after the object must not be dragged in, and a `}` inside a string must not be
+    /// mistaken for the end of it. `rfind('}')` alone gets one of these wrong either way.
+    #[test]
+    fn the_object_ends_where_the_object_ends() {
+        let value = parsed(r#"{"note":"usa }} para cerrar"} Espero que te sirva. }"#);
+        assert_eq!(value["note"], "usa }} para cerrar");
+    }
+
+    /// An answer with no object in it has to read as "no answer", and a brace that turned up in a
+    /// sentence must never be inflated into an empty object the caller would report as a
+    /// successful run of nothing.
+    #[test]
+    fn prose_is_never_salvaged_into_an_empty_object() {
+        assert!(json_answer("no pude generar historias").is_none());
+        assert!(json_answer("} desordenado {").is_none());
+        // This one does carry a brace pair, so it comes back — but as the unreadable text it is,
+        // which the caller quotes at the user. What it must not come back as is `{}`.
+        let braced = json_answer("usa la sintaxis {clave} para interpolar").expect("a brace pair");
+        assert!(serde_json::from_str::<serde_json::Value>(&braced).is_err());
+        assert_ne!(braced.as_ref(), "{}");
+    }
+
+    /// Beyond repair is not the same as absent: the caller still needs the text to put in front of
+    /// the user, and to hand to the model-driven repair pass behind it.
+    #[test]
+    fn an_unrepairable_answer_comes_back_whole_for_the_error() {
+        let hopeless = r#"{"a": <sin valor>, "b": ???}"#;
+        let answer = json_answer(hopeless).expect("there is an object here");
+        assert!(serde_json::from_str::<serde_json::Value>(&answer).is_err());
+        assert!(answer.contains("<sin valor>"), "the user is shown what the model actually wrote");
     }
 }

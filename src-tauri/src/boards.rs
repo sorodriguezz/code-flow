@@ -684,6 +684,15 @@ pub struct WorkItemEdit {
     pub repro_steps: Option<String>,
     /// One whole scenario per element.
     pub acceptance_criteria: Option<Vec<String>>,
+    /// Whether the prose above is already HTML and must be written through untouched.
+    ///
+    /// The review screen edits the description in a Markdown editor, and Markdown put through
+    /// [`text_to_html`] arrives on the board as a paragraph beginning with two literal hash marks.
+    /// The rendering is done where the Markdown parser already lives — the frontend, which
+    /// sanitises its output before it leaves — and this flag is how that pre-rendered HTML gets
+    /// past the escaping that every other caller still needs.
+    #[serde(default)]
+    pub prose_is_html: bool,
 }
 
 /// Applies an edit to a work item that already exists.
@@ -713,11 +722,15 @@ pub async fn update_work_item(
         }
         fields.push(("System.Title", serde_json::json!(title.trim())));
     }
+    let prose = |text: &String| match edit.prose_is_html {
+        true => text.clone(),
+        false => text_to_html(text),
+    };
     if let Some(description) = &edit.description {
-        fields.push(("System.Description", serde_json::json!(text_to_html(description))));
+        fields.push(("System.Description", serde_json::json!(prose(description))));
     }
     if let Some(steps) = &edit.repro_steps {
-        fields.push(("Microsoft.VSTS.TCM.ReproSteps", serde_json::json!(text_to_html(steps))));
+        fields.push(("Microsoft.VSTS.TCM.ReproSteps", serde_json::json!(prose(steps))));
     }
     if let Some(criteria) = &edit.acceptance_criteria {
         fields.push((

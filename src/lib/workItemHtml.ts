@@ -32,7 +32,21 @@ function decodeEntities(text: string): string {
   });
 }
 
-/** Azure's HTML as readable text: block tags become line breaks, list items get a bullet. */
+/**
+ * Azure's HTML as readable text: block tags become line breaks, list items get a bullet, and the
+ * handful of marks Markdown has a spelling for keep it.
+ *
+ * The marks are why this is not simply a tag strip. The review screen edits the description in a
+ * Markdown editor and publishes what it renders, so a heading written there reaches the board as
+ * an `<h2>` — and a strip would bring it back as a bare line, losing the structure on every round
+ * trip until the document was flat. What comes back now is the same document, spelled the way it
+ * was written.
+ *
+ * Still deliberately lossy in the other direction: tables, images and anything with attributes
+ * come back as their text. Round-tripping someone else's formatting through a text box is how a
+ * table becomes four lines of run-on prose in a board other people are working from, and a partial
+ * answer that admits it beats a faithful one that is wrong in the interesting cases.
+ */
 export function htmlToText(html: string): string {
   if (!html.trim()) return "";
   return decodeEntities(
@@ -40,7 +54,18 @@ export function htmlToText(html: string): string {
       // Script and style would otherwise survive as their own source code once the tags are gone.
       .replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/gi, "")
       .replace(/<br\s*\/?>/gi, "\n")
+      // Before the closing-tag pass, which turns `</h2>` into the newline that ends the line.
+      .replace(/<h([1-6])(\s[^>]*)?>/gi, (_whole, level: string) => `\n${"#".repeat(Number(level))} `)
+      // The optional-`\s` group is load-bearing: `<i[^>]*>` would also match `<img …>` and quietly
+      // turn every image into an underscore.
+      .replace(/<(strong|b)(\s[^>]*)?>|<\/(strong|b)\s*>/gi, "**")
+      .replace(/<(em|i)(\s[^>]*)?>|<\/(em|i)\s*>/gi, "_")
+      .replace(/<code(\s[^>]*)?>|<\/code\s*>/gi, "`")
       .replace(/<\/(p|div|h[1-6]|tr)\s*>/gi, "\n")
+      // The closing tag *and* the whitespace after it, before the bullets go in. A pretty-printed
+      // `</li>\n<li>` would otherwise leave a blank line between every item, which Markdown reads
+      // back as a loose list — the same items, spaced like paragraphs.
+      .replace(/<\/li\s*>\s*/gi, "")
       .replace(/<li[^>]*>/gi, "\n- ")
       .replace(/<\/(td|th)\s*>/gi, "\t")
       .replace(/<[^>]+>/g, ""),
@@ -55,7 +80,29 @@ export function htmlToText(html: string): string {
 }
 
 /**
- * The criteria field split into scenarios.
+ * The criteria field split into criteria, from the HTML rather than from its text.
+ *
+ * Azure stores the field as one blob, but when that blob is a list the boundaries are *in* it:
+ * `<li>` is exactly "one criterion", written there by whoever published it — CodeFlow itself does,
+ * and so does Azure's own editor. Reading them off the markup is unambiguous, which splitting the
+ * flattened text can never be: a criterion whose body is a checklist arrives as bulleted lines
+ * indistinguishable from four criteria that happen to be bullets, and the text-based split has to
+ * guess. It used to guess wrong on the commonest input there is — the criteria CodeFlow published
+ * itself come back as `<li>a</li><li>b</li>` with nothing between them, which flattens to two
+ * bulleted lines with no blank line to split on, and the whole list opened as a single criterion.
+ *
+ * Falls back to [`splitCriteria`] when there is no list: a field somebody typed as paragraphs is
+ * still a field with criteria in it.
+ */
+export function splitCriteriaHtml(html: string): string[] {
+  const items = [...html.matchAll(/<li[^>]*>([\s\S]*?)<\/li\s*>/gi)]
+    .map((match) => htmlToText(match[1]))
+    .filter((item) => item.trim());
+  return items.length > 0 ? items : splitCriteria(htmlToText(html));
+}
+
+/**
+ * The criteria field split into scenarios, given only its text.
  *
  * Gherkin has no separator of its own, so a field holding four scenarios is one blob of text. Split
  * on the line that opens a scenario when there is one, and fall back to blank lines — which is how
