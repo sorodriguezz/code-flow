@@ -36,6 +36,8 @@ import { usePrStore } from "../../state/prStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import {
   pickFolder,
+  scanFolder,
+  type FoundRepo,
   revealInFileManager,
   openInVsCode,
   autoLinkProject,
@@ -57,6 +59,7 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
 import { CloneRepoModal } from "./CloneRepoModal";
+import { ImportReposModal } from "./ImportReposModal";
 import { CreateBranchModal } from "./CreateBranchModal";
 import { MoveProjectModal } from "./MoveProjectModal";
 import { ConnectAdoModal } from "./ConnectAdoModal";
@@ -1243,6 +1246,12 @@ export function Sidebar() {
   const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
   const t = useT();
   const [showCloneModal, setShowCloneModal] = useState(false);
+  /** A picked folder that turned out to hold repositories, waiting for the user to choose which. */
+  const [folderScan, setFolderScan] = useState<{
+    folder: string;
+    repos: FoundRepo[];
+    truncated: boolean;
+  } | null>(null);
 
   useEffect(() => {
     void loadWorkspaces();
@@ -1252,15 +1261,13 @@ export function Sidebar() {
 
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
 
-  const handleAddProject = async () => {
-    if (!activeWorkspaceId) return;
-    const folder = await pickFolder();
-    if (!folder) return;
-    const name = folder.split(/[\\/]/).filter(Boolean).pop() ?? folder;
-    await addProject({
-      workspace_id: activeWorkspaceId,
-      name,
-      local_path: folder,
+  /** Registers one repository. The path is always a verified repository root by the time it gets
+   *  here — see `handleAddProject`. */
+  const importRepo = (path: string) =>
+    addProject({
+      workspace_id: activeWorkspaceId!,
+      name: path.split(/[\\/]/).filter(Boolean).pop() ?? path,
+      local_path: path,
       remote_url: null,
       color: "#6366f1",
       icon: "git-branch",
@@ -1273,6 +1280,57 @@ export function Sidebar() {
       gitlab_project: null,
       gitlab_host: null,
     });
+
+  /**
+   * Adds a repository, after asking what the picked folder actually is.
+   *
+   * Everything about an open project assumes its path is a repository *root*: `git status` and
+   * every diff run there, and the file watcher watches it **recursively**. Handed a folder full of
+   * repositories, that became a walk of every working tree in it at once — the report this
+   * replaces, where the app stopped responding entirely rather than saying no.
+   *
+   * So the folder is classified first, and each answer gets its own outcome: a repository is
+   * added; a folder *containing* repositories opens the picker, because "I keep my repos here" is
+   * a real thing to point at and importing several at once is the whole point; anything else is
+   * refused out loud, which is the case that previously had no handling at all.
+   */
+  const handleAddProject = async () => {
+    if (!activeWorkspaceId) return;
+    const folder = await pickFolder();
+    if (!folder) return;
+
+    let scan;
+    try {
+      scan = await scanFolder(folder);
+    } catch (e) {
+      pushErrorToast(String(e));
+      return;
+    }
+
+    if (scan.is_repo) {
+      if (projects.some((project) => project.local_path === folder)) {
+        pushErrorToast(t("import.alreadyInWorkspace"));
+        return;
+      }
+      await importRepo(folder);
+      return;
+    }
+
+    if (scan.repos.length > 0) {
+      setFolderScan({ folder, repos: scan.repos, truncated: scan.truncated });
+      return;
+    }
+
+    // Told apart deliberately: "there is nothing here" and "there are things here, none of them a
+    // repository" are different mistakes, and the second is the one where the user picked a level
+    // too high and needs to know that going one deeper would work. A folder so large the scan
+    // stopped early gets its own answer rather than being reported as having no repositories —
+    // which would be a cap presented as a finding.
+    if (scan.truncated) {
+      pushErrorToast(t("import.tooManyEntries"));
+      return;
+    }
+    pushErrorToast(scan.empty ? t("import.emptyFolder") : t("import.noRepos"));
   };
 
   return (
@@ -1332,6 +1390,21 @@ export function Sidebar() {
           </div>
         </div>
 
+        {folderScan && (
+          <ImportReposModal
+            folder={folderScan.folder}
+            repos={folderScan.repos}
+            existingPaths={projects.map((project) => project.local_path)}
+            truncated={folderScan.truncated}
+            onImport={async (picked) => {
+              // Sequential rather than `Promise.all`: each add writes the project list and the
+              // last one wins as the active project, and a race decides which. In order, "the
+              // last one you picked is the one you land on" is at least a rule.
+              for (const repo of picked) await importRepo(repo.path);
+            }}
+            onClose={() => setFolderScan(null)}
+          />
+        )}
         {showCloneModal && activeWorkspaceId && (
           <CloneRepoModal workspaceId={activeWorkspaceId} onClose={() => setShowCloneModal(false)} />
         )}

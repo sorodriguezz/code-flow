@@ -336,6 +336,8 @@ export interface DbConnectionRow {
   id: string;
   workspace_id: string;
   name: string;
+  /** Free text. Empty is "ungrouped", which the tree shows as a bucket of its own at the top. */
+  group_name: string;
   kind: DbKind;
   /** JSON `DbConnectionConfig`, minus the password. */
   spec: string;
@@ -371,8 +373,23 @@ export interface DbQueryHistoryEntry {
   ran_at: string;
 }
 
+/**
+ * A folder in the connection tree.
+ *
+ * Carries no members — a connection's `group_name` is what puts it in a group. This row exists so
+ * a group can exist while empty, which is the state between making a folder and filling it.
+ */
+export interface DbGroupRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  sort_order: number;
+  created_at: string;
+}
+
 export interface DbWorkspaceTree {
   connections: DbConnectionRow[];
+  groups: DbGroupRow[];
   consoles: DbConsole[];
 }
 

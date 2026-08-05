@@ -14,7 +14,10 @@ export type DbModal =
    * *before* the dialog opens — from the menu the `+` expands — because it decides what every field
    * in the dialog means, and a dialog that opens on Postgres when you came for IRIS asks you to
    * undo a choice you never made. */
-  | { kind: "newConnection"; engine: DbKind }
+  /** `group` is where in the tree it lands — set when the dialog was opened from a folder's own
+   * menu, so "new connection here" files it there rather than dropping it in ungrouped for the
+   * user to drag back. Absent means ungrouped. */
+  | { kind: "newConnection"; engine: DbKind; group?: string }
   /** The connection dialog on an existing connection. */
   | { kind: "connection"; connectionId: string }
   /** The connection dialog with nothing in particular selected — "manage my connections", which is

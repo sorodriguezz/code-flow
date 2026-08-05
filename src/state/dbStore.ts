@@ -9,8 +9,10 @@ import {
   dbConnected,
   dbCreateConnection,
   dbCreateConsole,
+  dbCreateGroup,
   dbDeleteConnection,
   dbDeleteConsole,
+  dbDeleteGroup,
   dbDeleteHistory,
   dbDisconnect,
   dbDuplicateConnection,
@@ -20,10 +22,12 @@ import {
   dbLoadTree,
   dbForeignKeys,
   dbObjectDdl,
+  dbRenameGroup,
   dbReorderConnections,
   dbRowCount,
   dbSchemaDiagram,
   dbSchemaObjects,
+  dbSetConnectionGroup,
   dbSetPassword,
   dbTableData,
   dbUpdateConnection,
@@ -44,6 +48,7 @@ import {
   type DbConnectionRow,
   type DbConsole,
   type DbExecuteResult,
+  type DbGroupRow,
   type DbKind,
   type DbNode,
   type DbNodeRef,
@@ -80,6 +85,12 @@ import {
  */
 
 const openTabsKey = (workspaceId: string) => `db_open_tabs:${workspaceId}`;
+const collapsedKey = (workspaceId: string) => `db_collapsed_groups:${workspaceId}`;
+
+/** The name the ungrouped bucket is *stored* under: none. Kept as a constant so the difference
+ *  between "no group" and a group literally called "" is stated once — a connection dragged out of
+ *  a folder must not acquire a group named after the label the tree happens to show. */
+export const UNGROUPED = "";
 
 /** How many history rows to load. Well under the backend's hard cap — this is a list to scan, not
  * an archive to browse. */
@@ -239,6 +250,12 @@ interface DbState {
   workspaceId: string | null;
   loading: boolean;
   connections: DbConnectionRow[];
+  /** Folder rows. Not the membership — that is still each connection's `group_name`. These exist
+   *  so a group the user made and hasn't filled yet survives a reload; see `DbGroupRow`. */
+  groups: DbGroupRow[];
+  /** Group names the user has collapsed. Persisted, because folding away the half of the estate
+   *  you are not working on is a decision worth making once rather than every launch. */
+  collapsedGroups: string[];
   consoles: DbConsole[];
   history: DbQueryHistoryEntry[];
   /** Connection ids with a live session. */
@@ -262,7 +279,11 @@ interface DbState {
   setWorkspace: (workspaceId: string) => Promise<void>;
   setSection: (section: DbSidebarSection) => void;
 
-  createConnection: (kind: DbKind, name: string) => Promise<DbConnectionRow | null>;
+  createConnection: (
+    kind: DbKind,
+    name: string,
+    groupName?: string,
+  ) => Promise<DbConnectionRow | null>;
   saveConnection: (
     row: DbConnectionRow,
     config: DbConnectionConfig,
@@ -272,12 +293,27 @@ interface DbState {
   /** Returns the copy, so a caller that has somewhere to put it — the dialog's list — can select it. */
   duplicateConnection: (id: string) => Promise<DbConnectionRow | null>;
   reorderConnections: (ids: string[]) => Promise<void>;
+
+  /** Creates an empty folder. Idempotent on the name — the backend deduplicates. */
+  createGroup: (name: string) => Promise<void>;
+  /** Renaming onto an existing group merges the two. */
+  renameGroup: (from: string, to: string) => Promise<void>;
+  /** Deletes the folder. Its connections move to ungrouped — never deleted with it. */
+  deleteGroup: (name: string) => Promise<void>;
+  /** Files a connection under a group, or under none with `UNGROUPED`. */
+  setConnectionGroup: (id: string, group: string) => Promise<void>;
+  toggleGroup: (group: string) => void;
   connect: (id: string) => Promise<boolean>;
   disconnect: (id: string) => Promise<void>;
   testConnection: (config: DbConnectionConfig) => Promise<DbServerInfo>;
 
   toggleNode: (connectionId: string, node: DbNodeRef, key: string) => Promise<void>;
   refreshNode: (connectionId: string, node: DbNodeRef, key: string) => Promise<void>;
+  /** `refreshNode` for a reader nobody asked to be one — the SQL console's completion, which reads
+   * catalog nodes the user never expanded. Fills `children` and says nothing else: no spinner on a
+   * row nobody clicked, and no error painted onto the tree for a table that was a typo. `false`
+   * means the read failed, which only the caller cares about. */
+  warmNode: (connectionId: string, node: DbNodeRef, key: string) => Promise<boolean>;
   /** Re-reads every branch the user currently has open on one connection. For a settings change
    * that alters what the tree should list without touching the session behind it. */
   refreshOpenNodes: (connectionId: string) => Promise<void>;
@@ -378,6 +414,40 @@ export function ensureDbStoreLoaded(): Promise<void> {
   return useDbStore.getState().setWorkspace(workspaceId);
 }
 
+/**
+ * Connections by group, in the order the tree draws them: ungrouped first, then groups
+ * alphabetically.
+ *
+ * Ungrouped first rather than last because it is where a newly created connection lands, and a
+ * user who has just pressed "New connection" should not have to scroll past their whole estate to
+ * find it. The bucket is only drawn when something is in it — a tree with every connection filed
+ * has no use for an empty "Ungrouped" heading, and one with no groups at all is just a flat list.
+ */
+export function groupConnections(
+  connections: DbConnectionRow[],
+  folders: DbGroupRow[] = [],
+): [string, DbConnectionRow[]][] {
+  const groups = new Map<string, DbConnectionRow[]>();
+  // The folder rows go in first, so a group the user created and hasn't filled still gets a
+  // heading — the whole reason those rows exist. A group named by a connection but with no row of
+  // its own (a restored backup, a rename in flight) is added by the loop below and reads
+  // identically.
+  for (const folder of folders) groups.set(folder.name.trim(), []);
+  for (const connection of connections) {
+    const key = connection.group_name.trim();
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(connection);
+    else groups.set(key, [connection]);
+  }
+  // An ungrouped bucket that nothing fell into is a heading over nothing.
+  if (groups.get(UNGROUPED)?.length === 0) groups.delete(UNGROUPED);
+  return [...groups.entries()].sort(([a], [b]) => {
+    if (a === UNGROUPED) return -1;
+    if (b === UNGROUPED) return 1;
+    return a.localeCompare(b);
+  });
+}
+
 /** Identifies a node in the `children` cache. Includes the connection, so two connections'
  * identically-named schemas never share an entry. */
 export function nodeKey(connectionId: string, node: DbNodeRef): string {
@@ -441,6 +511,8 @@ export const useDbStore = create<DbState>((set, get) => ({
   workspaceId: null,
   loading: false,
   connections: [],
+  groups: [],
+  collapsedGroups: [],
   consoles: [],
   history: [],
   connected: [],
@@ -458,11 +530,14 @@ export const useDbStore = create<DbState>((set, get) => ({
   init: async (workspaceId) => {
     set({ workspaceId, loading: true });
     try {
-      const [tree, history, connected, rawTabs] = await Promise.all([
+      const [tree, history, connected, rawTabs, collapsed] = await Promise.all([
         dbLoadTree(workspaceId),
         dbListHistory(workspaceId, HISTORY_LIMIT),
         dbConnected().catch(() => [] as string[]),
         getSetting(openTabsKey(workspaceId)).catch(() => null),
+        getSetting(collapsedKey(workspaceId))
+          .then((raw) => parseJson<string[]>(raw, []))
+          .catch(() => [] as string[]),
       ]);
       // Two switches in quick succession leave two loads in flight; the one whose workspace is no
       // longer selected must not publish its data.
@@ -479,6 +554,8 @@ export const useDbStore = create<DbState>((set, get) => ({
 
       set({
         connections: tree.connections,
+        groups: tree.groups,
+        collapsedGroups: Array.isArray(collapsed) ? collapsed : [],
         consoles: tree.consoles,
         history,
         connected,
@@ -498,6 +575,8 @@ export const useDbStore = create<DbState>((set, get) => ({
     // otherwise still show the workspace the user just left — including its tree and its results.
     set({
       connections: [],
+      groups: [],
+      collapsedGroups: [],
       consoles: [],
       history: [],
       children: {},
@@ -516,7 +595,7 @@ export const useDbStore = create<DbState>((set, get) => ({
 
   // ------------------------------------------------------------- connections
 
-  createConnection: async (kind, name) => {
+  createConnection: async (kind, name, groupName = UNGROUPED) => {
     const workspaceId = get().workspaceId;
     if (!workspaceId) return null;
     const config = defaultConnectionConfig(kind);
@@ -524,6 +603,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       const row = await dbCreateConnection(
         workspaceId,
         name,
+        groupName,
         kind,
         JSON.stringify(config),
         "",
@@ -621,6 +701,76 @@ export const useDbStore = create<DbState>((set, get) => ({
     await guarded(() => dbReorderConnections(ids));
   },
 
+  // ------------------------------------------------------------------ groups
+
+  createGroup: async (name) => {
+    const workspaceId = get().workspaceId;
+    const trimmed = name.trim();
+    // The ungrouped bucket is the absence of a group, not a group called "". Creating it would put
+    // a folder in the tree that every connection without one already falls into.
+    if (!workspaceId || !trimmed) return;
+    const row = await guarded(() => dbCreateGroup(workspaceId, trimmed));
+    if (!row) return;
+    // Written from the reply rather than optimistically: the backend deduplicates by name, so
+    // "New group" on a name that already exists must add nothing rather than a second row.
+    set((s) => ({
+      groups: s.groups.some((group) => group.name === row.name) ? s.groups : [...s.groups, row],
+    }));
+  },
+
+  renameGroup: async (from, to) => {
+    const workspaceId = get().workspaceId;
+    const target = to.trim();
+    if (!workspaceId || from === target || !target || from === UNGROUPED) return;
+    set((s) => ({
+      connections: s.connections.map((c) =>
+        c.group_name === from ? { ...c, group_name: target } : c,
+      ),
+      // Renaming onto an existing name merges, so the folder rows have to collapse the same way —
+      // otherwise the tree would briefly show the target twice.
+      groups: s.groups
+        .map((group) => (group.name === from ? { ...group, name: target } : group))
+        .filter((group, i, all) => all.findIndex((other) => other.name === group.name) === i),
+      collapsedGroups: [
+        ...new Set(s.collapsedGroups.map((name) => (name === from ? target : name))),
+      ],
+    }));
+    if (!(await guarded(() => dbRenameGroup(workspaceId, from, target)))) void get().init(workspaceId);
+  },
+
+  deleteGroup: async (name) => {
+    const workspaceId = get().workspaceId;
+    if (!workspaceId || name === UNGROUPED) return;
+    set((s) => ({
+      // The connections stay; they lose the folder, not their existence — and with it neither
+      // their consoles nor their saved password.
+      connections: s.connections.map((c) =>
+        c.group_name === name ? { ...c, group_name: UNGROUPED } : c,
+      ),
+      groups: s.groups.filter((group) => group.name !== name),
+      collapsedGroups: s.collapsedGroups.filter((entry) => entry !== name),
+    }));
+    if (!(await guarded(() => dbDeleteGroup(workspaceId, name)))) void get().init(workspaceId);
+  },
+
+  setConnectionGroup: async (id, group) => {
+    const target = group.trim();
+    if (get().connections.find((c) => c.id === id)?.group_name === target) return;
+    set((s) => ({
+      connections: s.connections.map((c) => (c.id === id ? { ...c, group_name: target } : c)),
+    }));
+    await guarded(() => dbSetConnectionGroup(id, target));
+  },
+
+  toggleGroup: (group) => {
+    const workspaceId = get().workspaceId;
+    const collapsed = get().collapsedGroups.includes(group)
+      ? get().collapsedGroups.filter((name) => name !== group)
+      : [...get().collapsedGroups, group];
+    set({ collapsedGroups: collapsed });
+    if (workspaceId) void setSetting(collapsedKey(workspaceId), JSON.stringify(collapsed)).catch(() => {});
+  },
+
   connect: async (id) => {
     const info = await guarded(() => dbConnect(id));
     if (!info) return false;
@@ -679,6 +829,29 @@ export const useDbStore = create<DbState>((set, get) => ({
       set((s) => ({ nodeErrors: { ...s.nodeErrors, [key]: String(e) } }));
     } finally {
       set((s) => ({ loadingNodes: s.loadingNodes.filter((entry) => entry !== key) }));
+    }
+  },
+
+  warmNode: async (connectionId, node, key) => {
+    // Deliberately none of `refreshNode`'s bookkeeping. A warm is nobody's request: the SQL console
+    // reads the columns of a table you *named in a query* and the tables of a schema you only
+    // mentioned, so its spinner would appear on rows the user is not touching and — the reason this
+    // exists — its failures would paint an error onto them. `from usres` must not put a red row in
+    // the explorer. The result is written where the tree will find it and nothing else is said.
+    if (get().children[key]) return true;
+    try {
+      const children = await dbChildren(connectionId, node);
+      set((s) => ({
+        // Never over an answer that arrived while this was in flight: the explorer's own read is
+        // the newer one, and it is the one the user is looking at.
+        children: s.children[key] ? s.children : { ...s.children, [key]: children },
+        connected: s.connected.includes(connectionId)
+          ? s.connected
+          : [...s.connected, connectionId],
+      }));
+      return true;
+    } catch {
+      return false;
     }
   },
 

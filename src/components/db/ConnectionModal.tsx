@@ -138,12 +138,16 @@ function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
 export function ConnectionModal({
   connectionId,
   newEngine,
+  newGroup = "",
   onClose,
 }: {
   /** The connection to open on. Ignored when `newEngine` is set. */
   connectionId: string | null;
   /** Set when the dialog was opened to create a connection, holding the engine already chosen. */
   newEngine: DbKind | null;
+  /** Which folder a connection created here lands in — set when the dialog was opened from a
+   * group's own menu. Empty is ungrouped, which is where every other entry point puts one. */
+  newGroup?: string;
   onClose: () => void;
 }) {
   const t = useT();
@@ -340,7 +344,7 @@ export function ConnectionModal({
       const finalName = name.trim() || derivedName;
       let saved = row;
       if (!saved) {
-        saved = await store.createConnection(config.kind, finalName);
+        saved = await store.createConnection(config.kind, finalName, newGroup);
         if (!saved) return null;
       }
       const ok = await store.saveConnection(

@@ -681,6 +681,8 @@ pub struct DbConnectionRow {
     pub id: String,
     pub workspace_id: String,
     pub name: String,
+    /// Free text. Empty is "ungrouped", which the UI shows as a bucket of its own at the top.
+    pub group_name: String,
     pub kind: String,
     pub spec: String,
     pub color: String,
@@ -718,10 +720,25 @@ pub struct DbQueryHistoryEntry {
     pub ran_at: String,
 }
 
+/// A folder in the connection tree.
+///
+/// Carries no members: a connection's `group_name` is still what puts it in a group. This row
+/// exists so a group can exist while empty — see the table's comment in `migrations` for why that
+/// is the one thing the string alone cannot express.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbGroupRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
 /// Everything the database workspace needs on load, in one round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbWorkspaceTree {
     pub connections: Vec<DbConnectionRow>,
+    pub groups: Vec<DbGroupRow>,
     pub consoles: Vec<DbConsole>,
 }
 

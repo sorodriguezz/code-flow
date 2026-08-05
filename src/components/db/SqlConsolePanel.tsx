@@ -47,14 +47,26 @@ const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
   padding: { top: 8, bottom: 8 },
   scrollbar: { verticalScrollbarSize: 8, horizontalScrollbarSize: 8 },
   // On by default for SQL: a console is where you type table and column names you half-remember.
-  quickSuggestions: true,
+  // Not inside strings or comments, where the catalog is never what you are typing — and with the
+  // space trigger below, the widget would otherwise open on every word of a `WHERE note = '…'`.
+  quickSuggestions: { other: true, comments: false, strings: false },
+  // The provider answers synchronously (see `sqlCompletion.ts`), so there is nothing to wait for.
+  quickSuggestionsDelay: 0,
   suggestOnTriggerCharacters: true,
   // Tab completes the best match without going through the list first — what you want when the
   // name is nearly typed and the point of the widget was never to be read.
   tabCompletion: "on",
-  // The catalog is the answer; words already in the buffer are the fallback, and Monaco ranks them
-  // below anything the provider returns.
-  wordBasedSuggestions: "currentDocument",
+  // ...and Enter stays a newline. The completion provider opens the list after a space, so the list
+  // is up far more often than it used to be, and Monaco's default would spend those Enters
+  // accepting `AND` instead of breaking the line — in the one editor where every line break is
+  // deliberate.
+  acceptSuggestionOnEnter: "off",
+  // No `wordBasedSuggestions` here, and not by omission. It read as "the catalog first, words in
+  // the buffer as a fallback", which is not what it does: Monaco asks completion providers in
+  // priority groups and stops at the first that answers, so while the SQL provider returns anything
+  // at all — it always returns keywords — the word-based one never runs. And in standalone Monaco
+  // that option is not per-editor: it goes through the one global configuration service, so
+  // mounting a console silently changed the setting for every other editor in the app.
 };
 
 // The provider is global to Monaco rather than per-editor, so it is installed once on import

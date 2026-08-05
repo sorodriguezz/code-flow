@@ -36,12 +36,13 @@ pub fn db_create_connection(
     db: State<Db>,
     workspace_id: String,
     name: String,
+    group_name: String,
     kind: String,
     spec: String,
     color: String,
 ) -> Result<DbConnectionRow, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::create_connection(&conn, &workspace_id, &name, &kind, &spec, &color)
+    queries::create_connection(&conn, &workspace_id, &name, group_name.trim(), &kind, &spec, &color)
         .map_err(|e| e.to_string())
 }
 
@@ -94,6 +95,57 @@ pub fn db_duplicate_connection(db: State<Db>, id: String) -> Result<DbConnection
 pub fn db_reorder_connections(db: State<Db>, ids: Vec<String>) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::reorder_connections(&conn, &ids).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn db_create_group(
+    db: State<Db>,
+    workspace_id: String,
+    name: String,
+) -> Result<DbGroupRow, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::create_group(&conn, &workspace_id, name.trim()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn db_rename_group(
+    db: State<Db>,
+    workspace_id: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::rename_group(&conn, &workspace_id, &from, to.trim()).map_err(|e| e.to_string())
+}
+
+/// Deletes a group. Its connections move to ungrouped — see [`queries::delete_group`] for why they
+/// are never deleted with it.
+#[tauri::command]
+pub fn db_delete_group(
+    db: State<Db>,
+    workspace_id: String,
+    name: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::delete_group(&conn, &workspace_id, &name).map_err(|e| e.to_string())
+}
+
+/// Files a connection under a group, or under none with an empty name.
+///
+/// Deliberately does not touch the registry: unlike [`db_update_connection`], this changes nothing
+/// about the server the connection talks to, so a live session survives being filed.
+#[tauri::command]
+pub fn db_set_connection_group(
+    db: State<Db>,
+    id: String,
+    group_name: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_connection_group(&conn, &id, group_name.trim()).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

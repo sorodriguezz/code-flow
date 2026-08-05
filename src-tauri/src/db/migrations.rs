@@ -870,10 +870,32 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         -- `db-password:<id>` (see `datasource::password_key`). This table is a plain-text file in
         -- the user's config directory; a database password in it would be readable by anything that
         -- can read a file.
+        -- A folder in the connection tree, as a row of its own. The same split as `remote_groups`
+        -- below, for the same reason and with the same trade-offs: connections carry `group_name`
+        -- as text and that is what puts one in a group, while this table owns only the group's
+        -- *existence* — the one thing the string alone cannot express is a group with nothing in
+        -- it, which is exactly the state between creating a folder and filling it.
+        CREATE TABLE IF NOT EXISTS db_groups (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL
+        );
+        -- One row per name per workspace. The tree renders a group once whether it is here, implied
+        -- by a connection, or both, so a duplicate would be invisible in the UI and confusing in
+        -- the data.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_db_groups_name
+            ON db_groups (workspace_id, name);
+
         CREATE TABLE IF NOT EXISTS db_connections (
             id           TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
             name         TEXT NOT NULL,
+            -- Free text, and the sole record of *membership* — see `db_groups` above for what that
+            -- table adds and why it deliberately isn't a foreign key. Empty means ungrouped, which
+            -- the tree shows as a bucket of its own rather than as a group named "".
+            group_name   TEXT NOT NULL DEFAULT '',
             -- postgres | supabase | sqlserver | iris | mongodb
             kind         TEXT NOT NULL,
             -- JSON: host, port, database, user, url, ssl, options, read_only, timeout. One blob
@@ -1040,6 +1062,22 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_board_provider_to_stories(conn)?;
     add_grouping_to_agent_tasks(conn)?;
     add_grouping_to_agent_chains(conn)?;
+    add_group_name_to_db_connections(conn)?;
+    Ok(())
+}
+
+/// Connections gained folders, the way hosts already had them.
+///
+/// The empty default is the whole migration: every connection that existed before this is
+/// ungrouped, which is the bucket the tree already draws first — so a database upgraded here looks
+/// exactly as it did, with one empty folder list beside it. `db_groups` needs no backfill for the
+/// same reason it exists at all: it records only the folders a user makes.
+fn add_group_name_to_db_connections(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "db_connections")? && !has_column(conn, "db_connections", "group_name")? {
+        conn.execute_batch(
+            "ALTER TABLE db_connections ADD COLUMN group_name TEXT NOT NULL DEFAULT '';",
+        )?;
+    }
     Ok(())
 }
 
@@ -1756,6 +1794,7 @@ mod tests {
                 "ON remote_groups (workspace_id, name)",
                 "ON remote_groups (name)",
             )
+            .replace("ON db_groups (workspace_id, name)", "ON db_groups (name)")
     }
 
     fn legacy_db() -> Connection {

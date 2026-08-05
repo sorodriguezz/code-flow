@@ -7,6 +7,7 @@ import type {
   DbForeignKey,
   DbExecContext,
   DbExecuteResult,
+  DbGroupRow,
   DbNode,
   DbNodeRef,
   DbQueryHistoryEntry,
@@ -42,10 +43,19 @@ export const dbLoadTree = (workspaceId: string) =>
 export const dbCreateConnection = (
   workspaceId: string,
   name: string,
+  groupName: string,
   kind: string,
   spec: string,
   color: string,
-) => invoke<DbConnectionRow>("db_create_connection", { workspaceId, name, kind, spec, color });
+) =>
+  invoke<DbConnectionRow>("db_create_connection", {
+    workspaceId,
+    name,
+    groupName,
+    kind,
+    spec,
+    color,
+  });
 
 /** Saving also drops any open session: a host or SSL change must not keep answering from the old
  * server. */
@@ -62,6 +72,25 @@ export const dbDuplicateConnection = (id: string) =>
 
 export const dbReorderConnections = (ids: string[]) =>
   invoke<void>("db_reorder_connections", { ids });
+
+// ---------- groups ----------
+
+/** Idempotent: creating a group that already exists returns the existing one. */
+export const dbCreateGroup = (workspaceId: string, name: string) =>
+  invoke<DbGroupRow>("db_create_group", { workspaceId, name });
+
+/** Renaming onto an existing group merges the two rather than failing. */
+export const dbRenameGroup = (workspaceId: string, from: string, to: string) =>
+  invoke<void>("db_rename_group", { workspaceId, from, to });
+
+/** Deletes the folder only. Its connections move to ungrouped — never deleted with it. */
+export const dbDeleteGroup = (workspaceId: string, name: string) =>
+  invoke<void>("db_delete_group", { workspaceId, name });
+
+/** Files a connection under a group, or under none with an empty name. Leaves any open session
+ *  alone: where a connection is filed says nothing about the server it talks to. */
+export const dbSetConnectionGroup = (id: string, groupName: string) =>
+  invoke<void>("db_set_connection_group", { id, groupName });
 
 // ---------- passwords ----------
 

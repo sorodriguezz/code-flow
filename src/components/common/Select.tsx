@@ -52,6 +52,9 @@ function flatten(items: SelectItems): SelectOption[] {
   return out;
 }
 
+/** How close to the window's edge an open menu may sit. */
+const EDGE = 8;
+
 const SIZE = {
   sm: "px-1.5 py-0.5 text-[12px]",
   md: "px-2.5 py-1.5 text-[13px]",
@@ -116,13 +119,30 @@ export function Select({
     // Prefer opening downward; flip up only when there's clearly more room above.
     const below = spaceBelow >= 200 || spaceBelow >= spaceAbove;
     const maxHeight = Math.min(288, (below ? spaceBelow : spaceAbove) - 12);
-    setPos({
-      left: rect.left,
+    // The menu is only *at least* as wide as its trigger, so a narrow trigger doesn't decide what
+    // its own options are allowed to say — a 92px one had "5.000" and "No limit" arriving as "5.0…"
+    // and "No…", which is the one thing a menu exists to tell you. Whatever it grows to is then
+    // pulled back onto the screen, since growing rightwards is how it would leave.
+    const width = listRef.current?.offsetWidth ?? rect.width;
+    const next = {
+      left: Math.max(EDGE, Math.min(rect.left, window.innerWidth - EDGE - width)),
       width: rect.width,
       maxHeight: Math.max(120, maxHeight),
       top: below ? rect.bottom + 4 : undefined,
       bottom: below ? undefined : window.innerHeight - rect.top + 4,
-    });
+    };
+    // Same values means the same object, so the measuring pass below settles instead of feeding
+    // itself a new position on every render.
+    setPos((prev) =>
+      prev &&
+      prev.left === next.left &&
+      prev.width === next.width &&
+      prev.maxHeight === next.maxHeight &&
+      prev.top === next.top &&
+      prev.bottom === next.bottom
+        ? prev
+        : next,
+    );
   }, []);
 
   // Position on open, and keep it pinned to the trigger while scrolling/resizing.
@@ -137,6 +157,23 @@ export function Select({
       window.removeEventListener("resize", onScroll);
     };
   }, [open, reposition]);
+
+  /**
+   * The one pass that can measure. The first `reposition` runs before the menu exists and has only
+   * the trigger to go on; this one runs once the portal is mounted, with the width the options
+   * actually took. Guarded by a ref rather than a dependency list because it has to run *after a
+   * render* rather than after a change — and after that first measurement it costs nothing.
+   */
+  const measured = useRef(false);
+  useLayoutEffect(() => {
+    if (!open) {
+      measured.current = false;
+      return;
+    }
+    if (measured.current || !listRef.current) return;
+    measured.current = true;
+    reposition();
+  });
 
   // Close on any click that lands outside both the trigger and the menu.
   useEffect(() => {
@@ -301,7 +338,12 @@ export function Select({
             style={{
               position: "fixed",
               left: pos.left,
-              width: pos.width,
+              // Aligned with the trigger at its narrowest and free to grow past it, up to whatever
+              // the window can hold. `truncate` on the labels is what is left for the option too
+              // long even for that.
+              minWidth: pos.width,
+              width: "max-content",
+              maxWidth: Math.max(pos.width, window.innerWidth - EDGE * 2),
               top: pos.top,
               bottom: pos.bottom,
               maxHeight: pos.maxHeight,

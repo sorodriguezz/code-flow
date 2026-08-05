@@ -87,6 +87,27 @@ export const resetAppData = () => invoke<void>("reset_app_data");
 
 export const pickFolder = () => invoke<string | null>("pick_folder");
 
+/** One git repository found inside a picked folder. */
+export interface FoundRepo {
+  name: string;
+  path: string;
+}
+
+/** What a picked folder turned out to be — see `scan_folder`. */
+export interface FolderScan {
+  /** The folder is itself a repository root. */
+  is_repo: boolean;
+  /** Repositories directly inside it, one level down and no further. */
+  repos: FoundRepo[];
+  empty: boolean;
+  /** The folder had more entries than the scan looks at, and the rest were skipped. */
+  truncated: boolean;
+}
+
+/** Asks what a picked folder actually is before anything is registered against it. Bounded on
+ *  purpose: it stats one level and stops. */
+export const scanFolder = (path: string) => invoke<FolderScan>("scan_folder", { path });
+
 export const defaultCloneDir = () => invoke<string>("default_clone_dir");
 
 export const createWorkspace = (name: string, icon: string, color: string) =>

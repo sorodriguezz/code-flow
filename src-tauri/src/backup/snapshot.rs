@@ -75,6 +75,7 @@ pub const TABLES: &[&str] = &[
     "api_cookies",
     "api_history",
     // The database workspace.
+    "db_groups",
     "db_connections",
     "db_consoles",
     "db_query_history",
@@ -148,7 +149,7 @@ pub const GROUPS: &[Group] = &[
             "api_tombstones",
         ],
     },
-    Group { key: "databases", tables: &["db_connections", "db_consoles"] },
+    Group { key: "databases", tables: &["db_groups", "db_connections", "db_consoles"] },
     Group {
         key: "remote",
         tables: &["remote_groups", "remote_hosts", "remote_snippets", "remote_log"],

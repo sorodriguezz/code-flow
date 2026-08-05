@@ -104,6 +104,7 @@ export function DatabaseView() {
         <ConnectionModal
           connectionId={modal.kind === "connection" ? modal.connectionId : null}
           newEngine={modal.kind === "newConnection" ? modal.engine : null}
+          newGroup={modal.kind === "newConnection" ? modal.group ?? "" : ""}
           onClose={closeModal}
         />
       )}

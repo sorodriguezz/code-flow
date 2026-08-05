@@ -11,6 +11,7 @@ import {
   Database,
   FileCode2,
   FolderCode,
+  FolderOpen,
   FolderPlus,
   Hash,
   KeyRound,
@@ -39,7 +40,9 @@ import { DbHistoryList } from "./DbHistoryList";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
 import {
   describeConnection,
+  groupConnections,
   nodeKey,
+  UNGROUPED,
   useDbStore,
   type DbSidebarSection,
 } from "../../state/dbStore";
@@ -500,7 +503,20 @@ function selectStarFor(connectionId: string, node: DbNode): string {
 // One connection
 // ---------------------------------------------------------------------------
 
-function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: number; total: number }) {
+function ConnectionBranch({
+  row,
+  index,
+  total,
+  siblings,
+}: {
+  row: DbConnectionRow;
+  index: number;
+  total: number;
+  /** The rows "move up/down" moves within — the group's members, or the whole list when the tree
+   * has no folders. Order is still stored globally, so a move inside a folder swaps the two rows'
+   * places in the full list and leaves everything else where it was. */
+  siblings: DbConnectionRow[];
+}) {
   const t = useT();
   const rootRef: DbNodeRef = { kind: "root", database: null, schema: null, name: null };
   const key = nodeKey(row.id, rootRef);
@@ -518,20 +534,52 @@ function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: 
     () => allConsoles.filter((c) => c.connection_id === row.id),
     [allConsoles, row.id],
   );
+  const groups = useDbStore((s) => s.groups);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /** Where to put it. A second menu rather than a submenu: `ContextMenu` has no nesting, and the
+   * list of groups is exactly the sort of thing that would need one. */
+  const [groupMenu, setGroupMenu] = useState<{ x: number; y: number } | null>(null);
 
   const store = useDbStore.getState();
 
-  /** Moves this connection one place, by rewriting the whole order — the backend takes a list, so
-   * there is no separate "swap" to get out of step with it. */
+  /** Moves this connection one place among its siblings, by rewriting the whole order — the backend
+   * takes a list, so there is no separate "swap" to get out of step with it. */
   const move = (direction: -1 | 1) => {
+    const neighbour = siblings[index + direction];
+    if (!neighbour) return;
     const ids = connections.map((c) => c.id);
-    const target = index + direction;
-    if (target < 0 || target >= ids.length) return;
-    [ids[index], ids[target]] = [ids[target], ids[index]];
+    const from = ids.indexOf(row.id);
+    const to = ids.indexOf(neighbour.id);
+    if (from < 0 || to < 0) return;
+    [ids[from], ids[to]] = [ids[to], ids[from]];
     void store.reorderConnections(ids);
   };
+
+  /** Every folder the tree knows about — the rows the user made, plus any name a connection carries
+   * without one — so "move to" can never be missing a group that is visibly on screen. */
+  const groupNames = [
+    ...new Set([
+      ...groups.map((group) => group.name.trim()),
+      ...connections.map((c) => c.group_name.trim()),
+    ]),
+  ]
+    .filter((name) => name !== UNGROUPED)
+    .sort((a, b) => a.localeCompare(b));
+
+  const groupItems: MenuItem[] = [
+    {
+      label: t("db.ungrouped"),
+      icon: FolderOpen,
+      onClick: () => void store.setConnectionGroup(row.id, UNGROUPED),
+    },
+    ...groupNames.map((name, i) => ({
+      label: name,
+      icon: FolderCode,
+      separated: i === 0,
+      onClick: () => void store.setConnectionGroup(row.id, name),
+    })),
+  ];
 
   const menuItems: MenuItem[] = [
     {
@@ -556,6 +604,14 @@ function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: 
       label: t("db.duplicate"),
       icon: Copy,
       onClick: () => void store.duplicateConnection(row.id),
+    },
+    {
+      label: `${t("db.moveToGroup")}…`,
+      icon: FolderCode,
+      separated: true,
+      // Anchored where the first menu was, so the second opens over it rather than wherever the
+      // pointer drifted to while reading.
+      onClick: () => setGroupMenu(menu),
     },
   ];
   if (index > 0) {
@@ -616,6 +672,15 @@ function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: 
         ))}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+      )}
+      {groupMenu && (
+        <ContextMenu
+          x={groupMenu.x}
+          y={groupMenu.y}
+          items={groupItems}
+          heading={t("db.moveToGroup")}
+          onClose={() => setGroupMenu(null)}
+        />
       )}
     </>
   );
@@ -736,6 +801,198 @@ function ConsoleNameInput({ saved }: { saved: DbConsole }) {
         }}
         className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1 py-[1px] text-[13px] outline-none"
       />
+    </div>
+  );
+}
+
+/**
+ * The inline editor a group is named in. Selects on mount, commits on Enter or blur, cancels on
+ * Escape — the same shape `ConsoleNameInput` has, and for the same reason: naming a folder is one
+ * word, and a modal to type one word into is three clicks around it.
+ */
+function GroupNameInput({
+  value,
+  onCommit,
+  onCancel,
+}: {
+  value: string;
+  onCommit: (value: string) => void;
+  onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  // Escape unmounts this row, and an unmount is not a blur React will tell us about — but it costs
+  // nothing to be sure the cancel path can never be overtaken by the commit one.
+  const settled = useRef(false);
+
+  const commit = () => {
+    if (settled.current) return;
+    settled.current = true;
+    onCommit(draft);
+  };
+
+  return (
+    <input
+      autoFocus
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onFocus={(e) => e.currentTarget.select()}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        // The tree above listens for arrows and Enter; none of that should reach it from here.
+        e.stopPropagation();
+        if (e.key === "Enter") {
+          e.preventDefault();
+          commit();
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          settled.current = true;
+          onCancel();
+        }
+      }}
+      className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1 py-px text-[12px] outline-none"
+    />
+  );
+}
+
+/**
+ * One folder in the connection tree, with its connections under it.
+ *
+ * The members are indented by a wrapper rather than by a `depth` threaded through every row: a
+ * connection's subtree already numbers its own levels from the connection, and a group is a shelf
+ * the whole subtree sits on, not another level inside it. One padding here moves the branch and
+ * everything it will ever expand into, and `ConnectionBranch` never learns it is in a folder.
+ */
+function GroupSection({
+  group,
+  members,
+  collapsed,
+  onToggle,
+  onNewGroup,
+}: {
+  group: string;
+  members: DbConnectionRow[];
+  collapsed: boolean;
+  onToggle: () => void;
+  onNewGroup: () => void;
+}) {
+  const t = useT();
+  const store = useDbStore.getState();
+  const openModal = useDbModalStore((s) => s.openDbModal);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
+  const [renaming, setRenaming] = useState(false);
+
+  const label = group || t("db.ungrouped");
+
+  /**
+   * Deleting a folder, with the one thing worth confirming spelled out.
+   *
+   * The connections survive — the backend moves them to ungrouped and never deletes them — so the
+   * prompt says exactly that rather than the generic "are you sure": the fear this dialog exists to
+   * answer is "am I about to lose my databases, their consoles and their saved passwords", and the
+   * answer is no.
+   */
+  const removeGroup = async () => {
+    const message =
+      members.length > 0
+        ? t("db.deleteGroupWithConnections", { name: label, count: String(members.length) })
+        : t("db.deleteGroupConfirm", { name: label });
+    if (await confirmAction(message)) void store.deleteGroup(group);
+  };
+
+  const menuItems: MenuItem[] = [
+    {
+      label: `${t("db.newConnectionHere")}…`,
+      icon: Plus,
+      onClick: () => setEngineMenu(menu),
+    },
+    { label: t("db.newGroup"), icon: FolderPlus, onClick: onNewGroup },
+  ];
+  // Renaming or deleting the ungrouped bucket is meaningless: it is the absence of a group, so
+  // renaming it would write a literal name onto every connection that deliberately has none, and
+  // deleting it would have nothing to delete.
+  if (group !== UNGROUPED) {
+    menuItems.push(
+      {
+        label: t("db.renameGroup"),
+        icon: Pencil,
+        separated: true,
+        onClick: () => setRenaming(true),
+      },
+      { label: t("db.deleteGroup"), icon: Trash2, danger: true, onClick: () => void removeGroup() },
+    );
+  }
+
+  return (
+    <div className="py-0.5">
+      <div
+        role="treeitem"
+        aria-expanded={!collapsed}
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+        className="group flex w-full cursor-default items-center gap-1 rounded-md px-1.5 py-[3px] text-left outline-none hover:bg-black/[0.03] focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] dark:hover:bg-white/[0.04]"
+      >
+        <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
+          {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+        </span>
+        {renaming ? (
+          <GroupNameInput
+            value={group}
+            onCommit={(value) => {
+              setRenaming(false);
+              if (value.trim()) void store.renameGroup(group, value.trim());
+            }}
+            onCancel={() => setRenaming(false)}
+          />
+        ) : (
+          <>
+            <span className="min-w-0 flex-1 truncate text-[12px] font-medium text-[var(--cf-text-muted)]">
+              {label}
+            </span>
+            <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+              {members.length}
+            </span>
+          </>
+        )}
+      </div>
+
+      {!collapsed && (
+        <div className="pl-3">
+          {members.map((row, index) => (
+            <ConnectionBranch
+              key={row.id}
+              row={row}
+              index={index}
+              total={members.length}
+              siblings={members}
+            />
+          ))}
+        </div>
+      )}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+      )}
+      {engineMenu && (
+        <EngineMenu
+          x={engineMenu.x}
+          y={engineMenu.y}
+          onPick={(engine) => openModal({ kind: "newConnection", engine, group })}
+          onClose={() => setEngineMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -880,17 +1137,31 @@ export function DbExplorer() {
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const connections = useDbStore((s) => s.connections);
+  const groups = useDbStore((s) => s.groups);
+  const collapsedGroups = useDbStore((s) => s.collapsedGroups);
+  const toggleGroup = useDbStore((s) => s.toggleGroup);
+  const createGroup = useDbStore((s) => s.createGroup);
   const section = useDbStore((s) => s.section);
   const setSection = useDbStore((s) => s.setSection);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const [query, setQuery] = useState("");
   /** Where the "which engine?" menu is anchored, when the `+` has expanded it. */
   const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
+  /** The unnamed folder being typed into, if the user just asked for one. */
+  const [creatingGroup, setCreatingGroup] = useState(false);
 
   const sections: { id: DbSidebarSection; label: string }[] = [
     { id: "explorer", label: t("db.explorer") },
     { id: "history", label: t("db.history") },
   ];
+
+  const buckets = useMemo(
+    () => groupConnections(connections, groups),
+    [connections, groups],
+  );
+  /** Whether the tree has folders at all. Without any, it stays the flat list it has always been —
+   * a lone "Ungrouped" heading over every connection is a level of structure that says nothing. */
+  const foldered = groups.length > 0 || buckets.some(([name]) => name !== UNGROUPED);
 
   return (
     <>
@@ -909,6 +1180,15 @@ export function DbExplorer() {
             title={t("db.manageConnections")}
           >
             <Settings2 size={13} />
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={() => {
+              setSection("explorer");
+              setCreatingGroup(true);
+            }}
+            title={t("db.newGroup")}
+          >
+            <FolderPlus size={13} />
           </ToolbarButton>
           <ToolbarButton
             onClick={(e) => setEngineMenu(menuAnchor(e))}
@@ -966,7 +1246,7 @@ export function DbExplorer() {
             <DbHistoryList />
           ) : query.trim() ? (
             <SearchResults query={query} />
-          ) : connections.length === 0 ? (
+          ) : connections.length === 0 && !foldered && !creatingGroup ? (
             // Just the state, no call to action: the "+" in the header is already the one way to
             // add a connection, and repeating it here as a second button (plus a list of the
             // engines, which the engine menu itself shows) made an empty panel look busier than a
@@ -977,14 +1257,39 @@ export function DbExplorer() {
             </div>
           ) : (
             <div role="tree" className="min-h-0 flex-1 overflow-auto p-1">
-              {connections.map((row, index) => (
-                <ConnectionBranch
-                  key={row.id}
-                  row={row}
-                  index={index}
-                  total={connections.length}
-                />
-              ))}
+              {creatingGroup && (
+                <div className="flex items-center gap-1 px-1.5 py-[3px]">
+                  <FolderPlus size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  <GroupNameInput
+                    value=""
+                    onCommit={(value) => {
+                      setCreatingGroup(false);
+                      if (value.trim()) void createGroup(value);
+                    }}
+                    onCancel={() => setCreatingGroup(false)}
+                  />
+                </div>
+              )}
+              {foldered
+                ? buckets.map(([group, members]) => (
+                    <GroupSection
+                      key={group || "__ungrouped__"}
+                      group={group}
+                      members={members}
+                      collapsed={collapsedGroups.includes(group)}
+                      onToggle={() => toggleGroup(group)}
+                      onNewGroup={() => setCreatingGroup(true)}
+                    />
+                  ))
+                : connections.map((row, index) => (
+                    <ConnectionBranch
+                      key={row.id}
+                      row={row}
+                      index={index}
+                      total={connections.length}
+                      siblings={connections}
+                    />
+                  ))}
             </div>
           )}
         </div>

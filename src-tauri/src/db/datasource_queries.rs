@@ -12,7 +12,9 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use super::models::{DbConnectionRow, DbConsole, DbQueryHistoryEntry, DbWorkspaceTree};
+use super::models::{
+    DbConnectionRow, DbConsole, DbGroupRow, DbQueryHistoryEntry, DbWorkspaceTree,
+};
 use super::queries::now;
 
 /// Backstop on `add_history`. Well above what the UI lists, so it only stops the table growing
@@ -20,7 +22,8 @@ use super::queries::now;
 const HISTORY_HARD_CAP: i64 = 2000;
 
 const CONNECTION_COLUMNS: &str =
-    "id, workspace_id, name, kind, spec, color, sort_order, created_at, updated_at";
+    "id, workspace_id, name, group_name, kind, spec, color, sort_order, created_at, updated_at";
+const GROUP_COLUMNS: &str = "id, workspace_id, name, sort_order, created_at";
 const CONSOLE_COLUMNS: &str =
     "id, connection_id, name, body, database_name, schema_name, sort_order, created_at, updated_at";
 const HISTORY_COLUMNS: &str = "id, workspace_id, connection_id, connection_name, statement, \
@@ -31,12 +34,23 @@ fn map_connection(row: &rusqlite::Row) -> rusqlite::Result<DbConnectionRow> {
         id: row.get(0)?,
         workspace_id: row.get(1)?,
         name: row.get(2)?,
-        kind: row.get(3)?,
-        spec: row.get(4)?,
-        color: row.get(5)?,
-        sort_order: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        group_name: row.get(3)?,
+        kind: row.get(4)?,
+        spec: row.get(5)?,
+        color: row.get(6)?,
+        sort_order: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn map_group(row: &rusqlite::Row) -> rusqlite::Result<DbGroupRow> {
+    Ok(DbGroupRow {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        name: row.get(2)?,
+        sort_order: row.get(3)?,
+        created_at: row.get(4)?,
     })
 }
 
@@ -73,8 +87,13 @@ fn map_history(row: &rusqlite::Row) -> rusqlite::Result<DbQueryHistoryEntry> {
 // Connections
 // ---------------------------------------------------------------------------
 
-/// One workspace's connections and every console under them, in one round trip. The UI nests them
-/// client-side.
+/// One workspace's connections, groups and every console under them, in one round trip. The UI
+/// nests them client-side.
+///
+/// The groups come back as their own list rather than being derived from the connections, because
+/// the two disagree in both directions and the tree needs both halves: a group row with no member
+/// is a folder the user made and hasn't filled, and a `group_name` with no row is a connection
+/// dragged into a name nobody created. The tree unions them.
 pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<DbWorkspaceTree> {
     let mut statement = conn.prepare(&format!(
         "SELECT {CONNECTION_COLUMNS} FROM db_connections WHERE workspace_id = ?1 \
@@ -82,6 +101,13 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<DbWo
     ))?;
     let connections = statement
         .query_map(params![workspace_id], map_connection)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut statement = conn.prepare(&format!(
+        "SELECT {GROUP_COLUMNS} FROM db_groups WHERE workspace_id = ?1 ORDER BY sort_order, name"
+    ))?;
+    let groups = statement
+        .query_map(params![workspace_id], map_group)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     // Joined through the connection rather than filtered on a column of its own — a console's
@@ -97,7 +123,7 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<DbWo
         .query_map(params![workspace_id], map_console)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    Ok(DbWorkspaceTree { connections, consoles })
+    Ok(DbWorkspaceTree { connections, groups, consoles })
 }
 
 pub fn get_connection(conn: &Connection, id: &str) -> rusqlite::Result<Option<DbConnectionRow>> {
@@ -113,6 +139,7 @@ pub fn create_connection(
     conn: &Connection,
     workspace_id: &str,
     name: &str,
+    group_name: &str,
     kind: &str,
     spec: &str,
     color: &str,
@@ -127,14 +154,15 @@ pub fn create_connection(
         )
         .unwrap_or(0);
     conn.execute(
-        "INSERT INTO db_connections (id, workspace_id, name, kind, spec, color, sort_order, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
-        params![id, workspace_id, name, kind, spec, color, sort_order, timestamp],
+        "INSERT INTO db_connections (id, workspace_id, name, group_name, kind, spec, color, sort_order, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
+        params![id, workspace_id, name, group_name, kind, spec, color, sort_order, timestamp],
     )?;
     Ok(DbConnectionRow {
         id,
         workspace_id: workspace_id.to_string(),
         name: name.to_string(),
+        group_name: group_name.to_string(),
         kind: kind.to_string(),
         spec: spec.to_string(),
         color: color.to_string(),
@@ -146,9 +174,35 @@ pub fn create_connection(
 
 pub fn update_connection(conn: &Connection, row: &DbConnectionRow) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE db_connections SET name = ?2, kind = ?3, spec = ?4, color = ?5, sort_order = ?6, \
-         updated_at = ?7 WHERE id = ?1",
-        params![row.id, row.name, row.kind, row.spec, row.color, row.sort_order, now()],
+        "UPDATE db_connections SET name = ?2, group_name = ?3, kind = ?4, spec = ?5, color = ?6, \
+         sort_order = ?7, updated_at = ?8 WHERE id = ?1",
+        params![
+            row.id,
+            row.name,
+            row.group_name,
+            row.kind,
+            row.spec,
+            row.color,
+            row.sort_order,
+            now()
+        ],
+    )?;
+    Ok(())
+}
+
+/// Moves a connection into a group, or out of every group when `group_name` is empty.
+///
+/// Its own statement rather than a full `update_connection` because this is the one edit that must
+/// not disturb the session: dragging a row between folders says nothing about the server it talks
+/// to, and closing a live connection over a filing decision would be a surprise.
+pub fn set_connection_group(
+    conn: &Connection,
+    id: &str,
+    group_name: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE db_connections SET group_name = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, group_name, now()],
     )?;
     Ok(())
 }
@@ -174,6 +228,7 @@ pub fn duplicate_connection(conn: &Connection, id: &str) -> rusqlite::Result<DbC
         conn,
         &source.workspace_id,
         &format!("{} copy", source.name),
+        &source.group_name,
         &source.kind,
         &source.spec,
         &source.color,
@@ -188,6 +243,95 @@ pub fn reorder_connections(conn: &Connection, ids: &[String]) -> rusqlite::Resul
             params![id, index as i64, timestamp],
         )?;
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
+/// Creates an empty group, or returns the one already carrying that name.
+///
+/// Idempotent on purpose: "New group" typed twice with the same name is a user who wants that
+/// group, not an error dialog. The `INSERT OR IGNORE` and the read-back together are what make the
+/// unique index a deduplicator rather than a failure mode.
+pub fn create_group(
+    conn: &Connection,
+    workspace_id: &str,
+    name: &str,
+) -> rusqlite::Result<DbGroupRow> {
+    let sort_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM db_groups WHERE workspace_id = ?1",
+        params![workspace_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        &format!("INSERT OR IGNORE INTO db_groups ({GROUP_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5)"),
+        params![Uuid::new_v4().to_string(), workspace_id, name, sort_order, now()],
+    )?;
+    conn.query_row(
+        &format!("SELECT {GROUP_COLUMNS} FROM db_groups WHERE workspace_id = ?1 AND name = ?2"),
+        params![workspace_id, name],
+        map_group,
+    )
+}
+
+/// Renames a group: its members, and the folder row itself.
+///
+/// Two writes rather than one because membership and existence are recorded separately — see the
+/// tables' comments in `migrations`. The members move whether or not a folder row exists, which is
+/// what keeps a group that was only ever implied by its connections renameable.
+///
+/// **Renaming onto an existing name merges.** The alternative is a unique-index failure the user
+/// reads as "you can't call it that", when what they almost always meant was "put these together".
+pub fn rename_group(
+    conn: &Connection,
+    workspace_id: &str,
+    from: &str,
+    to: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE db_connections SET group_name = ?3, updated_at = ?4 \
+         WHERE workspace_id = ?1 AND group_name = ?2",
+        params![workspace_id, from, to, now()],
+    )?;
+
+    let target_exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM db_groups WHERE workspace_id = ?1 AND name = ?2",
+        params![workspace_id, to],
+        |row| row.get(0),
+    )?;
+    if target_exists {
+        // The members are already there; the source folder is now a duplicate of the target.
+        conn.execute(
+            "DELETE FROM db_groups WHERE workspace_id = ?1 AND name = ?2",
+            params![workspace_id, from],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE db_groups SET name = ?3 WHERE workspace_id = ?1 AND name = ?2",
+            params![workspace_id, from, to],
+        )?;
+    }
+    Ok(())
+}
+
+/// Deletes a group and turns its members loose.
+///
+/// **Never the connections.** A folder and the databases filed in it are not the same thing, and a
+/// delete that took the connections with it would be the one destructive action in this tree —
+/// taking their consoles by cascade, and their keychain entries with them. They move to ungrouped,
+/// where they are still there to be found.
+pub fn delete_group(conn: &Connection, workspace_id: &str, name: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE db_connections SET group_name = '', updated_at = ?3 \
+         WHERE workspace_id = ?1 AND group_name = ?2",
+        params![workspace_id, name, now()],
+    )?;
+    conn.execute(
+        "DELETE FROM db_groups WHERE workspace_id = ?1 AND name = ?2",
+        params![workspace_id, name],
+    )?;
     Ok(())
 }
 
@@ -340,8 +484,8 @@ mod tests {
             [],
         )
         .unwrap();
-        let mine = create_connection(&conn, "w1", "Local", "postgres", "{}", "").unwrap();
-        let theirs = create_connection(&conn, "w2", "Theirs", "postgres", "{}", "").unwrap();
+        let mine = create_connection(&conn, "w1", "Local", "", "postgres", "{}", "").unwrap();
+        let theirs = create_connection(&conn, "w2", "Theirs", "", "postgres", "{}", "").unwrap();
         create_console(&conn, &mine.id, "Console 1", "SELECT 1", "app", "public").unwrap();
         create_console(&conn, &theirs.id, "Theirs", "SELECT 2", "", "").unwrap();
 
@@ -357,7 +501,7 @@ mod tests {
     #[test]
     fn deleting_a_connection_cascades_to_its_consoles() {
         let conn = setup();
-        let connection = create_connection(&conn, "w1", "Local", "postgres", "{}", "").unwrap();
+        let connection = create_connection(&conn, "w1", "Local", "", "postgres", "{}", "").unwrap();
         create_console(&conn, &connection.id, "C", "", "", "").unwrap();
         delete_connection(&conn, &connection.id).unwrap();
         assert_eq!(load_tree(&conn, "w1").unwrap().consoles.len(), 0);
@@ -368,7 +512,7 @@ mod tests {
     #[test]
     fn history_survives_its_connection() {
         let conn = setup();
-        let connection = create_connection(&conn, "w1", "Prod", "postgres", "{}", "").unwrap();
+        let connection = create_connection(&conn, "w1", "Prod", "", "postgres", "{}", "").unwrap();
         add_history(
             &conn,
             &DbQueryHistoryEntry {
@@ -393,12 +537,132 @@ mod tests {
         assert!(!history[0].ran_at.is_empty(), "an empty timestamp is stamped on insert");
     }
 
+    /// The whole reason `db_groups` exists: a folder with nothing in it survives a reload.
+    #[test]
+    fn an_empty_group_still_exists_after_being_created() {
+        let conn = setup();
+        create_group(&conn, "w1", "Producción").unwrap();
+        let tree = load_tree(&conn, "w1").unwrap();
+        assert_eq!(
+            tree.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            ["Producción"]
+        );
+        assert!(tree.connections.is_empty());
+    }
+
+    #[test]
+    fn creating_a_group_twice_returns_the_same_one_rather_than_failing() {
+        let conn = setup();
+        let first = create_group(&conn, "w1", "Prod").unwrap();
+        let second = create_group(&conn, "w1", "Prod").unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(load_tree(&conn, "w1").unwrap().groups.len(), 1);
+    }
+
+    #[test]
+    fn renaming_a_group_carries_the_folder_across_with_its_members() {
+        let conn = setup();
+        create_group(&conn, "w1", "Prod").unwrap();
+        create_connection(&conn, "w1", "Local", "Prod", "postgres", "{}", "").unwrap();
+        create_connection(&conn, "w1", "Other", "Staging", "postgres", "{}", "").unwrap();
+
+        rename_group(&conn, "w1", "Prod", "Producción").unwrap();
+
+        let tree = load_tree(&conn, "w1").unwrap();
+        assert_eq!(
+            tree.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            ["Producción"]
+        );
+        let names: Vec<&str> = tree.connections.iter().map(|c| c.group_name.as_str()).collect();
+        assert_eq!(names, ["Producción", "Staging"], "another group is untouched");
+    }
+
+    /// A group that only ever existed because connections named it is still renameable.
+    #[test]
+    fn renaming_a_group_that_has_no_row_still_moves_its_connections() {
+        let conn = setup();
+        create_connection(&conn, "w1", "Local", "Implied", "postgres", "{}", "").unwrap();
+        rename_group(&conn, "w1", "Implied", "Named").unwrap();
+        assert_eq!(load_tree(&conn, "w1").unwrap().connections[0].group_name, "Named");
+    }
+
+    /// Renaming onto a name that already exists is a merge, not a unique-index error.
+    #[test]
+    fn renaming_a_group_onto_an_existing_one_merges_them() {
+        let conn = setup();
+        create_group(&conn, "w1", "Prod").unwrap();
+        create_group(&conn, "w1", "Producción").unwrap();
+        create_connection(&conn, "w1", "A", "Prod", "postgres", "{}", "").unwrap();
+        create_connection(&conn, "w1", "B", "Producción", "postgres", "{}", "").unwrap();
+
+        rename_group(&conn, "w1", "Prod", "Producción").unwrap();
+
+        let tree = load_tree(&conn, "w1").unwrap();
+        assert_eq!(
+            tree.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            ["Producción"]
+        );
+        let names: Vec<&str> = tree.connections.iter().map(|c| c.group_name.as_str()).collect();
+        assert_eq!(names, ["Producción", "Producción"]);
+    }
+
+    /// The destructive-action guard: deleting a folder must never delete connections — which would
+    /// take their consoles by cascade and their keychain entries with them.
+    #[test]
+    fn deleting_a_group_ungroups_its_connections_rather_than_removing_them() {
+        let conn = setup();
+        create_group(&conn, "w1", "Prod").unwrap();
+        let member = create_connection(&conn, "w1", "A", "Prod", "postgres", "{}", "").unwrap();
+        create_connection(&conn, "w1", "B", "Staging", "postgres", "{}", "").unwrap();
+        create_console(&conn, &member.id, "C", "", "", "").unwrap();
+
+        delete_group(&conn, "w1", "Prod").unwrap();
+
+        let tree = load_tree(&conn, "w1").unwrap();
+        assert!(tree.groups.is_empty());
+        assert_eq!(tree.connections.len(), 2, "the connections must all still be there");
+        assert_eq!(tree.consoles.len(), 1, "and so must their consoles");
+        let a = tree.connections.iter().find(|c| c.name == "A").unwrap();
+        assert_eq!(a.group_name, "", "its connection moved to ungrouped");
+        let b = tree.connections.iter().find(|c| c.name == "B").unwrap();
+        assert_eq!(b.group_name, "Staging", "another group is untouched");
+    }
+
+    /// Filing a connection is not a settings change: it must not disturb anything else on the row.
+    #[test]
+    fn setting_a_group_moves_only_the_group() {
+        let conn = setup();
+        let row = create_connection(&conn, "w1", "A", "", "postgres", "{\"host\":\"x\"}", "#f00")
+            .unwrap();
+        set_connection_group(&conn, &row.id, "Prod").unwrap();
+
+        let after = get_connection(&conn, &row.id).unwrap().unwrap();
+        assert_eq!(after.group_name, "Prod");
+        assert_eq!(after.spec, row.spec);
+        assert_eq!(after.color, row.color);
+        assert_eq!(after.sort_order, row.sort_order);
+
+        set_connection_group(&conn, &row.id, "").unwrap();
+        assert_eq!(get_connection(&conn, &row.id).unwrap().unwrap().group_name, "");
+    }
+
+    #[test]
+    fn deleting_the_workspace_takes_its_groups_with_it() {
+        let conn = setup();
+        create_group(&conn, "w1", "Prod").unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM workspaces WHERE id = 'w1';")
+            .unwrap();
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM db_groups", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 0);
+    }
+
     /// A duplicate is a starting point, not a clone of the credential.
     #[test]
     fn a_duplicate_does_not_inherit_the_password() {
         let conn = setup();
         let source =
-            create_connection(&conn, "w1", "Prod", "postgres", "{\"host\":\"db\"}", "#f00").unwrap();
+            create_connection(&conn, "w1", "Prod", "", "postgres", "{\"host\":\"db\"}", "#f00").unwrap();
         let copy = duplicate_connection(&conn, &source.id).unwrap();
         assert_ne!(copy.id, source.id);
         assert_eq!(copy.name, "Prod copy");
