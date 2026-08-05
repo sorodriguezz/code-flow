@@ -185,6 +185,23 @@ export function HostDetailsPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [password]);
 
+  // Changing kind can pull the open tab out from under the panel — a host switched from SSH to FTP
+  // while Forwards is showing would otherwise render a tab that is no longer in the bar.
+  //
+  // Above the early return, and deliberately: `spec` is null for the render between opening a host
+  // and the effect that parses it, so a hook placed after `return null` is skipped on that render
+  // and called on the next one — which is exactly the hook-order change React refuses to accept.
+  useEffect(() => {
+    if (!spec) return;
+    const can = capabilities(spec);
+    setTab((current) =>
+      (current === "forwards" && !can.forwards) || (current === "screen" && !can.screen)
+        ? "connection"
+        : current,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spec?.kind]);
+
   if (!host || !spec) return null;
 
   const patch = (changes: Partial<RemoteHostSpec>) => {
@@ -208,12 +225,6 @@ export function HostDetailsPanel() {
     ...(can.screen ? [{ id: "screen" as Tab, label: t("remote.tabScreen"), icon: Monitor }] : []),
     { id: "advanced", label: t("remote.tabAdvanced"), icon: Terminal },
   ];
-
-  // Changing kind can pull the open tab out from under the panel — a host switched from SSH to FTP
-  // while Forwards is showing would otherwise render a tab that is no longer in the bar.
-  useEffect(() => {
-    if (!TABS.some((entry) => entry.id === tab)) setTab("connection");
-  }, [spec.kind]);
 
   return (
     <>
