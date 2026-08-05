@@ -61,6 +61,8 @@ export interface BackupInclude {
   credentials: boolean;
   apiClient: boolean;
   databases: boolean;
+  /** SSH hosts and snippets. Their passwords ride with `credentials`, not with this. */
+  remote: boolean;
   authored: boolean;
   requestHistory: boolean;
   conversations: boolean;
@@ -74,6 +76,7 @@ export const INCLUDE_KEYS: readonly (keyof BackupInclude)[] = [
   "credentials",
   "apiClient",
   "databases",
+  "remote",
   "authored",
   "requestHistory",
   "conversations",

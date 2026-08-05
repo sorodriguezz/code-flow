@@ -7,7 +7,7 @@ import { PromptTemplates } from "./PromptTemplates";
 import { ProvidersSection } from "./ProvidersSection";
 import { TaskRouting } from "./TaskRouting";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import { SettingsHeader } from "../api/settingsChrome";
+import { Panel, SettingsHeader } from "../api/settingsChrome";
 
 type AiTab = "providers" | "routing" | "templates";
 
@@ -101,16 +101,20 @@ export function ClaudeSettings() {
             the pane ends where the dialog does, and a last row flush against that edge reads as cut
             off rather than as the end of the list. */}
         <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
-          <div className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4">
+          {/* The API client's own panel, not a second box that looks nearly like it: a raised fill
+              and a wider radius here made this pane read as a different kind of surface from the
+              one two sections away, which is the sort of difference nobody can name and everybody
+              notices. */}
+          <Panel>
             {/* The rail names the pane, so there's no heading repeated here — but the hint says
                 something the label can't (what "inherit" falls back to, that a prompt is shared
                 across engines), so it stays. */}
-            <p className="mb-4 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
+            <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(active.hintKey)}</p>
 
             {tab === "providers" && <ProvidersSection />}
             {tab === "routing" && <TaskRouting />}
             {tab === "templates" && <PromptTemplates />}
-          </div>
+          </Panel>
         </div>
       </div>
     </section>

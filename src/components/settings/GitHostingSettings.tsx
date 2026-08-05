@@ -10,7 +10,7 @@ import { HOSTING_PROVIDERS, type HostingProvider } from "../../lib/vcsProviders"
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import { SettingsHeader } from "../api/settingsChrome";
+import { Panel, SettingsHeader } from "../api/settingsChrome";
 
 /** One hint per provider, as a lookup rather than a ternary: a chain of `?:` silently falls
  * through to Azure for anything it doesn't name, which is exactly how a third provider ends up
@@ -102,18 +102,20 @@ export function GitHostingSettings() {
         </motion.nav>
 
         <div className="min-w-0 flex-1">
-          <div className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4">
+          {/* The API client's panel, so the two read as the same surface — see the note on the
+              same swap in `ClaudeSettings`. */}
+          <Panel>
             {/* The rail names the provider, so its form no longer repeats it as a heading — but the
                 hint says what the label can't (which host a token is for, that a PAT is stored in
                 the keychain), so it stays. */}
-            <p className="mb-4 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(hintKey)}</p>
+            <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t(hintKey)}</p>
 
             {provider === "github" && <GitHubSettings />}
             {provider === "gitlab" && <GitLabSettings />}
             {provider === "azure" && <AzureDevOpsSettings />}
             {provider === "jira" && <JiraSettings />}
             {provider === "monday" && <MondaySettings />}
-          </div>
+          </Panel>
         </div>
       </div>
     </section>

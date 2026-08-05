@@ -5,6 +5,7 @@ import "@xterm/xterm/css/xterm.css";
 import { resizeTerminal, writeTerminal } from "../../lib/tauri/commands";
 import { onTerminalExit, onTerminalOutput } from "../../lib/tauri/events";
 import { useThemeStore } from "../../state/themeStore";
+import { TypedLineBuffer } from "../../lib/remote/typedLines";
 
 const LIGHT_THEME = { background: "#ffffff", foreground: "#1c1c26", cursor: "#1c1c26" };
 const DARK_THEME = { background: "#1e1e27", foreground: "#eceef5", cursor: "#eceef5" };
@@ -13,9 +14,25 @@ const DARK_THEME = { background: "#1e1e27", foreground: "#eceef5", cursor: "#ece
  * is owned by `terminalStore`, not this component) — it mounts once for the lifetime of that
  * session and is only ever hidden via CSS (`visible=false`) while a different pane/project is
  * shown, never unmounted, so scrollback and the shell process both survive switching away. */
-export function TerminalPane({ sessionId, visible }: { sessionId: string; visible: boolean }) {
+export function TerminalPane({
+  sessionId,
+  visible,
+  onCommand,
+}: {
+  sessionId: string;
+  visible: boolean;
+  /**
+   * Called with each whole line the user typed and submitted, for the panes that keep a history.
+   *
+   * Opt-in, and only ever a *copy* of what already went to the pty — the write below is unchanged
+   * whether or not anyone is listening, so a local shell behaves exactly as it always did.
+   */
+  onCommand?: (line: string) => void;
+}) {
   const resolved = useThemeStore((s) => s.resolved);
   const containerRef = useRef<HTMLDivElement>(null);
+  const onCommandRef = useRef(onCommand);
+  onCommandRef.current = onCommand;
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
 
@@ -37,8 +54,14 @@ export function TerminalPane({ sessionId, visible }: { sessionId: string; visibl
     termRef.current = term;
     fitRef.current = fitAddon;
 
+    const lines = new TypedLineBuffer();
     const dataDisposable = term.onData((data) => {
       void writeTerminal(sessionId, data);
+      // After the write, never instead of it: reconstructing the line must not be able to swallow
+      // a keystroke. `onCommandRef` rather than the prop, so a parent that re-renders with a new
+      // closure doesn't require tearing down the terminal to pick it up.
+      const line = lines.push(data);
+      if (line) onCommandRef.current?.(line);
     });
 
     (async () => {

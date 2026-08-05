@@ -28,7 +28,10 @@ export type LayoutKey =
   | "huReviewSourceWidth"
   | "huReviewPublishWidth"
   | "huReviewDraftDescWidth"
-  | "huReviewDraftCriteriaWidth";
+  | "huReviewDraftCriteriaWidth"
+  | "remoteSidebarWidth"
+  | "remoteDetailsWidth"
+  | "remoteSftpLocalWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -58,6 +61,9 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   huReviewPublishWidth: "layout_hu_review_publish_width",
   huReviewDraftDescWidth: "layout_hu_review_draft_desc_width",
   huReviewDraftCriteriaWidth: "layout_hu_review_draft_criteria_width",
+  remoteSidebarWidth: "layout_remote_sidebar_width",
+  remoteDetailsWidth: "layout_remote_details_width",
+  remoteSftpLocalWidth: "layout_remote_sftp_local_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -96,6 +102,15 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // the window, and a window resize would have to arbitrate between them.
   huReviewDraftDescWidth: 420,
   huReviewDraftCriteriaWidth: 460,
+  // Wider than the database explorer's: a host row carries three hover actions to the right of
+  // its name, and at 300 the name is what gets truncated to make room for them.
+  remoteSidebarWidth: 260,
+  // Wider than the host tree: this one holds label-and-control rows, and at the tree's width the
+  // control column is narrower than the values it has to show.
+  remoteDetailsWidth: 340,
+  // Only the *local* half is stored; the remote one takes what is left, for the reason the review
+  // board's middle column does — two stored widths would have to keep adding up to the window.
+  remoteSftpLocalWidth: 420,
 };
 
 /**

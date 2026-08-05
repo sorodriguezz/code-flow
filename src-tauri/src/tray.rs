@@ -35,8 +35,12 @@ pub fn show_main_window(app: &AppHandle) {
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "Show CodeFlow", true, None::<&str>)?;
+    // Between "show" and "quit" on purpose: it is the thing to try when "show" produced a window
+    // that is there but wrong — a wedged webview, a view that stopped repainting — and the only
+    // alternative left is quitting and finding the app again.
+    let restart_item = MenuItem::with_id(app, "restart", "Restart CodeFlow", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit CodeFlow", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+    let menu = Menu::with_items(app, &[&show_item, &restart_item, &quit_item])?;
 
     TrayIconBuilder::with_id("main-tray")
         .icon(app.default_window_icon().cloned().expect("app icon must be bundled"))
@@ -45,6 +49,19 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .tooltip("CodeFlow")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
+            // Re-execs the binary: the whole process goes, backend included, which is the point —
+            // a reload of the webview alone would leave a wedged Rust side exactly as wedged.
+            //
+            // The backup is flushed first for the same reason "quit" flushes it: this ends the
+            // session, and an ending session is the one a scheduled backup is least likely to have
+            // caught. `mark_quitting` so the window closing on the way out is not mistaken for the
+            // user pressing the red button and re-hidden to the tray — the restarted process gets
+            // a fresh flag of its own.
+            "restart" => {
+                crate::backup::auto::flush_on_exit(app);
+                app.state::<QuittingFlag>().mark_quitting();
+                app.restart();
+            }
             "quit" => {
                 // Same last step as the in-app quit: the session about to end is the one a
                 // scheduled backup is least likely to have caught.

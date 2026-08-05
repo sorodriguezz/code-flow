@@ -77,6 +77,10 @@ pub const TABLES: &[&str] = &[
     "db_connections",
     "db_consoles",
     "db_query_history",
+    // The Remote workspace. The host rows hold no credential — passwords and passphrases are in
+    // the OS store, and travel or not with the `credentials` switch like every other secret.
+    "remote_hosts",
+    "remote_snippets",
     // History, activity and agent work. Last because every one of them hangs off a project or a
     // workspace, and `agent_chain_steps` hangs off `agent_chains` in turn.
     "activity_log",
@@ -141,6 +145,7 @@ pub const GROUPS: &[Group] = &[
         ],
     },
     Group { key: "databases", tables: &["db_connections", "db_consoles"] },
+    Group { key: "remote", tables: &["remote_hosts", "remote_snippets"] },
     Group {
         key: "authored",
         tables: &["story_batches", "story_drafts", "doc_pages", "work_item_reviews"],
@@ -167,6 +172,7 @@ pub struct Selection {
     pub credentials: bool,
     pub api_client: bool,
     pub databases: bool,
+    pub remote: bool,
     pub authored: bool,
     pub request_history: bool,
     pub conversations: bool,
@@ -181,6 +187,7 @@ impl Default for Selection {
             credentials: true,
             api_client: true,
             databases: true,
+            remote: true,
             authored: true,
             request_history: true,
             conversations: true,
@@ -196,6 +203,7 @@ impl Selection {
         match key {
             "apiClient" => self.api_client,
             "databases" => self.databases,
+            "remote" => self.remote,
             "authored" => self.authored,
             "requestHistory" => self.request_history,
             "conversations" => self.conversations,

@@ -37,6 +37,26 @@ pub fn open_terminal(
     cwd: String,
     profile: &ShellProfile,
 ) -> Result<String, String> {
+    open_pty(app, registry, &profile.command, &profile.args, Some(&cwd))
+}
+
+/// Any program, in a pty, registered as a terminal session.
+///
+/// Extracted from [`open_terminal`] so the Remote workspace can put `ssh` in a pty and get, for
+/// free, everything a local shell already has: the `terminal:output` / `terminal:exit` events the
+/// xterm pane listens to, and the write/resize/close commands that drive it. A remote session is
+/// therefore not a second kind of terminal — it is the same kind, running a different program, and
+/// the frontend needs no branch for it.
+///
+/// `cwd` is where the *local* process starts. It means something for a shell and nothing for
+/// `ssh`, hence the `Option`.
+pub fn open_pty(
+    app: AppHandle,
+    registry: &TerminalRegistry,
+    program: &str,
+    args: &[String],
+    cwd: Option<&str>,
+) -> Result<String, String> {
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -47,11 +67,13 @@ pub fn open_terminal(
         })
         .map_err(|e| e.to_string())?;
 
-    let mut cmd = CommandBuilder::new(&profile.command);
-    for arg in &profile.args {
+    let mut cmd = CommandBuilder::new(program);
+    for arg in args {
         cmd.arg(arg);
     }
-    cmd.cwd(&cwd);
+    if let Some(cwd) = cwd {
+        cmd.cwd(cwd);
+    }
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| e.to_string())?;
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;

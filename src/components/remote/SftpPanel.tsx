@@ -1,0 +1,415 @@
+import { useCallback, useEffect, useState } from "react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  ChevronRight,
+  File as FileIcon,
+  Folder,
+  FolderPlus,
+  HardDrive,
+  Link2,
+  Loader2,
+  RefreshCw,
+  Server,
+  Trash2,
+} from "lucide-react";
+import { EmptyState } from "../common/EmptyState";
+import { ResizeHandle } from "../common/ResizeHandle";
+import { useRemoteStore, type RemoteSftpTab } from "../../state/remoteStore";
+import { useLayoutStore } from "../../state/layoutStore";
+import { confirmAction } from "../../state/confirmStore";
+import { pushErrorToast } from "../../state/toastStore";
+import { useT } from "../../state/languageStore";
+import {
+  remoteDownloadFile,
+  remoteListFiles,
+  remoteListLocalFiles,
+  remoteMakeDir,
+  remoteRemoveFile,
+  remoteUploadFile,
+} from "../../lib/tauri/remoteCommands";
+import type { RemoteFile, RemoteListing } from "../../types/remote";
+
+/**
+ * Files, both sides at once.
+ *
+ * **Two panes rather than one.** A single browser with a "switch to local" toggle is smaller to
+ * build and worse to use: a transfer is a statement about *two* places, and you cannot check you are
+ * putting the file in the right directory if only one of them is on screen. This is why every FTP
+ * client that has survived looks like this.
+ *
+ * Both halves render from one shape and one component — see `sftp::list_local` for why the backend
+ * hands local entries back in the remote entry's clothing. The permission string under each name is
+ * the detail worth keeping from Termius: it is the answer to "why did that upload fail", and it
+ * costs a line that was empty anyway.
+ *
+ * **The transfer buttons are the middle column.** Direction is chosen by which way the arrow points,
+ * not by which pane you started in — which means the same click means the same thing regardless of
+ * where the selection happens to be.
+ */
+export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
+  const width = useLayoutStore((s) => s.sizes.remoteSftpLocalWidth);
+  const setSize = useLayoutStore((s) => s.setSize);
+  const commitSize = useLayoutStore((s) => s.commitSize);
+  const host = useRemoteStore((s) => s.hosts.find((entry) => entry.id === tab.hostId) ?? null);
+  const t = useT();
+
+  const [local, setLocal] = useState<RemoteListing | null>(null);
+  const [remote, setRemote] = useState<RemoteListing | null>(null);
+  const [localPath, setLocalPath] = useState("");
+  const [remotePath, setRemotePath] = useState("");
+  const [localPick, setLocalPick] = useState<RemoteFile | null>(null);
+  const [remotePick, setRemotePick] = useState<RemoteFile | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [remoteError, setRemoteError] = useState<string | null>(null);
+
+  const loadLocal = useCallback(async (path: string) => {
+    try {
+      const listing = await remoteListLocalFiles(path);
+      setLocal(listing);
+      setLocalPath(listing.path);
+      setLocalPick(null);
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  }, []);
+
+  const loadRemote = useCallback(
+    async (path: string) => {
+      try {
+        const listing = await remoteListFiles(tab.hostId, path);
+        setRemote(listing);
+        setRemotePath(listing.path);
+        setRemotePick(null);
+        setRemoteError(null);
+      } catch (error) {
+        // Kept in the pane rather than thrown as a toast: an SFTP failure is almost always about
+        // *this host* — a key with a passphrase the agent doesn't have, a server with the subsystem
+        // disabled — and the message belongs where the user is looking, next to a Retry.
+        setRemoteError(String(error));
+      }
+    },
+    [tab.hostId],
+  );
+
+  useEffect(() => {
+    void loadLocal("");
+    void loadRemote("");
+  }, [loadLocal, loadRemote]);
+
+  const transfer = async (direction: "up" | "down") => {
+    const pick = direction === "up" ? localPick : remotePick;
+    if (!pick || pick.is_dir || busy) return;
+    setBusy(true);
+    try {
+      if (direction === "up") {
+        await remoteUploadFile(tab.hostId, pick.path, joinRemote(remotePath, pick.name));
+        await loadRemote(remotePath);
+      } else {
+        await remoteDownloadFile(tab.hostId, pick.path, joinLocal(localPath, pick.name));
+        await loadLocal(localPath);
+      }
+    } catch (error) {
+      pushErrorToast(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!host) return <EmptyState icon={Server} title={t("remote.hostGone")} />;
+
+  return (
+    <div className="flex h-full min-h-0">
+      <div style={{ width }} className="flex min-w-0 shrink-0 flex-col">
+        <FilePane
+          icon={HardDrive}
+          title={t("remote.sftpLocal")}
+          listing={local}
+          selected={localPick}
+          onSelect={setLocalPick}
+          onOpen={(entry) => void loadLocal(entry.path)}
+          onUp={() => void loadLocal(parentLocal(localPath))}
+          onRefresh={() => void loadLocal(localPath)}
+        />
+      </div>
+
+      <ResizeHandle
+        axis="x"
+        value={width}
+        min={240}
+        max={900}
+        onChange={(value) => setSize("remoteSftpLocalWidth", value)}
+        onCommit={(value) => void commitSize("remoteSftpLocalWidth", value)}
+      />
+
+      <div className="flex shrink-0 flex-col items-center justify-center gap-2 px-1">
+        <TransferButton
+          icon={ArrowRight}
+          label={t("remote.sftpUpload")}
+          disabled={!localPick || localPick.is_dir || busy}
+          onClick={() => void transfer("up")}
+        />
+        <TransferButton
+          icon={ArrowLeft}
+          label={t("remote.sftpDownload")}
+          disabled={!remotePick || remotePick.is_dir || busy}
+          onClick={() => void transfer("down")}
+        />
+        {busy && <Loader2 size={12} className="animate-spin text-[var(--cf-text-muted)]" />}
+      </div>
+
+      <div className="flex min-w-0 flex-1 flex-col">
+        {remoteError ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 p-6 text-center">
+            <Server size={24} className="text-[var(--cf-danger)]" />
+            <p className="max-w-md whitespace-pre-wrap text-[12px] leading-relaxed text-[var(--cf-text-muted)]">
+              {remoteError}
+            </p>
+            <button
+              type="button"
+              onClick={() => void loadRemote("")}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+            >
+              <RefreshCw size={13} />
+              {t("remote.retry")}
+            </button>
+          </div>
+        ) : (
+          <FilePane
+            icon={Server}
+            title={host.name}
+            listing={remote}
+            selected={remotePick}
+            onSelect={setRemotePick}
+            onOpen={(entry) => void loadRemote(entry.path)}
+            onUp={() => void loadRemote(parentRemote(remotePath))}
+            onRefresh={() => void loadRemote(remotePath)}
+            onMakeDir={async (name) => {
+              try {
+                await remoteMakeDir(tab.hostId, joinRemote(remotePath, name));
+                await loadRemote(remotePath);
+              } catch (error) {
+                pushErrorToast(String(error));
+              }
+            }}
+            onDelete={async (entry) => {
+              if (!(await confirmAction(t("remote.sftpConfirmDelete", { name: entry.name }))))
+                return;
+              try {
+                await remoteRemoveFile(tab.hostId, entry.path, entry.is_dir);
+                await loadRemote(remotePath);
+              } catch (error) {
+                pushErrorToast(String(error));
+              }
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TransferButton({
+  icon: Icon,
+  label,
+  disabled,
+  onClick,
+}: {
+  icon: typeof ArrowRight;
+  label: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--cf-border)] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-30 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text-muted)]"
+    >
+      <Icon size={14} />
+    </button>
+  );
+}
+
+function FilePane({
+  icon: Icon,
+  title,
+  listing,
+  selected,
+  onSelect,
+  onOpen,
+  onUp,
+  onRefresh,
+  onMakeDir,
+  onDelete,
+}: {
+  icon: typeof Server;
+  title: string;
+  listing: RemoteListing | null;
+  selected: RemoteFile | null;
+  onSelect: (entry: RemoteFile) => void;
+  onOpen: (entry: RemoteFile) => void;
+  onUp: () => void;
+  onRefresh: () => void;
+  /** Only the remote side offers these — the local one has Finder/Explorer, which is better at it. */
+  onMakeDir?: (name: string) => void;
+  onDelete?: (entry: RemoteFile) => void;
+}) {
+  const t = useT();
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
+        <Icon size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+        <span className="shrink-0 text-[12px] font-medium text-[var(--cf-text)]">{title}</span>
+        <span className="min-w-0 flex-1 truncate text-right font-mono text-[11px] text-[var(--cf-text-muted)]">
+          {listing?.path ?? ""}
+        </span>
+        <button
+          type="button"
+          onClick={onUp}
+          title={t("remote.sftpUp")}
+          aria-label={t("remote.sftpUp")}
+          className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        >
+          <ChevronRight size={13} className="-rotate-90" />
+        </button>
+        {onMakeDir && (
+          <button
+            type="button"
+            onClick={() => {
+              const name = window.prompt(t("remote.sftpNewFolder"));
+              if (name?.trim()) onMakeDir(name.trim());
+            }}
+            title={t("remote.sftpNewFolder")}
+            aria-label={t("remote.sftpNewFolder")}
+            className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          >
+            <FolderPlus size={13} />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onRefresh}
+          title={t("remote.refresh")}
+          aria-label={t("remote.refresh")}
+          className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        >
+          <RefreshCw size={12} />
+        </button>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-auto">
+        {listing === null ? (
+          <div className="flex h-full items-center justify-center">
+            <Loader2 size={16} className="animate-spin text-[var(--cf-text-muted)]" />
+          </div>
+        ) : listing.entries.length === 0 ? (
+          <p className="px-3 py-8 text-center text-[12px] text-[var(--cf-text-muted)]">
+            {t("remote.sftpEmpty")}
+          </p>
+        ) : (
+          listing.entries.map((entry) => (
+            <div
+              key={entry.path}
+              role="button"
+              tabIndex={0}
+              onClick={() => onSelect(entry)}
+              onDoubleClick={() => entry.is_dir && onOpen(entry)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  entry.is_dir ? onOpen(entry) : onSelect(entry);
+                }
+              }}
+              className={`group flex cursor-default items-center gap-2 px-2 py-1 outline-none ${
+                selected?.path === entry.path
+                  ? "bg-[var(--cf-accent-soft)]"
+                  : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              }`}
+            >
+              <span className="shrink-0 text-[var(--cf-text-muted)]">
+                {entry.is_link ? (
+                  <Link2 size={13} />
+                ) : entry.is_dir ? (
+                  <Folder size={13} className="text-[var(--cf-accent)]" />
+                ) : (
+                  <FileIcon size={13} />
+                )}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[12px] text-[var(--cf-text)]">{entry.name}</span>
+                {/* Under the name, the way Termius does it — and it is the answer to "why did that
+                    upload fail", which is otherwise a trip to the shell. */}
+                <span className="block truncate font-mono text-[10px] text-[var(--cf-text-muted)]">
+                  {entry.permissions}
+                </span>
+              </span>
+              {!entry.is_dir && (
+                <span className="shrink-0 tabular-nums text-[11px] text-[var(--cf-text-muted)]">
+                  {formatSize(entry.size)}
+                </span>
+              )}
+              {onDelete && (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(entry);
+                  }}
+                  aria-label={t("common.delete")}
+                  className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
+                >
+                  <Trash2 size={12} />
+                </button>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Remote paths are always `/`-separated, even when the server is Windows. */
+function joinRemote(dir: string, name: string): string {
+  return dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+}
+
+function parentRemote(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const cut = trimmed.lastIndexOf("/");
+  return cut <= 0 ? "/" : trimmed.slice(0, cut);
+}
+
+/** Local paths use whichever separator the listing came back with, so this works on both. */
+function joinLocal(dir: string, name: string): string {
+  const sep = dir.includes("\\") && !dir.includes("/") ? "\\" : "/";
+  return dir.endsWith(sep) ? `${dir}${name}` : `${dir}${sep}${name}`;
+}
+
+function parentLocal(path: string): string {
+  const sep = path.includes("\\") && !path.includes("/") ? "\\" : "/";
+  const trimmed = path.replace(/[\\/]+$/, "");
+  const cut = trimmed.lastIndexOf(sep);
+  // On Windows the parent of `C:\x` is `C:\`, which needs the separator kept or it becomes the
+  // drive-relative `C:` — a different directory entirely.
+  if (cut <= 0) return sep;
+  const parent = trimmed.slice(0, cut);
+  return /^[a-z]:$/i.test(parent) ? `${parent}\\` : parent;
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}

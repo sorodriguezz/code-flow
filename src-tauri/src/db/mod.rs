@@ -5,6 +5,7 @@ pub mod datasource_queries;
 pub mod migrations;
 pub mod models;
 pub mod queries;
+pub mod remote_queries;
 
 use rusqlite::Connection;
 use std::sync::Mutex;

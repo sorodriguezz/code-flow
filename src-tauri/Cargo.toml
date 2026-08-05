@@ -166,6 +166,7 @@ mongodb = { version = "3", default-features = false, features = [
     "rustls-tls",
 ] }
 tauri-plugin-single-instance = "2.4.3"
+russh-sftp = "2.4.0"
 
 # `keyring` ships with no OS credential-store backend enabled by default — without one
 # of these, Entry::set_password()/get_password() silently round-trip through a

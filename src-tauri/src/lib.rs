@@ -29,6 +29,7 @@ mod paths;
 mod pr_link;
 mod proc;
 mod remote;
+mod remotes;
 mod review_memory;
 mod search;
 mod secret_scan;
@@ -439,6 +440,41 @@ pub fn run() {
             commands::terminal_cmd::write_terminal,
             commands::terminal_cmd::resize_terminal,
             commands::terminal_cmd::close_terminal,
+            // The Remote workspace. Note the absence of write/resize/close: a remote session is a
+            // terminal session, driven by the five above.
+            commands::remote_cmd::remote_load_tree,
+            commands::remote_cmd::remote_create_host,
+            commands::remote_cmd::remote_update_host,
+            commands::remote_cmd::remote_delete_host,
+            commands::remote_cmd::remote_duplicate_host,
+            commands::remote_cmd::remote_reorder_hosts,
+            commands::remote_cmd::remote_rename_group,
+            commands::remote_cmd::remote_set_password,
+            commands::remote_cmd::remote_get_password,
+            commands::remote_cmd::remote_open_session,
+            commands::remote_cmd::remote_open_draft_session,
+            commands::remote_cmd::remote_open_forward,
+            commands::remote_cmd::remote_close_forward,
+            commands::remote_cmd::remote_close_host_forwards,
+            commands::remote_cmd::remote_list_forwards,
+            commands::remote_cmd::remote_open_screen,
+            commands::remote_cmd::remote_close_screen,
+            commands::remote_cmd::remote_list_files,
+            commands::remote_cmd::remote_list_local_files,
+            commands::remote_cmd::remote_download_file,
+            commands::remote_cmd::remote_upload_file,
+            commands::remote_cmd::remote_make_dir,
+            commands::remote_cmd::remote_remove_file,
+            commands::remote_cmd::remote_rename_file,
+            commands::remote_cmd::remote_close_files,
+            commands::remote_cmd::remote_parse_ssh_command,
+            commands::remote_cmd::remote_list_keys,
+            commands::remote_cmd::remote_ssh_config_path,
+            commands::remote_cmd::remote_scan_ssh_config,
+            commands::remote_cmd::remote_import_ssh_config,
+            commands::remote_cmd::remote_create_snippet,
+            commands::remote_cmd::remote_update_snippet,
+            commands::remote_cmd::remote_delete_snippet,
             commands::debug_cmd::debug_start,
             commands::debug_cmd::debug_start_adapter,
             commands::debug_cmd::debug_stop,

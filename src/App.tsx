@@ -13,6 +13,7 @@ import { EditorView } from "./components/editor/EditorView";
 import { ApiView } from "./components/api/ApiView";
 import { AgentsView } from "./components/agents/AgentsView";
 import { StoriesView } from "./components/stories/StoriesView";
+import { RemoteView } from "./components/remote/RemoteView";
 import { TerminalDock } from "./components/terminal/TerminalDock";
 import { SettingsView } from "./components/settings/SettingsView";
 import { CommandPalette } from "./components/layout/CommandPalette";
@@ -31,6 +32,7 @@ import { useLayoutStore } from "./state/layoutStore";
 import { useRepoStore } from "./state/repoStore";
 import { useApiStore } from "./state/apiStore";
 import { useDbStore } from "./state/dbStore";
+import { useRemoteStore } from "./state/remoteStore";
 import { usePreferencesStore } from "./state/preferencesStore";
 import { useAiProviderStore } from "./state/aiProviderStore";
 import { useLanguageStore } from "./state/languageStore";
@@ -56,11 +58,14 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
  * collections/environments and is expected to be usable before any repo has been added to it;
  * the agent console owns the workspace's agent roster, which is likewise defined before there is
  * anything for an agent to work on. The user-stories workspace is the clearest case of all: a
- * requirement is written *before* the code that satisfies it, and often before the repo exists. */
+ * requirement is written *before* the code that satisfies it, and often before the repo exists.
+ * The Remote workspace owns the machines a workspace deploys to, which likewise don't change when
+ * you click a different repository. */
 const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "api", render: () => <ApiView /> },
   { id: "agents", render: () => <AgentsView /> },
   { id: "stories", render: () => <StoriesView /> },
+  { id: "remote", render: () => <RemoteView /> },
 ];
 
 function MainContent() {
@@ -187,6 +192,10 @@ export default function App() {
     // saved consoles and query history belong to the workspace, and its live sessions belong to the
     // connections it is about to drop.
     void useDbStore.getState().setWorkspace(workspaceId);
+    // And the Remote workspace, whose hosts belong to the workspace and whose open sessions are
+    // `ssh` processes belonging to those hosts — so the switch has to close them rather than leave
+    // children behind that nothing on screen names.
+    void useRemoteStore.getState().setWorkspace(workspaceId);
   }, [workspaceId]);
 
   // Looks for a newer release: once on launch, then every hour for as long as the app is open.

@@ -17,6 +17,7 @@ import {
   ClipboardList,
   Database,
   Layers,
+  MonitorSmartphone,
   Send,
   type LucideIcon,
 } from "lucide-react";
@@ -79,6 +80,16 @@ const TOOLS: WorkspaceTool[] = [
     icon: ClipboardList,
     labelKey: "tabbar.stories",
     descriptionKey: "tabbar.storiesDescription",
+  },
+  // Last, and workspace-scoped for the same reason as the databases above it: a host is part of the
+  // environment a workspace's repositories are deployed to, so switching repository must not change
+  // which machines are listed.
+  {
+    id: "remote",
+    icon: MonitorSmartphone,
+    labelKey: "tabbar.remote",
+    descriptionKey: "tabbar.remoteDescription",
+    beta: true,
   },
 ];
 

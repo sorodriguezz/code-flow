@@ -16,7 +16,7 @@ import {
 import { motion } from "framer-motion";
 import { ApiModal, Field, GhostButton, PrimaryButton, Row } from "../api/ApiModal";
 import { ActivePill, ActiveUnderline } from "../common/ActivePill";
-import { Actions, HelpLink, Note, SettingsHeader, Status } from "../api/settingsChrome";
+import { Actions, HelpLink, Note, Panel, SettingsHeader, Status } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
 import { BackupAutomatic } from "./BackupAutomatic";
 import { DriveGuide, ICloudGuide, OneDriveGuide, SyncedFolderGuide } from "./backupGuides";
@@ -984,11 +984,13 @@ export function BackupSettings() {
             the pane ends where the dialog does, and a last row flush against that edge reads as cut
             off rather than as the end of the list. */}
         <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
-          <div className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4">
+          {/* The API client's panel, so the two read as the same surface — see the note on the
+              same swap in `ClaudeSettings`. */}
+          <Panel>
             {/* The rail names the pane, so no heading is repeated here — but the hint says what the
                 label cannot, which is why it stays for the panes that have one. */}
             {activeTab.hintKey && (
-              <p className="mb-4 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+              <p className="mb-3 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
                 {t(activeTab.hintKey)}
               </p>
             )}
@@ -1170,7 +1172,7 @@ export function BackupSettings() {
                 </div>
               </div>
             )}
-          </div>
+          </Panel>
         </div>
       </div>
 

@@ -910,6 +910,40 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_db_history_time
             ON db_query_history (workspace_id, ran_at DESC);
+
+        -- A machine reachable over SSH: a shell, its port forwards, and optionally a screen.
+        CREATE TABLE IF NOT EXISTS remote_hosts (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            -- Free text, not a foreign key into a folders table. A group here exists exactly while
+            -- something is in it: renaming one is an UPDATE over its members, and there is no such
+            -- thing as an empty group left behind to clean up. Nesting is what this gives up, and
+            -- an estate deep enough to need it wants tags rather than deeper folders anyway.
+            group_name   TEXT NOT NULL DEFAULT '',
+            -- JSON: host, port, user, auth, key_file, jump, os, options, command, screen,
+            -- forwards. One blob rather than columns for the same reason `db_connections.spec` is
+            -- one — a new SSH flag ships without a migration. Never holds a password.
+            spec         TEXT NOT NULL DEFAULT '{}',
+            -- Tints the host's row and its sessions' tabs, so "am I on production?" is answerable
+            -- at a glance rather than by reading a hostname.
+            color        TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+
+        -- A command to send into a session. Scoped to the workspace, not to a host: the point of a
+        -- snippet is that it runs on more than one of them.
+        CREATE TABLE IF NOT EXISTS remote_snippets (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            body         TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
         "#,
     )?;
 

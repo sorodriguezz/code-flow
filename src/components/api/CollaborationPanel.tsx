@@ -547,6 +547,19 @@ function ConnectionRow({
       }
     });
 
+  /**
+   * Out of the replacement, back to the row as it was.
+   *
+   * Nothing to undo on the way out: the stored key is only ever written by `save`, so what is
+   * discarded here is what was typed and never sent. Without it, opening the field by mistake left
+   * the row looking like a connection waiting to be re-authenticated, with the only ways back being
+   * to close the panel or to paste the key again.
+   */
+  const cancelEdit = () => {
+    setAnonKey("");
+    setEditing(false);
+  };
+
   const forget = () =>
     guard(async () => {
       if (!(await confirmAction(t("api.collab.forgetConfirm", { ref: projectRef(connection.url) }))))
@@ -662,6 +675,13 @@ function ConnectionRow({
               <GhostButton onClick={save} disabled={busy || anonKey.trim() === ""}>
                 <Link2 size={12} />
                 {t("api.collab.connect")}
+              </GhostButton>
+            )}
+            {/* Only while replacing a key that already works. A connection with no key has nothing
+                to go back to: cancelling there would leave the same empty field it left. */}
+            {editing && (
+              <GhostButton onClick={cancelEdit} disabled={busy}>
+                {t("api.collab.cancel")}
               </GhostButton>
             )}
             {/* `ml-auto`, so it sits at the far end of whichever line it lands on rather than

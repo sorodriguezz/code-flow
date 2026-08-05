@@ -724,3 +724,50 @@ pub struct DbWorkspaceTree {
     pub connections: Vec<DbConnectionRow>,
     pub consoles: Vec<DbConsole>,
 }
+
+// ---------------------------------------------------------------------------
+// Remote workspace
+// ---------------------------------------------------------------------------
+
+/// A saved SSH host.
+///
+/// `spec` is the JSON the remote layer deserializes into a [`crate::remotes::RemoteHostSpec`],
+/// minus the password — that lives in the OS keychain, so this row can be read by anything that can
+/// read the config file without leaking a credential. The same split, and the same reason, as
+/// [`DbConnectionRow`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteHostRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    /// Free text. Empty is "ungrouped", which the UI shows as a group of its own at the top.
+    pub group_name: String,
+    pub spec: String,
+    pub color: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A command to send into a session.
+///
+/// Workspace-scoped rather than host-scoped, because the point of a snippet is that it runs on more
+/// than one host — "tail the app log", "show disk", "restart the service" are written once and used
+/// across the whole estate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteSnippet {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub body: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Everything the Remote workspace needs on load, in one round trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteWorkspaceTree {
+    pub hosts: Vec<RemoteHostRow>,
+    pub snippets: Vec<RemoteSnippet>,
+}
