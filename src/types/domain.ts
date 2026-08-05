@@ -1021,6 +1021,11 @@ export interface ProposedCriterion {
   /** A few words naming what the criterion is about. Published as a bold first line inside it,
    *  which is what the draft pane collapses each criterion down to. Empty is allowed. */
   title: string;
+  /** The vertical slice it belongs to — `Slice 1 – Persistencia`. Criteria that have to ship
+   *  together carry the same string. Empty when the story does not divide. */
+  slice: string;
+  /** `ALTO` | `MEDIO` | `BAJO`, normalised by the backend, or empty when it declined to judge. */
+  risk: string;
   format: CriterionFormat;
   /** One whole Gherkin scenario. Empty when `format` is `checklist`. */
   gherkin: string;

@@ -10,6 +10,7 @@ import { isCancellation, newRunId, useAiRunStore, type AiRunLine } from "./aiRun
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
 import { notify } from "./notificationStore";
+import { useWorkspaceStore } from "./workspaceStore";
 import { formatAgentLogLine } from "../lib/agentLog";
 
 /** The repository name the backend puts after its busy marker. */
@@ -274,7 +275,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         notify({
           source: "chat",
           titleKey: "notifications.chatDone",
-            target: { view: "graph", openAiPanel: true },
+          // Straight to the conversation the reply landed in, not just to the panel: the rail may
+          // well be showing another chat, a pull request or an analysis by now.
+          target: {
+            openAiPanel: true,
+            projectId,
+            select: { kind: "chatConversation", id: conversationId },
+          },
+          // The repository's own workspace, not whichever one is in front when the answer lands:
+          // an answer arriving while the user is elsewhere is precisely what this store is for.
+          workspaceId: useWorkspaceStore.getState().workspaceOfProject(projectId) ?? undefined,
           status: "success",
           detail: base.title || liveTitle(trimmed),
         });
@@ -338,7 +348,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           notify({
             source: "chat",
             titleKey: "notifications.chatFailed",
-            target: { view: "graph", openAiPanel: true },
+            target: {
+              openAiPanel: true,
+              projectId,
+              select: { kind: "chatConversation", id: conversationId },
+            },
+            workspaceId: useWorkspaceStore.getState().workspaceOfProject(projectId) ?? undefined,
             status: "error",
             detail: base.title || liveTitle(trimmed),
           });

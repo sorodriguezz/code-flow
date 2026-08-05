@@ -39,6 +39,11 @@ interface WorkspaceState {
   focusProject: (workspaceId: string, projectId: string) => Promise<void>;
 
   activeProject: () => Project | null;
+  /** Which workspace a repository belongs to, for work that outlives the screen it was started
+   * from — a review filed against a project has to name that project's workspace, not whichever
+   * one the user has wandered into by the time it finishes. `null` for a project of a workspace
+   * whose list was never loaded, which in practice means one the user has not opened. */
+  workspaceOfProject: (projectId: string) => string | null;
 }
 
 export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
@@ -230,6 +235,13 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     const { activeWorkspaceId, activeProjectId, projectsByWorkspace } = get();
     if (!activeWorkspaceId || !activeProjectId) return null;
     return projectsByWorkspace[activeWorkspaceId]?.find((p) => p.id === activeProjectId) ?? null;
+  },
+
+  workspaceOfProject: (projectId) => {
+    for (const [workspaceId, projects] of Object.entries(get().projectsByWorkspace)) {
+      if (projects.some((p) => p.id === projectId)) return workspaceId;
+    }
+    return null;
   },
 }));
 

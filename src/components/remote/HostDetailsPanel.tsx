@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Eye, EyeOff, Monitor, Plus, Server, Terminal, Trash2, Waypoints, X } from "lucide-react";
+import { Check, Eye, EyeOff, Monitor, Plus, Server, Terminal, Trash2, Waypoints, X } from "lucide-react";
 import { Field, Row } from "../api/ApiModal";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ForwardDiagram } from "./ForwardDiagram";
 import { Select } from "../common/Select";
 import { Checkbox } from "../common/Checkbox";
-import { CARD, OsGlyph, Pill } from "./remoteChrome";
+import { CARD, HOST_COLORS, OsGlyph, Pill } from "./remoteChrome";
 import { useRemoteStore } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { remoteGetPassword, remoteListKeys, remoteSetPassword } from "../../lib/tauri/remoteCommands";
@@ -448,25 +448,63 @@ function ConnectionTab({
         />
       </Row>
 
-      <Row label={t("remote.fieldColor")} hint={t("remote.fieldColorHint")}>
-        <div className="flex w-full items-center gap-1.5">
-          <input
-            type="color"
-            value={color || "#6366f1"}
-            onChange={(e) => onColor(e.target.value)}
-            className="h-7 w-10 shrink-0 cursor-pointer rounded border border-[var(--cf-border)] bg-transparent"
-          />
-          {color && (
-            <button
-              type="button"
-              onClick={() => onColor("")}
-              className="text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            >
-              {t("remote.clear")}
-            </button>
-          )}
-        </div>
-      </Row>
+      <ColorPicker color={color} onColor={onColor} />
+    </div>
+  );
+}
+
+/**
+ * The host tint, as the twenty colours it is allowed to be.
+ *
+ * Not a `Row`: `Row` is a `<label>`, and a label hands its clicks to the first labelable thing
+ * inside it — the word "Color" would have set the host to whichever swatch happened to be first.
+ * The label sits above the grid instead, which is also the only way ten swatches fit in a panel
+ * that can be dragged down to 280px.
+ *
+ * A colour already stored that is not in the set keeps its own swatch at the front. It arrived from
+ * the old free picker, and quietly reassigning it to the nearest allowed hue would be this screen
+ * editing data the user never came here to change — the palette governs what can be *chosen*, not
+ * what is already true. See `HOST_COLORS` for why the set is fixed at all.
+ */
+function ColorPicker({ color, onColor }: { color: string; onColor: (value: string) => void }) {
+  const t = useT();
+  const picked = color.trim().toLowerCase();
+  const legacy = picked && !HOST_COLORS.some((hex) => hex === picked) ? picked : "";
+
+  const swatch = (hex: string) => (
+    <button
+      key={hex}
+      type="button"
+      title={hex}
+      aria-label={hex}
+      aria-pressed={hex === picked}
+      onClick={() => onColor(hex)}
+      style={{ background: hex }}
+      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full outline-none transition-transform hover:scale-110 focus-visible:ring-2 focus-visible:ring-[var(--cf-text)]"
+    >
+      {/* White on a tint whose luminance is pinned near 0.215 is ~4:1 — the check reads on every
+          swatch in the set, so the selected one needs no ring competing with the colour. */}
+      {hex === picked && <Check size={12} className="text-white" strokeWidth={3} />}
+    </button>
+  );
+
+  return (
+    <div className="py-1">
+      <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.fieldColor")}</span>
+      <span className="block text-[11px] text-[var(--cf-text-muted)]">{t("remote.fieldColorHint")}</span>
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+        {legacy && swatch(legacy)}
+        {HOST_COLORS.map(swatch)}
+        {picked && (
+          <button
+            type="button"
+            onClick={() => onColor("")}
+            className="ml-0.5 text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          >
+            {t("remote.clear")}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

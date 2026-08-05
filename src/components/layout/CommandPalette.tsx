@@ -9,8 +9,8 @@ import {
   FolderGit2,
   FolderPlus,
   GitBranch,
+  Glasses,
   History,
-  Link2,
   MessageCircle,
   Plus,
   TerminalSquare,
@@ -152,7 +152,7 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     const actionItems: PaletteItem[] = [
       {
         key: "action:pr-from-link",
-        icon: Link2,
+        icon: Glasses,
         label: t("prLink.menuItem"),
         group: "actions",
         onSelect: () => openPrLinkModal(),

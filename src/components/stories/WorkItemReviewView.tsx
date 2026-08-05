@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BookText,
   Bug,
@@ -72,6 +72,7 @@ import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
 import { useUiStore } from "../../state/uiStore";
 import { loadAdoConnections } from "../../lib/adoConnections";
 import { htmlToText } from "../../lib/workItemHtml";
+import { renderInlineMarkdown, renderMarkdown } from "../../lib/markdown";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import type {
@@ -182,6 +183,36 @@ function RepoChip({ repo }: { repo: string }) {
 const GHERKIN_KEYWORD =
   /^(\s*)(Feature|Característica|Scenario Outline|Esquema del escenario|Scenario|Escenario|Background|Antecedentes|Given|Dado|Dada|Dados|Dadas|When|Cuando|Then|Entonces|And|Y|E|But|Pero|Examples|Ejemplos)\b/i;
 
+/**
+ * Angle brackets, kept out of the Markdown renderers' way.
+ *
+ * `<importe>` is a scenario-outline placeholder and `<html>` in a description is something somebody
+ * wrote about, not markup: `marked` passes both straight through as inline HTML and the sanitiser
+ * after it drops unknown elements, so the text would come out one word lighter than it went in.
+ * Nothing is given up by escaping — everything on this screen arrives through `htmlToText`, which
+ * has already turned every real tag into the text of that tag.
+ */
+function escapeAngles(text: string): string {
+  return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * One line of a criterion with its Markdown drawn rather than spelled.
+ *
+ * Criteria are Markdown all the way round the trip: the prompt asks for it, the publish sends it to
+ * the board as HTML, and `htmlToText` brings the same marks back as `**…**` when the story is read
+ * again a sprint later. Rendering them as literal asterisks was the one point in that loop where
+ * the text stopped being what it meant — a scenario headed `**Riesgo:** ALTO` read as punctuation.
+ *
+ * Inline, not block: a criterion's line breaks are load-bearing (one step per line) and the block
+ * renderer would reflow them into paragraphs, which is exactly the shape the Gherkin highlighter
+ * exists to preserve.
+ */
+function MarkdownLine({ text }: { text: string }) {
+  const html = useMemo(() => renderInlineMarkdown(escapeAngles(text)), [text]);
+  return <span className="cf-markdown-inline" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
 function GherkinText({ text }: { text: string }) {
   return (
     <>
@@ -193,10 +224,12 @@ function GherkinText({ text }: { text: string }) {
               <>
                 {match[1]}
                 <span className="font-semibold text-[var(--cf-accent)]">{match[2]}</span>
-                {line.slice(match[0].length)}
+                <MarkdownLine text={line.slice(match[0].length)} />
               </>
+            ) : line ? (
+              <MarkdownLine text={line} />
             ) : (
-              line || " "
+              " "
             )}
           </span>
         );
@@ -219,6 +252,57 @@ function looksLikeChecklist(text: string): boolean {
 }
 
 /**
+ * A criterion's short title and its body, out of the one string both live in.
+ *
+ * The title is a bold first line — `**Título**\nDado que…` — and that spelling is doing real work
+ * rather than being a convention this screen invented. It is Markdown, so the publish turns it
+ * into a `<strong>` lead-in inside the criterion's own `<li>` and it reads as a heading on the
+ * board; and `htmlToText` brings that same `<strong>` back as `**…**`, so a story loaded from the
+ * board a sprint later arrives with its titles already on. Nothing has to be stored beside the
+ * criteria, and nothing is lost by a round trip through a field that only holds one string.
+ *
+ * A first line that is not bold is not a title — it is the first line of a criterion somebody else
+ * wrote, and claiming it would silently retitle their work.
+ */
+function splitCriterion(value: string): { title: string; body: string } {
+  const [first, ...rest] = value.split("\n");
+  const match = /^\s*\*\*(.+?)\*\*\s*$/.exec(first ?? "");
+  if (!match) return { title: "", body: value };
+  return { title: match[1].trim(), body: rest.join("\n").replace(/^\n+/, "") };
+}
+
+function joinCriterion(title: string, body: string): string {
+  const named = title.trim();
+  return named ? `**${named}**\n${body}` : body;
+}
+
+/**
+ * The one line a collapsed criterion is folded down to.
+ *
+ * Its title when it has one, its first line of substance otherwise — and either way with the
+ * Markdown marks taken off rather than rendered. A row set entirely in bold is a row with no
+ * hierarchy left in it, and the marks are what a one-line summary has no room for. Only the paired
+ * ones go, so `look_up_service` survives being named in a title.
+ *
+ * "Of substance" is the part that matters. A criterion pasted off a board opens with whatever the
+ * editor left behind — a stray `****`, a horizontal rule, an empty bullet — and a collapsed row
+ * reading `#1 ****` names nothing at all. Lines with no letter or digit in them are skipped until
+ * one that says something turns up.
+ */
+function criterionSummary(text: string): string {
+  const strip = (line: string) =>
+    line
+      .replace(/^\s*[-*]\s+/, "")
+      .replace(/^\s*#{1,6}\s+/, "")
+      .replace(/\*\*(.+?)\*\*/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .trim();
+  const { title, body } = splitCriterion(text);
+  const lines = title ? [title] : body.split("\n");
+  return lines.map(strip).find((line) => /[\p{L}\p{N}]/u.test(line)) ?? "";
+}
+
+/**
  * A criterion's text, drawn as whatever it is.
  *
  * A checklist rendered with the Gherkin highlighter lights up every line starting with "Y", and a
@@ -236,7 +320,9 @@ function CriterionText({ text, format }: { text: string; format: CriterionFormat
           .map((line, at) => (
             <li key={at} className="flex gap-1.5 text-[12px] leading-relaxed text-[var(--cf-text)]">
               <span className="mt-[5px] h-[5px] w-[5px] shrink-0 rounded-[1px] border border-[var(--cf-text-muted)]" />
-              <span className="min-w-0 break-words">{line}</span>
+              <span className="min-w-0 break-words">
+                <MarkdownLine text={line} />
+              </span>
             </li>
           ))}
       </ul>
@@ -591,8 +677,16 @@ function Collapsible({
 
 // ---------- tab 1: the story ----------
 
-/** A read-only block of the work item, boxed so it reads as a quotation rather than as a field. */
+/**
+ * A read-only block of the work item, boxed so it reads as a quotation rather than as a field.
+ *
+ * Rendered as Markdown, because that is what it is. The board stores this field as HTML and
+ * `htmlToText` brings it back spelled in marks — `**IT vigente**`, `` `ServiceID` ``, a `- ` per
+ * bullet — so showing the string raw meant showing the punctuation of a document instead of the
+ * document. The same text goes to the model either way; only the reading of it changes.
+ */
 function StoryBlock({ label, text, empty }: { label: string; text: string; empty: string }) {
+  const html = useMemo(() => renderMarkdown(escapeAngles(text)), [text]);
   return (
     <div>
       <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
@@ -600,7 +694,13 @@ function StoryBlock({ label, text, empty }: { label: string; text: string; empty
           it is a mark, not a field — nothing inside it can be typed into. */}
       <div className="max-h-72 overflow-y-auto rounded-lg border border-[var(--cf-field-border)] bg-[color-mix(in_oklab,var(--cf-field)_45%,transparent)] px-3 py-2">
         {text.trim() ? (
-          <p className="whitespace-pre-wrap break-words text-[12px] leading-relaxed text-[var(--cf-text)]">{text}</p>
+          // The first and last child lose their margin: a rendered document opens with a paragraph
+          // whose top margin is measured against the one above it, and here there is nothing above
+          // it but the box, so the text would sit a line lower than its own border.
+          <div
+            className="cf-markdown-preview break-words text-[12px] [&>:first-child]:mt-0 [&>:last-child]:mb-0"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
         ) : (
           <p className="text-[11.5px] italic text-[var(--cf-text-muted)]">{empty}</p>
         )}
@@ -777,7 +877,7 @@ function StoryTab() {
                     <>
                       <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">#{at + 1}</span>
                       <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
-                        {criterion.split("\n")[0]}
+                        {criterionSummary(criterion)}
                       </span>
                     </>
                   }
@@ -1011,7 +1111,7 @@ function CriterionCard({ proposal, at }: { proposal: CriterionProposal; at: numb
           <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 py-px text-[10px] text-[var(--cf-text-muted)]">
             {proposal.format === "ambos" ? t("huReview.formatBoth") : FORMAT_LABEL[proposal.format]}
           </span>
-          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{text.split("\n")[0]}</span>
+          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{criterionSummary(text)}</span>
           <RepoChip repo={proposal.repo} />
         </>
       }
@@ -1142,28 +1242,38 @@ function CriteriaTab({ width, seam }: { width: string; seam: React.ReactNode }) 
         ) : (
           <div className="space-y-1.5">
             {criteria.map((criterion, at) => (
+              // Folded, and the same fold as the story tab. Thirteen criteria drawn open is a pane
+              // you scroll looking for the one you meant, which is the opposite of the question
+              // this column answers — "which of these does the proposal beside it rewrite?".
+              //
               // No delete here on purpose. This pane is what the item says today; removing a
               // criterion from it would look like removing it from the story, and the place a
               // criterion actually stops existing is the draft.
-              <article
+              <Collapsible
                 key={at}
-                style={riseDelay(at)}
-                className={`rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
-              >
-                <div className="mb-1 flex items-center gap-1.5">
-                  <span className="text-[10px] font-semibold tabular-nums text-[var(--cf-text-muted)]">#{at + 1}</span>
+                at={at}
+                head={
+                  <>
+                    <span className="shrink-0 font-mono text-[10.5px] text-[var(--cf-text-muted)]">#{at + 1}</span>
+                    <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
+                      {criterionSummary(criterion)}
+                    </span>
+                  </>
+                }
+                actions={
                   <button
                     type="button"
                     onClick={() => copy(criterion, t("huReview.copied"))}
                     title={t("huReview.copy")}
                     aria-label={t("huReview.copy")}
-                    className={`ml-auto ${ICON_ACTION}`}
+                    className={`shrink-0 ${ICON_ACTION}`}
                   >
-                    <Copy size={11} />
+                    <Copy size={12} />
                   </button>
-                </div>
+                }
+              >
                 <CriterionText text={criterion} format={looksLikeChecklist(criterion) ? "checklist" : "gherkin"} />
-              </article>
+              </Collapsible>
             ))}
           </div>
         )}
@@ -1841,31 +1951,6 @@ function PlanField({
       {unit && <span className="text-[var(--cf-text-muted)]">{unit}</span>}
     </label>
   );
-}
-
-/**
- * A criterion's short title and its body, out of the one string both live in.
- *
- * The title is a bold first line — `**Título**\nDado que…` — and that spelling is doing real work
- * rather than being a convention this screen invented. It is Markdown, so the publish turns it
- * into a `<strong>` lead-in inside the criterion's own `<li>` and it reads as a heading on the
- * board; and `htmlToText` brings that same `<strong>` back as `**…**`, so a story loaded from the
- * board a sprint later arrives with its titles already on. Nothing has to be stored beside the
- * criteria, and nothing is lost by a round trip through a field that only holds one string.
- *
- * A first line that is not bold is not a title — it is the first line of a criterion somebody else
- * wrote, and claiming it would silently retitle their work.
- */
-function splitCriterion(value: string): { title: string; body: string } {
-  const [first, ...rest] = value.split("\n");
-  const match = /^\s*\*\*(.+?)\*\*\s*$/.exec(first ?? "");
-  if (!match) return { title: "", body: value };
-  return { title: match[1].trim(), body: rest.join("\n").replace(/^\n+/, "") };
-}
-
-function joinCriterion(title: string, body: string): string {
-  const named = title.trim();
-  return named ? `**${named}**\n${body}` : body;
 }
 
 /** The narrowest either draft column may be dragged to, and the widest. */

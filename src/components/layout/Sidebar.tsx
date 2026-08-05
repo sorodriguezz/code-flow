@@ -16,8 +16,8 @@ import {
   GitFork,
   GitMerge,
   GitPullRequest,
+  Glasses,
   Globe,
-  Link2,
   RefreshCw,
   Loader2,
   Lock,
@@ -1303,7 +1303,7 @@ export function Sidebar() {
                 className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
                 title={t("prLink.menuItem")}
               >
-                <Link2 size={13} />
+                <Glasses size={13} />
               </button>
               <button
                 onClick={() => setShowCloneModal(true)}

@@ -11,6 +11,7 @@ import {
 import { isWorkspaceBucket, workspaceIdFromBucket } from "../lib/prTarget";
 import type { JobHistoryEntry, WorkspaceActivityEntry } from "../types/domain";
 import { useLanguageStore } from "./languageStore";
+import { useWorkspaceStore } from "./workspaceStore";
 import { isCancellation, useAiRunStore } from "./aiRunStore";
 import { notify } from "./notificationStore";
 import { translations } from "../lib/i18n/translations";
@@ -156,9 +157,18 @@ function toJob(projectId: string, row: ActivityRow): Job {
  * while they were elsewhere, and it settles in the same instant they click. Telling them it
  * happened would be telling them what they did.
  */
-function notifyJobSettled(kind: JobKind, label: string, ok: boolean): void {
-  if (kind === "pr-action") return;
-  const analyzing = kind === "analyze-changes";
+function notifyJobSettled(job: Job, ok: boolean): void {
+  if (job.kind === "pr-action") return;
+  const analyzing = job.kind === "analyze-changes";
+  // A run filed under a workspace is a PR reviewed from a link: there is no project to bring to the
+  // front, and the workspace it belongs to is the bucket's own rather than whichever one the user
+  // has wandered into since. A run filed under a project answers the same question through the
+  // project — a review is exactly the kind of work that outlives the screen it was started from,
+  // and the store's default ("wherever the user is now") would file it under the wrong workspace
+  // and then send the button there.
+  const linkWorkspaceId = workspaceIdFromBucket(job.projectId);
+  const workspaceId =
+    linkWorkspaceId ?? useWorkspaceStore.getState().workspaceOfProject(job.projectId);
   notify({
     source: analyzing ? "changes" : "review",
     titleKey: analyzing
@@ -168,8 +178,17 @@ function notifyJobSettled(kind: JobKind, label: string, ok: boolean): void {
       : ok
         ? "notifications.reviewDone"
         : "notifications.reviewFailed",
+    // Where the result is: this run, in the assistant panel, on the project it ran for. No view —
+    // the panel is a rail over whichever one the user is on, and a review is not a reason to move
+    // them off it.
+    target: {
+      openAiPanel: true,
+      projectId: linkWorkspaceId ? undefined : job.projectId,
+      select: { kind: "job", id: job.id },
+    },
+    workspaceId: workspaceId ?? undefined,
     status: ok ? "success" : "error",
-    detail: label,
+    detail: job.label,
   });
 }
 
@@ -211,7 +230,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     void task(id)
       .then((result) => {
         settle({ status: "done", result, finishedAt: Date.now() });
-        notifyJobSettled(kind, label, true);
+        notifyJobSettled(job, true);
       })
       .catch((e) => {
         const cancelled = isCancellation(e);
@@ -220,7 +239,7 @@ export const useJobsStore = create<JobsState>((set, get) => ({
             ? { status: "cancelled", finishedAt: Date.now() }
             : { status: "error", error: parseClaudeError(String(e)), finishedAt: Date.now() },
         );
-        if (!cancelled) notifyJobSettled(kind, label, false);
+        if (!cancelled) notifyJobSettled(job, false);
       })
       .finally(() => useAiRunStore.getState().finish(id));
 

@@ -143,12 +143,26 @@ export function useResolveWithAi(
     try {
       const result = await resolveFindingWithAi(projectId, promptText, id);
       record(result);
-      notify({ source: "review", titleKey: "notifications.fixDone", status: "success", detail: label });
+      // The proposal is in the panel, on the finding it belongs to — which only exists while that
+      // project's review is the one open, so the project is part of the destination.
+      notify({
+        source: "review",
+        titleKey: "notifications.fixDone",
+        target: { openAiPanel: true, projectId },
+        status: "success",
+        detail: label,
+      });
     } catch (e) {
       // Stopping is a decision, not a failure — no error toast for it.
       if (!isCancellation(e)) {
         pushErrorToast(String(e));
-        notify({ source: "review", titleKey: "notifications.fixFailed", status: "error", detail: label });
+        notify({
+          source: "review",
+          titleKey: "notifications.fixFailed",
+          target: { openAiPanel: true, projectId },
+          status: "error",
+          detail: label,
+        });
       }
     } finally {
       useAiRunStore.getState().finish(id);

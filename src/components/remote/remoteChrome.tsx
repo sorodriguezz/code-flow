@@ -51,6 +51,46 @@ export function OsGlyph({ os, size = 14 }: { os: RemoteOs; size?: number }) {
 }
 
 /**
+ * The colours a host may be tinted with.
+ *
+ * A fixed set rather than a colour wheel, because this tint is not decoration: it is drawn as the
+ * *label* of the active tab, over `--cf-accent-soft`, and as a dot on the surface — in both themes,
+ * from the one hex that was stored. A free picker offers thousands of values that fail at least one
+ * of those four backgrounds, and the failure is invisible at the moment of choosing: a yellow picked
+ * while the light theme is on is an unreadable tab label the next time the user opens the dark one.
+ *
+ * Twenty hues around the wheel, each with its lightness solved so its relative luminance lands near
+ * 0.215 — the narrow band where a single colour clears 3:1 against white *and* against `#1e1e27`.
+ * Every entry measures at least 3.48:1 on all four backgrounds: light surface, light accent-soft,
+ * dark surface, dark accent-soft. The band is why they are all mid-tone and none is pale or nearly
+ * black: 4.5:1 against both a near-white and a near-black is arithmetically impossible for any one
+ * colour, so 3:1 — the WCAG floor for UI components — is the honest target and the tints sit in the
+ * middle of it.
+ */
+export const HOST_COLORS = [
+  "#d75454", // rojo
+  "#d85730", // bermellón
+  "#c46720", // naranja
+  "#a9761e", // ámbar
+  "#977e19", // oro
+  "#7f8521", // oliva
+  "#628c2c", // lima
+  "#429133", // verde
+  "#309151", // esmeralda
+  "#2a9071", // jade
+  "#298d8a", // teal
+  "#298ba3", // cian
+  "#2d86c2", // azul cielo
+  "#4d7fd5", // azul
+  "#6b79d4", // índigo
+  "#8273d0", // violeta
+  "#996bc7", // púrpura
+  "#b45dc2", // orquídea
+  "#c756a5", // magenta
+  "#ce577f", // rosa
+] as const;
+
+/**
  * A host's state, as one dot.
  *
  * Three states rather than two, because "has a live session" and "has a live tunnel" are genuinely

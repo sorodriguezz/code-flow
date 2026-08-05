@@ -123,11 +123,25 @@ export function PrCommentCard({
     try {
       const text = await draftPrCommentReply(threadAsText(thread), replyBody.trim() || null, id);
       setReplyBody(text.trim());
-      notify({ source: "review", titleKey: "notifications.draftDone", status: "success", detail: threadLabel });
+      // The draft is sitting in this thread's reply box, inside the panel — nowhere else to go.
+      // `projectId` is absent for a link review, which belongs to no repository here.
+      notify({
+        source: "review",
+        titleKey: "notifications.draftDone",
+        target: { openAiPanel: true, projectId },
+        status: "success",
+        detail: threadLabel,
+      });
     } catch (e) {
       if (!isCancellation(e)) {
         pushErrorToast(String(e));
-        notify({ source: "review", titleKey: "notifications.draftFailed", status: "error", detail: threadLabel });
+        notify({
+          source: "review",
+          titleKey: "notifications.draftFailed",
+          target: { openAiPanel: true, projectId },
+          status: "error",
+          detail: threadLabel,
+        });
       }
     } finally {
       useAiRunStore.getState().finish(id);

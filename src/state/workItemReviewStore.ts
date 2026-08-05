@@ -302,12 +302,17 @@ async function theOneJiraSite(): Promise<string | null> {
 
 /** Which text of an `ambos` proposal the user is sending. */
 /**
- * What a proposal becomes once it is staged: its title as a bold first line, then its text.
+ * What a proposal becomes once it is staged: its heading lines, then its text.
  *
- * The title lives inside the one string because that is all a criterion ever is — the board has a
+ * The heading lives inside the one string because that is all a criterion ever is — the board has a
  * single field for the whole list, and anything stored beside it would be lost the first time the
  * story was read back. Markdown carries it in both directions: it publishes as a `<strong>`
  * lead-in and comes back as `**…**` (see `splitCriterion` in the review view).
+ *
+ * Slice and risk join the title there for the same reason, and in the spelling the teams that write
+ * them by hand already use — `**Slice:** Slice 1 – Persistencia`. The model returns them as their
+ * own fields so the backend can hold them to three words and one shape; the app writes the line, so
+ * a run where the model phrases it its own way still publishes the same document as every other.
  */
 function textOf(criterion: CriterionProposal): string {
   const body =
@@ -319,7 +324,14 @@ function textOf(criterion: CriterionProposal): string {
           ? criterion.checklist
           : criterion.gherkin;
   const title = (criterion.title ?? "").trim();
-  return title ? `**${title}**\n${body.trim()}` : body;
+  const slice = (criterion.slice ?? "").trim();
+  const risk = (criterion.risk ?? "").trim();
+  const head = [
+    title && `**${title}**`,
+    slice && `**Slice:** ${slice}`,
+    risk && `**Riesgo:** ${risk}`,
+  ].filter(Boolean);
+  return head.length > 0 ? `${head.join("\n")}\n${body.trim()}` : body;
 }
 
 interface WorkItemReviewState {
@@ -1241,6 +1253,8 @@ function asCriterionProposal(criterion: ProposedCriterion | CriterionProposal): 
     repo: criterion.repo ?? "",
     // Absent on a run from a build before criteria were titled, and on a model that skipped it.
     title: (criterion.title ?? "").trim(),
+    slice: (criterion.slice ?? "").trim(),
+    risk: (criterion.risk ?? "").trim(),
     id: crypto.randomUUID(),
     pick:
       "pick" in criterion && criterion.pick

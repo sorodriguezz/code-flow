@@ -312,6 +312,21 @@ pub struct ProposedCriterion {
     /// allowed and means the criterion goes out as its text alone.
     #[serde(default)]
     pub title: String,
+    /// Which vertical slice of the story this criterion belongs to — "Slice 1 – Persistencia".
+    ///
+    /// Not decoration: it is the order the story can be delivered in, and criteria that share a
+    /// slice are the ones that have to ship together to be worth anything. Published as a bold
+    /// `**Slice:**` line inside the criterion, beside its title, which is where the team that asked
+    /// for this already writes it by hand.
+    #[serde(default)]
+    pub slice: String,
+    /// `ALTO` | `MEDIO` | `BAJO` — how much it costs to get this criterion wrong.
+    ///
+    /// Normalised to those three words on the way in (see [`normalise_criterion`]) rather than
+    /// trusted as written: a field a model spells four ways across four runs is a field nobody can
+    /// sort a backlog by. Empty when the model declined to judge.
+    #[serde(default)]
+    pub risk: String,
     /// The 1-based number of the existing criterion this rewrites, or `0` when it is new. What
     /// lets the screen colour a correction differently from an addition — a rewrite that looks
     /// like a new criterion is how a story ends up holding both wordings.
@@ -712,6 +727,22 @@ fn parse_review(stage: ai::WorkItemReviewStage, text: &str) -> Result<WorkItemRe
     }
 }
 
+/// The three words a risk is allowed to be, out of everything a model might write.
+///
+/// Spanish and English both, because a model asked for `ALTO` returns `High` often enough that
+/// dropping it would lose a judgement that was actually made. Anything else comes back empty:
+/// a risk field holding `Medio-Alto` is worse than one holding nothing, because the first sorts
+/// wrong and the second admits it.
+fn normalised_risk(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "alto" | "alta" | "high" => "ALTO",
+        "medio" | "media" | "medium" | "moderado" | "moderada" => "MEDIO",
+        "bajo" | "baja" | "low" => "BAJO",
+        _ => "",
+    }
+    .to_string()
+}
+
 /// One criterion with its format and its two texts made to agree.
 ///
 /// The model is asked for `format` plus whichever text that format names, and it is the field it
@@ -732,6 +763,8 @@ fn normalise_criterion(mut criterion: ProposedCriterion) -> ProposedCriterion {
     if criterion.replaces < 0 {
         criterion.replaces = 0;
     }
+    criterion.slice = criterion.slice.trim().to_string();
+    criterion.risk = normalised_risk(&criterion.risk);
     criterion
 }
 

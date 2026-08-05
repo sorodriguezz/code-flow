@@ -128,9 +128,15 @@ export interface BoardsTarget {
 }
 
 /** The board a batch publishes to. An empty column is a batch that predates Jira, and Azure is what
- * it meant — the same rule the backend applies, so the two cannot disagree about an old row. */
+ * it meant — the same rule the backend applies (`BoardProvider::parse`), so the two cannot disagree
+ * about an old row.
+ *
+ * Written as "anything stored, or Azure when nothing is" rather than as a list of the boards this
+ * knows: the previous form named Jira and sent everything else to Azure, so adding monday to the
+ * picker gave a board that could be chosen, was saved, and then read back as Azure — the panel
+ * snapping to Azure DevOps the instant it was selected. A board added next will not repeat it. */
 export function providerOf(batch: StoryBatch): BoardProvider {
-  return batch.board_provider === "jira" ? "jira" : "azure";
+  return batch.board_provider || "azure";
 }
 
 export function targetFrom(batch: StoryBatch): BoardsTarget {

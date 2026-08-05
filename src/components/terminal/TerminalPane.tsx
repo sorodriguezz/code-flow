@@ -6,9 +6,57 @@ import { resizeTerminal, writeTerminal } from "../../lib/tauri/commands";
 import { onTerminalExit, onTerminalOutput } from "../../lib/tauri/events";
 import { useThemeStore } from "../../state/themeStore";
 import { TypedLineBuffer } from "../../lib/remote/typedLines";
+import { isMac } from "../../lib/platform";
+import { pushErrorToast } from "../../state/toastStore";
 
 const LIGHT_THEME = { background: "#ffffff", foreground: "#1c1c26", cursor: "#1c1c26" };
 const DARK_THEME = { background: "#1e1e27", foreground: "#eceef5", cursor: "#eceef5" };
+
+/**
+ * Copy and paste, wired by hand.
+ *
+ * A terminal in a browser gets these for free; a terminal in a Tauri window does not. The webview
+ * only routes ⌘C/⌘V to the page when the app carries a native Edit menu with those accelerators on
+ * it, and this app has none — so the keystrokes reached nothing at all and the only way text left
+ * this pane was the mouse. xterm's own paste handler never fires either, for the same reason: it
+ * listens for a `paste` event the webview never dispatches.
+ *
+ * The bindings are the ones every terminal already uses, which is the whole point — ⌘C/⌘V on macOS,
+ * `Ctrl+Shift+C`/`Ctrl+Shift+V` elsewhere. **Not** plain `Ctrl+C`: that is SIGINT, and a terminal
+ * that copies instead of interrupting is a terminal you cannot stop a runaway command in. ⌘C with
+ * nothing selected is passed through rather than swallowed, so it stays whatever the shell makes
+ * of it.
+ *
+ * Paste writes to the pty directly instead of going through xterm, because the pty is where typed
+ * input goes: `term.paste()` would echo locally and hand the shell a line it never saw typed.
+ */
+function clipboardKeys(term: Terminal, sessionId: string) {
+  term.attachCustomKeyEventHandler((event) => {
+    if (event.type !== "keydown" || event.altKey) return true;
+    const combo = isMac() ? event.metaKey && !event.ctrlKey : event.ctrlKey && event.shiftKey;
+    if (!combo) return true;
+
+    const key = event.key.toLowerCase();
+    if (key === "c") {
+      const selection = term.getSelection();
+      if (!selection) return true;
+      void navigator.clipboard.writeText(selection).catch((e: unknown) => pushErrorToast(String(e)));
+      event.preventDefault();
+      return false;
+    }
+    if (key === "v") {
+      void navigator.clipboard
+        .readText()
+        .then((text) => {
+          if (text) return writeTerminal(sessionId, text);
+        })
+        .catch((e: unknown) => pushErrorToast(String(e)));
+      event.preventDefault();
+      return false;
+    }
+    return true;
+  });
+}
 
 /** One xterm.js instance attached to an *already-open* backend pty session (creation/closing
  * is owned by `terminalStore`, not this component) — it mounts once for the lifetime of that
@@ -53,6 +101,7 @@ export function TerminalPane({
     fitAddon.fit();
     termRef.current = term;
     fitRef.current = fitAddon;
+    clipboardKeys(term, sessionId);
 
     const lines = new TypedLineBuffer();
     const dataDisposable = term.onData((data) => {

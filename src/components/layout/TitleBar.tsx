@@ -4,7 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Copy,
-  Link2,
+  Glasses,
   MessageCircle,
   Minus,
   Search,
@@ -146,7 +146,7 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
           onClick={reviewFromLink}
           className="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
         >
-          <Link2 size={13} />
+          <Glasses size={13} />
           {t("prLink.menuItem")}
         </button>
       </div>

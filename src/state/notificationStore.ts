@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { translate } from "./languageStore";
 import { useUiStore, type MainView, type StoriesMode } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { workspaceIdFromBucket } from "../lib/prTarget";
 import type { TranslationKey } from "../lib/i18n/translations";
 
 /**
@@ -46,13 +47,33 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
  * selecting, because only it knows how to load a row it may not be holding yet.
  */
 export interface NotificationTarget {
-  view: MainView;
+  /**
+   * The view to bring up — when the thing has one.
+   *
+   * Optional because the assistant's own work does not. Its panel is a rail over whichever view is
+   * showing (see `openAiPanel`), so a finished review, a reply that landed, or a fix it proposed is
+   * reached by opening the rail — naming a view as well would take the screen the user was on away
+   * to give nothing back.
+   */
+  view?: MainView;
   /** Which sub-tab, for the stories section's three. */
   storiesMode?: StoriesMode;
   /** Opens the assistant panel alongside the view. The chat is not a view of its own — it is a
    *  rail over whichever one is showing — so "go to the answer" means opening the rail. */
   openAiPanel?: boolean;
-  select?: { kind: "batch" | "agentTask" | "chain" | "docPage" | "reviewSession"; id: string };
+  /**
+   * The project the work belonged to, brought to the front before anything else opens.
+   *
+   * The assistant panel reads its chat, its Activity and its findings from whichever project is
+   * *active*, so opening it for a review that ran in another repository without this lands on the
+   * right rail showing the wrong project's history. Absent for work that belongs to no repository
+   * here — a pull request reviewed from a link is filed under the workspace instead.
+   */
+  projectId?: string;
+  select?: {
+    kind: "batch" | "agentTask" | "chain" | "docPage" | "reviewSession" | "chatConversation" | "job";
+    id: string;
+  };
 }
 
 export interface AppNotification {
@@ -167,7 +188,8 @@ export function notify(input: NotificationInput): void {
 }
 
 /**
- * Brings the notification's workspace to the front, with the data behind it already loaded.
+ * Brings the notification's workspace — and, when the work belonged to one, its repository — to the
+ * front, with the data behind it already loaded.
  *
  * The owning store is loaded *before* the sidebar flips, which is the opposite of the obvious order
  * and the only one that works. Every `setWorkspace` returns the instant its id already matches, and
@@ -181,45 +203,110 @@ export function notify(input: NotificationInput): void {
  * while the sidebar still names the current one. It reads as loading, it is bounded by the fetch,
  * and it ends consistent — which is more than the other order can say.
  */
-async function enterWorkspace(workspaceId: string | null, target: NotificationTarget): Promise<void> {
+async function enterWorkspace(stampedWorkspaceId: string | null, target: NotificationTarget): Promise<void> {
   const workspaces = useWorkspaceStore.getState();
-  if (!workspaceId || workspaceId === workspaces.activeWorkspaceId) return;
+  // A project knows which workspace it is in, and that outranks the one stamped on the row: the
+  // stamp is "wherever the user was standing when this finished", which for work that outlives the
+  // screen it was started from is somewhere else entirely — and a right project under a wrong
+  // workspace selects an id that resolves to nothing, landing the panel on no project at all.
+  const ownWorkspaceId = target.projectId ? workspaces.workspaceOfProject(target.projectId) : null;
+  const workspaceId = ownWorkspaceId ?? stampedWorkspaceId;
+  if (!workspaceId) return;
+  const crossing = workspaceId !== workspaces.activeWorkspaceId;
   // A workspace deleted since the run finished. The panel hides the button in that case, so this
   // is the unreachable path — it throws rather than carrying on, because carrying on would open
   // the destination view in the *current* workspace and look like it worked.
-  if (!workspaces.workspaces.some((w) => w.id === workspaceId)) {
+  if (crossing && !workspaces.workspaces.some((w) => w.id === workspaceId)) {
     throw new Error(translate("notifications.workspaceGone"));
   }
 
-  switch (target.select?.kind) {
-    case "batch": {
-      const { useStoriesStore } = await import("./storiesStore");
-      await useStoriesStore.getState().setWorkspace(workspaceId);
-      break;
+  if (crossing) {
+    switch (target.select?.kind) {
+      case "batch": {
+        const { useStoriesStore } = await import("./storiesStore");
+        await useStoriesStore.getState().setWorkspace(workspaceId);
+        break;
+      }
+      case "agentTask": {
+        const { useAgentsStore } = await import("./agentsStore");
+        await useAgentsStore.getState().setWorkspace(workspaceId);
+        break;
+      }
+      case "chain": {
+        const { useChainStore } = await import("./chainStore");
+        await useChainStore.getState().setWorkspace(workspaceId);
+        break;
+      }
+      case "docPage": {
+        const { useDocsStore } = await import("./docsStore");
+        await useDocsStore.getState().setWorkspace(workspaceId);
+        break;
+      }
+      // `reviewSession` is absent on purpose. Every case above belongs to a store with a
+      // `setWorkspace` that can be pre-loaded, which is what the note above is about. The review
+      // store has none — it follows the workspace through a subscription, and its `loadHistory`
+      // reads whichever workspace is *active*. Pre-loading here would list the old one; `openById`
+      // does its own load, after the switch below, which is the only order that works.
+      //
+      // `chatConversation` and `job` are absent for the opposite reason: neither is filed per
+      // workspace. The chat loads its own conversation on demand and the job list holds every
+      // bucket this session touched, so there is nothing to pre-load for either.
     }
-    case "agentTask": {
-      const { useAgentsStore } = await import("./agentsStore");
-      await useAgentsStore.getState().setWorkspace(workspaceId);
-      break;
-    }
-    case "chain": {
-      const { useChainStore } = await import("./chainStore");
-      await useChainStore.getState().setWorkspace(workspaceId);
-      break;
-    }
-    case "docPage": {
-      const { useDocsStore } = await import("./docsStore");
-      await useDocsStore.getState().setWorkspace(workspaceId);
-      break;
-    }
-    // `reviewSession` is absent on purpose. Every case above belongs to a store with a
-    // `setWorkspace` that can be pre-loaded, which is what the note above is about. The review
-    // store has none — it follows the workspace through a subscription, and its `loadHistory`
-    // reads whichever workspace is *active*. Pre-loading here would list the old one; `openById`
-    // does its own load, after the switch below, which is the only order that works.
   }
 
-  workspaces.setActiveWorkspace(workspaceId);
+  // The project comes last, and through `focusProject` rather than the pair of calls it looks like:
+  // it is the one that *awaits* the destination's project list before selecting out of it, where
+  // `setActiveWorkspace` fires that load and moves on. Selecting a project the list hasn't got yet
+  // sets an id nothing resolves, and the panel this was opening lands on no project at all.
+  if (target.projectId) {
+    await workspaces.focusProject(workspaceId, target.projectId);
+  } else if (crossing) {
+    workspaces.setActiveWorkspace(workspaceId);
+  }
+}
+
+/**
+ * Puts a finished assistant run back on screen: the pull request it reviewed, the link session it
+ * ran without a repository, or the analysis it produced.
+ *
+ * This is the same landing the panel's own Activity list performs when the run is clicked there —
+ * arrived at from the other end. The job is looked up across every bucket rather than asked for by
+ * one: a run filed under a project and one filed under a workspace (a PR reviewed from a link,
+ * which belongs to no repository here) are the same row to the user, and the id is unique either
+ * way, so carrying the bucket through the notification would only be a second thing to keep true.
+ */
+async function showJobInAiPanel(jobId: string): Promise<void> {
+  const [{ useJobsStore }, { usePrStore }, { useAnalyzeUiStore }] = await Promise.all([
+    import("./jobsStore"),
+    import("./prStore"),
+    import("./analyzeUiStore"),
+  ]);
+  const job = Object.values(useJobsStore.getState().byProject)
+    .flat()
+    .find((j) => j.id === jobId);
+  // Deleted from Activity since it finished. The panel is open on the right project either way,
+  // which is most of where the user was going.
+  if (!job) return;
+
+  const linkWorkspaceId = workspaceIdFromBucket(job.projectId);
+  if (linkWorkspaceId) {
+    useAnalyzeUiStore.getState().hide();
+    usePrStore.getState().openLinkPrFromMeta(job.meta, linkWorkspaceId);
+    return;
+  }
+  if (job.kind === "analyze-changes") {
+    usePrStore.getState().selectPr(null);
+    useAnalyzeUiStore.getState().showJob(job.id);
+    return;
+  }
+  const prId = job.meta.prId;
+  if (typeof prId !== "number") return;
+  // Fetched rather than read off whatever the sidebar last loaded: the pull request this reviewed
+  // may not be in that list at all, and a review reached from a notification has to open either way.
+  const pr = await usePrStore.getState().ensureProjectPr(job.projectId, prId);
+  if (!pr) return;
+  useAnalyzeUiStore.getState().hide();
+  usePrStore.getState().selectPr(pr);
 }
 
 /**
@@ -241,8 +328,9 @@ export async function followNotification(notification: AppNotification): Promise
   await enterWorkspace(notification.workspaceId, target);
 
   const ui = useUiStore.getState();
+  // No view is a destination in itself for the assistant's own work — see `NotificationTarget.view`.
   if (target.view === "stories") ui.openStories(target.storiesMode ?? "batches");
-  else ui.setActiveView(target.view);
+  else if (target.view) ui.setActiveView(target.view);
   if (target.openAiPanel) ui.openAiPanel();
 
   if (!target.select) return;
@@ -262,5 +350,23 @@ export async function followNotification(notification: AppNotification): Promise
   } else if (kind === "reviewSession") {
     const { useWorkItemReviewStore } = await import("./workItemReviewStore");
     await useWorkItemReviewStore.getState().openById(id);
+  } else if (kind === "chatConversation") {
+    // Addressed by project — the rail reads its conversation from whichever one is active — so
+    // without one there is no chat to open, only the panel that was already opened above.
+    if (!target.projectId) return;
+    const [{ useChatStore }, { usePrStore }, { useAnalyzeUiStore }] = await Promise.all([
+      import("./chatStore"),
+      import("./prStore"),
+      import("./analyzeUiStore"),
+    ]);
+    // The panel shows one thing at a time and the chat is the last in line: a pull request left
+    // selected, or an analysis left open, would sit on top of the answer this notification is
+    // about. The same clearing the Activity list does before opening a chat row.
+    usePrStore.getState().selectPr(null);
+    usePrStore.getState().closeLinkPr();
+    useAnalyzeUiStore.getState().hide();
+    await useChatStore.getState().switchTo(target.projectId, id);
+  } else if (kind === "job") {
+    await showJobInAiPanel(id);
   }
 }

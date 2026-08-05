@@ -94,22 +94,34 @@ export function StatusBar() {
       {terminalButton}
       {aiPanelButton}
 
+      {/* Never truncated. This is the answer to "which repository am I about to push?", and a name
+          cut at 140px turned two repos that share a prefix — `acme-api-gateway` and
+          `acme-api-gateway-v2` — into the same label on the one bar that is always on screen.
+          `whitespace-nowrap` so a long name stays one line in an 8px-tall bar; what gives instead
+          is the branch and the counters in the middle, which the git actions to the right are
+          pinned against by their own `shrink-0`. */}
       <span
-        className="flex shrink-0 items-center gap-1 truncate font-medium text-[var(--cf-text)]"
+        className="flex shrink-0 items-center gap-1 whitespace-nowrap font-medium text-[var(--cf-text)]"
         title={project.local_path}
       >
         <Folder size={11} style={{ color: project.color }} />
-        <span className="max-w-[140px] truncate">{project.name}</span>
+        {project.name}
       </span>
       <span className="h-3 w-px shrink-0 bg-[var(--cf-border)]" />
 
       <button
         onClick={toggleBranchSwitcher}
         title={hint("branch.switcher", t("shortcuts.cmdBranchSwitcher"))}
-        className="flex items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+        className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
       >
-        <GitBranch size={12} />
-        {status?.current_branch ?? (status?.is_detached ? t("statusbar.detachedHead") : "—")}
+        <GitBranch size={12} className="shrink-0" />
+        {/* The one thing on this bar that gives when it runs out of room. A branch name is recovered
+            from the switcher this button opens, and a truncated one still says which branch it is —
+            they differ at the start (`feature/…`, `hotfix/…`), unlike repository names that share a
+            prefix and differ at the end. */}
+        <span className="min-w-0 truncate">
+          {status?.current_branch ?? (status?.is_detached ? t("statusbar.detachedHead") : "—")}
+        </span>
         {current?.is_locked && (
           <span className="text-[var(--cf-warning)]" title={t("branch.lockedBadge")}>
             <Lock size={11} />
@@ -141,7 +153,9 @@ export function StatusBar() {
         </span>
       )}
 
-      <div className="ml-auto flex items-center gap-1">
+      {/* `shrink-0`: these are the bar's actions, and a repository with a long name must not be able
+          to squeeze fetch/pull/push off the end of it. */}
+      <div className="ml-auto flex shrink-0 items-center gap-1">
         <button
           disabled={remoteOp !== null}
           onClick={fetchNow}
