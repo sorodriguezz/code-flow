@@ -94,6 +94,22 @@ interface PrState {
   forgetLinkPr: (url: string) => void;
 
   loadPullRequests: (projectId: string) => Promise<void>;
+  /**
+   * One PR of a project, fetching the project's list first if it isn't loaded yet.
+   *
+   * For the callers that reach a pull request *without* going through the sidebar list — an
+   * Activity row reopening a review taken days ago is the one that matters. Those used to be able
+   * to assume the list was already in memory, because the sidebar loaded it on sight; it now waits
+   * to be asked (see `PullRequestsSection`), so a row clicked before the section was ever unfolded
+   * would find nothing and silently do nothing.
+   *
+   * Returns `null` for both "the host says there is no such pull request" and "the host wouldn't
+   * answer" — this deliberately doesn't distinguish them, because no caller acts differently: the
+   * right response to either is to leave the screen as it is rather than navigate somewhere empty.
+   * Don't build a "this pull request was deleted" message on it; the answer may just be that the
+   * network was down. The reason, when there is one, is in `loadErrorByProject`.
+   */
+  ensureProjectPr: (projectId: string, prId: number) => Promise<PullRequestSummary | null>;
   selectPr: (pr: PullRequestSummary | null) => void;
   setReviewLevel: (level: ReviewLevel) => void;
   /** Fire-and-forget — the run is tracked in `jobsStore`, not here, precisely so it survives
@@ -170,6 +186,16 @@ export const usePrStore = create<PrState>((set, get) => ({
     } finally {
       set((s) => (s.loadingProjectId === projectId ? { loadingProjectId: null } : {}));
     }
+  },
+
+  ensureProjectPr: async (projectId, prId) => {
+    const cached = get().prsByProject[projectId]?.find((p) => p.id === prId);
+    if (cached) return cached;
+    // Only ever one round trip: `loadPullRequests` swallows its own failures into
+    // `loadErrorByProject`, so a host that won't answer leaves the list absent rather than
+    // throwing, and the lookup below simply comes up empty.
+    await get().loadPullRequests(projectId);
+    return get().prsByProject[projectId]?.find((p) => p.id === prId) ?? null;
   },
 
   linkPr: null,

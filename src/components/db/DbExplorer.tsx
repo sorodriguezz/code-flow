@@ -601,6 +601,11 @@ function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: 
  *
  * Open/closed is local state rather than the store's `expanded`: that list is keyed by server nodes
  * and cleared whenever a connection is touched, and this folder has nothing to do with a session.
+ *
+ * Folded on arrival. What you open a connection to look at is its databases, and this folder sat
+ * above them with every saved console unrolled — pushing the tree itself down the panel by however
+ * many consoles had accumulated. The count stays on the row while it is folded, which is the part
+ * that has to be visible: it says there is something in here without spending the room to list it.
  */
 function SavedConsolesFolder({
   consoles,
@@ -610,7 +615,7 @@ function SavedConsolesFolder({
   connectionId: string;
 }) {
   const t = useT();
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const store = useDbStore.getState();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 

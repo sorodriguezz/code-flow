@@ -44,20 +44,31 @@ pub fn db_create_connection(
         .map_err(|e| e.to_string())
 }
 
-/// Saves a connection's settings, and closes any session it already had.
+/// Saves a connection's settings, closing any session it already had unless told otherwise.
 ///
-/// The close is the point: a host, port or SSL change that left the old session open would keep
-/// answering from the *previous* server, which is the kind of bug that ends with a statement run
-/// against the wrong database.
+/// The close is the default because it is the safe answer: a host, port or SSL change that left the
+/// old session open would keep answering from the *previous* server, which is the kind of bug that
+/// ends with a statement run against the wrong database.
+///
+/// `keep_session` is for the edits that decide what the explorer *lists* rather than what it talks
+/// to — which schemas are visible, the object filter, the connection's name. Those describe the
+/// same server through the same socket, and dropping the session for them means a reconnect (and,
+/// over SSH, a whole tunnel) to change a checkbox. The caller is the one that can tell the two
+/// apart, because it holds the settings as they were before the edit; see `saveConnection`.
 #[tauri::command]
 pub fn db_update_connection(
     db: State<Db>,
     registry: State<DbRegistry>,
     connection: DbConnectionRow,
+    keep_session: Option<bool>,
 ) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::update_connection(&conn, &connection).map_err(|e| e.to_string())?;
-    registry.disconnect(&connection.id);
+    // Absent means "close it" — an older frontend, or any caller that hasn't thought about it,
+    // gets the behaviour that cannot be wrong.
+    if !keep_session.unwrap_or(false) {
+        registry.disconnect(&connection.id);
+    }
     Ok(())
 }
 

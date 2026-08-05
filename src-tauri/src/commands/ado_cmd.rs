@@ -109,9 +109,9 @@ struct AdoConnectionOrg {
 ///
 /// The distinction matters on macOS: an app signed ad-hoc rather than with a stable Developer ID
 /// isn't recognized by the ACL on its own Keychain items, so every read pops a "enter your
-/// password" dialog. [`auto_link_project`] runs on every repo opened or switched to, so reading
-/// the Keychain from here meant one such prompt per repo switch. The credential itself is still
-/// read — later, only when a request to the host is actually made.
+/// password" dialog. [`auto_link_project`] runs whenever a repository's pull request list is
+/// opened, so reading the Keychain from here meant one such prompt each time. The credential
+/// itself is still read — later, only when a request to the host is actually made.
 fn connected_hosts(db: &State<'_, Db>, setting: &str) -> Result<Vec<String>, String> {
     let raw = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;

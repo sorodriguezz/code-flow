@@ -251,6 +251,9 @@ interface DbState {
 
   toggleNode: (connectionId: string, node: DbNodeRef, key: string) => Promise<void>;
   refreshNode: (connectionId: string, node: DbNodeRef, key: string) => Promise<void>;
+  /** Re-reads every branch the user currently has open on one connection. For a settings change
+   * that alters what the tree should list without touching the session behind it. */
+  refreshOpenNodes: (connectionId: string) => Promise<void>;
 
   openConsole: (connectionId: string, consoleId?: string) => void;
   newConsole: (connectionId: string, database?: string, schema?: string, body?: string) => void;
@@ -347,6 +350,59 @@ export function ensureDbStoreLoaded(): Promise<void> {
  * identically-named schemas never share an entry. */
 export function nodeKey(connectionId: string, node: DbNodeRef): string {
   return [connectionId, node.kind, node.database ?? "", node.schema ?? "", node.name ?? ""].join("|");
+}
+
+/** [`nodeKey`] read backwards, for the one caller that has keys and needs the nodes they name:
+ * re-reading the branches the user has open. The empty string is how a `null` was written, so it
+ * comes back as one. */
+function nodeFromKey(key: string): DbNodeRef {
+  const [, kind, database, schema, name] = key.split("|");
+  return {
+    kind: kind as DbNodeRef["kind"],
+    database: database || null,
+    schema: schema || null,
+    name: name || null,
+  };
+}
+
+/**
+ * Whether an edit changes only what the explorer *lists*, and not what it is talking to.
+ *
+ * The two schema fields decide which branches the tree shows, and `object_filter` which rows appear
+ * inside them; every other field is part of reaching the server — host, port, credentials, SSL,
+ * the SSH tunnel, the startup script that runs on connect. So this is written as "everything that
+ * matters is unchanged" rather than "one of these two changed": a field added to the config later
+ * is a field this refuses to keep the session for until somebody has thought about it, which is the
+ * failure that costs a reconnect rather than the one that queries the wrong database.
+ */
+function onlyChangesWhatIsListed(before: DbConnectionConfig, after: DbConnectionConfig): boolean {
+  return (
+    before.kind === after.kind &&
+    before.host === after.host &&
+    before.port === after.port &&
+    before.database === after.database &&
+    before.user === after.user &&
+    before.url === after.url &&
+    before.ssl === after.ssl &&
+    before.read_only === after.read_only &&
+    before.connect_timeout_ms === after.connect_timeout_ms &&
+    before.show_all_databases === after.show_all_databases &&
+    before.keep_alive_secs === after.keep_alive_secs &&
+    before.auto_disconnect_secs === after.auto_disconnect_secs &&
+    before.startup_script === after.startup_script &&
+    before.ssl_ca_file === after.ssl_ca_file &&
+    before.ssl_cert_file === after.ssl_cert_file &&
+    before.ssl_key_file === after.ssl_key_file &&
+    before.ssh_enabled === after.ssh_enabled &&
+    before.ssh_host === after.ssh_host &&
+    before.ssh_port === after.ssh_port &&
+    before.ssh_user === after.ssh_user &&
+    before.ssh_key_file === after.ssh_key_file &&
+    before.auth_method === after.auth_method &&
+    before.tenant_id === after.tenant_id &&
+    before.options.length === after.options.length &&
+    before.options.every(([key, value], i) => after.options[i]?.[0] === key && after.options[i]?.[1] === value)
+  );
 }
 
 export const useDbStore = create<DbState>((set, get) => ({
@@ -450,21 +506,49 @@ export const useDbStore = create<DbState>((set, get) => ({
     // config directory, and the keychain is the only place a database credential belongs.
     const spec = JSON.stringify({ ...config, password: "" });
     const next: DbConnectionRow = { ...row, kind: config.kind, spec };
+    // `row` still carries the settings as they were, which is what makes this decidable here and
+    // nowhere else. A password the user retyped counts as a change whatever the fields say.
+    const previous = parseSpec(row);
+    const keepSession =
+      password === null && previous !== null && onlyChangesWhatIsListed(previous, config);
     const saved = await guarded(async () => {
-      await dbUpdateConnection(next);
+      await dbUpdateConnection(next, keepSession);
       if (password !== null) await dbSetPassword(row.id, password);
       return true;
     });
     if (!saved) return false;
+
+    if (keepSession) {
+      // The session is the same one, so the dot stays lit and the tree stays where the user left
+      // it. What *is* stale is every list read under the old visibility — a schema just unticked is
+      // still sitting in `children`. Dropping it and re-reading the open nodes is what makes the
+      // change show up in the tree at once, instead of after a manual refresh of each one.
+      set((s) => ({
+        connections: s.connections.map((c) => (c.id === next.id ? next : c)),
+        children: dropConnection(s.children, next.id),
+      }));
+      await get().refreshOpenNodes(next.id);
+      return true;
+    }
+
     set((s) => ({
       connections: s.connections.map((c) => (c.id === next.id ? next : c)),
-      // Saving closes the session on the backend, so the dot has to go with it.
+      // Saving closed the session on the backend, so the dot has to go with it.
       connected: s.connected.filter((id) => id !== next.id),
       // Anything cached about the old server is now about a server we may not be talking to.
       children: dropConnection(s.children, next.id),
       expanded: s.expanded.filter((key) => !key.startsWith(`${next.id}|`)),
     }));
     return true;
+  },
+
+  refreshOpenNodes: async (connectionId) => {
+    const prefix = `${connectionId}|`;
+    const keys = get().expanded.filter((key) => key.startsWith(prefix));
+    // Concurrently: these are independent reads of sibling branches, and doing them one after
+    // another makes a tree with a few schemas open feel like a reconnect — which is the thing this
+    // whole path exists to avoid.
+    await Promise.all(keys.map((key) => get().refreshNode(connectionId, nodeFromKey(key), key)));
   },
 
   deleteConnection: async (id) => {

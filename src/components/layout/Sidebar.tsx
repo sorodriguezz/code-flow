@@ -569,6 +569,33 @@ function PullRequestsSection({ project }: { project: Project }) {
   /** Takes what the group is *showing* rather than reading the record: a group that is open by
    * default has no entry to negate, so `!openGroups[key]` would re-open it on the first click. */
   const toggleGroup = (key: string, open: boolean) => setOpenGroups((g) => ({ ...g, [key]: !open }));
+  /**
+   * Whether this section has been unfolded yet — and therefore whether it is allowed to run.
+   *
+   * The thing being avoided is one call, not four. Of what this section starts on mount, the two
+   * connection reads and `autoLinkProject` are local — `getSetting` against SQLite and a libgit2
+   * read of the repo's own remote URLs (see `auto_link_project`, which isn't even async). The one
+   * that leaves the machine is `listPullRequests`: a round trip to GitHub / Azure DevOps / GitLab,
+   * on every repository you click, whether or not anyone was going to look at the answer. That is
+   * what made this the slow part of opening a repo — and on a rate-limited host, the expensive one.
+   *
+   * Folding the section isn't enough on its own: `CollapsibleSection` only stops rendering its
+   * children, and every one of those calls is started by an effect *here*, in a component that
+   * stays mounted regardless. So the fold is now the gate — nothing runs until the user unfolds
+   * the section, and unfolding it is what starts the work.
+   *
+   * What that costs, stated plainly because nothing else in the app covers it: a pull request
+   * opened on the host while you weren't looking is now announced by nothing until you unfold
+   * this. The notification bell only fires on runs *this app* started (see `jobsStore.run`), and
+   * the "waiting on you" list in the AI panel is built from the PRs you have already opened here —
+   * neither goes and asks the host what is new. That is the trade this section was folded to make.
+   */
+  const [activated, setActivated] = useState(false);
+  /** One-way: folding it again doesn't un-fetch what has already been fetched, and re-opening it
+   * should show that rather than start over. */
+  const onOpenChange = (open: boolean) => {
+    if (open) setActivated(true);
+  };
 
   const initiallyLinked = Boolean(
     (project.ado_org && project.ado_project && project.ado_repo_id) ||
@@ -580,6 +607,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   );
 
   useEffect(() => {
+    if (!activated) return;
     let cancelled = false;
     (async () => {
       const ado = await loadAdoConnections().catch(() => []);
@@ -590,7 +618,7 @@ function PullRequestsSection({ project }: { project: Project }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activated]);
 
   // Tries to derive the PR host — Azure DevOps org/project/repo, GitHub owner/repo, or a GitLab
   // project path — straight from this repo's own remote URL. Git already knows where the repo
@@ -609,6 +637,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   };
 
   useEffect(() => {
+    if (!activated) return;
     if (initiallyLinked) {
       setLinkState({ status: "linked" });
       return;
@@ -619,11 +648,12 @@ function PullRequestsSection({ project }: { project: Project }) {
       cancelledRef.current = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [project.id]);
+  }, [project.id, activated]);
 
   useEffect(() => {
+    if (!activated) return;
     if (linkState.status === "linked") void loadPullRequests(project.id);
-  }, [linkState.status, project.id]);
+  }, [linkState.status, project.id, activated]);
 
   // Re-detect when Settings closes: a token/connection may have just been added there, so the
   // repo should bind to its host on its own — no manual "connect" click and no switching away
@@ -631,7 +661,13 @@ function PullRequestsSection({ project }: { project: Project }) {
   const wasSettingsOpen = useRef(settingsOpen);
   useEffect(() => {
     const justClosed = wasSettingsOpen.current && !settingsOpen;
+    // Tracked whether or not the section is awake, so the *next* close is still read as an edge
+    // rather than as "settings were never open".
     wasSettingsOpen.current = settingsOpen;
+    // A folded section has nothing to re-detect for: it hasn't detected anything yet, and the
+    // moment it is unfolded the effect above runs auto-detect against whatever Settings just left
+    // behind. Nothing is lost by sitting this one out.
+    if (!activated) return;
     if (!justClosed || linkState.status === "linked") return;
     const ref = { current: false };
     (async () => {
@@ -663,10 +699,77 @@ function PullRequestsSection({ project }: { project: Project }) {
     }
   };
 
+  /**
+   * The header's own buttons, which live in the *collapsed* header too and so must not wait on
+   * anything the fold is gating.
+   *
+   * Folding the section took these away with it, which was never the point: "open this repo on its
+   * host" reads the remote in the backend and "create a pull request" only needs the repository —
+   * neither is the round trip this section was folded to avoid, and both used to be one click from
+   * a repo you had just opened. Refresh is the exception and is only offered once there is a list
+   * to refresh.
+   */
+  const headerAction = ({ expand }: { expand: () => void }) => (
+    <div className="flex items-center gap-1.5">
+      <button
+        onClick={() => {
+          // Unfolds as part of the same click — the modal it opens is rendered among the
+          // children, which a folded section doesn't mount. See `CollapsibleSection.action`.
+          expand();
+          setShowCreatePr(true);
+        }}
+        title={t("createPr.title")}
+        className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+      >
+        <Plus size={12} />
+      </button>
+      <button
+        onClick={openRepo}
+        title={t("sidebar.openRepoInBrowser")}
+        className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+      >
+        <Globe size={11} />
+      </button>
+      {activated && (
+        <button
+          onClick={() => void loadPullRequests(project.id)}
+          disabled={loading}
+          title={t("sidebar.refreshPrs")}
+          className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-50"
+        >
+          <RefreshCw size={11} className={loading ? "animate-spin" : undefined} />
+        </button>
+      )}
+    </div>
+  );
+
   if (hosting === undefined || linkState.status === "checking") {
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} defaultOpen>
+      // `initiallyLinked` is the whole reason the header can be decided here: it reads fields
+      // already on the `project` row, so a repository that is *known* to have a host keeps its
+      // buttons without this section having asked anyone anything. One that isn't gets the bare
+      // header it would have got anyway — offering "create a pull request" on a repo with no host
+      // is how you find out it has no host, via an error.
+      <CollapsibleSection
+        icon={GitPullRequest}
+        title={t("sidebar.pullRequests")}
+        onOpenChange={onOpenChange}
+        action={initiallyLinked ? headerAction : undefined}
+      >
         <SkeletonRows count={2} className="p-0" />
+        {/* Mounted here as well as in the linked branch: the "+" above is reachable before this
+            section has finished waking up, and the modal it opens has to survive the branch
+            flipping under it once the list lands. */}
+        {showCreatePr && (
+          <CreatePrModal
+            project={project}
+            onClose={() => setShowCreatePr(false)}
+            onCreated={() => {
+              useAnalyzeUiStore.getState().hide();
+              openAiPanel();
+            }}
+          />
+        )}
       </CollapsibleSection>
     );
   }
@@ -674,7 +777,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   if (linkState.status === "needsToken") {
     const provider = linkState.provider;
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} defaultOpen>
+      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} onOpenChange={onOpenChange}>
         <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">
           {provider === "github"
             ? t("sidebar.needsGithubToken")
@@ -696,7 +799,7 @@ function PullRequestsSection({ project }: { project: Project }) {
     hosting.gitlab.length === 0
   ) {
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} defaultOpen>
+      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} onOpenChange={onOpenChange}>
         <div className="space-y-0.5">
           {PR_SECTIONS.map((section) => (
             <div
@@ -715,7 +818,7 @@ function PullRequestsSection({ project }: { project: Project }) {
 
   if (linkState.status === "notDetected") {
     return (
-      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} defaultOpen>
+      <CollapsibleSection icon={GitPullRequest} title={t("sidebar.pullRequests")} onOpenChange={onOpenChange}>
         {hosting.github.length > 0 && (
           <button
             onClick={() => setShowConnect("github")}
@@ -775,39 +878,12 @@ function PullRequestsSection({ project }: { project: Project }) {
     <CollapsibleSection
       icon={GitPullRequest}
       title={t("sidebar.pullRequests")}
-      // Open on arrival, along with the "open" group inside it — the pull requests waiting on you
-      // are the reason to look at a repository's sidebar, and they were two clicks down. The
-      // other status groups stay folded, which is what keeps this from filling the panel.
-      defaultOpen
-      action={({ expand }) => (
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={() => {
-              expand();
-              setShowCreatePr(true);
-            }}
-            title={t("createPr.title")}
-            className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-          >
-            <Plus size={12} />
-          </button>
-          <button
-            onClick={openRepo}
-            title={t("sidebar.openRepoInBrowser")}
-            className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
-          >
-            <Globe size={11} />
-          </button>
-          <button
-            onClick={() => void loadPullRequests(project.id)}
-            disabled={loading}
-            title={t("sidebar.refreshPrs")}
-            className="text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-50"
-          >
-            <RefreshCw size={11} className={loading ? "animate-spin" : undefined} />
-          </button>
-        </div>
-      )}
+      // Folded on arrival — see `activated`. Unfolding it is what fetches the list, so the "open"
+      // group inside starts unfolded in turn: the click that asks for pull requests should land on
+      // the ones waiting on you, not on another chevron. The other status groups stay folded, which
+      // is what keeps this from filling the panel.
+      onOpenChange={onOpenChange}
+      action={headerAction}
     >
       {loadError ? (
         <div className="space-y-1 px-1.5">

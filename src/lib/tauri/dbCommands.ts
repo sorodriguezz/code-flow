@@ -48,8 +48,11 @@ export const dbCreateConnection = (
 
 /** Saving also drops any open session: a host or SSL change must not keep answering from the old
  * server. */
-export const dbUpdateConnection = (connection: DbConnectionRow) =>
-  invoke<void>("db_update_connection", { connection });
+/** `keepSession` leaves an open session alone — only for edits that change what the explorer lists
+ * rather than what it is talking to. Omitted means "close it", which is the answer that can never
+ * be wrong. See `db_update_connection`. */
+export const dbUpdateConnection = (connection: DbConnectionRow, keepSession = false) =>
+  invoke<void>("db_update_connection", { connection, keepSession });
 
 export const dbDeleteConnection = (id: string) => invoke<void>("db_delete_connection", { id });
 

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Globe, Pencil, Search, Trash2, X } from "lucide-react";
 import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useChatHistoryStore, EMPTY_CONVERSATIONS } from "../../state/activityStore";
@@ -41,7 +41,6 @@ export function ActivityModal({
   const conversations = useChatHistoryStore((s) => (projectId ? s.byProject[projectId] : undefined) ?? EMPTY_CONVERSATIONS);
   const removeConversation = useChatHistoryStore((s) => s.remove);
   const renameConversation = useChatHistoryStore((s) => s.rename);
-  const prsByProject = usePrStore((s) => s.prsByProject);
   const selectedPr = usePrStore((s) => s.selectedPr);
   const linkPr = usePrStore((s) => s.linkPr);
   const selectPr = usePrStore((s) => s.selectPr);
@@ -54,6 +53,9 @@ export function ActivityModal({
   const [query, setQuery] = useState("");
   const [renamingKey, setRenamingKey] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
+  /** Which row-opening is the current one, so a pull request fetched on demand can tell whether it
+   * is still the one being waited for. See `open`. */
+  const openReqRef = useRef(0);
 
   const jobs = useMemo(
     () => (workspaceJobs.length === 0 ? projectJobs : [...projectJobs, ...workspaceJobs]),
@@ -81,7 +83,11 @@ export function ActivityModal({
   /** Which store the row lives in — a job carries its own bucket, a chat is always the project's. */
   const bucketOf = (entry: ActivityEntry) => (entry.type === "job" ? entry.job.projectId : projectId);
 
-  const open = (entry: ActivityEntry) => {
+  const open = async (entry: ActivityEntry) => {
+    // See the same token in `ActivitySection.openEntry`. It matters more here: this modal stays
+    // open across the wait below, so the next row is not merely reachable during it — it is the
+    // obvious thing to click when the first one appears to have done nothing.
+    const token = ++openReqRef.current;
     if (entry.type === "chat") {
       if (!projectId) return;
       // Clear whatever else the panel might currently be showing — otherwise the chat
@@ -98,10 +104,15 @@ export function ActivityModal({
     if (rowWorkspaceId) {
       useAnalyzeUiStore.getState().hide();
       usePrStore.getState().openLinkPrFromMeta(entry.job.meta, rowWorkspaceId);
-      // A row whose newest entry is a decision still opens the PR it was taken on.
+      // A row whose newest entry is a decision still opens the PR it was taken on. The project's
+      // list is fetched on demand if the sidebar section hasn't been unfolded to load it — and the
+      // modal stays open until it lands, so a row that resolves to nothing leaves the user where
+      // they were rather than closing onto an unchanged panel.
     } else if (entry.job.kind === "pr-review" || entry.job.kind === "pr-action") {
-      const pr = projectId ? prsByProject[projectId]?.find((p) => p.id === entry.job.meta.prId) : undefined;
-      if (!pr) return;
+      const prId = entry.job.meta.prId;
+      if (!projectId || typeof prId !== "number") return;
+      const pr = await usePrStore.getState().ensureProjectPr(projectId, prId);
+      if (openReqRef.current !== token || !pr) return;
       useAnalyzeUiStore.getState().hide();
       selectPr(pr);
     } else if (entry.job.kind === "analyze-changes") {
@@ -202,7 +213,7 @@ export function ActivityModal({
                         className="min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-transparent px-1.5 py-0.5 text-[12px] font-medium text-[var(--cf-text)] outline-none"
                       />
                     ) : (
-                      <button onClick={() => open(entry)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                      <button onClick={() => void open(entry)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
                         <Icon size={13} className={spinning ? "shrink-0 animate-spin" : "shrink-0"} style={{ color }} />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1.5">

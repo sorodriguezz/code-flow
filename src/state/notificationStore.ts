@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { translate } from "./languageStore";
 import { useUiStore, type MainView, type StoriesMode } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type { TranslationKey } from "../lib/i18n/translations";
@@ -51,7 +52,7 @@ export interface NotificationTarget {
   /** Opens the assistant panel alongside the view. The chat is not a view of its own — it is a
    *  rail over whichever one is showing — so "go to the answer" means opening the rail. */
   openAiPanel?: boolean;
-  select?: { kind: "batch" | "agentTask" | "chain" | "docPage"; id: string };
+  select?: { kind: "batch" | "agentTask" | "chain" | "docPage" | "reviewSession"; id: string };
 }
 
 export interface AppNotification {
@@ -60,10 +61,12 @@ export interface AppNotification {
   /**
    * The workspace the work belonged to.
    *
-   * Stamped at push time from whatever was active, and the panel shows only the active one's: a
-   * notification is "come back to this", and a row pointing at a batch in another workspace is a
-   * row whose button cannot do what it says. `null` only for work that started before a workspace
-   * was chosen, which the panel treats as belonging to none.
+   * Stamped at push time from whatever was active. The panel lists every workspace's entries and
+   * names this one on each row, rather than hiding the ones that aren't the active workspace's: a
+   * generation the user walked away from is worth knowing about whichever workspace they came back
+   * to, and a notification you can only find by guessing which workspace to switch to first is one
+   * that arrives after it mattered. Following the row crosses back over — see
+   * [`followNotification`]. `null` only for work that started before a workspace was chosen.
    */
   workspaceId: string | null;
   /** Where to go. Absent when the work has nowhere to come back to. */
@@ -86,8 +89,18 @@ export interface AppNotification {
   seen: boolean;
 }
 
-/** What a caller supplies; the store stamps the rest. */
-export type NotificationInput = Omit<AppNotification, "id" | "finishedAt" | "seen" | "workspaceId">;
+/**
+ * What a caller supplies; the store stamps the rest.
+ *
+ * `workspaceId` is the one exception, and optional: the store's default of "wherever the user is
+ * now" is right for work that finishes while they are still there, but wrong for the work that
+ * outlives it. A review generation left running when the user changes workspace belongs to the
+ * workspace it was started in — filing it under the new one would hide it from the only history
+ * that can open it.
+ */
+export type NotificationInput = Omit<AppNotification, "id" | "finishedAt" | "seen" | "workspaceId"> & {
+  workspaceId?: string | null;
+};
 
 /** Older entries fall off the end. Nobody scrolls a notification list this far back, and the store
  * lives for the whole session — without a cap a long day of auto-fetches would grow forever. */
@@ -124,8 +137,9 @@ export const useNotificationStore = create<NotificationState>((set) => ({
         ...input,
         // Read here rather than asked of the caller: every one of them is running inside a
         // workspace already, and a parameter twenty call sites have to remember is one that
-        // nineteen will pass correctly.
-        workspaceId: useWorkspaceStore.getState().activeWorkspaceId,
+        // nineteen will pass correctly. The twentieth passes it explicitly — see the note on
+        // `NotificationInput` — because it may finish long after the user moved on.
+        workspaceId: input.workspaceId ?? useWorkspaceStore.getState().activeWorkspaceId,
         id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         finishedAt: Date.now(),
         seen: false,
@@ -153,17 +167,79 @@ export function notify(input: NotificationInput): void {
 }
 
 /**
- * Follows a notification to the thing it is about.
+ * Brings the notification's workspace to the front, with the data behind it already loaded.
  *
- * Opens the view, the sub-tab under it, and then the row itself — three steps because "where the
- * wiki page finished" is not a place until all three have happened, and landing on the right tab
- * with nothing selected is landing the user in front of the list they were trying to skip.
+ * The owning store is loaded *before* the sidebar flips, which is the opposite of the obvious order
+ * and the only one that works. Every `setWorkspace` returns the instant its id already matches, and
+ * several of them are already following the active workspace on their own — `chainStore` and
+ * `docsStore` subscribe to it at module scope, and the agent and story views reload on theirs. Call
+ * after the switch and you get an instant return from a load somebody else started and nobody can
+ * await, so `select` runs against a list that is still empty and silently selects nothing. Loading
+ * first makes every one of those later calls the no-op it looks like.
+ *
+ * The cost is a beat where the view still on screen is showing the destination workspace's data
+ * while the sidebar still names the current one. It reads as loading, it is bounded by the fetch,
+ * and it ends consistent — which is more than the other order can say.
+ */
+async function enterWorkspace(workspaceId: string | null, target: NotificationTarget): Promise<void> {
+  const workspaces = useWorkspaceStore.getState();
+  if (!workspaceId || workspaceId === workspaces.activeWorkspaceId) return;
+  // A workspace deleted since the run finished. The panel hides the button in that case, so this
+  // is the unreachable path — it throws rather than carrying on, because carrying on would open
+  // the destination view in the *current* workspace and look like it worked.
+  if (!workspaces.workspaces.some((w) => w.id === workspaceId)) {
+    throw new Error(translate("notifications.workspaceGone"));
+  }
+
+  switch (target.select?.kind) {
+    case "batch": {
+      const { useStoriesStore } = await import("./storiesStore");
+      await useStoriesStore.getState().setWorkspace(workspaceId);
+      break;
+    }
+    case "agentTask": {
+      const { useAgentsStore } = await import("./agentsStore");
+      await useAgentsStore.getState().setWorkspace(workspaceId);
+      break;
+    }
+    case "chain": {
+      const { useChainStore } = await import("./chainStore");
+      await useChainStore.getState().setWorkspace(workspaceId);
+      break;
+    }
+    case "docPage": {
+      const { useDocsStore } = await import("./docsStore");
+      await useDocsStore.getState().setWorkspace(workspaceId);
+      break;
+    }
+    // `reviewSession` is absent on purpose. Every case above belongs to a store with a
+    // `setWorkspace` that can be pre-loaded, which is what the note above is about. The review
+    // store has none — it follows the workspace through a subscription, and its `loadHistory`
+    // reads whichever workspace is *active*. Pre-loading here would list the old one; `openById`
+    // does its own load, after the switch below, which is the only order that works.
+  }
+
+  workspaces.setActiveWorkspace(workspaceId);
+}
+
+/**
+ * Follows a notification to the thing it is about, crossing into its workspace when it belongs to
+ * another one.
+ *
+ * Opens the workspace, the view, the sub-tab under it, and then the row itself — four steps because
+ * "where the wiki page finished" is not a place until all of them have happened, and landing on the
+ * right tab with nothing selected is landing the user in front of the list they were trying to skip.
  *
  * The selection is delegated to the store that owns it, and imported where it is used rather than
  * at the top of the file: `storiesStore` and the rest already depend on this module for `notify`,
  * and importing them back at module scope would close the cycle.
  */
-export async function followNotification(target: NotificationTarget): Promise<void> {
+export async function followNotification(notification: AppNotification): Promise<void> {
+  const { target } = notification;
+  if (!target) return;
+
+  await enterWorkspace(notification.workspaceId, target);
+
   const ui = useUiStore.getState();
   if (target.view === "stories") ui.openStories(target.storiesMode ?? "batches");
   else ui.setActiveView(target.view);
@@ -183,5 +259,8 @@ export async function followNotification(target: NotificationTarget): Promise<vo
   } else if (kind === "docPage") {
     const { useDocsStore } = await import("./docsStore");
     useDocsStore.getState().select(id);
+  } else if (kind === "reviewSession") {
+    const { useWorkItemReviewStore } = await import("./workItemReviewStore");
+    await useWorkItemReviewStore.getState().openById(id);
   }
 }

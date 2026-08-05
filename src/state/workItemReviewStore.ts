@@ -28,6 +28,7 @@ import type {
   ReviewFinding,
   ReviewProvenance,
   WorkItemKind,
+  WorkItemReviewResult,
   WorkItemReviewRow,
   WorkItemReviewStage,
 } from "../types/domain";
@@ -211,6 +212,33 @@ const EMPTY_DRAFT: ReviewDraft = { description: null, criteria: null, tasks: nul
  * that reads `undefined` publishes as `NaN` rather than as "unset". Defaulting on the way in keeps
  * every session that ever opened openable, which is the whole contract of the payload version.
  */
+/**
+ * The skeleton a hand-added task starts from.
+ *
+ * Translated rather than hard-coded in English: this text is published to Azure DevOps and read by
+ * the team, so it has to arrive in the language the board is kept in — which is the app's, the same
+ * language the generated tasks come back in.
+ *
+ * The prefix on the title is what the generated tasks use (`[QA] …`), so the two sort and scan
+ * together on the board; the numbers are left at 0, which publishes as "unset" rather than as a
+ * guess the user never made.
+ */
+function newDraftTask(kind: "dev" | "qa", flavour: "plain" | "gherkin"): DraftTask {
+  const detailKey: TranslationKey =
+    kind === "dev"
+      ? "huReview.taskTemplateDev"
+      : flavour === "gherkin"
+        ? "huReview.taskTemplateQaGherkin"
+        : "huReview.taskTemplateQaList";
+  return {
+    title: kind === "qa" ? "[QA] " : "",
+    detail: translate(detailKey),
+    kind,
+    priority: 0,
+    estimateHours: 0,
+  };
+}
+
 function draftFromPayload(draft: ReviewDraft | undefined): ReviewDraft {
   if (!draft) return EMPTY_DRAFT;
   if (!draft.tasks) return draft;
@@ -334,8 +362,25 @@ interface WorkItemReviewState {
   proposedCriteria: CriterionProposal[];
   proposedTasks: TaskProposal[];
   producedByStage: Partial<Record<WorkItemReviewStage, number>>;
-  /** Run ids by stage — present means "in flight", which is also what the Stop button acts on. */
-  runByStage: Partial<Record<WorkItemReviewStage, string>>;
+  /**
+   * Run ids in flight, by session and then by stage. Present means "still generating", which is
+   * also what the Stop buttons act on — hence run ids rather than booleans.
+   *
+   * Keyed by session and *not* part of [`EMPTY`], which is the whole point: a generation outlives
+   * the screen it was started from. Setting the review aside with ✕ leaves its run going, and the
+   * answer is filed into the saved session when it lands (see `landOffScreen`). Keying it by stage
+   * alone was a way of saying "the session on screen", so a run could only ever report back to
+   * whatever happened to be showing — which is why it had to be killed on the way out.
+   *
+   * Same shape and same reasoning as `storiesStore.runByBatch`.
+   */
+  runsBySession: Record<string, Partial<Record<WorkItemReviewStage, string>>>;
+  /** Cancels every stage still running for one session, on screen or not. What the history row's
+   * Stop button calls. */
+  stopSession: (sessionId: string) => Promise<void>;
+  /** Reopens a saved session by id, from anywhere — the notification bell, which knows an id and
+   * not a row. Sets aside whatever is on screen first, exactly as opening from the history does. */
+  openById: (sessionId: string) => Promise<void>;
   /** What produced each stage's answer: engine, model, version, how long it took. */
   provenance: Partial<Record<WorkItemReviewStage, ReviewProvenance>>;
   draft: ReviewDraft;
@@ -404,6 +449,15 @@ interface WorkItemReviewState {
   setDraftCriterion: (at: number, value: string) => void;
   removeDraftCriterion: (at: number) => void;
   addDraftCriterion: () => void;
+  /**
+   * Stages one hand-written task, pre-filled with the skeleton its kind expects.
+   *
+   * `flavour` only means anything for QA, where a test task is written either as a numbered list of
+   * cases or as Gherkin scenarios; a dev task has one shape and ignores it. The body is a template
+   * rather than a blank, so a task typed by hand and one proposed by a run read the same on the
+   * board — and so the user is answering questions instead of facing an empty box.
+   */
+  addDraftTask: (kind: "dev" | "qa", flavour: "plain" | "gherkin") => void;
   setDraftTask: (at: number, patch: Partial<DraftTask>) => void;
   removeDraftTask: (at: number) => void;
   discardDraft: (part: PublishPart) => void;
@@ -439,10 +493,11 @@ const EMPTY = {
   proposedTasks: [] as TaskProposal[],
   producedByStage: {} as Partial<Record<WorkItemReviewStage, number>>,
   provenance: {} as Partial<Record<WorkItemReviewStage, ReviewProvenance>>,
-  // Cleared with the rest: a run still registered here after the session was replaced would let a
-  // late answer land on the new story. The engine process is left to finish on its own — stopping
-  // it is the user's call, and its output simply has nowhere to go now.
-  runByStage: {} as Partial<Record<WorkItemReviewStage, string>>,
+  // `runsBySession` is deliberately *not* here. It used to be, as `runByStage`, because a run could
+  // only report back to the session on screen and clearing it was the only way to stop a late
+  // answer landing on the wrong story. Now every run carries the id of the session it belongs to,
+  // so it can be left alone: what is in flight stays in flight across setting a review aside,
+  // opening another one, and switching workspace.
   draft: EMPTY_DRAFT,
   published: {} as Partial<Record<PublishPart, { at: string; count: number }>>,
   tab: "story" as ReviewTab,
@@ -469,6 +524,47 @@ function editable(status: ReviewStatus): boolean {
   return status === "open";
 }
 
+/** A stable empty map, so the selectors below can hand back the same reference on every miss.
+ * Building `{}` inline would be a new object per render, which zustand's `Object.is` comparison
+ * reads as a change — and re-rendering is what calls the selector again. */
+const NO_RUNS: Partial<Record<WorkItemReviewStage, string>> = {};
+
+/** What is generating *for the session on screen*. The drop-in replacement for the old
+ * `runByStage`, and the only thing the review screen's own buttons care about. */
+export const stagesRunning = (s: WorkItemReviewState): Partial<Record<WorkItemReviewStage, string>> =>
+  s.runsBySession[s.sessionId] ?? NO_RUNS;
+
+/** Whether a *saved* session has anything still generating — for the history, where the whole
+ * point is asking about sessions that are not on screen. */
+export const isSessionRunning = (
+  runs: Record<string, Partial<Record<WorkItemReviewStage, string>>>,
+  sessionId: string,
+): boolean => Object.keys(runs[sessionId] ?? NO_RUNS).length > 0;
+
+/**
+ * Everything a run needs to know about the session that started it, taken before the invoke.
+ *
+ * Read once and carried, rather than looked up when the answer arrives: by then the screen may be
+ * showing another story, or nothing at all, and `get().title` would be the empty string that
+ * [`EMPTY`] left behind. The workspace matters for the same reason — the session is filed under the
+ * workspace it was opened in, not whichever one the user has since moved to.
+ */
+interface RunSession {
+  id: string;
+  workspaceId: string;
+  title: string;
+}
+
+/**
+ * Sessions deleted from the history while one of their runs was still going.
+ *
+ * `saveWorkItemReview` is an upsert, so a background answer landing after a delete would write the
+ * row back — resurrecting a review the user threw away, with no way to tell it apart from one they
+ * kept. Module scope rather than store state because it is bookkeeping about rows that no longer
+ * exist, and nothing renders from it.
+ */
+const deletedSessions = new Set<string>();
+
 export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => ({
   input: "",
   org: "",
@@ -477,6 +573,9 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
   projectIds: [],
   useContext: false,
   history: [],
+  // Outside the spread on purpose — `EMPTY` is what every "clear the screen" path applies, and
+  // this map has to survive all of them. See its declaration.
+  runsBySession: {},
   ...EMPTY,
 
   setInput: (input) => set({ input }),
@@ -699,6 +798,13 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
     set((s) => ({ draft: { ...s.draft, criteria: [...(s.draft.criteria ?? s.criteria), ""] } }));
     void saveSoon();
   },
+  addDraftTask: (kind, flavour) => {
+    if (!editable(get().status)) return;
+    set((s) => ({
+      draft: { ...s.draft, tasks: [...(s.draft.tasks ?? []), newDraftTask(kind, flavour)] },
+    }));
+    void saveSoon();
+  },
   setDraftTask: (at, patch) => {
     if (!editable(get().status)) return;
     set((s) => ({
@@ -786,123 +892,46 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
   // ---------- the runs ----------
 
   run: async (stage) => {
-    const state = get();
-    if (state.runByStage[stage] || !state.item || !editable(state.status)) return;
-    const workspaceId = activeWorkspaceId();
-    if (!workspaceId) return;
-
-    const runId = newRunId("hu-review");
-    // Before the invoke, or the first lines the engine prints have nowhere to land.
-    useAiRunStore.getState().start(runId);
-    set((s) => ({ runByStage: { ...s.runByStage, [stage]: runId } }));
-
-    try {
-      const result = await reviewWorkItem({
-        workspaceId,
-        projectIds: state.projectIds,
-        stage,
-        kind: kindOf(state.item.work_item_type),
-        storyText: storyPayload({
-          title: state.title,
-          workItemType: state.item.work_item_type,
-          effort: effortLabel(state.item),
-          description: state.description,
-          reproSteps: state.reproSteps,
-          systemInfo: htmlToText(state.item.system_info_html),
-          criteria: state.criteria,
-          tasks: state.item.children.map((child) => ({ title: child.title, state: child.state })),
-        }),
-        useContext: state.useContext,
-        runId,
-      });
-
-      // The session may have moved on: loading another work item, or opening one from the history,
-      // replaces everything while this run is still in flight. `runByStage` is cleared by both, so
-      // a run whose id is no longer registered is a run whose answer belongs to a story that is no
-      // longer on screen — and writing it here would put story A's proposals under story B, then
-      // save them there.
-      if (get().runByStage[stage] !== runId) return;
-
-      const { review, ...provenance } = result;
-      let produced = 0;
-      if (review.stage === "description") {
-        produced = review.description.trim() ? 1 : 0;
-        set((s) => ({
-          proposedDescription: produced
-            ? {
-                description: review.description,
-                rationale: review.rationale,
-                evidence: review.evidence,
-              }
-            : null,
-          producedByStage: { ...s.producedByStage, description: produced },
-        }));
-      } else if (review.stage === "criteria") {
-        produced = review.criteria.length;
-        set((s) => ({
-          // Appended, not replaced: a second run against a story the user has since edited is a
-          // second opinion, and throwing away the first would take the cards they were still
-          // reading with it. The Clear button is right there for the user who wants a blank panel.
-          proposedCriteria: [...s.proposedCriteria, ...review.criteria.map(asCriterionProposal)],
-          producedByStage: { ...s.producedByStage, criteria: review.criteria.length },
-        }));
-      } else if (review.stage === "tasks") {
-        produced = review.tasks.length;
-        set((s) => ({
-          proposedTasks: [...s.proposedTasks, ...review.tasks.map(asTaskProposal)],
-          producedByStage: { ...s.producedByStage, [stage]: review.tasks.length },
-        }));
-      }
-      set((s) => ({ provenance: { ...s.provenance, [stage]: provenance } }));
-      // Filed only past the guard above: a run whose answer was discarded because the session moved
-      // on has nothing for the user to come back to, and saying it finished would send them looking
-      // for cards that were never written.
-      notify({
-        source: "review",
-        titleKey: STAGE_NOTIFICATION[stage],
-        target: { view: "stories", storiesMode: "review" },
-        params: { n: produced },
-        status: "success",
-        detail: get().title,
-      });
-      // Saved once the stage has landed in state, so what is written is what is on screen. A
-      // failure to save is reported and no more: the review itself is still in front of the user,
-      // and losing the copy is not a reason to also throw away the answer.
-      void get()
-        .persist()
-        .catch((e: unknown) => pushErrorToast(String(e)));
-    } catch (e: unknown) {
-      // A stopped run is not a failure: nothing was written, and the previous answer is still on
-      // screen exactly as it was.
-      //
-      // Parsed rather than raw: a provider refusal arrives tagged with the quota marker, and
-      // `String(e)` would put that machine prefix in front of the sentence the user reads.
-      if (!isCancellation(e)) {
-        pushErrorToast(parseClaudeError(String(e)).message);
-        notify({
-          source: "review",
-          titleKey: "notifications.huFailed",
-        target: { view: "stories", storiesMode: "review" },
-          status: "error",
-          detail: get().title,
-        });
-      }
-    } finally {
-      useAiRunStore.getState().finish(runId);
-      set((s) => ({ runByStage: without(s.runByStage, stage) }));
-    }
+    const request = captureRun(get(), stage);
+    if (request) await runFor(request.session, stage, request.input);
   },
 
   runTasks: async (scope) => {
+    // Captured once, up front, rather than per run. `both` is two sequential runs, and the second
+    // used to read the store again — so setting the review aside during the DEV half meant the QA
+    // half silently never started, because by then there was no item on screen to read.
+    const request = captureRun(get(), "tasks");
+    if (!request) return;
     // Sequential rather than concurrent: the two runs lease the same repositories, and the second
     // would be refused by the lock the first is holding.
-    if (scope === "dev" || scope === "both") await get().run("tasks");
-    if (scope === "qa" || scope === "both") await get().run("tasksqa");
+    if (scope === "dev" || scope === "both") await runFor(request.session, "tasks", request.input);
+    if (scope === "qa" || scope === "both") await runFor(request.session, "tasksqa", request.input);
   },
 
   stop: async (stage) => {
-    const runId = get().runByStage[stage];
+    const runId = stagesRunning(get())[stage];
     if (runId) await useAiRunStore.getState().cancel(runId);
+  },
+
+  stopSession: async (sessionId) => {
+    const stages = get().runsBySession[sessionId];
+    if (!stages) return;
+    for (const runId of Object.values(stages)) {
+      if (runId) await useAiRunStore.getState().cancel(runId).catch((e: unknown) => pushErrorToast(String(e)));
+    }
+  },
+
+  openById: async (sessionId) => {
+    await get().dismiss();
+    await get().loadHistory();
+    const row = get().history.find((r) => r.id === sessionId);
+    if (!row) {
+      // Deleted since the notification was posted, or filed under another workspace this one
+      // can't see. Saying so beats landing the user on an empty review screen.
+      pushErrorToast(translate("huReview.sessionGone"));
+      return;
+    }
+    get().openFromHistory(row);
   },
 
   /**
@@ -969,6 +998,10 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
       pushErrorToast(parseClaudeError(String(e)).message);
     } finally {
       set({ publishing: null });
+      // Published is an ending, so anything still generating stops here — same reasoning as
+      // `close`. Without this the run would finish, find the session no longer `open`, and drop its
+      // answer anyway: the tokens would be spent for nothing rather than merely wasted.
+      if (get().status === "published") await stopEverything();
       // Awaited rather than fired off, because the screen is cleared next and a save that reads the
       // state after that would find nothing to write.
       await get()
@@ -1001,14 +1034,23 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
    *
    * Saved before it is cleared: the write is debounced, so the last thing typed may still be in the
    * air, and clearing first would leave that save with nothing to write.
+   *
+   * A stage still generating is deliberately left alone — it is the one thing here that does *not*
+   * belong to the screen. It keeps running, the history row says so, and when it lands the answer
+   * is merged into this session's saved row and announced in the notification centre. Setting a
+   * review aside is not a reason to throw away twenty minutes of work the user already paid for.
    */
   dismiss: async () => {
+    const leaving = get().sessionId;
     if (!get().item) return;
-    await stopEverything();
     cancelSave();
     await get()
       .persist()
       .catch((e: unknown) => pushErrorToast(String(e)));
+    // Something else claimed the screen while the save was in flight — the workspace subscription
+    // fires this without awaiting, and `openById` can land in between. Clearing now would wipe a
+    // session that has nothing to do with the one this call was about.
+    if (get().sessionId !== leaving) return;
     set({ ...EMPTY });
     useToastStore.getState().pushToast(translate("huReview.setAsideDone"), "success");
   },
@@ -1159,6 +1201,11 @@ export const useWorkItemReviewStore = create<WorkItemReviewState>((set, get) => 
   },
 
   removeFromHistory: async (id) => {
+    // Both are about the same hazard: a background run whose answer is written with an upsert, and
+    // would therefore put the deleted row back. Stopping it is the fix; the tombstone covers the
+    // one already on its way home.
+    await get().stopSession(id);
+    deletedSessions.add(id);
     await deleteWorkItemReview(id).catch((e: unknown) => pushErrorToast(String(e)));
     // A session deleted while it is on screen keeps its content but loses its row: the next save
     // would otherwise silently resurrect what the user just threw away.
@@ -1393,15 +1440,286 @@ function cancelSave() {
 }
 
 /**
- * Stops whatever is still generating, for the two ways a session leaves the screen.
+ * Stops whatever the session on screen still has generating.
  *
- * Its answer had nowhere to land the moment the screen was cleared, and an engine left running is
- * one still spending tokens on a review nobody is looking at.
+ * For the ways a session *ends* — closed, or published. Not for ✕: setting a review aside says
+ * "not now", not "never", and an answer that arrives afterwards still has somewhere to go. Ending
+ * it is different, because an engine spending tokens on a review that is already on the board, or
+ * that the user declared finished, is spending them on nothing.
  */
 async function stopEverything(): Promise<void> {
   const store = useWorkItemReviewStore.getState();
-  for (const stage of Object.keys(store.runByStage) as WorkItemReviewStage[]) {
-    await store.stop(stage).catch((e: unknown) => pushErrorToast(String(e)));
+  await store.stopSession(store.sessionId);
+}
+
+/**
+ * Everything a run needs, read off the screen in one go before anything is dispatched.
+ *
+ * The capture is the whole trick: past this point the run holds a copy and never reads the store
+ * for its own inputs again, so the user is free to set the review aside, open another one, or
+ * change workspace while it works. `null` when there is nothing to run — no item, a session that
+ * has ended, no workspace, or this stage already going for this session.
+ */
+function captureRun(
+  state: WorkItemReviewState,
+  stage: WorkItemReviewStage,
+): { session: RunSession; input: string } | null {
+  if (!state.item || !editable(state.status)) return null;
+  if (stagesRunning(state)[stage]) return null;
+  const workspaceId = activeWorkspaceId();
+  if (!workspaceId) return null;
+  // A session that has never been saved has no id to file an answer under. `load` mints one before
+  // the screen is usable, so this is a guard rather than a case.
+  if (!state.sessionId) return null;
+  return {
+    session: { id: state.sessionId, workspaceId, title: state.title },
+    input: storyPayload({
+      title: state.title,
+      workItemType: state.item.work_item_type,
+      effort: effortLabel(state.item),
+      description: state.description,
+      reproSteps: state.reproSteps,
+      systemInfo: htmlToText(state.item.system_info_html),
+      criteria: state.criteria,
+      tasks: state.item.children.map((child) => ({ title: child.title, state: child.state })),
+    }),
+  };
+}
+
+/** The proposals a finished stage contributes, in the shape the session payload stores them. */
+interface StageOutcome {
+  produced: number;
+  proposedDescription?: DescriptionProposal | null;
+  addedCriteria?: CriterionProposal[];
+  addedTasks?: TaskProposal[];
+}
+
+/**
+ * What a stage's answer amounts to, independent of where it is about to be written.
+ *
+ * Split out so the on-screen path and the saved-session path apply *the same* rules — description
+ * replaces, criteria and tasks append — rather than two copies that drift.
+ */
+function outcomeOf(review: WorkItemReviewResult["review"]): StageOutcome {
+  if (review.stage === "description") {
+    const produced = review.description.trim() ? 1 : 0;
+    return {
+      produced,
+      proposedDescription: produced
+        ? { description: review.description, rationale: review.rationale, evidence: review.evidence }
+        : null,
+    };
+  }
+  if (review.stage === "criteria") {
+    return { produced: review.criteria.length, addedCriteria: review.criteria.map(asCriterionProposal) };
+  }
+  if (review.stage === "tasks") {
+    return { produced: review.tasks.length, addedTasks: review.tasks.map(asTaskProposal) };
+  }
+  return { produced: 0 };
+}
+
+/**
+ * One stage, start to finish, on behalf of `session` rather than on behalf of the screen.
+ *
+ * The two paths at the end are the point of the whole change. If the session is still the one being
+ * looked at, the answer goes into state exactly as it always did. If it is not — the user pressed
+ * ✕, or opened another story, or changed workspace — it goes into that session's saved row instead,
+ * and the notification is what tells them it arrived.
+ */
+async function runFor(session: RunSession, stage: WorkItemReviewStage, storyText: string): Promise<void> {
+  const store = () => useWorkItemReviewStore.getState();
+  const runId = newRunId("hu-review");
+  // Before the invoke, or the first lines the engine prints have nowhere to land.
+  useAiRunStore.getState().start(runId);
+  useWorkItemReviewStore.setState((s) => ({
+    runsBySession: {
+      ...s.runsBySession,
+      [session.id]: { ...(s.runsBySession[session.id] ?? {}), [stage]: runId },
+    },
+  }));
+
+  try {
+    const state = store();
+    const result = await reviewWorkItem({
+      workspaceId: session.workspaceId,
+      // Read now rather than captured: the repositories a review reads are a setting of the screen,
+      // and the ones in force when it was dispatched are the ones it should use. They only differ
+      // if the user changed them mid-run, which is not a case worth a second snapshot.
+      projectIds: state.sessionId === session.id ? state.projectIds : [],
+      stage,
+      kind: kindOf(state.item?.work_item_type ?? ""),
+      storyText,
+      useContext: state.sessionId === session.id ? state.useContext : false,
+      runId,
+    });
+
+    // Not "is this session on screen?" but "is this run still the one this session is waiting on?".
+    // A stopped or superseded run is one whose id has been taken off the map, and its answer is
+    // discarded — the difference from before being that leaving the screen no longer does that.
+    if (store().runsBySession[session.id]?.[stage] !== runId) return;
+
+    const { review, ...provenance } = result;
+    const outcome = outcomeOf(review);
+    const onScreen = store().sessionId === session.id;
+
+    if (onScreen) {
+      useWorkItemReviewStore.setState((s) => ({
+        proposedDescription:
+          outcome.proposedDescription !== undefined ? outcome.proposedDescription : s.proposedDescription,
+        // Appended, not replaced: a second run against a story the user has since edited is a
+        // second opinion, and throwing away the first would take the cards they were still
+        // reading with it. The Clear button is right there for the user who wants a blank panel.
+        proposedCriteria: outcome.addedCriteria
+          ? [...s.proposedCriteria, ...outcome.addedCriteria]
+          : s.proposedCriteria,
+        proposedTasks: outcome.addedTasks ? [...s.proposedTasks, ...outcome.addedTasks] : s.proposedTasks,
+        // Keyed by the stage that was *asked for*, not the one that came back: the QA task run
+        // reports itself as `tasks`, and collapsing the two would make one count overwrite the other.
+        producedByStage: { ...s.producedByStage, [stage]: outcome.produced },
+        provenance: { ...s.provenance, [stage]: provenance },
+      }));
+      // Saved once the stage has landed in state, so what is written is what is on screen. A
+      // failure to save is reported and no more: the review itself is still in front of the user,
+      // and losing the copy is not a reason to also throw away the answer.
+      void store()
+        .persist()
+        .catch((e: unknown) => pushErrorToast(String(e)));
+    } else {
+      await landOffScreen(session, stage, outcome, provenance);
+    }
+
+    notify({
+      source: "review",
+      titleKey: STAGE_NOTIFICATION[stage],
+      target: { view: "stories", storiesMode: "review", select: { kind: "reviewSession", id: session.id } },
+      params: { n: outcome.produced },
+      status: "success",
+      // The captured title, not `get().title` — after ✕ that is the empty string `EMPTY` left, and
+      // a notification that doesn't name the story is no use to someone who set three aside.
+      detail: session.title,
+      workspaceId: session.workspaceId,
+    });
+  } catch (e: unknown) {
+    // A stopped run is not a failure: nothing was written, and the previous answer is still on
+    // screen exactly as it was.
+    //
+    // Parsed rather than raw: a provider refusal arrives tagged with the quota marker, and
+    // `String(e)` would put that machine prefix in front of the sentence the user reads.
+    if (!isCancellation(e)) {
+      // The toast only where there is a screen to put it on. The notification always — for a run
+      // the user walked away from, that is the only way they learn it failed.
+      if (store().sessionId === session.id) pushErrorToast(parseClaudeError(String(e)).message);
+      notify({
+        source: "review",
+        titleKey: "notifications.huFailed",
+        target: { view: "stories", storiesMode: "review", select: { kind: "reviewSession", id: session.id } },
+        status: "error",
+        detail: session.title,
+        workspaceId: session.workspaceId,
+      });
+    }
+  } finally {
+    useAiRunStore.getState().finish(runId);
+    useWorkItemReviewStore.setState((s) => {
+      const stages = without(s.runsBySession[session.id] ?? {}, stage);
+      const { [session.id]: _done, ...others } = s.runsBySession;
+      // The session's key goes when its last stage does — that emptiness is exactly what turns the
+      // history row's "working" chip back into its status.
+      return {
+        runsBySession: Object.keys(stages).length > 0 ? { ...others, [session.id]: stages } : others,
+      };
+    });
+  }
+}
+
+/**
+ * Files a finished stage into a session that isn't on screen.
+ *
+ * Deliberately not `persist()`: that one writes whatever the store currently holds, which is some
+ * other review, and it drives the save indicator (`saving`, `dirty`, `savedAt`) belonging to the
+ * session the user is actually editing. This reads the row back, merges into it, and writes it by
+ * id — so the two sessions never touch.
+ */
+async function landOffScreen(
+  session: RunSession,
+  stage: WorkItemReviewStage,
+  outcome: StageOutcome,
+  provenance: ReviewProvenance,
+): Promise<void> {
+  // Thrown away while it was running. Writing would resurrect the row, since the save is an upsert.
+  if (deletedSessions.has(session.id)) return;
+
+  const rows = await listWorkItemReviews(session.workspaceId).catch((e: unknown) => {
+    pushErrorToast(String(e));
+    return [] as WorkItemReviewRow[];
+  });
+  const row = rows.find((r) => r.id === session.id);
+  // No row means nothing to come back to — deleted, or never saved. Silence is right: there is no
+  // screen showing this session and nothing the user could do about it.
+  if (!row) return;
+
+  let payload: Partial<ReviewSessionPayload> = {};
+  try {
+    payload = JSON.parse(row.payload) as ReviewSessionPayload;
+  } catch {
+    // Unreadable payload: merging into it would replace a record we can't read with one we made up.
+    return;
+  }
+  // Ended while the run was in flight. Proposals in a published or closed review are unreachable —
+  // `editable` locks the screen — so they would be invisible clutter on a finished record.
+  if ((payload.status ?? "open") !== "open") return;
+
+  // Reopened during the read above. The live path owns it now, and writing the row underneath would
+  // put the answer somewhere the user can't see it while the screen shows the version without it.
+  if (useWorkItemReviewStore.getState().sessionId === session.id) {
+    useWorkItemReviewStore.setState((s) => ({
+      proposedDescription:
+        outcome.proposedDescription !== undefined ? outcome.proposedDescription : s.proposedDescription,
+      proposedCriteria: outcome.addedCriteria ? [...s.proposedCriteria, ...outcome.addedCriteria] : s.proposedCriteria,
+      proposedTasks: outcome.addedTasks ? [...s.proposedTasks, ...outcome.addedTasks] : s.proposedTasks,
+      producedByStage: { ...s.producedByStage, [stage]: outcome.produced },
+      provenance: { ...s.provenance, [stage]: provenance },
+    }));
+    void useWorkItemReviewStore
+      .getState()
+      .persist()
+      .catch((e: unknown) => pushErrorToast(String(e)));
+    return;
+  }
+
+  const merged: ReviewSessionPayload = {
+    ...(payload as ReviewSessionPayload),
+    version: 2,
+    status: "open",
+    proposedDescription:
+      outcome.proposedDescription !== undefined
+        ? outcome.proposedDescription
+        : (payload.proposedDescription ?? null),
+    proposedCriteria: [...(payload.proposedCriteria ?? []), ...(outcome.addedCriteria ?? [])],
+    proposedTasks: [...(payload.proposedTasks ?? []), ...(outcome.addedTasks ?? [])],
+    producedByStage: { ...(payload.producedByStage ?? {}), [stage]: outcome.produced },
+    provenance: { ...(payload.provenance ?? {}), [stage]: provenance },
+  };
+
+  await saveWorkItemReview({
+    id: row.id,
+    workspaceId: session.workspaceId,
+    org: row.ado_org,
+    workItemId: row.work_item_id,
+    workItemType: row.work_item_type,
+    workItemUrl: row.work_item_url,
+    title: row.title,
+    payload: JSON.stringify(merged),
+    engine: provenance.engine,
+    model: provenance.model,
+    version: provenance.version,
+  }).catch((e: unknown) => pushErrorToast(String(e)));
+
+  // The history list is the one thing on screen that shows this session, so it has to be re-read —
+  // but only when it is this workspace's history that is being listed.
+  if (useWorkspaceStore.getState().activeWorkspaceId === session.workspaceId) {
+    await useWorkItemReviewStore.getState().loadHistory();
   }
 }
 
@@ -1414,9 +1732,14 @@ async function stopEverything(): Promise<void> {
  * criteria, tasks with their estimates — which `dismiss` persists before clearing; leaving that to
  * a remount would mean the switch happened with the write still owed.
  *
- * `dismiss` is exactly what the screen's own ✕ does: stops any run, writes the session, and clears
- * the screen. Nothing is lost — the session is in the history of the workspace it belongs to, and
- * that is where it is picked back up.
+ * `dismiss` is exactly what the screen's own ✕ does: writes the session and clears the screen.
+ * Nothing is lost — the session is in the history of the workspace it belongs to, and that is where
+ * it is picked back up.
+ *
+ * A generation in flight survives this, as it survives the ✕, and for a stronger reason: changing
+ * workspace is an even weaker signal of "I'm done with that review" than setting it aside was. It
+ * finishes against the workspace it was started in, files itself into that workspace's copy of the
+ * session, and its notification is stamped with that workspace so the bell can cross back to it.
  */
 useWorkspaceStore.subscribe((state, previous) => {
   if (state.activeWorkspaceId === previous.activeWorkspaceId) return;

@@ -8,9 +8,10 @@ const KEY = "ado_connections";
 // Where a single org lived before multi-org support — read once for back-compat migration.
 const LEGACY_ORG_KEY = "ado_default_org";
 
-// The legacy probe below reads the OS keychain, and this loader runs on every mount of the pull
-// requests panel — i.e. on every repo you open or switch to. On macOS each keychain read can pop
-// a password prompt, so the probe is memoized: the legacy state can't change during a session
+// The legacy probe below reads the OS keychain, and this loader has many callers — the Azure
+// settings screen, the stories workspace, and the sidebar's pull requests section, which runs it
+// once per repository whose PR list you actually open. On macOS each keychain read can pop a
+// password prompt, so the probe is memoized: the legacy state can't change during a session
 // without the user saving connections, and saving writes `ado_connections`, which makes the
 // legacy path unreachable from then on anyway.
 let legacyProbe: Promise<AdoConnection[]> | null = null;

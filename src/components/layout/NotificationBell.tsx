@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "framer-motion";
-import { ArrowRight, Bell, CircleAlert, CircleCheck, Info, Trash2, X } from "lucide-react";
+import { ArrowRight, Bell, CircleAlert, CircleCheck, Info, Trash2, Volume2, VolumeX, X } from "lucide-react";
 import {
   followNotification,
   NOTIFICATION_SOURCE_LABEL,
@@ -9,6 +9,8 @@ import {
   type AppNotification,
 } from "../../state/notificationStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { usePreferencesStore } from "../../state/preferencesStore";
+import { playNotificationSound, previewNotificationSound } from "../../lib/notificationSound";
 import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 
@@ -94,9 +96,14 @@ function UnreadDot({ burst }: { burst: number }) {
  * The notification centre, hung off the end of the status bar.
  *
  * It answers one question — "did the thing I walked away from finish?" — and the panel is built
- * around the three parts of that answer: **where** it happened (the menu, so you know where to go
- * back to), **what** it did, and **when** it finished. Toasts can't do this job: they expire, and
- * the whole point is that nobody was looking.
+ * around the four parts of that answer: **where** it happened (the menu, so you know where to go
+ * back to), **what** it did, **when** it finished, and **whose** workspace it was. Toasts can't do
+ * this job: they expire, and the whole point is that nobody was looking.
+ *
+ * It spans every workspace rather than the active one, which is what makes the workspace name on
+ * each row load-bearing and what the go button is crossing when it switches. The alternative — one
+ * list per workspace — hides finished work behind the very act of looking somewhere else, which is
+ * exactly what a notification is meant to survive.
  *
  * The dot means unread, and it clears when the panel *closes* rather than when it opens. Opening is
  * not reading — closing is the gesture that says you're done with the list — and marking on open
@@ -110,19 +117,23 @@ function UnreadDot({ burst }: { burst: number }) {
 export function NotificationBell() {
   const t = useT();
   const locale = useLanguageStore((s) => (s.language === "es" ? "es-ES" : "en-US"));
-  const all = useNotificationStore((s) => s.items);
-  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  /* This workspace's only. A notification is an invitation to come back to something, and a batch
-     or a task from another workspace is not somewhere this panel can take you — the stores hold
-     one workspace at a time. Filtered rather than dropped at push, so switching back brings the
-     entries back with you. */
-  const items = useMemo(
-    () => all.filter((item) => item.workspaceId === workspaceId),
-    [all, workspaceId],
+  const items = useNotificationStore((s) => s.items);
+  /* Every workspace's, with each row naming its own — this panel is the one place the app answers
+     "did anything finish?", and an answer scoped to whichever workspace happens to be open is one
+     the user has to ask again in every other workspace to trust. Following a row crosses back over
+     on its own, so the stores holding one workspace at a time is a thing the button handles rather
+     than a reason to hide the row. */
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const workspaces = useWorkspaceStore((s) => s.workspaces);
+  const workspaceNames = useMemo(
+    () => new Map(workspaces.map((w) => [w.id, w.name])),
+    [workspaces],
   );
   const remove = useNotificationStore((s) => s.remove);
   const clear = useNotificationStore((s) => s.clear);
   const markAllSeen = useNotificationStore((s) => s.markAllSeen);
+  const soundEnabled = usePreferencesStore((s) => s.notificationSoundEnabled);
+  const setSoundEnabled = usePreferencesStore((s) => s.setNotificationSoundEnabled);
 
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -137,12 +148,14 @@ export function NotificationBell() {
       : t("notifications.title");
 
   /**
-   * The arrival burst: a counter bumped whenever the unread count *grows*, used as the animation
-   * key so a second notification restarts the ripples instead of queueing behind the first.
+   * The arrival: a counter bumped whenever the unread count *grows*, used as the animation key so a
+   * second notification restarts the ripples instead of queueing behind the first, and the one
+   * place the sound is played.
    *
    * It rides the count rather than the item list because that is the thing the dot is about — a
    * notification arriving already-seen (there is no such thing today, but nothing stops one) is not
-   * news, and a removal that lowers the count is not either.
+   * news, and a removal that lowers the count is not either. Sound and animation hanging off the
+   * same signal is what keeps them from ever disagreeing about what an arrival is.
    */
   const [burst, setBurst] = useState(0);
   const [bursting, setBursting] = useState(false);
@@ -150,12 +163,19 @@ export function NotificationBell() {
   useEffect(() => {
     const grew = unseen > previousUnseen.current;
     previousUnseen.current = unseen;
-    if (!grew || reduceMotion) return;
+    // Re-runs when the preference changes too, which is harmless: the count did not grow, so this
+    // returns before anything sounds. Toggling the setting is not an arrival.
+    if (!grew) return;
+    // Above the reduced-motion gate, deliberately. Someone who asked the system for less movement
+    // did not ask for less sound — the two settings mean different things, and folding them
+    // together would silently take the feature away from the users most likely to want it.
+    if (soundEnabled) playNotificationSound();
+    if (reduceMotion) return;
     setBurst((n) => n + 1);
     setBursting(true);
     const timer = setTimeout(() => setBursting(false), BURST_MS);
     return () => clearTimeout(timer);
-  }, [unseen, reduceMotion]);
+  }, [unseen, reduceMotion, soundEnabled]);
 
   // Closing is what marks them read, so every path out of the panel goes through here — outside
   // click, Escape, and clicking the bell again all mean the same thing.
@@ -289,16 +309,42 @@ export function NotificationBell() {
                   {t("notifications.unseen", { n: unseen })}
                 </span>
               )}
-              {items.length > 0 && (
+              <div className="ml-auto flex items-center gap-0.5">
+                {/* Outside the `items.length` guard the clear button sits behind: an empty panel is
+                    exactly where someone goes to turn the sound on *before* the next run finishes,
+                    and a control that appears only once there is something to hear is a control
+                    they can only find too late. */}
                 <button
                   type="button"
-                  onClick={clear}
-                  className="ml-auto flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.06]"
+                  aria-pressed={soundEnabled}
+                  onClick={() => {
+                    const next = !soundEnabled;
+                    void setSoundEnabled(next);
+                    // Turning it on plays it. Partly so the choice is informed — nobody should have
+                    // to wait for a random background job to learn what they just agreed to — and
+                    // partly because this click is a user gesture, which is what an `AudioContext`
+                    // needs to be born unsuspended. See `lib/notificationSound`.
+                    if (next) previewNotificationSound();
+                  }}
+                  title={soundEnabled ? t("notifications.soundDisable") : t("notifications.soundEnable")}
+                  aria-label={soundEnabled ? t("notifications.soundDisable") : t("notifications.soundEnable")}
+                  className={`flex items-center rounded-md p-1 hover:bg-black/[0.05] dark:hover:bg-white/[0.06] ${
+                    soundEnabled ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+                  }`}
                 >
-                  <Trash2 size={11} />
-                  {t("notifications.clearAll")}
+                  {soundEnabled ? <Volume2 size={12} /> : <VolumeX size={12} />}
                 </button>
-              )}
+                {items.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={clear}
+                    className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.06]"
+                  >
+                    <Trash2 size={11} />
+                    {t("notifications.clearAll")}
+                  </button>
+                )}
+              </div>
             </div>
 
             {items.length === 0 ? (
@@ -317,6 +363,8 @@ export function NotificationBell() {
                     key={item.id}
                     item={item}
                     locale={locale}
+                    workspaceName={item.workspaceId ? (workspaceNames.get(item.workspaceId) ?? null) : null}
+                    foreign={item.workspaceId !== null && item.workspaceId !== activeWorkspaceId}
                     onRemove={() => remove(item.id)}
                     onFollowed={() => setOpen(false)}
                   />
@@ -331,7 +379,7 @@ export function NotificationBell() {
 }
 
 /**
- * One entry: where it happened, what it did, and when it finished.
+ * One entry: where it happened, what it did, when it finished, and which workspace it belonged to.
  *
  * The origin is a chip rather than prose because it is the field the eye scans — with a mixed list
  * (a fetch, two generations, a review) the menu name is what separates them.
@@ -339,11 +387,19 @@ export function NotificationBell() {
 function Row({
   item,
   locale,
+  workspaceName,
+  foreign,
   onRemove,
   onFollowed,
 }: {
   item: AppNotification;
   locale: string;
+  /** `null` when the notification predates any workspace, or when the one it names has since been
+   *  deleted — the two cases the footer line has nothing to say about. */
+  workspaceName: string | null;
+  /** In some *other* workspace than the one on screen. Only changes what the button's tooltip
+   *  promises: the jump itself works the same either way. */
+  foreign: boolean;
   onRemove: () => void;
   /** Closes the panel. Following a notification means going somewhere, and a panel left open over
    *  the destination is one the user has to dismiss before they can look at what they came for. */
@@ -352,6 +408,13 @@ function Row({
   const t = useT();
   const Icon = STATUS_ICON[item.status];
   const finished = new Date(item.finishedAt);
+  /* A deleted workspace is nowhere to go, so the button goes rather than fails on click. The
+     entry stays: it is still a true record of something that finished. */
+  const followable = item.target && !(foreign && workspaceName === null);
+  const goLabel =
+    foreign && workspaceName
+      ? t("notifications.goOtherWorkspace", { name: workspaceName })
+      : t("notifications.go");
 
   return (
     <div
@@ -381,24 +444,38 @@ function Row({
           </p>
         )}
         {/* Date *and* time, both always: a list that mixes today and yesterday needs the date to be
-            readable, and "14:32" alone is a lie once the app has been open overnight. */}
-        <p className="mt-0.5 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
-          {finished.toLocaleDateString(locale, { day: "2-digit", month: "short" })}
-          {" · "}
-          {finished.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
+            readable, and "14:32" alone is a lie once the app has been open overnight. The workspace
+            closes the line because the list spans all of them — without it two identical "Fetch
+            finished" rows are indistinguishable, and the button under them goes to different
+            places. Truncated rather than wrapped: a long workspace name should cost the name, not
+            the timestamp, which is why the name is the flexible half of the row. */}
+        <p className="mt-0.5 flex items-baseline gap-1 text-[10px] text-[var(--cf-text-muted)]">
+          <span className="shrink-0 tabular-nums">
+            {finished.toLocaleDateString(locale, { day: "2-digit", month: "short" })}
+            {" · "}
+            {finished.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
+          </span>
+          {workspaceName && (
+            <>
+              <span className="shrink-0">—</span>
+              <span className="min-w-0 truncate font-medium" title={workspaceName}>
+                {workspaceName}
+              </span>
+            </>
+          )}
         </p>
       </div>
 
       <div className="flex shrink-0 items-center gap-0.5">
-        {item.target && (
+        {followable && (
           <button
             type="button"
             onClick={() => {
               onFollowed();
-              void followNotification(item.target!).catch((e: unknown) => pushErrorToast(String(e)));
+              void followNotification(item).catch((e: unknown) => pushErrorToast(String(e)));
             }}
-            title={t("notifications.go")}
-            aria-label={t("notifications.go")}
+            title={goLabel}
+            aria-label={goLabel}
             className="rounded p-0.5 text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-accent)]"
           >
             <ArrowRight size={12} />

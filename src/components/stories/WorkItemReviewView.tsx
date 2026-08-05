@@ -54,13 +54,17 @@ import {
   draftIsEmpty,
   effortLabel,
   isRewrite,
+  isSessionRunning,
   kindOf,
+  stagesRunning,
   useWorkItemReviewStore,
   type CriterionProposal,
+  type DraftTask,
   type PublishPart,
   type ReviewTab,
   type TaskProposal,
 } from "../../state/workItemReviewStore";
+import { ContextMenu } from "../api/CollectionTree";
 import { useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
 import { useAiProviderStore } from "../../state/aiProviderStore";
@@ -415,7 +419,7 @@ function ModelTag() {
 /** The button that runs one tab's AI stage, sitting in the pane whose content it produces. */
 function RunStage({ stage, label }: { stage: WorkItemReviewStage; label: string }) {
   const t = useT();
-  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage[stage]));
+  const running = useWorkItemReviewStore((s) => Boolean(stagesRunning(s)[stage]));
   const ready = useWorkItemReviewStore((s) => Boolean(s.item) && s.status === "open");
 
   return (
@@ -446,7 +450,7 @@ function RunStage({ stage, label }: { stage: WorkItemReviewStage; label: string 
  */
 function RunTasksMenu() {
   const t = useT();
-  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage.tasks || s.runByStage.tasksqa));
+  const running = useWorkItemReviewStore((s) => Boolean(stagesRunning(s).tasks || stagesRunning(s).tasksqa));
   const ready = useWorkItemReviewStore((s) => Boolean(s.item) && s.status === "open");
   const [open, setOpen] = useState(false);
 
@@ -842,7 +846,7 @@ function DescriptionTab({ width, seam }: { width: string; seam: React.ReactNode 
   const reproSteps = useWorkItemReviewStore((s) => s.reproSteps);
   const proposal = useWorkItemReviewStore((s) => s.proposedDescription);
   const produced = useWorkItemReviewStore((s) => s.producedByStage.description);
-  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage.description));
+  const running = useWorkItemReviewStore((s) => Boolean(stagesRunning(s).description));
   const open = useWorkItemReviewStore((s) => s.status === "open");
   if (!item) return null;
 
@@ -1112,7 +1116,7 @@ function CriteriaTab({ width, seam }: { width: string; seam: React.ReactNode }) 
   const criteria = useWorkItemReviewStore((s) => s.criteria);
   const proposals = useWorkItemReviewStore((s) => s.proposedCriteria);
   const produced = useWorkItemReviewStore((s) => s.producedByStage.criteria);
-  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage.criteria));
+  const running = useWorkItemReviewStore((s) => Boolean(stagesRunning(s).criteria));
   const open = useWorkItemReviewStore((s) => s.status === "open");
 
   const body = () => {
@@ -1383,7 +1387,7 @@ function TasksTab({ width, seam }: { width: string; seam: React.ReactNode }) {
   const proposals = useWorkItemReviewStore((s) => s.proposedTasks);
   const producedDev = useWorkItemReviewStore((s) => s.producedByStage.tasks);
   const producedQa = useWorkItemReviewStore((s) => s.producedByStage.tasksqa);
-  const running = useWorkItemReviewStore((s) => Boolean(s.runByStage.tasks || s.runByStage.tasksqa));
+  const running = useWorkItemReviewStore((s) => Boolean(stagesRunning(s).tasks || stagesRunning(s).tasksqa));
   const open = useWorkItemReviewStore((s) => s.status === "open");
   if (!item) return null;
 
@@ -1497,6 +1501,7 @@ function DraftPane({
   part,
   count,
   confirm,
+  note,
   width,
   children,
 }: {
@@ -1505,6 +1510,8 @@ function DraftPane({
   part: PublishPart;
   count: number;
   confirm: string;
+  /** What emptying this pane costs, said once next to the bin. See `PaneNote`. */
+  note?: string;
   /** Omitted on the last pane, which takes whatever the two before it leave. */
   width?: string;
   children: React.ReactNode;
@@ -1524,15 +1531,18 @@ function DraftPane({
       action={
         staged &&
         open && (
-          <button
-            type="button"
-            onClick={() => store().discardDraft(part)}
-            title={t("huReview.discardPartHint")}
-            className={`${ICON_ACTION} hover:text-[var(--cf-danger)]`}
-            aria-label={t("huReview.discardPart")}
-          >
-            <Trash2 size={12} />
-          </button>
+          <>
+            {note && <PaneNote note={note} />}
+            <button
+              type="button"
+              onClick={() => store().discardDraft(part)}
+              title={t("huReview.discardPartHint")}
+              className={`${ICON_ACTION} hover:text-[var(--cf-danger)]`}
+              aria-label={t("huReview.discardPart")}
+            >
+              <Trash2 size={12} />
+            </button>
+          </>
         )
       }
       footer={
@@ -1610,7 +1620,7 @@ function SaveState() {
 }
 
 /**
- * The note that rides next to a draft row's bin.
+ * The note that rides next to a draft pane's bin.
  *
  * The two lists are published in opposite ways and the bin looks identical in both: the criteria
  * are one field that gets rewritten whole — seeded with the ones the work item already had, so the
@@ -1618,19 +1628,20 @@ function SaveState() {
  * and the list only ever holds what does not exist yet. So the same gesture deletes on the board in
  * one pane and merely cancels in the other, which is not something a bin icon can say on its own.
  *
- * Revealed with the bin rather than always on: a warning that is only true when you are about to
- * press something belongs where the pointer already is, and fifteen standing warning triangles on a
- * list of criteria are read as decoration by the second one.
+ * One per pane, in the header, rather than one per row: what it warns about is a property of the
+ * list, not of the criterion you happen to be hovering, and fifteen copies of the same triangle
+ * down a column are read as decoration by the second one. Next to the bin because that is the
+ * gesture it qualifies.
  */
-function BinNote({ icon: Icon, note, tone }: { icon: typeof CircleAlert; note: string; tone: string }) {
+function PaneNote({ note }: { note: string }) {
   return (
     <span
       role="img"
       title={note}
       aria-label={note}
-      className={`flex h-5 w-5 shrink-0 cursor-help items-center justify-center opacity-0 transition-opacity group-hover:opacity-100 ${tone}`}
+      className="flex h-6 w-6 shrink-0 cursor-help items-center justify-center text-[var(--cf-warning)]"
     >
-      <Icon size={11} />
+      <TriangleAlert size={12} />
     </span>
   );
 }
@@ -1915,18 +1926,15 @@ function DraftCriterion({
           className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 text-[11.5px] font-medium text-[var(--cf-text)] outline-none placeholder:font-normal placeholder:italic placeholder:text-[var(--cf-text-muted)] hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
         />
         {open && (
-          <div className="flex shrink-0 items-center gap-0.5">
-            <BinNote icon={TriangleAlert} note={t("huReview.binNoteCriteria")} tone="text-[var(--cf-warning)]" />
-            <button
-              type="button"
-              onClick={onRemove}
-              title={t("stories.removeCriterion")}
-              aria-label={t("stories.removeCriterion")}
-              className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
-            >
-              <Trash2 size={11} />
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onRemove}
+            title={t("stories.removeCriterion")}
+            aria-label={t("stories.removeCriterion")}
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+          >
+            <Trash2 size={11} />
+          </button>
         )}
       </div>
       {expanded && (
@@ -1939,6 +1947,164 @@ function DraftCriterion({
         />
       )}
     </article>
+  );
+}
+
+/**
+ * One staged task, folded down to a line.
+ *
+ * Same treatment as `DraftCriterion`, and for a sharper reason: a generated task carries a
+ * "¿Qué? / ¿Cómo? / ¿Para qué?" body that runs to twenty lines, so five of them made the column a
+ * document to scroll rather than a list to check. Folded, the row answers the questions you ask
+ * when reviewing a plan — what is it, how long, how important, and whose work it is — and the body
+ * is one click away for the one you want to read.
+ *
+ * The numbers are shown in the header and edited in the footer rather than duplicated as inputs:
+ * two live copies of the same value in one card is a race the user has to arbitrate.
+ */
+function DraftTaskCard({
+  at,
+  task,
+  open,
+  onChange,
+  onRemove,
+}: {
+  at: number;
+  task: DraftTask;
+  open: boolean;
+  onChange: (patch: Partial<DraftTask>) => void;
+  onRemove: () => void;
+}) {
+  const t = useT();
+  // A task with no title yet is one the user just added and is about to fill in — it opens on its
+  // own rather than making them find the chevron first. Same rule as a blank criterion.
+  const [expanded, setExpanded] = useState(!task.title.trim());
+
+  return (
+    <article
+      style={riseDelay(at)}
+      className={`group rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] ${CARD_MOTION}`}
+    >
+      <div className="flex items-center gap-1.5 border-b border-[var(--cf-border)] px-2.5 py-1">
+        <button
+          type="button"
+          onClick={() => setExpanded((was) => !was)}
+          aria-expanded={expanded}
+          title={t(expanded ? "huReview.collapseTask" : "huReview.expandTask")}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        >
+          <ChevronRight size={12} className={`transition-transform duration-200 ${expanded ? "rotate-90" : ""}`} />
+        </button>
+        <KindChip kind={task.kind} />
+        {/* Editable in place, like the criterion's: renaming five tasks should not mean opening
+            and closing five cards. */}
+        <input
+          value={task.title}
+          readOnly={!open}
+          onChange={(e) => onChange({ title: e.target.value })}
+          placeholder={t("huReview.taskTitlePlaceholder")}
+          aria-label={t("stories.fieldTitle")}
+          className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[11.5px] font-medium text-[var(--cf-text)] outline-none placeholder:font-sans placeholder:font-normal placeholder:italic placeholder:text-[var(--cf-text-muted)] hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
+        />
+        {/* Read-only here on purpose — see the note on the component. Unset values say nothing
+            rather than showing a zero, which is the same rule `PlanField` follows. */}
+        <span className="flex shrink-0 items-center gap-1.5 text-[10px] tabular-nums text-[var(--cf-text-muted)]">
+          {task.estimateHours > 0 && (
+            <span title={t("huReview.estimate")}>
+              {task.estimateHours}
+              {t("huReview.hoursShort")}
+            </span>
+          )}
+          {task.priority > 0 && <span title={t("stories.fieldPriority")}>P{task.priority}</span>}
+          <span
+            title={t("huReview.activityHint")}
+            className="rounded-full border border-[var(--cf-border)] px-1.5 py-px font-mono"
+          >
+            {task.kind === "qa" ? "QA" : "DEV"}
+          </span>
+        </span>
+        {open && (
+          <button
+            type="button"
+            onClick={onRemove}
+            title={t("huReview.unstage")}
+            aria-label={t("huReview.unstage")}
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+          >
+            <Trash2 size={11} />
+          </button>
+        )}
+      </div>
+      {expanded && (
+        <div className="cf-fade-in px-2.5 pb-2 pt-1">
+          <textarea
+            value={task.detail}
+            readOnly={!open}
+            rows={Math.max(3, task.detail.split("\n").length)}
+            onChange={(e) => onChange({ detail: e.target.value })}
+            className="w-full resize-y bg-transparent text-[11px] leading-snug text-[var(--cf-text-muted)] outline-none read-only:cursor-default"
+          />
+          <PlanningRow
+            priority={task.priority}
+            hours={task.estimateHours}
+            kind={task.kind}
+            readOnly={!open}
+            onPriority={(priority) => onChange({ priority })}
+            onHours={(estimateHours) => onChange({ estimateHours })}
+          />
+        </div>
+      )}
+    </article>
+  );
+}
+
+/**
+ * "Add a task", asked as one question instead of two.
+ *
+ * The kind decides the Azure activity and the shape of the body, and for QA the body has two
+ * conventions — a numbered list of cases, or Gherkin scenarios — so a strict reading would be
+ * "dev or qa?" followed by "list or gherkin?". Three items in one menu answers both in a single
+ * click, and nobody has to back out of the first question to change their mind about it.
+ *
+ * Every choice lands a filled-in skeleton rather than a blank card. A blank task is a card that
+ * says nothing about what belongs in it; a template is the same prompt the generated ones follow,
+ * so a hand-written task and a proposed one read alike on the board.
+ */
+function AddTaskButton() {
+  const t = useT();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const add = (kind: "dev" | "qa", flavour: "plain" | "gherkin") => {
+    setMenu(null);
+    store().addDraftTask(kind, flavour);
+  };
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={(e) => {
+          const box = e.currentTarget.getBoundingClientRect();
+          setMenu({ x: box.left, y: box.bottom + 4 });
+        }}
+        className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--cf-border)] py-1.5 text-[11.5px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+      >
+        <Plus size={12} />
+        {t("huReview.addTask")}
+      </button>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={[
+            { label: t("huReview.addTaskDev"), icon: Wrench, onClick: () => add("dev", "plain") },
+            { label: t("huReview.addTaskQaList"), icon: FlaskConical, onClick: () => add("qa", "plain") },
+            { label: t("huReview.addTaskQaGherkin"), icon: FlaskConical, onClick: () => add("qa", "gherkin") },
+          ]}
+        />
+      )}
+    </>
   );
 }
 
@@ -2011,6 +2177,7 @@ function DraftTab() {
         part="criteria"
         count={criteria.length}
         width={DRAFT_CRIT_WIDTH}
+        note={t("huReview.binNoteCriteria")}
         confirm={t("huReview.confirmCriteria").replace("{n}", String(criteria.filter((c) => c.trim()).length))}
       >
         <div className="space-y-1.5">
@@ -2044,61 +2211,21 @@ function DraftTab() {
         label={t("huReview.stepTasks")}
         part="tasks"
         count={tasks.length}
+        note={t("huReview.binNoteTasks")}
         confirm={t("huReview.confirmTasks").replace("{n}", String(tasks.length))}
       >
         <div className="space-y-1.5">
           {tasks.map((task, at) => (
-            <article
+            <DraftTaskCard
               key={at}
-              style={riseDelay(at)}
-              className={`group rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 ${CARD_MOTION}`}
-            >
-              <div className="flex items-center gap-1.5">
-                <KindChip kind={task.kind} />
-                <input
-                  value={task.title}
-                  readOnly={!open}
-                  onChange={(e) => store().setDraftTask(at, { title: e.target.value })}
-                  className="min-w-0 flex-1 rounded border border-transparent bg-transparent px-1 py-0.5 font-mono text-[11.5px] font-medium text-[var(--cf-text)] outline-none hover:border-[var(--cf-field-border)] focus:border-[var(--cf-accent)] read-only:hover:border-transparent"
-                />
-                {open && (
-                  <>
-                    {/* Muted circle rather than the criteria's warning triangle: removing a task
-                        here cancels a creation, it does not delete anything anyone else can see. */}
-                    <BinNote
-                      icon={CircleAlert}
-                      note={t("huReview.binNoteTasks")}
-                      tone="text-[var(--cf-text-muted)]"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => store().removeDraftTask(at)}
-                      title={t("huReview.unstage")}
-                      aria-label={t("huReview.unstage")}
-                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
-                    >
-                      <Trash2 size={11} />
-                    </button>
-                  </>
-                )}
-              </div>
-              <textarea
-                value={task.detail}
-                readOnly={!open}
-                rows={Math.max(2, task.detail.split("\n").length)}
-                onChange={(e) => store().setDraftTask(at, { detail: e.target.value })}
-                className="mt-1 w-full resize-y bg-transparent text-[11px] leading-snug text-[var(--cf-text-muted)] outline-none read-only:cursor-default"
-              />
-              <PlanningRow
-                priority={task.priority}
-                hours={task.estimateHours}
-                kind={task.kind}
-                readOnly={!open}
-                onPriority={(priority) => store().setDraftTask(at, { priority })}
-                onHours={(estimateHours) => store().setDraftTask(at, { estimateHours })}
-              />
-            </article>
+              at={at}
+              task={task}
+              open={open}
+              onChange={(patch) => store().setDraftTask(at, patch)}
+              onRemove={() => store().removeDraftTask(at)}
+            />
           ))}
+          {open && <AddTaskButton />}
         </div>
       </DraftPane>
     </>
@@ -2125,7 +2252,7 @@ function TabBar() {
   const proposedDescription = useWorkItemReviewStore((s) => s.proposedDescription);
   const proposedCriteria = useWorkItemReviewStore((s) => s.proposedCriteria);
   const proposedTasks = useWorkItemReviewStore((s) => s.proposedTasks);
-  const running = useWorkItemReviewStore((s) => s.runByStage);
+  const running = useWorkItemReviewStore(stagesRunning);
 
   const draftEmpty = draftIsEmpty(draft);
   // What each tab is holding, so the strip carries the counts and nobody has to open a tab to find
@@ -2262,6 +2389,10 @@ function HistoryModal({ onClose }: { onClose: () => void }) {
   const t = useT();
   const history = useWorkItemReviewStore((s) => s.history);
   const openId = useWorkItemReviewStore((s) => s.sessionId);
+  // Subscribed once for the whole list rather than per row: a row is a `<div>` inside a `.map`, not
+  // a component, so a hook per row isn't available — and this map changes rarely enough that one
+  // subscription re-rendering the modal costs nothing.
+  const runs = useWorkItemReviewStore((s) => s.runsBySession);
 
   return (
     <ApiModal
@@ -2302,7 +2433,18 @@ function HistoryModal({ onClose }: { onClose: () => void }) {
                       {keyOf(row.payload) || `#${row.work_item_id}`}
                     </span>
                     <span className="min-w-0 truncate font-medium">{row.title}</span>
-                    <StatusChip status={statusOf(row.payload)} />
+                    {/* Live beats persisted, the same way a running batch outranks its saved state
+                        in `StoryBatchList`. A session set aside mid-generation is still a draft on
+                        disk — but "still working" is the more useful thing to say about it, and the
+                        status comes back on its own the moment the run lands. */}
+                    {isSessionRunning(runs, row.id) ? (
+                      <span className="flex shrink-0 items-center gap-1 text-[10.5px] text-[var(--cf-accent)]">
+                        <ThinkingOrb size="sm" />
+                        {t("huReview.statusWorking")}
+                      </span>
+                    ) : (
+                      <StatusChip status={statusOf(row.payload)} />
+                    )}
                   </p>
                   <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
                     <span>{new Date(row.updated_at).toLocaleString()}</span>
@@ -2320,6 +2462,20 @@ function HistoryModal({ onClose }: { onClose: () => void }) {
                     )}
                   </p>
                 </button>
+                {/* Always visible while it runs, unlike the delete button that appears on hover:
+                    this is the only way to call off a generation whose screen the user has already
+                    left, and a control you have to go looking for is not one you find in a hurry. */}
+                {isSessionRunning(runs, row.id) && (
+                  <button
+                    type="button"
+                    onClick={() => void store().stopSession(row.id)}
+                    title={t("huReview.stopRun")}
+                    aria-label={t("huReview.stopRun")}
+                    className={`shrink-0 ${ICON_ACTION} hover:text-[var(--cf-danger)]`}
+                  >
+                    <Square size={11} className="fill-current" />
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -2455,7 +2611,7 @@ export function WorkItemReviewView() {
   const item = useWorkItemReviewStore((s) => s.item);
   const title = useWorkItemReviewStore((s) => s.title);
   const status = useWorkItemReviewStore((s) => s.status);
-  const running = useWorkItemReviewStore((s) => s.runByStage);
+  const running = useWorkItemReviewStore(stagesRunning);
   const openedFrom = useWorkItemReviewStore((s) => s.openedFrom);
   const publishing = useWorkItemReviewStore((s) => s.publishing);
   const draft = useWorkItemReviewStore((s) => s.draft);

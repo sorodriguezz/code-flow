@@ -97,7 +97,43 @@ import { AiErrorBanner } from "./AiErrorBanner";
 import type { PrDecision, PullRequestSummary, PrCommentThread, SavedFinding } from "../../types/domain";
 
 const PANEL_MIN = 280;
-const PANEL_MAX = 520;
+
+/**
+ * How wide the panel is allowed to get: half the window, and no more.
+ *
+ * It used to be a flat 520px, which was a reasonable *default* mistaken for a ceiling — fine for
+ * glancing at a chat beside your code, too narrow for the things this panel grew into. A PR review
+ * with findings, diffs and comment threads is a document, not a sidebar, and on a wide monitor 520
+ * was leaving two thirds of the screen to a file tree.
+ *
+ * Half is where it stops because past half it stops being a panel: the view it is docked beside
+ * becomes the smaller of the two, and the thing the user came to look at is the one that gets
+ * squeezed. Anyone who wants the review to have the whole window can close the panel and open the
+ * PR from its link instead.
+ *
+ * The floor keeps the ceiling above `PANEL_MIN` on a window too narrow for both — without it the
+ * clamp inverts and the panel is pinned to something smaller than its own minimum.
+ */
+const maxPanelWidth = () => Math.max(PANEL_MIN, Math.round(window.innerWidth / 2));
+
+/**
+ * That ceiling, kept current as the window is resized.
+ *
+ * A stored width outliving the window it was chosen in is the case this exists for: drag the panel
+ * out to 900 on an external display, unplug it, and a static maximum would leave the panel wider
+ * than the laptop screen with the app behind it squeezed to nothing. The clamp is applied to what
+ * is *rendered*, never written back — plug the display in again and the 900 the user chose is still
+ * what they get.
+ */
+function useMaxPanelWidth(): number {
+  const [max, setMax] = useState(maxPanelWidth);
+  useEffect(() => {
+    const onResize = () => setMax(maxPanelWidth());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return max;
+}
 
 /** A stored JSON column (a run's `meta` / `findings`), or `null` when it can't be read — memory
  * written by an older version is context to do without, never a crash. */
@@ -264,7 +300,6 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
   const jobsLoaded = useJobsStore((s) => (projectId ? s.loaded[projectId] : true));
   const workspaceLoaded = useJobsStore((s) => (workspaceBucket ? s.loaded[workspaceBucket] : true));
   const loadJobHistory = useJobsStore((s) => s.load);
-  const prsByProject = usePrStore((s) => s.prsByProject);
   const selectedPr = usePrStore((s) => s.selectedPr);
   const linkPr = usePrStore((s) => s.linkPr);
   const selectPr = usePrStore((s) => s.selectPr);
@@ -279,6 +314,10 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
   const switchTo = useChatStore((s) => s.switchTo);
   const [collapsed, setCollapsed] = useState(true);
   const [showModal, setShowModal] = useState(false);
+  /** Which row-opening is the current one. See `openEntry` — same monotonic-token idea as
+   * `memoryReqRef` further down, for the same reason: an answer that arrives after the question
+   * stopped being the one on screen has to be dropped, not applied. */
+  const openReqRef = useRef(0);
 
   useEffect(() => {
     if (!projectId) return;
@@ -322,6 +361,11 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
   const topFive = entries.slice(0, 5);
 
   const openEntry = (entry: ActivityEntry) => {
+    // Every row taken from here counts, whichever kind it is: the pull-request branch below can
+    // finish *after* the click that came next, and what makes that safe is knowing it was
+    // superseded. Bumped before any branch runs so a chat or an analysis opened in the meantime is
+    // enough to disown a review still in flight.
+    const token = ++openReqRef.current;
     if (entry.type === "chat") {
       if (!projectId) return;
       // Clear whatever else the panel might currently be showing — otherwise the chat
@@ -339,13 +383,23 @@ function ActivitySection({ projectId, workspaceId }: { projectId: string | null;
       usePrStore.getState().openLinkPrFromMeta(entry.job.meta, rowWorkspaceId);
       return;
     }
-    // A recorded decision opens the PR it was taken on, same as a review of it would.
+    // A recorded decision opens the PR it was taken on, same as a review of it would. The list it
+    // is looked up in is fetched on demand: the sidebar section that used to load it eagerly now
+    // waits to be unfolded, and this row has to work whether or not it ever was.
     if (entry.job.kind === "pr-review" || entry.job.kind === "pr-action") {
-      const pr = projectId ? prsByProject[projectId]?.find((p) => p.id === entry.job.meta.prId) : undefined;
-      if (pr) {
-        useAnalyzeUiStore.getState().hide();
-        selectPr(pr);
-      }
+      const prId = entry.job.meta.prId;
+      if (!projectId || typeof prId !== "number") return;
+      void usePrStore
+        .getState()
+        .ensureProjectPr(projectId, prId)
+        .then((pr) => {
+          // The click that started this is no longer the one the user is waiting on — a row opened
+          // since owns the panel now, and taking it over from behind is how a chat someone just
+          // opened turns back into a pull request under their hands.
+          if (openReqRef.current !== token || !pr) return;
+          useAnalyzeUiStore.getState().hide();
+          selectPr(pr);
+        });
     } else if (entry.job.kind === "analyze-changes") {
       selectPr(null);
       useAnalyzeUiStore.getState().showJob(entry.job.id);
@@ -1576,7 +1630,11 @@ export function AiPanel() {
   );
   const analyzeOpen = useAnalyzeUiStore((s) => s.open);
   const toggle = useUiStore((s) => s.toggleAiPanel);
-  const width = useLayoutStore((s) => s.sizes.aiPanelWidth);
+  const storedWidth = useLayoutStore((s) => s.sizes.aiPanelWidth);
+  const maxWidth = useMaxPanelWidth();
+  // What the panel is actually drawn at. Only ever narrower than what is stored, and only while the
+  // window is too small to honour it — see `useMaxPanelWidth`.
+  const width = Math.min(storedWidth, maxWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
 
@@ -1621,7 +1679,7 @@ export function AiPanel() {
         axis="x"
         value={width}
         min={PANEL_MIN}
-        max={PANEL_MAX}
+        max={maxWidth}
         invert
         onChange={(w) => setSize("aiPanelWidth", w)}
         onCommit={(w) => commitSize("aiPanelWidth", w)}
