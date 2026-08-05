@@ -168,6 +168,9 @@ export function ContextMenu({
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ left: x, top: y });
 
+  // The item count is in the deps because a menu can be *replaced* in place: a two-entry menu whose
+  // item opens a six-entry one keeps the same x and y, so measuring only on those would leave the
+  // taller list clamped to the shorter one's fit — hanging off the bottom of the window.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -176,7 +179,7 @@ export function ContextMenu({
       left: Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)),
       top: Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)),
     });
-  }, [x, y]);
+  }, [x, y, items.length, heading]);
 
   useEffect(() => {
     const onPointerDown = (e: MouseEvent) => {

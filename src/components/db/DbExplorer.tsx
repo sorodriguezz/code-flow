@@ -14,6 +14,7 @@ import {
   FolderPlus,
   Hash,
   KeyRound,
+  LayoutList,
   Loader2,
   Network,
   Pencil,
@@ -113,13 +114,22 @@ function TreeRow({
       aria-expanded={expandable ? expanded : undefined}
       title={title}
       tabIndex={0}
-      onClick={onToggle}
-      onDoubleClick={onOpen}
+      // No `onClick`: expanding is the chevron's job alone. A single click on the row used to
+      // toggle, which made every attempt to *select* a node fold or unfold it — and on a slow
+      // connection, expanding is a round trip, so brushing past a schema went and fetched it.
+      // Falls back to the chevron's job only for a node that *has* one — a folder with no open
+      // action of its own. On a leaf (a column, a key) there is nothing to expand, and calling
+      // toggle there would send a fetch for children that cannot exist.
+      onDoubleClick={() => {
+        if (onOpen) onOpen();
+        else if (expandable) onToggle();
+      }}
       onContextMenu={onContextMenu}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          (onOpen ?? onToggle)();
+          if (onOpen) onOpen();
+          else if (expandable) onToggle();
         } else if (e.key === "ArrowRight" && expandable && !expanded) {
           e.preventDefault();
           onToggle();
@@ -135,7 +145,20 @@ function TreeRow({
           : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       }`}
     >
-      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
+      {/* The only thing that expands. `stopPropagation` so a double click here folds and unfolds
+          rather than also firing the row's open action. */}
+      <span
+        onClick={(e) => {
+          if (!expandable) return;
+          e.stopPropagation();
+          onToggle();
+        }}
+        onDoubleClick={(e) => e.stopPropagation()}
+        aria-hidden={!expandable}
+        className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)] ${
+          expandable ? "cursor-pointer hover:text-[var(--cf-text)]" : ""
+        }`}
+      >
         {loading ? (
           <Loader2 size={11} className="animate-spin" />
         ) : expandable ? (
@@ -204,6 +227,15 @@ function NodeSubtree({
   // number, so "open" can't mean the data grid for them — which is why they used to mean nothing at
   // all: no double-click, no menu, a name in the tree you could only look at.
   const isDefinition = node.kind === "routine" || node.kind === "sequence";
+  // The level that *is* a schema, which differs by engine: a schema on the four SQL engines, and a
+  // database on Mongo, which has no schema level at all. The same rule the diagram uses, hoisted
+  // because the overview needs it too.
+  const isSchemaLike =
+    node.kind === "schema" ||
+    (node.kind === "database" &&
+      !engineInfo(
+        useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind ?? "postgres",
+      ).sql);
 
   const openData = () => {
     if (!isRelation) return;
@@ -211,6 +243,9 @@ function NodeSubtree({
   };
 
   const showDdl = () => void store.openDdl(connectionId, nodeRef, node.name);
+
+  /** Every object of this schema side by side, with its type, dates, size and comment. */
+  const showObjects = () => store.openSchema(connectionId, nodeRef, node.name);
 
   /**
    * Drops a generated statement into a new console.
@@ -259,6 +294,9 @@ function NodeSubtree({
   if (isDefinition) {
     menuItems.push({ label: t("db.showDdl"), icon: FileCode2, onClick: showDdl });
   }
+  if (isSchemaLike) {
+    menuItems.push({ label: t("db.showObjects"), icon: LayoutList, onClick: showObjects });
+  }
   if (node.kind === "database" || node.kind === "schema") {
     menuItems.push({
       label: t("db.newConsole"),
@@ -270,12 +308,7 @@ function NodeSubtree({
     // on the four SQL engines, and a database on Mongo, which has no schema level at all. Offering
     // it on a Mongo database rather than nowhere is the whole point — the collections and the
     // references between them are exactly what nobody can see from a tree.
-    const drawable =
-      node.kind === "schema" ||
-      !engineInfo(
-        useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind ?? "postgres",
-      ).sql;
-    if (drawable) {
+    if (isSchemaLike) {
       menuItems.push({
         label: t("db.showDiagram"),
         icon: Network,
@@ -358,12 +391,10 @@ function NodeSubtree({
         expandable={node.has_children}
         expanded={expanded}
         loading={loading}
-        onToggle={() => {
-          if (node.has_children) void store.toggleNode(connectionId, nodeRef, key);
-          else if (isRelation) openData();
-          else if (isDefinition) showDdl();
-        }}
-        onOpen={isRelation ? openData : isDefinition ? showDdl : undefined}
+        onToggle={() => void store.toggleNode(connectionId, nodeRef, key)}
+        onOpen={
+          isRelation ? openData : isDefinition ? showDdl : isSchemaLike ? showObjects : undefined
+        }
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();

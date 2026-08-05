@@ -756,7 +756,6 @@ export const deleteAiCheckpoint = (repoPath: string, checkpointId: string) =>
 
 export const defaultCommitTemplate = () => invoke<string>("default_commit_template");
 
-export const defaultReviewTemplate = () => invoke<string>("default_review_template");
 
 export const defaultAnalyzeTemplate = () => invoke<string>("default_analyze_template");
 
@@ -882,11 +881,14 @@ export const resolvePrCommentThread = (
 export const draftPrCommentReply = (conversation: string, note: string | null, runId: string) =>
   invoke<string>("draft_pr_comment_reply", { conversation, note, runId });
 
+/** `force` answers a skip that asked — a draft, a merged PR. Only ever set in reply to a
+ * {@link REVIEW_SKIPPED} message the user chose to override; a review never assumes it. */
 export const reviewPullRequest = (
   projectId: string,
   prId: number,
   jobId: string,
   level: string,
+  force = false,
   agent?: ChatAgentOverride | null,
 ) =>
   invoke<string>("review_pull_request", {
@@ -894,10 +896,54 @@ export const reviewPullRequest = (
     prId,
     jobId,
     level,
+    force,
     agentProvider: agent?.provider ?? null,
     agentModel: agent?.model ?? null,
     agentPrompt: agent?.prompt ?? null,
   });
+
+/** Prefix the backend puts on a review it stopped to ask about, so the panel can offer "review
+ * anyway" instead of rendering a perfectly ordinary draft as a failure. Mirrors
+ * `review_pipeline::SKIP_MARKER`. */
+export const REVIEW_SKIPPED = "REVIEW_SKIPPED::";
+
+/** One depth level as the settings screen edits it — every value resolved, so the screen shows
+ * what a review will really run under even before anything is customised. */
+export interface ReviewLevelSettings {
+  level: string;
+  minConfidence: number;
+  minConfidenceBlocker: number;
+  severities: string[];
+  lenses: number[];
+  subagents: boolean;
+  nitpicks: boolean;
+  filesPerGroup: number;
+  maxGroups: number;
+  crossFile: boolean;
+}
+
+/** The workspace's whole PR review policy. The numbers the engine enforces and freezes into every
+ * saved review — deliberately apart from the prompts, which are text handed to a model. */
+export interface ReviewEngineConfig {
+  levels: ReviewLevelSettings[];
+  qualityGate: { blockingSeverities: string[] };
+  scope: { include: string[]; exclude: string[] };
+  graph: { enabled: boolean; maxSymbols: number; maxCallers: number };
+  bundles: { contextLines: number; maxLinesPerFile: number; maxKbPerGroup: number };
+  workers: { maxParallel: number };
+  /** Every lens the catalog knows, as `[number, label]` — from the editable `review_lenses`
+   * prompt, so the level editor offers them by name rather than by number. */
+  lensCatalog: [number, string][];
+}
+
+export const getReviewEngineConfig = (workspaceId: string) =>
+  invoke<ReviewEngineConfig>("get_review_engine_config", { workspaceId });
+
+export const setReviewEngineConfig = (workspaceId: string, config: ReviewEngineConfig) =>
+  invoke<void>("set_review_engine_config", { workspaceId, config });
+
+export const resetReviewEngineConfig = (workspaceId: string) =>
+  invoke<void>("reset_review_engine_config", { workspaceId });
 
 /** Reviews a pull request from its link alone: the diff comes from the host's API, not from a
  * working copy. Weaker than {@link reviewPullRequest} by construction — the model sees the diff

@@ -83,6 +83,15 @@ export const FORWARD_POLL_MS = 4000;
  *  dragged out of a real group doesn't acquire a literal group called "Ungrouped". */
 export const UNGROUPED = "";
 
+/**
+ * Which page of the host editor to land on.
+ *
+ * It lives here rather than in the panel's own state because the caller is what knows: creating a
+ * VNC host from the "New connection" menu should open on Screen, not on Connection with the one
+ * field that matters two clicks away.
+ */
+export type RemoteDetailsTab = "connection" | "forwards" | "screen" | "advanced";
+
 // ---------------------------------------------------------------------------
 // Tabs
 // ---------------------------------------------------------------------------
@@ -220,6 +229,10 @@ interface RemoteState {
    * no address — and threading one setter through all four was prop drilling with no benefit.
    */
   detailsHostId: string | null;
+  /** Which page of that panel to show, or `null` to leave it on Connection. Cleared by every
+   *  `openDetails` that doesn't ask for one, so a tab requested once doesn't stick to the next
+   *  host. */
+  detailsTab: RemoteDetailsTab | null;
   /**
    * The host the tree is focused on, or `null`.
    *
@@ -238,11 +251,17 @@ interface RemoteState {
   setHostView: (view: "grid" | "list") => void;
   toggleGroup: (group: string) => void;
   setRenamingHost: (id: string | null) => void;
-  openDetails: (id: string) => void;
+  openDetails: (id: string, tab?: RemoteDetailsTab) => void;
   closeDetails: () => void;
   selectHost: (id: string | null) => void;
 
-  createHost: (name: string, groupName: string) => Promise<RemoteHostRow | null>;
+  /** `spec` is what a host is created *as* — the "New connection" menu passes an SSH, an FTP or a
+   *  VNC-shaped one. Omitted, it is `defaultHostSpec()`. */
+  createHost: (
+    name: string,
+    groupName: string,
+    spec?: RemoteHostSpec,
+  ) => Promise<RemoteHostRow | null>;
   saveHost: (row: RemoteHostRow, spec: RemoteHostSpec) => Promise<boolean>;
   renameHost: (id: string, name: string) => Promise<void>;
   deleteHost: (id: string) => Promise<void>;
@@ -381,6 +400,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   renamingHostId: null,
   selectedHostId: null,
   detailsHostId: null,
+  detailsTab: null,
 
   setWorkspace: async (workspaceId) => {
     if (pendingLoad?.workspaceId === workspaceId) return pendingLoad.promise;
@@ -411,6 +431,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       renamingHostId: null,
       selectedHostId: null,
       detailsHostId: null,
+      detailsTab: null,
       history: [],
     });
 
@@ -483,19 +504,19 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
 
   // Opening the panel also focuses the host: the panel and the highlighted row must never name two
   // different machines.
-  openDetails: (id) => set({ detailsHostId: id, selectedHostId: id }),
+  openDetails: (id, tab) => set({ detailsHostId: id, selectedHostId: id, detailsTab: tab ?? null }),
 
-  closeDetails: () => set({ detailsHostId: null }),
+  closeDetails: () => set({ detailsHostId: null, detailsTab: null }),
 
   // The old number goes the moment the host does — a stale latency under a new name is worse
   // than none, because it looks measured.
   selectHost: (selectedHostId) => set({ selectedHostId, latency: null }),
 
-  createHost: async (name, groupName) => {
+  createHost: async (name, groupName, hostSpec) => {
     const workspaceId = get().workspaceId;
     if (!workspaceId) return null;
     try {
-      const spec = JSON.stringify(defaultHostSpec());
+      const spec = JSON.stringify(hostSpec ?? defaultHostSpec());
       const row = await remoteCreateHost(workspaceId, name, groupName, spec, "");
       set((s) => ({ hosts: [...s.hosts, row] }));
       return row;

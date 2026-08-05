@@ -45,12 +45,9 @@ pub fn create_workspace(conn: &Connection, name: &str, icon: &str, color: &str) 
         "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![ws.id, ws.name, ws.icon, ws.color, ws.sort_order, ws.created_at],
     )?;
-    // Seed the workspace's editable prompt overrides (review standard + PR-description template)
-    // with their built-in defaults so a new workspace works out of the box and the user can edit.
-    for (kind, default) in [
-        ("review_standard", crate::ai::DEFAULT_PR_REVIEW_STANDARD),
-        ("pr_description", crate::ai::DEFAULT_PR_DESCRIPTION_TEMPLATE),
-    ] {
+    // Seed the workspace's editable prompt overrides with their built-in defaults so a new
+    // workspace works out of the box and the user can edit real text rather than an empty box.
+    for (kind, default) in WORKSPACE_PROMPT_KINDS {
         conn.execute(
             "INSERT INTO workspace_prompts (workspace_id, kind, content, updated_at) VALUES (?1, ?2, ?3, ?4)",
             params![ws.id, kind, default, ws.created_at],
@@ -58,6 +55,37 @@ pub fn create_workspace(conn: &Connection, name: &str, icon: &str, color: &str) 
     }
     Ok(ws)
 }
+
+/// Every per-workspace prompt `kind`, with its built-in default.
+///
+/// One list, because it is read in four places that must agree — creating a workspace, backfilling
+/// an existing one, importing one from a shared collection, and answering "restore default" — and
+/// a kind that reaches three of them is a prompt that silently falls back to the wrong text in the
+/// fourth.
+pub const WORKSPACE_PROMPT_KINDS: &[(&str, &str)] = &[
+    ("review_standard", crate::ai::DEFAULT_PR_REVIEW_STANDARD),
+    ("pr_description", crate::ai::DEFAULT_PR_DESCRIPTION_TEMPLATE),
+    // The PR review engine's own prompts: the depth directive of each level, the lens catalog, and
+    // the two roles the pipeline fans out into.
+    ("review_lenses", crate::ai::DEFAULT_REVIEW_LENSES),
+    ("review_level_basico", crate::ai::DEFAULT_REVIEW_LEVEL_BASICO),
+    ("review_level_completo", crate::ai::DEFAULT_REVIEW_LEVEL_COMPLETO),
+    ("review_level_ultra", crate::ai::DEFAULT_REVIEW_LEVEL_ULTRA),
+    ("review_worker", crate::ai::DEFAULT_REVIEW_WORKER),
+    ("review_crossfile", crate::ai::DEFAULT_REVIEW_CROSSFILE),
+    ("review_summary", crate::ai::DEFAULT_REVIEW_SUMMARY),
+    ("user_stories", crate::ai::DEFAULT_USER_STORIES_TEMPLATE),
+    ("story_verify", crate::ai::DEFAULT_STORY_VERIFY_TEMPLATE),
+    ("work_item_analyze", crate::ai::DEFAULT_WORK_ITEM_ANALYZE_TEMPLATE),
+    ("work_item_bug_analyze", crate::ai::DEFAULT_WORK_ITEM_BUG_ANALYZE_TEMPLATE),
+    ("work_item_description", crate::ai::DEFAULT_WORK_ITEM_DESCRIPTION_TEMPLATE),
+    ("work_item_criteria", crate::ai::DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE),
+    ("work_item_tasks", crate::ai::DEFAULT_WORK_ITEM_TASKS_TEMPLATE),
+    ("work_item_tasks_qa", crate::ai::DEFAULT_WORK_ITEM_TASKS_QA_TEMPLATE),
+    ("work_item_qa_estimation", crate::ai::DEFAULT_WORK_ITEM_QA_ESTIMATION),
+    ("repo_doc", crate::ai::DEFAULT_REPO_DOC_TEMPLATE),
+    ("workspace_doc", crate::ai::DEFAULT_WORKSPACE_DOC_TEMPLATE),
+];
 
 // ---------- review runs (durable review memory) ----------
 
@@ -257,29 +285,98 @@ pub fn purge_workspace_review_runs(conn: &Connection, workspace_id: &str) -> rus
     Ok(())
 }
 
+// ---------- review engine configuration ----------
+
+/// The workspace's review engine configuration, resolved.
+///
+/// A missing row, a blank one, or one no version of this build can parse all resolve to the
+/// built-in defaults — never to an error. A configuration nobody can read is a reason to review
+/// with the standard rules, not a reason to refuse to review.
+pub fn get_review_engine_config(
+    conn: &Connection,
+    workspace_id: &str,
+) -> crate::review::contract::ReviewEngineConfig {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT config FROM review_engine_config WHERE workspace_id = ?1",
+            params![workspace_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .ok()
+        .flatten();
+    crate::review::contract::ReviewEngineConfig::load(stored.as_deref())
+}
+
+/// Saves the workspace's review engine configuration. An empty string clears it back to the
+/// built-in defaults, the same way a blank prompt does.
+pub fn set_review_engine_config(
+    conn: &Connection,
+    workspace_id: &str,
+    config: &str,
+) -> rusqlite::Result<()> {
+    if config.trim().is_empty() {
+        conn.execute("DELETE FROM review_engine_config WHERE workspace_id = ?1", params![workspace_id])?;
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO review_engine_config (workspace_id, config, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(workspace_id) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at",
+        params![workspace_id, config, now()],
+    )?;
+    Ok(())
+}
+
+/// The most recent run of every **other** pull request of one repository — the raw material for
+/// [`crate::review::hints`].
+///
+/// Only the newest run per pull request: an older iteration's findings were superseded by the run
+/// that came after it, and carrying all of them would make one long-lived pull request drown out
+/// every other. Newest first, which is what makes the first hint seen the most recent one.
+pub fn review_runs_for_repo(
+    conn: &Connection,
+    workspace_id: &str,
+    repo_key: &str,
+    exclude_pr: i64,
+    limit: i64,
+) -> rusqlite::Result<Vec<crate::review::hints::PastRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT pr_id, created_at, findings FROM review_runs r
+         WHERE workspace_id = ?1
+           AND COALESCE(json_extract(meta, '$.repo_key'), '') = ?2
+           AND pr_id != ?3
+           AND created_at = (
+               SELECT MAX(created_at) FROM review_runs x
+               WHERE x.workspace_id = r.workspace_id AND x.pr_id = r.pr_id
+                 AND COALESCE(json_extract(x.meta, '$.repo_key'), '') = ?2
+           )
+         ORDER BY created_at DESC
+         LIMIT ?4",
+    )?;
+    let rows = stmt.query_map(params![workspace_id, repo_key, exclude_pr, limit], |row| {
+        Ok(crate::review::hints::PastRun {
+            pr_id: row.get(0)?,
+            created_at: row.get(1)?,
+            findings_json: row.get(2)?,
+        })
+    })?;
+    rows.collect()
+}
+
 // ---------- workspace prompts (review standard, PR description) ----------
 
 /// The built-in default text for a prompt `kind` — the fallback when a workspace has no override
 /// (or blanked it), and the source for the editor's "restore default".
 pub fn workspace_prompt_default(kind: &str) -> &'static str {
-    match kind {
-        "pr_description" => crate::ai::DEFAULT_PR_DESCRIPTION_TEMPLATE,
-        "user_stories" => crate::ai::DEFAULT_USER_STORIES_TEMPLATE,
-        "story_verify" => crate::ai::DEFAULT_STORY_VERIFY_TEMPLATE,
-        "work_item_analyze" => crate::ai::DEFAULT_WORK_ITEM_ANALYZE_TEMPLATE,
-        "work_item_bug_analyze" => crate::ai::DEFAULT_WORK_ITEM_BUG_ANALYZE_TEMPLATE,
-        "work_item_description" => crate::ai::DEFAULT_WORK_ITEM_DESCRIPTION_TEMPLATE,
-        "work_item_criteria" => crate::ai::DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE,
-        "work_item_tasks" => crate::ai::DEFAULT_WORK_ITEM_TASKS_TEMPLATE,
-        "work_item_tasks_qa" => crate::ai::DEFAULT_WORK_ITEM_TASKS_QA_TEMPLATE,
-        // Not a prompt of its own: the hours the QA ladder is estimated with, spliced into the
-        // template above at its slot. Stored apart so recalibrating them is not an edit to prose.
-        "work_item_qa_estimation" => crate::ai::DEFAULT_WORK_ITEM_QA_ESTIMATION,
-        "repo_doc" => crate::ai::DEFAULT_REPO_DOC_TEMPLATE,
-        "workspace_doc" => crate::ai::DEFAULT_WORKSPACE_DOC_TEMPLATE,
-        // review_standard and anything unexpected fall back to the review methodology.
-        _ => crate::ai::DEFAULT_PR_REVIEW_STANDARD,
-    }
+    // `work_item_qa_estimation` is in the list but is not a prompt of its own: it is the hours the
+    // QA ladder is estimated with, spliced into that template at its slot. It is stored apart so
+    // recalibrating the numbers is not an edit to prose.
+    WORKSPACE_PROMPT_KINDS
+        .iter()
+        .find(|(k, _)| *k == kind)
+        .map(|(_, default)| *default)
+        // `review_standard` and anything unexpected fall back to the review methodology.
+        .unwrap_or(crate::ai::DEFAULT_PR_REVIEW_STANDARD)
 }
 
 /// The workspace's saved override for `kind`, or the built-in default when the row is missing or

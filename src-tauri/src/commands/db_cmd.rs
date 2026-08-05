@@ -13,7 +13,8 @@ use tauri::State;
 
 use crate::datasource::{
     filter_children, scope_to_current_database, DbConnectionConfig, DbEditResult, DbExecContext,
-    DbExecuteResult, DbForeignKey, DbNode, DbNodeKind, DbNodeRef, DbRegistry, DbRowEdit,
+    DbExecuteResult, DbForeignKey, DbNode, DbNodeKind, DbNodeRef, DbObjectInfo, DbRegistry,
+    DbRowEdit,
     DbSchemaDiagram, DbSchemaGroup, DbServerInfo, DbStatementResult, DbTableDataRequest, Session,
 };
 use crate::db::datasource_queries as queries;
@@ -468,6 +469,27 @@ pub async fn db_foreign_keys(
 /// Routed through `registry.run` so the Cancel button reaches it: on a schema with hundreds of
 /// tables these catalog queries are the slowest thing the workspace sends, and a diagram that can't
 /// be abandoned would hold the session until it finished.
+/// Every object of one schema, with the metadata its engine keeps about it.
+///
+/// Cancellable through `run_id` like the diagram is, and for the same reason: on a schema with
+/// hundreds of tables the size columns are the slow part, and somebody who opened the tab by
+/// accident should be able to take it back.
+#[tauri::command]
+pub async fn db_schema_objects(
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    node: DbNodeRef,
+    run_id: String,
+) -> Result<Vec<DbObjectInfo>, String> {
+    let config = resolve_config(&db, &connection_id)?;
+    let session = registry.session(&config, node.database.as_deref()).await?;
+    let key = DbRegistry::session_key(&connection_id, node.database.as_deref());
+    registry
+        .run(&run_id, &session, &key, session.schema_objects(&node))
+        .await
+}
+
 #[tauri::command]
 pub async fn db_schema_diagram(
     db: State<'_, Db>,

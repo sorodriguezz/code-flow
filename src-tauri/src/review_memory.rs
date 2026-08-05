@@ -3,12 +3,11 @@
 //! with it — this module is the pure logic that turns a review's markdown into the slim,
 //! comparable findings kept there, and diffs a re-review against the previous run.
 //!
-//! The finding parse is intentionally minimal: it extracts only what memory + reconciliation need
-//! (id, severity, type, category, location, confidence). The canonical, user-facing render stays
-//! in `src/lib/parseAnalysis.ts`; this must track that format's finding header, which is why both
-//! are documented as a shared contract.
+//! Parsing the review markdown into findings used to live here too. It moved to
+//! `review::merge`, which needs every field rather than the slim projection, and keeping a second
+//! reader of the same format was how the two would eventually disagree about it: what this module
+//! stores is now a projection of what that one parsed (`review::merge::Finding::to_memory`).
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -113,99 +112,24 @@ pub struct ReviewMeta {
     pub additions: usize,
     #[serde(default)]
     pub deletions: usize,
-}
-
-/// Files touched and lines added / removed across a reviewed diff — the "scope" line of a review
-/// summary. Counted from the diff the review was actually given, so it describes the review rather
-/// than the branch.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct DiffScope {
-    pub files: usize,
-    pub additions: usize,
-    pub deletions: usize,
-}
-
-/// Parses the slim finding projection from a review's markdown. Mirrors the finding header the
-/// frontend parser (`parseAnalysis.ts`) emits: `### {emoji} [{Severidad} · {Tipo}] {Categoría} · F-NNN`.
-pub fn parse_findings(review_md: &str) -> Vec<MemoryFinding> {
-    // Same shape as parseAnalysis.ts HEADER_RE, adapted to Rust regex (unicode-aware by default).
-    let header = Regex::new(
-        r"(?m)^###\s*(🚨|⚠️|ℹ️)\s*\[([^·\]]+)·([^\]]+)\]\s*([^·]+)·\s*(F-\d+)\s*$",
-    )
-    .expect("valid header regex");
-    let loc_re = Regex::new(r"📍\s*Ubicaci[oó]n:\s*([^\n]+)").expect("valid loc regex");
-    let conf_re = Regex::new(r"🎯\s*Confianza:\s*(\d+)").expect("valid conf regex");
-
-    let matches: Vec<_> = header.captures_iter(review_md).collect();
-    let starts: Vec<usize> = header.find_iter(review_md).map(|m| m.start()).collect();
-
-    let mut out = Vec::new();
-    for (i, caps) in matches.iter().enumerate() {
-        let block_start = starts[i];
-        let block_end = starts.get(i + 1).copied().unwrap_or(review_md.len());
-        let block = &review_md[block_start..block_end];
-
-        let emoji = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-        let severity = match emoji {
-            "🚨" => "critical",
-            "⚠️" => "warning",
-            _ => "info",
-        };
-        let tipo = caps.get(3).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
-        let categoria = caps.get(4).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
-        let id = caps.get(5).map(|m| m.as_str().trim().to_string()).unwrap_or_default();
-
-        // Subtitle: first non-empty line after the header line, before the 📍/💭 fields.
-        let subtitulo = block
-            .lines()
-            .skip(1)
-            .map(str::trim)
-            .find(|l| !l.is_empty() && !l.starts_with('📍') && !l.starts_with('💭'))
-            .unwrap_or("")
-            .to_string();
-
-        let (archivo, lineas) = loc_re
-            .captures(block)
-            .and_then(|c| c.get(1))
-            .map(|m| parse_location(m.as_str()))
-            .unwrap_or((None, None));
-
-        let confianza = conf_re
-            .captures(block)
-            .and_then(|c| c.get(1))
-            .and_then(|m| m.as_str().parse::<i64>().ok());
-
-        out.push(MemoryFinding {
-            id,
-            severity: severity.to_string(),
-            tipo,
-            categoria,
-            subtitulo,
-            archivo,
-            lineas,
-            confianza,
-            estado: default_estado(),
-            thread_id: None,
-            introducido_en_iter: 0,
-            resuelto_en_iter: None,
-            motivo_descarte: None,
-            delta: None,
-        });
-    }
-    out
-}
-
-/// Splits a "📍 Ubicación" value into `(file, lines)`, stripping Markdown wrapping the model may
-/// have added — same tolerance as the frontend's `parseLocation`.
-fn parse_location(raw: &str) -> (Option<String>, Option<String>) {
-    let cleaned = raw.trim().replace(['`', '*', '_'], "");
-    let cleaned = cleaned.trim();
-    match cleaned.rsplit_once(':') {
-        Some((file, lines)) if !file.trim().is_empty() && lines.chars().any(|c| c.is_ascii_digit()) => {
-            (Some(file.trim().to_string()), Some(lines.trim().to_string()))
-        }
-        _ => (Some(cleaned.to_string()).filter(|s| !s.is_empty()), None),
-    }
+    /// The level's contract as it was resolved for this run — threshold, severities, lenses.
+    ///
+    /// Frozen rather than re-derived on read, because the workspace's policy is editable: a review
+    /// from three months ago was produced under whatever the rules were then, and re-reading it
+    /// under today's would describe a review that never happened. `Null` on runs recorded before
+    /// the policy was tracked.
+    #[serde(default)]
+    pub level_contract: serde_json::Value,
+    /// Which severities the Quality Gate blocked on for this run, for the same reason.
+    #[serde(default)]
+    pub quality_gate_policy: Vec<String>,
+    /// Whether this run passed its gate. Stored so a memory browser can show the verdict without
+    /// re-deriving it from findings whose state has since been edited by hand.
+    #[serde(default)]
+    pub quality_gate: bool,
+    /// How many reviewers produced it — what the level actually bought.
+    #[serde(default)]
+    pub workers: usize,
 }
 
 /// Identity of a finding across runs — the same defect keeps this key even as line numbers drift,

@@ -37,6 +37,45 @@ pub fn default_workspace_prompt(kind: String) -> String {
     queries::workspace_prompt_default(&kind).to_string()
 }
 
+// ---------- review engine configuration ----------
+
+/// The workspace's review engine settings, fully resolved: what each depth level actually costs,
+/// which severities fail the Quality Gate, what is in scope, and the context budgets.
+///
+/// Resolved rather than raw so the screen shows the numbers a review will really run under, even
+/// for a workspace that has never customised anything.
+#[tauri::command]
+pub fn get_review_engine_config(
+    db: State<Db>,
+    workspace_id: String,
+) -> Result<crate::review::contract::ResolvedConfig, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let config = queries::get_review_engine_config(&conn, &workspace_id);
+    let lenses = queries::get_workspace_prompt(&conn, &workspace_id, "review_lenses")
+        .map_err(|e| e.to_string())?;
+    Ok(crate::review::contract::resolve_all(&config, &lenses))
+}
+
+/// Saves the workspace's review engine settings.
+#[tauri::command]
+pub fn set_review_engine_config(
+    db: State<Db>,
+    workspace_id: String,
+    config: crate::review::contract::ResolvedConfig,
+) -> Result<(), String> {
+    let stored = crate::review::contract::from_resolved(&config);
+    let json = serde_json::to_string(&stored).map_err(|e| e.to_string())?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_review_engine_config(&conn, &workspace_id, &json).map_err(|e| e.to_string())
+}
+
+/// Clears every override, putting the workspace back on the built-in review policy.
+#[tauri::command]
+pub fn reset_review_engine_config(db: State<Db>, workspace_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_review_engine_config(&conn, &workspace_id, "").map_err(|e| e.to_string())
+}
+
 // ---------- review memory (review_runs) ----------
 
 #[tauri::command]

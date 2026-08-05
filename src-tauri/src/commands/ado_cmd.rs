@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::ado;
+use crate::commands::review_pipeline;
 use crate::ai;
 use crate::commands::claude_cmd::{load_ai_config, AiTask};
 use crate::commands::skills_cmd;
@@ -849,7 +850,7 @@ pub async fn review_pr_from_link(
 ) -> Result<String, String> {
     let (target, credential) = link_credentials(&db, &url)?;
 
-    let (contexts, skills, config, review_template) = {
+    let (contexts, skills, config, review_prompt) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
@@ -859,9 +860,11 @@ pub async fn review_pr_from_link(
             }
             _ => load_ai_config(&conn, AiTask::Review)?,
         };
-        let review_template = queries::get_workspace_prompt(&conn, &workspace_id, "review_standard")
-            .map_err(|e| e.to_string())?;
-        (contexts, skills, config, review_template)
+        // The same methodology and the same level directive the project-backed pipeline uses — a
+        // review with no clone is shallower in what it can *read*, not in the rules it is held to.
+        let (_, contract) = review_pipeline::contract_for(&conn, &workspace_id, &level);
+        let prompts = review_pipeline::ReviewPrompts::load(&conn, &workspace_id, &contract)?;
+        (contexts, skills, config, prompts.for_role(None))
     };
 
     let LinkPr { pr, diff: diff_text, repo_label, clone_url } = fetch_pr_and_diff(&target, &credential).await?;
@@ -910,8 +913,7 @@ pub async fn review_pr_from_link(
             &diff_text,
             &config.tools,
             &cwd,
-            &review_template,
-            &level,
+            &review_prompt,
         )
         .await
     })
@@ -1656,6 +1658,10 @@ pub async fn discard_pr_finding(
     Ok(outcome)
 }
 
+/// Reviews one pull request of a linked project and saves the run as durable memory.
+///
+/// `force` is the human's answer to a skip that asks ("it is a draft — review it anyway?"). It is
+/// only ever set by the panel in reply to a `REVIEW_SKIPPED::` message; a review never assumes it.
 #[tauri::command]
 pub async fn review_pull_request(
     app: AppHandle,
@@ -1664,6 +1670,7 @@ pub async fn review_pull_request(
     pr_id: i64,
     job_id: String,
     level: String,
+    force: bool,
     // When an SDD/Harness agent runs this review, its provider + model + prompt for this run.
     agent_provider: Option<String>,
     agent_model: Option<String>,
@@ -1676,7 +1683,7 @@ pub async fn review_pull_request(
     let repo = repo_key(&link);
     let workspace_id = project.workspace_id.clone();
 
-    let (contexts, skills, config, review_template) = {
+    let (contexts, skills, config, engine_config, contract, prompts) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
@@ -1687,13 +1694,16 @@ pub async fn review_pull_request(
             }
             _ => load_ai_config(&conn, AiTask::Review)?,
         };
-        // The review methodology is the workspace's own (editable) PR review standard — the
-        // transversal base every review runs under. Always non-empty (falls back to the built-in
-        // default), so it's the prompt directly; project-specific rules ride along in `contexts`.
-        let review_template = queries::get_workspace_prompt(&conn, &workspace_id, "review_standard")
-            .map_err(|e| e.to_string())?;
-        (contexts, skills, config, review_template)
+        // The workspace's review policy: what this depth level costs, what fails the gate, what is
+        // in scope. Resolved once here and frozen into the run's memory, so a review read months
+        // from now still says which rules produced it.
+        let (engine_config, contract) = review_pipeline::contract_for(&conn, &workspace_id, &level);
+        // The methodology, the level's directive and the two fan-out roles — all editable per
+        // workspace; project-specific rules ride along in `contexts`.
+        let prompts = review_pipeline::ReviewPrompts::load(&conn, &workspace_id, &contract)?;
+        (contexts, skills, config, engine_config, contract, prompts)
     };
+    let blocking = crate::review::contract::blocking_severities(&engine_config);
 
     let prs = match &link {
         LinkedRepo::Azure { org, project: ado_project, repo_id } => {
@@ -1833,7 +1843,18 @@ pub async fn review_pull_request(
 
     let diff_files = git::diff::get_branch_diff(&project.local_path, &pr.target_branch, &head_ref)?;
     let diff_text = git::diff::render_diff_for_prompt(&diff_files);
-    let scope = diff_scope(&diff_files);
+
+    // What this repository already settled about these same files, in OTHER pull requests. Read
+    // here because it needs the touched paths, and best-effort because a missing hint costs
+    // context, and context is not worth failing a review the user is waiting on.
+    let touched: Vec<String> = diff_files
+        .iter()
+        .filter_map(|f| f.new_path.clone().or_else(|| f.old_path.clone()))
+        .collect();
+    let hints = match db.0.lock() {
+        Ok(conn) => review_pipeline::hints_for(&conn, &workspace_id, &repo, pr_id, &touched),
+        Err(_) => Vec::new(),
+    };
 
     let mut enabled_contexts: Vec<(String, String)> = contexts
         .into_iter()
@@ -1867,43 +1888,73 @@ pub async fn review_pull_request(
     }
 
 
+    // Everything from here is the pipeline's: the plan, the bundles, the reviewers and the merge.
     // Same identity for the job row and the run, so the row can stream its own output and stop it.
+    let request = review_pipeline::ReviewRequest {
+        config: &config,
+        repo_path: &project.local_path,
+        head_ref: &head_ref,
+        target_ref: &pr.target_branch,
+        pr_title: &pr.title,
+        pr_description: &pr.description,
+        pr_status: &pr.status,
+        contexts: enabled_contexts,
+        prompts,
+        engine: engine_config,
+        contract: contract.clone(),
+        changed_since: changed_files.clone(),
+        hints,
+        force,
+    };
     let result = crate::ai_runs::scoped(app.clone(), Some(job_id.clone()), async {
-        ai::review_pull_request(
-            &*config.engine,
-            &config.binary,
-            &config.model,
-            &pr.title,
-            &pr.description,
-            &enabled_contexts,
-            &diff_text,
-            &config.tools,
-            &project.local_path,
-            &review_template,
-            &level,
-        )
-        .await
+        review_pipeline::run(request, &diff_files).await
     })
     .await;
 
     // A stopped run leaves nothing behind (no history row, no saved memory) — return as-is.
     if matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
-        return result;
+        return result.map(|_| String::new());
     }
+
+    // A plan that says "probably don't review this" costs nothing and records nothing. The ones
+    // that ask come back marked, so the panel can offer to review anyway instead of showing an
+    // error for a perfectly ordinary draft.
+    let outcome = match result {
+        Ok(review_pipeline::Pipeline::Skipped(skip)) => {
+            return Ok(match skip.requires_confirmation {
+                true => format!("{}{}", review_pipeline::SKIP_MARKER, skip.reason),
+                false => format!("⏭️ {}", skip.reason),
+            })
+        }
+        Ok(review_pipeline::Pipeline::Reviewed(outcome)) => Ok(outcome),
+        Err(e) => Err(e),
+    };
 
     let label = format!("#{} {}", pr.id, pr.title);
     let history_meta = serde_json::json!({ "prId": pr.id, "prTitle": pr.title, "level": level }).to_string();
     let conn = db.0.lock().map_err(|e| e.to_string())?;
 
-    // On success, save durable memory of the run into the DB and, when this PR was reviewed
-    // before, reconcile against the previous run so the delta (new / still-present / resolved)
-    // rides on top of the returned review. Best-effort: a memory write must never turn a good
-    // review into a failure.
-    let result = match result {
-        Ok(text) => {
-            let text = persist_review_run(
-                &conn, &job_id, &project, &repo, &workspace_id, &pr, &level, config.engine.label(),
-                &config.model, &diff_text, &head_sha, scope, changed_files.as_deref(), text,
+    // On success, reconcile against this pull request's memory — which is what gives each finding
+    // its stable id — render the report from the reconciled set, and save the run. Best-effort on
+    // the write: losing memory must never turn a good review into a failure.
+    let result = match outcome {
+        Ok(outcome) => {
+            let text = finalize_review(
+                &conn,
+                &job_id,
+                &project,
+                &repo,
+                &workspace_id,
+                &pr,
+                &level,
+                config.engine.label(),
+                &config.model,
+                &diff_text,
+                &head_sha,
+                changed_files.as_deref(),
+                *outcome,
+                &contract,
+                &blocking,
             );
             let _ = queries::add_job_history(
                 &conn, &job_id, &project_id, "pr-review", &label, "done", Some(&text), None, &history_meta,
@@ -1919,25 +1970,6 @@ pub async fn review_pull_request(
     };
 
     result
-}
-
-/// Files touched and lines added / removed in the diff this review was handed — the numbers behind
-/// the summary's "scope analysed" line. Counted from the same `FileDiffInfo` the prompt was
-/// rendered from, so the summary can never claim a scope the review didn't actually see.
-fn diff_scope(files: &[git::diff::FileDiffInfo]) -> crate::review_memory::DiffScope {
-    let mut scope = crate::review_memory::DiffScope { files: files.len(), additions: 0, deletions: 0 };
-    for file in files {
-        for hunk in &file.hunks {
-            for line in &hunk.lines {
-                match line.origin.as_str() {
-                    "+" => scope.additions += 1,
-                    "-" => scope.deletions += 1,
-                    _ => {}
-                }
-            }
-        }
-    }
-    scope
 }
 
 /// How much of one comment's text is carried into the prompt. Enough to know what was asked;
@@ -2086,12 +2118,19 @@ fn pending_comments_block(
     Some(out)
 }
 
-/// Saves one completed review into `review_runs` (durable memory, in the DB) and, when the PR has
-/// a previous run, reconciles the new findings against it — returning the review text with a
-/// one-line re-review delta banner prepended. Best-effort: any failure just returns the review
-/// unchanged, since losing memory must never fail the review the user is waiting on.
+/// Turns one finished pipeline run into the review the user reads, and saves it.
+///
+/// The order here is the whole point, and it is why rendering does not happen inside the pipeline.
+/// A finding's **id is not decided by the review that found it** — it is decided by reconciliation
+/// against this pull request's memory, so that a defect still present in iteration four keeps the
+/// `F-003` it was given in iteration one, along with the comment thread opened for it. Rendering
+/// before that step would produce a report whose numbering disagreed with both the memory and the
+/// pull request.
+///
+/// So: reconcile, carry the reconciled identity back onto the full findings, render, then save.
+/// Best-effort on the write — losing memory must never turn a good review into a failure.
 #[allow(clippy::too_many_arguments)]
-fn persist_review_run(
+fn finalize_review(
     conn: &rusqlite::Connection,
     job_id: &str,
     project: &Project,
@@ -2105,44 +2144,86 @@ fn persist_review_run(
     model: &str,
     diff_text: &str,
     head_sha: &str,
-    scope: crate::review_memory::DiffScope,
     changed_files: Option<&[String]>,
-    text: String,
+    mut outcome: review_pipeline::PipelineOutcome,
+    contract: &crate::review::contract::LevelContract,
+    blocking: &[crate::review::contract::Severity],
 ) -> String {
+    use crate::review::render;
     use crate::review_memory as mem;
 
     let prior = queries::count_review_runs(conn, &project.id, pr.id, repo).unwrap_or(0) as usize;
-    let parsed = mem::parse_findings(&text);
+    let mut findings = std::mem::take(&mut outcome.findings);
+    let projected: Vec<mem::MemoryFinding> = findings.iter().map(|f| f.to_memory()).collect();
 
-    // Reconcile against the previous run's findings when there is one; otherwise it's the first
-    // run and the parsed findings are the whole set (introduced this iteration).
-    let (findings, delta) = if prior > 0 {
+    let (remembered, delta) = if prior > 0 {
         let prev: Vec<mem::MemoryFinding> = queries::latest_review_findings(conn, &project.id, pr.id, repo)
             .ok()
             .flatten()
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        let (merged, d) = mem::reconcile(&prev, &parsed, prior, changed_files);
+        let (merged, d) = mem::reconcile(&prev, &projected, prior, changed_files);
         (merged, Some(d))
     } else {
-        let mut first = parsed;
+        let mut first = projected;
         for f in first.iter_mut() {
             f.introducido_en_iter = 1;
         }
         (first, None)
     };
-    let iter = prior + 1;
 
-    // On a re-review, append the cumulative "resolved findings" traceability to the review body
-    // and prepend the delta banner — the stored memory and the returned text are identical.
-    let mut text = match mem::resolved_history_section(&findings) {
-        Some(section) => format!("{text}{section}"),
-        None => text,
+    // Carry the reconciled identity back onto the full findings, by the same key reconciliation
+    // matched on. A finding with no counterpart in the memory cannot happen (every one was
+    // projected into it), but if it ever did, leaving it as it came is better than dropping it.
+    for finding in findings.iter_mut() {
+        let key = finding.identity();
+        let Some(stored) = remembered
+            .iter()
+            .find(|m| mem::finding_identity(m.archivo.as_deref(), &m.categoria) == key)
+        else {
+            continue;
+        };
+        finding.id = stored.id.clone();
+        finding.estado = stored.estado.clone();
+        finding.thread_id = stored.thread_id;
+        finding.introducido_en_iter = stored.introducido_en_iter;
+        finding.resuelto_en_iter = stored.resuelto_en_iter;
+        finding.motivo_descarte = stored.motivo_descarte.clone();
+        finding.delta = stored.delta.clone();
+    }
+    crate::review::merge::sort(&mut findings);
+
+    let plan = &outcome.plan;
+    let body = render::review_markdown(
+        &findings,
+        &render::ReportContext {
+            contract,
+            blocking,
+            narrative: &outcome.narrative,
+            files: plan.files.len(),
+            additions: plan.additions,
+            deletions: plan.deletions,
+            out_of_scope: plan.out_of_scope.len(),
+            delta_files: (plan.mode == crate::review::plan::PlanMode::Delta).then(|| plan.files.len()),
+            degraded: &outcome.degraded,
+            workers: outcome.workers,
+        },
+    );
+
+    // The cumulative traceability and the delta banner wrap the report the same way they always
+    // have — the stored memory and the returned text stay identical.
+    let mut text = match mem::resolved_history_section(&remembered) {
+        Some(section) => format!("{body}{section}"),
+        None => body,
     };
     if let Some(d) = &delta {
         text = format!("{}{}", mem::delta_banner(d), text);
     }
+    // What the CLI reported it actually ran beats what was configured — the two differ whenever no
+    // model was forced and the CLI picked its own default.
+    let text = ai::review_footer(&text, engine_label, outcome.model.as_deref().unwrap_or(model));
 
+    let iter = prior + 1;
     let meta = mem::ReviewMeta {
         pr_id: pr.id,
         pr_title: pr.title.clone(),
@@ -2162,13 +2243,21 @@ fn persist_review_run(
         timestamp: chrono::Local::now().to_rfc3339(),
         iter,
         head_sha: head_sha.to_string(),
-        files: scope.files,
-        additions: scope.additions,
-        deletions: scope.deletions,
+        // The plan's numbers, not the raw diff's: this field is what a memory browser calls "what
+        // this run looked at", and a file the scope globs kept out was never looked at.
+        files: plan.files.len(),
+        additions: plan.additions,
+        deletions: plan.deletions,
+        // Frozen per run: a review read months from now has to be able to say which rules produced
+        // it, and by then the workspace's policy may be something else entirely.
+        level_contract: serde_json::to_value(contract).unwrap_or(serde_json::Value::Null),
+        quality_gate_policy: blocking.iter().map(|s| s.label().to_string()).collect(),
+        quality_gate: render::passes_gate(&findings, blocking),
+        workers: outcome.workers,
     };
 
     let meta_json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
-    let findings_json = serde_json::to_string(&findings).unwrap_or_else(|_| "[]".to_string());
+    let findings_json = serde_json::to_string(&remembered).unwrap_or_else(|_| "[]".to_string());
     if let Err(e) = queries::add_review_run(
         conn, job_id, &project.id, workspace_id, pr.id, iter as i64, level, &meta_json, &text, diff_text, &findings_json,
     ) {

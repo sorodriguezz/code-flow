@@ -1,18 +1,22 @@
 import { useState } from "react";
-import { Database, MessageSquareText, ShieldCheck, SquarePen, type LucideIcon } from "lucide-react";
+import { Database, MessageSquareText, ShieldCheck, SlidersHorizontal, SquarePen, type LucideIcon } from "lucide-react";
 import { WorkspacePromptEditor } from "./WorkspacePromptEditor";
 import { ReviewContextEditor } from "./ReviewContextEditor";
 import { ReviewMemoriesSettings } from "./ReviewMemoriesSettings";
+import { ReviewEngineSettings } from "./ReviewEngineSettings";
 import { ActiveUnderline } from "../common/ActivePill";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { SettingsHeader } from "../api/settingsChrome";
 
-type TabId = "standard" | "context" | "prDesc" | "memories";
+type TabId = "standard" | "engine" | "context" | "prDesc" | "memories";
 
 const TABS: { id: TabId; labelKey: TranslationKey; icon: LucideIcon }[] = [
   { id: "standard", labelKey: "settings.reviewTabStandard", icon: ShieldCheck },
+  // Right after the methodology, because it is the other half of it: the standard says how a
+  // review is done and this says what each depth level actually costs.
+  { id: "engine", labelKey: "settings.reviewTabEngine", icon: SlidersHorizontal },
   { id: "context", labelKey: "settings.reviewTabContext", icon: MessageSquareText },
   { id: "prDesc", labelKey: "settings.reviewTabPrDesc", icon: SquarePen },
   { id: "memories", labelKey: "settings.reviewTabMemories", icon: Database },
@@ -65,6 +69,7 @@ export function ReviewSettings() {
           resetConfirmKey="settings.reviewStandardResetConfirm"
         />
       )}
+      {tab === "engine" && <ReviewEngineSettings />}
       {tab === "context" && <ReviewContextEditor />}
       {tab === "prDesc" && (
         <WorkspacePromptEditor

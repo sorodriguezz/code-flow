@@ -715,6 +715,42 @@ pub struct DbDiagramEdge {
     pub inferred: bool,
 }
 
+/// One object of a schema, with everything the catalog will say about it.
+///
+/// The explorer's tree answers "what is in here"; this answers "and what are they" — the type the
+/// engine calls it, when it was created and last altered, what it costs on disk, roughly how many
+/// rows it holds, and whatever comment somebody left on it. That is a different question, asked at a
+/// different moment, which is why it is a separate call rather than more columns on [`DbNode`]:
+/// sizes and row counts are the expensive part of a catalog query, and every tree expansion would
+/// otherwise pay for metadata nobody asked to see.
+///
+/// **Every field but the name and the kind is optional, and that is the honest shape.** Postgres
+/// does not record when a table was created; Mongo has no schema-level `CREATE` at all; IRIS
+/// reports neither size nor dates through SQL. A `None` means "this engine will not say", and the
+/// panel leaves the cell empty rather than inventing a zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbObjectInfo {
+    pub name: String,
+    /// Which explorer category it belongs to, so the panel can group and ice it with the same
+    /// vocabulary the tree uses.
+    pub kind: DbNodeKind,
+    /// What the engine itself calls this type — `USER_TABLE`, `MATERIALIZED VIEW`, `SQL_STORED_PROCEDURE`.
+    /// Its own field rather than a prettified `kind`, because the exact word is what somebody
+    /// comparing against the engine's own tooling is looking for.
+    pub object_type: String,
+    pub created_at: Option<String>,
+    pub modified_at: Option<String>,
+    /// Bytes reserved for the object, indexes included.
+    pub total_bytes: Option<i64>,
+    /// Bytes actually holding data. Below `total_bytes` by whatever the engine has reserved and not
+    /// yet filled.
+    pub used_bytes: Option<i64>,
+    /// An estimate, never a `COUNT(*)`: counting every table of a schema turns opening a tab into a
+    /// full scan per table.
+    pub rows: Option<i64>,
+    pub comment: String,
+}
+
 /// A whole schema's structure, in one answer.
 ///
 /// Deliberately not assembled from the per-table calls the explorer already has: a schema with 300
@@ -958,6 +994,20 @@ impl Session {
     /// `node` is the container to draw: a schema on a SQL engine, a database on Mongo. Each driver
     /// reads it wholesale rather than per table — see [`DbSchemaDiagram`] — and the `foreign_key`
     /// flags are derived here so they cannot disagree with the lines.
+    /// Every object of one schema, with its catalog metadata.
+    ///
+    /// One call per schema rather than one per object, for the same reason `schema_diagram` is: a
+    /// schema with 300 tables would otherwise be 300 round trips, and on anything remote that is
+    /// minutes.
+    pub async fn schema_objects(&self, node: &DbNodeRef) -> Result<Vec<DbObjectInfo>, String> {
+        match self {
+            Session::Postgres(s) => s.schema_objects(node).await,
+            Session::Mssql(s) => s.schema_objects(node).await,
+            Session::Mongo(s) => s.schema_objects(node).await,
+            Session::Iris(s) => s.schema_objects(node).await,
+        }
+    }
+
     pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
         let mut diagram = match self {
             Session::Postgres(s) => s.schema_diagram(node).await,

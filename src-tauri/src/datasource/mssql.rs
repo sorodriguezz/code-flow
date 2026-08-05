@@ -17,11 +17,13 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use super::entra;
 use super::postgres::{annotate_types, cell, relation_folders, schema_folders};
 use super::sqlgen::{self, quote_ident, quote_literal};
+use super::postgres::parse_bytes;
 use super::{
     describe_db_error, read_only_guard, read_only_refusal, split_statements, DbColumn,
     DbColumnInfo, DbConnectionConfig, DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult,
     DbExecContext, DbExecuteResult, DbForeignKey, DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit,
-    DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest, SqlDialect,
+    DbObjectInfo, DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult,
+    DbTableDataRequest, SqlDialect,
 };
 
 const DIALECT: SqlDialect = SqlDialect::TSql;
@@ -634,6 +636,87 @@ impl MssqlSession {
     /// `sys.partitions` gives the row count the same way the tables folder does — metadata, not a
     /// scan — and the primary-key flag comes from `sys.index_columns` on the PK index, which is
     /// where T-SQL actually keeps it.
+    /// Every object of a schema, with the metadata SQL Server actually keeps: the type it calls the
+    /// object, when it was created and last altered, what it reserves and uses on disk, and the
+    /// `MS_Description` extended property if somebody wrote one.
+    ///
+    /// The size columns come from `sys.dm_db_partition_stats`, which needs `VIEW DATABASE STATE`.
+    /// A login without it makes the whole statement fail, so the query is tried once with the sizes
+    /// and once without: a reader who cannot see the DMV still gets the names, types and dates
+    /// rather than an error where the tab should be.
+    pub async fn schema_objects(&self, node: &DbNodeRef) -> Result<Vec<DbObjectInfo>, String> {
+        self.use_database(node).await?;
+        let schema = node.schema().unwrap_or("dbo");
+        let literal = quote_literal(Some(schema))?;
+
+        // 121 is ODBC canonical with milliseconds — `2026-06-15 18:38:46.037`, sortable as text and
+        // free of the locale the server happens to run under.
+        let select = |sizes: bool| {
+            let (size_cols, size_join) = if sizes {
+                (
+                    "CAST(ISNULL(ps.reserved_bytes, 0) AS bigint), \
+                     CAST(ISNULL(ps.used_bytes, 0) AS bigint), \
+                     CAST(ISNULL(ps.row_total, 0) AS bigint)",
+                    "LEFT JOIN ( \
+                         SELECT object_id, \
+                                SUM(reserved_page_count) * 8192 AS reserved_bytes, \
+                                SUM(used_page_count) * 8192 AS used_bytes, \
+                                SUM(CASE WHEN index_id IN (0, 1) THEN row_count ELSE 0 END) AS row_total \
+                         FROM sys.dm_db_partition_stats GROUP BY object_id \
+                     ) ps ON ps.object_id = o.object_id ",
+                )
+            } else {
+                ("NULL, NULL, NULL", "")
+            };
+            format!(
+                "SELECT o.name, o.type_desc, \
+                        CONVERT(varchar(23), o.create_date, 121), \
+                        CONVERT(varchar(23), o.modify_date, 121), \
+                        {size_cols}, \
+                        ISNULL(CAST(ep.value AS nvarchar(4000)), '') \
+                 FROM sys.objects o \
+                 JOIN sys.schemas s ON s.schema_id = o.schema_id \
+                 {size_join}\
+                 LEFT JOIN sys.extended_properties ep \
+                        ON ep.major_id = o.object_id AND ep.minor_id = 0 \
+                       AND ep.class = 1 AND ep.name = 'MS_Description' \
+                 WHERE s.name = {literal} \
+                   AND o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF', 'SO') \
+                 ORDER BY o.name"
+            )
+        };
+
+        let rows = match self.text_rows(&select(true)).await {
+            Ok(rows) => rows,
+            Err(_) => self.text_rows(&select(false)).await?,
+        };
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let object_type = cell(row, 1);
+                let kind = match object_type.as_str() {
+                    "VIEW" => DbNodeKind::View,
+                    "SEQUENCE_OBJECT" => DbNodeKind::Sequence,
+                    "USER_TABLE" => DbNodeKind::Table,
+                    // Everything else in the `type` filter above is a routine of some shape.
+                    _ => DbNodeKind::Routine,
+                };
+                DbObjectInfo {
+                    name: cell(row, 0),
+                    kind,
+                    object_type,
+                    created_at: Some(cell(row, 2)).filter(|v| !v.is_empty()),
+                    modified_at: Some(cell(row, 3)).filter(|v| !v.is_empty()),
+                    total_bytes: parse_bytes(&cell(row, 4)),
+                    used_bytes: parse_bytes(&cell(row, 5)),
+                    rows: parse_bytes(&cell(row, 6)),
+                    comment: cell(row, 7),
+                }
+            })
+            .collect())
+    }
+
     pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
         self.use_database(node).await?;
         let schema = node.schema().unwrap_or("dbo");

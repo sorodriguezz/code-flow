@@ -62,6 +62,21 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (workspace_id, kind)
         );
 
+        -- The PR review engine's numbers, per workspace: what each depth level costs (confidence
+        -- threshold, reportable severities, active lenses, parallelism), which severities fail the
+        -- Quality Gate, which paths are in scope, and the context budgets.
+        --
+        -- Deliberately NOT in `workspace_prompts`, even though it is edited on the same screen: this
+        -- is a policy the code enforces and freezes into every saved review, while a prompt is text
+        -- handed to a model. Storing one JSON document rather than a column per knob is what lets a
+        -- new setting ship without a migration, and `ReviewEngineConfig` deserializes every field
+        -- with a default so a row written by an older build stays readable.
+        CREATE TABLE IF NOT EXISTS review_engine_config (
+            workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+            config       TEXT NOT NULL DEFAULT '{}',
+            updated_at   TEXT NOT NULL
+        );
+
         -- Durable memory of every completed PR review — one row per run, kept in the DB (not on
         -- disk) so it moves/backs up with codeflow.db. Holds the rendered review, the exact diff
         -- reviewed, run metadata and the parsed findings (JSON), which is what a re-review reads
@@ -1595,10 +1610,7 @@ fn migrate_review_standards_into_prompts(conn: &Connection) -> rusqlite::Result<
 /// users see and can edit the real methodology/template rather than an empty box.
 fn backfill_workspace_prompts(conn: &Connection) -> rusqlite::Result<()> {
     let now = crate::db::queries::now();
-    for (kind, default) in [
-        ("review_standard", crate::ai::DEFAULT_PR_REVIEW_STANDARD),
-        ("pr_description", crate::ai::DEFAULT_PR_DESCRIPTION_TEMPLATE),
-    ] {
+    for (kind, default) in crate::db::queries::WORKSPACE_PROMPT_KINDS {
         conn.execute(
             "INSERT INTO workspace_prompts (workspace_id, kind, content, updated_at)
              SELECT w.id, ?1, ?2, ?3 FROM workspaces w

@@ -30,6 +30,7 @@ mod pr_link;
 mod proc;
 mod remote;
 mod remotes;
+mod review;
 mod review_memory;
 mod search;
 mod secret_scan;
@@ -240,6 +241,9 @@ pub fn run() {
             commands::settings::get_workspace_prompt,
             commands::settings::set_workspace_prompt,
             commands::settings::default_workspace_prompt,
+            commands::settings::get_review_engine_config,
+            commands::settings::set_review_engine_config,
+            commands::settings::reset_review_engine_config,
             commands::settings::list_workspace_agents,
             commands::settings::upsert_workspace_agent,
             commands::settings::delete_workspace_agent,
@@ -322,7 +326,6 @@ pub fn run() {
             commands::claude_cmd::check_ai_provider,
             commands::ado_cmd::open_external_url,
             commands::claude_cmd::default_commit_template,
-            commands::claude_cmd::default_review_template,
             commands::claude_cmd::default_analyze_template,
             commands::claude_cmd::default_pr_description_template,
             commands::claude_cmd::default_resolve_conflict_template,
@@ -519,6 +522,7 @@ pub fn run() {
             commands::db_cmd::db_row_count,
             commands::db_cmd::db_apply_edits,
             commands::db_cmd::db_foreign_keys,
+            commands::db_cmd::db_schema_objects,
             commands::db_cmd::db_schema_diagram,
             commands::db_cmd::db_object_ddl,
             commands::db_cmd::db_cancel,

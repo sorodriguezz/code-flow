@@ -115,7 +115,7 @@ interface PrState {
   /** Fire-and-forget — the run is tracked in `jobsStore`, not here, precisely so it survives
    * switching away from this PR (or this project) before it finishes. Uses `reviewLevel` unless
    * an explicit `level` is passed. */
-  reviewPr: (target: PrTarget, prId: number, level?: ReviewLevel) => void;
+  reviewPr: (target: PrTarget, prId: number, level?: ReviewLevel, force?: boolean) => void;
   /** One comment thread per finding (anchored to its file/line when known) plus an optional
    * summary thread. On a project target these are reconciled against the saved run (`runId`) so a
    * finding keeps one thread across re-reviews; a link target has no saved run, so each finding
@@ -239,7 +239,7 @@ export const usePrStore = create<PrState>((set, get) => ({
 
   setReviewLevel: (level) => set({ reviewLevel: level }),
 
-  reviewPr: (target, prId, level) => {
+  reviewPr: (target, prId, level, force = false) => {
     const key = targetKey(target);
     // The current selection is a valid source for the label too: a review launched straight from
     // a pasted link starts before that project's PR list has finished loading.
@@ -273,7 +273,7 @@ export const usePrStore = create<PrState>((set, get) => ({
       kind: "pr-review",
       label,
       meta: { prId, level: activeLevel, ...linkMeta },
-      task: (jobId) => prTarget.review(target, prId, jobId, activeLevel),
+      task: (jobId) => prTarget.review(target, prId, jobId, activeLevel, force),
     });
   },
 

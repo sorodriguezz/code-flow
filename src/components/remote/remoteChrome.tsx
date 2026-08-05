@@ -200,7 +200,9 @@ export function ToolbarButton({
 }: {
   icon: LucideIcon;
   label: string;
-  onClick: () => void;
+  /** The event is passed so a button that opens a menu can anchor it to itself — the (+) drops its
+   *  list under the button rather than at wherever the pointer happened to be. */
+  onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
   active?: boolean;
 }) {

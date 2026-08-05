@@ -26,7 +26,8 @@ use serde::Deserialize;
 use super::{
     describe_db_error, read_only_refusal, DbColumn, DbColumnInfo, DbConnectionConfig,
     DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult, DbExecContext, DbExecuteResult,
-    DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit, DbRowEditKind, DbSchemaDiagram, DbServerInfo,
+    DbKind, DbNode, DbNodeKind, DbNodeRef, DbObjectInfo, DbRowEdit, DbRowEditKind,
+    DbSchemaDiagram, DbServerInfo,
     DbSslMode, DbStatementResult, DbTableDataRequest,
 };
 
@@ -399,6 +400,67 @@ impl MongoSession {
     /// navigated, and because "which collections look like they point at each other" is the question
     /// being asked. So the edges here are marked `inferred`, drawn dashed, and counted apart — and a
     /// note says so on the panel. Nothing downstream may treat them as constraints.
+    /// Every collection of a database, with what `collStats` will say about it.
+    ///
+    /// Mongo has no schema level, so the "schema" a caller points at is the database — the same
+    /// substitution the diagram makes. It also records no creation or modification date for a
+    /// collection, so those stay `None`: a collection comes into existence on its first insert,
+    /// and there is nothing to report.
+    ///
+    /// One `collStats` per collection is a round trip each, which is why it is bounded. Past the
+    /// cap the names are still listed — a database with a thousand collections is exactly the one
+    /// where waiting for a thousand stat calls would be the wrong trade.
+    pub async fn schema_objects(&self, node: &DbNodeRef) -> Result<Vec<DbObjectInfo>, String> {
+        const MAX_STATS: usize = 300;
+        let database = node.db().unwrap_or(&self.database).to_string();
+        let (documents, _) = self
+            .cursor_command(&database, doc! { "listCollections": 1 }, None)
+            .await?;
+
+        let mut out = Vec::with_capacity(documents.len());
+        for (index, entry) in documents.iter().enumerate() {
+            let name = entry.get_str("name").unwrap_or_default().to_string();
+            let is_view = entry.get_str("type").unwrap_or("collection") == "view";
+            let comment = entry
+                .get_document("options")
+                .ok()
+                .and_then(|options| options.get_str("comment").ok())
+                .unwrap_or_default()
+                .to_string();
+
+            // A view has no storage of its own, so asking for its stats is a round trip that can
+            // only answer zero.
+            let stats = if is_view || index >= MAX_STATS {
+                None
+            } else {
+                self.command(&database, doc! { "collStats": name.clone() }).await.ok()
+            };
+            let number = |key: &str| -> Option<i64> {
+                let stats = stats.as_ref()?;
+                stats
+                    .get_i64(key)
+                    .ok()
+                    .or_else(|| stats.get_i32(key).ok().map(i64::from))
+                    .or_else(|| stats.get_f64(key).ok().map(|v| v as i64))
+            };
+
+            out.push(DbObjectInfo {
+                name,
+                kind: DbNodeKind::Collection,
+                object_type: if is_view { "VIEW".to_string() } else { "COLLECTION".to_string() },
+                created_at: None,
+                modified_at: None,
+                // `storageSize` is what the collection reserves on disk and `size` what the
+                // documents actually occupy — the same reserved/used pair the SQL engines report.
+                total_bytes: number("storageSize"),
+                used_bytes: number("size"),
+                rows: number("count"),
+                comment,
+            });
+        }
+        Ok(out)
+    }
+
     pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
         let database = node.db().unwrap_or(&self.database).to_string();
         let mut names: Vec<String> = self

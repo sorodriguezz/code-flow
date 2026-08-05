@@ -138,8 +138,15 @@ export function postFindings(
  * link-backed one reads the diff from the host's API and doesn't — a weaker review, on purpose,
  * and the panel says so.
  */
-export function review(target: PrTarget, prId: number, jobId: string, level: string): Promise<string> {
+export function review(
+  target: PrTarget,
+  prId: number,
+  jobId: string,
+  level: string,
+  force = false,
+): Promise<string> {
   return target.kind === "project"
-    ? api.reviewPullRequest(target.projectId, prId, jobId, level)
+    ? api.reviewPullRequest(target.projectId, prId, jobId, level, force)
+    // A review with no clone builds no plan, so nothing there can decide to stop and ask.
     : api.reviewPrFromLink(target.url, jobId, level, target.workspaceId);
 }

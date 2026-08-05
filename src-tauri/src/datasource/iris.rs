@@ -37,7 +37,7 @@ use super::{
     read_only_guard, read_only_refusal, split_statements, DbColumn, DbColumnInfo,
     DbConnectionConfig, DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult, DbExecContext,
     DbExecuteResult, DbForeignKey, DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit,
-    DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult,
+    DbObjectInfo, DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult,
     DbTableDataRequest, SqlDialect,
 };
 
@@ -514,6 +514,89 @@ impl IrisSession {
     /// `INFORMATION_SCHEMA`, and a `COUNT(*)` per table is exactly what
     /// [`super::DbSchemaDiagram`] says this must never do. The panel simply omits the figure rather
     /// than showing a zero it can't stand behind.
+    /// Every table, view and routine of a schema.
+    ///
+    /// IRIS reports no size for a table through SQL — storage lives in globals, which no catalog
+    /// view maps back to a relation — so those columns stay empty. The **dates do exist**, in an
+    /// unusual place: an IRIS table is projected from a class, and `%Dictionary.CompiledClass`
+    /// records when that class was created and last compiled. Joining through `CLASSNAME` is what
+    /// turns "no dates on this engine" into the real answer.
+    ///
+    /// That dictionary is privileged, though, so the join is attempted and then given up on: a user
+    /// who cannot read it still gets the names, types and the class each table comes from.
+    pub async fn schema_objects(&self, node: &DbNodeRef) -> Result<Vec<DbObjectInfo>, String> {
+        let schema = node.schema().unwrap_or("SQLUser");
+        let literal = quote_literal(Some(schema))?;
+
+        let rich = format!(
+            "SELECT t.TABLE_NAME, t.TABLE_TYPE, t.CLASSNAME, \
+                    c.TimeCreated, c.TimeChanged, c.Description \
+             FROM INFORMATION_SCHEMA.TABLES t \
+             LEFT JOIN %Dictionary.CompiledClass c ON c.Name = t.CLASSNAME \
+             WHERE t.TABLE_SCHEMA = {literal} ORDER BY t.TABLE_NAME"
+        );
+        let plain = format!(
+            "SELECT TABLE_NAME, TABLE_TYPE, CLASSNAME, NULL, NULL, NULL \
+             FROM INFORMATION_SCHEMA.TABLES \
+             WHERE TABLE_SCHEMA = {literal} ORDER BY TABLE_NAME"
+        );
+        let rows = match self.rows(&rich).await {
+            Ok(rows) => rows,
+            Err(_) => self.rows(&plain).await?,
+        };
+
+        let mut out: Vec<DbObjectInfo> = rows
+            .iter()
+            .map(|row| {
+                let table_type = cell(row, 1);
+                let class = cell(row, 2);
+                let description = cell(row, 5);
+                DbObjectInfo {
+                    name: cell(row, 0),
+                    kind: if table_type == "VIEW" { DbNodeKind::View } else { DbNodeKind::Table },
+                    object_type: table_type,
+                    created_at: Some(cell(row, 3)).filter(|v| !v.is_empty()),
+                    modified_at: Some(cell(row, 4)).filter(|v| !v.is_empty()),
+                    total_bytes: None,
+                    used_bytes: None,
+                    rows: None,
+                    // The class a table is projected from is the piece of context no other engine
+                    // has, and the thing somebody opens in Studio — so it leads the comment when
+                    // there is no description of its own.
+                    comment: match (class.is_empty(), description.is_empty()) {
+                        (false, false) => format!("{class} — {description}"),
+                        (false, true) => class,
+                        (true, false) => description,
+                        (true, true) => String::new(),
+                    },
+                }
+            })
+            .collect();
+
+        // Routines come from their own view, and on some versions it does not exist at all — an
+        // empty routine list is a better answer than a failed tab.
+        let routines = self
+            .rows(&format!(
+                "SELECT ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES \
+                 WHERE ROUTINE_SCHEMA = {literal} ORDER BY ROUTINE_NAME"
+            ))
+            .await
+            .unwrap_or_default();
+        out.extend(routines.iter().map(|row| DbObjectInfo {
+            name: cell(row, 0),
+            kind: DbNodeKind::Routine,
+            object_type: cell(row, 1),
+            created_at: None,
+            modified_at: None,
+            total_bytes: None,
+            used_bytes: None,
+            rows: None,
+            comment: String::new(),
+        }));
+
+        Ok(out)
+    }
+
     pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
         let schema = node.schema().unwrap_or("SQLUser");
         let literal = quote_literal(Some(schema))?;

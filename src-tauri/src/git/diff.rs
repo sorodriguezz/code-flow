@@ -192,6 +192,54 @@ pub fn changed_files_between(path: &str, from: &str, to: &str) -> Result<Vec<Str
         .collect())
 }
 
+/// One file's full content as of `refname` — the new side of a reviewed change, read straight out
+/// of the object database.
+///
+/// The review's reading bundles need the whole method around a change, and a diff only carries its
+/// three lines of context. Reading from the tree rather than from the working directory is what
+/// makes that safe: the checkout is on whatever branch the user happens to have out, while the
+/// review is about the pull request's head.
+///
+/// `Err` for anything that isn't text at that ref — a deletion, a binary blob, a path that does not
+/// exist there. Callers treat that as "no content to show", never as a failed review.
+pub fn file_at_ref(path: &str, refname: &str, file_path: &str) -> Result<String, String> {
+    let repo = open(path)?;
+    let commit = resolve_branch_commit(&repo, refname)?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let entry = tree
+        .get_path(Path::new(file_path))
+        .map_err(|e| e.message().to_string())?;
+    let object = entry.to_object(&repo).map_err(|e| e.message().to_string())?;
+    let blob = object.as_blob().ok_or_else(|| format!("'{file_path}' is not a file at {refname}"))?;
+    if blob.is_binary() {
+        return Err(format!("'{file_path}' is binary"));
+    }
+    Ok(String::from_utf8_lossy(blob.content()).into_owned())
+}
+
+/// Every file path under `refname`, repository-relative with forward slashes.
+///
+/// From the commit's tree rather than from `search::list_files`, which walks the working directory:
+/// the review's blast radius is about the pull request's target branch, and the checkout is on
+/// whatever the user happens to have out.
+pub fn list_tree(path: &str, refname: &str) -> Result<Vec<String>, String> {
+    let repo = open(path)?;
+    let commit = resolve_branch_commit(&repo, refname)?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+
+    let mut out = Vec::new();
+    tree.walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+        if entry.kind() == Some(git2::ObjectType::Blob) {
+            if let Some(name) = entry.name() {
+                out.push(format!("{dir}{name}").replace('\\', "/"));
+            }
+        }
+        git2::TreeWalkResult::Ok
+    })
+    .map_err(|e| e.message().to_string())?;
+    Ok(out)
+}
+
 /// Flattens file diffs into plain unified-diff-ish text suitable for a Claude prompt.
 pub fn render_diff_for_prompt(files: &[FileDiffInfo]) -> String {
     let mut out = String::new();

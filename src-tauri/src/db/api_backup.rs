@@ -129,10 +129,7 @@ fn resolve_workspace(conn: &Connection, ws: &BackupWorkspace, match_by_name: boo
         "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![ws.id, ws.name, icon, color, sort_order, now()],
     )?;
-    for (kind, default) in [
-        ("review_standard", crate::ai::DEFAULT_PR_REVIEW_STANDARD),
-        ("pr_description", crate::ai::DEFAULT_PR_DESCRIPTION_TEMPLATE),
-    ] {
+    for (kind, default) in crate::db::queries::WORKSPACE_PROMPT_KINDS {
         conn.execute(
             "INSERT OR IGNORE INTO workspace_prompts (workspace_id, kind, content, updated_at) VALUES (?1, ?2, ?3, ?4)",
             params![ws.id, kind, default, now()],

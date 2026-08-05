@@ -19,7 +19,8 @@ use super::{
     describe_db_error_at, read_only_guard, read_only_refusal, split_statements, DbColumn,
     DbColumnInfo, DbConnectionConfig, DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult,
     DbExecContext, DbExecuteResult, DbForeignKey, DbKind, DbNode, DbNodeKind, DbNodeRef, DbRowEdit,
-    DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult, DbTableDataRequest, SqlDialect,
+    DbObjectInfo, DbSchemaDiagram, DbServerInfo, DbSslMode, DbStatementResult,
+    DbTableDataRequest, SqlDialect,
 };
 
 const DIALECT: SqlDialect = SqlDialect::Postgres;
@@ -609,6 +610,91 @@ impl PgSession {
     /// but a diagram that silently drops an object is worse than one that draws an empty box.
     /// `relkind` keeps ordinary tables, partitioned tables, foreign tables, views and materialised
     /// views; sequences and indexes have no place on an ER canvas.
+    /// Every object of a schema, with its size, its comment and a row estimate.
+    ///
+    /// Two queries — relations and routines — because they live in different catalogs and neither
+    /// has the other's columns. **No creation or modification date**: Postgres does not record them
+    /// for any object, so the honest answer is `None` rather than something derived from a file
+    /// timestamp that means "when it was last vacuumed".
+    pub async fn schema_objects(&self, node: &DbNodeRef) -> Result<Vec<DbObjectInfo>, String> {
+        let schema = node.schema().unwrap_or("public");
+        let literal = quote_literal(Some(schema))?;
+
+        // `pg_total_relation_size` includes indexes and TOAST; `pg_relation_size` is the heap
+        // alone, which is the closest thing Postgres has to "used". Both answer 0 for a view,
+        // which is correct — a view stores nothing.
+        let relations = self
+            .text_rows(&format!(
+                "SELECT c.relname, c.relkind, \
+                        pg_total_relation_size(c.oid)::text, \
+                        pg_relation_size(c.oid)::text, \
+                        COALESCE(s.n_live_tup, -1)::text, \
+                        COALESCE(obj_description(c.oid, 'pg_class'), '') \
+                 FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid \
+                 WHERE n.nspname = {literal} AND c.relkind IN ('r', 'p', 'v', 'm', 'S') \
+                 ORDER BY c.relname"
+            ))
+            .await?;
+
+        let mut out: Vec<DbObjectInfo> = relations
+            .iter()
+            .map(|row| {
+                let relkind = cell(row, 1);
+                let (kind, object_type) = match relkind.as_str() {
+                    "v" => (DbNodeKind::View, "VIEW"),
+                    "m" => (DbNodeKind::View, "MATERIALIZED VIEW"),
+                    "S" => (DbNodeKind::Sequence, "SEQUENCE"),
+                    "p" => (DbNodeKind::Table, "PARTITIONED TABLE"),
+                    _ => (DbNodeKind::Table, "TABLE"),
+                };
+                DbObjectInfo {
+                    name: cell(row, 0),
+                    kind,
+                    object_type: object_type.to_string(),
+                    created_at: None,
+                    modified_at: None,
+                    total_bytes: parse_bytes(&cell(row, 2)),
+                    used_bytes: parse_bytes(&cell(row, 3)),
+                    // -1 is the sentinel for "this relation has no stats row", which is not the
+                    // same as an empty table.
+                    rows: parse_bytes(&cell(row, 4)).filter(|n| *n >= 0),
+                    comment: cell(row, 5),
+                }
+            })
+            .collect();
+
+        // `prokind` only exists from Postgres 11. On older servers the column is missing and the
+        // whole query errors, so the routine list degrades to nothing rather than taking the tab
+        // down with it — the relations above are the part somebody opened this for.
+        let routines = self
+            .text_rows(&format!(
+                "SELECT p.proname, pg_get_function_identity_arguments(p.oid), \
+                        CASE p.prokind WHEN 'p' THEN 'PROCEDURE' WHEN 'a' THEN 'AGGREGATE' \
+                                       WHEN 'w' THEN 'WINDOW' ELSE 'FUNCTION' END, \
+                        COALESCE(obj_description(p.oid, 'pg_proc'), '') \
+                 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+                 WHERE n.nspname = {literal} ORDER BY p.proname"
+            ))
+            .await
+            .unwrap_or_default();
+
+        out.extend(routines.iter().map(|row| DbObjectInfo {
+            name: format!("{}({})", cell(row, 0), cell(row, 1)),
+            kind: DbNodeKind::Routine,
+            object_type: cell(row, 2),
+            created_at: None,
+            modified_at: None,
+            total_bytes: None,
+            used_bytes: None,
+            rows: None,
+            comment: cell(row, 3),
+        }));
+
+        Ok(out)
+    }
+
     pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
         let schema = node.schema().unwrap_or("public");
         let literal = quote_literal(Some(schema))?;
@@ -1056,6 +1142,13 @@ pub(super) fn relation_folders(node: &DbNodeRef) -> Vec<DbNode> {
     .collect()
 }
 
+/// A catalog number that arrived as text, or `None` when the engine left the column null or wrote
+/// something that isn't one. Shared by every driver's `schema_objects`, since all four read their
+/// catalogs through the same text-row path.
+pub(super) fn parse_bytes(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok()
+}
+
 pub(super) fn cell(row: &[Option<String>], index: usize) -> String {
     row.get(index).cloned().flatten().unwrap_or_default()
 }
@@ -1481,6 +1574,18 @@ mod tests {
 
     /// A CA path that isn't there has to be reported as that, and not as a connection failure ten
     /// seconds later.
+    /// Every driver reads its catalog through the same text-row path, so a size column arrives as
+    /// a string — including the strings that are not numbers at all.
+    #[test]
+    fn a_catalog_number_that_is_not_one_reads_as_absent() {
+        assert_eq!(parse_bytes("73728"), Some(73_728));
+        assert_eq!(parse_bytes("  16384 "), Some(16_384));
+        assert_eq!(parse_bytes("-1"), Some(-1));
+        assert_eq!(parse_bytes(""), None, "a null column");
+        assert_eq!(parse_bytes("NULL"), None);
+        assert_eq!(parse_bytes("12.5"), None, "a size is never fractional");
+    }
+
     #[test]
     fn a_missing_ca_file_is_named() {
         let mut config = config();

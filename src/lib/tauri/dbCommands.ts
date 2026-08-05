@@ -11,6 +11,7 @@ import type {
   DbNodeRef,
   DbQueryHistoryEntry,
   DbRowEdit,
+  DbObjectInfo,
   DbSchemaDiagram,
   DbSchemaGroup,
   DbServerInfo,
@@ -170,5 +171,11 @@ export const dbForeignKeys = (connectionId: string, node: DbNodeRef) =>
  * cancellable. */
 export const dbSchemaDiagram = (connectionId: string, node: DbNodeRef, runId: string) =>
   invoke<DbSchemaDiagram>("db_schema_diagram", { connectionId, node, runId });
+
+/** Every object of one schema with its catalog metadata — the schema overview tab's whole content.
+ * Takes a run id for the same reason the diagram does: on a schema with hundreds of tables the size
+ * columns are the slow part, and it has to be possible to take it back. */
+export const dbSchemaObjects = (connectionId: string, node: DbNodeRef, runId: string) =>
+  invoke<DbObjectInfo[]>("db_schema_objects", { connectionId, node, runId });
 
 export const dbCancel = (runId: string) => invoke<void>("db_cancel", { runId });

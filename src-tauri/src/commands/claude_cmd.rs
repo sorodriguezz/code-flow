@@ -354,11 +354,6 @@ pub fn default_commit_template() -> String {
 }
 
 #[tauri::command]
-pub fn default_review_template() -> String {
-    ai::DEFAULT_REVIEW_PROMPT.to_string()
-}
-
-#[tauri::command]
 pub fn default_analyze_template() -> String {
     ai::DEFAULT_ANALYZE_TEMPLATE.to_string()
 }

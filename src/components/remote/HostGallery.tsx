@@ -1,15 +1,18 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import {
   FolderOpen,
   LayoutGrid,
   List,
   Monitor,
   MonitorSmartphone,
+  Plus,
   Settings2,
   Terminal,
   Waypoints,
 } from "lucide-react";
+import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { HostDot, KindGlyph, OsGlyph, Pill } from "./remoteChrome";
+import { useHostMenu, useNewConnectionMenu } from "./hostMenu";
 import { allTags, hostMatches, useRemoteStore } from "../../state/remoteStore";
 import { useT } from "../../state/languageStore";
 import {
@@ -38,12 +41,23 @@ export function HostGallery() {
   const tagFilter = useRemoteStore((s) => s.tagFilter);
   const hostView = useRemoteStore((s) => s.hostView);
   const setHostView = useRemoteStore((s) => s.setHostView);
+  const newConnectionMenu = useNewConnectionMenu();
   const t = useT();
+
+  // The same menu the tree raises, on the same gesture. The gallery had none, which is the version
+  // of this view where a host can be deleted from the sidebar and nowhere else — and the gallery is
+  // the half of the workspace with room to actually read what you are deleting.
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; heading?: string } | null>(
+    null,
+  );
 
   const visible = useMemo(
     () => hosts.filter((host) => hostMatches(host, query, tagFilter)),
     [hosts, query, tagFilter],
   );
+
+  const openNewMenu = (x: number, y: number) =>
+    setMenu({ x, y, heading: t("remote.newConnection"), items: newConnectionMenu() });
 
   if (hosts.length === 0) {
     return (
@@ -53,12 +67,40 @@ export function HostGallery() {
         <p className="max-w-sm text-[13px] leading-relaxed text-[var(--cf-text-muted)]">
           {t("remote.emptySubtitle")}
         </p>
+        {/* The one thing to do on an empty estate, where the eye already is. The sidebar's (+) is
+            the same menu, but an empty view that only *describes* the button is a dead end. */}
+        <button
+          type="button"
+          onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            openNewMenu(rect.left, rect.bottom + 4);
+          }}
+          className="mt-2 flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:brightness-110"
+        >
+          <Plus size={13} />
+          {t("remote.newConnection")}
+        </button>
+        {menu && (
+          <ContextMenu
+            x={menu.x}
+            y={menu.y}
+            items={menu.items}
+            heading={menu.heading}
+            onClose={() => setMenu(null)}
+          />
+        )}
       </div>
     );
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      className="flex h-full min-h-0 flex-col"
+      onContextMenu={(event) => {
+        event.preventDefault();
+        openNewMenu(event.clientX, event.clientY);
+      }}
+    >
       <div className="flex shrink-0 items-center gap-2 px-4 pb-2 pt-3">
         <span className="text-[12px] font-medium text-[var(--cf-text)]">
           {t("remote.hosts")}
@@ -92,19 +134,47 @@ export function HostGallery() {
           // rather than as a grid. `auto-fill` keeps the column rhythm at any count.
           <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
             {visible.map((host) => (
-              <HostCard key={host.id} host={host} />
+              <HostCard key={host.id} host={host} onMenu={setMenu} />
             ))}
           </div>
         ) : (
           <div className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-md border border-[var(--cf-border)]">
             {visible.map((host) => (
-              <HostListRow key={host.id} host={host} />
+              <HostListRow key={host.id} host={host} onMenu={setMenu} />
             ))}
           </div>
         )}
       </div>
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menu.items}
+          heading={menu.heading}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
+}
+
+/** Raising the gallery's one menu, handed down to the cards. */
+type SetMenu = (menu: { x: number; y: number; items: MenuItem[]; heading?: string } | null) => void;
+
+/** What a right-click on a card or a row does. A hook so both drawings of a host raise the identical
+ *  menu — see `useHostMenu`. */
+function useCardMenu(onMenu: SetMenu) {
+  const hostMenu = useHostMenu();
+  const selectHost = useRemoteStore((s) => s.selectHost);
+
+  return (host: RemoteHostRow) => (event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    // Right-click focuses too: the panel, the status bar and the menu must all name the same host.
+    selectHost(host.id);
+    onMenu({ x: event.clientX, y: event.clientY, items: hostMenu(host) });
+  };
 }
 
 function ViewButton({
@@ -260,8 +330,9 @@ function Action({
   );
 }
 
-function HostCard({ host }: { host: RemoteHostRow }) {
+function HostCard({ host, onMenu }: { host: RemoteHostRow; onMenu: SetMenu }) {
   const openPrimary = useOpenPrimary();
+  const cardMenu = useCardMenu(onMenu);
   const selectHost = useRemoteStore((s) => s.selectHost);
   const selected = useRemoteStore((s) => s.selectedHostId === host.id);
   const hasSession = useRemoteStore((s) =>
@@ -279,6 +350,7 @@ function HostCard({ host }: { host: RemoteHostRow }) {
       tabIndex={0}
       onClick={() => selectHost(host.id)}
       onDoubleClick={() => openPrimary(host, spec)}
+      onContextMenu={cardMenu(host)}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
@@ -324,8 +396,9 @@ function HostCard({ host }: { host: RemoteHostRow }) {
   );
 }
 
-function HostListRow({ host }: { host: RemoteHostRow }) {
+function HostListRow({ host, onMenu }: { host: RemoteHostRow; onMenu: SetMenu }) {
   const openPrimary = useOpenPrimary();
+  const cardMenu = useCardMenu(onMenu);
   const selectHost = useRemoteStore((s) => s.selectHost);
   const selected = useRemoteStore((s) => s.selectedHostId === host.id);
   const hasSession = useRemoteStore((s) =>
@@ -341,6 +414,7 @@ function HostListRow({ host }: { host: RemoteHostRow }) {
       tabIndex={0}
       onClick={() => selectHost(host.id)}
       onDoubleClick={() => openPrimary(host, spec)}
+      onContextMenu={cardMenu(host)}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();

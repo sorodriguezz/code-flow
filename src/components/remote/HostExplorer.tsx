@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEven
 import {
   ChevronDown,
   ChevronRight,
-  Copy,
   Download,
   Bookmark,
   FolderOpen,
@@ -19,7 +18,6 @@ import {
   Settings2,
   Terminal,
   Trash2,
-  Unplug,
   Waypoints,
   X,
 } from "lucide-react";
@@ -28,13 +26,8 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRemoteDragStore } from "../../state/remoteDragStore";
 import { CARD, HostDot, KindGlyph, OsGlyph, ToolbarButton } from "./remoteChrome";
-import {
-  disconnectHost,
-  groupHosts,
-  hostMatches,
-  UNGROUPED,
-  useRemoteStore,
-} from "../../state/remoteStore";
+import { useHostMenu, useNewConnectionMenu } from "./hostMenu";
+import { groupHosts, hostMatches, UNGROUPED, useRemoteStore } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -45,6 +38,15 @@ import {
   parseHostSpec,
   type RemoteHostRow,
 } from "../../types/remote";
+
+/** What a right-click put on screen: a point, a list, and optionally the question the list answers.
+ *  One shape for both the tree's own menus and the (+)'s. */
+interface OpenMenu {
+  x: number;
+  y: number;
+  items: MenuItem[];
+  heading?: string;
+}
 
 const WIDTH_MIN = 200;
 const WIDTH_MAX = 480;
@@ -97,17 +99,16 @@ function HostList({ onImport }: { onImport: () => void }) {
   const collapsed = useRemoteStore((s) => s.collapsedGroups);
   const tagFilter = useRemoteStore((s) => s.tagFilter);
   const toggleGroup = useRemoteStore((s) => s.toggleGroup);
-  const createHost = useRemoteStore((s) => s.createHost);
   const folders = useRemoteStore((s) => s.groups);
   const createGroup = useRemoteStore((s) => s.createGroup);
   const refresh = useRemoteStore((s) => s.refresh);
-  const openDetails = useRemoteStore((s) => s.openDetails);
   const openAllForwards = useRemoteStore((s) => s.openAllForwards);
   const openLog = useRemoteStore((s) => s.openLog);
   const loading = useRemoteStore((s) => s.loading);
+  const newConnectionMenu = useNewConnectionMenu();
   const t = useT();
 
-  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [menu, setMenu] = useState<OpenMenu | null>(null);
   const [creatingGroup, setCreatingGroup] = useState(false);
 
   // Released over the search box, the toolbar, or off the window entirely: none of those are drop
@@ -139,23 +140,28 @@ function HostList({ onImport }: { onImport: () => void }) {
     [visible, folders, query, tagFilter],
   );
 
-  const addHost = async (group = "") => {
-    const row = await createHost(t("remote.newHostName"), group);
-    // Straight into the editor rather than into inline rename: a new host needs an address before
-    // it is anything, and the editor's first field is the name anyway — so this is one step that
-    // asks for everything instead of two that ask for the least useful part first.
-    if (row) openDetails(row.id);
-  };
+  /**
+   * The (+): which kind of connection, asked before anything is created.
+   *
+   * A single "New host" could only ever make one thing — an SSH row — and left the user to find the
+   * Type selector, and then the Screen tab, to turn it into what they actually came for. Asking
+   * first costs one click and decides the whole shape of the row: see `NEW_CONNECTIONS`.
+   */
+  const openNewMenu = (x: number, y: number, group = "") =>
+    setMenu({ x, y, heading: t("remote.newConnection"), items: newConnectionMenu(group) });
 
   /** The tree's own background menu — the only place "New group" can live, since an empty tree has
    *  no group heading to right-click. */
   const treeMenu = (event: ReactMouseEvent) => {
     event.preventDefault();
+    const { clientX: x, clientY: y } = event;
     setMenu({
-      x: event.clientX,
-      y: event.clientY,
+      x,
+      y,
       items: [
-        { label: t("remote.newHost"), icon: Plus, onClick: () => void addHost() },
+        // Two steps rather than six entries here: this menu is also where "New group" lives, and a
+        // background menu that opened with the whole connection catalogue would bury it.
+        { label: `${t("remote.newConnection")}…`, icon: Plus, onClick: () => openNewMenu(x, y) },
         { label: t("remote.newGroup"), icon: FolderPlus, onClick: () => setCreatingGroup(true) },
       ],
     });
@@ -180,7 +186,16 @@ function HostList({ onImport }: { onImport: () => void }) {
           onClick={() => void refresh()}
           disabled={loading}
         />
-        <ToolbarButton icon={Plus} label={t("remote.newHost")} onClick={() => void addHost()} />
+        {/* Anchored to the button, not to the pointer: a menu that opened wherever the cursor was
+            when it happened to be over a toolbar reads as a right-click that fired by accident. */}
+        <ToolbarButton
+          icon={Plus}
+          label={t("remote.newConnection")}
+          onClick={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            openNewMenu(rect.left, rect.bottom + 4);
+          }}
+        />
       </div>
 
       <div className="shrink-0 px-2 py-1.5">
@@ -237,7 +252,7 @@ function HostList({ onImport }: { onImport: () => void }) {
               // collapsed is a search that lies about what it found.
               collapsed={!query.trim() && tagFilter.length === 0 && collapsed.includes(group)}
               onToggle={() => toggleGroup(group)}
-              onAddHost={() => void addHost(group)}
+              onNewHere={(x, y) => openNewMenu(x, y, group)}
               onNewGroup={() => setCreatingGroup(true)}
               onMenu={setMenu}
             />
@@ -246,7 +261,13 @@ function HostList({ onImport }: { onImport: () => void }) {
       </div>
 
       {menu && (
-        <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menu.items}
+          heading={menu.heading}
+          onClose={() => setMenu(null)}
+        />
       )}
     </div>
   );
@@ -257,7 +278,7 @@ function GroupSection({
   hosts,
   collapsed,
   onToggle,
-  onAddHost,
+  onNewHere,
   onNewGroup,
   onMenu,
 }: {
@@ -265,9 +286,9 @@ function GroupSection({
   hosts: RemoteHostRow[];
   collapsed: boolean;
   onToggle: () => void;
-  onAddHost: () => void;
+  onNewHere: (x: number, y: number) => void;
   onNewGroup: () => void;
-  onMenu: (menu: { x: number; y: number; items: MenuItem[] } | null) => void;
+  onMenu: (menu: OpenMenu | null) => void;
 }) {
   const renameGroup = useRemoteStore((s) => s.renameGroup);
   const deleteGroup = useRemoteStore((s) => s.deleteGroup);
@@ -317,11 +338,16 @@ function GroupSection({
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          const { clientX: x, clientY: y } = e;
           onMenu({
-            x: e.clientX,
-            y: e.clientY,
+            x,
+            y,
             items: [
-              { label: t("remote.newHostHere"), icon: Plus, onClick: onAddHost },
+              {
+                label: `${t("remote.newHostHere")}…`,
+                icon: Plus,
+                onClick: () => onNewHere(x, y),
+              },
               { label: t("remote.newGroup"), icon: FolderPlus, onClick: onNewGroup },
               // Renaming or deleting the ungrouped bucket is meaningless: it is the absence of a
               // group, so renaming it would write a literal name onto every host that deliberately
@@ -390,14 +416,12 @@ function HostRow({
   onMenu,
 }: {
   host: RemoteHostRow;
-    onMenu: (menu: { x: number; y: number; items: MenuItem[] } | null) => void;
+  onMenu: (menu: OpenMenu | null) => void;
 }) {
   const openSession = useRemoteStore((s) => s.openSession);
   const openForwards = useRemoteStore((s) => s.openForwards);
   const openScreen = useRemoteStore((s) => s.openScreen);
   const openSftp = useRemoteStore((s) => s.openSftp);
-  const duplicateHost = useRemoteStore((s) => s.duplicateHost);
-  const deleteHost = useRemoteStore((s) => s.deleteHost);
   const renameHost = useRemoteStore((s) => s.renameHost);
   const setRenamingHost = useRemoteStore((s) => s.setRenamingHost);
   const openDetails = useRemoteStore((s) => s.openDetails);
@@ -408,6 +432,7 @@ function HostRow({
     s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited),
   );
   const hasForward = useRemoteStore((s) => s.forwards.some((f) => f.host_id === host.id));
+  const hostMenu = useHostMenu();
   const t = useT();
 
   const press = useRemoteDragStore((s) => s.press);
@@ -445,43 +470,6 @@ function HostRow({
    */
   const openPrimary = () =>
     act(() => (can.shell ? void openSession(host.id) : openSftp(host.id)));
-
-  const menuItems = (): MenuItem[] => [
-    ...(can.shell
-      ? [{ label: t("remote.openShell"), icon: Terminal, onClick: () => act(() => void openSession(host.id)) }]
-      : []),
-    { label: t("remote.files"), icon: FolderOpen, onClick: () => act(() => openSftp(host.id)) },
-    ...(can.forwards
-      ? [{ label: t("remote.portForwards"), icon: Waypoints, onClick: () => act(() => openForwards(host.id)) }]
-      : []),
-    ...(hasScreen
-      ? [{ label: t("remote.openScreen"), icon: Monitor, onClick: () => act(() => void openScreen(host.id)) }]
-      : []),
-    { label: t("remote.editHost"), icon: Settings2, onClick: () => openDetails(host.id), separated: true },
-    { label: t("remote.rename"), icon: Pencil, onClick: () => setRenamingHost(host.id) },
-    { label: t("remote.duplicate"), icon: Copy, onClick: () => void duplicateHost(host.id) },
-    ...(hasSession || hasForward
-      ? [
-          {
-            label: t("remote.disconnect"),
-            icon: Unplug,
-            onClick: () => void disconnectHost(host.id),
-            separated: true,
-          },
-        ]
-      : []),
-    {
-      label: t("common.delete"),
-      icon: Trash2,
-      danger: true,
-      separated: true,
-      onClick: async () => {
-        if (await confirmAction(t("remote.confirmDeleteHost", { name: host.name }))) {
-          void deleteHost(host.id);
-        }
-      },
-    },
-  ];
 
   const detail = describeHost(spec);
 
@@ -522,9 +510,17 @@ function HostRow({
           setRenamingHost(host.id);
         }
       }}
+      // `stopPropagation` is what makes this menu the one you get. Without it the event reached the
+      // tree's own background handler, which set its "New connection / New group" menu over the
+      // top — so right-clicking a host offered everything except the things you can do to a host.
       onContextMenu={(e) => {
         e.preventDefault();
-        onMenu({ x: e.clientX, y: e.clientY, items: menuItems() });
+        e.stopPropagation();
+        onMenu({
+          x: e.clientX,
+          y: e.clientY,
+          items: hostMenu(host, { onRename: () => setRenamingHost(host.id) }),
+        });
       }}
       className={`group flex w-full cursor-default items-center gap-1.5 rounded-md py-[3px] pl-5 pr-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         beingDragged ? "opacity-40" : ""

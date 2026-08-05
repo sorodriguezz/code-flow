@@ -17,6 +17,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  SkipForward,
   Sparkles,
   Square,
   ThumbsDown,
@@ -26,7 +27,7 @@ import {
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
 import { CONFIRM_POST_KEYS, POSTED_KEYS, VIEW_ON_KEYS } from "../../lib/providerLabels";
-import { discardPrFinding, getReviewRun } from "../../lib/tauri/commands";
+import { discardPrFinding, getReviewRun, REVIEW_SKIPPED } from "../../lib/tauri/commands";
 import { parseClaudeError } from "../../lib/claudeError";
 import {
   listCommentThreads,
@@ -530,7 +531,14 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   const [logExpanded, setLogExpanded] = useState(false);
   const loading = job?.status === "running";
   const error = job?.status === "error" ? job.error : null;
-  const reviewText = job?.status === "done" ? job.result : null;
+  const rawReviewText = job?.status === "done" ? job.result : null;
+  // A review the plan stopped to ask about — a draft, a merged PR. It comes back as a *successful*
+  // run carrying a marker rather than as an error, because nothing failed: the review simply
+  // hasn't been authorised yet. Kept out of `reviewText` so the findings parse never sees it.
+  const skipReason = rawReviewText?.startsWith(REVIEW_SKIPPED)
+    ? rawReviewText.slice(REVIEW_SKIPPED.length)
+    : null;
+  const reviewText = skipReason ? null : rawReviewText;
   const parsed = useMemo(() => (reviewText ? parseAnalysis(reviewText) : null), [reviewText]);
   const findings = parsed?.findings ?? [];
   const summary = parsed?.summary ?? "";
@@ -971,6 +979,26 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
         )}
 
         {!loading && error && <AiErrorBanner error={error} compact />}
+
+        {/* The plan declined to spend anything and said why. An answer, not a failure — so it is
+            offered as a question with the override next to it, and the override is the only thing
+            that sets `force`. */}
+        {!loading && skipReason && (
+          <div className="mb-2 flex items-start gap-2 rounded-lg border border-[color-mix(in_oklab,var(--cf-warning)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_9%,transparent)] px-3 py-2 text-[12px] text-[var(--cf-text)]">
+            <SkipForward size={13} className="mt-0.5 shrink-0 text-[var(--cf-warning)]" />
+            <div className="min-w-0 flex-1">
+              <p className="break-words">{skipReason}</p>
+              {!prClosed && (
+                <button
+                  onClick={() => reviewPr(target, pr.id, undefined, true)}
+                  className="mt-1 text-[var(--cf-accent)] underline"
+                >
+                  {t("pr.reviewAnyway")}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* Nothing open, and the memory says this PR closed things along the way. Without this the
             panel shows a bare "no issues" that reads the same on a PR that never had one. */}

@@ -225,6 +225,29 @@ export type DbNodeKind =
   | "index"
   | "key";
 
+/**
+ * One object of a schema, with everything its engine's catalog will say about it.
+ *
+ * Every field but the name and the kind is optional, and that is the honest shape: Postgres records
+ * no creation date, IRIS reports no size, Mongo has neither. `null` means "this engine will not
+ * say" and the grid leaves the cell empty rather than inventing a zero.
+ */
+export interface DbObjectInfo {
+  name: string;
+  kind: DbNodeKind;
+  /** What the engine itself calls the type — `USER_TABLE`, `MATERIALIZED VIEW`, `SEQUENCE_OBJECT`. */
+  objectType: string;
+  createdAt: string | null;
+  modifiedAt: string | null;
+  /** Bytes reserved, indexes included. */
+  totalBytes: number | null;
+  /** Bytes actually holding data. */
+  usedBytes: number | null;
+  /** An estimate, never a `COUNT(*)`. */
+  rows: number | null;
+  comment: string;
+}
+
 export interface DbColumnInfo {
   data_type: string;
   nullable: boolean;

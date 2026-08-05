@@ -160,6 +160,17 @@ uses, so there aren't two lists to keep in step.
   That's a shallower review (the model can't see the rest of the code), so you can also clone it in one
   click for the full one.
 - **List, review and comment** on PRs; **approve, request changes or close** them.
+- **The review is planned before anything is spent**: CodeFlow trims each file down to the symbols
+  the PR touched — the whole method, numbered, with `>` marking what changed — splits the work
+  across several reviewers in parallel, and closes with a cross-file pass looking for what no
+  single-file reviewer can see: signatures that left their callers behind, schemas that drifted apart.
+- **Three depth levels** (basic · full · ultra) with a real contract rather than a suggestion:
+  confidence threshold, reported severities, active lenses and parallelism. All of it is edited in
+  Settings → Review → Engine, enforced in code, and frozen into every saved review so an old one
+  still says which rules produced it.
+- **Memory that gets consulted, not just stored**: what was already dismissed on those same files in
+  other PRs comes back as context, and whoever else in the repository references the symbols you are
+  touching arrives as a hint for contract changes.
 - **Create a PR** with an AI title and description, as a draft too.
 - Publish the **AI review's** comments straight onto the pull request.
 
@@ -263,6 +274,10 @@ The query you need to check is one tab away from the migration you just wrote.
 - **Prompt templates** for commit, analysis, review, PR description and conflicts — and for
   writing stories, verifying them and generating documentation, so the backlog comes out in
   your team's house style.
+- The **PR review** ones are six, one per part of the engine: the lenses, each level's depth, the
+  parallel reviewer, the cross-file pass and the closing summary. The numbers are not typed into
+  them — they arrive from the Engine tab through `{{MIN_CONFIANZA}}`-style placeholders, so
+  rewriting the wording can never put the instruction and the filter that enforces it out of step.
 - Per workspace: **review context**, **instructions (.md)** and **Skills**.
 - **Reusable agents** with their own model and standing instructions.
 - **A full history** of what the AI has done — failures included, so tomorrow you know what happened.

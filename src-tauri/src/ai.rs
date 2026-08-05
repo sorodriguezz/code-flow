@@ -136,48 +136,6 @@ pub const DEFAULT_COMMIT_TEMPLATE: &str =
      mood, summary line under 72 chars, no body) for the staged diff piped on stdin. \
      Respond with ONLY the commit message text — no quotes, no markdown, no explanation.";
 
-pub const DEFAULT_REVIEW_PROMPT: &str =
-    "Eres un revisor de código senior revisando un pull request. Se te entrega el título, la \
-     descripción, el contexto del proyecto y el diff por stdin.\n\n\
-     Antes que nada, en la primera línea de tu respuesta, califica el cambio completo con \
-     EXACTAMENTE este formato:\n\n\
-     📈 CALIDAD: Fiabilidad={A-E} Seguridad={A-E} Mantenibilidad={A-E}\n\n\
-     Criterio de las notas (A = mejor, E = peor), evaluando SOLO lo que toca este diff:\n\
-     - Fiabilidad: A si no hay bugs/riesgos lógicos, B si hay solo hallazgos menores, C si hay \
-     advertencias, D si hay un hallazgo crítico, E si hay varios.\n\
-     - Seguridad: igual criterio pero solo con hallazgos de seguridad.\n\
-     - Mantenibilidad: igual criterio pero con estilo/complejidad/duplicación.\n\n\
-     Luego, para cada problema real que encuentres (bugs, riesgos de seguridad, rendimiento, \
-     integración, estilo importante — no inventes hallazgos triviales si el código está bien), \
-     responde en Markdown con EXACTAMENTE este formato, uno por hallazgo, en este orden:\n\n\
-     ### {emoji} [{Severidad} · {Tipo}] {Categoría corta} · F-{número correlativo de 3 dígitos}\n\n\
-     {Un subtítulo de una línea, algo más largo que el título, describiendo el problema puntual}\n\n\
-     📍 Ubicación: {ruta relativa exacta del archivo desde la raíz del repo}:{línea inicio}-{línea fin}\n\n\
-     💭 Por qué: {explicación concreta del problema, citando archivo y línea/función relevante}\n\n\
-     💡 Sugerencia: {qué cambiar exactamente para resolverlo}\n\n\
-     🛠️ Ejemplo de solución:\n\
-     ```{lenguaje}\n\
-     {fragmento de código mostrando la solución concreta}\n\
-     ```\n\n\
-     🎯 Confianza: {0-100}/100\n\n\
-     ---\n\n\
-     Reglas:\n\
-     - Responde SIEMPRE en español — el subtítulo, el \"Por qué\", la \"Sugerencia\" y \
-     cualquier otro texto libre deben estar en español, sin importar el idioma del título, la \
-     descripción del PR, el diff, o los comentarios/nombres en el código.\n\
-     - Usa 🚨 para Crítico, ⚠️ para Advertencia/Mayor, ℹ️ para Menor/Sugerencia.\n\
-     - Numera los hallazgos F-001, F-002, etc. en el orden en que aparecen en el diff.\n\
-     - La línea \"📍 Ubicación\" es obligatoria en cada hallazgo y debe usar la ruta real del \
-     archivo tal como aparece en el diff (encabezado `+++ b/...`) y el rango de línea real del \
-     lado nuevo del diff — esto se usa para anclar el comentario a esa línea exacta en el PR, \
-     así que no la omitas ni la inventes. Escríbela en TEXTO PLANO, sin backticks ni ningún \
-     otro formato Markdown (a diferencia del resto de la respuesta, donde sí puedes usar \
-     backticks para código) — el valor se parsea literalmente para ubicar el comentario.\n\
-     - Sé específico y cita archivos/líneas reales del diff — no generalices.\n\
-     - No repitas el diff completo ni resumas cambios que no son problemáticos.\n\
-     - Si no encuentras ningún problema real, dilo brevemente en un par de líneas con ✅ después \
-     de la línea de CALIDAD, sin inventar hallazgos ni usar la plantilla anterior.";
-
 /// The default per-workspace **PR review standard** — the methodology every review follows,
 /// seeded into each workspace and editable from Settings. Ported from the transversal
 /// `WF-PR-REVIEWER` runbook (SonarQube-style taxonomy, A–E ratings, Quality Gate, review
@@ -256,6 +214,96 @@ Reglas del formato:
 - Sé específico y cita archivos/líneas reales del diff — no generalices ni repitas el diff completo.
 - Ordena los hallazgos por severidad (Blocker→Info) y, dentro de cada severidad, por confianza descendente.
 - Si NO encuentras ningún problema real, dilo en un par de líneas con ✅ justo después de la línea de CALIDAD, sin inventar hallazgos ni usar la plantilla de arriba."#;
+
+/// The **review lenses**, editable per workspace.
+///
+/// Each level switches a subset of them on (`LevelContract::lenses`), and the selected ones travel
+/// in every reading bundle's header instead of being repeated in each worker's prompt — with four
+/// groups that was four copies of the same checklist.
+pub const DEFAULT_REVIEW_LENSES: &str = crate::review::contract::DEFAULT_LENSES;
+
+// The per-level **depth directives**. These used to be a hardcoded `match` in this file, which made
+// the one thing a team most often wants to tune — how strict its reviews are — the one thing it
+// could not touch. The numbers are no longer written into the prose either: they are injected from
+// the level's resolved contract through the placeholders below, so editing the wording can never
+// put the prompt and the filter that enforces it out of step.
+//
+//   {{NIVEL}}                   the level's name
+//   {{SEVERIDADES}}             the severities this level reports
+//   {{MIN_CONFIANZA}}           the confidence threshold
+//   {{MIN_CONFIANZA_BLOCKER}}   the (lower) threshold Blocker gets
+//   {{LENTES}}                  the active lens numbers
+
+pub const DEFAULT_REVIEW_LEVEL_BASICO: &str = r#"## NIVEL DE REVISIÓN ACTIVO: {{NIVEL}}
+Triage rápido, una sola pasada. Aplica solo las lentes {{LENTES}}.
+Reporta ÚNICAMENTE hallazgos de severidad {{SEVERIDADES}} con confianza >= {{MIN_CONFIANZA}} (Blocker >= {{MIN_CONFIANZA_BLOCKER}}). Todo lo demás se descarta: no listes nada que no sea un bloqueante real y de alta confianza.
+Si no encuentras nada que llegue a ese listón, dilo en un par de líneas con ✅ tras la línea de CALIDAD."#;
+
+pub const DEFAULT_REVIEW_LEVEL_COMPLETO: &str = r#"## NIVEL DE REVISIÓN ACTIVO: {{NIVEL}}
+Revisión a fondo. Aplica las lentes {{LENTES}}.
+Reporta hallazgos de severidad {{SEVERIDADES}} con confianza >= {{MIN_CONFIANZA}} (los Blocker con >= {{MIN_CONFIANZA_BLOCKER}}, porque callar un posible Blocker cuesta más que un falso positivo).
+Omite los nitpicks subjetivos. No inventes hallazgos triviales si el código está bien: un PR sin hallazgos es un resultado válido."#;
+
+pub const DEFAULT_REVIEW_LEVEL_ULTRA: &str = r#"## NIVEL DE REVISIÓN ACTIVO: {{NIVEL}}
+Revisión exhaustiva. Aplica las lentes {{LENTES}}, incluida la mantenibilidad a fondo.
+Reporta hallazgos de severidad {{SEVERIDADES}} con confianza >= {{MIN_CONFIANZA}} (Blocker >= {{MIN_CONFIANZA_BLOCKER}}) e INCLUYE los Info/nitpicks.
+Antes de concluir sobre un cambio, lee el método completo que lo rodea y, si el cambio toca una firma o un contrato, abre también a quien lo llama. Prioriza precisión sobre brevedad."#;
+
+/// What each parallel reviewer is told, on top of the standard and the level directive.
+///
+/// Its whole job is to narrow the role: this reviewer owns some files and not others, writes
+/// findings and nothing else, and does not number them meaningfully because the consolidation step
+/// reassigns every id.
+pub const DEFAULT_REVIEW_WORKER: &str = r#"## TU ROL EN ESTA REVISIÓN
+Esta revisión se repartió entre varios revisores en paralelo. Por stdin recibes UN BUNDLE: los archivos que te tocan, ya recortados a los símbolos que el PR modificó, con las líneas numeradas y un `>` marcando lo que el PR introdujo o cambió.
+
+- Revisa SOLO los archivos de tu bundle. De los demás archivos del PR se encarga otro revisor: no opines sobre ellos ni comentes que no los viste.
+- La cabecera del bundle ya trae tu nivel, tu umbral de confianza y tus lentes. Son los que aplican: no los repitas en la respuesta ni los discutas.
+- Tienes el repositorio abierto. Si te falta contexto (un callee, otra parte del archivo, el tipo de un parámetro), ábrelo con tus herramientas antes de concluir. Un hallazgo que no verificaste no vale la pena escribirlo.
+- NO escribas la línea 📈 CALIDAD, ni resumen, ni conclusiones generales, ni "en resumen": solo los bloques de hallazgo. Todo eso lo arma el consolidador con lo que devuelvan todos los revisores.
+- La numeración `F-NNN` que escribas es provisional y se reasigna al consolidar. Numera desde F-001 sin preocuparte por los otros revisores.
+- Si no encuentras nada en TUS archivos, responde exactamente: SIN HALLAZGOS"#;
+
+/// The short prose a fanned-out review would otherwise not have.
+///
+/// With one reviewer the summary is free: it saw everything, so it writes the report's opening
+/// paragraph as part of its answer. With several, nobody is in a position to — each one saw a
+/// slice, and a summary written from a slice describes the whole pull request wrongly. So the
+/// synthesis is its own (small, code-free) pass over the consolidated findings.
+pub const DEFAULT_REVIEW_SUMMARY: &str = r#"Eres un revisor de código senior cerrando la revisión de un pull request.
+
+Por stdin recibes el título y la descripción del PR, y la lista ya consolidada de hallazgos (severidad, tipo, categoría, ubicación y el porqué de cada uno). No recibes el código: ya lo revisaron.
+
+Escribe SOLO el resumen que abre el reporte, en español:
+- 2 a 4 frases en prosa: qué hace el PR, qué tan sano se ve y cuál es el riesgo principal si lo hay.
+- Después, si corresponde, una línea `**Lo que está bien:**` con 1 a 3 puntos concretos.
+- Si hay algo que el equipo deba saber y no es un hallazgo (una variable de entorno nueva, una migración que correr), agrégalo como `**Notas:**` con 1 a 3 puntos.
+
+Reglas:
+- NO repitas los hallazgos uno por uno: ya se listan abajo con todo el detalle. Refiérete a ellos por su patrón ("dos problemas de validación en el BFF"), no por su id.
+- NO escribas la línea 📈 CALIDAD, ni el Quality Gate, ni encabezados `###`: eso lo arma el reporte.
+- No inventes nada que no esté en los hallazgos o en la descripción del PR.
+- Si no hay hallazgos, dilo en una o dos frases sin adornos."#;
+
+/// The pass no single-file reviewer can do.
+///
+/// It reads only the outline — every touched file with its symbols — because the point is what
+/// happens *between* files, and handing it the code again would buy nothing but tokens.
+pub const DEFAULT_REVIEW_CROSSFILE: &str = r#"## TU ROL EN ESTA REVISIÓN
+Haces la ÚLTIMA pasada: la que ningún revisor por archivo puede hacer. Por stdin recibes el OUTLINE del PR (cada archivo tocado con sus símbolos y rangos), no el código.
+
+Los problemas DENTRO de cada archivo ya los cubrieron los otros revisores. No los repitas.
+
+Busca solo lo que cruza archivos:
+- Cambios de firma o de contrato que dejan desactualizado a quien los llama.
+- Breaking changes de API, DTO o esquema sin migración ni retrocompatibilidad.
+- Dos archivos que quedaron inconsistentes entre sí: un tipo duplicado que divergió, un enum ampliado de un lado y no del otro, un campo agregado al modelo y no al mapper.
+- Migraciones o cambios de datos sin su contraparte en el código (o al revés).
+
+Reglas:
+- Si necesitas confirmar algo, abre el archivo con tus herramientas. No reportes una sospecha sin mirarla.
+- NO escribas la línea 📈 CALIDAD ni resumen: solo los bloques de hallazgo.
+- Si no encuentras nada que cruce archivos, responde exactamente: SIN HALLAZGOS"#;
 
 pub const DEFAULT_ANALYZE_TEMPLATE: &str =
     "Eres un revisor de código senior. Se te entrega por stdin el contexto del proyecto y el \
@@ -2774,29 +2822,62 @@ pub async fn resolve_conflict(
     Ok(strip_code_fence(&run.text))
 }
 
-/// Reviews a pull request's diff with the active engine, folding in the workspace's enabled
-/// review contexts/MD instructions as extra background. Returns a Markdown review body —
-/// nothing gets posted to the VCS host here, that's a separate explicit step.
-/// The depth directive appended to the review prompt for the chosen level — confidence threshold,
-/// which severities survive, and how much to report. Mirrors the WF-PR-REVIEWER level rules
-/// (report-standard §2). Unknown/empty levels fall back to `completo`.
-fn review_level_directive(level: &str) -> &'static str {
-    match level {
-        "basico" | "básico" => "## NIVEL DE REVISIÓN ACTIVO: básico\n\
-            Triage rápido. Reporta SOLO hallazgos con confianza ≥ 75 y severidad Blocker o Crítico. \
-            Ignora Mayor/Menor/Info. Sé breve: no listes nada que no sea un bloqueante real de alta \
-            confianza. Si no hay Blocker/Crítico de alta confianza, dilo con ✅ tras la línea de CALIDAD.",
-        "ultra" => "## NIVEL DE REVISIÓN ACTIVO: ultra\n\
-            Revisión exhaustiva. Aplica las 6 lentes (incluida mantenibilidad a fondo). Reporta \
-            hallazgos con confianza ≥ 50 e INCLUYE Info/nitpicks. Lee el método completo alrededor \
-            de cada cambio antes de concluir; prioriza precisión sobre brevedad.",
-        _ => "## NIVEL DE REVISIÓN ACTIVO: completo\n\
-            Revisión a fondo con las 5 lentes principales. Reporta hallazgos con confianza ≥ 60 \
-            (los Blocker con ≥ 50). Incluye Blocker/Crítico/Mayor/Menor; omite los Info salvo que \
-            sean claramente útiles. No inventes hallazgos triviales si el código está bien.",
-    }
+/// One reviewer invocation — the primitive every shape of PR review is built from.
+///
+/// A "chunk" is whatever that reviewer is responsible for: one group's reading bundle, the
+/// cross-file outline pass, or (with no local clone to build bundles from) the whole diff. The
+/// caller owns the prompt and the payload; this owns only the plumbing, which is why the parallel
+/// fan-out is a loop over this rather than a second copy of the invocation logic.
+///
+/// No footer is stamped here: a worker's reply is an intermediate that gets parsed, merged and
+/// re-rendered, and a signature line in the middle of that would end up inside the report.
+#[allow(clippy::too_many_arguments)]
+pub async fn review_chunk(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    prompt: &str,
+    stdin_payload: &str,
+    allowed_tools: &[String],
+    cwd: &str,
+) -> Result<AiRun, String> {
+    let mut inv = AiInvocation::new(prompt, stdin_payload);
+    inv.model = model;
+    inv.allowed_tools = allowed_tools;
+    inv.cwd = Some(cwd);
+    run(engine, binary, inv).await
 }
 
+/// The signature line every finished review carries. Public because the review pipeline assembles
+/// its report from several runs and stamps it once, at the end.
+pub fn review_footer(body: &str, engine_label: &str, model: &str) -> String {
+    stamp_footer(body, "pr-review", engine_label, model)
+}
+
+/// The header of a review payload: what is being reviewed, and under which project rules.
+///
+/// Shared by every path so the model reads the same preamble whether it was handed a bundle or a
+/// raw diff — only what follows differs.
+pub fn review_preamble(pr_title: &str, pr_description: &str, contexts: &[(String, String)]) -> String {
+    let description = if pr_description.trim().is_empty() { "(sin descripción)" } else { pr_description };
+    let mut out = format!("PR TITLE: {pr_title}\n\nPR DESCRIPTION:\n{description}\n\n");
+    if !contexts.is_empty() {
+        out.push_str("PROJECT REVIEW CONTEXT:\n");
+        for (name, content) in contexts {
+            out.push_str(&format!("- {name}: {content}\n"));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Reviews a pull request from its raw diff, in one pass.
+///
+/// The fallback path, and deliberately kept: reviewing a pull request by link — a repository this
+/// machine has no clone of — cannot produce an outline, a bundle or a blast radius, because all
+/// three read the working copy. That is a genuinely weaker review than the project-backed one, and
+/// having it as its own function is what keeps the difference visible instead of hidden behind a
+/// pile of `Option`s in the main pipeline.
 #[allow(clippy::too_many_arguments)]
 pub async fn review_pull_request(
     engine: &dyn AiEngine,
@@ -2808,48 +2889,21 @@ pub async fn review_pull_request(
     diff_text: &str,
     allowed_tools: &[String],
     cwd: &str,
-    prompt_template: &str,
-    level: &str,
+    prompt: &str,
 ) -> Result<String, String> {
     if diff_text.trim().is_empty() {
         return Err("This pull request has no changes to review".to_string());
     }
 
     let truncated: String = diff_text.chars().take(MAX_REVIEW_DIFF_CHARS).collect();
-    let description = if pr_description.trim().is_empty() {
-        "(no description)"
-    } else {
-        pr_description
-    };
-
-    let mut stdin_payload = format!("PR TITLE: {pr_title}\n\nPR DESCRIPTION:\n{description}\n\n");
-    if !contexts.is_empty() {
-        stdin_payload.push_str("PROJECT REVIEW CONTEXT:\n");
-        for (name, content) in contexts {
-            stdin_payload.push_str(&format!("- {name}: {content}\n"));
-        }
-        stdin_payload.push('\n');
-    }
+    let mut stdin_payload = review_preamble(pr_title, pr_description, contexts);
     stdin_payload.push_str("DIFF:\n");
     stdin_payload.push_str(&truncated);
 
-    let base_prompt = if prompt_template.trim().is_empty() {
-        DEFAULT_REVIEW_PROMPT
-    } else {
-        prompt_template
-    };
-    // The level directive rides at the end of the prompt so it overrides any default depth the
-    // standard implies — the standard describes the method, the level tunes how deep/strict.
-    let prompt = format!("{base_prompt}\n\n{}", review_level_directive(level));
-
-    let mut inv = AiInvocation::new(&prompt, &stdin_payload);
-    inv.model = model;
-    inv.allowed_tools = allowed_tools;
-    inv.cwd = Some(cwd);
-    let run = run(engine, binary, inv).await?;
+    let run = review_chunk(engine, binary, model, prompt, &stdin_payload, allowed_tools, cwd).await?;
     // Prefer what the CLI reports it actually ran over what was configured — they differ
     // whenever `model` is empty and the CLI picked its own default.
-    Ok(stamp_footer(&run.text, "pr-review", engine.label(), run.model.as_deref().unwrap_or(model)))
+    Ok(review_footer(&run.text, engine.label(), run.model.as_deref().unwrap_or(model)))
 }
 
 /// Scans the working directory's not-yet-committed diff for bugs/vulnerabilities/perf issues

@@ -18,7 +18,7 @@ import { ForwardDiagram } from "./ForwardDiagram";
 import { Select } from "../common/Select";
 import { Checkbox } from "../common/Checkbox";
 import { CARD, HOST_COLORS, KindGlyph, OsGlyph, Pill, kindIcon } from "./remoteChrome";
-import { useRemoteStore } from "../../state/remoteStore";
+import { useRemoteStore, type RemoteDetailsTab } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { remoteGetPassword, remoteListKeys, remoteSetPassword } from "../../lib/tauri/remoteCommands";
 import { pushErrorToast } from "../../state/toastStore";
@@ -43,7 +43,9 @@ import {
   type SshKey,
 } from "../../types/remote";
 
-type Tab = "connection" | "forwards" | "screen" | "advanced";
+/** Owned by the store, because the caller that opens the panel is what knows which page to land on
+ *  — see `RemoteDetailsTab`. */
+type Tab = RemoteDetailsTab;
 
 /**
  * The host editor, as a persistent right-hand panel.
@@ -78,6 +80,7 @@ const WIDTH_MAX = 560;
 
 export function HostDetailsPanel() {
   const hostId = useRemoteStore((s) => s.detailsHostId);
+  const requestedTab = useRemoteStore((s) => s.detailsTab);
   const host = useRemoteStore((s) => s.hosts.find((entry) => entry.id === hostId) ?? null);
   const saveHost = useRemoteStore((s) => s.saveHost);
   const closeDetails = useRemoteStore((s) => s.closeDetails);
@@ -137,6 +140,13 @@ export function HostDetailsPanel() {
     setTab("connection");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host?.id]);
+
+  // After the effect above, and that ordering is the whole point: adopting a host resets the panel
+  // to Connection, so a caller that asked for a page — the (+)'s VNC entry wants Screen — has to
+  // get the last word. Effects run in declaration order, so this one does.
+  useEffect(() => {
+    if (requestedTab) setTab(requestedTab);
+  }, [requestedTab, hostId]);
 
   // Flush on the way out — closing the panel is the other way an edit can be left in the air.
   useEffect(() => () => flush(), []);

@@ -23,6 +23,7 @@ import {
   dbReorderConnections,
   dbRowCount,
   dbSchemaDiagram,
+  dbSchemaObjects,
   dbSetPassword,
   dbTableData,
   dbUpdateConnection,
@@ -48,6 +49,7 @@ import {
   type DbNodeRef,
   type DbQueryHistoryEntry,
   type DbRowEdit,
+  type DbObjectInfo,
   type DbSchemaDiagram,
   type DbServerInfo,
   type DbSortKey,
@@ -182,7 +184,32 @@ export interface DbDiagramTab {
   error: string | null;
 }
 
-export type DbTab = DbConsoleTab | DbDataTab | DbDdlTab | DbDiagramTab;
+/**
+ * A whole schema listed: every table, view, routine and sequence it holds, with what the catalog
+ * says about each.
+ *
+ * The tab that answers "what *is* in here", as opposed to the tree, which answers "what is in
+ * here". The tree is a list of names you walk one at a time; this is the same objects side by side
+ * with their type, their dates, their size and their comment — which is the view you want the
+ * moment you are comparing them rather than opening one.
+ *
+ * Like the diagram, it holds only what the server said: which category is selected and how the grid
+ * is sorted live in the panel, because they are ways of looking at this data rather than part of it.
+ */
+export interface DbSchemaTab {
+  id: string;
+  kind: "schema";
+  connectionId: string;
+  /** The container listed: a schema on the SQL engines, a database on Mongo, which has no schema. */
+  node: DbNodeRef;
+  name: string;
+  loading: boolean;
+  runId: string | null;
+  objects: DbObjectInfo[] | null;
+  error: string | null;
+}
+
+export type DbTab = DbConsoleTab | DbDataTab | DbDdlTab | DbDiagramTab | DbSchemaTab;
 
 /** Which explorer section the sidebar is showing. */
 export type DbSidebarSection = "explorer" | "history";
@@ -288,6 +315,11 @@ interface DbState {
   openDdl: (connectionId: string, node: DbNodeRef, name: string) => Promise<void>;
 
   /** Opens (or brings forward) the diagram of a schema — or, on Mongo, of a database. */
+  /** Opens (or focuses) the schema overview, and loads it. */
+  openSchema: (connectionId: string, node: DbNodeRef, name: string) => void;
+  /** Re-reads a schema overview tab. Also the retry after a failure, and what the refresh button
+   * calls. */
+  loadSchema: (tabId: string) => Promise<void>;
   openDiagram: (connectionId: string, node: DbNodeRef, name: string) => void;
   /** Re-reads the catalog for a diagram tab. Also what a restored tab calls to fill itself in. */
   loadDiagram: (tabId: string) => Promise<void>;
@@ -1249,6 +1281,67 @@ export const useDbStore = create<DbState>((set, get) => ({
 
   // ----------------------------------------------------------------- diagram
 
+  openSchema: (connectionId, node, name) => {
+    const existing = get().tabs.find(
+      (tab) => tab.kind === "schema" && sameNode(tab.node, node) && tab.connectionId === connectionId,
+    );
+    if (existing) {
+      set({ activeTabId: existing.id });
+      return;
+    }
+    const id = newId();
+    addTab(set, get, {
+      id,
+      kind: "schema",
+      connectionId,
+      node,
+      name,
+      loading: false,
+      runId: null,
+      objects: null,
+      error: null,
+    });
+    void get().loadSchema(id);
+  },
+
+  loadSchema: async (tabId) => {
+    const tab = findTab<DbSchemaTab>(get, tabId, "schema");
+    if (!tab || tab.loading) return;
+    const runId = newRunId();
+    patchTab<DbSchemaTab>(set, tabId, "schema", (current) => ({
+      ...current,
+      loading: true,
+      runId,
+      error: null,
+    }));
+    const started = Date.now();
+    try {
+      const objects = await dbSchemaObjects(tab.connectionId, tab.node, runId);
+      patchTab<DbSchemaTab>(set, tabId, "schema", (current) => ({ ...current, objects }));
+      // A catalog query the user never wrote, on the schema they are looking at — the same reason
+      // the diagram logs itself. One line: what the panel *is*, not the SQL behind it.
+      get().logSql({
+        connectionId: tab.connectionId,
+        sql: `-- schema objects: ${[tab.node.database, tab.node.schema ?? tab.node.name]
+          .filter(Boolean)
+          .join(".")}`,
+        source: "grid",
+        durationMs: Date.now() - started,
+        rows: objects.length,
+        error: null,
+      });
+    } catch (e) {
+      // Against the tab rather than as a toast: the panel is empty and has room to explain itself.
+      patchTab<DbSchemaTab>(set, tabId, "schema", (current) => ({ ...current, error: String(e) }));
+    } finally {
+      patchTab<DbSchemaTab>(set, tabId, "schema", (current) => ({
+        ...current,
+        loading: false,
+        runId: null,
+      }));
+    }
+  },
+
   openDiagram: (connectionId, node, name) => {
     const existing = get().tabs.find(
       (tab) =>
@@ -1704,6 +1797,21 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
       // Left empty for the same reason a restored data tab is: reopening the app must not fire a
       // catalog sweep per tab at a database that may be behind a VPN. The panel asks when looked at.
       diagram: null,
+      error: null,
+    };
+  }
+  if (persisted.kind === "schema") {
+    return {
+      id,
+      kind: "schema",
+      connectionId: persisted.connectionId,
+      node,
+      name: persisted.name,
+      loading: false,
+      runId: null,
+      // Left empty for the same reason a restored diagram is: reopening the app must not fire a
+      // catalog sweep per tab at a database that may be behind a VPN. The panel asks when looked at.
+      objects: null,
       error: null,
     };
   }

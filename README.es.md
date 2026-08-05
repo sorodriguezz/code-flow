@@ -165,6 +165,18 @@ chat, así que no hay dos plantillas que mantener.
   Es una revisión más superficial (el modelo no ve el resto del código), así que también puedes
   clonarlo de un clic para la revisión completa.
 - **Lista, revisa y comenta** PRs; **aprueba, pide cambios o ciérralos**.
+- **La revisión se prepara antes de gastar nada**: CodeFlow recorta cada archivo a los símbolos que
+  el PR tocó — el método completo, numerado, con `>` marcando lo que cambió — reparte el trabajo
+  entre varios revisores en paralelo y cierra con una pasada cruzada que busca lo que ningún
+  revisor por archivo puede ver: firmas que dejaron atrás a quien las llama, esquemas que
+  divergieron.
+- **Tres niveles de profundidad** (básico · completo · ultra) con un contrato de verdad, no una
+  sugerencia: umbral de confianza, severidades que se reportan, lentes activas y paralelismo. Todo
+  se edita en Ajustes → Revisión → Motor, lo aplica el código, y queda congelado en cada revisión
+  guardada para que una vieja siga diciendo bajo qué reglas se hizo.
+- **Memoria que se consulta, no solo se guarda**: lo que ya se descartó en otros PRs sobre esos
+  mismos archivos vuelve como contexto, y quién más en el repositorio referencia los símbolos que
+  tocas llega como pista para los cambios de contrato.
 - **Crea un PR** con título y descripción por IA, también como borrador.
 - Publica los comentarios de la **revisión de IA** directamente en el pull request.
 
@@ -271,6 +283,10 @@ La consulta que necesitas comprobar está a una pestaña de la migración que ac
 - **Plantillas de prompt** para commit, análisis, revisión, descripción de PR y conflictos —
   y para redactar historias, verificarlas y generar documentación, para que el backlog salga
   con el estilo de tu equipo.
+- Las de **revisión de PR** son seis, una por pieza del motor: las lentes, la profundidad de cada
+  nivel, el revisor en paralelo, el pase cruzado y el resumen de cierre. Los números no se escriben
+  a mano: llegan del Motor por marcadores tipo `{{MIN_CONFIANZA}}`, así que reescribir la redacción
+  nunca deja la instrucción y el filtro que la aplica en desacuerdo.
 - Por espacio de trabajo: **contexto de revisión**, **instrucciones (.md)** y **Skills**.
 - **Agentes reutilizables** con su propio modelo e instrucciones fijas.
 - **Historial completo** de lo que ha hecho la IA — incluidos los fallos, para que mañana sepas qué pasó.
