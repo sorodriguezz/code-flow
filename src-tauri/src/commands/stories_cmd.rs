@@ -829,6 +829,28 @@ fn empty_review(stage: ai::WorkItemReviewStage) -> WorkItemReview {
     }
 }
 
+/// The QA template with the workspace's estimation model in it.
+///
+/// Appended rather than dropped when the template has no slot, because the templates that lack one
+/// are exactly the customised ones — a team that rewrote its ladder before the model existed — and
+/// a QA run that quietly stops estimating is a worse outcome than one whose sections arrive in an
+/// order nobody chose. Anyone who wants the numbers somewhere else puts the slot there.
+///
+/// An empty model is honoured as "no table": [`queries::get_workspace_prompt`] never returns one
+/// today (blank means "use the built-in"), but a caller that hands over an empty string is asking
+/// for the ladder alone, and leaving the raw `{{ESTIMACION_QA}}` in the prompt would be the model
+/// reading an instruction that never arrived.
+fn with_qa_estimation(template: &str, estimation: &str) -> String {
+    let estimation = estimation.trim();
+    if estimation.is_empty() {
+        return template.replace(ai::QA_ESTIMATION_SLOT, "").trim_end().to_string();
+    }
+    match template.contains(ai::QA_ESTIMATION_SLOT) {
+        true => template.replace(ai::QA_ESTIMATION_SLOT, estimation),
+        false => format!("{}\n\n{estimation}", template.trim_end()),
+    }
+}
+
 /// Runs one stage of the review against zero or more repositories.
 ///
 /// `story_text` is assembled by the frontend from the work item it fetched, because that is where
@@ -907,8 +929,16 @@ pub async fn review_work_item(
             }
             _ => load_ai_config(&conn, AiTask::WorkItemReview)?,
         };
-        let template =
+        let mut template =
             queries::get_workspace_prompt(&conn, &workspace_id, prompt_kind).map_err(|e| e.to_string())?;
+        // The QA ladder is written in one text and estimated with another. They meet here rather
+        // than in the editor, so a team that recalibrates its hours does not have to find them
+        // inside a page of writing rules — and so the five steps it rewrote keep the calibration.
+        if matches!(stage, ai::WorkItemReviewStage::TasksQa) {
+            let estimation = queries::get_workspace_prompt(&conn, &workspace_id, "work_item_qa_estimation")
+                .map_err(|e| e.to_string())?;
+            template = with_qa_estimation(&template, &estimation);
+        }
         (contexts, skills, config, template)
     };
 
@@ -3203,6 +3233,40 @@ mod tests {
         assert_eq!(prefixed_title("qa", "[Dev] Probar el alta"), "[QA] Probar el alta");
         assert_eq!(prefixed_title("dev", "[DEV] [QA] Mover"), "[DEV] Mover");
         assert_eq!(prefixed_title("cualquier-cosa", "Mover"), "[DEV] Mover", "unknown kinds are dev");
+    }
+
+    /// The estimation model has to reach the prompt whichever shape the team left its ladder in —
+    /// including the ladder somebody customised before the model was a separate text, which has no
+    /// slot to put it in.
+    #[test]
+    fn the_estimation_model_reaches_the_qa_prompt_with_or_without_a_slot() {
+        let with_slot = "Devuelve cinco tareas.\n\n{{ESTIMACION_QA}}\n\n=== SALIDA ===";
+        let spliced = with_qa_estimation(with_slot, "TABLA");
+        assert!(spliced.contains("TABLA"));
+        assert!(!spliced.contains(ai::QA_ESTIMATION_SLOT), "the slot is consumed, not left behind");
+        assert!(spliced.ends_with("=== SALIDA ==="), "the slot is where the team put it");
+
+        let customised = "Mi escalera de QA de cuatro pasos.";
+        assert_eq!(
+            with_qa_estimation(customised, "TABLA"),
+            "Mi escalera de QA de cuatro pasos.\n\nTABLA",
+            "a template with no slot still gets the hours"
+        );
+    }
+
+    /// A blanked model is a team estimating by hand — it must not leave the unreplaced placeholder
+    /// in the prompt, which is the model being told to read a table nobody sent.
+    #[test]
+    fn a_blank_estimation_model_takes_the_slot_with_it() {
+        let template = "Devuelve cinco tareas.\n\n{{ESTIMACION_QA}}";
+        assert_eq!(with_qa_estimation(template, "   \n  "), "Devuelve cinco tareas.");
+    }
+
+    /// The default ladder has to carry the slot: without it every run would append the table after
+    /// the output rules, which is the one place it reads worst.
+    #[test]
+    fn the_default_qa_ladder_carries_the_slot() {
+        assert!(ai::DEFAULT_WORK_ITEM_TASKS_QA_TEMPLATE.contains(ai::QA_ESTIMATION_SLOT));
     }
 
     /// The `[QA]` on the title and the fields the board files the task under have to say the same

@@ -594,6 +594,8 @@ export const translations = {
     "api.scripts.insertSnippet": "Insert at the cursor",
 
     "api.settings.title": "API client settings",
+    "api.settings.hint":
+      "How requests are sent from this machine: timeouts and redirects, a proxy, client certificates, and the collection you share with your team.",
     "api.settings.network": "Network",
     "api.settings.timeout": "Request timeout (ms)",
     "api.settings.followRedirects": "Follow redirects",
@@ -631,14 +633,64 @@ export const translations = {
     "backup.title": "Backup",
     "backup.subtitle":
       "One encrypted file that turns another computer into this one — settings, projects, collections, database connections and every saved credential.",
-    "backup.about":
-      "What travels: workspaces, projects, API collections, environments, database connections, prompts, agents, MCP servers, every setting, and every token, key and password from this machine's credential store.",
-    "backup.aboutExcluded":
-      "What stays behind: request and query history, AI conversations, past reviews and cookies. The other machine can do everything this one can, without carrying a record of what was done here.",
+    "backup.tabContent": "What to include",
+    "backup.tabContentHint":
+      "Workspaces, repositories, prompts, agents and settings always travel. Choose what goes with them.",
+    "backup.tabPassword": "Password",
+    "backup.tabPasswordHint":
+      "The file is always encrypted, and this is the only key to it. Nothing else in this section works until one is set, and nobody — including us — can open a backup without it.",
+    "backup.tabBackup": "Back up",
+    "backup.tabRestore": "Restore",
+    "backup.chooseFile": "Choose a file…",
+    "backup.refreshList": "Refresh",
+    "backup.lookingForBackups": "Looking for backups…",
+    "backup.unknownDate": "Date unknown",
+    "backup.restoreNoDestination":
+      "No destination is set up yet, so only the file route is available. Set one under Back up to enable the other.",
+    "backup.tabGuides": "Destination guides",
+    "backup.tabGuidesHint":
+      "Both cloud destinations are bring-your-own: a Google Cloud project for Drive, an app registration for OneDrive. A synced folder needs neither, and is the shortest route.",
+    "backup.include.credentials": "Credentials",
+    "backup.include.credentialsHint":
+      "Every token, key and password this app keeps in the operating system's credential store: Azure DevOps PATs, GitHub and GitLab tokens, AI provider keys, database passwords and cloud grants. Without these the other machine gets every repository and connection in place and cannot authenticate with any of them — you would type each one in again by hand. Turn it off only if the file will sit somewhere you would not put a password.",
+    "backup.include.apiClient": "API client",
+    "backup.include.apiClientHint":
+      "Collections, folders, requests, environments and shared collections — including where each shared collection stands with its server, so the other machine keeps syncing instead of starting over.",
+    "backup.include.databases": "Database connections",
+    "backup.include.databasesHint":
+      "Saved connections and their SQL consoles. The passwords themselves ride under Credentials above, so with this on and that off the connections arrive needing their password typed once.",
+    "backup.include.authored": "Documents and backlog",
+    "backup.include.authoredHint":
+      "What you wrote rather than what the app recorded: generated documents, story batches and drafts, and work item reviews.",
+    "backup.include.requestHistory": "Request and query history",
+    "backup.include.requestHistoryHint":
+      "Every request sent from the API client and every statement run in a SQL console. Useful to carry, and usually the first thing worth leaving out — on a busy install it is the largest part of the file and it changes constantly, which makes the scheduled backup re-upload everything far more often.",
+    "backup.include.conversations": "Conversations and activity",
+    "backup.include.conversationsHint":
+      "Full transcripts of every AI turn, their titles, the job history and the workspace activity feed. This is what makes a restored machine remember what was discussed — and, because transcripts are long, usually the biggest thing in the file.",
+    "backup.include.reviews": "Past reviews",
+    "backup.include.reviewsHint":
+      "Finished PR reviews and pre-commit analyses, so their results can still be reopened on the other machine.",
+    "backup.include.agentWork": "Agent tasks and chains",
+    "backup.include.agentWorkHint":
+      "Tasks, chains and their steps, with the plan each one was authored as. Anything still running when the backup was written arrives paused rather than pretending to run — there is no process behind it on the other machine.",
+    "backup.include.cookies": "Session cookies",
+    "backup.include.cookiesHint":
+      "The API client's cookie jar. These are live sessions: including them signs the other computer in as you, which is convenient between your own machines and worth thinking about for anything else.",
+    "backup.includeNoCredentialsWarning":
+      "Without credentials, a restore leaves every repository, connection and provider in place but unable to authenticate. Each token and password has to be entered again by hand.",
+    "backup.includeAgentWorkNeedsConversations":
+      "Agent tasks keep their transcripts in Conversations. With that off, the tasks arrive but their contents do not.",
+    "backup.includeAllHint":
+      "Everything is included — the other machine ends up exactly like this one, minus the repository folders themselves.",
+    "backup.includePartialHint":
+      "{n} left out. They are simply absent from the file: restoring never deletes what it cannot put back, so anything you exclude stays untouched on the machine you restore onto.",
 
-    "backup.groupPassword": "Password",
-    "backup.passwordWarning":
-      "The file is always encrypted, and this password is the only key. There is no recovery: lose it and the backup is unreadable — including by us.",
+    "backup.adviceEmpty": "At least 8 characters. A long phrase beats a short complicated word.",
+    "backup.adviceShort": "{n} more to go — 8 is the minimum.",
+    "backup.adviceWeak": "Too weak to save. Add a word or two — length is worth more here than symbols.",
+    "backup.adviceFair": "Good enough to save. One more word and it is strong.",
+    "backup.adviceStrong": "Strong. Store it somewhere you'll still have it if this computer doesn't boot.",
     "backup.passwordSet": "A password is set",
     "backup.changePassword": "Change password",
     "backup.removePassword": "Remove",
@@ -647,10 +699,7 @@ export const translations = {
     "backup.currentPassword": "Current password",
     "backup.currentWrong": "That is not the current password",
     "backup.newPassword": "Password",
-    "backup.newPasswordHint": "At least 8 characters. A phrase beats a short complicated word.",
-    "backup.passwordPlaceholder": "Needed to open the backup",
     "backup.confirmPassword": "Repeat it",
-    "backup.passwordTooShort": "Use at least {n} characters",
     "backup.passwordMismatch": "The two passwords are different",
     "backup.passwordSaved": "Password saved",
     "backup.strengthTooShort": "too short",
@@ -658,31 +707,53 @@ export const translations = {
     "backup.strengthFair": "fair",
     "backup.strengthStrong": "strong",
 
-    "backup.groupManual": "Create and restore",
+    "backup.modeManual": "Manual",
+    "backup.modeAutomatic": "Automatic",
     "backup.needPasswordFirst": "Set a password above before creating or restoring a backup.",
-    "backup.exportPassword": "Password for this file",
-    "backup.exportPasswordHint": "Type it again — it never leaves the app, so it can't be filled in for you",
     "backup.exportNow": "Create backup…",
     "backup.importFromFile": "Restore from a file…",
     "backup.manualHint":
-      "Creating one asks where to save it. Restoring one asks for its password, and tells you what it holds before anything changes.",
+      "Sealed with the password under Password — the same one the scheduled backup uses. Creating one asks where to save it; restoring one asks for that password, and tells you what the file holds before anything changes.",
     "backup.exported": "Backup saved to {path} ({size})",
 
-    "backup.groupAutomatic": "Automatic backup",
+    "backup.stepWhere": "Where",
+    "backup.stepWhereHint": "What kind of place the backup should live in. You choose the exact one next.",
+    "backup.stepDestination": "Destination",
+    "backup.stepSchedule": "How often",
+    "backup.stepScheduleHint":
+      "How often it runs, and how many dated copies are kept beside the current one.",
+    "backup.next": "Next",
+    "backup.back": "Back",
+    "backup.finish": "Finish",
+    "backup.edit": "Edit",
+    "backup.reset": "Reset",
+    "backup.resetHint": "Stop the scheduled backup and start the setup over",
+    "backup.resetAction": "Reset",
+    "backup.resetConfirm":
+      "Stop the scheduled backup and forget its setup? It will ask you where to back up again from the start. The backups already written are left exactly where they are — but CodeFlow signs itself out of Google Drive and OneDrive and forgets their setup. Your computer stays signed in to those accounts as before; this only revokes the app's own access.",
+    "backup.moveConfirmAction": "Move it",
+    "backup.moveConfirm":
+      "Change where the backup is written? Nothing is deleted: the files already at the old place stay there, untouched, and this simply stops writing to it. The next run — scheduled or by hand — writes the first file at the new one.",
+    "backup.summaryWhere": "Written to",
+    "backup.summaryNoAccount": "Not connected yet",
+
     "backup.target": "Back up to",
-    "backup.targetHint": "Where the scheduled backup is written",
-    "backup.targetFolder": "A folder (Dropbox, a USB drive, any synced folder…)",
+    "backup.targetFolder": "A folder",
+    "backup.targetFolderHint": "Dropbox, a USB drive, any synced folder",
     "backup.targetICloud": "iCloud Drive",
+    "backup.targetICloudHint": "The folder iCloud already syncs on this computer",
     "backup.targetDrive": "Google Drive",
-    "backup.targetOneDrive": "OneDrive (sign in)",
+    "backup.targetDriveHint": "Through your own Google Cloud app — no desktop client needed",
+    "backup.targetOneDrive": "OneDrive",
+    "backup.targetOneDriveHint": "By signing in, with or without the desktop client",
     "backup.folder": "Destination folder",
-    "backup.folderHint": "Point it inside a synced folder and the backup travels on its own",
     "backup.browse": "Choose folder…",
-    "backup.quickPicks": "Found here:",
+    "backup.foundHere": "Found on this computer",
+    "backup.otherPlaces": "Somewhere else",
+    "backup.syncFolderHint": "The folder {name} already syncs on this computer",
     "backup.icloudMissing":
       "iCloud Drive isn't set up on this computer — see the guide below, then choose the folder.",
     "backup.interval": "How often",
-    "backup.intervalHint": "Nothing is written when nothing changed",
     "backup.every15": "Every 15 minutes",
     "backup.every30": "Every 30 minutes",
     "backup.every60": "Every hour",
@@ -691,11 +762,10 @@ export const translations = {
     "backup.every720": "Every 12 hours",
     "backup.every1440": "Once a day",
     "backup.onExit": "Also back up when quitting",
-    "backup.onExitHint": "So the session that just ended is never the one missing",
     "backup.keepCopies": "Dated copies to keep",
-    "backup.keepCopiesHint": "Kept beside the current file. 0 keeps only the latest.",
+    "backup.keepCopiesZero": "Zero keeps only the latest.",
     "backup.enabled": "Back up automatically",
-    "backup.enabledHint": "Runs in the background, on the schedule above",
+    "backup.enabledHint": "Runs in the background, on the schedule you set",
     "backup.notReady": "Set a password and a destination to turn this on.",
     "backup.lastAt": "Last backup: {at}",
     "backup.lastError": "Last attempt failed: {error}",
@@ -707,6 +777,9 @@ export const translations = {
     "backup.skipUnchanged": "Nothing has changed since the last backup",
     "backup.skipNoDestination": "Choose a destination first",
     "backup.skipNoPassword": "Set a password first",
+    "backup.skipBusy": "A backup is already being written",
+    "backup.runningNow": "Backing up…",
+    "backup.exporting": "Creating backup…",
     "backup.skipDisabled": "Automatic backup is off",
 
     "backup.driveClientId": "Client ID",
@@ -722,7 +795,6 @@ export const translations = {
     "backup.driveNotConnected": "Not connected",
 
     "backup.onedriveClientId": "Application (client) ID",
-    "backup.onedriveClientIdHint": "From your app registration. There is no secret to paste — this one uses PKCE.",
     "backup.onedriveConnect": "Connect OneDrive",
     "backup.onedriveConnected": "Connected",
     "backup.onedriveConnectedAs": "Connected as {email}",
@@ -732,19 +804,21 @@ export const translations = {
     "backup.onedriveNotConnected": "Not connected",
 
     "backup.restoreTitle": "Restore backup",
-    "backup.fileCreated": "Created: {at}",
-    "backup.fileFrom": "From: {os}, CodeFlow {version}",
-    "backup.fileSize": "Size: {size}",
+    "backup.fileCreated": "Created",
+    "backup.fileFrom": "From",
+    "backup.fileSize": "Size",
     "backup.password": "Password",
     "backup.passwordForFile": "The password this file was created with",
     "backup.restoring": "Restoring…",
     "backup.restoreAction": "Restore",
-    "backup.replace": "Leave this computer exactly like the backup",
+    "backup.restoreModeTitle": "What to do with what is already here",
+    "backup.modeMerge": "Merge",
+    "backup.modeReplace": "Replace everything",
     "backup.replaceHint":
       "Everything currently configured here is cleared first. Anything set up on this machine and not in the file is lost.",
     "backup.mergeHint": "Adds and overwrites; whatever exists only on this machine is kept.",
     "backup.replaceConfirm":
-      "This clears the current configuration — workspaces, projects, collections, connections and settings — and replaces it with the backup's. Continue?",
+      "This clears everything on this computer — workspaces, projects, collections, connections, settings, and all history, conversations and agent work — and replaces it with the backup's. Continue?",
     "backup.mergeConfirm":
       "The backup's contents are written over the matching ones here. Anything that exists only on this machine is kept. Continue?",
 
@@ -816,13 +890,30 @@ export const translations = {
 
     "common.beta": "beta",
     "api.collab.title": "Collaboration",
-    "api.collab.about":
-      "Share a collection through your own Supabase project. Nothing routes through anyone else's server: you create the project, run the install script in it once, and everyone you invite talks straight to it.",
-    "api.collab.groupProject": "Your Supabase project",
-    "api.collab.oneProjectPerOwner":
-      "One project per person. This is where the collections you share are hosted; collections you were invited to live on the project of whoever invited you, and need nothing here.",
-    "api.collab.changingProjectWarning":
-      "You are already hosting collections on this project. Pointing it somewhere else does not move them — they will stop syncing for everyone.",
+    "api.collab.tabProject": "Project",
+    "api.collab.tabShares": "Shared",
+    "api.collab.tabJoin": "Import",
+    "api.collab.connectionsAbout":
+      "These are the projects that host the collections you share. Collections you were invited to live on the project of whoever invited you, and need nothing here.",
+    "api.collab.severalConnections":
+      "Each shared collection stays on the project it was created on. Adding another connection does not move anything, and a project keeps its own collections syncing for as long as it exists.",
+    "api.collab.noConnections":
+      "No project connected yet. Add one to start hosting shared collections.",
+    "api.collab.addConnection": "Add connection",
+    "api.collab.alreadyConnected": "That project is already in the list.",
+    "api.collab.oneCollection": "1 collection",
+    "api.collab.nCollections": "{n} collections",
+    "api.collab.noKey": "No key stored",
+    "api.collab.forget": "Remove",
+    "api.collab.forgetConfirm":
+      "Remove the connection to \"{ref}\"? Its stored key is deleted from this machine. Nothing on the project itself is touched.",
+    "api.collab.forgetBlocked": "Collections are hosted here — stop sharing them first",
+    "api.collab.urlPinned":
+      "Only the key can be replaced. A different URL is a different project — add it as another connection instead.",
+    "api.collab.pickProject": "Project…",
+    "api.collab.noProjectForInvite":
+      "No project is recorded for that collection, so the invitation would not work. Stop sharing it and share it again.",
+    "api.collab.cancel": "Cancel",
     "api.collab.viaInvitation": "by invitation",
     "api.collab.guestNoProject":
       "You don't host anything yet, so there is nothing to set up here. The collections you were invited to work through the project of whoever invited you.",
@@ -830,38 +921,43 @@ export const translations = {
     "api.collab.disconnect": "Disconnect",
     "api.collab.disconnectConfirm":
       "Disconnect from \"{name}\"? Your copy stays here as an ordinary local collection; the shared one is untouched.",
-    "api.collab.helpNewProject": "1. Create a project",
-    "api.collab.helpApiKeys": "2. Copy the URL and anon key",
-    "api.collab.helpSqlEditor": "3. Open the SQL editor",
+    "api.collab.helpNewProject": "Create a project",
+    "api.collab.helpApiKeys": "Copy the URL and key",
+    "api.collab.helpSqlEditor": "Open the SQL editor",
     "api.collab.projectUrl": "Project URL",
     "api.collab.anonKey": "Anon key",
-    "api.collab.anonKeyHint": "Public by design — row-level security is what protects the data",
     "api.collab.keyStored": "•••••••• stored",
+    "api.collab.noKeyForInvite":
+      "No anon key is stored for that project, so the invitation would not work. Add it under Project.",
     "api.collab.copySql": "Copy install SQL",
     "api.collab.sqlCopied": "Install script copied — run it in your project's SQL editor",
     "api.collab.test": "Test connection",
     "api.collab.connect": "Connect",
-    "api.collab.edit": "Edit",
-    "api.collab.editHint": "Unlock the project URL and key — every collection you share lives on them",
+    "api.collab.replaceKey": "Replace key",
+    "api.collab.editHint": "Unlock the key field — every collection hosted on this project authenticates with it",
     "api.collab.checking": "Checking the project…",
     "api.collab.checkPassed": "Connected — the project is ready",
     "api.collab.connected": "Connected",
     "api.collab.connectedAgo": "Connected — checked {ago}",
     "api.collab.untested": "Connection not tested yet",
     "api.collab.notReachable": "Could not reach the project, or the install script hasn't been run",
-    "api.collab.needsCredentials": "Add the project URL and anon key to get started",
+    "api.collab.needsCredentials":
+      "Add the project URL and anon key to get started. That key is public by design — row-level security is what protects the data.",
     "api.collab.justNow": "just now",
     "api.collab.minutesAgo": "{n} min ago",
     "api.collab.hoursAgo": "{n} h ago",
     "api.collab.daysAgo": "{n} d ago",
 
-    "api.collab.groupShares": "Shared collections",
     "api.collab.sharesAbout":
       "What travels is a collection, not a workspace — so a teammate can drop it into whichever workspace of theirs it belongs in.",
     "api.collab.activeWorkspace": "current",
     "api.collab.addCollection": "Share a collection",
     "api.collab.pickCollection": "Choose a collection",
     "api.collab.pickWorkspace": "Workspace",
+    "api.collab.moreInfo": "Additional information",
+    "api.collab.imported": "Collections you have joined",
+    "api.collab.needsProjectToShare": "Connect your project first, under Project",
+    "api.collab.workspaceHasNoCollections": "This workspace has no collections yet",
     "api.collab.nothingLeftToShare": "Every collection here is already shared",
     "api.collab.noneShared": "No collections shared from this workspace yet.",
     "api.collab.shareCollection": "Share this collection",
@@ -875,8 +971,6 @@ export const translations = {
     "api.collab.copyInviteHint": "Copies the code that lets someone else open this collection",
     "api.collab.inviteCopied": "Invitation code copied",
     "api.collab.noTokenHere": "This machine no longer holds an invitation code for that collection",
-    "api.collab.roleOwner": "owner",
-    "api.collab.roleMember": "member",
     "api.collab.nConflicts": "{n} to resolve",
     "api.collab.syncing": "Syncing…",
     "api.collab.syncedAgo": "Synced {ago}",
@@ -1086,6 +1180,8 @@ export const translations = {
     "settings.review": "PR review",
     "settings.context": "PR review context",
     "settings.skills": "Skills",
+    "settings.collapseNav": "Collapse to icons",
+    "settings.expandNav": "Show section names",
     "settings.globalGroup": "Global",
     "settings.workspaceGroup": "Workspace — {name}",
     "settings.workspaceGroupGeneric": "Workspace",
@@ -1114,6 +1210,7 @@ export const translations = {
     "settings.checkForUpdates": "Check for updates",
     "settings.checkingUpdates": "Checking…",
     "settings.upToDate": "You're on the latest version.",
+    "settings.updateNoBuild": "Nothing to install: the published release has no build for this platform.",
     "settings.updateAvailable": "Version {version} is available.",
     "settings.installUpdate": "Update to {version}",
     "settings.downloadingUpdate": "Downloading… {progress}%",
@@ -1164,6 +1261,8 @@ export const translations = {
     "settings.removeWorkspaceHasProjects": "Remove its projects first before removing this workspace",
 
     "settings.gitTitle": "Git behavior",
+    "settings.gitHint":
+      "The identity your commits carry, and what CodeFlow does on its own when you pull, push or switch branches.",
     "settings.secretScanDescription": "Secret scanning before every commit.",
     "settings.secretScanLabel": "Detect credentials in staged changes before committing",
     "settings.secretScanHint":
@@ -1251,7 +1350,7 @@ export const translations = {
       "Reads the repository documents already generated and writes how they fit together — components, integrations with their confidence level, and the Mermaid map. This run sees no code, only those documents.",
     "settings.reviewPromptsTitle": "Work item review",
     "settings.reviewPromptsHint":
-      "One prompt per tab of the review screen, saved with the open workspace — how a team writes criteria and breaks down work belongs to its backlog, not to this installation. Each says what to read, what to answer and in what shape; keep the output rules if you rewrite one.",
+      "One prompt per tab of the review screen — plus the hours QA is estimated with — saved with the open workspace, because how a team writes criteria and breaks down work belongs to its backlog, not to this installation. Each says what to read, what to answer and in what shape; keep the output rules if you rewrite one.",
     "settings.wiPromptAnalyze": "Review · story analysis",
     "settings.wiPromptAnalyzeHint":
       "The first pass over a user story: what it is missing, what is ambiguous, and what the code says about it. Everything the other three tabs propose is written from this.",
@@ -1269,7 +1368,10 @@ export const translations = {
       "Breaks the story into development work. Each task answers what, how and what for, at a technical level.",
     "settings.wiPromptTasksQa": "Review · QA tasks",
     "settings.wiPromptTasksQaHint":
-      "The QA ladder. The five titles are fixed in the prompt — edit them here if your team's process has different steps.",
+      "The QA ladder: the five titles are fixed in the prompt, and what each step says about the story is what the run writes. Edit it here if your team's process has different steps. The hours come from the estimation model below, at the {{ESTIMACION_QA}} slot.",
+    "settings.wiPromptQaEstimation": "Review · QA estimation model",
+    "settings.wiPromptQaEstimationHint":
+      "How long each QA step takes: the rubric that sizes the story S/M/L/XL, and the hours per phase for each size. Change the table and every QA estimate changes with it. The figures are a starting point — with 20 or more closed QA tasks per phase, your own median estimates better.",
     "settings.prDescriptionTemplateHint":
       "How the title and body are drafted when you open a pull request from CodeFlow. It receives the branches and their diff.",
     "settings.conflictTemplateHint":
@@ -1394,6 +1496,8 @@ export const translations = {
     "settings.reviewStandardPlaceholder": "The review methodology the AI follows for every PR in this workspace…",
     "settings.reviewStandardResetConfirm": "Restore this workspace's review standard to the built-in default? Your edits will be lost.",
 
+    "settings.reviewHint":
+      "What Claude reads before reviewing a pull request in this workspace: the review methodology, the context it is given, and the memories it has kept.",
     "settings.reviewTitleForProject": "PR review — {name}",
     "settings.reviewSelectWorkspace": "Select a workspace to configure its PR review.",
     "settings.reviewTabStandard": "Standard",
@@ -1983,6 +2087,8 @@ export const translations = {
 
     "common.save": "Save",
     "common.cancel": "Cancel",
+    "common.yes": "Yes",
+    "common.no": "No",
     "common.create": "Create",
     "common.close": "Close",
     "common.delete": "Delete",
@@ -2267,7 +2373,8 @@ export const translations = {
     "huReview.tasksScopeDev": "[DEV] Development tasks",
     "huReview.tasksScopeDevHint": "Broken down against this code, each one saying what, how and what for.",
     "huReview.tasksScopeQa": "[QA] QA tasks",
-    "huReview.tasksScopeQaHint": "The five-step ladder: design, agree with the PO, write, run, last check.",
+    "huReview.tasksScopeQaHint":
+      "The five-step ladder: design, agree with the PO, write, run, last check. It sizes the story S/M/L/XL and takes each step's hours from the estimation model.",
     "huReview.tasksScopeBoth": "DEV and QA",
     "huReview.tasksScopeBothHint": "Two runs, one panel: development first, then verification.",
     "huReview.descriptionAiHint": "Generate a description and it appears here, ready to send to the draft.",
@@ -2958,6 +3065,9 @@ export const translations = {
     "db.moveDown": "Move down",
     "db.deleteConsoleConfirm": 'Delete the saved console "{name}"? Its text stays open in its tab until you close it.',
     "db.openInConsole": "Open in a new console",
+    "db.rename": "Rename",
+    "db.savedConsoles": "Saved",
+    "db.savedConsolesEmpty": "Nothing saved yet — press ⌘S in a console to keep it here.",
     "db.newConsole": "New console",
     "db.saveConsole": "Save console",
     "db.saved": "Saved",
@@ -3715,6 +3825,8 @@ export const translations = {
     "api.scripts.insertSnippet": "Insertar en el cursor",
 
     "api.settings.title": "Ajustes del cliente API",
+    "api.settings.hint":
+      "Cómo se envían las peticiones desde este equipo: tiempos de espera y redirecciones, proxy, certificados de cliente, y la colección que compartes con tu equipo.",
     "api.settings.network": "Red",
     "api.settings.timeout": "Timeout de petición (ms)",
     "api.settings.followRedirects": "Seguir redirecciones",
@@ -3752,14 +3864,64 @@ export const translations = {
     "backup.title": "Respaldo",
     "backup.subtitle":
       "Un archivo cifrado que convierte otro computador en este — ajustes, proyectos, colecciones, conexiones de base de datos y todas las credenciales guardadas.",
-    "backup.about":
-      "Qué viaja: workspaces, proyectos, colecciones de API, entornos, conexiones de base de datos, prompts, agentes, servidores MCP, todos los ajustes, y cada token, clave y contraseña del almacén de credenciales de este equipo.",
-    "backup.aboutExcluded":
-      "Qué se queda: historial de peticiones y consultas, conversaciones de IA, revisiones pasadas y cookies. El otro equipo podrá hacer todo lo que hace este, sin llevarse el rastro de lo que hiciste aquí.",
+    "backup.tabContent": "Qué incluir",
+    "backup.tabContentHint":
+      "Workspaces, repositorios, prompts, agentes y ajustes viajan siempre. Elige qué los acompaña.",
+    "backup.tabPassword": "Contraseña",
+    "backup.tabPasswordHint":
+      "El archivo siempre va cifrado, y esta es la única llave. Nada más de esta sección funciona hasta que definas una, y nadie — nosotros incluidos — puede abrir un respaldo sin ella.",
+    "backup.tabBackup": "Respaldar",
+    "backup.tabRestore": "Restaurar",
+    "backup.chooseFile": "Elegir archivo…",
+    "backup.refreshList": "Actualizar",
+    "backup.lookingForBackups": "Buscando respaldos…",
+    "backup.unknownDate": "Fecha desconocida",
+    "backup.restoreNoDestination":
+      "Todavía no hay destino configurado, así que solo está disponible la vía del archivo. Configura uno en Respaldar para habilitar la otra.",
+    "backup.tabGuides": "Guías de destino",
+    "backup.tabGuidesHint":
+      "Los dos destinos en la nube son con credenciales propias: un proyecto de Google Cloud para Drive, un registro de aplicación para OneDrive. Una carpeta sincronizada no necesita ninguno, y es el camino más corto.",
+    "backup.include.credentials": "Credenciales",
+    "backup.include.credentialsHint":
+      "Cada token, clave y contraseña que la app guarda en el almacén de credenciales del sistema: PAT de Azure DevOps, tokens de GitHub y GitLab, claves de proveedores de IA, contraseñas de bases de datos y accesos a la nube. Sin esto el otro equipo recibe todos los repositorios y conexiones en su lugar y no puede autenticarse con ninguno — tendrías que escribir cada uno a mano. Apágalo solo si el archivo va a quedar en un lugar donde no dejarías una contraseña.",
+    "backup.include.apiClient": "Cliente de API",
+    "backup.include.apiClientHint":
+      "Colecciones, carpetas, peticiones, entornos y colecciones compartidas — incluyendo en qué punto quedó cada colección compartida con su servidor, para que el otro equipo siga sincronizando en vez de empezar de cero.",
+    "backup.include.databases": "Conexiones de base de datos",
+    "backup.include.databasesHint":
+      "Las conexiones guardadas y sus consolas SQL. Las contraseñas viajan en Credenciales, arriba: con esto encendido y aquello apagado, las conexiones llegan pidiendo la contraseña una vez.",
+    "backup.include.authored": "Documentos y backlog",
+    "backup.include.authoredHint":
+      "Lo que escribiste, no lo que la app registró: documentos generados, lotes y borradores de historias, y revisiones de work items.",
+    "backup.include.requestHistory": "Historial de peticiones y consultas",
+    "backup.include.requestHistoryHint":
+      "Cada petición enviada desde el cliente de API y cada sentencia ejecutada en una consola SQL. Útil de llevar, y normalmente lo primero que conviene dejar fuera — en una instalación con uso intenso es la parte más grande del archivo y cambia constantemente, lo que hace que el respaldo programado vuelva a subir todo mucho más seguido.",
+    "backup.include.conversations": "Conversaciones y actividad",
+    "backup.include.conversationsHint":
+      "Las transcripciones completas de cada turno de IA, sus títulos, el historial de trabajos y el feed de actividad del workspace. Es lo que hace que el equipo restaurado recuerde lo que se conversó — y, como las transcripciones son largas, suele ser lo más pesado del archivo.",
+    "backup.include.reviews": "Revisiones pasadas",
+    "backup.include.reviewsHint":
+      "Revisiones de PR y análisis pre-commit ya terminados, para poder volver a abrir sus resultados en el otro equipo.",
+    "backup.include.agentWork": "Tareas y cadenas de agentes",
+    "backup.include.agentWorkHint":
+      "Tareas, cadenas y sus pasos, con el plan tal como fue escrito. Lo que estuviera corriendo al momento del respaldo llega en pausa en vez de aparentar que corre — en el otro equipo no hay ningún proceso detrás.",
+    "backup.include.cookies": "Cookies de sesión",
+    "backup.include.cookiesHint":
+      "El frasco de cookies del cliente de API. Son sesiones vivas: incluirlas deja al otro computador con tu sesión iniciada, lo que entre equipos tuyos es cómodo y para cualquier otro caso conviene pensarlo.",
+    "backup.includeNoCredentialsWarning":
+      "Sin credenciales, al restaurar quedan todos los repositorios, conexiones y proveedores en su lugar pero sin poder autenticarse. Cada token y contraseña hay que ingresarlo de nuevo a mano.",
+    "backup.includeAgentWorkNeedsConversations":
+      "Las tareas de agentes guardan sus transcripciones en Conversaciones. Con eso apagado, las tareas llegan pero su contenido no.",
+    "backup.includeAllHint":
+      "Está todo incluido — el otro equipo queda igual a este, salvo las carpetas de los repositorios en sí.",
+    "backup.includePartialHint":
+      "{n} fuera. Simplemente no están en el archivo: restaurar nunca borra lo que no puede reponer, así que lo que excluyas queda intacto en el equipo donde restaures.",
 
-    "backup.groupPassword": "Contraseña",
-    "backup.passwordWarning":
-      "El archivo siempre va cifrado, y esta contraseña es la única llave. No hay recuperación: si la pierdes, el respaldo es ilegible — también para nosotros.",
+    "backup.adviceEmpty": "Mínimo 8 caracteres. Una frase larga vale más que una palabra corta y complicada.",
+    "backup.adviceShort": "Faltan {n} — 8 es el mínimo.",
+    "backup.adviceWeak": "Muy débil para guardarla. Súmale una palabra o dos — el largo rinde más que los símbolos.",
+    "backup.adviceFair": "Ya se puede guardar. Una palabra más y queda fuerte.",
+    "backup.adviceStrong": "Fuerte. Guárdala en algún lugar donde la tengas aunque este computador no arranque.",
     "backup.passwordSet": "Hay una contraseña guardada",
     "backup.changePassword": "Cambiar contraseña",
     "backup.removePassword": "Quitar",
@@ -3768,11 +3930,7 @@ export const translations = {
     "backup.currentPassword": "Contraseña actual",
     "backup.currentWrong": "Esa no es la contraseña actual",
     "backup.newPassword": "Contraseña",
-    "backup.newPasswordHint":
-      "Mínimo 8 caracteres. Una frase larga vale más que una palabra corta y complicada.",
-    "backup.passwordPlaceholder": "Necesaria para abrir el respaldo",
     "backup.confirmPassword": "Repítela",
-    "backup.passwordTooShort": "Usa al menos {n} caracteres",
     "backup.passwordMismatch": "Las dos contraseñas no coinciden",
     "backup.passwordSaved": "Contraseña guardada",
     "backup.strengthTooShort": "muy corta",
@@ -3780,32 +3938,53 @@ export const translations = {
     "backup.strengthFair": "aceptable",
     "backup.strengthStrong": "fuerte",
 
-    "backup.groupManual": "Crear y restaurar",
+    "backup.modeManual": "Manual",
+    "backup.modeAutomatic": "Automático",
     "backup.needPasswordFirst": "Define una contraseña arriba antes de crear o restaurar un respaldo.",
-    "backup.exportPassword": "Contraseña de este archivo",
-    "backup.exportPasswordHint":
-      "Escríbela de nuevo — nunca sale de la app, así que no se puede rellenar sola",
     "backup.exportNow": "Crear respaldo…",
     "backup.importFromFile": "Restaurar desde un archivo…",
     "backup.manualHint":
-      "Al crearlo se pregunta dónde guardarlo. Al restaurar se pide su contraseña y se muestra qué contiene antes de cambiar nada.",
+      "Se cifra con la contraseña de la pestaña Contraseña — la misma que usa el respaldo programado. Al crearlo se pregunta dónde guardarlo; al restaurar se pide esa contraseña y se muestra qué contiene antes de cambiar nada.",
     "backup.exported": "Respaldo guardado en {path} ({size})",
 
-    "backup.groupAutomatic": "Respaldo automático",
+    "backup.stepWhere": "Dónde",
+    "backup.stepWhereHint": "En qué tipo de lugar quieres el respaldo. El sitio exacto lo eliges en el paso siguiente.",
+    "backup.stepDestination": "Destino",
+    "backup.stepSchedule": "Cada cuánto",
+    "backup.stepScheduleHint":
+      "Con qué frecuencia se ejecuta, y cuántas copias fechadas se guardan al lado de la actual.",
+    "backup.next": "Siguiente",
+    "backup.back": "Atrás",
+    "backup.finish": "Aceptar",
+    "backup.edit": "Editar",
+    "backup.reset": "Restablecer",
+    "backup.resetHint": "Detener el respaldo programado y empezar la configuración de nuevo",
+    "backup.resetAction": "Restablecer",
+    "backup.resetConfirm":
+      "¿Detener el respaldo programado y olvidar su configuración? Te volverá a preguntar dónde respaldar desde el principio. Los respaldos ya escritos se quedan exactamente donde están — pero CodeFlow cierra su propia sesión en Google Drive y OneDrive y olvida su configuración. Tu equipo sigue conectado a esas cuentas como siempre; esto solo revoca el acceso de la app.",
+    "backup.moveConfirmAction": "Cambiarlo",
+    "backup.moveConfirm":
+      "¿Cambiar dónde se escribe el respaldo? No se borra nada: los archivos que ya están en el sitio anterior siguen ahí, intactos, y simplemente se deja de escribir en él. La próxima ejecución — programada o a mano — escribe el primer archivo en el nuevo.",
+    "backup.summaryWhere": "Se escribe en",
+    "backup.summaryNoAccount": "Todavía sin conectar",
+
     "backup.target": "Respaldar en",
-    "backup.targetHint": "Dónde se escribe el respaldo programado",
-    "backup.targetFolder": "Una carpeta (Dropbox, un pendrive, cualquier carpeta sincronizada…)",
+    "backup.targetFolder": "Una carpeta",
+    "backup.targetFolderHint": "Dropbox, un pendrive, cualquier carpeta sincronizada",
     "backup.targetICloud": "iCloud Drive",
+    "backup.targetICloudHint": "La carpeta que iCloud ya sincroniza en este equipo",
     "backup.targetDrive": "Google Drive",
-    "backup.targetOneDrive": "OneDrive (iniciando sesión)",
+    "backup.targetDriveHint": "Con tu propia app de Google Cloud, sin cliente de escritorio",
+    "backup.targetOneDrive": "OneDrive",
+    "backup.targetOneDriveHint": "Iniciando sesión, con o sin el cliente de escritorio",
     "backup.folder": "Carpeta de destino",
-    "backup.folderHint": "Apúntala dentro de una carpeta sincronizada y el respaldo viaja solo",
     "backup.browse": "Elegir carpeta…",
-    "backup.quickPicks": "Encontradas aquí:",
+    "backup.foundHere": "Encontradas en este equipo",
+    "backup.otherPlaces": "En otro sitio",
+    "backup.syncFolderHint": "La carpeta que {name} ya sincroniza en este equipo",
     "backup.icloudMissing":
       "iCloud Drive no está configurado en este equipo — mira la guía de abajo y luego elige la carpeta.",
     "backup.interval": "Cada cuánto",
-    "backup.intervalHint": "No se escribe nada si nada cambió",
     "backup.every15": "Cada 15 minutos",
     "backup.every30": "Cada 30 minutos",
     "backup.every60": "Cada hora",
@@ -3814,11 +3993,10 @@ export const translations = {
     "backup.every720": "Cada 12 horas",
     "backup.every1440": "Una vez al día",
     "backup.onExit": "Respaldar también al cerrar",
-    "backup.onExitHint": "Para que la sesión recién terminada nunca sea la que falta",
     "backup.keepCopies": "Copias fechadas a conservar",
-    "backup.keepCopiesHint": "Se guardan junto al archivo actual. 0 conserva solo el último.",
+    "backup.keepCopiesZero": "Cero conserva solo el último.",
     "backup.enabled": "Respaldar automáticamente",
-    "backup.enabledHint": "Se ejecuta en segundo plano, con la frecuencia de arriba",
+    "backup.enabledHint": "Se ejecuta en segundo plano, con la frecuencia que definiste",
     "backup.notReady": "Define una contraseña y un destino para poder activarlo.",
     "backup.lastAt": "Último respaldo: {at}",
     "backup.lastError": "El último intento falló: {error}",
@@ -3830,6 +4008,9 @@ export const translations = {
     "backup.skipUnchanged": "No ha cambiado nada desde el último respaldo",
     "backup.skipNoDestination": "Elige primero un destino",
     "backup.skipNoPassword": "Define primero una contraseña",
+    "backup.skipBusy": "Ya se está escribiendo un respaldo",
+    "backup.runningNow": "Respaldando…",
+    "backup.exporting": "Creando respaldo…",
     "backup.skipDisabled": "El respaldo automático está desactivado",
 
     "backup.driveClientId": "ID de cliente",
@@ -3845,7 +4026,6 @@ export const translations = {
     "backup.driveNotConnected": "Sin conectar",
 
     "backup.onedriveClientId": "ID de aplicación (cliente)",
-    "backup.onedriveClientIdHint": "De tu registro de aplicación. No hay ningún secreto que pegar — este usa PKCE.",
     "backup.onedriveConnect": "Conectar OneDrive",
     "backup.onedriveConnected": "Conectado",
     "backup.onedriveConnectedAs": "Conectado como {email}",
@@ -3855,19 +4035,21 @@ export const translations = {
     "backup.onedriveNotConnected": "Sin conectar",
 
     "backup.restoreTitle": "Restaurar respaldo",
-    "backup.fileCreated": "Creado: {at}",
-    "backup.fileFrom": "Desde: {os}, CodeFlow {version}",
-    "backup.fileSize": "Tamaño: {size}",
+    "backup.fileCreated": "Creado",
+    "backup.fileFrom": "Desde",
+    "backup.fileSize": "Tamaño",
     "backup.password": "Contraseña",
     "backup.passwordForFile": "La contraseña con la que se creó este archivo",
     "backup.restoring": "Restaurando…",
     "backup.restoreAction": "Restaurar",
-    "backup.replace": "Dejar este computador igual que el respaldo",
+    "backup.restoreModeTitle": "Qué hacer con lo que ya hay aquí",
+    "backup.modeMerge": "Combinar",
+    "backup.modeReplace": "Reemplazar todo",
     "backup.replaceHint":
       "Se borra primero todo lo configurado aquí. Lo que exista en este equipo y no esté en el archivo se pierde.",
     "backup.mergeHint": "Añade y sobrescribe; lo que solo existe en este equipo se conserva.",
     "backup.replaceConfirm":
-      "Esto borra la configuración actual — workspaces, proyectos, colecciones, conexiones y ajustes — y la reemplaza por la del respaldo. ¿Continuar?",
+      "Esto borra todo lo que hay en este computador — workspaces, proyectos, colecciones, conexiones, ajustes, y todo el historial, conversaciones y trabajo de agentes — y lo reemplaza por lo del respaldo. ¿Continuar?",
     "backup.mergeConfirm":
       "El contenido del respaldo se escribe sobre lo que coincida aquí. Lo que solo existe en este equipo se conserva. ¿Continuar?",
 
@@ -3940,13 +4122,30 @@ export const translations = {
 
     "common.beta": "beta",
     "api.collab.title": "Colaboración",
-    "api.collab.about":
-      "Comparte una colección a través de tu propio proyecto de Supabase. Nada pasa por el servidor de nadie más: creas el proyecto, ejecutas el script de instalación una vez y todos los que invites hablan directamente con él.",
-    "api.collab.groupProject": "Tu proyecto de Supabase",
-    "api.collab.oneProjectPerOwner":
-      "Un proyecto por persona. Aquí se alojan las colecciones que compartes tú; las colecciones a las que te invitaron viven en el proyecto de quien te invitó y no necesitan nada de esto.",
-    "api.collab.changingProjectWarning":
-      "Ya estás alojando colecciones en este proyecto. Apuntarlo a otro no las mueve — dejarán de sincronizar para todos.",
+    "api.collab.tabProject": "Proyecto",
+    "api.collab.tabShares": "Compartido",
+    "api.collab.tabJoin": "Importar",
+    "api.collab.connectionsAbout":
+      "Estos son los proyectos que alojan las colecciones que compartes tú. Las colecciones a las que te invitaron viven en el proyecto de quien te invitó y no necesitan nada de esto.",
+    "api.collab.severalConnections":
+      "Cada colección compartida se queda en el proyecto donde se creó. Añadir otra conexión no mueve nada, y un proyecto sigue sincronizando sus colecciones mientras exista.",
+    "api.collab.noConnections":
+      "Todavía no hay ningún proyecto conectado. Añade uno para empezar a alojar colecciones compartidas.",
+    "api.collab.addConnection": "Añadir conexión",
+    "api.collab.alreadyConnected": "Ese proyecto ya está en la lista.",
+    "api.collab.oneCollection": "1 colección",
+    "api.collab.nCollections": "{n} colecciones",
+    "api.collab.noKey": "Sin key guardada",
+    "api.collab.forget": "Quitar",
+    "api.collab.forgetConfirm":
+      "¿Quitar la conexión con «{ref}»? Su key guardada se borra de este equipo. En el proyecto no se toca nada.",
+    "api.collab.forgetBlocked": "Hay colecciones alojadas aquí — deja de compartirlas primero",
+    "api.collab.urlPinned":
+      "Solo se puede reemplazar la key. Otra URL es otro proyecto — añádelo como una conexión más.",
+    "api.collab.pickProject": "Proyecto…",
+    "api.collab.noProjectForInvite":
+      "Esa colección no tiene proyecto registrado, así que la invitación no funcionaría. Deja de compartirla y vuelve a compartirla.",
+    "api.collab.cancel": "Cancelar",
     "api.collab.viaInvitation": "por invitación",
     "api.collab.guestNoProject":
       "Todavía no alojas nada, así que aquí no hay nada que configurar. Las colecciones a las que te invitaron funcionan con el proyecto de quien te invitó.",
@@ -3954,38 +4153,43 @@ export const translations = {
     "api.collab.disconnect": "Desconectar",
     "api.collab.disconnectConfirm":
       "¿Desconectarte de \"{name}\"? Tu copia se queda aquí como una colección local normal; la compartida no se toca.",
-    "api.collab.helpNewProject": "1. Crear un proyecto",
-    "api.collab.helpApiKeys": "2. Copiar la URL y la anon key",
-    "api.collab.helpSqlEditor": "3. Abrir el editor SQL",
+    "api.collab.helpNewProject": "Crear un proyecto",
+    "api.collab.helpApiKeys": "Copiar la URL y la key",
+    "api.collab.helpSqlEditor": "Abrir el editor SQL",
     "api.collab.projectUrl": "URL del proyecto",
     "api.collab.anonKey": "Anon key",
-    "api.collab.anonKeyHint": "Es pública por diseño — lo que protege los datos es el RLS",
     "api.collab.keyStored": "•••••••• guardada",
+    "api.collab.noKeyForInvite":
+      "No hay anon key guardada para ese proyecto, así que la invitación no funcionaría. Añádela en Proyecto.",
     "api.collab.copySql": "Copiar SQL de instalación",
     "api.collab.sqlCopied": "Script copiado — ejecútalo en el editor SQL de tu proyecto",
     "api.collab.test": "Probar conexión",
     "api.collab.connect": "Conectar",
-    "api.collab.edit": "Editar",
-    "api.collab.editHint": "Desbloquea la URL y la clave del proyecto — todas las colecciones que compartes viven en ellas",
+    "api.collab.replaceKey": "Reemplazar key",
+    "api.collab.editHint": "Desbloquea el campo de la key — todas las colecciones alojadas en este proyecto se autentican con ella",
     "api.collab.checking": "Comprobando el proyecto…",
     "api.collab.checkPassed": "Conectado — el proyecto está listo",
     "api.collab.connected": "Conectado",
     "api.collab.connectedAgo": "Conectado — comprobado {ago}",
     "api.collab.untested": "Conexión sin probar",
     "api.collab.notReachable": "No se pudo llegar al proyecto, o falta ejecutar el script de instalación",
-    "api.collab.needsCredentials": "Añade la URL del proyecto y la anon key para empezar",
+    "api.collab.needsCredentials":
+      "Añade la URL del proyecto y la anon key para empezar. Esa key es pública por diseño — lo que protege los datos es el RLS.",
     "api.collab.justNow": "recién",
     "api.collab.minutesAgo": "hace {n} min",
     "api.collab.hoursAgo": "hace {n} h",
     "api.collab.daysAgo": "hace {n} d",
 
-    "api.collab.groupShares": "Colecciones compartidas",
     "api.collab.sharesAbout":
       "Lo que viaja es una colección, no un workspace — así cada persona la coloca en el workspace suyo que le corresponda.",
     "api.collab.activeWorkspace": "actual",
     "api.collab.addCollection": "Compartir colección",
     "api.collab.pickCollection": "Elige una colección",
     "api.collab.pickWorkspace": "Workspace",
+    "api.collab.moreInfo": "Información adicional",
+    "api.collab.imported": "Colecciones a las que te uniste",
+    "api.collab.needsProjectToShare": "Conecta tu proyecto primero, en Proyecto",
+    "api.collab.workspaceHasNoCollections": "Este workspace todavía no tiene colecciones",
     "api.collab.nothingLeftToShare": "Todas las colecciones de aquí ya están compartidas",
     "api.collab.noneShared": "Todavía no compartes ninguna colección de este workspace.",
     "api.collab.shareCollection": "Compartir esta colección",
@@ -3999,8 +4203,6 @@ export const translations = {
     "api.collab.copyInviteHint": "Copia el código con el que otra persona abre esta colección",
     "api.collab.inviteCopied": "Código de invitación copiado",
     "api.collab.noTokenHere": "Este equipo ya no tiene el código de invitación de esa colección",
-    "api.collab.roleOwner": "dueño",
-    "api.collab.roleMember": "miembro",
     "api.collab.nConflicts": "{n} por resolver",
     "api.collab.syncing": "Sincronizando…",
     "api.collab.syncedAgo": "Sincronizado {ago}",
@@ -4210,6 +4412,8 @@ export const translations = {
     "settings.review": "Revisión de PR",
     "settings.context": "Contexto de revisión de PR",
     "settings.skills": "Skills",
+    "settings.collapseNav": "Contraer a iconos",
+    "settings.expandNav": "Mostrar nombres de sección",
     "settings.globalGroup": "Global",
     "settings.workspaceGroup": "Workspace — {name}",
     "settings.workspaceGroupGeneric": "Workspace",
@@ -4238,6 +4442,7 @@ export const translations = {
     "settings.checkForUpdates": "Buscar actualizaciones",
     "settings.checkingUpdates": "Buscando…",
     "settings.upToDate": "Ya tienes la última versión.",
+    "settings.updateNoBuild": "Nada que instalar: la versión publicada no tiene build para esta plataforma.",
     "settings.updateAvailable": "La versión {version} está disponible.",
     "settings.installUpdate": "Actualizar a {version}",
     "settings.downloadingUpdate": "Descargando… {progress}%",
@@ -4288,6 +4493,8 @@ export const translations = {
     "settings.removeWorkspaceHasProjects": "Elimina primero sus proyectos antes de eliminar este workspace",
 
     "settings.gitTitle": "Comportamiento Git",
+    "settings.gitHint":
+      "La identidad con la que quedan tus commits, y qué hace CodeFlow por su cuenta al hacer pull, push o cambiar de rama.",
     "settings.secretScanDescription": "Escaneo de secretos antes de cada commit.",
     "settings.secretScanLabel": "Detectar credenciales en los cambios preparados antes de commitear",
     "settings.secretScanHint":
@@ -4375,7 +4582,7 @@ export const translations = {
       "Lee los documentos de repositorio ya generados y escribe cómo encajan entre sí — componentes, integraciones con su nivel de confianza y el mapa Mermaid. Esta ejecución no ve código, solo esos documentos.",
     "settings.reviewPromptsTitle": "Revisión de work items",
     "settings.reviewPromptsHint":
-      "Un prompt por pestaña de la pantalla de revisión, guardado con el espacio de trabajo abierto — cómo escribe criterios y desglosa el trabajo un equipo pertenece a su backlog, no a esta instalación. Cada uno dice qué leer, qué responder y con qué forma; si reescribes alguno, conserva sus reglas de salida.",
+      "Un prompt por pestaña de la pantalla de revisión —más las horas con las que se estima QA—, guardado con el espacio de trabajo abierto, porque cómo escribe criterios y desglosa el trabajo un equipo pertenece a su backlog, no a esta instalación. Cada uno dice qué leer, qué responder y con qué forma; si reescribes alguno, conserva sus reglas de salida.",
     "settings.wiPromptAnalyze": "Revisión · análisis de historia",
     "settings.wiPromptAnalyzeHint":
       "La primera pasada sobre una historia de usuario: qué le falta, qué es ambiguo y qué dice el código al respecto. Todo lo que proponen las otras tres pestañas se escribe a partir de esto.",
@@ -4393,7 +4600,10 @@ export const translations = {
       "Parte la historia en trabajo de desarrollo. Cada tarea responde ¿Qué?, ¿Cómo? y ¿Para qué?, a nivel técnico.",
     "settings.wiPromptTasksQa": "Revisión · tareas de QA",
     "settings.wiPromptTasksQaHint":
-      "La escalera de QA. Los cinco títulos están fijados en el prompt — edítalos aquí si el proceso de tu equipo tiene otros pasos.",
+      "La escalera de QA: los cinco títulos están fijados en el prompt y lo que cada paso dice de la historia es lo que redacta la ejecución. Edítala aquí si el proceso de tu equipo tiene otros pasos. Las horas salen del modelo de estimación de abajo, en el hueco {{ESTIMACION_QA}}.",
+    "settings.wiPromptQaEstimation": "Revisión · modelo de estimación de QA",
+    "settings.wiPromptQaEstimationHint":
+      "Cuánto dura cada paso de QA: la rúbrica que dimensiona la historia en S/M/L/XL y las horas por fase de cada tamaño. Cambia la tabla y cambian todas las estimaciones. Los números son un punto de partida — con 20 o más tareas de QA cerradas por fase, la mediana de tu equipo estima mejor.",
     "settings.prDescriptionTemplateHint":
       "Cómo se redactan el título y el cuerpo al abrir un pull request desde CodeFlow. Recibe las ramas y su diff.",
     "settings.conflictTemplateHint":
@@ -4519,6 +4729,8 @@ export const translations = {
     "settings.reviewStandardPlaceholder": "La metodología de revisión que la IA sigue para cada PR de este workspace…",
     "settings.reviewStandardResetConfirm": "¿Restaurar el estándar de revisión de este workspace al valor por defecto? Se perderán tus ediciones.",
 
+    "settings.reviewHint":
+      "Lo que Claude lee antes de revisar un pull request en este workspace: la metodología de revisión, el contexto que se le entrega y las memorias que ha guardado.",
     "settings.reviewTitleForProject": "Revisión de PR — {name}",
     "settings.reviewSelectWorkspace": "Selecciona un workspace para configurar su revisión de PR.",
     "settings.reviewTabStandard": "Estándar",
@@ -5108,6 +5320,8 @@ export const translations = {
 
     "common.save": "Guardar",
     "common.cancel": "Cancelar",
+    "common.yes": "Sí",
+    "common.no": "No",
     "common.create": "Crear",
     "common.close": "Cerrar",
     "common.delete": "Eliminar",
@@ -5396,7 +5610,8 @@ export const translations = {
     "huReview.tasksScopeDev": "[DEV] Tareas de desarrollo",
     "huReview.tasksScopeDevHint": "Desglosadas contra este c\u00f3digo, cada una con su \u00bfQu\u00e9?, \u00bfC\u00f3mo? y \u00bfPara qu\u00e9?",
     "huReview.tasksScopeQa": "[QA] Tareas de QA",
-    "huReview.tasksScopeQaHint": "Los cinco pasos: dise\u00f1ar, validar con el PO, elaborar, ejecutar y last check.",
+    "huReview.tasksScopeQaHint":
+      "Los cinco pasos: dise\u00f1ar, validar con el PO, elaborar, ejecutar y last check. Dimensiona la historia en S/M/L/XL y saca las horas de cada paso del modelo de estimaci\u00f3n.",
     "huReview.tasksScopeBoth": "DEV y QA",
     "huReview.tasksScopeBothHint": "Dos ejecuciones, un panel: primero el desarrollo, despu\u00e9s la verificaci\u00f3n.",
     "huReview.descriptionAiHint": "Genera una descripci\u00f3n y aparecer\u00e1 aqu\u00ed, lista para enviar al borrador.",
@@ -6092,6 +6307,9 @@ export const translations = {
     "db.moveDown": "Bajar",
     "db.deleteConsoleConfirm": '¿Eliminar la consola guardada "{name}"? Su texto sigue abierto en su pestaña hasta que la cierres.',
     "db.openInConsole": "Abrir en una consola nueva",
+    "db.rename": "Renombrar",
+    "db.savedConsoles": "Guardadas",
+    "db.savedConsolesEmpty": "Aún no hay nada guardado — pulsa ⌘S en una consola para dejarla aquí.",
     "db.newConsole": "Nueva consola",
     "db.saveConsole": "Guardar consola",
     "db.saved": "Guardada",

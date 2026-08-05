@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -10,6 +10,7 @@ import {
   Filter,
   Database,
   FileCode2,
+  FolderCode,
   FolderPlus,
   Hash,
   KeyRound,
@@ -570,10 +571,7 @@ function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: 
       />
       {/* Saved consoles sit above the server's own tree: they are this workspace's work, and the
           reason to open a connection more often than the schema is. */}
-      {expanded &&
-        consoles.map((console) => (
-          <SavedConsoleRow key={console.id} console={console} connectionId={row.id} />
-        ))}
+      {expanded && <SavedConsolesFolder consoles={consoles} connectionId={row.id} />}
       {expanded && error && (
         <p className="flex items-start gap-1 py-1 pl-[26px] pr-2 text-[11px] text-[var(--cf-danger)]">
           <AlertTriangle size={11} className="mt-[2px] shrink-0" />
@@ -592,6 +590,120 @@ function ConnectionBranch({ row, index, total }: { row: DbConnectionRow; index: 
   );
 }
 
+/**
+ * The connection's saved consoles, under a folder of their own.
+ *
+ * Loose leaves between the connection and its databases read as "something odd is in my schema" —
+ * a saved console called `Console 1` sitting where `postgres` sits says nothing about what it is or
+ * that it can be saved at all. A named folder answers both, so it is drawn even when empty: it is
+ * the only place in the app that says saving a console is a thing you can do, and a folder that
+ * appears only once you have already found the feature teaches nobody.
+ *
+ * Open/closed is local state rather than the store's `expanded`: that list is keyed by server nodes
+ * and cleared whenever a connection is touched, and this folder has nothing to do with a session.
+ */
+function SavedConsolesFolder({
+  consoles,
+  connectionId,
+}: {
+  consoles: DbConsole[];
+  connectionId: string;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(true);
+  const store = useDbStore.getState();
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
+  return (
+    <>
+      <TreeRow
+        depth={1}
+        icon={<FolderCode size={12} />}
+        name={t("db.savedConsoles")}
+        detail={consoles.length > 0 ? String(consoles.length) : undefined}
+        expandable
+        expanded={open}
+        onToggle={() => setOpen((current) => !current)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setMenu({ x: e.clientX, y: e.clientY });
+        }}
+      />
+      {open && consoles.length === 0 && (
+        <p className="py-1 pl-[38px] pr-2 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {t("db.savedConsolesEmpty")}
+        </p>
+      )}
+      {open &&
+        consoles.map((console) => (
+          <SavedConsoleRow key={console.id} console={console} connectionId={connectionId} />
+        ))}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={[
+            {
+              label: t("db.newConsole"),
+              icon: FileCode2,
+              onClick: () => store.newConsole(connectionId),
+            },
+          ]}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </>
+  );
+}
+
+/**
+ * A saved console's row while it is being named, in place of the row itself.
+ *
+ * Editing where the name is read rather than in a dialog, because renaming is one word long and a
+ * modal to type one word into is three clicks around it. Enter and blur commit, Escape leaves the
+ * name alone — and the flag that says *which* console is being renamed lives in the store, so the
+ * save that creates one can set it and have the row come up ready to type in.
+ */
+function ConsoleNameInput({ saved }: { saved: DbConsole }) {
+  const [value, setValue] = useState(saved.name);
+  const store = useDbStore.getState();
+  // Escape unmounts this row, and an unmount is not a blur React will tell us about — but it costs
+  // nothing to be sure the cancel path can never be overtaken by the commit one.
+  const cancelled = useRef(false);
+
+  return (
+    <div style={{ paddingLeft: 6 + 2 * 12 }} className="flex items-center gap-1 py-[3px] pr-1.5">
+      <span className="h-3.5 w-3.5 shrink-0" />
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
+        <FileCode2 size={12} />
+      </span>
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onFocus={(e) => e.currentTarget.select()}
+        onBlur={() => {
+          if (!cancelled.current) void store.renameConsole(saved.id, value);
+        }}
+        onKeyDown={(e) => {
+          // The tree above listens for arrows and Enter; none of that should reach it from here.
+          e.stopPropagation();
+          if (e.key === "Enter") {
+            e.preventDefault();
+            void store.renameConsole(saved.id, value);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            cancelled.current = true;
+            store.setRenamingConsole(null);
+          }
+        }}
+        className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1 py-[1px] text-[13px] outline-none"
+      />
+    </div>
+  );
+}
+
 /** One saved console, as a leaf under its connection. */
 function SavedConsoleRow({
   console: saved,
@@ -602,11 +714,19 @@ function SavedConsoleRow({
 }) {
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const renaming = useDbStore((s) => s.renamingConsoleId === saved.id);
   const store = useDbStore.getState();
   const open = () => store.openConsole(connectionId, saved.id);
 
+  if (renaming) return <ConsoleNameInput saved={saved} />;
+
   const items: MenuItem[] = [
     { label: t("db.openInConsole"), icon: FileCode2, onClick: open },
+    {
+      label: t("db.rename"),
+      icon: Pencil,
+      onClick: () => store.setRenamingConsole(saved.id),
+    },
     {
       label: t("db.delete"),
       icon: Trash2,
@@ -622,7 +742,7 @@ function SavedConsoleRow({
   return (
     <>
       <TreeRow
-        depth={1}
+        depth={2}
         icon={<FileCode2 size={12} />}
         name={saved.name}
         detail={saved.database_name}

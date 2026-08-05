@@ -185,6 +185,35 @@ fn prune(folder: &Path, keep: usize) {
     }
 }
 
+/// Every backup file in a folder: the current one and each dated copy kept beside it.
+///
+/// Unsorted — the caller has read the headers by then and can order them by what the files say
+/// about themselves, which is the honest answer and not the same as sorting by name: the current
+/// file has no date in its name at all, and a folder synced from two machines can hold copies whose
+/// names and contents disagree about which is newer.
+pub fn list_in_folder(folder: &Path) -> Vec<PathBuf> {
+    let current = folder.join(current_file_name());
+    let mut found: Vec<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|name| {
+                        name.starts_with("codeflow-backup-") && name.ends_with(FILE_EXTENSION)
+                    })
+        })
+        .collect();
+    if current.is_file() {
+        found.push(current);
+    }
+    found
+}
+
 /// The most recent backup in a folder — the current file if it is there, otherwise the newest
 /// rotated copy. What "restore from my synced folder" resolves to without making the user browse.
 pub fn newest_in_folder(folder: &Path) -> Option<PathBuf> {

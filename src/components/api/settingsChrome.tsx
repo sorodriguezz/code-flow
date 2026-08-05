@@ -11,6 +11,40 @@ import { openExternalUrl } from "../../lib/tauri/commands";
  * meaning one thing in one tab and something slightly different in the next.
  */
 
+/**
+ * The heading every settings section wears, and the reason they now all look alike.
+ *
+ * They had drifted into four shapes: title with a subtitle, title alone, title followed by a line
+ * that was really the first group's hint, and — in the API client's — no heading at all. Moving
+ * between sections shifted the first row up and down by a line and a half, which reads as the
+ * window resettling rather than as a different page of the same window.
+ *
+ * `hint` is deliberately required. A section that cannot say in one line what it is for is one
+ * whose title is doing work the body should be doing, and making it optional is how half of them
+ * ended up without one.
+ */
+export function SettingsHeader({
+  title,
+  hint,
+  aside,
+}: {
+  title: string;
+  /** A `ReactNode` rather than a string only so a hint can carry a link, which two of them do. */
+  hint: ReactNode;
+  /** Right-aligned controls that belong to the section as a whole rather than to any group. */
+  aside?: ReactNode;
+}) {
+  return (
+    <div className="mb-4">
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="text-sm font-semibold">{title}</h3>
+        {aside && <div className="shrink-0">{aside}</div>}
+      </div>
+      <p className="mt-1 text-[13px] leading-snug text-[var(--cf-text-muted)]">{hint}</p>
+    </div>
+  );
+}
+
 /** One tab's worth of settings. The tab above already names it, so there is no heading here. */
 export function Panel({ children }: { children: ReactNode }) {
   return <div className="rounded-lg border border-[var(--cf-border)] px-3 py-2">{children}</div>;
@@ -102,19 +136,35 @@ export function Note({ tone = "muted", children }: { tone?: Tone; children: Reac
 export function Status({
   tone,
   pulse = false,
+  wrap = false,
   children,
 }: {
   tone: Tone;
   /** For a state that is in motion — a sync round in flight, a check being re-run. */
   pulse?: boolean;
+  /**
+   * Lets the line wrap instead of truncating.
+   *
+   * One line is right for a status, which is a handful of words — and truncating is what keeps a
+   * long error from shoving the buttons beside it off the row. It is wrong for the one or two that
+   * also have to say what to do next, where the sentence is the whole point and half of it is
+   * worse than none.
+   */
+  wrap?: boolean;
   children: ReactNode;
 }) {
   return (
-    <span className={`flex min-w-0 items-center gap-1.5 text-[11px] ${TONE_TEXT[tone]}`}>
+    <span
+      className={`flex min-w-0 gap-1.5 text-[11px] ${wrap ? "items-start" : "items-center"} ${TONE_TEXT[tone]}`}
+    >
+      {/* Nudged down when wrapping, so the dot sits on the first line rather than centred against
+          a block of two. */}
       <span
-        className={`h-1.5 w-1.5 shrink-0 rounded-full ${TONE_DOT[tone]} ${pulse ? "animate-pulse" : ""}`}
+        className={`h-1.5 w-1.5 shrink-0 rounded-full ${TONE_DOT[tone]} ${pulse ? "animate-pulse" : ""} ${
+          wrap ? "mt-[5px]" : ""
+        }`}
       />
-      <span className="truncate">{children}</span>
+      <span className={wrap ? "leading-snug" : "truncate"}>{children}</span>
     </span>
   );
 }
@@ -146,7 +196,18 @@ export function HelpLink({ url, children }: { url: string; children: ReactNode }
 }
 
 /** A compact, non-interactive tag — "owner", "member", "2 conflicts". */
-export function Tag({ tone = "muted", icon: Icon, children }: { tone?: Tone; icon?: LucideIcon; children: ReactNode }) {
+export function Tag({
+  tone = "muted",
+  icon: Icon,
+  title,
+  children,
+}: {
+  tone?: Tone;
+  icon?: LucideIcon;
+  /** For a tag that is an abbreviation — a project ref standing in for its whole host. */
+  title?: string;
+  children: ReactNode;
+}) {
   const background = {
     muted: "bg-black/[0.05] dark:bg-white/[0.07]",
     warning: "bg-[color-mix(in_oklab,var(--cf-warning)_16%,transparent)]",
@@ -155,6 +216,7 @@ export function Tag({ tone = "muted", icon: Icon, children }: { tone?: Tone; ico
   }[tone];
   return (
     <span
+      title={title}
       className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-[1px] text-[10px] font-medium ${background} ${TONE_TEXT[tone]}`}
     >
       {Icon && <Icon size={9} />}

@@ -12,9 +12,10 @@
 //! The lock is never held across the network. Build and digest under it, drop it, then seal and
 //! upload — otherwise a slow Drive round trip would freeze every query in the app behind it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db::Db;
 
@@ -39,12 +40,45 @@ pub struct RunOutcome {
     pub at: String,
     pub contents: BackupContents,
     /// Set when the run was skipped rather than performed: `unchanged`, `disabled`,
-    /// `no-destination`, `no-password`.
+    /// `no-destination`, `no-password`, `busy`.
     pub skipped: String,
 }
 
 fn skipped(reason: &str) -> RunOutcome {
     RunOutcome { skipped: reason.to_string(), ..Default::default() }
+}
+
+/// Whether a run is in flight, from either the ticker or the button.
+///
+/// One at a time, and for two reasons. The cheap one is correctness: both paths finish by writing
+/// `last_backup_at` and `last_hash` into the same settings blob, so two overlapping runs mean the
+/// slower one's digest lands last and describes a file the faster one has already replaced. The
+/// expensive one is Argon2 — deliberately costly, and paying for it twice at once to produce two
+/// copies of the same payload is the worst moment this app can pick to be busy.
+///
+/// It is also what the panel reads. A backup started by the scheduler while settings are open used
+/// to be invisible: the button stayed pressable, the timestamp stayed stale, and the only sign
+/// anything had happened was the next time the section was reopened.
+static RUNNING: AtomicBool = AtomicBool::new(false);
+
+pub fn is_running() -> bool {
+    RUNNING.load(Ordering::SeqCst)
+}
+
+/// The event the panel follows. Emitted `true` when a run takes the flag and `false` when it lets
+/// it go, whichever way the run ended — so the frontend can go and re-read what it wrote.
+pub const RUNNING_EVENT: &str = "backup:running";
+
+/// Held for the length of a run. A guard rather than a pair of calls because the run has a dozen
+/// `?` in it, and every one of them is a way to leave the flag stuck at `true` for the lifetime of
+/// the process — which would be a button that never comes back.
+struct RunGuard(AppHandle);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        RUNNING.store(false, Ordering::SeqCst);
+        let _ = self.0.emit(RUNNING_EVENT, false);
+    }
 }
 
 /// Whether a destination is configured well enough to write to — what greys out the switch.
@@ -69,6 +103,18 @@ pub fn destination_ready(
 /// `force` is the "Back up now" button: it writes even when nothing changed, because a user who
 /// pressed a button and was told "nothing to do" has no way to tell that from a failure.
 pub async fn run(app: &AppHandle, force: bool) -> Result<RunOutcome, String> {
+    // Compare-and-swap rather than a read then a write: the ticker and the button are on different
+    // tasks, and two of them reading "not running" before either had written it is exactly the race
+    // this is here to lose.
+    if RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return Ok(skipped("busy"));
+    }
+    let _guard = RunGuard(app.clone());
+    // Announced before the work rather than after the decision to do it. Building and digesting the
+    // payload is most of the cost of a tick that turns out to write nothing, and during it a second
+    // run genuinely cannot start — saying so is the honest report of what the flag means.
+    let _ = app.emit(RUNNING_EVENT, true);
+
     let version = app.package_info().version.to_string();
 
     // ---- under the lock: settings, credentials list, payload, digest ----

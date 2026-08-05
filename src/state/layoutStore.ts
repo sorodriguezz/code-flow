@@ -98,17 +98,39 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   huReviewDraftCriteriaWidth: 460,
 };
 
+/**
+ * Persisted layout booleans, kept beside the sizes rather than in `uiStore`.
+ *
+ * `uiStore` is session state — its own `sidebarCollapsed` resets on every launch, which is fine for
+ * something toggled from the title bar several times an hour. A pane collapsed down to its icons is
+ * the opposite: it is a decision made once about how much room that pane deserves, and having to
+ * make it again at every launch is the whole reason it needs to be remembered.
+ */
+export type LayoutFlag = "settingsNavCollapsed";
+
+const FLAG_STORAGE_KEYS: Record<LayoutFlag, string> = {
+  settingsNavCollapsed: "layout_settings_nav_collapsed",
+};
+
+const FLAG_DEFAULTS: Record<LayoutFlag, boolean> = {
+  settingsNavCollapsed: false,
+};
+
 interface LayoutState {
   sizes: Record<LayoutKey, number>;
+  flags: Record<LayoutFlag, boolean>;
   init: () => Promise<void>;
   /** Live update while dragging — cheap, no disk write. */
   setSize: (key: LayoutKey, value: number) => void;
   /** Called once on drag end to persist the final value. */
   commitSize: (key: LayoutKey, value: number) => void;
+  /** Flips a flag and persists it in the same breath — there is no drag to wait for. */
+  toggleFlag: (key: LayoutFlag) => void;
 }
 
 export const useLayoutStore = create<LayoutState>((set) => ({
   sizes: { ...LAYOUT_DEFAULTS },
+  flags: { ...FLAG_DEFAULTS },
 
   init: async () => {
     const loaded = await Promise.all(
@@ -118,7 +140,16 @@ export const useLayoutStore = create<LayoutState>((set) => ({
         return [key, Number.isFinite(num) ? num : LAYOUT_DEFAULTS[key]] as const;
       }),
     );
-    set({ sizes: Object.fromEntries(loaded) as Record<LayoutKey, number> });
+    const flags = await Promise.all(
+      (Object.keys(FLAG_STORAGE_KEYS) as LayoutFlag[]).map(async (key) => {
+        const raw = await getSetting(FLAG_STORAGE_KEYS[key]).catch(() => null);
+        return [key, raw === null ? FLAG_DEFAULTS[key] : raw === "1"] as const;
+      }),
+    );
+    set({
+      sizes: Object.fromEntries(loaded) as Record<LayoutKey, number>,
+      flags: Object.fromEntries(flags) as Record<LayoutFlag, boolean>,
+    });
   },
 
   setSize: (key, value) => set((s) => ({ sizes: { ...s.sizes, [key]: value } })),
@@ -126,4 +157,11 @@ export const useLayoutStore = create<LayoutState>((set) => ({
   commitSize: (key, value) => {
     void setSetting(STORAGE_KEYS[key], String(Math.round(value)));
   },
+
+  toggleFlag: (key) =>
+    set((s) => {
+      const next = !s.flags[key];
+      void setSetting(FLAG_STORAGE_KEYS[key], next ? "1" : "0");
+      return { flags: { ...s.flags, [key]: next } };
+    }),
 }));

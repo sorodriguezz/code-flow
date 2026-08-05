@@ -1,61 +1,56 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import {
-  Cloud,
+  BookOpen,
+  ChevronDown,
+  ChevronRight,
+  Clock,
   DatabaseBackup,
   Download,
   FolderOpen,
   KeyRound,
+  ListChecks,
   RefreshCw,
   Upload,
+  type LucideIcon,
 } from "lucide-react";
 import { motion } from "framer-motion";
-import { ApiModal, Field, GhostButton, Row } from "../api/ApiModal";
-import { Actions, Group, HelpLink, Note, Panel, Status } from "../api/settingsChrome";
+import { ApiModal, Field, GhostButton, PrimaryButton, Row } from "../api/ApiModal";
+import { ActivePill, ActiveUnderline } from "../common/ActivePill";
+import { Actions, HelpLink, Note, SettingsHeader, Status } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
-import { Select } from "../common/Select";
+import { BackupAutomatic } from "./BackupAutomatic";
 import { DriveGuide, ICloudGuide, OneDriveGuide, SyncedFolderGuide } from "./backupGuides";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { onBackupRunning } from "../../lib/tauri/events";
 import {
   backupClearPassphrase,
   backupExportToFile,
-  backupInspectConfigured,
-  backupInspectDrive,
-  backupInspectOneDrive,
+  backupListAtDestination,
   backupPassphraseMatches,
   backupPickAndInspect,
-  backupPickFolder,
   backupRestoreDrive,
   backupRestoreFile,
   backupRestoreOneDrive,
-  backupRevealFolder,
+  backupResetAuto,
   backupRunNow,
   backupSaveDrive,
   backupSaveOneDrive,
   backupSaveSettings,
   backupSetPassphrase,
   backupState,
+  destinationReady,
   formatBytes,
-  onedriveConnect,
-  onedriveDisconnect,
-  onedriveStatus,
+  INCLUDE_KEYS,
   passphraseStrength,
   writesToFolder,
+  type BackupInclude,
   type BackupInfo,
   type BackupSettings as Settings,
   type BackupState,
-  type BackupTarget,
   type RestoreReport,
-  type SyncFolder,
 } from "../../lib/tauri/backupCommands";
-import {
-  gdriveConnect,
-  gdriveDisconnect,
-  gdriveSetClientSecret,
-  gdriveStatus,
-  type DriveStatus,
-} from "../../lib/tauri/apiCommands";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -81,46 +76,71 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 
 const MIN_PASSPHRASE = 8;
 
-/** How often the scheduler considers writing. Offered as choices because a free number field here
- * invites a "1" that turns a background task into a foreground one. */
-const INTERVALS: { value: string; labelKey: TranslationKey }[] = [
-  { value: "15", labelKey: "backup.every15" },
-  { value: "30", labelKey: "backup.every30" },
-  { value: "60", labelKey: "backup.every60" },
-  { value: "180", labelKey: "backup.every180" },
-  { value: "360", labelKey: "backup.every360" },
-  { value: "720", labelKey: "backup.every720" },
-  { value: "1440", labelKey: "backup.every1440" },
-];
+/** The lowest rung of [`passphraseStrength`] this panel will accept — "fair". */
+const MIN_STRENGTH = 2;
 
-const SYNC_LABELS: Record<SyncFolder["kind"], string> = {
-  icloud: "iCloud Drive",
-  onedrive: "OneDrive",
-  dropbox: "Dropbox",
-  "gdrive-desktop": "Google Drive",
-};
-
-/** A value the user reads rather than edits, and can click to open where it points. */
-function PathReadout({ value, onReveal }: { value: string; onReveal?: () => void }) {
-  const shared =
-    "mb-1.5 block w-full truncate rounded border border-[var(--cf-border)] bg-black/[0.02] px-1.5 py-1 text-left font-mono text-[11px] text-[var(--cf-text-muted)] dark:bg-white/[0.03]";
-  if (!onReveal) return <p className={shared} title={value}>{value}</p>;
-  return (
-    <button type="button" onClick={onReveal} title={value} className={`${shared} hover:text-[var(--cf-text)]`}>
-      {value}
-    </button>
-  );
-}
+type BackupTab = "content" | "password" | "backup" | "restore" | "guides";
 
 /**
- * Four segments, filled by [`passphraseStrength`]. Length-dominated on purpose — for a passphrase
- * fed to Argon2id it is worth far more than punctuation, and a meter that says otherwise teaches
- * the wrong habit.
+ * The five panes, in the order you would actually set this up: decide what goes in the file, give it
+ * a password, then say how it gets written. Guides last, because they are the thing you read once
+ * while choosing a destination and never again.
+ *
+ * `backup` and `restore` are one pane each, and that pairing is the point: restoring used to be two
+ * buttons in two different tabs, each tucked beside the settings for writing a file. Writing and
+ * reading are the two things that actually happen here — *how* a file gets written is a choice
+ * inside the writing pane, not a second place to look for it.
+ *
+ * `hintKey` is optional because one pane doesn't need one: `backup` opens on its own two tabs, which
+ * say what its two halves are more directly than a paragraph summarising both ever did.
  */
-function StrengthMeter({ value }: { value: string }) {
+const TABS: { id: BackupTab; labelKey: TranslationKey; hintKey?: TranslationKey; icon: LucideIcon }[] = [
+  { id: "content", labelKey: "backup.tabContent", hintKey: "backup.tabContentHint", icon: ListChecks },
+  { id: "password", labelKey: "backup.tabPassword", hintKey: "backup.tabPasswordHint", icon: KeyRound },
+  { id: "backup", labelKey: "backup.tabBackup", icon: Upload },
+  { id: "restore", labelKey: "backup.tabRestore", icon: Download },
+  { id: "guides", labelKey: "backup.tabGuides", hintKey: "backup.tabGuidesHint", icon: BookOpen },
+];
+
+/** The two halves of the "Back up" pane: one file written now, or the schedule that writes them. */
+type BackupMode = "manual" | "automatic";
+
+/**
+ * They are two tabs rather than two groups stacked in one pane because they are two errands, and
+ * only ever one at a time: "give me a copy right now" is a password and a button, while "keep this
+ * computer backed up" is a destination, an interval and a retention count. Stacked, the second one
+ * pushed the first's answer off the top of the pane, and the pane needed a paragraph above both to
+ * explain what it was you were looking at.
+ *
+ * Manual comes first, and is where the pane opens: it is the errand you arrive with, and it works
+ * before anything below it is set up.
+ */
+const MODES: { id: BackupMode; labelKey: TranslationKey; icon: LucideIcon }[] = [
+  { id: "manual", labelKey: "backup.modeManual", icon: Upload },
+  { id: "automatic", labelKey: "backup.modeAutomatic", icon: Clock },
+];
+
+/**
+ * The meter and the advice, as one panel sitting under the field it judges.
+ *
+ * Both used to live in the `Row`: the advice as its `hint`, under the "Password" label. A `Row` is
+ * `items-center` with the label in a flexible column, so a hint that grew to three lines grew the
+ * column, and the label — and the field beside it — slid down to stay centred against it. The
+ * feedback changes on every keystroke, so the title of the input it belongs to was drifting while
+ * you typed into it.
+ *
+ * Out here it can't move anything: the panel is below the row, in the field's own column so it
+ * lines up under what it is about, and the row above it is one line tall no matter what it says.
+ *
+ * The bars are length-dominated on purpose — for a passphrase fed to Argon2id, length is worth far
+ * more than punctuation, and a meter that says otherwise teaches the wrong habit. The line beneath
+ * them is advice rather than a second verdict: the bars already say "fair", and saying it twice in
+ * two registers is how a panel starts feeling like it is nagging.
+ */
+function PassphraseFeedback({ value }: { value: string }) {
   const t = useT();
-  if (value === "") return null;
   const score = passphraseStrength(value);
+  const empty = value === "";
   const labels: TranslationKey[] = [
     "backup.strengthTooShort",
     "backup.strengthWeak",
@@ -128,22 +148,47 @@ function StrengthMeter({ value }: { value: string }) {
     "backup.strengthStrong",
   ];
   const colors = ["var(--cf-danger)", "var(--cf-warning)", "var(--cf-warning)", "var(--cf-success)"];
+  // One rung, one thing to say. The two that can't be saved say what is missing; the two that can
+  // say what it buys, because at that point instructing further is nagging.
+  const advice: TranslationKey = empty
+    ? "backup.adviceEmpty"
+    : value.length < MIN_PASSPHRASE
+      ? "backup.adviceShort"
+      : score < MIN_STRENGTH
+        ? "backup.adviceWeak"
+        : score >= 3
+          ? "backup.adviceStrong"
+          : "backup.adviceFair";
+
   return (
-    <div className="mb-1.5 flex items-center gap-2">
-      <div className="flex flex-1 gap-1">
-        {[0, 1, 2, 3].map((segment) => (
-          <motion.span
-            key={segment}
-            layout
-            className="h-1 flex-1 rounded-full"
-            style={{
-              background: segment <= score && score > 0 ? colors[score] : "var(--cf-border)",
-            }}
-          />
-        ))}
-      </div>
-      <span className="shrink-0 text-[10px]" style={{ color: colors[score] }}>
-        {t(labels[score])}
+    // Mirrors `Row`'s two columns so the panel starts exactly where the field does, with an empty
+    // spacer standing in for the label.
+    <div className="flex items-start gap-3 pb-1">
+      <span className="min-w-0 flex-1" />
+      <span className="w-[360px] max-w-[62%] shrink-0 rounded-md bg-black/[0.02] px-2 py-1.5 dark:bg-white/[0.03]">
+        {/* Nothing typed yet is nothing to measure, so the bars stay away until there is. */}
+        {!empty && (
+          <span className="mb-1 flex items-center gap-2">
+            <span className="flex flex-1 gap-1">
+              {[0, 1, 2, 3].map((segment) => (
+                <motion.span
+                  key={segment}
+                  layout
+                  className="h-1 flex-1 rounded-full"
+                  style={{
+                    background: segment <= score && score > 0 ? colors[score] : "var(--cf-border)",
+                  }}
+                />
+              ))}
+            </span>
+            <span className="shrink-0 text-[10px] font-medium" style={{ color: colors[score] }}>
+              {t(labels[score])}
+            </span>
+          </span>
+        )}
+        <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {t(advice, { n: String(Math.max(0, MIN_PASSPHRASE - value.length)) })}
+        </span>
       </span>
     </div>
   );
@@ -177,9 +222,14 @@ function PassphraseGroup({ has, onChanged }: { has: boolean; onChanged: () => vo
     setConfirm("");
   };
 
-  const tooShort = next.length > 0 && next.length < MIN_PASSPHRASE;
   const mismatch = confirm.length > 0 && confirm !== next;
-  const canSave = next.length >= MIN_PASSPHRASE && confirm === next && (!has || current.length > 0);
+  // Nothing below "fair" can be saved. Eight characters is the floor the *format* needs — the file
+  // is meant to sit in someone's cloud storage, where the threat is an offline attack against a
+  // copy of it, and `password` clears eight characters. Refusing the two weakest rungs is the one
+  // moment this can be insisted on: after this the passphrase is what every future backup is sealed
+  // with, and there is no recovery to fall back on.
+  const strongEnough = passphraseStrength(next) >= MIN_STRENGTH;
+  const canSave = strongEnough && confirm === next && (!has || current.length > 0);
 
   const save = async () => {
     setBusy(true);
@@ -207,49 +257,47 @@ function PassphraseGroup({ has, onChanged }: { has: boolean; onChanged: () => vo
     onChanged();
   };
 
+  // Already set: the rail names this pane, so there is no heading to repeat here either.
   if (has && !editing) {
     return (
-      <Group title={t("backup.groupPassword")}>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <Status tone="success">{t("backup.passwordSet")}</Status>
-          <Actions>
-            <GhostButton onClick={() => setEditing(true)}>
-              <KeyRound size={12} />
-              {t("backup.changePassword")}
-            </GhostButton>
-            <GhostButton onClick={() => void remove()}>{t("backup.removePassword")}</GhostButton>
-          </Actions>
-        </div>
-      </Group>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Status tone="success">{t("backup.passwordSet")}</Status>
+        <Actions>
+          <GhostButton onClick={() => setEditing(true)}>
+            <KeyRound size={12} />
+            {t("backup.changePassword")}
+          </GhostButton>
+          <GhostButton onClick={() => void remove()}>{t("backup.removePassword")}</GhostButton>
+        </Actions>
+      </div>
     );
   }
 
   return (
-    <Group title={t("backup.groupPassword")}>
-      <Note tone="warning">{t("backup.passwordWarning")}</Note>
+    <>
       {has && (
         <Row label={t("backup.currentPassword")} wide>
           <Field type="password" value={current} onChange={setCurrent} />
         </Row>
       )}
-      <Row label={t("backup.newPassword")} hint={t("backup.newPasswordHint")} wide>
-        <Field
-          type="password"
-          value={next}
-          placeholder={t("backup.passwordPlaceholder")}
-          onChange={setNext}
-        />
+      {/* No `hint`: everything this row has to say about what was typed is in the panel below it,
+          which is what keeps this row exactly one line tall while you type. */}
+      <Row label={t("backup.newPassword")} wide>
+        <Field type="password" value={next} onChange={setNext} />
       </Row>
-      <StrengthMeter value={next} />
+      <PassphraseFeedback value={next} />
       <Row label={t("backup.confirmPassword")} wide>
         <Field type="password" value={confirm} onChange={setConfirm} />
       </Row>
-      {tooShort && <Note tone="warning">{t("backup.passwordTooShort", { n: String(MIN_PASSPHRASE) })}</Note>}
       {mismatch && <Note tone="warning">{t("backup.passwordMismatch")}</Note>}
       <Actions>
-        <GhostButton onClick={() => void save()} disabled={!canSave || busy}>
+        {/* Solid, not ghost. This is the one action the whole section is gated on, and as a ghost
+            button it was grey text on the panel background — indistinguishable from the labels
+            around it until you happened to hover it. `PrimaryButton` is the shape the app already
+            uses for a primary action; Cancel stays a ghost so the pair reads as one choice. */}
+        <PrimaryButton onClick={() => void save()} disabled={!canSave || busy}>
           {t("common.save")}
-        </GhostButton>
+        </PrimaryButton>
         {has && (
           <GhostButton
             onClick={() => {
@@ -261,196 +309,116 @@ function PassphraseGroup({ has, onChanged }: { has: boolean; onChanged: () => vo
           </GhostButton>
         )}
       </Actions>
-    </Group>
+    </>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Google Drive
+// What goes into the file
 // ---------------------------------------------------------------------------
 
 /**
- * The user's own Google OAuth client, and the consent flow that turns it into a connection.
+ * One switch: name and checkbox on the line, the explanation folded away behind it.
  *
- * Moved here wholesale from the API client's settings, because the thing being uploaded is no
- * longer one workspace's requests. The credentials are still the user's own, from a Google Cloud
- * project they create: the backup reaches their Drive through their registration, with nothing of
- * ours in the path.
+ * Collapsed by default, and that is the whole point of the row — nine groups each carrying two or
+ * three lines of prose turned this pane into a wall you had to read past to reach the third
+ * checkbox, when most visits are someone who already knows what they want toggling one thing. The
+ * detail is still a click away for the visit where you don't.
+ *
+ * The disclosure and the checkbox are siblings rather than one nested in the other, and that is the
+ * point: making the whole row toggle the switch would mean reading about a group costs you a change
+ * to it, and nesting the box inside the expander would fire both on every click. The name expands,
+ * the box checks, and neither can reach the other.
  */
-function DriveConnection({
-  clientId,
-  account,
-  onSave,
+function IncludeRow({
+  label,
+  detail,
+  checked,
+  onChange,
 }: {
-  clientId: string;
-  account: string;
-  onSave: (patch: { clientId?: string; account?: string }) => void;
+  label: string;
+  detail: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
 }) {
-  const t = useT();
-  const [status, setStatus] = useState<DriveStatus>({ has_secret: false, connected: false });
-  const [secret, setSecret] = useState("");
-  const [connecting, setConnecting] = useState(false);
-
-  const refresh = useCallback(() => {
-    void gdriveStatus().then(setStatus).catch(() => {});
-  }, []);
-  useEffect(refresh, [refresh]);
-
-  const saveSecret = async (value: string) => {
-    setSecret(value);
-    await gdriveSetClientSecret(value).catch((e: unknown) => pushErrorToast(String(e)));
-    refresh();
-  };
-
-  const connect = async () => {
-    setConnecting(true);
-    try {
-      const connected = await gdriveConnect(clientId);
-      onSave({ account: connected.email });
-      refresh();
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setConnecting(false);
-    }
-  };
-
-  const disconnect = async () => {
-    if (!(await confirmAction(t("backup.driveDisconnectConfirm")))) return;
-    await gdriveDisconnect().catch((e: unknown) => pushErrorToast(String(e)));
-    onSave({ account: "" });
-    refresh();
-  };
-
+  const [open, setOpen] = useState(false);
   return (
-    <div className="mb-1">
-      <Row label={t("backup.driveClientId")} wide>
-        <Field
-          mono
-          value={clientId}
-          placeholder="…apps.googleusercontent.com"
-          onChange={(value) => onSave({ clientId: value })}
-        />
-      </Row>
-      <Row label={t("backup.driveClientSecret")} wide>
-        <Field
-          type="password"
-          value={secret}
-          placeholder={status.has_secret ? t("backup.driveSecretStored") : ""}
-          onChange={(value) => void saveSecret(value)}
-        />
-      </Row>
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
-        {status.connected ? (
-          <>
-            <Status tone="success">
-              {account === "" ? t("backup.driveConnected") : t("backup.driveConnectedAs", { email: account })}
-            </Status>
-            <GhostButton onClick={() => void disconnect()}>{t("backup.driveDisconnect")}</GhostButton>
-          </>
-        ) : (
-          <>
-            <Status tone="muted">{t("backup.driveNotConnected")}</Status>
-            <GhostButton
-              onClick={() => void connect()}
-              disabled={connecting || clientId.trim() === "" || !status.has_secret}
-            >
-              <Cloud size={12} />
-              {connecting ? t("backup.driveWaiting") : t("backup.driveConnect")}
-            </GhostButton>
-          </>
-        )}
+    <div className="py-0.5">
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => setOpen((current) => !current)}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center gap-1.5 py-1 text-left text-[12px] text-[var(--cf-text)]"
+        >
+          {open ? (
+            <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+          ) : (
+            <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+          )}
+          <span className="truncate">{label}</span>
+        </button>
+        <span className="shrink-0">
+          <Checkbox checked={checked} onChange={onChange} />
+        </span>
       </div>
+      {open && (
+        // Indented to the label rather than the chevron, so the text reads as belonging to the row
+        // above it instead of starting a new one.
+        <p className="mb-1 pl-[18px] pr-6 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {detail}
+        </p>
+      )}
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// OneDrive
-// ---------------------------------------------------------------------------
-
 /**
- * The user's own Entra ID app registration, and the consent flow that turns it into a connection.
+ * The per-group switches, one row each with what it covers and what turning it off costs.
  *
- * Deliberately one field where Drive needs two: registered as a public client, the whole of the
- * setup is the application id, and PKCE does the job the client secret was doing next door. So
- * there is nothing here to store in the credential store until the browser comes back.
+ * Nothing above the rows. This pane used to open with three stacked blocks — the tab's own hint,
+ * "what travels", "what stays behind" — plus a fourth for what has no switch, and between them the
+ * sentence about repositories appeared twice word for word while "what travels" listed exactly what
+ * the switches below already say. Four paragraphs to reach the first checkbox. Each row now carries
+ * its own explanation, which is where someone deciding about that row is already looking; the two
+ * facts no row can state are the warnings and the closing line below.
  *
- * This is also the destination iCloud was asked to be and can't: Apple publishes no service API for
- * iCloud Drive, so that one stays a folder its sync daemon watches. This one signs in, and works on
- * Windows and macOS whether or not the OneDrive desktop client is installed at all.
+ * The rows are driven off `INCLUDE_KEYS` so a group added in Rust surfaces here by adding two
+ * translation keys, rather than by anyone remembering to write another `<Row>`.
  */
-function OneDriveConnection({
-  clientId,
-  account,
-  onSave,
+function IncludeGroup({
+  include,
+  onChange,
 }: {
-  clientId: string;
-  account: string;
-  onSave: (patch: { clientId?: string; account?: string }) => void;
+  include: BackupInclude;
+  onChange: (include: BackupInclude) => void;
 }) {
   const t = useT();
-  const [connected, setConnected] = useState(false);
-  const [connecting, setConnecting] = useState(false);
-
-  const refresh = useCallback(() => {
-    void onedriveStatus().then(setConnected).catch(() => {});
-  }, []);
-  useEffect(refresh, [refresh]);
-
-  const connect = async () => {
-    setConnecting(true);
-    try {
-      const linked = await onedriveConnect(clientId);
-      onSave({ account: linked.email });
-      refresh();
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setConnecting(false);
-    }
-  };
-
-  const disconnect = async () => {
-    if (!(await confirmAction(t("backup.onedriveDisconnectConfirm")))) return;
-    await onedriveDisconnect().catch((e: unknown) => pushErrorToast(String(e)));
-    onSave({ account: "" });
-    refresh();
-  };
+  const count = INCLUDE_KEYS.filter((key) => include[key]).length;
 
   return (
-    <div className="mb-1">
-      <Row label={t("backup.onedriveClientId")} hint={t("backup.onedriveClientIdHint")} wide>
-        <Field
-          mono
-          value={clientId}
-          placeholder="00000000-0000-0000-0000-000000000000"
-          onChange={(value) => onSave({ clientId: value })}
-        />
-      </Row>
-      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
-        {connected ? (
-          <>
-            <Status tone="success">
-              {account === ""
-                ? t("backup.onedriveConnected")
-                : t("backup.onedriveConnectedAs", { email: account })}
-            </Status>
-            <GhostButton onClick={() => void disconnect()}>
-              {t("backup.onedriveDisconnect")}
-            </GhostButton>
-          </>
-        ) : (
-          <>
-            <Status tone="muted">{t("backup.onedriveNotConnected")}</Status>
-            <GhostButton onClick={() => void connect()} disabled={connecting || clientId.trim() === ""}>
-              <Cloud size={12} />
-              {connecting ? t("backup.driveWaiting") : t("backup.onedriveConnect")}
-            </GhostButton>
-          </>
-        )}
+    <>
+      <div className="divide-y divide-[var(--cf-border)] border-y border-[var(--cf-border)]">
+        {INCLUDE_KEYS.map((key) => (
+          <IncludeRow
+            key={key}
+            label={t(`backup.include.${key}`)}
+            detail={t(`backup.include.${key}Hint`)}
+            checked={include[key]}
+            onChange={(checked) => onChange({ ...include, [key]: checked })}
+          />
+        ))}
       </div>
-    </div>
+      {!include.credentials && <Note tone="warning">{t("backup.includeNoCredentialsWarning")}</Note>}
+      {include.agentWork && !include.conversations && (
+        <Note tone="warning">{t("backup.includeAgentWorkNeedsConversations")}</Note>
+      )}
+      <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+        {count === INCLUDE_KEYS.length
+          ? t("backup.includeAllHint")
+          : t("backup.includePartialHint", { n: String(INCLUDE_KEYS.length - count) })}
+      </p>
+    </>
   );
 }
 
@@ -507,46 +475,141 @@ function RestoreModal({
       subtitle={source.info.path}
       busy={busy}
       dismissOnBackdrop={false}
+      // Opened from inside Settings, which is itself a `z-50` overlay — without this the dialog
+      // lands underneath it and all the user sees is the screen going darker.
+      raised
       onClose={onClose}
       footer={
-        <div className="flex items-center justify-end gap-1.5">
+        // `w-full`: the footer bar is a flex row and this is one item in it, so without a width to
+        // fill, `justify-end` has nothing to push against and both buttons sat at the left.
+        <div className="flex w-full items-center justify-end gap-1.5">
           <GhostButton onClick={onClose} disabled={busy}>
             {t("common.cancel")}
           </GhostButton>
-          <GhostButton onClick={() => void run()} disabled={busy || passphrase === ""}>
+          {/* Solid, and red when it is the replacing kind. This is the one button in the section
+              that can destroy work, and it was a ghost — grey text, lighter than the Cancel beside
+              it, indistinguishable from a label until you hovered it. */}
+          <PrimaryButton onClick={() => void run()} disabled={busy || passphrase === ""} danger={replace}>
             <Download size={12} />
             {busy ? t("backup.restoring") : t("backup.restoreAction")}
-          </GhostButton>
+          </PrimaryButton>
         </div>
       }
     >
-      <div className="px-1 py-1">
-        <div className="mb-3 rounded-md border border-[var(--cf-border)] px-2.5 py-2 text-[11px] text-[var(--cf-text-muted)]">
-          <p>{t("backup.fileCreated", { at: created })}</p>
-          <p>{t("backup.fileFrom", { os: source.info.os, version: source.info.appVersion })}</p>
-          <p>{t("backup.fileSize", { size: formatBytes(source.info.bytes) })}</p>
-        </div>
+      {/* Three questions in order, each with room around it: what this file is, the password for it,
+          and what to do with what is already here. It used to be three stacked strips inside `p-1`
+          — a bordered box of grey lines, a label and a field pushed to opposite edges of the
+          dialog, and a checkbox whose meaning changed the sentence under it — which is a lot of
+          decisions to read in the width of a paragraph. */}
+      <div className="overflow-y-auto px-4 py-4">
+        <dl className="rounded-lg border border-[var(--cf-border)] px-3 py-2.5">
+          <FileFact label={t("backup.fileCreated")} value={created === "" ? "—" : created} />
+          <FileFact
+            label={t("backup.fileFrom")}
+            value={`${source.info.os} · CodeFlow ${source.info.appVersion}`}
+          />
+          <FileFact label={t("backup.fileSize")} value={formatBytes(source.info.bytes)} />
+        </dl>
 
-        <Row label={t("backup.password")} wide>
+        {/* Stacked rather than a `Row`. Label and field on opposite sides of a dialog this wide put
+            a hand's width of nothing between the question and where you answer it. */}
+        <label className="mt-4 block">
+          <span className="mb-1.5 block text-[12px] text-[var(--cf-text)]">{t("backup.password")}</span>
           <Field
             type="password"
             value={passphrase}
             placeholder={t("backup.passwordForFile")}
             onChange={setPassphrase}
           />
-        </Row>
+        </label>
 
-        <div className="mt-2 border-t border-[var(--cf-border)] pt-2">
-          <label className="mb-1 flex items-center gap-2 text-[12px]">
-            <Checkbox checked={replace} onChange={setReplace} />
-            {t("backup.replace")}
-          </label>
-          <Note tone={replace ? "warning" : "muted"}>
-            {replace ? t("backup.replaceHint") : t("backup.mergeHint")}
-          </Note>
+        {/* Two named choices instead of one checkbox.
+            As a checkbox this was a single sentence — "leave this computer exactly like the
+            backup" — whose *unticked* meaning was written nowhere except a hint that swapped
+            underneath it as you clicked. Merging is not "not replacing"; it is the other half of
+            the decision, and it deserves a name and a line of its own. */}
+        <p className="mb-1.5 mt-4 text-[12px] text-[var(--cf-text)]">{t("backup.restoreModeTitle")}</p>
+        <div className="flex flex-col gap-1.5">
+          <RestoreChoice
+            title={t("backup.modeMerge")}
+            detail={t("backup.mergeHint")}
+            selected={!replace}
+            onSelect={() => setReplace(false)}
+          />
+          <RestoreChoice
+            title={t("backup.modeReplace")}
+            detail={t("backup.replaceHint")}
+            selected={replace}
+            danger
+            onSelect={() => setReplace(true)}
+          />
         </div>
       </div>
     </ApiModal>
+  );
+}
+
+/** One line of what the file says about itself: term on the left, value on the right. */
+function FileFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 py-[3px]">
+      <dt className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{label}</dt>
+      <dd className="min-w-0 truncate text-[12px] text-[var(--cf-text)]" title={value}>
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+/**
+ * Replace or merge, as one of two rows you pick between.
+ *
+ * A radio rather than a card grid: these are not two destinations, they are two answers to one
+ * question, and stacked rows keep the consequence of each on the same line of sight as its name.
+ * The replacing one goes red when chosen — not always, because a warning that is on screen before
+ * you have chosen anything is decoration.
+ */
+function RestoreChoice({
+  title,
+  detail,
+  selected,
+  danger = false,
+  onSelect,
+}: {
+  title: string;
+  detail: string;
+  selected: boolean;
+  danger?: boolean;
+  onSelect: () => void;
+}) {
+  const accent = danger ? "var(--cf-danger)" : "var(--cf-accent)";
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={selected}
+      onClick={onSelect}
+      className="flex items-start gap-2.5 rounded-lg border p-2.5 text-left transition-colors"
+      style={{
+        borderColor: selected ? accent : "var(--cf-border)",
+        background: selected ? `color-mix(in oklab, ${accent} 8%, transparent)` : "transparent",
+      }}
+    >
+      <span
+        className="mt-[3px] flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border"
+        style={{ borderColor: selected ? accent : "var(--cf-border)" }}
+      >
+        {selected && <span className="h-1.5 w-1.5 rounded-full" style={{ background: accent }} />}
+      </span>
+      <span className="min-w-0">
+        <span className="block text-[12px]" style={{ color: selected ? accent : "var(--cf-text)" }}>
+          {title}
+        </span>
+        <span className="mt-0.5 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {detail}
+        </span>
+      </span>
+    </button>
   );
 }
 
@@ -565,18 +628,19 @@ function RestoreDoneModal({ report, onClose }: { report: RestoreReport; onClose:
       icon={DatabaseBackup}
       title={t("backup.restoredTitle")}
       dismissOnBackdrop={false}
+      raised
       onClose={onClose}
       footer={
-        <div className="flex items-center justify-end gap-1.5">
+        <div className="flex w-full items-center justify-end gap-1.5">
           <GhostButton onClick={onClose}>{t("backup.later")}</GhostButton>
-          <GhostButton onClick={() => void relaunch()}>
+          <PrimaryButton onClick={() => void relaunch()}>
             <RefreshCw size={12} />
             {t("backup.restartNow")}
-          </GhostButton>
+          </PrimaryButton>
         </div>
       }
     >
-      <div className="px-1 py-1 text-[12px]">
+      <div className="overflow-y-auto px-4 py-4 text-[12px]">
         <p className="mb-2">
           {t("backup.restoredCounts", {
             rows: String(report.rows),
@@ -620,9 +684,24 @@ export function BackupSettings() {
 
   const [state, setState] = useState<BackupState | null>(null);
   const [busy, setBusy] = useState(false);
-  const [exportPassphrase, setExportPassphrase] = useState("");
   const [restoring, setRestoring] = useState<RestoreSource | null>(null);
   const [restored, setRestored] = useState<RestoreReport | null>(null);
+  /** What is sitting at the destination. `null` until it has been looked for. */
+  const [atDestination, setAtDestination] = useState<BackupInfo[] | null>(null);
+  const [listing, setListing] = useState(false);
+  const [tab, setTab] = useState<BackupTab>("content");
+  const [mode, setMode] = useState<BackupMode>("manual");
+  const activeTab = TABS.find((entry) => entry.id === tab) ?? TABS[0];
+
+  // The five panes are nowhere near the same height — arriving at the password pane while scrolled
+  // to the bottom of the guides left it starting somewhere in its middle. Same fix and same reason
+  // for the layout effect as `ClaudeSettings`: land at the top before the frame is painted rather
+  // than as a visible correction after it. `mode` is in here for the same reason: the scheduled
+  // half is several times the height of the by-hand one, so switching back landed mid-pane.
+  const paneRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    paneRef.current?.scrollTo({ top: 0 });
+  }, [tab, mode]);
 
   const load = useCallback(() => {
     void backupState()
@@ -630,6 +709,48 @@ export function BackupSettings() {
       .catch((e: unknown) => pushErrorToast(String(e)));
   }, []);
   useEffect(load, [load]);
+
+  /**
+   * Reads the destination, headers only — no password is involved in finding out what is there.
+   *
+   * Deferred until the Restore pane is actually opened: for Drive and OneDrive this is a network
+   * round trip, and paying for it on every visit to Settings — nearly all of which are about
+   * something else — would make opening the section wait on somebody's Wi-Fi.
+   */
+  const listDestination = useCallback(() => {
+    setListing(true);
+    backupListAtDestination()
+      .then(setAtDestination)
+      .catch((e: unknown) => {
+        setAtDestination([]);
+        pushErrorToast(String(e));
+      })
+      .finally(() => setListing(false));
+  }, []);
+
+  useEffect(() => {
+    if (tab === "restore" && atDestination === null && !listing) listDestination();
+  }, [tab, atDestination, listing, listDestination]);
+
+  /**
+   * Follows runs started anywhere, which in practice means the scheduler's.
+   *
+   * The button's own run is covered by `busy`, and this would be enough on its own — but a
+   * scheduled backup landing while this panel is open used to be invisible: it wrote a new
+   * timestamp and a new path into settings that this component had already read, so the summary sat
+   * there showing the previous run until someone happened to reopen the section. Reloading on the
+   * way *out* of a run is what keeps "last backup" a fact rather than a snapshot of when the panel
+   * was opened.
+   */
+  useEffect(() => {
+    const unlisten = onBackupRunning((running) => {
+      setState((previous) => (previous ? { ...previous, running } : previous));
+      if (!running) load();
+    });
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [load]);
 
   // Settings are written on every toggle, and the panel has several. Debounced so dragging the
   // "keep copies" field doesn't mean one SQLite write per keystroke, and flushed on unmount so a
@@ -655,17 +776,70 @@ export function BackupSettings() {
       return {
         ...previous,
         settings,
-        destinationReady: destinationReady({ ...previous, settings }),
+        destinationReady: destinationReady(settings, previous.drive.clientId, previous.onedrive.clientId),
       };
     });
   };
+
+  /**
+   * The same write without the debounce, and awaited.
+   *
+   * What the step-by-step setup commits through. The debounce is right for a checkbox that might be
+   * clicked twice in a second; it is wrong for a Save that the pane redraws itself off, where a
+   * 400ms window is long enough for the summary to appear before the settings behind it exist.
+   */
+  const commit = useCallback(async (settings: Settings) => {
+    // Whatever the debounce was holding is superseded — this writes the whole object.
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    pending.current = null;
+    // Written before the pane is redrawn off it, so a store that refuses leaves the wizard up with
+    // the answers still in it rather than a summary of settings that were never saved.
+    await backupSaveSettings(settings);
+    setState((previous) =>
+      previous
+        ? {
+            ...previous,
+            settings,
+            destinationReady: destinationReady(
+              settings,
+              previous.drive.clientId,
+              previous.onedrive.clientId,
+            ),
+          }
+        : previous,
+    );
+  }, []);
+
+  /**
+   * Forgets the scheduled setup and reloads, so the wizard comes back asking from the top.
+   *
+   * Here rather than in the pane that offers it because of the debounce: a switch flipped a moment
+   * before pressing Reset is still sitting in `pending`, and would be written back over the reset
+   * 400ms later. Cancelling it is bookkeeping only this component can do.
+   */
+  const resetAuto = useCallback(async () => {
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = null;
+    pending.current = null;
+    await backupResetAuto();
+    setState(await backupState());
+  }, []);
 
   const patchDrive = (changes: { clientId?: string; account?: string }) => {
     setState((previous) => {
       if (!previous) return previous;
       const drive = { ...previous.drive, ...changes };
       void backupSaveDrive(drive).catch((e: unknown) => pushErrorToast(String(e)));
-      return { ...previous, drive, destinationReady: destinationReady({ ...previous, drive }) };
+      return {
+        ...previous,
+        drive,
+        destinationReady: destinationReady(
+          previous.settings,
+          drive.clientId,
+          previous.onedrive.clientId,
+        ),
+      };
     });
   };
 
@@ -677,7 +851,11 @@ export function BackupSettings() {
       return {
         ...previous,
         onedrive,
-        destinationReady: destinationReady({ ...previous, onedrive }),
+        destinationReady: destinationReady(
+          previous.settings,
+          previous.drive.clientId,
+          onedrive.clientId,
+        ),
       };
     });
   };
@@ -688,22 +866,19 @@ export function BackupSettings() {
   if (!state) {
     return (
       <section>
-        <h3 className="mb-1 text-sm font-semibold">{t("backup.title")}</h3>
-        <p className="text-[13px] text-[var(--cf-text-muted)]">{t("backup.subtitle")}</p>
+        <SettingsHeader title={t("backup.title")} hint={t("backup.subtitle")} />
       </section>
     );
   }
 
-  const { settings, drive, onedrive } = state;
-  const ready = state.destinationReady && state.hasPassphrase;
+  const { settings } = state;
   const usesFolder = writesToFolder(settings.target);
 
   const exportNow = async () => {
     setBusy(true);
     try {
-      const result = await backupExportToFile(exportPassphrase);
+      const result = await backupExportToFile();
       if (!result) return;
-      setExportPassphrase("");
       pushToast(
         t("backup.exported", {
           path: result.path,
@@ -750,223 +925,254 @@ export function BackupSettings() {
     }
   };
 
-  const openFromDestination = async () => {
-    setBusy(true);
-    try {
-      const kind = usesFolder ? "file" : settings.target === "onedrive" ? "onedrive" : "drive";
-      const info =
-        kind === "file"
-          ? await backupInspectConfigured()
-          : kind === "onedrive"
-            ? await backupInspectOneDrive()
-            : await backupInspectDrive();
-      if (!info) {
-        pushErrorToast(t("backup.noBackupThere"));
-        return;
-      }
-      setRestoring({ kind, info });
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const browse = async () => {
-    const folder = await backupPickFolder().catch((e: unknown) => {
-      pushErrorToast(String(e));
-      return null;
-    });
-    if (folder) patch({ folder });
-  };
-
-  const lastBackup =
-    settings.lastBackupAt === ""
-      ? t("backup.never")
-      : new Date(settings.lastBackupAt).toLocaleString();
+  /**
+   * How a file from the destination is fetched back.
+   *
+   * A folder destination gives real paths, so each dated copy is restorable by name through the
+   * ordinary file route. The two cloud ones keep a single file addressed by the account rather than
+   * by a path, and have their own commands for it.
+   */
+  const destinationKind = usesFolder
+    ? "file"
+    : settings.target === "onedrive"
+      ? "onedrive"
+      : "drive";
 
   return (
-    <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("backup.title")}</h3>
-      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("backup.subtitle")}</p>
+    // The same frame as the AI assistant's settings, and for the same reason: five groups stacked
+    // in one column made this the longest section in the window by a wide margin, so the guides at
+    // the bottom were three screens below the destination they explain, and "back up now" scrolled
+    // off the moment you went to check what was included. One rail, one pane, nothing stacked.
+    <section className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0">
+        <SettingsHeader title={t("backup.title")} hint={t("backup.subtitle")} />
+      </div>
 
-      <Panel>
-        <Note>{t("backup.about")}</Note>
-        <Note>{t("backup.aboutExcluded")}</Note>
+      <div className="flex min-h-0 flex-1 gap-4">
+        {/* `layoutRoot` on a `motion.nav`, for the reason spelled out in `ApiSettingsBody`: the
+            pill's before/after rects would otherwise be measured against a scroll position the
+            arriving pane has just changed, and the slide would land as a jump. */}
+        <motion.nav layoutRoot className="w-[168px] shrink-0 self-start">
+          {TABS.map(({ id, labelKey, icon: Icon }) => (
+            <button
+              key={id}
+              onClick={() => setTab(id)}
+              aria-current={tab === id ? "page" : undefined}
+              title={t(labelKey)}
+              className={`relative mb-0.5 flex w-full items-center rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                tab === id
+                  ? "text-[var(--cf-accent)]"
+                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+              }`}
+            >
+              {/* Its own `layoutId`, so the pill can't fly between this rail and another's. */}
+              {tab === id && <ActivePill layoutId="cf-backup-settings-pill" />}
+              <span className="relative flex min-w-0 flex-1 items-center gap-1.5">
+                <Icon size={13} className="shrink-0" />
+                <span className="truncate">{t(labelKey)}</span>
+              </span>
+            </button>
+          ))}
+        </motion.nav>
 
-        <PassphraseGroup has={state.hasPassphrase} onChanged={load} />
-
-        <Group title={t("backup.groupManual")}>
-          {!state.hasPassphrase ? (
-            <Note tone="warning">{t("backup.needPasswordFirst")}</Note>
-          ) : (
-            <>
-              <Row label={t("backup.exportPassword")} hint={t("backup.exportPasswordHint")} wide>
-                <Field
-                  type="password"
-                  value={exportPassphrase}
-                  placeholder={t("backup.passwordPlaceholder")}
-                  onChange={setExportPassphrase}
-                />
-              </Row>
-              <Actions>
-                <GhostButton
-                  onClick={() => void exportNow()}
-                  disabled={busy || exportPassphrase.length < MIN_PASSPHRASE}
-                >
-                  <Upload size={12} />
-                  {t("backup.exportNow")}
-                </GhostButton>
-                <GhostButton onClick={() => void openFromFile()} disabled={busy}>
-                  <Download size={12} />
-                  {t("backup.importFromFile")}
-                </GhostButton>
-              </Actions>
-              <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                {t("backup.manualHint")}
+        {/* The one moving part. `overflow-y-scroll`, not `auto`: the app styles its scrollbars, so
+            one is a real 10px of layout rather than an overlay. Letting it come and go as a pane
+            grows past the height — which is exactly what expanding a row does — narrowed the
+            content and shifted every row sideways, then shifted them back on collapse. Same
+            reserved-gutter fix, and the same reason, as the settings column around it; the track is
+            transparent and the thumb isn't drawn when there is nothing to scroll. `pb-6` because
+            the pane ends where the dialog does, and a last row flush against that edge reads as cut
+            off rather than as the end of the list. */}
+        <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
+          <div className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4">
+            {/* The rail names the pane, so no heading is repeated here — but the hint says what the
+                label cannot, which is why it stays for the panes that have one. */}
+            {activeTab.hintKey && (
+              <p className="mb-4 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+                {t(activeTab.hintKey)}
               </p>
-            </>
-          )}
-        </Group>
+            )}
 
-        <Group title={t("backup.groupAutomatic")}>
-          <Row label={t("backup.target")} hint={t("backup.targetHint")} wide>
-            <Select
-              size="sm"
-              value={settings.target}
-              onChange={(value) => patch({ target: value as BackupTarget })}
-              options={[
-                { value: "folder", label: t("backup.targetFolder") },
-                { value: "icloud", label: t("backup.targetICloud") },
-                { value: "gdrive", label: t("backup.targetDrive") },
-                { value: "onedrive", label: t("backup.targetOneDrive") },
-              ]}
-              ariaLabel={t("backup.target")}
-            />
-          </Row>
+            {tab === "content" && (
+              <IncludeGroup include={settings.include} onChange={(include) => patch({ include })} />
+            )}
 
-          {usesFolder ? (
-            <>
-              <Row label={t("backup.folder")} hint={t("backup.folderHint")} wide>
-                <GhostButton onClick={() => void browse()}>
-                  <FolderOpen size={12} />
-                  {t("backup.browse")}
-                </GhostButton>
-              </Row>
-              {settings.folder !== "" && (
-                <PathReadout
-                  value={settings.folder}
-                  onReveal={() =>
-                    void backupRevealFolder(settings.folder).catch((e: unknown) =>
-                      pushErrorToast(String(e)),
-                    )
-                  }
-                />
-              )}
-              {/* Detected sync clients as one-click destinations. For Dropbox and the rest this is
-                  the whole "integration", and it is enough: they are folders. OneDrive appears
-                  here too — pointing at its synced folder is still the zero-setup route, and the
-                  destination above is for reaching the account without the desktop client. */}
-              {state.syncFolders.length > 0 && (
-                <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                  <span className="text-[11px] text-[var(--cf-text-muted)]">
-                    {t("backup.quickPicks")}
-                  </span>
-                  {state.syncFolders.map((found) => (
-                    <button
-                      key={found.path}
-                      type="button"
-                      onClick={() => patch({ folder: `${found.path}/CodeFlow` })}
-                      title={found.path}
-                      className="rounded border border-[var(--cf-border)] px-1.5 py-[2px] text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+            {tab === "password" && <PassphraseGroup has={state.hasPassphrase} onChanged={load} />}
+
+            {/* Restoring lives in its own pane, so both halves of this one are about writing a file:
+                by hand, or on a schedule — two tabs rather than two stacked groups, see `MODES`.
+                The same underlined strip as the review section's sub-tabs, and the same `-mb-px` so
+                the active rule sits *on* the rule under the row rather than above it. */}
+            {/* One row, split in two. Sized to their labels these were a short pair huddled in the
+                top-left corner of a wide pane, which reads as a leftover control rather than as the
+                two halves this pane has; an equal share each makes the underline say which half of
+                the pane you are in. No `gap`, so the two rules meet as one line. */}
+            {tab === "backup" && (
+              <div className="mb-3 flex border-b border-[var(--cf-border)]">
+                {MODES.map(({ id, labelKey, icon: Icon }) => (
+                  <button
+                    key={id}
+                    onClick={() => setMode(id)}
+                    aria-current={mode === id ? "page" : undefined}
+                    className={`relative -mb-px flex flex-1 items-center justify-center gap-1.5 px-2.5 pb-2.5 pt-1.5 text-[12.5px] ${
+                      mode === id
+                        ? "text-[var(--cf-accent)]"
+                        : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                    }`}
+                  >
+                    {mode === id && <ActiveUnderline layoutId="cf-backup-mode-underline" />}
+                    <Icon size={13} />
+                    {t(labelKey)}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {tab === "backup" &&
+              mode === "manual" &&
+              (!state.hasPassphrase ? (
+                <Note tone="warning">{t("backup.needPasswordFirst")}</Note>
+              ) : (
+                <>
+                  {/* A button and a sentence, with nothing to fill in. The file is sealed with the
+                      password already stored — the same one the scheduled run writes with — so the
+                      field that used to be here was asking for something the app was holding, and
+                      a typo in it produced a file whose password nobody would learn was wrong
+                      until the day they needed to open it. */}
+                  {/* Centred and given room above rather than left-aligned in an `Actions` row.
+                      With the password field gone there is nothing for it to line up under, and a
+                      lone button pinned to the left edge of an otherwise empty pane reads as the
+                      leftovers of a form. The paragraph below stays left-aligned — three centred
+                      lines are harder to read than three ragged-right ones. */}
+                  {/* Disabled while *any* backup is being written, not just this one. Sealing is
+                      Argon2 by design, and a by-hand export started on top of the scheduler's run
+                      pays for it twice at once to produce two copies of the same payload. */}
+                  <div className="mt-5 flex justify-center">
+                    <PrimaryButton onClick={() => void exportNow()} disabled={busy || state.running}>
+                      {busy ? (
+                        <RefreshCw size={12} className="animate-spin" />
+                      ) : (
+                        <Upload size={12} />
+                      )}
+                      {busy ? t("backup.exporting") : t("backup.exportNow")}
+                    </PrimaryButton>
+                  </div>
+                  <p className="mt-3 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                    {t("backup.manualHint")}
+                  </p>
+                </>
+              ))}
+
+            {tab === "backup" && mode === "automatic" && (
+              <BackupAutomatic
+                state={state}
+                busy={busy}
+                onPatch={patch}
+                onCommit={commit}
+                onReset={resetAuto}
+                onRunNow={runNow}
+                onPatchDrive={patchDrive}
+                onPatchOneDrive={patchOneDrive}
+              />
+            )}
+
+            {/* Its own pane, because restoring is not the other half of backing up — it is the
+                thing you come here for on a bad day, and it was previously two buttons sitting in
+                two different tabs, each beside the settings for writing a file. Both routes end in
+                the same confirmation, which is where the file says what it holds before anything
+                is touched. */}
+            {tab === "restore" && (
+              <>
+                {/* No group heading: the rail already says Restore, and the pane holds nothing
+                    else for a title to distinguish it from.
+
+                    Two routes to the same dialog, as two blocks with a rule between them, and both
+                    built out of the same bar — picking a file from disk and picking one of the
+                    copies already at the destination end in exactly the same place, so neither is
+                    a corner button while the other is a list. */}
+                <RestoreSection title={t("backup.importFromFile")}>
+                  <RestoreRow
+                    icon={FolderOpen}
+                    title={t("backup.chooseFile")}
+                    disabled={busy}
+                    onClick={() => void openFromFile()}
+                  />
+                </RestoreSection>
+
+                {/* What is at the destination, listed rather than opened.
+                    The button that used to be here fetched the newest file and went straight to the
+                    password prompt, which quietly decided the one thing worth deciding: the dated
+                    copies exist because the newest backup is often not the one you want — you are
+                    usually here because of something that went wrong recently, and the newest copy
+                    is the one most likely to have it in. */}
+                <RestoreSection
+                  divided
+                  title={t("backup.restoreFromDestination")}
+                  action={
+                    <GhostButton
+                      onClick={listDestination}
+                      disabled={listing || !state.destinationReady}
+                      title={t("backup.refreshList")}
                     >
-                      {SYNC_LABELS[found.kind]}
-                    </button>
-                  ))}
+                      <RefreshCw size={12} className={listing ? "animate-spin" : ""} />
+                      {t("backup.refreshList")}
+                    </GhostButton>
+                  }
+                >
+                  {!state.destinationReady ? (
+                    <Note>{t("backup.restoreNoDestination")}</Note>
+                  ) : listing && atDestination === null ? (
+                    <p className="text-[11px] text-[var(--cf-text-muted)]">
+                      {t("backup.lookingForBackups")}
+                    </p>
+                  ) : (atDestination?.length ?? 0) === 0 ? (
+                    <Note>{t("backup.noBackupThere")}</Note>
+                  ) : (
+                    <ul className="flex flex-col gap-1.5">
+                      {atDestination?.map((info) => (
+                        <li key={info.path}>
+                          <RestoreRow
+                            icon={Download}
+                            title={
+                              info.createdAt === ""
+                                ? t("backup.unknownDate")
+                                : new Date(info.createdAt).toLocaleString()
+                            }
+                            subtitle={fileNameOf(info.path)}
+                            aside={formatBytes(info.bytes)}
+                            hoverTitle={info.path}
+                            disabled={busy}
+                            onClick={() => setRestoring({ kind: destinationKind, info })}
+                          />
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </RestoreSection>
+                {/* No warning line down here. It was saying what the dialog that opens next says
+                    properly — which file, and a named choice between replacing and merging with the
+                    consequence of each. Choosing something to look at is not the destructive step,
+                    and a warning in front of a step that changes nothing is one people learn to
+                    read past before reaching the one that matters. */}
+              </>
+            )}
+
+            {tab === "guides" && (
+              <div className="flex flex-col gap-2">
+                <SyncedFolderGuide />
+                <ICloudGuide platform={state.platform} folder={state.icloudFolder} />
+                <OneDriveGuide />
+                <DriveGuide />
+                <div className="mt-1">
+                  <HelpLink url="https://www.google.com/drive/download/">
+                    {t("backup.guide.driveDesktopLink")}
+                  </HelpLink>
                 </div>
-              )}
-              {settings.target === "icloud" && state.icloudFolder === "" && (
-                <Note tone="warning">{t("backup.icloudMissing")}</Note>
-              )}
-            </>
-          ) : settings.target === "onedrive" ? (
-            <OneDriveConnection
-              clientId={onedrive.clientId}
-              account={onedrive.account}
-              onSave={patchOneDrive}
-            />
-          ) : (
-            <DriveConnection clientId={drive.clientId} account={drive.account} onSave={patchDrive} />
-          )}
-
-          <Row label={t("backup.interval")} hint={t("backup.intervalHint")} wide>
-            <Select
-              size="sm"
-              value={String(settings.intervalMinutes)}
-              onChange={(value) => patch({ intervalMinutes: Number(value) })}
-              options={INTERVALS.map(({ value, labelKey }) => ({ value, label: t(labelKey) }))}
-              ariaLabel={t("backup.interval")}
-            />
-          </Row>
-          <Row label={t("backup.onExit")} hint={t("backup.onExitHint")}>
-            <Checkbox checked={settings.onExit} onChange={(onExit) => patch({ onExit })} />
-          </Row>
-          <Row label={t("backup.keepCopies")} hint={t("backup.keepCopiesHint")}>
-            <Field
-              type="number"
-              value={String(settings.keepCopies)}
-              onChange={(value) => {
-                const parsed = Number(value);
-                patch({
-                  keepCopies: Number.isFinite(parsed) ? Math.min(50, Math.max(0, Math.floor(parsed))) : 0,
-                });
-              }}
-            />
-          </Row>
-          <Row label={t("backup.enabled")} hint={t("backup.enabledHint")}>
-            <Checkbox
-              checked={settings.enabled}
-              disabled={!ready}
-              onChange={(enabled) => patch({ enabled })}
-            />
-          </Row>
-          {!ready && <Note tone="warning">{t("backup.notReady")}</Note>}
-
-          <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
-            <Status tone={settings.lastError !== "" ? "warning" : settings.lastBackupAt === "" ? "muted" : "success"}>
-              {settings.lastError !== ""
-                ? t("backup.lastError", { error: settings.lastError })
-                : t("backup.lastAt", { at: lastBackup })}
-            </Status>
-            <Actions>
-              <GhostButton onClick={() => void openFromDestination()} disabled={busy || !state.destinationReady}>
-                <Download size={12} />
-                {t("backup.restoreFromDestination")}
-              </GhostButton>
-              <GhostButton onClick={() => void runNow()} disabled={busy || !ready}>
-                <RefreshCw size={12} />
-                {t("backup.runNow")}
-              </GhostButton>
-            </Actions>
+              </div>
+            )}
           </div>
-          {settings.lastBackupPath !== "" && <PathReadout value={settings.lastBackupPath} />}
-        </Group>
-
-        <Group title={t("backup.groupGuides")}>
-          <Note>{t("backup.guidesAbout")}</Note>
-          <div className="flex flex-col gap-2">
-            <SyncedFolderGuide />
-            <ICloudGuide platform={state.platform} folder={state.icloudFolder} />
-            <OneDriveGuide />
-            <DriveGuide />
-          </div>
-          <div className="mt-2">
-            <HelpLink url="https://www.google.com/drive/download/">
-              {t("backup.guide.driveDesktopLink")}
-            </HelpLink>
-          </div>
-        </Group>
-      </Panel>
+        </div>
+      </div>
 
       {restoring && (
         <RestoreModal
@@ -985,16 +1191,88 @@ export function BackupSettings() {
 }
 
 /**
- * Whether the chosen destination has the one piece it actually needs.
+ * One route into the restore dialog: a title, the line explaining it, its button, and whatever the
+ * route needs below.
  *
- * Each target is asked only about its own: a folder for the two that write to one, a client id for
- * the two that sign in. Mirrors `destination_ready` in `backup/auto.rs` — the backend is what
- * decides, and this is only so the switch greys out before a run has to prove it.
+ * A `Row` did this before and was the wrong shape for it. `Row` is `items-center` with a fixed
+ * column for the control, which centres a two-word button against a two-line sentence and leaves a
+ * gap the width of a hand between them — fine for a setting, wrong for a heading with an action.
+ * Here the button aligns to the top, beside the title it belongs to.
  */
-function destinationReady({ settings, drive, onedrive }: BackupState): boolean {
-  if (settings.target === "gdrive") return drive.clientId.trim() !== "";
-  if (settings.target === "onedrive") return onedrive.clientId.trim() !== "";
-  return settings.folder.trim() !== "";
+function RestoreSection({
+  title,
+  action,
+  divided = false,
+  children,
+}: {
+  title: string;
+  action?: ReactNode;
+  /** Draws the rule and the space that separate this route from the one above it. */
+  divided?: boolean;
+  children?: ReactNode;
+}) {
+  return (
+    <section className={divided ? "mt-5 border-t border-[var(--cf-border)] pt-4" : "pt-1"}>
+      <div className="flex items-start justify-between gap-4">
+        <p className="min-w-0 text-[12.5px] text-[var(--cf-text)]">{title}</p>
+        {action && <div className="shrink-0">{action}</div>}
+      </div>
+      {children && <div className="mt-2.5">{children}</div>}
+    </section>
+  );
+}
+
+/**
+ * One pressable bar: an icon, what it is, and a chevron saying it opens something.
+ *
+ * Shared by both routes on purpose. Picking a file and picking one of the copies already at the
+ * destination end in exactly the same dialog, so they are the same kind of act and should not be a
+ * button in a corner in one case and a list row in the other.
+ */
+function RestoreRow({
+  icon: Icon,
+  title,
+  subtitle,
+  aside,
+  hoverTitle,
+  disabled,
+  onClick,
+}: {
+  icon: LucideIcon;
+  title: string;
+  subtitle?: string;
+  aside?: string;
+  hoverTitle?: string;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      title={hoverTitle}
+      className="flex w-full items-center gap-2.5 rounded-lg border border-[var(--cf-border)] px-3 py-2.5 text-left transition-colors hover:border-[color-mix(in_oklab,var(--cf-accent)_50%,transparent)] hover:bg-black/[0.02] disabled:opacity-40 dark:hover:bg-white/[0.03]"
+    >
+      <Icon size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+      <span className="min-w-0 flex-1">
+        <span className="block text-[12px] text-[var(--cf-text)]">{title}</span>
+        {subtitle && (
+          <span className="mt-0.5 block truncate font-mono text-[10.5px] text-[var(--cf-text-muted)]">
+            {subtitle}
+          </span>
+        )}
+      </span>
+      {aside && <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{aside}</span>}
+      <ChevronRight size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+    </button>
+  );
+}
+
+/** The last segment of a path, for a list where every row shares the same folder. Both separators,
+ * because a backup restored onto the other operating system carries the paths it was written with. */
+function fileNameOf(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
 }
 
 /** Why a run wrote nothing, as something the user can act on. */
@@ -1006,6 +1284,8 @@ function skipMessage(reason: string): TranslationKey {
       return "backup.skipNoDestination";
     case "no-password":
       return "backup.skipNoPassword";
+    case "busy":
+      return "backup.skipBusy";
     default:
       return "backup.skipDisabled";
   }

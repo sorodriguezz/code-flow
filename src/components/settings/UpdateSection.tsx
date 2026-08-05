@@ -18,6 +18,7 @@ export function UpdateSection() {
   const update = useUpdateStore((s) => s.update);
   const progress = useUpdateStore((s) => s.progress);
   const error = useUpdateStore((s) => s.error);
+  const noBuildForPlatform = useUpdateStore((s) => s.noBuildForPlatform);
   const lastCheckedAt = useUpdateStore((s) => s.lastCheckedAt);
   const checkNow = useUpdateStore((s) => s.checkNow);
   const install = useUpdateStore((s) => s.install);
@@ -61,12 +62,18 @@ export function UpdateSection() {
         </button>
       )}
 
-      {status === "uptodate" && (
-        <p className="mt-2 flex items-center gap-1.5 text-[12px] text-[var(--cf-success)]">
-          <Check size={13} />
-          {t("settings.upToDate")}
-        </p>
-      )}
+      {/* Two ways to have nothing to install, and they are not the same sentence: "you are on the
+          latest" would be a claim nobody checked when the release simply has no build for this
+          platform. Neither is an error, so neither is red. */}
+      {status === "uptodate" &&
+        (noBuildForPlatform ? (
+          <p className="mt-2 text-[12px] text-[var(--cf-text-muted)]">{t("settings.updateNoBuild")}</p>
+        ) : (
+          <p className="mt-2 flex items-center gap-1.5 text-[12px] text-[var(--cf-success)]">
+            <Check size={13} />
+            {t("settings.upToDate")}
+          </p>
+        ))}
 
       {status === "available" && update && (
         <div className="flex flex-col gap-2">

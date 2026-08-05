@@ -10,6 +10,7 @@ import { HOSTING_PROVIDERS, type HostingProvider } from "../../lib/vcsProviders"
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { SettingsHeader } from "../api/settingsChrome";
 
 /** One hint per provider, as a lookup rather than a ternary: a chain of `?:` silently falls
  * through to Azure for anything it doesn't name, which is exactly how a third provider ends up
@@ -58,8 +59,7 @@ export function GitHostingSettings() {
 
   return (
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.integrationsTitle")}</h3>
-      <p className="mb-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.integrationsHint")}</p>
+      <SettingsHeader title={t("settings.integrationsTitle")} hint={t("settings.integrationsHint")} />
 
       <div ref={bodyRef} className="flex gap-4">
         {/* `layoutRoot` on a `motion.nav`, for the reason spelled out in `ApiSettingsBody`: the

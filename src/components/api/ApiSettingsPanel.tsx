@@ -14,7 +14,7 @@ import { Checkbox } from "../common/Checkbox";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import { Field, GhostButton, Row } from "./ApiModal";
-import { Panel } from "./settingsChrome";
+import { Panel, SettingsHeader } from "./settingsChrome";
 import { CollaborationPanel } from "./CollaborationPanel";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
 import { useUiStore } from "../../state/uiStore";
@@ -374,19 +374,30 @@ export function ApiSettingsBody() {
     if (initialTab) setTab(initialTab);
   }, [initialTab]);
 
-  // The scrolling happens in the settings pane around this body, and the six panes are nowhere
-  // near the same height — switching from a tall one that had been scrolled down handed the next
-  // one a viewport starting somewhere in its middle, and the browser then clamped that offset
-  // against the new, shorter content while the rail's pill was still sliding. Back to the top on
+  // This pane scrolls itself rather than riding the settings column's scrollbar, which is what
+  // keeps the heading and the rail still: with the whole section scrolling, reading to the bottom
+  // of Collaboration took the title and every sub-tab off the top of the window, so the way back to
+  // another tab was to scroll up first. Only the pane beside the rail moves now. Same arrangement,
+  // and the same reason, as the AI assistant's and the backup section's.
+  //
+  // The panes are also nowhere near the same height, so switching from a tall one that had been
+  // scrolled down handed the next a viewport starting somewhere in its middle. Back to the top on
   // every switch, in a layout effect so it lands before the frame is painted rather than as a
   // visible correction after it.
-  const bodyRef = useRef<HTMLDivElement>(null);
+  const paneRef = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
-    bodyRef.current?.closest("[data-settings-scroll]")?.scrollTo({ top: 0 });
+    paneRef.current?.scrollTo({ top: 0 });
   }, [tab]);
 
   return (
-    <div ref={bodyRef} className="flex gap-4">
+    // A heading of its own, which this pane went without for as long as it has existed: it was the
+    // only settings section that opened straight onto a rail, so arriving here from any other one
+    // dropped the first row a line and a half up the pane.
+    <section className="flex h-full min-h-0 flex-col">
+      <div className="shrink-0">
+        <SettingsHeader title={t("api.settings.title")} hint={t("api.settings.hint")} />
+      </div>
+      <div className="flex min-h-0 flex-1 gap-4">
       {/* A rail rather than a strip across the top.
           Six sub-tabs with Spanish labels in a 576px column already wrapped, and the wrap put
           "Colaboración" — the one most used right now — alone on a second line; a "beta" badge was
@@ -397,15 +408,12 @@ export function ApiSettingsBody() {
       {/* `layoutRoot`, and it has to be a `motion.nav` to carry it.
           The pill inside is a shared-layout animation: framer measures where it was, measures where
           it lands, and tweens between the two. Those measurements are taken against the page unless
-          something says otherwise — and this rail is `sticky`, which means its own offset depends on
-          a scroll position that the arriving pane has just changed underneath it. Picking
-          "Colaboración" is the case that shows it: it is the one pane tall enough to turn the
-          settings column into a scrolling one, so the frame the pill was measured in stopped
-          matching the frame it was measured into, and the slide arrived as a jump. `layoutRoot`
-          makes this element the frame of reference, so the pill travels relative to the rail — which
-          never moves — and behaves exactly like the outer settings nav, whose own pill has always
-          been smooth for the simple reason that it isn't sticky. */}
-      <motion.nav layoutRoot className="sticky top-0 w-[168px] shrink-0 self-start">
+          something says otherwise — and the rail used to be `sticky`, which made its own offset
+          depend on a scroll position the arriving pane had just changed underneath it, so the slide
+          arrived as a jump. The rail no longer moves at all now that the pane beside it does the
+          scrolling, but `layoutRoot` stays: it makes this element the frame of reference, which is
+          what the tween should have been measured against all along. */}
+      <motion.nav layoutRoot className="w-[168px] shrink-0 self-start">
         {TABS.map(({ id, labelKey, icon: Icon }) => (
           <button
             key={id}
@@ -430,13 +438,19 @@ export function ApiSettingsBody() {
         ))}
       </motion.nav>
 
-      <div className="min-w-0 flex-1">
-        {tab === "network" && <NetworkPanel />}
-        {tab === "proxy" && <ProxyPanel />}
-        {tab === "certificates" && <CertificatesPanel />}
-        {tab === "general" && <GeneralPanel />}
-        {tab === "collab" && <CollaborationPanel />}
+        {/* `overflow-y-scroll`, not `auto`: the app styles its scrollbars, so one is a real 10px of
+            layout rather than an overlay. Letting it come and go as a pane grows past the height
+            narrows the content and shifts every row sideways, then shifts them back. `pb-6` because
+            the pane ends where the dialog does, and a last row flush against that edge reads as cut
+            off rather than as the end of the list. */}
+        <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
+          {tab === "network" && <NetworkPanel />}
+          {tab === "proxy" && <ProxyPanel />}
+          {tab === "certificates" && <CertificatesPanel />}
+          {tab === "general" && <GeneralPanel />}
+          {tab === "collab" && <CollaborationPanel />}
+        </div>
       </div>
-    </div>
+    </section>
   );
 }

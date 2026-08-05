@@ -1,16 +1,27 @@
 //! What travels, and how it is copied out of and back into SQLite.
 //!
-//! **Configuration and credentials only — no history, no traces.** The distinction the user drew is
-//! the one implemented here: a restored machine must be able to *do* everything the old one could,
-//! without carrying a record of what was done on it. So collections, connections, workspaces,
-//! prompts, agents, settings and every stored credential travel; request history, SQL history, AI
-//! conversations, review runs, job history and the cookie jar do not. That is also why a backup of
-//! a heavily used install stays small enough to encrypt and upload in well under a second.
+//! **Everything in the database.** The user's line is that a restored machine should be the old one
+//! — not merely able to do what it could, but holding what it held: the same request history, the
+//! same AI conversations, the same past reviews and the same agent work. So [`TABLES`] is the whole
+//! schema, and [`covers_every_table`] is the test that keeps it that way. The only things left
+//! behind are the handful of *fields* that name this particular computer, listed in
+//! [`MACHINE_LOCAL_BACKUP_FIELDS`] — a destination folder on a disk the other machine doesn't have
+//! is not configuration, it is a broken path waiting to be discovered.
+//!
+//! Two consequences worth stating, because they are the price of "everything":
+//!
+//! - **The cookie jar travels.** `api_cookies` holds live sessions, so restoring moves a signed-in
+//!   session onto the other computer. Between two machines belonging to the same person that is the
+//!   point; it is also why the file is encrypted whole rather than field by field.
+//! - **Live state arrives mid-flight.** A chain that was running when the backup was written
+//!   restores saying so. [`super::restore`] runs `recover_after_restart` afterwards for exactly
+//!   this: the same reconciliation the app does after a crash, which is what a restored session
+//!   effectively is.
 //!
 //! Rows are copied generically — `SELECT *`, columns read off the statement — rather than through
-//! one struct per table. Fifteen hand-written mappings would be fifteen places for a column added
-//! next month to be silently dropped on the round trip, and a backup that quietly loses a field is
-//! the failure mode with no symptom until the restore.
+//! one struct per table. Thirty-six hand-written mappings would be thirty-six places for a column
+//! added next month to be silently dropped on the round trip, and a backup that quietly loses a
+//! field is the failure mode with no symptom until the restore.
 
 use std::collections::BTreeMap;
 
@@ -18,60 +29,56 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, ToSql};
 use serde::{Deserialize, Serialize};
 
-/// The tables that make up "everything the user set up", in dependency order: a parent is always
-/// written before the rows that point at it, and deleted after them.
+/// Every table in the schema, in dependency order: a parent is always written before the rows that
+/// point at it, and deleted after them.
 ///
 /// Foreign keys are switched off for the duration of a restore (see [`apply`]), so this order is
 /// not what keeps the writes legal — it is what keeps `PRAGMA foreign_key_check` clean at the end
 /// and what makes a partial failure leave the least wreckage.
+///
+/// A table missing from this list is a table that vanishes on a restore, silently, and is not
+/// noticed until someone needs it. That is not a hypothetical: `workspace_mcps`, `doc_pages` and
+/// `work_item_reviews` were each absent here for several releases while the settings panel promised
+/// MCP servers travelled. [`covers_every_table`] is the test that now makes that state unreachable
+/// — a migration adding a table fails it until the table is named here.
 pub const TABLES: &[&str] = &[
+    // Roots. Everything below points at one of these, directly or through another.
     "workspaces",
+    "app_settings",
     "projects",
+    // Workspace-scoped configuration.
     "review_contexts",
     "workspace_prompts",
     "workspace_skills",
     "workspace_agents",
+    "workspace_mcps",
     "workspace_chain_templates",
     "workspace_chain_template_steps",
     "agent_projects",
-    // Authored content, not a log: a backlog derived from a wiki is something the user wrote and
-    // edited, and it is workspace-scoped, so it restores onto another machine meaning the same
-    // thing. (Both tables come after `projects` — `story_batches.project_id` points at it.)
+    // Authored content: things the user wrote and edited, as opposed to things the app recorded.
     "story_batches",
     "story_drafts",
-    "app_settings",
+    "doc_pages",
+    "work_item_reviews",
+    // The API client, its sync bookkeeping and its jar. The three sync tables travel so the
+    // restored machine resumes the shared collection exactly where this one left it, rather than
+    // re-deriving a base by pulling — see the note in [`apply`] about merging.
     "api_collections",
     "api_folders",
     "api_requests",
     "api_environments",
     "api_shared_collections",
+    "api_sync_base",
+    "api_sync_conflicts",
+    "api_tombstones",
+    "api_cookies",
+    "api_history",
+    // The database workspace.
     "db_connections",
     "db_consoles",
-];
-
-/// Deliberately absent from [`TABLES`], and each for a reason worth stating once:
-///
-/// - `api_history`, `db_query_history`, `activity_log`, `job_history`, `workspace_activity`,
-///   `conversation_titles`, `review_runs`, `agent_tasks` — a log of what was done, not part of
-///   being able to do it. Carrying them would move a trace of the other machine's work onto this
-///   one. `agent_tasks` in particular names a project row and replays out of `activity_log`, so
-///   restored elsewhere it would be a list of work pointing at repositories and transcripts that
-///   were never there — and `agent_chains`/`agent_chain_steps` go with it for the same reason,
-///   plus a worse one: a chain carries a live scheduler state, and restoring one mid-flight onto
-///   another machine would hand it a plan that believes a step is running somewhere. `agent_projects`
-///   travels while all three of these stay behind, and the asymmetry is the point: the folders are a
-///   filing scheme the user authored, and they restore empty, whereas carrying the work inside them
-///   would put a list of tasks on a machine that has neither the repositories nor the transcripts
-///   they name.
-/// - `api_cookies` — live sessions. Restoring them would move a signed-in session between machines.
-/// - `api_tombstones`, `api_sync_base`, `api_sync_conflicts` — the bookkeeping of one machine's
-///   sync with a shared collection. It describes *this* install's relationship with the server; on
-///   another machine it would be a false memory of agreements that never happened, and the first
-///   pull would resolve against a base that was never true here.
-#[cfg(test)]
-const EXCLUDED: &[&str] = &[
-    "api_history",
     "db_query_history",
+    // History, activity and agent work. Last because every one of them hangs off a project or a
+    // workspace, and `agent_chain_steps` hangs off `agent_chains` in turn.
     "activity_log",
     "job_history",
     "workspace_activity",
@@ -80,20 +87,167 @@ const EXCLUDED: &[&str] = &[
     "agent_tasks",
     "agent_chains",
     "agent_chain_steps",
-    "api_cookies",
-    "api_tombstones",
-    "api_sync_base",
-    "api_sync_conflicts",
 ];
 
-/// `app_settings` keys that describe *this machine* rather than the user's setup, and so must not
-/// ride along: the backup's own destination folder, its schedule and its last-run state.
+// ---------------------------------------------------------------------------
+// What the user chose to include
+// ---------------------------------------------------------------------------
+
+/// One switch in the settings panel: a name the user picks by, and the tables behind it.
 ///
-/// A restored machine that inherited them would point its automatic backup at a path that exists on
-/// the other computer — writing nowhere, and reporting a stale "last backup" that was never its own.
-/// The portable half of the Drive connection lives under a separate key (`backup_drive`) precisely
-/// so it *can* travel while this one doesn't.
-const MACHINE_LOCAL_SETTINGS: &[&str] = &["backup_settings"];
+/// Grouped by what the rows *are* to the person reading the panel, not by which subsystem wrote
+/// them — "conversations" is one choice even though it spans four tables, because nobody wants
+/// `workspace_activity` without `activity_log`.
+pub struct Group {
+    /// Matches the field on [`Selection`] and the `backup.include.*` translation keys.
+    pub key: &'static str,
+    pub tables: &'static [&'static str],
+}
+
+/// The setup itself: workspaces, the repositories' entries, and everything the user configured
+/// against them. Not a group — it has no switch, because every other group's rows hang off it and a
+/// backup without it restores into nothing.
+pub const CORE_TABLES: &[&str] = &[
+    "workspaces",
+    "app_settings",
+    "projects",
+    "review_contexts",
+    "workspace_prompts",
+    "workspace_skills",
+    "workspace_agents",
+    "workspace_mcps",
+    "workspace_chain_templates",
+    "workspace_chain_template_steps",
+    "agent_projects",
+];
+
+/// The optional groups, in the order the panel lists them.
+pub const GROUPS: &[Group] = &[
+    Group {
+        key: "apiClient",
+        // The three sync tables ride with the collections rather than getting a switch of their
+        // own: they are meaningless without `api_shared_collections`, and a collection restored
+        // without its sync base would re-derive one on the next pull — which is the slow, lossy
+        // version of what carrying them does exactly.
+        tables: &[
+            "api_collections",
+            "api_folders",
+            "api_requests",
+            "api_environments",
+            "api_shared_collections",
+            "api_sync_base",
+            "api_sync_conflicts",
+            "api_tombstones",
+        ],
+    },
+    Group { key: "databases", tables: &["db_connections", "db_consoles"] },
+    Group {
+        key: "authored",
+        tables: &["story_batches", "story_drafts", "doc_pages", "work_item_reviews"],
+    },
+    Group { key: "requestHistory", tables: &["api_history", "db_query_history"] },
+    Group {
+        key: "conversations",
+        tables: &["activity_log", "conversation_titles", "workspace_activity", "job_history"],
+    },
+    Group { key: "reviews", tables: &["review_runs"] },
+    Group { key: "agentWork", tables: &["agent_tasks", "agent_chains", "agent_chain_steps"] },
+    Group { key: "cookies", tables: &["api_cookies"] },
+];
+
+/// Which groups go into the file. Every field defaults to `true`, which is what makes an install
+/// upgrading from a build without this setting keep backing up everything rather than quietly
+/// starting to leave things out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Selection {
+    /// Not a table group: every token, key and password in the OS credential store. Its own switch
+    /// because it is the one part of the file whose loss is a lockout and whose leak is a breach —
+    /// a user keeping backups on a shared drive may reasonably want the setup without the keys.
+    pub credentials: bool,
+    pub api_client: bool,
+    pub databases: bool,
+    pub authored: bool,
+    pub request_history: bool,
+    pub conversations: bool,
+    pub reviews: bool,
+    pub agent_work: bool,
+    pub cookies: bool,
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self {
+            credentials: true,
+            api_client: true,
+            databases: true,
+            authored: true,
+            request_history: true,
+            conversations: true,
+            reviews: true,
+            agent_work: true,
+            cookies: true,
+        }
+    }
+}
+
+impl Selection {
+    fn group_enabled(&self, key: &str) -> bool {
+        match key {
+            "apiClient" => self.api_client,
+            "databases" => self.databases,
+            "authored" => self.authored,
+            "requestHistory" => self.request_history,
+            "conversations" => self.conversations,
+            "reviews" => self.reviews,
+            "agentWork" => self.agent_work,
+            "cookies" => self.cookies,
+            // A group added to `GROUPS` without a field here would silently never be written.
+            // Defaulting to "included" makes that failure a too-large backup rather than a
+            // too-small one, which is the direction with a symptom.
+            _ => true,
+        }
+    }
+
+    /// The tables this selection writes, in [`TABLES`] order.
+    pub fn tables(&self) -> Vec<&'static str> {
+        let chosen: Vec<&'static str> = CORE_TABLES
+            .iter()
+            .copied()
+            .chain(
+                GROUPS
+                    .iter()
+                    .filter(|group| self.group_enabled(group.key))
+                    .flat_map(|group| group.tables.iter().copied()),
+            )
+            .collect();
+        TABLES.iter().copied().filter(|table| chosen.contains(table)).collect()
+    }
+}
+
+/// The one `app_settings` key that cannot be copied across verbatim, and the fields of it that are
+/// the reason why.
+///
+/// `backup_settings` is a single JSON blob mixing two unrelated things: what the user chose (run it,
+/// how often, keep how many, also on exit) and where *this computer* puts the file. The first half
+/// is a preference and travels. The second half names a directory on the other machine's disk, a
+/// Drive file this install alone has permission to write, and a last-run outcome that was never
+/// this machine's — inherited, they point the automatic backup at nowhere and report a success that
+/// never happened here.
+///
+/// So the key travels with these fields blanked, and [`merge_backup_settings`] puts this machine's
+/// own values back on restore. The Drive and OneDrive client registrations live under separate keys
+/// (`backup_drive`, `backup_onedrive`) and travel whole, because an app registration is a one-time
+/// setup in a portal rather than a fact about a computer.
+const BACKUP_SETTINGS_KEY: &str = "backup_settings";
+const MACHINE_LOCAL_BACKUP_FIELDS: &[&str] = &[
+    "folder",
+    "driveFileId",
+    "lastBackupAt",
+    "lastBackupPath",
+    "lastError",
+    "lastHash",
+];
 
 // ---------------------------------------------------------------------------
 // Shape
@@ -175,43 +329,74 @@ fn json_to_value(value: &serde_json::Value) -> Value {
     }
 }
 
+/// Blanks the fields of a `backup_settings` blob that describe the machine it was written on,
+/// leaving the user's schedule preferences intact.
+///
+/// Blanked rather than removed so the shape stays the one `BackupSettings` deserialises; an absent
+/// field and an empty one land the same way through `#[serde(default)]`, and an empty string is
+/// what the rest of the module already treats as "not chosen yet".
+fn strip_machine_fields(raw: &str) -> String {
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(raw)
+    else {
+        // Unparseable settings are not worth failing a backup over, and carrying them forward
+        // verbatim would carry the folder too — so the safe answer is to carry nothing.
+        return String::new();
+    };
+    for field in MACHINE_LOCAL_BACKUP_FIELDS {
+        if map.contains_key(*field) {
+            map.insert((*field).to_string(), serde_json::Value::from(""));
+        }
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
 /// Reads one table whole. `SELECT *` rather than a column list so a column added by a future
 /// migration travels without this file having to hear about it.
 fn dump_table(conn: &Connection, table: &str) -> rusqlite::Result<TableDump> {
     let mut statement = conn.prepare(&format!("SELECT * FROM {table}"))?;
     let columns: Vec<String> = statement.column_names().iter().map(|c| (*c).to_string()).collect();
     let width = columns.len();
-    let skip_key = table == "app_settings";
+    // `app_settings` is one table holding many unrelated things, so the one key needing special
+    // treatment has to be found per row rather than per table. Both columns are looked up by name
+    // rather than by position: `SELECT *` returns declaration order, and a migration that ever
+    // rebuilt this table would silently move them.
+    let settings = (table == "app_settings")
+        .then(|| {
+            Some((
+                columns.iter().position(|c| c == "key")?,
+                columns.iter().position(|c| c == "value")?,
+            ))
+        })
+        .flatten();
 
     let mut rows = Vec::new();
     let mut cursor = statement.query([])?;
     while let Some(row) = cursor.next()? {
-        // `app_settings` is one table holding many unrelated things, so the exclusion has to happen
-        // per row rather than per table.
-        if skip_key {
-            let key: String = row.get(0)?;
-            if MACHINE_LOCAL_SETTINGS.contains(&key.as_str()) {
-                continue;
-            }
-        }
         let mut values = Vec::with_capacity(width);
         for index in 0..width {
             values.push(value_to_json(row.get_ref(index)?));
+        }
+        if let Some((key_column, value_column)) = settings {
+            if values[key_column].as_str() == Some(BACKUP_SETTINGS_KEY) {
+                let stripped = values[value_column].as_str().map(strip_machine_fields).unwrap_or_default();
+                values[value_column] = serde_json::Value::from(stripped);
+            }
         }
         rows.push(values);
     }
     Ok(TableDump { name: table.to_string(), columns, rows })
 }
 
-/// Every configuration table, in one consistent read.
+/// The chosen tables, in one consistent read.
 ///
-/// The transaction matters: without it the read spans fifteen statements, and a sync applying a
+/// The transaction matters: without it the read spans dozens of statements, and a sync applying a
 /// pull between two of them would seal a backup holding a collection but not the requests that
 /// arrived with it — a state that never existed on either machine.
-pub fn export(conn: &Connection) -> rusqlite::Result<Vec<TableDump>> {
+pub fn export(conn: &Connection, selection: &Selection) -> rusqlite::Result<Vec<TableDump>> {
     let tx = conn.unchecked_transaction()?;
-    let mut tables = Vec::with_capacity(TABLES.len());
-    for table in TABLES {
+    let chosen = selection.tables();
+    let mut tables = Vec::with_capacity(chosen.len());
+    for table in chosen {
         tables.push(dump_table(&tx, table)?);
     }
     Ok(tables)
@@ -289,34 +474,79 @@ fn write_table(conn: &Connection, dump: &TableDump, summary: &mut RestoreSummary
     Ok(())
 }
 
-/// Empties the configuration tables, children first, leaving history and traces untouched.
+/// Empties the tables the backup actually carries, children first.
 ///
-/// `app_settings` is emptied too: a setting the backup doesn't carry is one the user turned off on
-/// the other machine, and a "clean restore" that left it on here would be neither clean nor a
-/// restore. The machine-local keys are the exception, and [`apply`] puts them back.
-fn wipe(conn: &Connection) -> rusqlite::Result<()> {
+/// **Only those.** `Replace` means "leave this machine like the backup", and for a table the backup
+/// has an opinion about that means emptying it first. For a table the user chose not to include it
+/// means nothing at all — clearing it would delete data on the strength of a file that never
+/// claimed to replace it, which is destruction with no possible restore behind it. A partial
+/// backup must never be able to erase more than it can put back.
+///
+/// `app_settings` is emptied when carried: a setting the backup doesn't have is one the user turned
+/// off on the other machine, and a "clean restore" that left it on here would be neither clean nor
+/// a restore. `backup_settings` is the exception, and [`apply`] merges this machine's half back.
+fn wipe(conn: &Connection, carried: &[TableDump]) -> rusqlite::Result<()> {
     for table in TABLES.iter().rev() {
-        conn.execute(&format!("DELETE FROM {table}"), [])?;
+        if carried.iter().any(|dump| dump.name == *table) {
+            conn.execute(&format!("DELETE FROM {table}"), [])?;
+        }
     }
     Ok(())
 }
 
-/// The machine-local settings, read before a wipe so they can be put back after it.
+/// This machine's `backup_settings`, read before anything is written.
+fn local_backup_settings(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT value FROM app_settings WHERE key = ?1",
+        [BACKUP_SETTINGS_KEY],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Puts this computer's destination back on top of the schedule that came from the backup.
 ///
-/// Without this a clean restore points this computer's backup at the *other* computer's folder —
-/// which is both the wrong place and, on a different platform, not a place at all. The backup
-/// deliberately doesn't carry these keys, so nothing in the file would rewrite them.
-fn keep_local(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
-    let mut kept = Vec::new();
-    for key in MACHINE_LOCAL_SETTINGS {
-        let value: Option<String> = conn
-            .query_row("SELECT value FROM app_settings WHERE key = ?1", [key], |row| row.get(0))
-            .ok();
-        if let Some(value) = value {
-            kept.push(((*key).to_string(), value));
+/// Runs in both modes and after the writes, so the result is the same either way: the incoming blob
+/// supplies the preferences, `local` supplies every field in [`MACHINE_LOCAL_BACKUP_FIELDS`] that
+/// this machine already had an answer for. Without it a clean restore points this computer's backup
+/// at the *other* computer's folder — the wrong place, and on a different platform not a place at
+/// all — and hands it a `driveFileId` it has no permission to write.
+fn merge_backup_settings(conn: &Connection, local: Option<&str>) -> rusqlite::Result<()> {
+    let restored = local_backup_settings(conn);
+    let field_of = |raw: Option<&str>, field: &str| -> Option<serde_json::Value> {
+        serde_json::from_str::<serde_json::Value>(raw?)
+            .ok()?
+            .get(field)
+            .cloned()
+            .filter(|value| !matches!(value.as_str(), Some("")))
+    };
+
+    // The backup's blob when there is one, this machine's when there isn't. Neither side having
+    // anything to say leaves the key absent rather than writing an empty object — that is what a
+    // fresh install looks like, and what `load_settings` already defaults from.
+    let Some(base) = restored.as_deref().or(local) else {
+        return Ok(());
+    };
+    let Ok(serde_json::Value::Object(mut map)) = serde_json::from_str::<serde_json::Value>(base)
+    else {
+        return Ok(());
+    };
+    for field in MACHINE_LOCAL_BACKUP_FIELDS {
+        match field_of(local, field) {
+            Some(value) => {
+                map.insert((*field).to_string(), value);
+            }
+            // Nothing local to keep — make sure the other machine's value can't survive either.
+            None => {
+                map.insert((*field).to_string(), serde_json::Value::from(""));
+            }
         }
     }
-    Ok(kept)
+    conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+        rusqlite::params![BACKUP_SETTINGS_KEY, serde_json::Value::Object(map).to_string()],
+    )?;
+    Ok(())
 }
 
 /// Applies a snapshot's tables.
@@ -338,13 +568,12 @@ pub fn apply(
     conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
     let result = (|| -> rusqlite::Result<()> {
         let tx = conn.transaction()?;
-        let local = if mode == RestoreMode::Replace {
-            let local = keep_local(&tx)?;
-            wipe(&tx)?;
-            local
-        } else {
-            Vec::new()
-        };
+        // Read in both modes: `Merge` doesn't wipe, but the incoming row would still overwrite this
+        // machine's destination on its way past.
+        let local = local_backup_settings(&tx);
+        if mode == RestoreMode::Replace {
+            wipe(&tx, tables)?;
+        }
         // In `TABLES` order, not the file's: a backup written by another build may list them
         // differently, and parents still want to land first.
         for table in TABLES {
@@ -352,14 +581,9 @@ pub fn apply(
                 write_table(&tx, dump, &mut summary)?;
             }
         }
-        // After the writes, so this machine's own settings win even against a file that somehow
-        // carries them.
-        for (key, value) in &local {
-            tx.execute(
-                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
-                rusqlite::params![key, value],
-            )?;
-        }
+        // After the writes, so this machine's own destination wins even against a file that somehow
+        // carries one.
+        merge_backup_settings(&tx, local.as_deref())?;
         tx.commit()
     })();
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -405,8 +629,9 @@ mod tests {
             INSERT INTO db_connections (id, workspace_id, name, kind, spec, created_at, updated_at)
                 VALUES ('d1', 'w1', 'prod', 'postgres', '{}', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
             INSERT INTO app_settings (key, value) VALUES ('ai_provider', 'claude');
-            INSERT INTO app_settings (key, value) VALUES ('backup_settings', '{"folder":"C:/only/here"}');
-            -- History and traces: present here, and expected to stay behind.
+            INSERT INTO app_settings (key, value)
+                VALUES ('backup_settings', '{"keepCopies":9,"folder":"C:/only/here","driveFileId":"file-on-the-other-mac"}');
+            -- History and traces: present here, and expected to travel with everything else.
             INSERT INTO api_history (id, workspace_id, url, created_at)
                 VALUES ('h1', 'w1', 'https://a', '2026-01-01T00:00:00+00:00');
             INSERT INTO api_cookies (id, workspace_id, domain, name, value, updated_at)
@@ -431,7 +656,7 @@ mod tests {
     #[test]
     fn a_restore_reproduces_the_configuration() {
         let source = seeded();
-        let tables = export(&source).unwrap();
+        let tables = export(&source, &Selection::default()).unwrap();
 
         let mut target = empty();
         let summary = apply(&mut target, &tables, RestoreMode::Replace).unwrap();
@@ -444,31 +669,130 @@ mod tests {
         assert_eq!(summary.dangling_rows, 0, "a whole restore must leave no orphans");
     }
 
-    /// The user's own line: able to do everything, carrying no record of what was done.
+    /// The user's line: the other machine picks up where this one left off, history included.
     #[test]
-    fn history_and_live_sessions_stay_behind() {
+    fn history_and_live_sessions_travel() {
         let source = seeded();
-        let tables = export(&source).unwrap();
-        assert!(
-            tables.iter().all(|t| !EXCLUDED.contains(&t.name.as_str())),
-            "no history table may appear in a backup"
-        );
+        let tables = export(&source, &Selection::default()).unwrap();
 
         let mut target = empty();
         apply(&mut target, &tables, RestoreMode::Replace).unwrap();
-        assert_eq!(scalar(&target, "SELECT COUNT(*) FROM api_history"), 0);
-        assert_eq!(scalar(&target, "SELECT COUNT(*) FROM api_cookies"), 0);
+        assert_eq!(scalar(&target, "SELECT COUNT(*) FROM api_history WHERE id = 'h1'"), 1);
+        assert_eq!(scalar(&target, "SELECT COUNT(*) FROM api_cookies WHERE id = 'k1'"), 1);
     }
 
-    /// The destination folder of the machine the backup came from must not become this machine's.
+    /// The rule a partial backup lives or dies by: `Replace` may empty a table the file can refill,
+    /// and must not touch one it cannot. Otherwise turning a switch off would turn the restore into
+    /// a delete — destruction with nothing behind it to put back.
     #[test]
-    fn the_backups_own_settings_do_not_travel() {
+    fn a_partial_replace_does_not_erase_what_it_cannot_restore() {
         let source = seeded();
-        let tables = export(&source).unwrap();
+        let selection = Selection { conversations: false, ..Default::default() };
+        let tables = export(&source, &selection).unwrap();
+
+        let mut target = seeded();
+        target
+            .execute(
+                "INSERT INTO activity_log (id, project_id, session_id, question, answer, created_at)
+                 VALUES ('mine', 'p1', 's1', 'q', 'a', '2026-06-01T00:00:00+00:00')",
+                [],
+            )
+            .unwrap();
+        apply(&mut target, &tables, RestoreMode::Replace).unwrap();
+
+        assert_eq!(
+            scalar(&target, "SELECT COUNT(*) FROM activity_log WHERE id = 'mine'"),
+            1,
+            "a group left out of the backup must survive a Replace untouched"
+        );
+        // And a group that *was* included still replaces cleanly.
+        assert_eq!(scalar(&target, "SELECT COUNT(*) FROM api_history WHERE id = 'h1'"), 1);
+    }
+
+    #[test]
+    fn a_switch_turned_off_keeps_its_tables_out_of_the_file() {
+        let source = seeded();
+        let tables = export(&source, &Selection { cookies: false, ..Default::default() }).unwrap();
+        assert!(
+            !tables.iter().any(|t| t.name == "api_cookies"),
+            "the jar must not be in a file the user excluded it from"
+        );
+        assert!(tables.iter().any(|t| t.name == "workspaces"), "the setup is never optional");
+    }
+
+    /// Every table belongs to exactly one switch, or to the core. A table in neither is one no
+    /// setting can control and — worse — one `Selection::tables` never returns.
+    #[test]
+    fn every_table_belongs_to_exactly_one_group() {
+        for table in TABLES {
+            let in_core = CORE_TABLES.contains(table);
+            let groups: Vec<&str> = GROUPS
+                .iter()
+                .filter(|g| g.tables.contains(table))
+                .map(|g| g.key)
+                .collect();
+            assert_eq!(
+                usize::from(in_core) + groups.len(),
+                1,
+                "{table} is in core={in_core} and groups {groups:?}"
+            );
+        }
+        assert_eq!(Selection::default().tables().len(), TABLES.len(), "all on means everything");
+    }
+
+    /// The upgrade path: a `backup_settings` blob written before this setting existed has no
+    /// `include` field, and must keep backing up everything rather than quietly narrowing.
+    #[test]
+    fn settings_without_a_selection_still_include_everything() {
+        let restored: Selection = serde_json::from_str("{}").unwrap();
+        assert_eq!(restored, Selection::default());
+        assert!(restored.credentials);
+    }
+
+    /// The guard that makes "everything" checkable rather than asserted: a migration adding a table
+    /// fails here until [`TABLES`] names it. `workspace_mcps`, `doc_pages` and `work_item_reviews`
+    /// were each silently unbacked for releases for want of this test.
+    #[test]
+    fn covers_every_table() {
+        let conn = empty();
+        let mut statement = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap();
+        let present: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap();
+
+        let missing: Vec<&String> = present.iter().filter(|name| !TABLES.contains(&name.as_str())).collect();
+        assert!(missing.is_empty(), "these tables would vanish on a restore: {missing:?}");
+
+        let stale: Vec<&&str> = TABLES.iter().filter(|name| !present.iter().any(|p| p == *name)).collect();
+        assert!(stale.is_empty(), "these are named but no longer in the schema: {stale:?}");
+    }
+
+    /// The schedule is a preference and travels; the folder it writes to is a fact about a computer
+    /// and does not.
+    #[test]
+    fn the_schedule_travels_but_the_destination_does_not() {
+        let source = seeded();
+        let tables = export(&source, &Selection::default()).unwrap();
         let settings = tables.iter().find(|t| t.name == "app_settings").unwrap();
         let keys: Vec<&str> = settings.rows.iter().filter_map(|r| r[0].as_str()).collect();
         assert!(keys.contains(&"ai_provider"));
-        assert!(!keys.contains(&"backup_settings"));
+        assert!(keys.contains(&"backup_settings"), "the schedule is part of the setup");
+
+        let row = settings
+            .rows
+            .iter()
+            .find(|r| r[0].as_str() == Some("backup_settings"))
+            .unwrap();
+        let blob: serde_json::Value = serde_json::from_str(row[1].as_str().unwrap()).unwrap();
+        assert_eq!(blob["keepCopies"], 9, "a preference travels");
+        assert_eq!(blob["folder"], "", "a path on the other machine's disk does not");
     }
 
     /// The failure `PRAGMA foreign_keys = OFF` exists to prevent: rewriting a workspace row must
@@ -476,7 +800,7 @@ mod tests {
     #[test]
     fn replacing_a_parent_row_does_not_cascade_its_children_away() {
         let source = seeded();
-        let tables = export(&source).unwrap();
+        let tables = export(&source, &Selection::default()).unwrap();
 
         // Same ids already present, so every write is a REPLACE rather than an INSERT.
         let mut target = seeded();
@@ -491,7 +815,7 @@ mod tests {
     #[test]
     fn replace_drops_what_the_backup_does_not_carry_and_merge_keeps_it() {
         let source = seeded();
-        let tables = export(&source).unwrap();
+        let tables = export(&source, &Selection::default()).unwrap();
 
         let mut replaced = seeded();
         replaced
@@ -520,7 +844,7 @@ mod tests {
     #[test]
     fn restoring_twice_changes_nothing_the_second_time() {
         let source = seeded();
-        let tables = export(&source).unwrap();
+        let tables = export(&source, &Selection::default()).unwrap();
 
         let mut target = empty();
         apply(&mut target, &tables, RestoreMode::Replace).unwrap();
@@ -534,7 +858,7 @@ mod tests {
     #[test]
     fn project_paths_that_do_not_exist_here_are_reported() {
         let source = seeded();
-        let tables = export(&source).unwrap();
+        let tables = export(&source, &Selection::default()).unwrap();
         let mut target = empty();
         let summary = apply(&mut target, &tables, RestoreMode::Replace).unwrap();
         assert_eq!(summary.missing_project_paths.len(), 1);
@@ -544,7 +868,7 @@ mod tests {
     #[test]
     fn an_unknown_column_is_dropped_rather_than_refused() {
         let source = seeded();
-        let mut tables = export(&source).unwrap();
+        let mut tables = export(&source, &Selection::default()).unwrap();
         let workspaces = tables.iter_mut().find(|t| t.name == "workspaces").unwrap();
         workspaces.columns.push("since_removed".into());
         for row in &mut workspaces.rows {

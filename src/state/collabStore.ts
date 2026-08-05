@@ -12,6 +12,7 @@ import {
   type SharedCollectionRow,
   type SyncConflict,
 } from "../lib/tauri/apiCommands";
+import { listConnections, projectHost } from "../lib/api/projects";
 import { useApiStore } from "./apiStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { pushErrorToast } from "./toastStore";
@@ -33,8 +34,12 @@ import { pushErrorToast } from "./toastStore";
 export type ShareHealth = "syncing" | "conflict" | "error" | "paused" | "ok";
 
 interface CollabState {
-  /** Whether an anon key is stored — the panel can't tell from `settings` alone. */
-  hasKey: boolean;
+  /**
+   * The project hosts an anon key is stored for. Plural, and asked per connection: the credential
+   * store files a key per project, so "is this set up?" has a different answer for each row of the
+   * connections list, and a single boolean answered it for whichever one happened to be first.
+   */
+  keys: string[];
   shares: SharedCollectionRow[];
   conflicts: SyncConflict[];
   /** Collection ids with a sync round in flight right now. */
@@ -49,7 +54,11 @@ interface CollabState {
   shareFor: (collectionId: string) => SharedCollectionRow | null;
   health: (collectionId: string) => ShareHealth;
 
-  startSharing: (collectionId: string, name: string) => Promise<string | null>;
+  startSharing: (
+    collectionId: string,
+    name: string,
+    projectUrl: string,
+  ) => Promise<string | null>;
   join: (url: string, token: string, workspaceId: string) => Promise<string | null>;
   rotate: (collectionId: string) => Promise<string | null>;
   leave: (collectionId: string) => Promise<void>;
@@ -59,7 +68,7 @@ interface CollabState {
 }
 
 export const useCollabStore = create<CollabState>((set, get) => ({
-  hasKey: false,
+  keys: [],
   shares: [],
   conflicts: [],
   busy: [],
@@ -67,12 +76,21 @@ export const useCollabStore = create<CollabState>((set, get) => ({
 
   refresh: async () => {
     try {
-      const url = useApiStore.getState().settings.supabaseUrl;
-      const [shares, hasKey] = await Promise.all([
-        apiSharedCollections(),
-        url.trim() === "" ? Promise.resolve(false) : supabaseHasKey(url),
-      ]);
-      set({ shares, hasKey, loaded: true });
+      const shares = await apiSharedCollections();
+      // Asked of every connection, not only the ones in settings: a project that is only known
+      // because shares point at it still needs a key to be reachable, and a row that cannot say
+      // whether it has one is a row that cannot explain why its collections stopped syncing.
+      const connections = listConnections(
+        useApiStore.getState().settings.supabaseProjects,
+        shares,
+      );
+      const answered = await Promise.all(
+        connections.map(async (connection) => {
+          const has = await supabaseHasKey(connection.url).catch(() => false);
+          return has ? projectHost(connection.url) : null;
+        }),
+      );
+      set({ shares, keys: answered.filter((host): host is string => host !== null), loaded: true });
       await get().refreshConflicts();
     } catch (e) {
       pushErrorToast(String(e));
@@ -118,12 +136,11 @@ export const useCollabStore = create<CollabState>((set, get) => ({
     return "ok";
   },
 
-  startSharing: async (collectionId, name) => {
-    const { settings } = useApiStore.getState();
+  startSharing: async (collectionId, name, projectUrl) => {
     const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
-    if (workspaceId === null) return null;
+    if (workspaceId === null || projectUrl.trim() === "") return null;
     try {
-      const shared = await supabaseShare(settings.supabaseUrl, collectionId, workspaceId, name);
+      const shared = await supabaseShare(projectUrl, collectionId, workspaceId, name);
       await get().refresh();
       return shared.share_token;
     } catch (e) {

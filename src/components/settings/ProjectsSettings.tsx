@@ -16,6 +16,7 @@ import { useToastStore } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
+import { SettingsHeader } from "../api/settingsChrome";
 
 /** The repository being dragged, and where it would land if the pointer were released now. */
 interface RowDrag {
@@ -172,10 +173,7 @@ export function ProjectsSettings() {
 
   return (
     <section>
-      <div className="mb-1 flex items-center justify-between">
-        <h3 className="text-sm font-semibold">{t("settings.projectsTitle")}</h3>
-      </div>
-      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.projectsHint")}</p>
+      <SettingsHeader title={t("settings.projectsTitle")} hint={t("settings.projectsHint")} />
       <div className="space-y-4">
         {workspaces.map((ws) => {
           const projects = projectsByWorkspace[ws.id] ?? [];

@@ -29,6 +29,16 @@ export const onRepoFsChanged = (handler: (event: { repo_path: string }) => void)
 export const onSkillsProgress = (handler: (event: { line: string }) => void) =>
   listen<{ line: string }>("skills:progress", (e) => handler(e.payload));
 
+/**
+ * A backup starting and finishing, whether it was the button or the scheduler that started it.
+ *
+ * The settings panel follows this for two things at once: a "Back up now" it must not let you press
+ * twice, and a scheduled run that would otherwise write a new timestamp underneath an open panel
+ * still showing the old one. `false` is the cue to re-read the state, not just to re-enable.
+ */
+export const onBackupRunning = (handler: (running: boolean) => void) =>
+  listen<boolean>("backup:running", (e) => handler(e.payload));
+
 export interface AiOutputEvent {
   run_id: string;
   stream: "stdout" | "stderr";

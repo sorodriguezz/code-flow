@@ -7,6 +7,7 @@ import { ActivePill } from "../common/ActivePill";
 import type { ThemePreference } from "../../types/domain";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { SettingsHeader } from "../api/settingsChrome";
 
 const OPTIONS: { id: ThemePreference; labelKey: TranslationKey; icon: typeof Sun }[] = [
   { id: "light", labelKey: "settings.themeLight", icon: Sun },
@@ -179,8 +180,7 @@ export function ThemeSettings() {
 
   return (
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.appearance")}</h3>
-      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.chooseTheme")}</p>
+      <SettingsHeader title={t("settings.appearance")} hint={t("settings.chooseTheme")} />
       <div className="flex gap-2">
         {OPTIONS.map(({ id, labelKey, icon: Icon }) => (
           <button

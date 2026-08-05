@@ -7,6 +7,7 @@ import { ActiveUnderline } from "../common/ActivePill";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { SettingsHeader } from "../api/settingsChrome";
 
 type TabId = "standard" | "context" | "prDesc" | "memories";
 
@@ -33,11 +34,10 @@ export function ReviewSettings() {
 
   return (
     <section>
-      <div className="mb-3">
-        <h3 className="text-sm font-semibold">
-          {workspaceName ? t("settings.reviewTitleForProject", { name: workspaceName }) : t("settings.review")}
-        </h3>
-      </div>
+      <SettingsHeader
+        title={workspaceName ? t("settings.reviewTitleForProject", { name: workspaceName }) : t("settings.review")}
+        hint={t("settings.reviewHint")}
+      />
 
       <div className="mb-4 flex flex-wrap gap-1 border-b border-[var(--cf-border)]">
         {TABS.map(({ id, labelKey, icon: Icon }) => (
@@ -46,7 +46,7 @@ export function ReviewSettings() {
             onClick={() => setTab(id)}
             // No weight change on select, for the same reason as the settings nav: bolding
             // re-measures the label and shoves every tab to its right along by a few pixels.
-            className={`relative -mb-px flex items-center gap-1.5 px-2.5 py-1.5 text-[12.5px] ${
+            className={`relative -mb-px flex items-center gap-1.5 px-2.5 pb-2.5 pt-1.5 text-[12.5px] ${
               tab === id ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
             }`}
           >

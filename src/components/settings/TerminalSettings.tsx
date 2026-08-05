@@ -5,6 +5,7 @@ import type { ShellProfile } from "../../types/domain";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Select } from "../common/Select";
+import { SettingsHeader } from "../api/settingsChrome";
 
 const PROFILES_KEY = "terminal_profiles";
 const DEFAULT_PROFILE_KEY = "terminal_default_profile";
@@ -90,8 +91,7 @@ export function TerminalSettings() {
 
   return (
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.terminalTitle")}</h3>
-      <p className="mb-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.terminalHint")}</p>
+      <SettingsHeader title={t("settings.terminalTitle")} hint={t("settings.terminalHint")} />
 
       <p className="mb-1.5 text-[13px] font-medium">{t("settings.terminalDefault")}</p>
       <Select

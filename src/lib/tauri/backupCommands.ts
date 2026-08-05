@@ -32,6 +32,56 @@ export type BackupTarget = "folder" | "icloud" | "gdrive" | "onedrive";
 export const writesToFolder = (target: BackupTarget) =>
   target !== "gdrive" && target !== "onedrive";
 
+/**
+ * Whether the chosen destination has the one piece it actually needs.
+ *
+ * Each target is asked only about its own: a folder for the two that write to one, a client id for
+ * the two that sign in. Mirrors `destination_ready` in `backup/auto.rs` — the backend is what
+ * decides, and this is so the panel can say so before a run has to prove it.
+ */
+export function destinationReady(
+  settings: Pick<BackupSettings, "target" | "folder">,
+  driveClientId: string,
+  onedriveClientId: string,
+): boolean {
+  if (settings.target === "gdrive") return driveClientId.trim() !== "";
+  if (settings.target === "onedrive") return onedriveClientId.trim() !== "";
+  return settings.folder.trim() !== "";
+}
+
+/**
+ * What goes into the file, group by group. Mirrors `snapshot::Selection` in Rust, and the keys
+ * double as translation keys (`backup.include.<key>` / `.hint`).
+ *
+ * The setup itself — workspaces, repositories, prompts, agents, MCP servers and every setting — has
+ * no switch: everything below hangs off it, and a backup without it restores into nothing.
+ */
+export interface BackupInclude {
+  /** Every token, key and password from the OS credential store. */
+  credentials: boolean;
+  apiClient: boolean;
+  databases: boolean;
+  authored: boolean;
+  requestHistory: boolean;
+  conversations: boolean;
+  reviews: boolean;
+  agentWork: boolean;
+  cookies: boolean;
+}
+
+/** The order the panel lists the switches in — matches `GROUPS` in `snapshot.rs`. */
+export const INCLUDE_KEYS: readonly (keyof BackupInclude)[] = [
+  "credentials",
+  "apiClient",
+  "databases",
+  "authored",
+  "requestHistory",
+  "conversations",
+  "reviews",
+  "agentWork",
+  "cookies",
+];
+
 export interface BackupSettings {
   enabled: boolean;
   target: BackupTarget;
@@ -46,7 +96,13 @@ export interface BackupSettings {
   lastBackupPath: string;
   /** The last automatic failure, so a silently broken backup is visible here rather than nowhere. */
   lastError: string;
+  /** What the file holds. A preference, so it travels with the backup like the schedule does. */
+  include: BackupInclude;
   lastHash: string;
+  /** Whether the step-by-step setup has been finished — what shows the summary instead of the
+   * wizard. Stored rather than inferred: the backend fills in a default folder, so "has somewhere
+   * to write" is true before anything has been asked. */
+  setupDone: boolean;
 }
 
 /** The portable half of the Google Drive setup — it rides along inside the backup. */
@@ -82,6 +138,8 @@ export interface BackupState {
   syncFolders: SyncFolder[];
   defaultFolder: string;
   platform: "windows" | "macos" | "linux";
+  /** Whether a backup is being written right now — by the scheduler as much as by the button. */
+  running: boolean;
 }
 
 /** What went into a file, for the line shown after writing one. */
@@ -117,7 +175,14 @@ export interface RestoreReport {
 }
 
 /** Why a run wrote nothing. `unchanged` is the good case, not a failure. */
-export type BackupSkip = "" | "unchanged" | "disabled" | "no-destination" | "no-password";
+export type BackupSkip =
+  | ""
+  | "unchanged"
+  | "disabled"
+  | "no-destination"
+  | "no-password"
+  /** Another run — the scheduler's, usually — already had the flag. */
+  | "busy";
 
 export interface RunOutcome {
   wrote: boolean;
@@ -141,6 +206,11 @@ export const backupState = () => invoke<BackupState>("backup_state");
 
 export const backupSaveSettings = (settings: BackupSettings) =>
   invoke<void>("backup_save_settings", { settings });
+
+/** Stops the schedule and forgets what the step-by-step setup was told, so it asks again. The
+ * backups already written are left where they are; the Drive and OneDrive connections are not —
+ * they are signed out and forgotten along with the rest of the setup. */
+export const backupResetAuto = () => invoke<void>("backup_reset_auto");
 
 export const backupSaveDrive = (drive: DriveSettings) =>
   invoke<void>("backup_save_drive", { drive });
@@ -179,9 +249,9 @@ export const backupPassphraseMatches = (passphrase: string) =>
 // Writing
 // ---------------------------------------------------------------------------
 
-/** Save-as export. `null` when the dialog was dismissed — nothing is built until a path exists. */
-export const backupExportToFile = (passphrase: string) =>
-  invoke<ExportResult | null>("backup_export_to_file", { passphrase });
+/** Save-as export, sealed with the stored password. `null` when the dialog was dismissed — nothing
+ * is built until a path exists. */
+export const backupExportToFile = () => invoke<ExportResult | null>("backup_export_to_file");
 
 /** "Back up now": writes to the configured destination even when nothing changed. */
 export const backupRunNow = () => invoke<RunOutcome>("backup_run_now");
@@ -197,6 +267,15 @@ export const backupPickAndInspect = () =>
 /** The newest backup already in the configured folder — the fresh-machine path. */
 export const backupInspectConfigured = () =>
   invoke<BackupInfo | null>("backup_inspect_configured");
+
+/**
+ * Every backup at the configured destination, newest first, each read without its password.
+ *
+ * A list rather than "the latest one", because the reason to restore is usually something that went
+ * wrong recently — which makes the newest copy the one most likely to have it in.
+ */
+export const backupListAtDestination = () =>
+  invoke<BackupInfo[]>("backup_list_at_destination");
 
 export const backupInspectDrive = () => invoke<BackupInfo | null>("backup_inspect_drive");
 

@@ -7,6 +7,16 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
  * tighter than this is just traffic against GitHub for no gain. */
 export const CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
+/**
+ * The updater's way of saying the published manifest has no build for this OS and architecture.
+ *
+ * Both spellings come from `tauri-plugin-updater`'s `TargetNotFound` / `TargetsNotFound`: the
+ * release exists, it just has no `darwin-aarch64` entry because only the Windows job has finished
+ * — or ever runs. That is a fact about the release, not a failure of the check, and it used to be
+ * painted as a red error with a Rust message under it on every macOS launch.
+ */
+const NO_BUILD_FOR_PLATFORM = /(?:was not found|were found) in the response `platforms` object/;
+
 export type UpdateStatus =
   | "idle"
   | "checking"
@@ -27,6 +37,11 @@ interface UpdateState {
   progress: number;
   /** Last failure message. Shown only for checks the user asked for — see `checkNow`. */
   error: string;
+  /** Whether the last check found a release that simply has nothing built for this platform. Kept
+   * apart from `error` because it is not one: the answer is "nothing to install", which is what
+   * `status: "uptodate"` already says — this only lets the panel say *why* without claiming the
+   * running build is the latest one. */
+  noBuildForPlatform: boolean;
   /** A download/install that failed, kept apart from `error` so the corner notice can offer a
    * retry for *this* — a check that couldn't reach GitHub is not something to interrupt anyone
    * with, and `status: "error"` alone can't tell the two apart. */
@@ -67,6 +82,7 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   update: null,
   progress: 0,
   error: "",
+  noBuildForPlatform: false,
   installError: "",
   lastCheckedAt: null,
   notesOpen: false,
@@ -98,12 +114,20 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
         status: found ? "available" : "uptodate",
         lastCheckedAt: Date.now(),
         error: "",
+        noBuildForPlatform: false,
         // Whatever went wrong last time is stale news now: this is a fresh answer about a
         // release that's there to be installed again.
         installError: "",
       });
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      // "There is no build for you" is an answer, not a failure — it reached GitHub and read the
+      // manifest. Reported the same way "you are on the latest" is, so a platform the release
+      // pipeline hasn't built for stops looking like something the user has to fix.
+      if (NO_BUILD_FOR_PLATFORM.test(message)) {
+        set({ status: "uptodate", lastCheckedAt: Date.now(), error: "", noBuildForPlatform: true });
+        return;
+      }
       // A failed re-check must not retract an update already found: the release didn't stop
       // existing because this one request didn't get through.
       set({ status: manual ? "error" : get().update ? "available" : "idle", error: message });

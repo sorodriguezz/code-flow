@@ -46,6 +46,43 @@ fn field_of_each(conn: &Connection, key: &str, field: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every Supabase project set up on this machine, from the API client's settings blob.
+///
+/// Read here rather than inferred from `api_shared_collections` alone, which is where the URLs used
+/// to come from exclusively. A connection that has been added but not yet shared on has no rows
+/// there at all, so its anon key was the one credential a restore could not put back — the machine
+/// came back with the project listed and no way to reach it. Now that a machine can be on several
+/// projects at once, that is no longer a corner.
+///
+/// The single `supabaseUrl` of the versions before the list is read as a fallback: the frontend
+/// migrates it on load, and a backup taken before that has happened would otherwise miss it.
+fn supabase_project_urls(conn: &Connection) -> Vec<String> {
+    let Ok(Some(raw)) = queries::get_setting(conn, "api_settings") else {
+        return Vec::new();
+    };
+    let Ok(settings) = serde_json::from_str::<Value>(&raw) else {
+        return Vec::new();
+    };
+
+    let mut urls: Vec<String> = settings
+        .get("supabaseProjects")
+        .and_then(Value::as_array)
+        .map(|projects| {
+            projects
+                .iter()
+                .filter_map(|project| project.get("url").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if let Some(legacy) = settings.get("supabaseUrl").and_then(Value::as_str) {
+        urls.push(legacy.to_string());
+    }
+    urls.retain(|url| !url.trim().is_empty());
+    urls
+}
+
 fn column(conn: &Connection, sql: &str) -> Vec<String> {
     conn.prepare(sql)
         .and_then(|mut statement| {
@@ -120,7 +157,9 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
     // Shared collections: the anon key of every Supabase project involved, plus one share token per
     // collection.
     push_unique(&mut keys, secrets::supabase_legacy_anon_key());
-    for url in column(conn, "SELECT DISTINCT project_url FROM api_shared_collections") {
+    let mut projects = supabase_project_urls(conn);
+    projects.extend(column(conn, "SELECT DISTINCT project_url FROM api_shared_collections"));
+    for url in projects {
         push_unique(&mut keys, secrets::supabase_anon_key(&url));
     }
     for id in column(conn, "SELECT collection_id FROM api_shared_collections") {
@@ -191,6 +230,8 @@ mod tests {
             INSERT INTO api_shared_collections (collection_id, workspace_id, project_url, created_at)
                 VALUES ('c1', 'w1', 'https://abc.supabase.co', '2026-01-01T00:00:00+00:00');
             INSERT INTO app_settings (key, value)
+                VALUES ('api_settings', '{"supabaseProjects":[{"url":"https://xyz.supabase.co","ready":true,"checkedAt":""}]}');
+            INSERT INTO app_settings (key, value)
                 VALUES ('ado_connections', '[{"org":"fabrikam"}]');
             INSERT INTO app_settings (key, value)
                 VALUES ('github_connections', '[{"host":"github.com"}]');
@@ -219,9 +260,25 @@ mod tests {
             "db-password:d1",
             "supabase-collection:c1",
             "supabase-anon:abc.supabase.co",
+            // Set up in settings and shared on by nothing yet. Inferred from the shares alone it
+            // would be invisible here, and the restore would bring the project back with no key.
+            "supabase-anon:xyz.supabase.co",
         ] {
             assert!(keys.contains(&expected.to_string()), "missing {expected} in {keys:?}");
         }
+    }
+
+    /// The single project of the versions before a machine could be on several. The frontend
+    /// migrates it into the list on load; a backup taken before that must still carry its key.
+    #[test]
+    fn the_pre_list_project_url_is_still_read() {
+        let conn = seeded();
+        conn.execute(
+            "UPDATE app_settings SET value = ?1 WHERE key = 'api_settings'",
+            [r#"{"supabaseUrl":"https://legacy.supabase.co"}"#],
+        )
+        .unwrap();
+        assert!(secret_keys(&conn).contains(&"supabase-anon:legacy.supabase.co".to_string()));
     }
 
     #[test]

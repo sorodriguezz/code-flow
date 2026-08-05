@@ -26,6 +26,70 @@ const STATUS_COLOR = {
   info: "var(--cf-text-muted)",
 } as const;
 
+/** How long the arrival burst runs before the dot settles into its resting pulse. Long enough to
+ * catch an eye that was elsewhere, short enough that it is over by the time you look. */
+const BURST_MS = 2400;
+
+/**
+ * The unread dot, and the small performance it puts on when something lands.
+ *
+ * Two states, deliberately different in volume, because they answer different questions:
+ *
+ * - **Arrival** — the bell swings, the dot springs in past its own size, and two rings ripple out
+ *   of it. This is the only moment the user is not looking, so it is the only moment worth being
+ *   loud in.
+ * - **Resting** — once the burst is over the dot keeps a slow breath and a soft halo, roughly one
+ *   cycle every two seconds. Enough to be found on a glance across the window, calm enough to sit
+ *   in a status bar for an hour without becoming something to resent. A ripple that never stopped
+ *   would be wallpaper within a minute, and then the *next* arrival would say nothing at all.
+ *
+ * The rings are capped at 3× a 6px dot on purpose: the footer is 32px tall and this sits in its
+ * top-right corner, so anything larger paints outside the bar and depends on no ancestor ever
+ * clipping.
+ */
+function UnreadDot({ burst }: { burst: number }) {
+  return (
+    <span className="pointer-events-none absolute right-0.5 top-0.5 h-[6px] w-[6px]">
+      {/* Ripples. Keyed by the burst so a second notification restarts them mid-flight rather than
+          waiting politely for the first one to finish. */}
+      {[0, 1].map((index) => (
+        <motion.span
+          key={`${burst}-${index}`}
+          className="absolute inset-0 rounded-full bg-[var(--cf-accent)]"
+          initial={{ scale: 1, opacity: 0.5 }}
+          animate={{ scale: 3, opacity: 0 }}
+          transition={{ duration: 1.05, delay: index * 0.4, ease: "easeOut" }}
+        />
+      ))}
+
+      {/* The halo breathes for as long as there is anything unread. Opacity and scale only — a
+          `box-shadow` in `color-mix()` is not something framer-motion can interpolate. */}
+      <motion.span
+        className="absolute -inset-[3px] rounded-full bg-[var(--cf-accent)] blur-[3px]"
+        animate={{ opacity: [0.2, 0.55, 0.2], scale: [0.85, 1.1, 0.85] }}
+        transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+      />
+
+      {/* Two nested spans rather than one: the outer one breathes forever, the inner one springs in
+          once per arrival. Keyframes that did both would have to re-derive the resting loop from
+          wherever the spring left off. */}
+      <motion.span
+        className="absolute inset-0"
+        animate={{ scale: [1, 1.16, 1] }}
+        transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+      >
+        <motion.span
+          key={burst}
+          className="block h-full w-full rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-surface)]"
+          initial={{ scale: 0.2 }}
+          animate={{ scale: 1 }}
+          transition={{ type: "spring", stiffness: 700, damping: 14 }}
+        />
+      </motion.span>
+    </span>
+  );
+}
+
 /**
  * The notification centre, hung off the end of the status bar.
  *
@@ -71,6 +135,27 @@ export function NotificationBell() {
     unseen > 0
       ? `${t("notifications.title")} — ${t("notifications.unseen", { n: unseen })}`
       : t("notifications.title");
+
+  /**
+   * The arrival burst: a counter bumped whenever the unread count *grows*, used as the animation
+   * key so a second notification restarts the ripples instead of queueing behind the first.
+   *
+   * It rides the count rather than the item list because that is the thing the dot is about — a
+   * notification arriving already-seen (there is no such thing today, but nothing stops one) is not
+   * news, and a removal that lowers the count is not either.
+   */
+  const [burst, setBurst] = useState(0);
+  const [bursting, setBursting] = useState(false);
+  const previousUnseen = useRef(unseen);
+  useEffect(() => {
+    const grew = unseen > previousUnseen.current;
+    previousUnseen.current = unseen;
+    if (!grew || reduceMotion) return;
+    setBurst((n) => n + 1);
+    setBursting(true);
+    const timer = setTimeout(() => setBursting(false), BURST_MS);
+    return () => clearTimeout(timer);
+  }, [unseen, reduceMotion]);
 
   // Closing is what marks them read, so every path out of the panel goes through here — outside
   // click, Escape, and clicking the bell again all mean the same thing.
@@ -136,12 +221,25 @@ export function NotificationBell() {
           open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
         }`}
       >
-        <Bell size={13} />
+        {/* The bell swings from its crown, the way one actually rung would. Keyed by the burst so
+            the swing restarts on each arrival; between bursts it is an ordinary static icon. */}
+        <motion.span
+          key={burst}
+          className="flex items-center justify-center"
+          style={{ transformOrigin: "50% 15%" }}
+          animate={bursting ? { rotate: [0, -16, 12, -8, 5, -2, 0] } : { rotate: 0 }}
+          transition={bursting ? { duration: 0.8, ease: "easeInOut" } : { duration: 0 }}
+        >
+          <Bell size={13} />
+        </motion.span>
         {/* Just a dot: the count is in the tooltip and the panel header. A number this small in a
             24px button is unreadable, and the question the bell answers is yes/no. */}
-        {unseen > 0 && (
-          <span className="absolute right-0.5 top-0.5 h-[6px] w-[6px] rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-surface)]" />
-        )}
+        {unseen > 0 &&
+          (reduceMotion ? (
+            <span className="absolute right-0.5 top-0.5 h-[6px] w-[6px] rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-surface)]" />
+          ) : (
+            <UnreadDot burst={burst} />
+          ))}
       </button>
 
       {/* Rendered conditionally rather than through `AnimatePresence`, unlike the other menus here.

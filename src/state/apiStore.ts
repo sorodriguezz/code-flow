@@ -1019,22 +1019,55 @@ function releaseTab(tabId: string) {
  * The stored settings blob, which is whatever shape the version that wrote it used — including
  * fields this one has since dropped.
  */
-type StoredSettings = Partial<ApiSettings> & { syncCursors?: unknown };
+type StoredSettings = Partial<ApiSettings> & {
+  syncCursors?: unknown;
+  supabaseUrl?: string;
+  supabaseReady?: boolean;
+  supabaseCheckedAt?: string;
+};
 
 /**
- * Brings a settings blob written before collaboration was reworked up to the current shape, or
- * returns `null` when there is nothing to do.
+ * Brings a settings blob written by an earlier version up to the current shape, or returns `null`
+ * when there is nothing to do.
  *
- * `syncCursors` is the marker: a per-workspace cursor map that the collection-shaped sync replaced
- * with a column in `api_shared_collections`. Its presence means the blob predates the rework — and
- * therefore that its `syncAuto: false` is the *old default*, not a choice anyone made. Merged over
- * the new defaults it silently left background sync off, which for a collaboration feature means
- * edits that never reach anyone, with nothing on screen to say why.
+ * Two migrations, applied in order, because an install that has been here since before the
+ * collaboration rework needs both.
+ *
+ * 1. `syncCursors` — a per-workspace cursor map that the collection-shaped sync replaced with a
+ *    column in `api_shared_collections`. Its presence means the blob predates the rework, and
+ *    therefore that its `syncAuto: false` is the *old default*, not a choice anyone made. Merged
+ *    over the new defaults it silently left background sync off, which for a collaboration feature
+ *    means edits that never reach anyone, with nothing on screen to say why.
+ * 2. `supabaseUrl` — the single project, from before this machine could be on several. It becomes
+ *    the first entry of the list, carrying its verdict with it, so the connection every existing
+ *    share points at is still named on screen after the upgrade. An empty one migrates to an empty
+ *    list rather than to a nameless entry: never having set a project up is the normal state for
+ *    someone who only ever accepted invitations.
  */
 function migrateSettings(stored: StoredSettings): ApiSettings | null {
-  if (!("syncCursors" in stored)) return null;
-  const { syncCursors: _retired, ...rest } = stored;
-  return { ...defaultApiSettings(), ...rest, syncAuto: defaultApiSettings().syncAuto };
+  let blob = stored;
+  let migrated = false;
+
+  if ("syncCursors" in blob) {
+    const { syncCursors: _retired, ...rest } = blob;
+    blob = { ...rest, syncAuto: defaultApiSettings().syncAuto };
+    migrated = true;
+  }
+
+  if ("supabaseUrl" in blob) {
+    const { supabaseUrl, supabaseReady, supabaseCheckedAt, ...rest } = blob;
+    const url = (supabaseUrl ?? "").trim();
+    blob = {
+      ...rest,
+      supabaseProjects:
+        url === ""
+          ? []
+          : [{ url, ready: supabaseReady ?? false, checkedAt: supabaseCheckedAt ?? "" }],
+    };
+    migrated = true;
+  }
+
+  return migrated ? { ...defaultApiSettings(), ...blob } : null;
 }
 
 /** A tab written by an older version can be missing spec fields the editor now reads. */

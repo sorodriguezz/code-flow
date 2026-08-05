@@ -6,6 +6,7 @@ import { quitApp, resetAppData } from "../../lib/tauri/commands";
 import { confirmAction } from "../../state/confirmStore";
 import { usePlatform } from "../../lib/platform";
 import { UpdateSection } from "./UpdateSection";
+import { SettingsHeader } from "../api/settingsChrome";
 
 // Language names stay in their own language (endonyms) — "English"/"Español" don't change
 // depending on the currently selected UI language, same as any language picker.
@@ -23,8 +24,7 @@ export function GeneralSettings() {
 
   return (
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.general")}</h3>
-      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("settings.languageHint")}</p>
+      <SettingsHeader title={t("settings.general")} hint={t("settings.languageHint")} />
       <div className="flex gap-2">
         {OPTIONS.map((opt) => (
           <button

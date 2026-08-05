@@ -1,9 +1,10 @@
 //! The whole-install backup: one encrypted file that turns another computer into this one.
 //!
-//! What it is for, in the user's own words: import the file on a different machine and be able to
-//! do everything again — including authenticate — without carrying across a record of what was done
-//! on the first one. So this moves *configuration and credentials*, and deliberately not history
-//! (see [`snapshot`] for the table-by-table reasoning).
+//! What it is for, in the user's own words: import the file on a different machine and pick up
+//! where the first one left off — everything except the repositories themselves, which are git's
+//! job and not this module's. So this moves the whole database and every stored credential:
+//! configuration, authored content, history, conversations and agent work alike. The only fields
+//! held back are the ones naming *this* computer — see [`snapshot`] for that list and its reasoning.
 //!
 //! Four modules, one job each:
 //!
@@ -83,9 +84,16 @@ pub struct BackupSettings {
     /// The last failure, kept so an automatic backup that has been quietly failing for a week is
     /// visible in settings rather than only in a toast nobody was there to see.
     pub last_error: String,
+    /// What goes into the file. A preference, so it travels with the backup like the schedule does.
+    pub include: snapshot::Selection,
     /// Digest of the last payload written. What makes a scheduled run cost nothing when nothing
     /// changed — no encryption, no write, no upload.
     pub last_hash: String,
+    /// Whether the step-by-step setup has been finished. What settings shows the summary instead of
+    /// the wizard, and the reason it is stored rather than worked out from the other fields:
+    /// [`load_settings`] fills in a default folder, so "has somewhere to write" is already true on
+    /// an install that has never been asked anything.
+    pub setup_done: bool,
 }
 
 impl Default for BackupSettings {
@@ -103,9 +111,42 @@ impl Default for BackupSettings {
             last_backup_at: String::new(),
             last_backup_path: String::new(),
             last_error: String::new(),
+            include: snapshot::Selection::default(),
             last_hash: String::new(),
+            setup_done: false,
         }
     }
+}
+
+/// Forgets the scheduled backup: the schedule stops, both cloud destinations are signed out and
+/// forgotten, and the step-by-step setup asks again from the top.
+///
+/// What survives is deliberate, and it is the two ends of the thing. The **files already written**
+/// are untouched — this stops writing new ones, it does not delete anything, and a reset that took
+/// the backups with it would be the opposite of a backup feature. `include` survives too: it
+/// belongs to "What to include", which is a different question in a different tab.
+///
+/// Everything in between goes, connections included. Leaving a live Google or Microsoft grant
+/// behind after the user asked to forget the setup means this app still holds a token to their
+/// drive for a backup it is no longer taking — which is not a convenience, it is a credential
+/// nobody remembers granting.
+///
+/// What is revoked is *this app's* access and nothing else: the refresh token it was issued, and
+/// the registration it used to ask for one. The machine's own Google Drive or OneDrive sign-in —
+/// the desktop client, the browser session, the system account — is not ours to touch and is not
+/// touched.
+///
+/// The settings are written first: a credential store that refuses is worth reporting, but it must
+/// not be what leaves the schedule running.
+pub fn reset_auto(conn: &Connection) -> Result<(), String> {
+    let include = load_settings(conn).include;
+    save_settings(conn, &BackupSettings { include, ..Default::default() })?;
+    save_drive(conn, &DriveSettings::default())?;
+    save_onedrive(conn, &OneDriveSettings::default())?;
+
+    crate::gdrive::disconnect()?;
+    secrets::delete_secret(&secrets::gdrive_client_secret_key())?;
+    crate::onedrive::disconnect()
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -260,9 +301,14 @@ pub struct Payload {
     pub contents: BackupContents,
 }
 
+/// Builds the payload from what the user chose to include.
+///
+/// The selection is read here rather than passed in, so the scheduled run and the manual export
+/// cannot disagree about it: there is one persisted answer and both go through this function.
 pub fn build_payload(conn: &Connection) -> Result<Payload, String> {
-    let tables = snapshot::export(conn).map_err(|e| e.to_string())?;
-    let secrets = vault::collect(conn);
+    let selection = load_settings(conn).include;
+    let tables = snapshot::export(conn, &selection).map_err(|e| e.to_string())?;
+    let secrets = if selection.credentials { vault::collect(conn) } else { Vec::new() };
     let contents = BackupContents {
         rows: tables.iter().map(|t| t.rows.len() as i64).sum(),
         secrets: secrets.len() as i64,
@@ -366,6 +412,20 @@ pub fn restore(
         serde_json::from_slice(&plain).map_err(|_| "the backup's contents could not be read")?;
 
     let summary = snapshot::apply(conn, &snapshot.tables, mode).map_err(|e| e.to_string())?;
+
+    // The backup carries live state — a task mid-turn, a chain mid-step, a batch mid-generation —
+    // because the alternative was leaving the user's work behind. Restored here, none of it has a
+    // process behind it, which is the same situation as a machine that was killed mid-run. So the
+    // same reconciliation runs: `running` demotes to `idle`, `running`/`queued` chains park as
+    // interrupted, and anything caught generating goes back to `draft`. Without this the restored
+    // install shows spinners that would never resolve until the next restart.
+    //
+    // A failure here is reported, not raised: the tables are already committed, and refusing the
+    // whole restore over a reconciliation would leave the user with no way to retry the rest.
+    if let Err(error) = queries::recover_after_restart(conn) {
+        eprintln!("restore: reconciling live state failed: {error}");
+    }
+
     let mut report = report(summary, &header);
 
     let (written, failed) = vault::restore(&snapshot.secrets);
@@ -507,6 +567,39 @@ mod tests {
         restore(&mut target, &file, "a-long-enough-password", RestoreMode::Replace).unwrap();
 
         assert_eq!(load_settings(&target).folder, "D:/mine");
+    }
+
+    /// Work in progress travels — and lands reconciled, not pretending to still be running.
+    ///
+    /// A backup written while a chain was mid-step restores saying so, and there is no process on
+    /// the new machine behind it. That is the crash case, so the crash reconciliation runs.
+    #[test]
+    fn live_state_arrives_parked_rather_than_running() {
+        let source = seeded();
+        source
+            .execute_batch(
+                r#"
+                INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at)
+                    VALUES ('p1', 'w1', 'api', '/tmp/api', 0, '2026-01-01T00:00:00+00:00');
+                INSERT INTO agent_tasks (id, workspace_id, project_id, conversation_id, status, created_at, updated_at)
+                    VALUES ('t1', 'w1', 'p1', 'c-1', 'running', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+                INSERT INTO agent_chains (id, project_id, status, created_at, updated_at)
+                    VALUES ('ch1', 'p1', 'running', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+                "#,
+            )
+            .unwrap();
+        let (file, _, _) = create(&source, "a-long-enough-password", "1.0.0").unwrap();
+
+        let mut target = seeded();
+        restore(&mut target, &file, "a-long-enough-password", RestoreMode::Replace).unwrap();
+
+        let status = |sql: &str| -> String { target.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(status("SELECT status FROM agent_tasks WHERE id = 't1'"), "idle");
+        assert_eq!(status("SELECT status FROM agent_chains WHERE id = 'ch1'"), "paused");
+        assert_eq!(
+            status("SELECT last_reason FROM agent_chains WHERE id = 'ch1'"),
+            "chain.interrupted"
+        );
     }
 
     /// The Drive client id, by contrast, is exactly the sort of thing that should travel.

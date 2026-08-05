@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Bug,
+  Calculator,
   ChevronDown,
   ClipboardCheck,
   ClipboardList,
@@ -176,6 +177,16 @@ const WORKSPACE_PROMPT_GROUPS: {
         icon: FlaskConical,
         labelKey: "settings.wiPromptTasksQa",
         hintKey: "settings.wiPromptTasksQaHint",
+      },
+      // Not a prompt of its own — the hours the row above estimates with, spliced into it at
+      // `{{ESTIMACION_QA}}`. Its own row because recalibrating a table against the team's closed
+      // tasks is a different act, and a different rhythm, from rewriting how the ladder is worded.
+      {
+        kind: "work_item_qa_estimation",
+        task: "work_item_review",
+        icon: Calculator,
+        labelKey: "settings.wiPromptQaEstimation",
+        hintKey: "settings.wiPromptQaEstimationHint",
       },
     ],
   },

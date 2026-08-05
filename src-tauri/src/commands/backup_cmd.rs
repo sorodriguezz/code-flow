@@ -33,6 +33,10 @@ pub struct BackupState {
     pub default_folder: String,
     /// `windows` | `macos` | `linux`, so the guides show the right paths.
     pub platform: String,
+    /// Whether a backup is being written right now. In the opening round trip as well as on the
+    /// event, so a panel opened *during* a scheduled run shows it rather than waiting for the next
+    /// change to find out.
+    pub running: bool,
 }
 
 fn platform() -> &'static str {
@@ -66,6 +70,7 @@ pub fn backup_state(db: State<Db>) -> Result<BackupState, String> {
         sync_folders: destination::sync_folders(),
         default_folder: destination::default_folder().to_string_lossy().into_owned(),
         platform: platform().to_string(),
+        running: auto::is_running(),
     })
 }
 
@@ -73,6 +78,14 @@ pub fn backup_state(db: State<Db>) -> Result<BackupState, String> {
 pub fn backup_save_settings(db: State<Db>, settings: backup::BackupSettings) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     backup::save_settings(&conn, &settings)
+}
+
+/// Stops the scheduled backup and forgets what the step-by-step setup was told, so it asks again.
+/// Nothing already written is touched — see [`backup::reset_auto`] for what survives and why.
+#[tauri::command]
+pub fn backup_reset_auto(db: State<Db>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    backup::reset_auto(&conn)
 }
 
 #[tauri::command]
@@ -141,11 +154,20 @@ pub fn backup_passphrase_matches(passphrase: String) -> Result<bool, String> {
 
 /// Writes a one-off backup wherever the user points the save dialog. Returns `None` when the
 /// dialog was dismissed — nothing is built until a real path comes back.
+///
+/// Sealed with the *stored* password rather than one typed into the panel. The app already holds
+/// it — the scheduled run writes with nothing else — so asking again only invited a second password
+/// for a file that is opened by the same "Restore" as every other one, and a file whose password
+/// was a typo is one nobody finds out about until the day they need it.
+///
+/// Read before the save dialog so a missing password is an error instead of something discovered
+/// after choosing where to put the file.
 #[tauri::command]
-pub async fn backup_export_to_file(
-    app: AppHandle,
-    passphrase: String,
-) -> Result<Option<ExportResult>, String> {
+pub async fn backup_export_to_file(app: AppHandle) -> Result<Option<ExportResult>, String> {
+    let Some(passphrase) = backup::passphrase()? else {
+        return Err("set a backup password first".into());
+    };
+
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
@@ -187,18 +209,38 @@ pub async fn backup_run_now(app: AppHandle) -> Result<auto::RunOutcome, String> 
 
 /// Opens the picker and reports what the chosen file says about itself — no password involved, so
 /// the prompt that follows is about a file the user has already recognised.
+///
+/// The filter is asked for *and* enforced, because they are two different promises. The filter is a
+/// request to the platform's own panel, and how strictly it is honoured is the platform's business:
+/// a dialog can offer an "all files" escape, a path can be typed rather than clicked, and on macOS
+/// an extension nobody has registered a type for resolves to a dynamic one the panel treats
+/// loosely. The check below is what makes "only `.cfbackup`" true rather than merely requested —
+/// and it turns picking the wrong file into a sentence about the extension instead of whatever the
+/// envelope parser makes of a JPEG.
 #[tauri::command]
 pub async fn backup_pick_and_inspect(app: AppHandle) -> Result<Option<backup::BackupInfo>, String> {
+    let extension = backup::envelope::FILE_EXTENSION;
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("CodeFlow backup", &[backup::envelope::FILE_EXTENSION])
+        .add_filter("CodeFlow backup", &[extension])
         .pick_file(move |file| {
             let _ = tx.send(file.map(|p| p.to_string()));
         });
     let Some(path) = rx.await.ok().flatten() else {
         return Ok(None);
     };
+
+    // Case-insensitively: the file may have come from a Windows machine, or through a sync client
+    // that took its own view of the name.
+    let matches = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(extension));
+    if !matches {
+        return Err(format!("that is not a .{extension} file"));
+    }
+
     let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
     backup::inspect(&bytes, &path).map(Some)
 }
@@ -219,6 +261,52 @@ pub fn backup_inspect_configured(db: State<Db>) -> Result<Option<backup::BackupI
     };
     let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     backup::inspect(&bytes, &path.to_string_lossy()).map(Some)
+}
+
+/// Every backup at the configured destination, newest first — what the restore pane lists so the
+/// choice of *which* one is the user's.
+///
+/// The dated copies exist precisely because the newest backup is often not the one you want: the
+/// reason to restore is usually something that went wrong recently, and "the most recent file" is
+/// the copy most likely to have it in. Offering only that one made the retention setting above pay
+/// for copies nothing could reach.
+///
+/// Ordered by what each file's own header says, not by name: the current file carries no date in
+/// its name, and a folder synced from two machines can hold copies whose names and contents
+/// disagree. Unreadable files are skipped rather than failing the listing — one truncated copy
+/// mid-sync must not hide the nine good ones beside it.
+#[tauri::command]
+pub async fn backup_list_at_destination(app: AppHandle) -> Result<Vec<backup::BackupInfo>, String> {
+    let (target, folder) = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let settings = backup::load_settings(&conn);
+        (settings.target, settings.folder)
+    };
+
+    if !backup::writes_to_folder(&target) {
+        // One file each, kept up to date in place — there is nothing to choose between, so the
+        // list is however many of it there is.
+        let one = if target == "onedrive" {
+            backup_inspect_onedrive(app).await?
+        } else {
+            backup_inspect_drive(app).await?
+        };
+        return Ok(one.into_iter().collect());
+    }
+
+    if folder.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut found: Vec<backup::BackupInfo> = destination::list_in_folder(std::path::Path::new(&folder))
+        .into_iter()
+        .filter_map(|path| {
+            let bytes = std::fs::read(&path).ok()?;
+            backup::inspect(&bytes, &path.to_string_lossy()).ok()
+        })
+        .collect();
+    found.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(found)
 }
 
 /// The backup in the connected Drive account, if there is one.

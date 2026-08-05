@@ -18,6 +18,7 @@ import {
   Waypoints,
 } from "lucide-react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
+import { installSqlCompletions } from "../../lib/db/sqlCompletion";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
@@ -48,7 +49,17 @@ const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
   // On by default for SQL: a console is where you type table and column names you half-remember.
   quickSuggestions: true,
   suggestOnTriggerCharacters: true,
+  // Tab completes the best match without going through the list first — what you want when the
+  // name is nearly typed and the point of the widget was never to be read.
+  tabCompletion: "on",
+  // The catalog is the answer; words already in the buffer are the fallback, and Monaco ranks them
+  // below anything the provider returns.
+  wordBasedSuggestions: "currentDocument",
 };
+
+// The provider is global to Monaco rather than per-editor, so it is installed once on import
+// — the same shape as the GraphQL and script panels.
+installSqlCompletions();
 
 const ROW_LIMITS = [100, 500, 1000, 5000, 0];
 

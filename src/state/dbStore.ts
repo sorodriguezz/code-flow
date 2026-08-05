@@ -226,6 +226,10 @@ interface DbState {
   tabs: DbTab[];
   activeTabId: string | null;
   section: DbSidebarSection;
+  /** The saved console whose row in the tree is showing its name as an input, if any. Set on the
+   * save that *creates* one, so a console names itself at the moment it becomes something worth
+   * finding again rather than staying `Console 3` forever. */
+  renamingConsoleId: string | null;
 
   init: (workspaceId: string) => Promise<void>;
   setWorkspace: (workspaceId: string) => Promise<void>;
@@ -252,6 +256,9 @@ interface DbState {
   newConsole: (connectionId: string, database?: string, schema?: string, body?: string) => void;
   updateConsole: (tabId: string, patch: Partial<DbConsoleTab>) => void;
   saveConsole: (tabId: string) => Promise<void>;
+  /** Puts a saved console's row into (or out of, with `null`) rename mode. */
+  setRenamingConsole: (consoleId: string | null) => void;
+  renameConsole: (consoleId: string, name: string) => Promise<void>;
   deleteConsole: (consoleId: string) => Promise<void>;
   runConsole: (tabId: string, sql?: string) => Promise<void>;
   explainConsole: (tabId: string, sql?: string) => Promise<void>;
@@ -357,6 +364,7 @@ export const useDbStore = create<DbState>((set, get) => ({
   tabs: [],
   activeTabId: null,
   section: "explorer",
+  renamingConsoleId: null,
   sqlLog: [],
 
   init: async (workspaceId) => {
@@ -650,8 +658,49 @@ export const useDbStore = create<DbState>((set, get) => ({
           ...current,
           consoleId: created.id,
         }));
+        // A console lands in a folder the user may have closed, under a name the app chose. Opening
+        // the connection and putting the new row straight into rename mode is the naming prompt —
+        // without a dialog in front of the editor to dismiss, and skippable by carrying on typing.
+        //
+        // Only `expanded` is written, never a fetch: saving a console is a local act, and making it
+        // open a session against the server would be a surprising thing for ⌘S to do.
+        const rootKey = nodeKey(tab.connectionId, {
+          kind: "root",
+          database: null,
+          schema: null,
+          name: null,
+        });
+        set((s) => ({
+          expanded: s.expanded.includes(rootKey) ? s.expanded : [...s.expanded, rootKey],
+          renamingConsoleId: created.id,
+        }));
       }
       patchTab<DbConsoleTab>(set, tabId, "console", (current) => ({ ...current, dirty: false }));
+      persistTabs(get);
+      return true;
+    });
+  },
+
+  setRenamingConsole: (consoleId) => set({ renamingConsoleId: consoleId }),
+
+  renameConsole: async (consoleId, name) => {
+    const trimmed = name.trim();
+    const existing = get().consoles.find((c) => c.id === consoleId);
+    // Out of rename mode first, whatever happens next: leaving the row as an input because the
+    // write failed would trap the user in a field that keeps failing.
+    set({ renamingConsoleId: null });
+    if (!existing || !trimmed || trimmed === existing.name) return;
+    const next: DbConsole = { ...existing, name: trimmed };
+    await guarded(async () => {
+      await dbUpdateConsole(next);
+      set((s) => ({
+        consoles: s.consoles.map((c) => (c.id === next.id ? next : c)),
+        // The open tab carries the same name and `saveConsole` writes it back, so leaving it stale
+        // would rename the console and then quietly rename it back on the next ⌘S.
+        tabs: s.tabs.map((tab) =>
+          tab.kind === "console" && tab.consoleId === consoleId ? { ...tab, name: trimmed } : tab,
+        ),
+      }));
       persistTabs(get);
       return true;
     });

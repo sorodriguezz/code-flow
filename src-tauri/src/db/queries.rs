@@ -272,6 +272,9 @@ pub fn workspace_prompt_default(kind: &str) -> &'static str {
         "work_item_criteria" => crate::ai::DEFAULT_WORK_ITEM_CRITERIA_TEMPLATE,
         "work_item_tasks" => crate::ai::DEFAULT_WORK_ITEM_TASKS_TEMPLATE,
         "work_item_tasks_qa" => crate::ai::DEFAULT_WORK_ITEM_TASKS_QA_TEMPLATE,
+        // Not a prompt of its own: the hours the QA ladder is estimated with, spliced into the
+        // template above at its slot. Stored apart so recalibrating them is not an edit to prose.
+        "work_item_qa_estimation" => crate::ai::DEFAULT_WORK_ITEM_QA_ESTIMATION,
         "repo_doc" => crate::ai::DEFAULT_REPO_DOC_TEMPLATE,
         "workspace_doc" => crate::ai::DEFAULT_WORKSPACE_DOC_TEMPLATE,
         // review_standard and anything unexpected fall back to the review methodology.

@@ -28,8 +28,15 @@ import { useT } from "../../state/languageStore";
  *
  * `z-40` is deliberate, not a leftover. Out here the layers are: app chrome (unnumbered) < this
  * dialog < the overlays mounted at the app root — Settings, the command palette, toasts (`z-50`) <
- * `ConfirmModal` (`z-[60]`, since it is raised *on top* of dialogs) < popovers (`z-[9999]`, which is
- * what a `Select` inside this dialog opens with).
+ * this dialog when `raised` (`z-[55]`) < `ConfirmModal` (`z-[60]`, since it is raised *on top* of
+ * dialogs) < popovers (`z-[9999]`, which is what a `Select` inside this dialog opens with).
+ *
+ * `raised` exists because that ladder assumed these only ever open from the main content area, and
+ * the backup section broke the assumption: it lives *inside* Settings, so its restore dialog came
+ * out at `z-40` under a `z-50` overlay. What that looks like is worth spelling out, because it does
+ * not look like a layering bug — the backdrop covers the screen and darkens everything around the
+ * settings window, so pressing the button visibly *did* something, and the panel it dimmed the
+ * screen for is behind the settings window where nobody thinks to look.
  */
 export function ApiModal({
   icon: Icon,
@@ -39,6 +46,7 @@ export function ApiModal({
   height,
   busy = false,
   dismissOnBackdrop = true,
+  raised = false,
   onClose,
   toolbar,
   footer,
@@ -54,6 +62,9 @@ export function ApiModal({
   busy?: boolean;
   /** Whether a click on the backdrop closes the modal. Off for forms holding unsaved input. */
   dismissOnBackdrop?: boolean;
+  /** Set when the dialog is opened from *inside* a root overlay — Settings, chiefly — so it lands
+   * above it instead of behind it. See the layer ladder above. */
+  raised?: boolean;
   onClose: () => void;
   /** Rendered at the right of the header, before the close button. */
   toolbar?: ReactNode;
@@ -80,7 +91,9 @@ export function ApiModal({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-6"
+      className={`fixed inset-0 flex items-center justify-center bg-black/40 p-6 ${
+        raised ? "z-[55]" : "z-40"
+      }`}
       onMouseDown={(e) => {
         pressedBackdrop.current = e.target === e.currentTarget;
       }}

@@ -7,6 +7,7 @@ import { PromptTemplates } from "./PromptTemplates";
 import { ProvidersSection } from "./ProvidersSection";
 import { TaskRouting } from "./TaskRouting";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { SettingsHeader } from "../api/settingsChrome";
 
 type AiTab = "providers" | "routing" | "templates";
 
@@ -55,8 +56,7 @@ export function ClaudeSettings() {
     // them is the only thing that scrolls.
     <section className="flex h-full min-h-0 flex-col">
       <div className="shrink-0">
-        <h3 className="mb-1 text-sm font-semibold">{t("settings.aiSectionTitle")}</h3>
-        <p className="mb-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.aiSectionHint")}</p>
+        <SettingsHeader title={t("settings.aiSectionTitle")} hint={t("settings.aiSectionHint")} />
       </div>
 
       <div className="flex min-h-0 flex-1 gap-4">
@@ -92,9 +92,15 @@ export function ClaudeSettings() {
           ))}
         </motion.nav>
 
-        {/* The one moving part. `pb-6` because the pane now ends where the dialog does, and a last
-            row flush against that edge reads as cut off rather than as the end of the list. */}
-        <div ref={paneRef} className="min-w-0 flex-1 overflow-y-auto pb-6">
+        {/* The one moving part. `overflow-y-scroll`, not `auto`: the app styles its scrollbars, so
+            one is a real 10px of layout rather than an overlay. Letting it come and go as a pane
+            grows past the height — which is exactly what expanding a row does — narrowed the
+            content and shifted every row sideways, then shifted them back on collapse. Same
+            reserved-gutter fix, and the same reason, as the settings column around it; the track is
+            transparent and the thumb isn't drawn when there is nothing to scroll. `pb-6` because
+            the pane ends where the dialog does, and a last row flush against that edge reads as cut
+            off rather than as the end of the list. */}
+        <div ref={paneRef} className="min-w-0 flex-1 overflow-y-scroll pb-6">
           <div className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4">
             {/* The rail names the pane, so there's no heading repeated here — but the hint says
                 something the label can't (what "inherit" falls back to, that a prompt is shared

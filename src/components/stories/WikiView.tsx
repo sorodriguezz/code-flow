@@ -116,28 +116,6 @@ function decode(text: string): string {
  * come back as they were written and the field stays editable. Pages without spaces in their names
  * — the ordinary case — land exactly right.
  */
-/**
- * The key two wiki paths are *the same page* under.
- *
- * Everything above is why this exists: the address bar spells a space `-`, the REST API wants the
- * space, and neither spelling can be turned into the other without guessing. So nothing is
- * rewritten — this key only decides whether a page the wiki *itself just listed* is the one that
- * was asked for, and the real path is then taken from that listing rather than invented here.
- *
- * Accents are composed because a path copied on macOS arrives decomposed (`e` + U+0301) where the
- * wiki holds it composed: the same word to everyone except a byte comparison, and a second way for
- * this field to 404 on a path that looks right on screen.
- */
-function wikiPathKey(path: string): string {
-  return path
-    .normalize("NFC")
-    .replace(/-/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\/+$/, "")
-    .toLocaleLowerCase();
-}
-
 function wikiPathFrom(input: string): string {
   const raw = input.trim();
   if (!raw) return "";
@@ -153,6 +131,29 @@ function wikiPathFrom(input: string): string {
   // [0] is the wiki itself; a page id follows it when the URL names one page rather than the wiki.
   const rest = /^\d+$/.test(segments[1] ?? "") ? segments.slice(2) : segments.slice(1);
   return rest.length > 0 ? `/${rest.map(decode).join("/")}` : "";
+}
+
+/**
+ * The key two wiki paths are *the same page* under.
+ *
+ * The paragraph above `wikiPathFrom` is why this exists: the address bar spells a space `-`, the
+ * REST API wants the space, and neither spelling can be turned into the other without guessing. So
+ * nothing is rewritten — this key only decides whether a page the wiki *itself just listed* is the
+ * one that was asked for, and the real path is then taken from that listing rather than invented
+ * here.
+ *
+ * Accents are composed because a path copied on macOS arrives decomposed (`e` + U+0301) where the
+ * wiki holds it composed: the same word to everyone except a byte comparison, and a second way for
+ * this field to 404 on a path that looks right on screen.
+ */
+function wikiPathKey(path: string): string {
+  return path
+    .normalize("NFC")
+    .replace(/-/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\/+$/, "")
+    .toLocaleLowerCase();
 }
 
 /**
@@ -324,7 +325,7 @@ function useWikiPathCandidates(
   enabled: boolean,
 ): string[] {
   const [listing, setListing] = useState<{ key: string; pages: AdoWikiPage[] }>({ key: "", pages: [] });
-  const wikiKey = `${org} ${project} ${wiki}`;
+  const wikiKey = `${org}|${project}|${wiki}`;
 
   useEffect(() => {
     if (!enabled || !org || !project || !wiki || listing.key === wikiKey) return;
@@ -1102,7 +1103,10 @@ function PublishPanel({ page, body, width }: { page: DocPage; body: string; widt
   return (
     <aside
       style={{ width }}
-      className="flex min-h-0 shrink-0 flex-col overflow-y-auto border-l border-[var(--cf-border)] bg-[var(--cf-bg)]"
+      // `--cf-surface`, the same tone as the document rail on the other side of the editor: the two
+      // things flanking it are the same kind of thing, and the window background between them read
+      // as a slab of a different colour rather than as a panel.
+      className="flex min-h-0 shrink-0 flex-col overflow-y-auto border-l border-[var(--cf-border)] bg-[var(--cf-surface)]"
     >
       <div className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2.5">
         <div className="flex items-center gap-2">

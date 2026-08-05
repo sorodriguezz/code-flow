@@ -10,6 +10,7 @@ import {
   type ShortcutId,
 } from "../../lib/shortcuts";
 import { chordKeycaps, eventToChord, isBindable } from "../../lib/keys";
+import { SettingsHeader } from "../api/settingsChrome";
 
 const GROUP_ORDER: ShortcutGroup[] = [
   "general",
@@ -157,9 +158,8 @@ export function ShortcutsSettings() {
 
   return (
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("shortcuts.title")}</h3>
-      <p className="mb-1 text-[13px] text-[var(--cf-text-muted)]">{t("settings.keybindingsHint")}</p>
-      <p className="mb-4 text-[11px] text-[var(--cf-text-muted)]">{t("shortcuts.recordHint")}</p>
+      <SettingsHeader title={t("shortcuts.title")} hint={t("settings.keybindingsHint")} />
+      <p className="-mt-2 mb-4 text-[11px] text-[var(--cf-text-muted)]">{t("shortcuts.recordHint")}</p>
 
       {GROUP_ORDER.map((group) => {
         const commands = SHORTCUT_COMMANDS.filter((c) => c.group === group);

@@ -1429,11 +1429,16 @@ Las tres son técnicas y las tres son obligatorias.
 ///
 /// It is a template like any other, so a team whose QA ladder has four steps or seven edits it
 /// here rather than living with somebody else's process.
+///
+/// What it does *not* hold is the hours. Those arrive at [`QA_ESTIMATION_SLOT`] from
+/// [`DEFAULT_WORK_ITEM_QA_ESTIMATION`], which is a second editable text, for the reason given
+/// there: the five steps are a writing convention and the hours are a calibration, and the team
+/// that changes one rarely means to touch the other.
 pub const DEFAULT_WORK_ITEM_TASKS_QA_TEMPLATE: &str = r#"Eres un QA lead generando las tareas de QA de una historia de usuario. Trabajas en el directorio de un repositorio y tienes herramientas para leerlo.
 
 Por stdin recibes la historia con sus criterios de aceptación, y la lista de tareas que ya tiene.
 
-Tu tarea: devolver EXACTAMENTE estas cinco tareas de QA, en este orden y con estos títulos literales:
+Tu tarea: dimensionar el esfuerzo de QA de esta historia y devolver EXACTAMENTE estas cinco tareas, en este orden y con estos títulos literales:
 
 1. Título: `Diseñar casos de prueba`
    Descripción base: "Crear títulos de casos de prueba en base a los criterios de aceptación, ruta crítica y escenarios borde."
@@ -1446,12 +1451,28 @@ Tu tarea: devolver EXACTAMENTE estas cinco tareas de QA, en este orden y con est
 5. Título: `Last check con negocio`
    Descripción base: "Inicio de la ejecución de casos de prueba creados previamente."
 
+=== ANTES DE ESCRIBIR NADA: DIMENSIONA LA HISTORIA ===
+Lee los criterios de aceptación y, si hay repositorio, el código que tiene que cumplirlos. Decide un tamaño para la historia — S, M, L o XL — con la rúbrica del MODELO DE ESTIMACIÓN que viene más abajo: de ese tamaño salen las horas de las cinco tareas.
+Si la historia no tiene criterios de aceptación, no los inventes: dilo en el `how` de la primera tarea y dimensiónala como M.
+
 === CÓMO RELLENARLAS ===
 - `title` es el título literal de la lista, sin prefijo: la aplicación le pone el `[QA]`.
 - `what` es la descripción base tal cual, palabra por palabra. No la reescribas.
-- `how` es lo único que adaptas a ESTA historia: qué criterios de aceptación cubre ese paso, qué ruta crítica y qué escenarios borde tiene esta historia en concreto. Nombra los criterios por su número.
+- `how` es lo único que adaptas a ESTA historia, y lo que tiene que decir cambia en cada paso:
+  - Diseñar: qué criterios de aceptación cubre (nómbralos por su número), cuál es la ruta crítica y qué escenarios borde tiene esta historia en concreto.
+  - Validar con PO: qué cobertura se le propone al PO y qué queda deliberadamente fuera — que es la decisión que hay que sacar de esa reunión.
+  - Elaborar: qué datos de prueba y qué precondiciones hacen falta, y cuál es el resultado esperado de cada flujo.
+  - Ejecutar: en qué ambiente, con qué perfiles o roles, qué dependencias pueden bloquear la ejecución y qué se vuelve a pasar después de cada corrección.
+  - Last check: quién acepta, sobre qué evidencia, y qué tiene que ser cierto para dar la historia por aceptada.
 - `why` es qué queda garantizado cuando ese paso está hecho.
-- Si la historia no tiene criterios de aceptación, dilo en `how` de la primera tarea en lugar de inventarlos.
+
+=== ESTIMACIÓN ===
+- El tamaño que decidiste es un razonamiento tuyo, no un texto que publicar: no lo escribas en `what`, `how` ni `why`. Sale solo por las horas.
+- `estimate_hours` sale de la tabla del MODELO DE ESTIMACIÓN, de la columna de ese tamaño. Las cinco tareas usan el mismo.
+- No repartas un total a ojo ni apliques un multiplicador uniforme sobre las cinco: cada fase escala distinto y la tabla ya lo hace por ti.
+- `priority` es la escala de Azure: 1 crítica, 2 normal, 3 puede esperar, 4 opcional.
+
+{{ESTIMACION_QA}}
 
 === FORMATO DEL TEXTO (Markdown) ===
 `how` y `why` se publican en la descripción de la tarea, y la aplicación convierte tu Markdown al HTML que el tablero dibuja. Escribe Markdown, y solo este subconjunto:
@@ -1465,8 +1486,6 @@ Tu tarea: devolver EXACTAMENTE estas cinco tareas de QA, en este orden y con est
 - NO modifiques, crees ni borres ningún archivo.
 - `kind` es siempre `qa` en esta ejecución.
 - Las cinco van siempre, aunque la historia ya tenga tareas de QA parecidas: el usuario decide en pantalla cuáles se queda.
-- `estimate_hours` son las horas que ese paso lleva para ESTA historia: un diseño de casos de una historia con doce criterios no dura lo que el de una con dos. Medias horas permitidas.
-- `priority` es la escala de Azure: 1 crítica, 2 normal, 3 puede esperar, 4 opcional. Los pasos de QA suelen ser 2, y el que bloquea al resto del equipo si no se hace, 1.
 - Escribe SIEMPRE en español.
 
 === REGLAS ESTRICTAS DE SALIDA ===
@@ -1475,6 +1494,71 @@ Tu tarea: devolver EXACTAMENTE estas cinco tareas de QA, en este orden y con est
 {"tasks":[{"kind":"qa","title":"","what":"","how":"","why":"","evidence":[],"estimate_hours":0,"priority":2}]}
 - `estimate_hours` es un número en horas (no texto, no "4h") y `priority` un entero de 1 a 4.
 - No uses saltos de línea sin escapar dentro de las cadenas JSON: usa \n."#;
+
+/// Where the placeholder for the estimation model sits inside the QA template.
+///
+/// A slot rather than a fixed position, because a team that rewrites its ladder decides where the
+/// numbers read best — before the phases, after them, or between the writing rules and the output
+/// shape. A template that lost the slot still gets the model, appended (see `with_qa_estimation`).
+pub const QA_ESTIMATION_SLOT: &str = "{{ESTIMACION_QA}}";
+
+/// The hours behind the QA ladder, kept apart from the prompt that writes it.
+///
+/// Two different things happen in a QA run: *what the five steps say about this story*, which is a
+/// writing job and changes with every story, and *how long they take*, which is a number the team
+/// owns and revises against its own closed tasks a couple of times a year. Held in one prompt they
+/// could only be edited together, so recalibrating hours meant editing prose around them and a team
+/// that rewrote its ladder lost its calibration with it. Two texts, one slot.
+///
+/// Sizing before hours is the part that makes this more than a default: QA effort does not track
+/// development effort — a one-line change to a pricing rule can need a matrix of cases, and a new
+/// screen worth forty hours of work can be tested in three — so the rubric asks about test surface
+/// (flows, data combinations, regression, external dependencies) and nothing about the code.
+///
+/// The table's *shape* matters more than its numbers, and it is why a single "testing: 8 h" block
+/// cannot be calibrated: the two ceremonies barely grow with size (a review meeting lasts the same
+/// for eight cases as for thirty), writing cases grows about linearly, and running them grows worse
+/// than linearly because it is not one pass but report → fix → re-run. Scaling all five by the same
+/// factor — the usual way to estimate a bigger story — gets every one of them wrong at once.
+pub const DEFAULT_WORK_ITEM_QA_ESTIMATION: &str = r#"=== MODELO DE ESTIMACIÓN ===
+Las horas de las cinco tareas de QA salen de aquí.
+
+PASO 1 — EL TAMAÑO DE LA HISTORIA
+Cuenta cuántos de estos factores aplican:
+- Más de 3 flujos o caminos alternativos que probar
+- Integración con un sistema externo o de terceros
+- Combinaciones de datos relevantes (una matriz de casos, no una lista)
+- Reglas de negocio con excepciones o casos borde
+- Superficie de regresión: puede romper funcionalidad que ya existe
+- Hay que preparar datos de prueba o dejar el ambiente en un estado concreto
+- Involucra permisos, roles o varios perfiles
+- Depende de otro equipo para poder probarse
+
+0 o 1 factores → S · 2 o 3 → M · 4 o 5 → L · 6 o más → XL
+
+- Si la historia no se puede probar sin coordinar con alguien de fuera del equipo, sube un tamaño sea cual sea el conteo: la coordinación externa es la fuente de desviación más grande y la menos controlable.
+- Ante la duda entre dos tamaños, elige el mayor.
+- El tamaño se mide por superficie de prueba —flujos, datos, regresión—, nunca por lo que cuesta programar la historia: no hay relación estable entre las dos cosas.
+
+PASO 2 — LAS HORAS DE CADA FASE
+Tarea                                    S     M     L     XL
+Diseñar casos de prueba                  1     2     3     4
+Validar pruebas con PO                   1     1     1     2
+Elaborar casos de prueba (paso a paso)   2     3     5     8
+Ejecutar casos de prueba                 2     4     7     12
+Last check con negocio                   1     1     1     2
+TOTAL                                    7     11    17    28
+
+Las cinco tareas salen de la MISMA columna. No apliques multiplicadores propios: la tabla ya escala cada fase según su naturaleza — diseñar y elaborar crecen con la cantidad de casos, ejecutar crece peor que lineal porque incluye reintentos y verificación de correcciones, y las dos reuniones casi no crecen.
+
+PASO 3 — COMPROBACIONES ANTES DE RESPONDER
+- Horas enteras. Los decimales son precisión falsa.
+- Ninguna fase queda en 0: las reuniones también son trabajo y consumen agenda.
+- Ejecutar tiene que quedar entre el 29% y el 43% del total. Por debajo, estás subestimando los reintentos.
+- Prioridad 2 en las cinco, salvo el paso que bloquea al resto del equipo si no se hace, que va en 1.
+
+NOTA PARA QUIEN EDITA ESTA TABLA
+Estos números son un punto de partida. Con 20 o más tareas de QA cerradas por fase, la mediana del histórico del equipo estima mejor: esa mediana pasa a ser la columna M, con S ≈ 60% de M, L ≈ 160% y XL ≈ 260%, dejando las dos reuniones en 1 hora (2 en XL) y subiendo ejecutar a 150% en L y 300% en XL."#;
 
 pub const DEFAULT_RESOLVE_CONFLICT_TEMPLATE: &str =
     "Eres un ingeniero de software resolviendo un conflicto de merge de git. Se te entregan por \

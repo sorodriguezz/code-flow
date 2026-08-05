@@ -897,10 +897,25 @@ export interface ApiSettings {
   saveHistory: boolean;
   historyLimit: number;
   /**
-   * The user's own Supabase project for shared collections. The anon key and every share token live
-   * in the OS credential store; only the project URL is a setting.
+   * The Supabase projects this machine hosts shared collections on. The anon key of each and every
+   * share token live in the OS credential store; only the URL and the last verdict are settings.
    */
-  supabaseUrl: string;
+  supabaseProjects: SupabaseProject[];
+  /** Keep shared collections in step in the background as well as on demand. */
+  syncAuto: boolean;
+}
+
+/**
+ * One Supabase project, as the collaboration panel knows it.
+ *
+ * A list rather than the single `supabaseUrl` this replaced. The backend was always plural — an
+ * anon key is filed per project host, and every share carries the project it lives on — so the one
+ * field was never the truth, only the *last* project set up. Changing it left every collection
+ * created before it syncing happily against a project the settings pane no longer named, which is
+ * exactly the state nothing on screen could describe.
+ */
+export interface SupabaseProject {
+  url: string;
   /**
    * The last connection test succeeded — the project answered and the schema is installed.
    *
@@ -910,11 +925,9 @@ export interface ApiSettings {
    * changes nothing. The panel re-verifies in the background on every open; this is what it shows
    * while that is in flight.
    */
-  supabaseReady: boolean;
+  ready: boolean;
   /** When that check last passed, so the panel can say how fresh "connected" is. */
-  supabaseCheckedAt: string;
-  /** Keep shared collections in step in the background as well as on demand. */
-  syncAuto: boolean;
+  checkedAt: string;
 }
 
 /*
@@ -953,9 +966,7 @@ export function defaultApiSettings(): ApiSettings {
     prettyPrint: true,
     saveHistory: true,
     historyLimit: 500,
-    supabaseUrl: "",
-    supabaseReady: false,
-    supabaseCheckedAt: "",
+    supabaseProjects: [],
     syncAuto: true,
   };
 }

@@ -4,6 +4,7 @@ import { MIN_AUTO_FETCH_SECONDS, usePreferencesStore } from "../../state/prefere
 import { getGitIdentity, setGitIdentity } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
+import { SettingsHeader } from "../api/settingsChrome";
 
 export function GitSettings() {
   const t = useT();
@@ -41,7 +42,7 @@ export function GitSettings() {
 
   return (
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.gitTitle")}</h3>
+      <SettingsHeader title={t("settings.gitTitle")} hint={t("settings.gitHint")} />
 
       <p className="mb-2 text-[13px] text-[var(--cf-text-muted)]">{t("settings.gitIdentityHint")}</p>
       <div className="mb-1.5 flex gap-2">

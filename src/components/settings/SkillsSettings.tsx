@@ -21,6 +21,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
 import { Skeleton } from "../common/Skeleton";
+import { SettingsHeader } from "../api/settingsChrome";
 
 const DEFAULT_SKILL_MD = "---\nname: my-skill\ndescription: What this skill does and when to use it.\n---\n\n# My skill\n\nInstructions for the model…\n";
 
@@ -46,8 +47,7 @@ export function SkillsSettings() {
   if (!workspaceId) {
     return (
       <section>
-        <h3 className="mb-1 text-sm font-semibold">{t("settings.skillsTitle")}</h3>
-        <p className="text-[13px] text-[var(--cf-text-muted)]">{t("settings.skillsSelectWorkspace")}</p>
+        <SettingsHeader title={t("settings.skillsTitle")} hint={t("settings.skillsSelectWorkspace")} />
       </section>
     );
   }
@@ -117,14 +117,23 @@ export function SkillsSettings() {
 
   return (
     <section>
-      <h3 className="mb-1 text-sm font-semibold">{t("settings.skillsTitle")}</h3>
-      <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">
-        {t("settings.skillsHintPrefix")}{" "}
-        <a href="https://www.skills.sh/" target="_blank" rel="noreferrer" className="text-[var(--cf-accent)] underline">
-          skills.sh
-        </a>{" "}
-        {t("settings.skillsHintSuffix")} {t("settings.skillsOnlyClaude")}
-      </p>
+      <SettingsHeader
+        title={t("settings.skillsTitle")}
+        hint={
+          <>
+            {t("settings.skillsHintPrefix")}{" "}
+            <a
+              href="https://www.skills.sh/"
+              target="_blank"
+              rel="noreferrer"
+              className="text-[var(--cf-accent)] underline"
+            >
+              skills.sh
+            </a>{" "}
+            {t("settings.skillsHintSuffix")} {t("settings.skillsOnlyClaude")}
+          </>
+        }
+      />
 
       <div className="mb-3 space-y-2 rounded-lg border border-[var(--cf-border)] p-3">
         <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
