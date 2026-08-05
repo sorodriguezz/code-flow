@@ -413,6 +413,20 @@ function ConnectionTab({
         <Field value={spec.jump} onChange={(jump) => onPatch({ jump })} mono placeholder="bastion.example.com" />
       </Row>
 
+      <label className="flex items-start gap-2 py-1">
+        <Checkbox
+          checked={spec.agent_forward}
+          onChange={(agent_forward) => onPatch({ agent_forward })}
+          className="mt-px"
+        />
+        <span className="min-w-0">
+          <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.fieldAgentForward")}</span>
+          <span className="block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+            {t("remote.fieldAgentForwardHint")}
+          </span>
+        </span>
+      </label>
+
       <Row label={t("remote.fieldTags")} hint={t("remote.fieldTagsHint")} wide>
         {/* Edited as text rather than as chips: a comma-separated line is faster to retype than a
             chip editor is to click through, and it is what the user would have written anyway. The
@@ -759,6 +773,23 @@ function ScreenTab({
             )}
           </div>
 
+          {screen.protocol === "vnc" && (
+            <div className="my-2 rounded-md border border-[var(--cf-border)] p-2.5">
+              <label className="flex items-center gap-2">
+                <Checkbox
+                  checked={screen.embedded}
+                  onChange={(embedded) => patchScreen({ embedded })}
+                />
+                <span className="text-[12px] text-[var(--cf-text)]">
+                  {t("remote.screenEmbedded")}
+                </span>
+              </label>
+              <p className="mt-1.5 pl-6 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+                {t("remote.screenEmbeddedHint")}
+              </p>
+            </div>
+          )}
+
           <Row label={t("remote.fieldViewer")} hint={t("remote.fieldViewerHint")} wide>
             <Field
               value={screen.viewer}
@@ -784,6 +815,7 @@ function AdvancedTab({
   spec: RemoteHostSpec;
   onPatch: (changes: Partial<RemoteHostSpec>) => void;
 }) {
+  const snippets = useRemoteStore((s) => s.snippets);
   const t = useT();
 
   return (
@@ -796,6 +828,17 @@ function AdvancedTab({
           placeholder="docker compose logs -f"
         />
       </Row>
+      <Row label={t("remote.fieldStartupSnippet")} hint={t("remote.fieldStartupSnippetHint")} wide>
+        <Select
+          value={spec.startup_snippet_id}
+          onChange={(startup_snippet_id) => onPatch({ startup_snippet_id })}
+          options={[
+            { value: "", label: t("remote.screenNone") },
+            ...snippets.map((snippet) => ({ value: snippet.id, label: snippet.name })),
+          ]}
+        />
+      </Row>
+
       <Row label={t("remote.fieldDirectory")} hint={t("remote.fieldDirectoryHint")} wide>
         <Field
           value={spec.directory}

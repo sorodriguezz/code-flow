@@ -12,7 +12,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use super::models::{RemoteHostRow, RemoteSnippet, RemoteWorkspaceTree};
+use super::models::{RemoteHostRow, RemoteLogEntry, RemoteSnippet, RemoteWorkspaceTree};
 use super::queries::now;
 
 const HOST_COLUMNS: &str =
@@ -202,6 +202,73 @@ pub fn host_name_taken(
 }
 
 // ---------------------------------------------------------------------------
+// Log
+// ---------------------------------------------------------------------------
+
+const LOG_COLUMNS: &str = "id, workspace_id, host_id, host_name, kind, detail, error, at";
+
+/// Backstop on [`add_log`]. Well above what the UI lists, so it only stops the table growing
+/// without bound over the app's lifetime.
+const LOG_HARD_CAP: i64 = 2000;
+
+fn map_log(row: &rusqlite::Row) -> rusqlite::Result<RemoteLogEntry> {
+    Ok(RemoteLogEntry {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        host_id: row.get(2)?,
+        host_name: row.get(3)?,
+        kind: row.get(4)?,
+        detail: row.get(5)?,
+        error: row.get(6)?,
+        at: row.get(7)?,
+    })
+}
+
+pub fn add_log(
+    conn: &Connection,
+    workspace_id: &str,
+    host_id: &str,
+    host_name: &str,
+    kind: &str,
+    detail: &str,
+    error: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        &format!("INSERT INTO remote_log ({LOG_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"),
+        params![Uuid::new_v4().to_string(), workspace_id, host_id, host_name, kind, detail, error, now()],
+    )?;
+    // Trimmed on write rather than on a schedule: there is no other moment this table changes, and
+    // a background sweep would be a timer existing solely to delete rows nobody has looked at.
+    conn.execute(
+        "DELETE FROM remote_log WHERE workspace_id = ?1 AND id NOT IN \
+         (SELECT id FROM remote_log WHERE workspace_id = ?1 ORDER BY at DESC LIMIT ?2)",
+        params![workspace_id, LOG_HARD_CAP],
+    )?;
+    Ok(())
+}
+
+pub fn list_logs(
+    conn: &Connection,
+    workspace_id: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<RemoteLogEntry>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {LOG_COLUMNS} FROM remote_log WHERE workspace_id = ?1 ORDER BY at DESC LIMIT ?2"
+    ))?;
+    // Collected into a `Vec` before returning rather than handing the iterator back: it borrows
+    // `statement`, which dies at the end of this function.
+    let rows = statement
+        .query_map(params![workspace_id, limit], map_log)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+pub fn clear_logs(conn: &Connection, workspace_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM remote_log WHERE workspace_id = ?1", params![workspace_id])?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Snippets
 // ---------------------------------------------------------------------------
 
@@ -231,6 +298,16 @@ pub fn create_snippet(
         created_at: timestamp.clone(),
         updated_at: timestamp,
     })
+}
+
+/// One snippet by id — what a host's startup snippet is resolved through.
+pub fn get_snippet(conn: &Connection, id: &str) -> rusqlite::Result<Option<RemoteSnippet>> {
+    conn.query_row(
+        &format!("SELECT {SNIPPET_COLUMNS} FROM remote_snippets WHERE id = ?1"),
+        params![id],
+        map_snippet,
+    )
+    .optional()
 }
 
 pub fn update_snippet(conn: &Connection, snippet: &RemoteSnippet) -> rusqlite::Result<()> {

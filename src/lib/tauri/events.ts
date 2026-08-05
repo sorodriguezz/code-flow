@@ -23,6 +23,20 @@ export const onTerminalOutput = (handler: (event: TerminalOutputEvent) => void) 
 export const onTerminalExit = (handler: (event: { id: string }) => void) =>
   listen<{ id: string }>("terminal:exit", (e) => handler(e.payload));
 
+/** How far along a file transfer is. `total` covers the *whole* transfer, not the current file —
+ *  a folder of two hundred files gets one bar that fills once. */
+export interface RemoteTransferEvent {
+  id: string;
+  name: string;
+  done: number;
+  total: number;
+  file_index: number;
+  files: number;
+}
+
+export const onRemoteTransfer = (handler: (event: RemoteTransferEvent) => void) =>
+  listen<RemoteTransferEvent>("remote:transfer", (e) => handler(e.payload));
+
 export const onRepoFsChanged = (handler: (event: { repo_path: string }) => void) =>
   listen<{ repo_path: string }>("repo:fs-changed", (e) => handler(e.payload));
 

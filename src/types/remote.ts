@@ -62,6 +62,9 @@ export interface ScreenSpec {
   /** A viewer command line to use instead of the platform default. `{host}`, `{port}` and `{user}`
    *  are substituted. */
   viewer: string;
+  /** Draw the screen inside CodeFlow instead of handing it to the platform's viewer. VNC only —
+   *  RDP has no in-webview client, so a Windows host still opens its own. */
+  embedded: boolean;
 }
 
 export interface RemoteHostSpec {
@@ -86,6 +89,17 @@ export interface RemoteHostSpec {
   tags: string[];
   /** Verbatim `-o Key=Value` arguments, for anything the form doesn't model. */
   options: string[];
+  /**
+   * Forward the local SSH agent (`-A`).
+   *
+   * Off by default and worth leaving off: anyone with root on the far host can use the forwarded
+   * socket to authenticate as you, anywhere your keys work. It exists because hopping from a
+   * bastion to a machine behind it needs it.
+   */
+  agent_forward: boolean;
+  /** A snippet from the workspace library to run on connect. Resolved by the backend, which
+   *  splices its body into the remote command rather than typing it in after login. */
+  startup_snippet_id: string;
   /** Run this instead of the login shell. */
   command: string;
   /** `cd` here on connect. */
@@ -120,6 +134,19 @@ export interface RemoteSnippet {
   updated_at: string;
 }
 
+/** One thing that was opened against a host, and how it went. Mirrors `RemoteLogEntry`. */
+export interface RemoteLogEntry {
+  id: string;
+  host_id: string;
+  host_name: string;
+  /** `session` | `forward` | `screen` | `files`. */
+  kind: string;
+  detail: string;
+  /** Empty when it worked. */
+  error: string;
+  at: string;
+}
+
 export interface RemoteWorkspaceTree {
   hosts: RemoteHostRow[];
   snippets: RemoteSnippet[];
@@ -146,7 +173,11 @@ export interface ScreenLaunch {
   target_host: string;
   target_port: number;
   tunnelled: boolean;
+  /** Empty when the screen is drawn in-app. */
   viewer: string;
+  /** Set when embedded: the loopback WebSocket the canvas opens. */
+  ws_url: string | null;
+  ws_token: string | null;
 }
 
 /** One entry in a directory — remote or local, deliberately the same shape so one component draws
@@ -221,9 +252,19 @@ export function defaultHostSpec(): RemoteHostSpec {
     os: "linux",
     tags: [],
     options: [],
+    agent_forward: false,
+    startup_snippet_id: "",
     command: "",
     directory: "",
-    screen: { protocol: "none", host: "", port: 0, user: "", tunnel: false, viewer: "" },
+    screen: {
+      protocol: "none",
+      host: "",
+      port: 0,
+      user: "",
+      tunnel: false,
+      viewer: "",
+      embedded: true,
+    },
     forwards: [],
     notes: "",
   };

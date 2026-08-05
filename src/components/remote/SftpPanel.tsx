@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -9,6 +9,7 @@ import {
   HardDrive,
   Link2,
   Loader2,
+  Pencil,
   RefreshCw,
   Server,
   Trash2,
@@ -20,12 +21,15 @@ import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { onRemoteTransfer, type RemoteTransferEvent } from "../../lib/tauri/events";
+import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import {
   remoteDownloadFile,
   remoteListFiles,
   remoteListLocalFiles,
   remoteMakeDir,
   remoteRemoveFile,
+  remoteRenameFile,
   remoteUploadFile,
 } from "../../lib/tauri/remoteCommands";
 import type { RemoteFile, RemoteListing } from "../../types/remote";
@@ -61,7 +65,47 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
   const [localPick, setLocalPick] = useState<RemoteFile | null>(null);
   const [remotePick, setRemotePick] = useState<RemoteFile | null>(null);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<RemoteTransferEvent | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
+  /** Identifies this pane's transfer, so a late event from a previous one is ignored rather than
+   *  jerking the bar backwards. */
+  const transferId = useRef(0);
+  /**
+   * The entry being dragged and which side it came from.
+   *
+   * Pointer-driven, like every other drag in this app — Tauri's webview swallows HTML5 `dragstart`
+   * entirely (see `lib/pointerDrag`). Held as state rather than a ref because the target pane
+   * highlights while it is set.
+   */
+  const [dragging, setDragging] = useState<{ side: "local" | "remote"; entry: RemoteFile } | null>(
+    null,
+  );
+  const [dropSide, setDropSide] = useState<"local" | "remote" | null>(null);
+
+  // A release anywhere ends it, including over chrome that is not a drop target.
+  useEffect(() => {
+    const cancel = () => {
+      setDragging(null);
+      setDropSide(null);
+      setDragCursor(false);
+    };
+    window.addEventListener("pointerup", cancel);
+    window.addEventListener("pointercancel", cancel);
+    return () => {
+      window.removeEventListener("pointerup", cancel);
+      window.removeEventListener("pointercancel", cancel);
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void onRemoteTransfer((event) => {
+      if (event.id === String(transferId.current)) setProgress(event);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => unlisten?.();
+  }, []);
 
   const loadLocal = useCallback(async (path: string) => {
     try {
@@ -97,29 +141,38 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
     void loadRemote("");
   }, [loadLocal, loadRemote]);
 
-  const transfer = async (direction: "up" | "down") => {
-    const pick = direction === "up" ? localPick : remotePick;
-    if (!pick || pick.is_dir || busy) return;
+  /**
+   * Moves `pick` in `direction`. Directories included — the backend walks them.
+   *
+   * Takes the entry rather than reading the selection, so a drop can transfer what was dragged
+   * even when it is not what is selected.
+   */
+  const transfer = async (direction: "up" | "down", pick: RemoteFile | null) => {
+    if (!pick || busy) return;
+    const id = String(++transferId.current);
     setBusy(true);
+    setProgress(null);
     try {
       if (direction === "up") {
-        await remoteUploadFile(tab.hostId, pick.path, joinRemote(remotePath, pick.name));
+        await remoteUploadFile(id, tab.hostId, pick.path, joinRemote(remotePath, pick.name));
         await loadRemote(remotePath);
       } else {
-        await remoteDownloadFile(tab.hostId, pick.path, joinLocal(localPath, pick.name));
+        await remoteDownloadFile(id, tab.hostId, pick.path, joinLocal(localPath, pick.name));
         await loadLocal(localPath);
       }
     } catch (error) {
       pushErrorToast(String(error));
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   };
 
   if (!host) return <EmptyState icon={Server} title={t("remote.hostGone")} />;
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex min-h-0 flex-1">
       <div style={{ width }} className="flex min-w-0 shrink-0 flex-col">
         <FilePane
           icon={HardDrive}
@@ -130,6 +183,17 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
           onOpen={(entry) => void loadLocal(entry.path)}
           onUp={() => void loadLocal(parentLocal(localPath))}
           onRefresh={() => void loadLocal(localPath)}
+          onDragStart={(entry) => setDragging({ side: "local", entry })}
+          // Only the *other* side is a drop target: dropping a file back where it came from is a
+          // copy onto itself, and the backend would truncate it before reading it.
+          dropTarget={dragging?.side === "remote"}
+          dropActive={dropSide === "local"}
+          onDragOver={() => dragging?.side === "remote" && setDropSide("local")}
+          onDrop={() => {
+            if (dragging?.side === "remote") void transfer("down", dragging.entry);
+            setDragging(null);
+            setDropSide(null);
+          }}
         />
       </div>
 
@@ -146,14 +210,14 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
         <TransferButton
           icon={ArrowRight}
           label={t("remote.sftpUpload")}
-          disabled={!localPick || localPick.is_dir || busy}
-          onClick={() => void transfer("up")}
+          disabled={!localPick || busy}
+          onClick={() => void transfer("up", localPick)}
         />
         <TransferButton
           icon={ArrowLeft}
           label={t("remote.sftpDownload")}
-          disabled={!remotePick || remotePick.is_dir || busy}
-          onClick={() => void transfer("down")}
+          disabled={!remotePick || busy}
+          onClick={() => void transfer("down", remotePick)}
         />
         {busy && <Loader2 size={12} className="animate-spin text-[var(--cf-text-muted)]" />}
       </div>
@@ -184,9 +248,29 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
             onOpen={(entry) => void loadRemote(entry.path)}
             onUp={() => void loadRemote(parentRemote(remotePath))}
             onRefresh={() => void loadRemote(remotePath)}
+            onDragStart={(entry) => setDragging({ side: "remote", entry })}
+            dropTarget={dragging?.side === "local"}
+            dropActive={dropSide === "remote"}
+            onDragOver={() => dragging?.side === "local" && setDropSide("remote")}
+            onDrop={() => {
+              if (dragging?.side === "local") void transfer("up", dragging.entry);
+              setDragging(null);
+              setDropSide(null);
+            }}
             onMakeDir={async (name) => {
               try {
                 await remoteMakeDir(tab.hostId, joinRemote(remotePath, name));
+                await loadRemote(remotePath);
+              } catch (error) {
+                pushErrorToast(String(error));
+              }
+            }}
+            onRename={async (entry, name) => {
+              try {
+                // Renaming *is* moving in SFTP, so the destination is built from the directory the
+                // pane is in rather than from the entry's own path — which is what makes a name
+                // with a `/` in it fail loudly instead of silently relocating the file.
+                await remoteRenameFile(tab.hostId, entry.path, joinRemote(remotePath, name));
                 await loadRemote(remotePath);
               } catch (error) {
                 pushErrorToast(String(error));
@@ -204,6 +288,38 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
             }}
           />
         )}
+      </div>
+      </div>
+
+      {progress && <TransferBar progress={progress} />}
+    </div>
+  );
+}
+
+/**
+ * One bar for the whole transfer.
+ *
+ * The count is only shown for more than one file: on a single file "1 of 1" is noise, and on a
+ * folder it is the only thing that says how much is left to start.
+ */
+function TransferBar({ progress }: { progress: RemoteTransferEvent }) {
+  const percent = progress.total > 0 ? Math.min(100, (progress.done / progress.total) * 100) : 0;
+  return (
+    <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-1.5">
+      <div className="flex items-center gap-2 text-[11px] text-[var(--cf-text-muted)]">
+        <span className="min-w-0 flex-1 truncate font-mono">{progress.name}</span>
+        {progress.files > 1 && (
+          <span className="shrink-0 tabular-nums">
+            {progress.file_index}/{progress.files}
+          </span>
+        )}
+        <span className="shrink-0 tabular-nums">{Math.round(percent)}%</span>
+      </div>
+      <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.08]">
+        <div
+          className="h-full rounded-full bg-[var(--cf-accent)] transition-[width] duration-150"
+          style={{ width: `${percent}%` }}
+        />
       </div>
     </div>
   );
@@ -245,6 +361,12 @@ function FilePane({
   onRefresh,
   onMakeDir,
   onDelete,
+  onRename,
+  onDragStart,
+  dropTarget,
+  dropActive,
+  onDragOver,
+  onDrop,
 }: {
   icon: typeof Server;
   title: string;
@@ -257,11 +379,25 @@ function FilePane({
   /** Only the remote side offers these — the local one has Finder/Explorer, which is better at it. */
   onMakeDir?: (name: string) => void;
   onDelete?: (entry: RemoteFile) => void;
+  onRename?: (entry: RemoteFile, name: string) => void;
+  onDragStart: (entry: RemoteFile) => void;
+  /** Whether a drag is in flight *from the other pane*. */
+  dropTarget: boolean;
+  dropActive: boolean;
+  onDragOver: () => void;
+  onDrop: () => void;
 }) {
   const t = useT();
+  const press = useRef<{ x: number; y: number; entry: RemoteFile } | null>(null);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      onPointerEnter={onDragOver}
+      onPointerUp={onDrop}
+      className={`flex h-full min-h-0 flex-col ${
+        dropActive ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
+      } ${dropTarget && !dropActive ? "ring-1 ring-inset ring-[var(--cf-accent)]/30" : ""}`}
+    >
       <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
         <Icon size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
         <span className="shrink-0 text-[12px] font-medium text-[var(--cf-text)]">{title}</span>
@@ -317,6 +453,18 @@ function FilePane({
               key={entry.path}
               role="button"
               tabIndex={0}
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                press.current = { x: e.clientX, y: e.clientY, entry };
+              }}
+              onPointerMove={(e) => {
+                const start = press.current;
+                if (!start) return;
+                if (Math.hypot(e.clientX - start.x, e.clientY - start.y) < DRAG_THRESHOLD) return;
+                press.current = null;
+                setDragCursor(true);
+                onDragStart(start.entry);
+              }}
               onClick={() => onSelect(entry)}
               onDoubleClick={() => entry.is_dir && onOpen(entry)}
               onKeyDown={(e) => {
@@ -353,19 +501,37 @@ function FilePane({
                   {formatSize(entry.size)}
                 </span>
               )}
-              {onDelete && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(entry);
-                  }}
-                  aria-label={t("common.delete")}
-                  className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:text-[var(--cf-danger)] focus-visible:opacity-100 group-hover:opacity-100"
-                >
-                  <Trash2 size={12} />
-                </button>
-              )}
+              <span className="flex shrink-0 gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                {onRename && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const name = window.prompt(t("remote.sftpRename"), entry.name);
+                      if (name?.trim() && name.trim() !== entry.name) onRename(entry, name.trim());
+                    }}
+                    aria-label={t("remote.sftpRename")}
+                    title={t("remote.sftpRename")}
+                    className="rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                  >
+                    <Pencil size={12} />
+                  </button>
+                )}
+                {onDelete && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDelete(entry);
+                    }}
+                    aria-label={t("common.delete")}
+                    title={t("common.delete")}
+                    className="rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                )}
+              </span>
             </div>
           ))
         )}

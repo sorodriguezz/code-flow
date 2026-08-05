@@ -1,25 +1,23 @@
-//! The remote-desktop half: VNC and RDP, opened in the platform's viewer.
+//! The remote-desktop half: VNC drawn in-app, and everything else handed to the platform's viewer.
 //!
-//! **Why CodeFlow does not draw the screen itself, and what it does instead.**
+//! **What is not here, and why.** RustDesk's own protocol is not integrable: a rendezvous/relay
+//! pair, NAT hole punching, VP8/VP9/AV1, a Flutter client, and AGPL-3.0 — adopting it would mean
+//! operating `hbbs`/`hbbr` and relicensing this app. So the screen is reached with the protocols
+//! the far machine already speaks.
 //!
-//! RustDesk is not integrable. Its protocol is its own (a rendezvous/relay pair, NAT hole punching,
-//! VP8/VP9/AV1), its client is Flutter, and it is AGPL-3.0 — adopting it would mean operating
-//! `hbbs`/`hbbr` and relicensing this app. So the screen is handed to a viewer that already exists
-//! on the machine, and what CodeFlow contributes is the two things having both apps side by side
-//! never gives you:
+//! **Two routes, and which one a host takes.**
 //!
-//! 1. **One inventory.** The screen is a property of the same host row that owns the shell, so
-//!    there is no second address book to keep in step with the first.
-//! 2. **The screen through the SSH tunnel.** This is the real point. A VNC server bound to
-//!    `127.0.0.1:5900` — the only sane way to run one — is unreachable from here and fully
-//!    reachable through the SSH this host already has. With `tunnel` on, opening the screen raises
-//!    a `-L`, points the viewer at loopback, and nothing is exposed to the network in between.
-//!    Termius doesn't do screens; RustDesk doesn't do SSH tunnels.
+//! - **Embedded** (`screen.embedded`, VNC only). RFB has a client that runs in a webview, so the
+//!   pixels land in a tab beside the terminal. It cannot open a TCP socket, so [`super::wsbridge`]
+//!   carries the stream over a loopback WebSocket.
+//! - **The platform's viewer**, for everything else. RDP has no in-webview client worth shipping,
+//!   so a Windows host still opens `mstsc` — and a user who prefers their own viewer keeps it.
 //!
-//! Drawing the screen in-app is a later step and a well-defined one — a WebSocket-to-TCP bridge
-//! (the crate for it is already in the tree) plus an RFB client in the webview. Nothing here would
-//! have to change: this module's job would become picking between an embedded canvas and the
-//! viewer, and the tunnel above is what either needs.
+//! **The tunnel is what makes either worth having**, and it is the same code path for both. A VNC
+//! server bound to `127.0.0.1:5900` — the only sane way to run one — is unreachable from here and
+//! fully reachable through the SSH this host already has. With `tunnel` on, opening the screen
+//! raises a `-L` and points the canvas (or the viewer) at loopback; nothing is exposed to any
+//! network in between. Termius doesn't do screens; RustDesk doesn't do SSH tunnels.
 
 use serde::Serialize;
 
@@ -41,8 +39,13 @@ pub struct ScreenLaunch {
     pub target_port: u16,
     pub tunnelled: bool,
     /// The command line that ran, so a viewer that opens and immediately closes is diagnosable
-    /// without a debugger.
+    /// without a debugger. Empty when the screen is drawn in-app.
     pub viewer: String,
+    /// Set when the screen is embedded: the loopback WebSocket the canvas should open. See
+    /// [`super::wsbridge`].
+    pub ws_url: Option<String>,
+    /// The bridge token, so closing the screen can retire it.
+    pub ws_token: Option<String>,
 }
 
 /// The forward id a host's screen uses.
@@ -95,6 +98,30 @@ pub async fn open(host_id: &str, host: &RemoteHostSpec) -> Result<ScreenLaunch, 
         (target_host.to_string(), target_port)
     };
 
+    // Embedded: no viewer at all. The bridge is published against the same address the viewer
+    // would have been given — which, with `tunnel` on, is the local end of the SSH forward raised
+    // just above. Nothing about the tunnel changes; only who draws the pixels.
+    if screen.embedded && screen.protocol == ScreenProtocol::Vnc {
+        let address = tokio::net::lookup_host((host_arg.as_str(), port_arg))
+            .await
+            .map_err(|e| format!("Couldn't resolve {host_arg}: {e}"))?
+            .next()
+            .ok_or_else(|| format!("{host_arg} resolved to no address"))?;
+        let (ws_url, ws_token) = super::wsbridge::publish(address).await?;
+        remember_token(host_id, &ws_token);
+        return Ok(ScreenLaunch {
+            protocol: screen.protocol,
+            host: host_arg,
+            port: port_arg,
+            target_host: target_host.to_string(),
+            target_port,
+            tunnelled: screen.tunnel,
+            viewer: String::new(),
+            ws_url: Some(ws_url),
+            ws_token: Some(ws_token),
+        });
+    }
+
     let user = screen.user.trim();
     let command = viewer_command(screen.protocol, &screen.viewer, &host_arg, port_arg, user)?;
     spawn(&command).map_err(|e| {
@@ -114,13 +141,40 @@ pub async fn open(host_id: &str, host: &RemoteHostSpec) -> Result<ScreenLaunch, 
         target_port,
         tunnelled: screen.tunnel,
         viewer: command.join(" "),
+        ws_url: None,
+        ws_token: None,
     })
+}
+
+/// The bridge token a host's embedded screen is using, so [`close`] can retire it.
+///
+/// Keyed by host for the same reason the tunnel is: reopening a screen replaces the one before it
+/// rather than stacking a second token that nothing would ever revoke.
+fn tokens() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static TOKENS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    TOKENS.get_or_init(Default::default)
+}
+
+fn remember_token(host_id: &str, token: &str) {
+    if let Ok(mut map) = tokens().lock() {
+        if let Some(previous) = map.insert(host_id.to_string(), token.to_string()) {
+            super::wsbridge::revoke(&previous);
+        }
+    }
 }
 
 /// Closes whatever the screen left running. Only the tunnel: the viewer is the user's own window
 /// and killing it out from under them would be a surprise, not a cleanup.
 pub fn close(host_id: &str) {
     super::forward::close(&tunnel_id(host_id));
+    // And the bridge token, or a closed screen would leave a loopback route to the far host open
+    // for anything on this machine that had the URL.
+    if let Ok(mut map) = tokens().lock() {
+        if let Some(token) = map.remove(host_id) {
+            super::wsbridge::revoke(&token);
+        }
+    }
 }
 
 /// The viewer command line: the user's own if they set one, otherwise the platform's.

@@ -9,6 +9,7 @@ import type {
   RemoteHostSpec,
   RemoteSnippet,
   RemoteListing,
+  RemoteLogEntry,
   RemoteWorkspaceTree,
   SshKey,
   ScreenLaunch,
@@ -107,6 +108,19 @@ export const remoteCloseScreen = (id: string) => invoke<void>("remote_close_scre
 export const remoteParseSshCommand = (line: string) =>
   invoke<ParsedCommand | null>("remote_parse_ssh_command", { line });
 
+/** Round-trip time to the host's SSH port, or `null` when there is no direct route — a jump-hosted
+ *  machine has none from here, and reporting the bastion's number instead would be a lie. */
+export const remotePing = (id: string) => invoke<number | null>("remote_ping", { id });
+
+// ---------- log ----------
+
+/** What was opened against which host, newest first. */
+export const remoteListLogs = (workspaceId: string, limit: number) =>
+  invoke<RemoteLogEntry[]>("remote_list_logs", { workspaceId, limit });
+
+export const remoteClearLogs = (workspaceId: string) =>
+  invoke<void>("remote_clear_logs", { workspaceId });
+
 // ---------- files (SFTP) ----------
 
 /** Lists a directory on the far side. An empty `path` means the login directory. The transport is
@@ -118,11 +132,22 @@ export const remoteListFiles = (hostId: string, path: string) =>
 export const remoteListLocalFiles = (path: string) =>
   invoke<RemoteListing>("remote_list_local_files", { path });
 
-export const remoteDownloadFile = (hostId: string, remotePath: string, localPath: string) =>
-  invoke<void>("remote_download_file", { hostId, remotePath, localPath });
+/** Downloads a file, or a whole directory. `id` comes back on `remote:transfer` events, so a
+ *  progress bar can tell its own from a previous transfer's arriving late. */
+export const remoteDownloadFile = (
+  id: string,
+  hostId: string,
+  remotePath: string,
+  localPath: string,
+) => invoke<void>("remote_download_file", { id, hostId, remotePath, localPath });
 
-export const remoteUploadFile = (hostId: string, localPath: string, remotePath: string) =>
-  invoke<void>("remote_upload_file", { hostId, localPath, remotePath });
+/** Uploads a file, or a whole directory. */
+export const remoteUploadFile = (
+  id: string,
+  hostId: string,
+  localPath: string,
+  remotePath: string,
+) => invoke<void>("remote_upload_file", { id, hostId, localPath, remotePath });
 
 export const remoteMakeDir = (hostId: string, path: string) =>
   invoke<void>("remote_make_dir", { hostId, path });

@@ -26,9 +26,11 @@
 pub mod forward;
 pub mod keys;
 pub mod parse;
+pub mod ping;
 pub mod screen;
 pub mod session;
 pub mod sftp;
+pub mod wsbridge;
 pub mod sshconfig;
 
 use serde::{Deserialize, Serialize};
@@ -164,6 +166,12 @@ pub struct ScreenSpec {
     /// `{user}` are substituted; see [`screen`].
     #[serde(default)]
     pub viewer: String,
+    /// Draw the screen inside CodeFlow instead of handing it to the platform's viewer.
+    ///
+    /// VNC only — RFB has an in-webview client and a WebSocket bridge to reach it ([`wsbridge`]);
+    /// RDP has neither, so a Windows host still opens `mstsc`.
+    #[serde(default)]
+    pub embedded: bool,
 }
 
 /// Everything about a host that isn't a database column: the `spec` blob of a `remote_hosts` row.
@@ -198,6 +206,20 @@ pub struct RemoteHostSpec {
     /// Verbatim `-o Key=Value` arguments, one per entry, for anything not modelled above.
     #[serde(default)]
     pub options: Vec<String>,
+    /// Forward the local SSH agent (`-A`).
+    ///
+    /// Off by default, and worth leaving off: anyone with root on the far host can use the
+    /// forwarded socket to authenticate as you, anywhere your keys work. It is here because
+    /// hopping from a bastion to a machine behind it needs it, which is exactly the case this
+    /// app's jump-host support otherwise leaves half-solved.
+    #[serde(default)]
+    pub agent_forward: bool,
+    /// A snippet from the workspace's library to run on connect.
+    ///
+    /// Resolved by the command layer, not here: this module never touches the database, and the
+    /// spec that reaches [`session`] already has the body spliced into `command`.
+    #[serde(default)]
+    pub startup_snippet_id: String,
     /// Run this instead of the login shell. Empty opens a shell.
     #[serde(default)]
     pub command: String,
@@ -265,6 +287,10 @@ impl RemoteHostSpec {
         if !jump.is_empty() {
             args.push("-J".into());
             args.push(jump.to_string());
+        }
+
+        if self.agent_forward {
+            args.push("-A".into());
         }
 
         if !interactive {
@@ -359,6 +385,14 @@ mod tests {
         s.key_file = "~/.ssh/prod".into();
         let args = s.base_args(true);
         assert!(args.contains(&"IdentitiesOnly=yes".to_string()));
+    }
+
+    #[test]
+    fn agent_forwarding_is_off_unless_asked_for() {
+        assert!(!spec().base_args(true).contains(&"-A".to_string()));
+        let mut s = spec();
+        s.agent_forward = true;
+        assert!(s.base_args(true).contains(&"-A".to_string()));
     }
 
     #[test]

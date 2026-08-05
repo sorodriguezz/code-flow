@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -13,6 +13,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  ScrollText,
   Search,
   Settings2,
   Terminal,
@@ -23,6 +24,8 @@ import {
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
+import { useRemoteDragStore } from "../../state/remoteDragStore";
 import { CARD, HostDot, OsGlyph, ToolbarButton } from "./remoteChrome";
 import {
   disconnectHost,
@@ -91,10 +94,28 @@ function HostList({ onImport }: { onImport: () => void }) {
   const refresh = useRemoteStore((s) => s.refresh);
   const openDetails = useRemoteStore((s) => s.openDetails);
   const openAllForwards = useRemoteStore((s) => s.openAllForwards);
+  const openLog = useRemoteStore((s) => s.openLog);
   const loading = useRemoteStore((s) => s.loading);
   const t = useT();
 
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+
+  // Released over the search box, the toolbar, or off the window entirely: none of those are drop
+  // targets, but every one of them still ends the drag. Without this the body keeps `cf-dragging`
+  // and the next click lands on a tree that thinks it is still being dragged.
+  useEffect(() => {
+    const cancel = () => {
+      if (!useRemoteDragStore.getState().drag && !useRemoteDragStore.getState().origin) return;
+      useRemoteDragStore.getState().end();
+      setDragCursor(false);
+    };
+    window.addEventListener("pointerup", cancel);
+    window.addEventListener("pointercancel", cancel);
+    return () => {
+      window.removeEventListener("pointerup", cancel);
+      window.removeEventListener("pointercancel", cancel);
+    };
+  }, []);
 
   const visible = useMemo(
     () => hosts.filter((host) => hostMatches(host, query, tagFilter)),
@@ -121,6 +142,7 @@ function HostList({ onImport }: { onImport: () => void }) {
           label={t("remote.allForwards")}
           onClick={openAllForwards}
         />
+        <ToolbarButton icon={ScrollText} label={t("remote.log")} onClick={openLog} />
         <ToolbarButton icon={Download} label={t("remote.importSshConfig")} onClick={onImport} />
         <ToolbarButton
           icon={RefreshCw}
@@ -196,6 +218,10 @@ function GroupSection({
     onMenu: (menu: { x: number; y: number; items: MenuItem[] } | null) => void;
 }) {
   const renameGroup = useRemoteStore((s) => s.renameGroup);
+  const hoverDrag = useRemoteDragStore((s) => s.hover);
+  const dragging = useRemoteDragStore((s) => s.drag !== null);
+  const isTarget = useRemoteDragStore((s) => s.drag !== null && s.overGroup === group && s.overHostId === null);
+  const commitDrop = useDrop();
   const [renaming, setRenaming] = useState(false);
   const t = useT();
 
@@ -207,6 +233,10 @@ function GroupSection({
         role="treeitem"
         aria-expanded={!collapsed}
         tabIndex={0}
+        // Dropping on the heading means "into this group, at the end" — the move that has no row to
+        // aim at, and the only way to reach an empty-looking collapsed group.
+        onPointerEnter={() => hoverDrag(null, group)}
+        onPointerUp={() => commitDrop(group, null)}
         onClick={onToggle}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -227,7 +257,13 @@ function GroupSection({
             ],
           });
         }}
-        className="group flex w-full cursor-default items-center gap-1 rounded-md px-1.5 py-[3px] text-left outline-none hover:bg-black/[0.03] focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] dark:hover:bg-white/[0.04]"
+        className={`group flex w-full cursor-default items-center gap-1 rounded-md px-1.5 py-[3px] text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+          isTarget
+            ? "bg-[var(--cf-accent-soft)] ring-1 ring-[var(--cf-accent)]"
+            : dragging
+              ? ""
+              : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        }`}
       >
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
@@ -286,6 +322,13 @@ function HostRow({
   const hasForward = useRemoteStore((s) => s.forwards.some((f) => f.host_id === host.id));
   const t = useT();
 
+  const press = useRemoteDragStore((s) => s.press);
+  const begin = useRemoteDragStore((s) => s.begin);
+  const hoverDrag = useRemoteDragStore((s) => s.hover);
+  const beingDragged = useRemoteDragStore((s) => s.drag?.hostId === host.id);
+  const isTarget = useRemoteDragStore((s) => s.drag !== null && s.overHostId === host.id);
+  const commitDrop = useDrop();
+
   const spec = useMemo(() => parseHostSpec(host), [host]);
   const renaming = renamingHostId === host.id;
   const hasScreen = spec.screen.protocol !== "none";
@@ -341,6 +384,26 @@ function HostRow({
       tabIndex={0}
       title={detail || undefined}
       aria-selected={selected}
+      onPointerDown={(e) => {
+        // Left button only, and never while renaming — the inline input needs the press to place a
+        // caret, not to pick the row up.
+        if (e.button !== 0 || renaming) return;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        press(host.id, host.group_name, e.clientX, e.clientY);
+      }}
+      onPointerMove={(e) => {
+        const origin = useRemoteDragStore.getState().origin;
+        if (!origin || useRemoteDragStore.getState().drag) return;
+        // The threshold is what keeps a click from being a one-pixel drag.
+        if (Math.hypot(e.clientX - origin.x, e.clientY - origin.y) < DRAG_THRESHOLD) return;
+        begin();
+        setDragCursor(true);
+        // Capture is released so the rows the pointer crosses receive their own enter events —
+        // with it held, every move would keep reporting this row.
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }}
+      onPointerEnter={() => hoverDrag(host.id, host.group_name)}
+      onPointerUp={() => commitDrop(host.group_name, host.id)}
       onClick={() => selectHost(host.id)}
       onDoubleClick={() => act(() => void openSession(host.id))}
       onKeyDown={(e) => {
@@ -357,10 +420,12 @@ function HostRow({
         onMenu({ x: e.clientX, y: e.clientY, items: menuItems() });
       }}
       className={`group flex w-full cursor-default items-center gap-1.5 rounded-md py-[3px] pl-5 pr-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
-        selected
-          ? "bg-[var(--cf-accent-soft)]"
-          : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-      }`}
+        beingDragged ? "opacity-40" : ""
+      } ${
+        // A line above the row, not a fill: the drop lands *before* this host, and a filled row
+        // would say "into this one" — which is what a folder tree means by it, and this isn't one.
+        isTarget ? "border-t border-[var(--cf-accent)]" : "border-t border-transparent"
+      } ${selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"}`}
     >
       <HostDot session={hasSession} active={hasForward} color={host.color} />
       <OsGlyph os={spec.os} size={13} />
@@ -431,6 +496,26 @@ function HostRow({
       )}
     </div>
   );
+}
+
+/**
+ * Ends a drag, wherever it was released.
+ *
+ * A hook rather than a handler on each row, because both the rows and the group headings drop, and
+ * the tidy-up (clear the drag, drop the grabbing cursor) has to happen on every release including
+ * the ones that land on nothing.
+ */
+function useDrop() {
+  const dropHost = useRemoteStore((s) => s.dropHost);
+  const endDrag = useRemoteDragStore((s) => s.end);
+
+  return (group: string, beforeHostId: string | null) => {
+    const drag = useRemoteDragStore.getState().drag;
+    endDrag();
+    setDragCursor(false);
+    if (!drag || drag.hostId === beforeHostId) return;
+    void dropHost(drag.hostId, group, beforeHostId);
+  };
 }
 
 function RowAction({

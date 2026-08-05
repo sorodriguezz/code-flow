@@ -15,6 +15,7 @@ import {
   remoteOpenForward,
   remoteOpenScreen,
   remoteOpenSession,
+  remotePing,
   remoteRenameGroup,
   remoteReorderHosts,
   remoteUpdateHost,
@@ -133,6 +134,14 @@ export interface RemoteSftpTab {
   name: string;
 }
 
+/** The connection log. Belongs to no host, like the global forwards tab. */
+export interface RemoteLogTab {
+  id: string;
+  kind: "log";
+  hostId: string;
+  name: string;
+}
+
 /** One command, and which machine it was typed at. */
 export interface RemoteHistoryEntry {
   id: string;
@@ -146,7 +155,8 @@ export type RemoteTab =
   | RemoteForwardsTab
   | RemoteScreenTab
   | RemoteAllForwardsTab
-  | RemoteSftpTab;
+  | RemoteSftpTab
+  | RemoteLogTab;
 
 interface RemoteState {
   workspaceId: string | null;
@@ -185,6 +195,15 @@ interface RemoteState {
    * it as a snippet without retyping it.
    */
   history: RemoteHistoryEntry[];
+  /**
+   * Round-trip time to the selected host, in milliseconds — `null` for "no direct route", which is
+   * the correct answer for anything behind a jump host.
+   *
+   * Only the selected host is measured. Probing the whole estate on every tick would open a TCP
+   * connection per host per poll, which against a firewall that logs them is indistinguishable from
+   * a port scan.
+   */
+  latency: number | null;
   /** Host whose row is in inline-rename mode, or `null`. */
   renamingHostId: string | null;
   /**
@@ -225,6 +244,15 @@ interface RemoteState {
   reorderHosts: (ids: string[]) => Promise<void>;
   renameGroup: (from: string, to: string) => Promise<void>;
   setHostGroup: (id: string, group: string) => Promise<void>;
+  /**
+   * What a drop does: put `hostId` immediately before `beforeHostId` (or last in `group` when that
+   * is null), moving it between groups if the group changed.
+   *
+   * One action rather than two calls from the UI, because the two writes have to agree: a host that
+   * changed group and then got reordered against the *old* group's list would land somewhere
+   * nobody dropped it.
+   */
+  dropHost: (hostId: string, group: string, beforeHostId: string | null) => Promise<void>;
 
   openSession: (hostId: string) => Promise<void>;
   /** Opens a session against a spec that was never saved — the connect bar's one-off. */
@@ -234,6 +262,7 @@ interface RemoteState {
   markExited: (sessionId: string) => void;
   openForwards: (hostId: string) => void;
   openAllForwards: () => void;
+  openLog: () => void;
   openSftp: (hostId: string) => void;
   openScreen: (hostId: string) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
@@ -329,6 +358,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   tagFilter: [],
   hostView: "grid",
   history: [],
+  latency: null,
   tabs: [],
   activeTabId: null,
   renamingHostId: null,
@@ -438,7 +468,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
 
   closeDetails: () => set({ detailsHostId: null }),
 
-  selectHost: (selectedHostId) => set({ selectedHostId }),
+  // The old number goes the moment the host does — a stale latency under a new name is worse
+  // than none, because it looks measured.
+  selectHost: (selectedHostId) => set({ selectedHostId, latency: null }),
 
   createHost: async (name, groupName) => {
     const workspaceId = get().workspaceId;
@@ -563,6 +595,33 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   // Tabs
   // -------------------------------------------------------------------------
 
+  dropHost: async (hostId, group, beforeHostId) => {
+    const hosts = get().hosts;
+    const moving = hosts.find((host) => host.id === hostId);
+    if (!moving || hostId === beforeHostId) return;
+
+    const changedGroup = moving.group_name !== group;
+    // Optimistic and in one `set`, so the row never blinks through an intermediate list — the
+    // reason `reorderProject` does the same.
+    const without = hosts.filter((host) => host.id !== hostId);
+    const moved = { ...moving, group_name: group };
+    const at = beforeHostId ? without.findIndex((host) => host.id === beforeHostId) : -1;
+    const next = at >= 0
+      ? [...without.slice(0, at), moved, ...without.slice(at)]
+      : [...without, moved];
+    set({ hosts: next });
+
+    try {
+      // The group first: `reorder_hosts` writes positions, and doing it the other way round would
+      // leave a window where the row is in the right place under the wrong heading.
+      if (changedGroup) await remoteUpdateHost(moved);
+      await remoteReorderHosts(next.map((host) => host.id));
+    } catch (error) {
+      pushErrorToast(`${translate("remote.saveFailed")}: ${String(error)}`);
+      void get().refresh();
+    }
+  },
+
   openSession: async (hostId) => {
     const host = hostOf(get().hosts, hostId);
     if (!host) return;
@@ -650,6 +709,21 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     };
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
     void get().pollForwards();
+  },
+
+  openLog: () => {
+    const existing = get().tabs.find((tab) => tab.kind === "log");
+    if (existing) {
+      set({ activeTabId: existing.id });
+      return;
+    }
+    const tab: RemoteLogTab = {
+      id: nextTabId(),
+      kind: "log",
+      hostId: "",
+      name: translate("remote.log"),
+    };
+    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id }));
   },
 
   openSftp: (hostId) => {
@@ -741,6 +815,22 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   // -------------------------------------------------------------------------
 
   pollForwards: async () => {
+    // The latency probe rides the same tick rather than getting a timer of its own: they answer
+    // one question between them — "is this working right now" — and two intervals would mean the
+    // status bar's two halves disagreed about when "now" was.
+    const selected = get().selectedHostId;
+    if (selected) {
+      void remotePing(selected)
+        .then((latency) => {
+          // Guarded: the answer can arrive after the user has moved on, and writing it then would
+          // label one host with another's number.
+          if (get().selectedHostId === selected) set({ latency });
+        })
+        .catch(() => {});
+    } else if (get().latency !== null) {
+      set({ latency: null });
+    }
+
     try {
       set({ forwards: await remoteListForwards() });
     } catch {

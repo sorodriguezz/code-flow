@@ -39,6 +39,44 @@ fn load(db: &State<'_, Db>, id: &str) -> Result<(RemoteHostRow, RemoteHostSpec),
     Ok((row, spec))
 }
 
+/// The spec a *session* should run, with the host's startup snippet folded in.
+///
+/// **Why the snippet becomes part of the remote command rather than being typed into the pty.**
+/// Writing it in after connecting means guessing when the far shell is ready to read it, and every
+/// guess is wrong somewhere — a slow login, a banner, a `.bashrc` that takes a second. Splicing it
+/// into the command `ssh` already carries makes it deterministic: the shell runs it because it was
+/// asked to, in the order it was asked.
+///
+/// It is appended to any `command` the host already has rather than replacing it, and the login
+/// shell is what follows, so a host with a startup snippet still lands you at a prompt.
+fn session_spec(db: &State<'_, Db>, id: &str) -> Result<RemoteHostSpec, String> {
+    let (_, mut spec) = load(db, id)?;
+    let snippet_id = spec.startup_snippet_id.trim().to_string();
+    if snippet_id.is_empty() {
+        return Ok(spec);
+    }
+
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let body = remote_queries::get_snippet(&conn, &snippet_id)
+        .map_err(|e| e.to_string())?
+        .map(|snippet| snippet.body);
+    drop(conn);
+
+    // A snippet that has been deleted since it was chosen is not an error worth refusing to
+    // connect over — the session is what the user asked for, and the missing snippet is visible in
+    // the host's own settings.
+    let Some(body) = body.filter(|body| !body.trim().is_empty()) else {
+        return Ok(spec);
+    };
+    let body = body.trim().replace('\n', "; ");
+
+    spec.command = match spec.command.trim() {
+        "" => body,
+        existing => format!("{body}; {existing}"),
+    };
+    Ok(spec)
+}
+
 // ---------------------------------------------------------------------------
 // Inventory
 // ---------------------------------------------------------------------------
@@ -124,6 +162,60 @@ pub fn remote_get_password(id: String) -> Result<Option<String>, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Log
+// ---------------------------------------------------------------------------
+
+/// Records what was opened and how it went.
+///
+/// Best-effort by design: a log write that failed must never be the reason a connection is
+/// reported as failed. Nothing here returns a `Result` to its caller for that reason.
+fn log(db: &State<'_, Db>, row: &RemoteHostRow, kind: &str, detail: &str, error: &str) {
+    if let Ok(conn) = db.0.lock() {
+        let _ = remote_queries::add_log(
+            &conn,
+            &row.workspace_id,
+            &row.id,
+            &row.name,
+            kind,
+            detail,
+            error,
+        );
+    }
+}
+
+/// Records the outcome of an operation and passes it straight through, so the call site stays one
+/// expression instead of a match that exists only to log.
+fn logged<T>(
+    db: &State<'_, Db>,
+    row: &RemoteHostRow,
+    kind: &str,
+    detail: &str,
+    outcome: Result<T, String>,
+) -> Result<T, String> {
+    match &outcome {
+        Ok(_) => log(db, row, kind, detail, ""),
+        Err(error) => log(db, row, kind, detail, error),
+    }
+    outcome
+}
+
+#[tauri::command]
+pub fn remote_list_logs(
+    db: State<Db>,
+    workspace_id: String,
+    limit: i64,
+) -> Result<Vec<crate::db::models::RemoteLogEntry>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    remote_queries::list_logs(&conn, &workspace_id, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remote_clear_logs(db: State<Db>, workspace_id: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    remote_queries::clear_logs(&conn, &workspace_id).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
@@ -136,8 +228,10 @@ pub fn remote_open_session(
     db: State<Db>,
     id: String,
 ) -> Result<String, String> {
-    let (_, spec) = load(&db, &id)?;
-    remotes::session::open(app, &registry, &spec)
+    let (row, _) = load(&db, &id)?;
+    let spec = session_spec(&db, &id)?;
+    let detail = spec.destination();
+    logged(&db, &row, "session", &detail, remotes::session::open(app, &registry, &spec))
 }
 
 /// A one-off session against a spec that hasn't been saved yet — the "Test" button in the host
@@ -162,8 +256,9 @@ pub async fn remote_open_forward(
     host_id: String,
     forward: ForwardSpec,
 ) -> Result<ActiveForward, String> {
-    let (_, spec) = load(&db, &host_id)?;
-    remotes::forward::open(&host_id, &spec, &forward).await
+    let (row, spec) = load(&db, &host_id)?;
+    let detail = format!("{:?} :{}", forward.kind, forward.listen_port);
+    logged(&db, &row, "forward", &detail, remotes::forward::open(&host_id, &spec, &forward).await)
 }
 
 #[tauri::command]
@@ -192,8 +287,9 @@ pub fn remote_list_forwards() -> Vec<ActiveForward> {
 
 #[tauri::command]
 pub async fn remote_open_screen(db: State<'_, Db>, id: String) -> Result<ScreenLaunch, String> {
-    let (_, spec) = load(&db, &id)?;
-    remotes::screen::open(&id, &spec).await
+    let (row, spec) = load(&db, &id)?;
+    let detail = format!("{:?}", spec.screen.protocol);
+    logged(&db, &row, "screen", &detail, remotes::screen::open(&id, &spec).await)
 }
 
 /// Closes the screen's tunnel. Not the viewer — that is the user's own window.
@@ -216,6 +312,14 @@ pub fn remote_list_keys() -> Vec<remotes::keys::SshKey> {
     remotes::keys::list()
 }
 
+/// Round-trip time to a host's SSH port, or `null` when there is no direct route from here.
+/// See [`remotes::ping`] for what that measures and why it is often nothing.
+#[tauri::command]
+pub async fn remote_ping(db: State<'_, Db>, id: String) -> Result<Option<u32>, String> {
+    let (_, spec) = load(&db, &id)?;
+    Ok(remotes::ping::measure(&spec).await)
+}
+
 // ---------------------------------------------------------------------------
 // Files
 // ---------------------------------------------------------------------------
@@ -227,8 +331,15 @@ pub async fn remote_list_files(
     host_id: String,
     path: String,
 ) -> Result<remotes::sftp::RemoteListing, String> {
-    let (_, spec) = load(&db, &host_id)?;
-    remotes::sftp::list(&host_id, &spec, &path).await
+    let (row, spec) = load(&db, &host_id)?;
+    let outcome = remotes::sftp::list(&host_id, &spec, &path).await;
+    // Only the *first* listing of a session is logged — every directory the user clicks into would
+    // otherwise be a row, and the interesting event is whether the file session opened at all.
+    if outcome.is_err() || path.trim().is_empty() {
+        let error = outcome.as_ref().err().cloned().unwrap_or_default();
+        log(&db, &row, "files", &path, &error);
+    }
+    outcome
 }
 
 /// The local half of the dual pane. Takes no host: it is this machine.
@@ -237,26 +348,36 @@ pub fn remote_list_local_files(path: String) -> Result<remotes::sftp::RemoteList
     remotes::sftp::list_local(&path)
 }
 
+/// Downloads a file, or a whole directory when `remote_path` is one.
+///
+/// `id` is the caller's handle on this transfer: `remote:transfer` events carry it back, so a
+/// progress bar can tell its own events from a previous transfer's arriving late.
 #[tauri::command]
 pub async fn remote_download_file(
+    app: AppHandle,
     db: State<'_, Db>,
+    id: String,
     host_id: String,
     remote_path: String,
     local_path: String,
 ) -> Result<(), String> {
     let (_, spec) = load(&db, &host_id)?;
-    remotes::sftp::download(&host_id, &spec, &remote_path, &local_path).await
+    remotes::sftp::download(&app, &id, &host_id, &spec, &remote_path, &local_path).await
 }
 
+/// Uploads a file, or a whole directory when `local_path` is one. See [`remote_download_file`]
+/// for what `id` is.
 #[tauri::command]
 pub async fn remote_upload_file(
+    app: AppHandle,
     db: State<'_, Db>,
+    id: String,
     host_id: String,
     local_path: String,
     remote_path: String,
 ) -> Result<(), String> {
     let (_, spec) = load(&db, &host_id)?;
-    remotes::sftp::upload(&host_id, &spec, &local_path, &remote_path).await
+    remotes::sftp::upload(&app, &id, &host_id, &spec, &local_path, &remote_path).await
 }
 
 #[tauri::command]

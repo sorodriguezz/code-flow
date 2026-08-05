@@ -1,5 +1,13 @@
 import { useEffect, useState } from "react";
-import { FolderOpen, Monitor, MonitorSmartphone, Terminal, Waypoints, X } from "lucide-react";
+import {
+  FolderOpen,
+  Monitor,
+  MonitorSmartphone,
+  ScrollText,
+  Terminal,
+  Waypoints,
+  X,
+} from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { HostExplorer } from "./HostExplorer";
@@ -8,6 +16,7 @@ import { ImportSshConfigModal } from "./ImportSshConfigModal";
 import { ForwardsPanel } from "./ForwardsPanel";
 import { AllForwardsPanel } from "./AllForwardsPanel";
 import { SftpPanel } from "./SftpPanel";
+import { LogPanel } from "./LogPanel";
 import { ScreenPanel } from "./ScreenPanel";
 import { HostGallery } from "./HostGallery";
 import { ConnectBar } from "./ConnectBar";
@@ -19,7 +28,9 @@ import {
   type RemoteTab,
 } from "../../state/remoteStore";
 import { useUiStore } from "../../state/uiStore";
+import { parseHostSpec, type RemoteAuth } from "../../types/remote";
 import { onTerminalExit } from "../../lib/tauri/events";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -137,6 +148,11 @@ export function RemoteView() {
                       <SftpPanel tab={activeTab} />
                     </div>
                   )}
+                  {activeTab?.kind === "log" && (
+                    <div className="absolute inset-0">
+                      <LogPanel />
+                    </div>
+                  )}
                   {activeTab?.kind === "all-forwards" && (
                     <div className="absolute inset-0">
                       <AllForwardsPanel />
@@ -167,6 +183,7 @@ export function RemoteView() {
 function tabIcon(tab: RemoteTab) {
   if (tab.kind === "forwards" || tab.kind === "all-forwards") return Waypoints;
   if (tab.kind === "sftp") return FolderOpen;
+  if (tab.kind === "log") return ScrollText;
   if (tab.kind === "screen") return tab.launch?.protocol === "rdp" ? MonitorSmartphone : Monitor;
   return Terminal;
 }
@@ -246,6 +263,15 @@ function RemoteTabStrip() {
 // Status
 // ---------------------------------------------------------------------------
 
+/** How the selected host authenticates, said in the status bar — the honest half of what the
+ *  original mockup promised, since the other half (`known_hosts ok`) would mean parsing a file this
+ *  app deliberately leaves to `ssh`. */
+const AUTH_LABEL: Record<RemoteAuth, TranslationKey> = {
+  agent: "remote.authAgent",
+  key: "remote.authKey",
+  password: "remote.authPassword",
+};
+
 /**
  * The one line that says what is actually running.
  *
@@ -259,9 +285,17 @@ function RemoteStatusBar() {
     (s) => s.tabs.filter((tab) => tab.kind === "session" && !tab.exited).length,
   );
   const openAllForwards = useRemoteStore((s) => s.openAllForwards);
+  const latency = useRemoteStore((s) => s.latency);
+  const selected = useRemoteStore((s) =>
+    s.hosts.find((host) => host.id === s.selectedHostId) ?? null,
+  );
+  const auth = useRemoteStore((s) => {
+    const host = s.hosts.find((entry) => entry.id === s.selectedHostId);
+    return host ? parseHostSpec(host).auth : null;
+  });
   const t = useT();
 
-  if (sessions === 0 && forwards.length === 0) return null;
+  if (sessions === 0 && forwards.length === 0 && latency === null) return null;
 
   return (
     <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-3 py-1 text-[11px] text-[var(--cf-text-muted)]">
@@ -270,6 +304,23 @@ function RemoteStatusBar() {
           <span aria-hidden className="h-[6px] w-[6px] rounded-full bg-[var(--cf-success)]" />
           {sessions === 1 ? t("remote.statusSessionsOne") : t("remote.statusSessions", { n: String(sessions) })}
         </span>
+      )}
+      {latency !== null && selected && (
+        <>
+          {sessions > 0 && <span aria-hidden>·</span>}
+          <span
+            className="tabular-nums"
+            title={t("remote.latencyHint", { name: selected.name })}
+          >
+            {t("remote.latency", { ms: String(latency) })}
+          </span>
+        </>
+      )}
+      {auth && selected && (
+        <>
+          <span aria-hidden>·</span>
+          <span title={t("remote.statusAuthHint")}>{t(AUTH_LABEL[auth])}</span>
+        </>
       )}
       {sessions > 0 && forwards.length > 0 && <span aria-hidden>·</span>}
       {forwards.length > 0 && (

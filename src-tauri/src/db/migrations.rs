@@ -933,6 +933,26 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             updated_at   TEXT NOT NULL
         );
 
+        -- What was opened against which host, and whether it worked.
+        --
+        -- `host_id` deliberately carries no foreign key, and `host_name` is denormalized, for the
+        -- reason `db_query_history` gives: deleting a host must not erase the record of what was
+        -- done with it, and the name is the only thing left naming it afterwards.
+        CREATE TABLE IF NOT EXISTS remote_log (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL DEFAULT '' REFERENCES workspaces(id) ON DELETE CASCADE,
+            host_id      TEXT NOT NULL DEFAULT '',
+            host_name    TEXT NOT NULL DEFAULT '',
+            -- session | forward | screen | files
+            kind         TEXT NOT NULL,
+            detail       TEXT NOT NULL DEFAULT '',
+            -- Empty when it worked. Kept rather than dropped: a failure is the entry most worth
+            -- finding again, because it is the one about to be diagnosed.
+            error        TEXT NOT NULL DEFAULT '',
+            at           TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_log_time ON remote_log (workspace_id, at DESC);
+
         -- A command to send into a session. Scoped to the workspace, not to a host: the point of a
         -- snippet is that it runs on more than one of them.
         CREATE TABLE IF NOT EXISTS remote_snippets (
@@ -1686,6 +1706,14 @@ mod tests {
             .replace(
                 "ON api_history (workspace_id, created_at DESC)",
                 "ON api_history (created_at DESC)",
+            )
+            // Every index over a `workspace_id` this strips has to be patched too, or it is left
+            // naming a column that no longer exists. `idx_db_history_time` escapes only because
+            // `db_query_history` aligns its column declaration differently and so isn't matched
+            // above — which is luck, not design, and the reason this list has to be maintained.
+            .replace(
+                "ON remote_log (workspace_id, at DESC)",
+                "ON remote_log (at DESC)",
             )
     }
 

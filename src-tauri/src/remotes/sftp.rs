@@ -21,6 +21,7 @@ use std::sync::Arc;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::FileType;
 use serde::Serialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
 use super::RemoteHostSpec;
@@ -182,48 +183,268 @@ pub async fn list(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<Re
     Ok(RemoteListing { path: resolved, entries })
 }
 
-/// Downloads one file to a local path.
+/// How much of a transfer is done, as the UI sees it.
+///
+/// `total` is the *whole* transfer, not the current file: a folder of two hundred files should
+/// show one bar that fills once, and a bar that resets per file is a bar that lies about how long
+/// this will take.
+#[derive(Clone, Serialize)]
+pub struct TransferProgress {
+    /// Which transfer this belongs to — the frontend runs one at a time, but an event that didn't
+    /// say would be indistinguishable from a stale one arriving late.
+    pub id: String,
+    /// The file currently moving, for the label.
+    pub name: String,
+    pub done: u64,
+    pub total: u64,
+    /// Files finished so far, and how many there are. Meaningless for a single file, which is why
+    /// the UI only shows it when `files > 1`.
+    pub file_index: u64,
+    pub files: u64,
+}
+
+/// How often progress is emitted while a file is moving.
+///
+/// Every chunk would be thousands of events for a large file — each one an IPC hop and a React
+/// render — for a bar that cannot move by a visible amount that often.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// The size of one read/write. Large enough that the syscall overhead disappears, small enough that
+/// progress still moves smoothly on a slow link.
+const CHUNK: usize = 64 * 1024;
+
+/// One file or one whole directory, from the far side to here.
+///
+/// Recursive when `remote_path` is a directory: the tree is walked first so `total` is the real
+/// byte count before a single byte moves, which is what makes the bar mean something.
 pub async fn download(
+    app: &tauri::AppHandle,
+    id: &str,
     host_id: &str,
     spec: &RemoteHostSpec,
     remote_path: &str,
     local_path: &str,
 ) -> Result<(), String> {
     let session = session(host_id, spec).await?;
-    let mut source = session
-        .sftp
-        .open(remote_path)
-        .await
-        .map_err(|e| explain(&format!("open {remote_path}"), e))?;
-    let mut target = tokio::fs::File::create(local_path)
-        .await
-        .map_err(|e| format!("Couldn't write {local_path}: {e}"))?;
-    tokio::io::copy(&mut source, &mut target)
-        .await
-        .map_err(|e| format!("Couldn't copy {remote_path}: {e}"))?;
+    let files = plan_download(&session, remote_path, local_path).await?;
+    let total: u64 = files.iter().map(|file| file.size).sum();
+    let mut done = 0u64;
+
+    for (index, file) in files.iter().enumerate() {
+        if let Some(parent) = std::path::Path::new(&file.local).parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Couldn't create {}: {e}", parent.display()))?;
+        }
+        let mut source = session
+            .sftp
+            .open(&file.remote)
+            .await
+            .map_err(|e| explain(&format!("open {}", file.remote), e))?;
+        let mut target = tokio::fs::File::create(&file.local)
+            .await
+            .map_err(|e| format!("Couldn't write {}: {e}", file.local))?;
+        pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
+            .await?;
+    }
     Ok(())
 }
 
-/// Uploads one local file.
+/// One file or one whole directory, from here to the far side.
 pub async fn upload(
+    app: &tauri::AppHandle,
+    id: &str,
     host_id: &str,
     spec: &RemoteHostSpec,
     local_path: &str,
     remote_path: &str,
 ) -> Result<(), String> {
     let session = session(host_id, spec).await?;
-    let mut source = tokio::fs::File::open(local_path)
-        .await
-        .map_err(|e| format!("Couldn't read {local_path}: {e}"))?;
-    let mut target = session
-        .sftp
-        .create(remote_path)
-        .await
-        .map_err(|e| explain(&format!("create {remote_path}"), e))?;
-    tokio::io::copy(&mut source, &mut target)
-        .await
-        .map_err(|e| format!("Couldn't copy to {remote_path}: {e}"))?;
+    let files = plan_upload(local_path, remote_path)?;
+    let total: u64 = files.iter().map(|file| file.size).sum();
+    let mut done = 0u64;
+
+    for (index, file) in files.iter().enumerate() {
+        // Created before the file that goes in it, and a directory that already exists is not an
+        // error — an interrupted transfer resumed by re-running it must not fail on its own
+        // leftovers.
+        if let Some(parent) = file.remote.rsplit_once('/').map(|(head, _)| head) {
+            if !parent.is_empty() {
+                let _ = session.sftp.create_dir(parent).await;
+            }
+        }
+        let mut source = tokio::fs::File::open(&file.local)
+            .await
+            .map_err(|e| format!("Couldn't read {}: {e}", file.local))?;
+        let mut target = session
+            .sftp
+            .create(&file.remote)
+            .await
+            .map_err(|e| explain(&format!("create {}", file.remote), e))?;
+        pump(app, id, &mut source, &mut target, &file.name, &mut done, total, index as u64, files.len() as u64)
+            .await?;
+        // Explicit: `create` returns a handle whose writes are only guaranteed flushed on close,
+        // and dropping it silently would make a truncated upload look like a finished one.
+        target.shutdown().await.map_err(|e| format!("Couldn't finish {}: {e}", file.remote))?;
+    }
     Ok(())
+}
+
+/// One file's worth of a transfer.
+struct Planned {
+    remote: String,
+    local: String,
+    name: String,
+    size: u64,
+}
+
+/// Copies one stream to another, emitting progress on a timer rather than per chunk.
+#[allow(clippy::too_many_arguments)]
+async fn pump<R, W>(
+    app: &tauri::AppHandle,
+    id: &str,
+    source: &mut R,
+    target: &mut W,
+    name: &str,
+    done: &mut u64,
+    total: u64,
+    file_index: u64,
+    files: u64,
+) -> Result<(), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    use tauri::Emitter;
+    let mut buffer = vec![0u8; CHUNK];
+    let mut last = std::time::Instant::now();
+    loop {
+        let read = source.read(&mut buffer).await.map_err(|e| format!("Couldn't read {name}: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        target
+            .write_all(&buffer[..read])
+            .await
+            .map_err(|e| format!("Couldn't write {name}: {e}"))?;
+        *done += read as u64;
+        if last.elapsed() >= PROGRESS_INTERVAL {
+            last = std::time::Instant::now();
+            let _ = app.emit(
+                "remote:transfer",
+                TransferProgress {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    done: *done,
+                    total,
+                    file_index,
+                    files,
+                },
+            );
+        }
+    }
+    // A final event on every file, so the bar reaches the end rather than stopping wherever the
+    // last tick happened to land.
+    let _ = app.emit(
+        "remote:transfer",
+        TransferProgress {
+            id: id.to_string(),
+            name: name.to_string(),
+            done: *done,
+            total,
+            file_index: file_index + 1,
+            files,
+        },
+    );
+    Ok(())
+}
+
+/// Walks the far side, breadth-first, collecting every file under `remote_path`.
+///
+/// Iterative rather than recursive: `async fn` recursion needs boxing, and a deep tree would be a
+/// stack of futures. Symlinks are copied as whatever they point at and never followed as
+/// directories — which is what stops a link back to `/` from becoming an infinite walk.
+async fn plan_download(
+    session: &Session,
+    remote_path: &str,
+    local_path: &str,
+) -> Result<Vec<Planned>, String> {
+    let resolved = session
+        .sftp
+        .canonicalize(remote_path)
+        .await
+        .map_err(|e| explain(&format!("read {remote_path}"), e))?;
+    let metadata = session
+        .sftp
+        .metadata(&resolved)
+        .await
+        .map_err(|e| explain(&format!("read {resolved}"), e))?;
+
+    if metadata.file_type() != FileType::Dir {
+        let name = resolved.rsplit('/').next().unwrap_or(&resolved).to_string();
+        return Ok(vec![Planned {
+            remote: resolved,
+            local: local_path.to_string(),
+            name,
+            size: metadata.size.unwrap_or(0),
+        }]);
+    }
+
+    let mut planned = Vec::new();
+    let mut queue = vec![(resolved.clone(), local_path.to_string())];
+    while let Some((dir, into)) = queue.pop() {
+        let entries = session
+            .sftp
+            .read_dir(&dir)
+            .await
+            .map_err(|e| explain(&format!("read {dir}"), e))?;
+        for entry in entries {
+            let name = entry.file_name();
+            let remote = join(&dir, &name);
+            let local = format!("{into}{}{name}", std::path::MAIN_SEPARATOR);
+            if entry.file_type() == FileType::Dir {
+                queue.push((remote, local));
+            } else {
+                planned.push(Planned { remote, local, name, size: entry.metadata().size.unwrap_or(0) });
+            }
+        }
+    }
+    Ok(planned)
+}
+
+/// The same walk on this side. Synchronous: `std::fs` is fast enough locally that making it async
+/// buys nothing but a spawn_blocking.
+fn plan_upload(local_path: &str, remote_path: &str) -> Result<Vec<Planned>, String> {
+    let path = std::path::Path::new(local_path);
+    let metadata = std::fs::metadata(path).map_err(|e| format!("Couldn't read {local_path}: {e}"))?;
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+
+    if !metadata.is_dir() {
+        return Ok(vec![Planned {
+            remote: remote_path.to_string(),
+            local: local_path.to_string(),
+            name,
+            size: metadata.len(),
+        }]);
+    }
+
+    let mut planned = Vec::new();
+    let mut queue = vec![(path.to_path_buf(), remote_path.to_string())];
+    while let Some((dir, into)) = queue.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let Ok(metadata) = entry.metadata() else { continue };
+            let name = entry.file_name().to_string_lossy().to_string();
+            let remote = join(&into, &name);
+            let local = entry.path().to_string_lossy().to_string();
+            if metadata.is_dir() {
+                queue.push((entry.path(), remote));
+            } else {
+                planned.push(Planned { remote, local, name, size: metadata.len() });
+            }
+        }
+    }
+    Ok(planned)
 }
 
 pub async fn make_dir(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<(), String> {

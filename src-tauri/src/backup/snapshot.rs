@@ -81,6 +81,7 @@ pub const TABLES: &[&str] = &[
     // the OS store, and travel or not with the `credentials` switch like every other secret.
     "remote_hosts",
     "remote_snippets",
+    "remote_log",
     // History, activity and agent work. Last because every one of them hangs off a project or a
     // workspace, and `agent_chain_steps` hangs off `agent_chains` in turn.
     "activity_log",
@@ -145,7 +146,7 @@ pub const GROUPS: &[Group] = &[
         ],
     },
     Group { key: "databases", tables: &["db_connections", "db_consoles"] },
-    Group { key: "remote", tables: &["remote_hosts", "remote_snippets"] },
+    Group { key: "remote", tables: &["remote_hosts", "remote_snippets", "remote_log"] },
     Group {
         key: "authored",
         tables: &["story_batches", "story_drafts", "doc_pages", "work_item_reviews"],

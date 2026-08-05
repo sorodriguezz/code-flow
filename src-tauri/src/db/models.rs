@@ -765,6 +765,20 @@ pub struct RemoteSnippet {
     pub updated_at: String,
 }
 
+/// One thing that was opened against a host, and how it went.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteLogEntry {
+    pub id: String,
+    pub workspace_id: String,
+    pub host_id: String,
+    pub host_name: String,
+    pub kind: String,
+    pub detail: String,
+    /// Empty when it worked.
+    pub error: String,
+    pub at: String,
+}
+
 /// Everything the Remote workspace needs on load, in one round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteWorkspaceTree {

@@ -1,6 +1,9 @@
+import { useEffect, useState } from "react";
 import { AlertTriangle, ExternalLink, Loader2, Monitor, RefreshCw, ShieldCheck } from "lucide-react";
 import { Pill } from "./remoteChrome";
+import { VncCanvas } from "./VncCanvas";
 import { useRemoteStore, type RemoteScreenTab } from "../../state/remoteStore";
+import { remoteGetPassword } from "../../lib/tauri/remoteCommands";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -18,7 +21,22 @@ import { useT } from "../../state/languageStore";
  */
 export function ScreenPanel({ tab }: { tab: RemoteScreenTab }) {
   const openScreen = useRemoteStore((s) => s.openScreen);
+  const [viewOnly, setViewOnly] = useState(false);
+  const [screenPassword, setScreenPassword] = useState("");
   const t = useT();
+
+  // The VNC password is the host's stored credential — a different secret from the SSH one in
+  // principle, but this app keeps one per host, and a server that wants a password is the case
+  // where that one is what you saved.
+  useEffect(() => {
+    let cancelled = false;
+    void remoteGetPassword(tab.hostId)
+      .then((value) => !cancelled && setScreenPassword(value ?? ""))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [tab.hostId]);
 
   if (tab.opening) {
     return (
@@ -51,6 +69,52 @@ export function ScreenPanel({ tab }: { tab: RemoteScreenTab }) {
 
   const launch = tab.launch;
   if (!launch) return null;
+
+  // Embedded: the pixels are ours to draw, so the panel becomes a canvas with a thin bar over it
+  // rather than a page describing a window that opened somewhere else.
+  if (launch.ws_url) {
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1">
+          <Monitor size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
+          <span className="shrink-0 text-[12px] font-medium text-[var(--cf-text)]">{tab.name}</span>
+          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
+            {launch.target_host}:{launch.target_port}
+            {launch.tunnelled && ` · ${t("remote.screenViaTunnel")}`}
+          </span>
+          <label className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+            <input
+              type="checkbox"
+              checked={viewOnly}
+              onChange={(e) => setViewOnly(e.target.checked)}
+              className="h-3 w-3 accent-[var(--cf-accent)]"
+            />
+            {t("remote.screenViewOnly")}
+          </label>
+          <button
+            type="button"
+            onClick={() => void openScreen(tab.hostId)}
+            title={t("remote.screenReopen")}
+            aria-label={t("remote.screenReopen")}
+            className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+          >
+            <RefreshCw size={12} />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1">
+          <VncCanvas
+            // Keyed on the URL: a reconnect mints a new bridge token, and the canvas must be torn
+            // down and rebuilt rather than pointed at a route that no longer exists.
+            key={launch.ws_url}
+            url={launch.ws_url}
+            password={screenPassword}
+            viewOnly={viewOnly}
+            onDisconnect={() => {}}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-full flex-col items-center justify-center gap-4 p-8 text-center">

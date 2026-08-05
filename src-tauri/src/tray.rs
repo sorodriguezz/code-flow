@@ -33,13 +33,53 @@ pub fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// The tray's labels, in the language the app is set to.
+///
+/// Read from the database at startup rather than translated on the frontend, because the tray is
+/// built before any window exists and lives outside the webview entirely — `useT` is not reachable
+/// from here and never will be.
+///
+/// **It does not follow a language change until the next launch**, and that is the trade this
+/// makes: rebuilding the tray on every settings write would mean tearing down and re-registering
+/// the icon, which on Windows briefly removes it from the notification area. Three strings that
+/// update on restart is the better side of that.
+struct TrayLabels {
+    show: &'static str,
+    restart: &'static str,
+    quit: &'static str,
+}
+
+fn labels(app: &AppHandle) -> TrayLabels {
+    let spanish = app
+        .try_state::<crate::db::Db>()
+        .and_then(|db| db.0.lock().ok().and_then(|conn| {
+            crate::db::queries::get_setting(&conn, "app_language").ok().flatten()
+        }))
+        .is_some_and(|language| language.starts_with("es"));
+
+    if spanish {
+        TrayLabels {
+            show: "Mostrar CodeFlow",
+            restart: "Reiniciar CodeFlow",
+            quit: "Salir de CodeFlow",
+        }
+    } else {
+        TrayLabels {
+            show: "Show CodeFlow",
+            restart: "Restart CodeFlow",
+            quit: "Quit CodeFlow",
+        }
+    }
+}
+
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
-    let show_item = MenuItem::with_id(app, "show", "Show CodeFlow", true, None::<&str>)?;
+    let labels = labels(app);
+    let show_item = MenuItem::with_id(app, "show", labels.show, true, None::<&str>)?;
     // Between "show" and "quit" on purpose: it is the thing to try when "show" produced a window
     // that is there but wrong — a wedged webview, a view that stopped repainting — and the only
     // alternative left is quitting and finding the app again.
-    let restart_item = MenuItem::with_id(app, "restart", "Restart CodeFlow", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit CodeFlow", true, None::<&str>)?;
+    let restart_item = MenuItem::with_id(app, "restart", labels.restart, true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", labels.quit, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &restart_item, &quit_item])?;
 
     TrayIconBuilder::with_id("main-tray")
