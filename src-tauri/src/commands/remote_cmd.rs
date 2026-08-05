@@ -125,6 +125,18 @@ pub fn remote_reorder_hosts(db: State<Db>, ids: Vec<String>) -> Result<(), Strin
     remote_queries::reorder_hosts(&conn, &ids).map_err(|e| e.to_string())
 }
 
+/// Creates an empty group. Idempotent — the name it returns is the group that now exists, whether
+/// this call made it or found it.
+#[tauri::command]
+pub fn remote_create_group(
+    db: State<Db>,
+    workspace_id: String,
+    name: String,
+) -> Result<crate::db::models::RemoteGroupRow, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    remote_queries::create_group(&conn, &workspace_id, name.trim()).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn remote_rename_group(
     db: State<Db>,
@@ -133,7 +145,19 @@ pub fn remote_rename_group(
     to: String,
 ) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    remote_queries::rename_group(&conn, &workspace_id, &from, &to).map_err(|e| e.to_string())
+    remote_queries::rename_group(&conn, &workspace_id, &from, to.trim()).map_err(|e| e.to_string())
+}
+
+/// Deletes a group. Its hosts move to ungrouped — see [`remote_queries::delete_group`] for why they
+/// are never deleted with it.
+#[tauri::command]
+pub fn remote_delete_group(
+    db: State<Db>,
+    workspace_id: String,
+    name: String,
+) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    remote_queries::delete_group(&conn, &workspace_id, &name).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -330,9 +354,9 @@ pub async fn remote_list_files(
     db: State<'_, Db>,
     host_id: String,
     path: String,
-) -> Result<remotes::sftp::RemoteListing, String> {
+) -> Result<remotes::files::RemoteListing, String> {
     let (row, spec) = load(&db, &host_id)?;
-    let outcome = remotes::sftp::list(&host_id, &spec, &path).await;
+    let outcome = remotes::files::list(&host_id, &spec, &path).await;
     // Only the *first* listing of a session is logged — every directory the user clicks into would
     // otherwise be a row, and the interesting event is whether the file session opened at all.
     if outcome.is_err() || path.trim().is_empty() {
@@ -344,8 +368,8 @@ pub async fn remote_list_files(
 
 /// The local half of the dual pane. Takes no host: it is this machine.
 #[tauri::command]
-pub fn remote_list_local_files(path: String) -> Result<remotes::sftp::RemoteListing, String> {
-    remotes::sftp::list_local(&path)
+pub fn remote_list_local_files(path: String) -> Result<remotes::files::RemoteListing, String> {
+    remotes::files::list_local(&path)
 }
 
 /// Downloads a file, or a whole directory when `remote_path` is one.
@@ -362,7 +386,7 @@ pub async fn remote_download_file(
     local_path: String,
 ) -> Result<(), String> {
     let (_, spec) = load(&db, &host_id)?;
-    remotes::sftp::download(&app, &id, &host_id, &spec, &remote_path, &local_path).await
+    remotes::files::download(&app, &id, &host_id, &spec, &remote_path, &local_path).await
 }
 
 /// Uploads a file, or a whole directory when `local_path` is one. See [`remote_download_file`]
@@ -377,7 +401,7 @@ pub async fn remote_upload_file(
     remote_path: String,
 ) -> Result<(), String> {
     let (_, spec) = load(&db, &host_id)?;
-    remotes::sftp::upload(&app, &id, &host_id, &spec, &local_path, &remote_path).await
+    remotes::files::upload(&app, &id, &host_id, &spec, &local_path, &remote_path).await
 }
 
 #[tauri::command]
@@ -387,10 +411,10 @@ pub async fn remote_make_dir(
     path: String,
 ) -> Result<(), String> {
     let (_, spec) = load(&db, &host_id)?;
-    remotes::sftp::make_dir(&host_id, &spec, &path).await
+    remotes::files::make_dir(&host_id, &spec, &path).await
 }
 
-/// Deletes one file or one empty directory. Never recursive — see [`remotes::sftp::remove`].
+/// Deletes one file or one empty directory. Never recursive — see [`remotes::files::remove`].
 #[tauri::command]
 pub async fn remote_remove_file(
     db: State<'_, Db>,
@@ -399,7 +423,7 @@ pub async fn remote_remove_file(
     is_dir: bool,
 ) -> Result<(), String> {
     let (_, spec) = load(&db, &host_id)?;
-    remotes::sftp::remove(&host_id, &spec, &path, is_dir).await
+    remotes::files::remove(&host_id, &spec, &path, is_dir).await
 }
 
 #[tauri::command]
@@ -410,12 +434,12 @@ pub async fn remote_rename_file(
     to: String,
 ) -> Result<(), String> {
     let (_, spec) = load(&db, &host_id)?;
-    remotes::sftp::rename(&host_id, &spec, &from, &to).await
+    remotes::files::rename(&host_id, &spec, &from, &to).await
 }
 
 #[tauri::command]
 pub async fn remote_close_files(host_id: String) {
-    remotes::sftp::close(&host_id).await;
+    remotes::files::close(&host_id).await;
 }
 
 // ---------------------------------------------------------------------------

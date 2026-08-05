@@ -79,6 +79,7 @@ pub const TABLES: &[&str] = &[
     "db_query_history",
     // The Remote workspace. The host rows hold no credential — passwords and passphrases are in
     // the OS store, and travel or not with the `credentials` switch like every other secret.
+    "remote_groups",
     "remote_hosts",
     "remote_snippets",
     "remote_log",
@@ -146,7 +147,10 @@ pub const GROUPS: &[Group] = &[
         ],
     },
     Group { key: "databases", tables: &["db_connections", "db_consoles"] },
-    Group { key: "remote", tables: &["remote_hosts", "remote_snippets", "remote_log"] },
+    Group {
+        key: "remote",
+        tables: &["remote_groups", "remote_hosts", "remote_snippets", "remote_log"],
+    },
     Group {
         key: "authored",
         tables: &["story_batches", "story_drafts", "doc_pages", "work_item_reviews"],

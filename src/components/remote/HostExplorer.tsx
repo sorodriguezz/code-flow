@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -6,6 +6,7 @@ import {
   Download,
   Bookmark,
   FolderOpen,
+  FolderPlus,
   FolderTree,
   History,
   Monitor,
@@ -26,7 +27,7 @@ import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRemoteDragStore } from "../../state/remoteDragStore";
-import { CARD, HostDot, OsGlyph, ToolbarButton } from "./remoteChrome";
+import { CARD, HostDot, KindGlyph, OsGlyph, ToolbarButton } from "./remoteChrome";
 import {
   disconnectHost,
   groupHosts,
@@ -37,7 +38,13 @@ import {
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
-import { describeHost, hasAddress, parseHostSpec, type RemoteHostRow } from "../../types/remote";
+import {
+  capabilities,
+  describeHost,
+  hasAddress,
+  parseHostSpec,
+  type RemoteHostRow,
+} from "../../types/remote";
 
 const WIDTH_MIN = 200;
 const WIDTH_MAX = 480;
@@ -91,6 +98,8 @@ function HostList({ onImport }: { onImport: () => void }) {
   const tagFilter = useRemoteStore((s) => s.tagFilter);
   const toggleGroup = useRemoteStore((s) => s.toggleGroup);
   const createHost = useRemoteStore((s) => s.createHost);
+  const folders = useRemoteStore((s) => s.groups);
+  const createGroup = useRemoteStore((s) => s.createGroup);
   const refresh = useRemoteStore((s) => s.refresh);
   const openDetails = useRemoteStore((s) => s.openDetails);
   const openAllForwards = useRemoteStore((s) => s.openAllForwards);
@@ -99,6 +108,7 @@ function HostList({ onImport }: { onImport: () => void }) {
   const t = useT();
 
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [creatingGroup, setCreatingGroup] = useState(false);
 
   // Released over the search box, the toolbar, or off the window entirely: none of those are drop
   // targets, but every one of them still ends the drag. Without this the body keeps `cf-dragging`
@@ -121,14 +131,34 @@ function HostList({ onImport }: { onImport: () => void }) {
     () => hosts.filter((host) => hostMatches(host, query, tagFilter)),
     [hosts, query, tagFilter],
   );
-  const groups = useMemo(() => groupHosts(visible), [visible]);
+  // The folder rows are passed unfiltered on purpose: a group is hidden by a search only when it
+  // has no matching hosts, and an *empty* group has none either way. Dropping it while filtering
+  // would make the user's own folder vanish the moment they typed.
+  const groups = useMemo(
+    () => groupHosts(visible, query.trim() || tagFilter.length > 0 ? [] : folders),
+    [visible, folders, query, tagFilter],
+  );
 
-  const addHost = async () => {
-    const row = await createHost(t("remote.newHostName"), "");
+  const addHost = async (group = "") => {
+    const row = await createHost(t("remote.newHostName"), group);
     // Straight into the editor rather than into inline rename: a new host needs an address before
     // it is anything, and the editor's first field is the name anyway — so this is one step that
     // asks for everything instead of two that ask for the least useful part first.
     if (row) openDetails(row.id);
+  };
+
+  /** The tree's own background menu — the only place "New group" can live, since an empty tree has
+   *  no group heading to right-click. */
+  const treeMenu = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      items: [
+        { label: t("remote.newHost"), icon: Plus, onClick: () => void addHost() },
+        { label: t("remote.newGroup"), icon: FolderPlus, onClick: () => setCreatingGroup(true) },
+      ],
+    });
   };
 
   return (
@@ -175,8 +205,25 @@ function HostList({ onImport }: { onImport: () => void }) {
         </div>
       </div>
 
-      <div role="tree" className="min-h-0 flex-1 overflow-y-auto px-1 pb-2">
-        {groups.length === 0 ? (
+      <div
+        role="tree"
+        onContextMenu={treeMenu}
+        className="min-h-0 flex-1 overflow-y-auto px-1 pb-2"
+      >
+        {creatingGroup && (
+          <div className="flex items-center gap-1 px-1.5 py-[3px]">
+            <FolderPlus size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+            <InlineInput
+              value=""
+              onCommit={(value) => {
+                setCreatingGroup(false);
+                if (value.trim()) void createGroup(value);
+              }}
+              onCancel={() => setCreatingGroup(false)}
+            />
+          </div>
+        )}
+        {groups.length === 0 && !creatingGroup ? (
           <p className="px-3 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">
             {hosts.length === 0 ? t("remote.noHostsYet") : t("remote.noHostsMatch")}
           </p>
@@ -190,7 +237,8 @@ function HostList({ onImport }: { onImport: () => void }) {
               // collapsed is a search that lies about what it found.
               collapsed={!query.trim() && tagFilter.length === 0 && collapsed.includes(group)}
               onToggle={() => toggleGroup(group)}
-             
+              onAddHost={() => void addHost(group)}
+              onNewGroup={() => setCreatingGroup(true)}
               onMenu={setMenu}
             />
           ))
@@ -209,15 +257,20 @@ function GroupSection({
   hosts,
   collapsed,
   onToggle,
+  onAddHost,
+  onNewGroup,
   onMenu,
 }: {
   group: string;
   hosts: RemoteHostRow[];
   collapsed: boolean;
   onToggle: () => void;
-    onMenu: (menu: { x: number; y: number; items: MenuItem[] } | null) => void;
+  onAddHost: () => void;
+  onNewGroup: () => void;
+  onMenu: (menu: { x: number; y: number; items: MenuItem[] } | null) => void;
 }) {
   const renameGroup = useRemoteStore((s) => s.renameGroup);
+  const deleteGroup = useRemoteStore((s) => s.deleteGroup);
   const hoverDrag = useRemoteDragStore((s) => s.hover);
   const dragging = useRemoteDragStore((s) => s.drag !== null);
   const isTarget = useRemoteDragStore((s) => s.drag !== null && s.overGroup === group && s.overHostId === null);
@@ -226,6 +279,23 @@ function GroupSection({
   const t = useT();
 
   const label = group || t("remote.ungrouped");
+
+  /**
+   * Deleting a folder, with the one thing worth confirming spelled out.
+   *
+   * The hosts survive — the backend moves them to ungrouped and never deletes them — so the prompt
+   * says exactly that rather than the generic "are you sure": the fear this dialog exists to
+   * answer is "am I about to lose my machines", and the answer is no.
+   */
+  const removeGroup = async () => {
+    const message =
+      hosts.length > 0
+        ? t("remote.deleteGroupWithHosts")
+            .replace("{name}", label)
+            .replace("{count}", String(hosts.length))
+        : t("remote.deleteGroupConfirm").replace("{name}", label);
+    if (await confirmAction(message, true, t("remote.delete"))) void deleteGroup(group);
+  };
 
   return (
     <div className="py-0.5">
@@ -246,14 +316,32 @@ function GroupSection({
         }}
         onContextMenu={(e) => {
           e.preventDefault();
-          // Renaming the ungrouped bucket would mean writing a literal group name onto every host
-          // that deliberately has none, so it isn't offered.
-          if (group === UNGROUPED) return;
+          e.stopPropagation();
           onMenu({
             x: e.clientX,
             y: e.clientY,
             items: [
-              { label: t("remote.renameGroup"), icon: Pencil, onClick: () => setRenaming(true) },
+              { label: t("remote.newHostHere"), icon: Plus, onClick: onAddHost },
+              { label: t("remote.newGroup"), icon: FolderPlus, onClick: onNewGroup },
+              // Renaming or deleting the ungrouped bucket is meaningless: it is the absence of a
+              // group, so renaming it would write a literal name onto every host that deliberately
+              // has none, and deleting it would have nothing to delete.
+              ...(group === UNGROUPED
+                ? []
+                : [
+                    {
+                      label: t("remote.renameGroup"),
+                      icon: Pencil,
+                      onClick: () => setRenaming(true),
+                      separated: true,
+                    },
+                    {
+                      label: t("remote.deleteGroup"),
+                      icon: Trash2,
+                      danger: true,
+                      onClick: () => void removeGroup(),
+                    },
+                  ]),
             ],
           });
         }}
@@ -331,7 +419,12 @@ function HostRow({
 
   const spec = useMemo(() => parseHostSpec(host), [host]);
   const renaming = renamingHostId === host.id;
-  const hasScreen = spec.screen.protocol !== "none";
+  // What this host can be asked to do, by kind. An FTP host has files and nothing else, and a
+  // jailed SFTP account has no shell — so the menu doesn't offer either. The backend refuses the
+  // same three independently (`RemoteHostSpec::require_shell` and friends); this is what keeps the
+  // user from ever meeting that refusal.
+  const can = capabilities(spec);
+  const hasScreen = can.screen && spec.screen.protocol !== "none";
   const incomplete = !hasAddress(spec);
 
   /**
@@ -343,10 +436,24 @@ function HostRow({
    */
   const act = (run: () => void) => (incomplete ? openDetails(host.id) : run());
 
+  /**
+   * What double-click and Enter do: the shell where there is one, the file browser otherwise.
+   *
+   * Not "open a shell and let it fail" — on a file-only host there is no shell to open, and the
+   * row's *point* is the files. Same gesture, same meaning ("show me this machine"), different
+   * thing on the other side.
+   */
+  const openPrimary = () =>
+    act(() => (can.shell ? void openSession(host.id) : openSftp(host.id)));
+
   const menuItems = (): MenuItem[] => [
-    { label: t("remote.openShell"), icon: Terminal, onClick: () => act(() => void openSession(host.id)) },
+    ...(can.shell
+      ? [{ label: t("remote.openShell"), icon: Terminal, onClick: () => act(() => void openSession(host.id)) }]
+      : []),
     { label: t("remote.files"), icon: FolderOpen, onClick: () => act(() => openSftp(host.id)) },
-    { label: t("remote.portForwards"), icon: Waypoints, onClick: () => act(() => openForwards(host.id)) },
+    ...(can.forwards
+      ? [{ label: t("remote.portForwards"), icon: Waypoints, onClick: () => act(() => openForwards(host.id)) }]
+      : []),
     ...(hasScreen
       ? [{ label: t("remote.openScreen"), icon: Monitor, onClick: () => act(() => void openScreen(host.id)) }]
       : []),
@@ -405,11 +512,11 @@ function HostRow({
       onPointerEnter={() => hoverDrag(host.id, host.group_name)}
       onPointerUp={() => commitDrop(host.group_name, host.id)}
       onClick={() => selectHost(host.id)}
-      onDoubleClick={() => act(() => void openSession(host.id))}
+      onDoubleClick={openPrimary}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          act(() => void openSession(host.id));
+          openPrimary();
         } else if (e.key === "F2") {
           e.preventDefault();
           setRenamingHost(host.id);
@@ -428,7 +535,11 @@ function HostRow({
       } ${selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"}`}
     >
       <HostDot session={hasSession} active={hasForward} color={host.color} />
+      {/* Both glyphs, never one: the OS says what the machine is, the kind says what this app can
+          do with it. A Linux box reachable only over FTP is a penguin *and* a globe, and dropping
+          either loses whichever half the user was scanning for. */}
       <OsGlyph os={spec.os} size={13} />
+      <KindGlyph kind={spec.kind} size={13} />
 
       {renaming ? (
         <InlineInput
@@ -464,21 +575,25 @@ function HostRow({
               selected ? "opacity-100" : "opacity-0"
             }`}
           >
-            <RowAction
-              icon={Terminal}
-              label={t("remote.openShell")}
-              onClick={() => act(() => void openSession(host.id))}
-            />
+            {can.shell && (
+              <RowAction
+                icon={Terminal}
+                label={t("remote.openShell")}
+                onClick={() => act(() => void openSession(host.id))}
+              />
+            )}
             <RowAction
               icon={FolderOpen}
               label={t("remote.files")}
               onClick={() => act(() => openSftp(host.id))}
             />
-            <RowAction
-              icon={Waypoints}
-              label={t("remote.portForwards")}
-              onClick={() => act(() => openForwards(host.id))}
-            />
+            {can.forwards && (
+              <RowAction
+                icon={Waypoints}
+                label={t("remote.portForwards")}
+                onClick={() => act(() => openForwards(host.id))}
+              />
+            )}
             {hasScreen && (
               <RowAction
                 icon={Monitor}

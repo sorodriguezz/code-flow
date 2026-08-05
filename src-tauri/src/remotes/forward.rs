@@ -113,6 +113,7 @@ pub async fn open(
     spec: &ForwardSpec,
 ) -> Result<ActiveForward, String> {
     host.require_host()?;
+    host.require_forwards()?;
     close(&spec.id);
 
     let mut resolved = spec.clone();

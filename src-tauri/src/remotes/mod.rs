@@ -12,18 +12,30 @@
 //! carries `options` — anything this module hasn't modelled is still reachable as `-o Key=Value`
 //! rather than being a feature request.
 //!
-//! The four halves, one file each:
+//! **The one exception, and why it is one.** [`RemoteKind::Ftp`]/[`Ftps`](RemoteKind::Ftps) hosts
+//! do not go through `ssh` — there is no `ssh` to go through, FTP being a different protocol on a
+//! socket of its own ([`ftp`]). Everything above still holds for every other kind, and the reason
+//! the exception is safe is that it is *visible*: a host declares its [`RemoteKind`], the kind
+//! decides which capabilities exist, and an FTP host therefore never reaches a code path that
+//! would have spawned `ssh`.
+//!
+//! The halves, one file each:
 //!
 //! - [`session`] — an interactive shell, as a pty running `ssh`. It reuses the terminal registry,
 //!   so a remote session is written to, resized and closed by the same commands a local one is.
 //! - [`forward`] — `-L` / `-R` / `-D`, held open independently of any session.
 //! - [`screen`] — VNC/RDP, handed to the OS viewer, through a forward when the screen only
 //!   answers from inside the far network.
+//! - [`files`] — the file browser's one entry point, dispatching on [`RemoteKind`] to:
+//! - [`sftp`] — files over SSH's SFTP subsystem, and
+//! - [`ftp`] — files over FTP/FTPS, the one transport that owns its own socket.
 //! - [`sshconfig`] — reading `~/.ssh/config`, because nobody's first host should be typed in.
 //! - [`parse`] — turning a pasted `ssh user@host -p 2222` into a spec, because that is the shape an
 //!   address actually arrives in.
 
+pub mod files;
 pub mod forward;
+pub mod ftp;
 pub mod keys;
 pub mod parse;
 pub mod ping;
@@ -37,6 +49,139 @@ use serde::{Deserialize, Serialize};
 
 /// The default SSH port, applied wherever a spec leaves `port` at 0.
 pub const DEFAULT_SSH_PORT: u16 = 22;
+/// FTP's control port, and the one explicit FTPS (`AUTH TLS`) also uses — upgrading in place is
+/// the whole point of explicit mode.
+pub const DEFAULT_FTP_PORT: u16 = 21;
+/// Implicit FTPS: TLS before a byte of FTP is spoken, on a port of its own.
+pub const DEFAULT_FTPS_IMPLICIT_PORT: u16 = 990;
+
+/// What a host actually speaks — and therefore what it can be asked to do.
+///
+/// **This is not a way to split one machine into several hosts.** The module's premise is that a
+/// host is a set of flags for a command line, and for an SSH machine that premise is what makes a
+/// shell, a file browser, a forward and a screen *the same host*: same `~/.ssh/config`, same
+/// `ProxyJump`, same `known_hosts`, by construction. Modelling SFTP as a separate connection would
+/// undo exactly that, and make the user keep two rows for one machine in sync by hand.
+///
+/// What it *does* separate is the two honest cases the SSH premise cannot cover:
+///
+/// - [`Ftp`](Self::Ftp)/[`Ftps`](Self::Ftps) do not go through `ssh` at all. No shell, no forward,
+///   no screen, no config file — a different protocol on a socket of its own ([`ftp`]).
+/// - [`Sftp`](Self::Sftp) is the same `ssh` transport as [`Ssh`](Self::Ssh), narrowed on purpose:
+///   an account jailed with `ForceCommand internal-sftp` has files and will never have a shell.
+///   Offering it a shell button is offering a button that cannot work.
+///
+/// So the variants gate *capabilities*, and the capability table below is the whole of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteKind {
+    /// A machine over SSH: shell, files, forwards, screen. The default, and what every host
+    /// written before this field existed loads as.
+    Ssh,
+    /// Files only, over SSH's SFTP subsystem.
+    Sftp,
+    /// Files only, over FTP. Plaintext unless the server is reached some other way.
+    Ftp,
+    /// Files only, over FTP with TLS — explicit `AUTH TLS` by default, implicit when
+    /// [`FtpSpec::implicit_tls`] is set.
+    Ftps,
+}
+
+impl Default for RemoteKind {
+    fn default() -> Self {
+        Self::Ssh
+    }
+}
+
+impl RemoteKind {
+    /// An interactive shell. Only a full SSH host — a jailed SFTP account and an FTP server have
+    /// no command to run. Files are deliberately absent from this table: every kind has them, and
+    /// that is the one thing they all share.
+    pub fn has_shell(self) -> bool {
+        matches!(self, Self::Ssh)
+    }
+
+    /// Port forwards and screens both ride on an SSH connection, so both stop at the same line.
+    pub fn has_forwards(self) -> bool {
+        matches!(self, Self::Ssh)
+    }
+
+    pub fn has_screen(self) -> bool {
+        matches!(self, Self::Ssh)
+    }
+
+    /// The port to assume when a spec leaves `port` at 0. `implicit_tls` only moves the answer for
+    /// [`Ftps`](Self::Ftps), which is the one kind whose default port depends on *how* it is
+    /// secured rather than on what it is.
+    pub fn default_port(self, implicit_tls: bool) -> u16 {
+        match self {
+            Self::Ssh | Self::Sftp => DEFAULT_SSH_PORT,
+            Self::Ftp => DEFAULT_FTP_PORT,
+            Self::Ftps if implicit_tls => DEFAULT_FTPS_IMPLICIT_PORT,
+            Self::Ftps => DEFAULT_FTP_PORT,
+        }
+    }
+
+    /// What this kind is called in a message to the user.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ssh => "SSH",
+            Self::Sftp => "SFTP",
+            Self::Ftp => "FTP",
+            Self::Ftps => "FTPS",
+        }
+    }
+
+    /// The refusal for an operation this kind cannot perform.
+    ///
+    /// Enforced in the backend rather than only by hiding the button, and that is the point: the
+    /// capability table is what keeps an FTP host from ever reaching a code path that spawns `ssh`,
+    /// and a guarantee that lives only in the UI is a guarantee one wrong `if` removes.
+    fn refuses(self, what: &str) -> String {
+        format!("This is a {} host — it can't {what}.", self.label())
+    }
+}
+
+/// The FTP-only half of a host. Ignored entirely unless [`RemoteHostSpec::kind`] is
+/// [`RemoteKind::Ftp`] or [`RemoteKind::Ftps`].
+///
+/// Kept as its own struct rather than loose fields on the spec for the reason [`ScreenSpec`] is:
+/// these are meaningless for four fifths of the hosts in the list, and burying them one level down
+/// says so.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FtpSpec {
+    /// Passive mode (`PASV`/`EPSV`) — the server names the data port and we dial out.
+    ///
+    /// Defaults to on, and should essentially always stay on: active mode asks the *server* to
+    /// open a connection back to this machine, which any NAT or local firewall in between will
+    /// drop. It is here because a handful of old servers still only do active.
+    #[serde(default = "yes")]
+    pub passive: bool,
+    /// Wrap the control connection in TLS before speaking FTP, instead of connecting in the clear
+    /// and issuing `AUTH TLS`. [`RemoteKind::Ftps`] only, and it moves the default port to 990.
+    #[serde(default)]
+    pub implicit_tls: bool,
+    /// Log in as `anonymous`, ignoring the host's user and stored password.
+    #[serde(default)]
+    pub anonymous: bool,
+    /// Accept a server certificate that doesn't verify.
+    ///
+    /// Off by default and deliberately not hidden behind a friendlier name: an FTPS host with this
+    /// on is an FTPS host anybody on the path can read, which is the state the `s` was added to
+    /// avoid. It exists because self-signed certificates on internal appliances are real.
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for FtpSpec {
+    fn default() -> Self {
+        Self { passive: true, implicit_tls: false, anonymous: false, accept_invalid_certs: false }
+    }
+}
 
 /// How to authenticate. Only ever a *hint* to `ssh`: `Agent` adds no flags at all and lets the
 /// user's own configuration decide, which is why it's the default.
@@ -181,6 +326,11 @@ pub struct ScreenSpec {
 /// still loads.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RemoteHostSpec {
+    /// What this host speaks, and therefore what it can be asked to do. See [`RemoteKind`] — and
+    /// note that it defaults to [`RemoteKind::Ssh`], which is what every row written before this
+    /// field existed loads as.
+    #[serde(default)]
+    pub kind: RemoteKind,
     /// The address `ssh` connects to. May be a `Host` alias from `~/.ssh/config`, in which case
     /// almost everything else here can stay empty and the user's own config decides.
     #[serde(default)]
@@ -231,14 +381,20 @@ pub struct RemoteHostSpec {
     pub screen: ScreenSpec,
     #[serde(default)]
     pub forwards: Vec<ForwardSpec>,
+    /// The FTP-only settings. Meaningless unless `kind` is `Ftp` or `Ftps`.
+    #[serde(default)]
+    pub ftp: FtpSpec,
     #[serde(default)]
     pub notes: String,
 }
 
 impl RemoteHostSpec {
+    /// The port to connect to, resolving 0 against whatever this host's protocol defaults to —
+    /// 22, 21 or 990. Kind-aware rather than always-22 because `port` left at 0 means "the usual
+    /// one", and the usual one is not the same number for every kind.
     pub fn effective_port(&self) -> u16 {
         if self.port == 0 {
-            DEFAULT_SSH_PORT
+            self.kind.default_port(self.ftp.implicit_tls)
         } else {
             self.port
         }
@@ -325,6 +481,32 @@ impl RemoteHostSpec {
             return Err("This host has no address. Open it and fill in the hostname.".into());
         }
         Ok(())
+    }
+
+    /// Refuses the operation unless this host's kind can do it. See [`RemoteKind::refuses`] for why
+    /// this is checked here and not left to the UI.
+    pub fn require_shell(&self) -> Result<(), String> {
+        if self.kind.has_shell() {
+            Ok(())
+        } else {
+            Err(self.kind.refuses("open a shell"))
+        }
+    }
+
+    pub fn require_forwards(&self) -> Result<(), String> {
+        if self.kind.has_forwards() {
+            Ok(())
+        } else {
+            Err(self.kind.refuses("forward a port"))
+        }
+    }
+
+    pub fn require_screen(&self) -> Result<(), String> {
+        if self.kind.has_screen() {
+            Ok(())
+        } else {
+            Err(self.kind.refuses("open a screen"))
+        }
     }
 }
 

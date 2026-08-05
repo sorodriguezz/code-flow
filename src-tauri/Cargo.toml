@@ -167,6 +167,21 @@ mongodb = { version = "3", default-features = false, features = [
 ] }
 tauri-plugin-single-instance = "2.4.3"
 russh-sftp = "2.4.0"
+# FTP/FTPS — the one file transport that is *not* a subsystem of the user's `ssh`, so unlike
+# `russh-sftp` this crate owns its socket. `tokio-rustls-ring` rather than any native-tls or
+# aws-lc-rs variant for the reason `rustls` above gives: a second crypto provider in the binary is
+# a runtime "no process-level CryptoProvider available" away from breaking every other TLS caller.
+# `deprecated` is only there for `connect_secure_implicit` — implicit FTPS (port 990) is what the
+# RFC deprecated, not the binding, and it is still what a decade-old appliance answers on.
+suppaftp = { version = "10", default-features = false, features = [
+    "tokio-rustls-ring",
+    "deprecated",
+] }
+# suppaftp's `AsyncRustlsConnector` is only constructible `From<tokio_rustls::TlsConnector>`, and it
+# re-exports neither the type nor a builder — so the crate has to be named here to hand it one.
+# Pinned to the version suppaftp itself resolves: two `tokio-rustls` majors in the tree would make
+# the `From` impl take a `TlsConnector` that is not the one this code builds.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 
 # `keyring` ships with no OS credential-store backend enabled by default — without one
 # of these, Entry::set_password()/get_password() silently round-trip through a

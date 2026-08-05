@@ -12,11 +12,14 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use super::models::{RemoteHostRow, RemoteLogEntry, RemoteSnippet, RemoteWorkspaceTree};
+use super::models::{
+    RemoteGroupRow, RemoteHostRow, RemoteLogEntry, RemoteSnippet, RemoteWorkspaceTree,
+};
 use super::queries::now;
 
 const HOST_COLUMNS: &str =
     "id, workspace_id, name, group_name, spec, color, sort_order, created_at, updated_at";
+const GROUP_COLUMNS: &str = "id, workspace_id, name, sort_order, created_at";
 const SNIPPET_COLUMNS: &str = "id, workspace_id, name, body, sort_order, created_at, updated_at";
 
 fn map_host(row: &rusqlite::Row) -> rusqlite::Result<RemoteHostRow> {
@@ -30,6 +33,16 @@ fn map_host(row: &rusqlite::Row) -> rusqlite::Result<RemoteHostRow> {
         sort_order: row.get(6)?,
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
+    })
+}
+
+fn map_group(row: &rusqlite::Row) -> rusqlite::Result<RemoteGroupRow> {
+    Ok(RemoteGroupRow {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        name: row.get(2)?,
+        sort_order: row.get(3)?,
+        created_at: row.get(4)?,
     })
 }
 
@@ -49,9 +62,12 @@ fn map_snippet(row: &rusqlite::Row) -> rusqlite::Result<RemoteSnippet> {
 // Hosts
 // ---------------------------------------------------------------------------
 
-/// One workspace's hosts and snippets in a single round trip. The UI groups the hosts client-side
-/// by `group_name`, which is why there is no folder table to join — see the column's comment in
-/// `migrations`.
+/// One workspace's hosts, groups and snippets in a single round trip.
+///
+/// The groups come back as their own list rather than being derived from the hosts, because the
+/// two disagree in both directions and the UI needs both halves: a group row with no member is a
+/// folder the user made and hasn't filled, and a `group_name` with no row is a host imported or
+/// dragged into a name nobody created. The tree unions them.
 pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<RemoteWorkspaceTree> {
     let mut statement = conn.prepare(&format!(
         "SELECT {HOST_COLUMNS} FROM remote_hosts WHERE workspace_id = ?1 \
@@ -62,6 +78,14 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Remo
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut statement = conn.prepare(&format!(
+        "SELECT {GROUP_COLUMNS} FROM remote_groups WHERE workspace_id = ?1 \
+         ORDER BY sort_order, name"
+    ))?;
+    let groups = statement
+        .query_map(params![workspace_id], map_group)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut statement = conn.prepare(&format!(
         "SELECT {SNIPPET_COLUMNS} FROM remote_snippets WHERE workspace_id = ?1 \
          ORDER BY sort_order, name"
     ))?;
@@ -69,7 +93,7 @@ pub fn load_tree(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Remo
         .query_map(params![workspace_id], map_snippet)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    Ok(RemoteWorkspaceTree { hosts, snippets })
+    Ok(RemoteWorkspaceTree { hosts, groups, snippets })
 }
 
 pub fn get_host(conn: &Connection, id: &str) -> rusqlite::Result<Option<RemoteHostRow>> {
@@ -166,12 +190,44 @@ pub fn reorder_hosts(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> 
     Ok(())
 }
 
-/// Renames a group across every host in it, in one statement.
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
+/// Creates an empty group, or returns the one already carrying that name.
 ///
-/// A group is a string on each row rather than a table, so renaming it is an `UPDATE` over the
-/// members instead of a single write — which is the cost this shape was chosen to pay. What it buys
-/// is that a group has no lifecycle of its own: it exists while something is in it, it disappears
-/// when the last host leaves, and there is no such thing as an empty group to clean up.
+/// Idempotent on purpose: "New group" typed twice with the same name is a user who wants that
+/// group, not an error dialog. The `INSERT OR IGNORE` and the read-back together are what make the
+/// unique index a deduplicator rather than a failure mode.
+pub fn create_group(
+    conn: &Connection,
+    workspace_id: &str,
+    name: &str,
+) -> rusqlite::Result<RemoteGroupRow> {
+    let sort_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM remote_groups WHERE workspace_id = ?1",
+        params![workspace_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        &format!("INSERT OR IGNORE INTO remote_groups ({GROUP_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5)"),
+        params![Uuid::new_v4().to_string(), workspace_id, name, sort_order, now()],
+    )?;
+    conn.query_row(
+        &format!("SELECT {GROUP_COLUMNS} FROM remote_groups WHERE workspace_id = ?1 AND name = ?2"),
+        params![workspace_id, name],
+        map_group,
+    )
+}
+
+/// Renames a group: its members, and the folder row itself.
+///
+/// Two writes rather than one because membership and existence are recorded separately — see the
+/// tables' comments in `migrations`. The members move whether or not a folder row exists, which is
+/// what keeps a group that was only ever implied by its hosts renameable.
+///
+/// **Renaming onto an existing name merges.** The alternative is a unique-index failure the user
+/// reads as "you can't call it that", when what they almost always meant was "put these together".
 pub fn rename_group(
     conn: &Connection,
     workspace_id: &str,
@@ -182,6 +238,42 @@ pub fn rename_group(
         "UPDATE remote_hosts SET group_name = ?3, updated_at = ?4 \
          WHERE workspace_id = ?1 AND group_name = ?2",
         params![workspace_id, from, to, now()],
+    )?;
+
+    let target_exists: bool = conn.query_row(
+        "SELECT COUNT(*) > 0 FROM remote_groups WHERE workspace_id = ?1 AND name = ?2",
+        params![workspace_id, to],
+        |row| row.get(0),
+    )?;
+    if target_exists {
+        // The members are already there; the source folder is now a duplicate of the target.
+        conn.execute(
+            "DELETE FROM remote_groups WHERE workspace_id = ?1 AND name = ?2",
+            params![workspace_id, from],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE remote_groups SET name = ?3 WHERE workspace_id = ?1 AND name = ?2",
+            params![workspace_id, from, to],
+        )?;
+    }
+    Ok(())
+}
+
+/// Deletes a group and turns its members loose.
+///
+/// **Never the hosts.** A folder and the machines in it are not the same thing, and a delete that
+/// took the machines with it would be the one destructive action in this tree — undoable only by
+/// retyping every host. They move to ungrouped, where they are still there to be found.
+pub fn delete_group(conn: &Connection, workspace_id: &str, name: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE remote_hosts SET group_name = '', updated_at = ?3 \
+         WHERE workspace_id = ?1 AND group_name = ?2",
+        params![workspace_id, name, now()],
+    )?;
+    conn.execute(
+        "DELETE FROM remote_groups WHERE workspace_id = ?1 AND name = ?2",
+        params![workspace_id, name],
     )?;
     Ok(())
 }
@@ -368,6 +460,94 @@ mod tests {
         let tree = load_tree(&conn, "w1").unwrap();
         let groups: Vec<&str> = tree.hosts.iter().map(|h| h.group_name.as_str()).collect();
         assert_eq!(groups, ["Production", "Production", "Staging"]);
+    }
+
+    /// The whole reason the table exists: a folder with nothing in it survives a reload.
+    #[test]
+    fn an_empty_group_still_exists_after_being_created() {
+        let conn = db();
+        create_group(&conn, "w1", "Staging").unwrap();
+        let tree = load_tree(&conn, "w1").unwrap();
+        assert_eq!(tree.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["Staging"]);
+        assert!(tree.hosts.is_empty());
+    }
+
+    #[test]
+    fn creating_a_group_twice_returns_the_same_one_rather_than_failing() {
+        let conn = db();
+        let first = create_group(&conn, "w1", "Prod").unwrap();
+        let second = create_group(&conn, "w1", "Prod").unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(load_tree(&conn, "w1").unwrap().groups.len(), 1);
+    }
+
+    #[test]
+    fn renaming_a_group_row_carries_the_folder_across_with_its_members() {
+        let conn = db();
+        create_group(&conn, "w1", "Prod").unwrap();
+        create_host(&conn, "w1", "a", "Prod", "{}", "").unwrap();
+        rename_group(&conn, "w1", "Prod", "Production").unwrap();
+
+        let tree = load_tree(&conn, "w1").unwrap();
+        assert_eq!(tree.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["Production"]);
+        assert_eq!(tree.hosts[0].group_name, "Production");
+    }
+
+    /// Renaming onto a name that already exists is a merge, not a unique-index error.
+    #[test]
+    fn renaming_a_group_onto_an_existing_one_merges_them() {
+        let conn = db();
+        create_group(&conn, "w1", "Prod").unwrap();
+        create_group(&conn, "w1", "Production").unwrap();
+        create_host(&conn, "w1", "a", "Prod", "{}", "").unwrap();
+        create_host(&conn, "w1", "b", "Production", "{}", "").unwrap();
+
+        rename_group(&conn, "w1", "Prod", "Production").unwrap();
+
+        let tree = load_tree(&conn, "w1").unwrap();
+        assert_eq!(tree.groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["Production"]);
+        let groups: Vec<&str> = tree.hosts.iter().map(|h| h.group_name.as_str()).collect();
+        assert_eq!(groups, ["Production", "Production"]);
+    }
+
+    /// A group that only ever existed because hosts named it is still renameable.
+    #[test]
+    fn renaming_a_group_that_has_no_row_still_moves_its_hosts() {
+        let conn = db();
+        create_host(&conn, "w1", "a", "Implied", "{}", "").unwrap();
+        rename_group(&conn, "w1", "Implied", "Named").unwrap();
+        assert_eq!(load_tree(&conn, "w1").unwrap().hosts[0].group_name, "Named");
+    }
+
+    /// The destructive-action guard: deleting a folder must never delete machines.
+    #[test]
+    fn deleting_a_group_ungroups_its_hosts_rather_than_removing_them() {
+        let conn = db();
+        create_group(&conn, "w1", "Prod").unwrap();
+        create_host(&conn, "w1", "a", "Prod", "{}", "").unwrap();
+        create_host(&conn, "w1", "b", "Staging", "{}", "").unwrap();
+
+        delete_group(&conn, "w1", "Prod").unwrap();
+
+        let tree = load_tree(&conn, "w1").unwrap();
+        assert!(tree.groups.is_empty());
+        assert_eq!(tree.hosts.len(), 2, "the hosts must all still be there");
+        let a = tree.hosts.iter().find(|h| h.name == "a").unwrap();
+        assert_eq!(a.group_name, "", "its host moved to ungrouped");
+        let b = tree.hosts.iter().find(|h| h.name == "b").unwrap();
+        assert_eq!(b.group_name, "Staging", "another group is untouched");
+    }
+
+    #[test]
+    fn deleting_the_workspace_takes_its_groups_with_it() {
+        let conn = db();
+        create_group(&conn, "w1", "Prod").unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON; DELETE FROM workspaces WHERE id = 'w1';")
+            .unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM remote_groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]

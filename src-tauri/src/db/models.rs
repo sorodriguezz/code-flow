@@ -779,9 +779,24 @@ pub struct RemoteLogEntry {
     pub at: String,
 }
 
+/// A folder in the host tree.
+///
+/// Carries no members: a host's `group_name` is still what puts it in a group. This row exists so a
+/// group can exist while empty — see the table's comment in `migrations` for why that is the one
+/// thing the string alone cannot express.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteGroupRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
 /// Everything the Remote workspace needs on load, in one round trip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemoteWorkspaceTree {
     pub hosts: Vec<RemoteHostRow>,
+    pub groups: Vec<RemoteGroupRow>,
     pub snippets: Vec<RemoteSnippet>,
 }

@@ -1,19 +1,34 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Eye, EyeOff, Monitor, Plus, Server, Terminal, Trash2, Waypoints, X } from "lucide-react";
+import {
+  Check,
+  Eye,
+  EyeOff,
+  FolderPlus,
+  Monitor,
+  Plus,
+  Server,
+  Terminal,
+  Trash2,
+  Waypoints,
+  X,
+} from "lucide-react";
 import { Field, Row } from "../api/ApiModal";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ForwardDiagram } from "./ForwardDiagram";
 import { Select } from "../common/Select";
 import { Checkbox } from "../common/Checkbox";
-import { CARD, HOST_COLORS, OsGlyph, Pill } from "./remoteChrome";
+import { CARD, HOST_COLORS, KindGlyph, OsGlyph, Pill, kindIcon } from "./remoteChrome";
 import { useRemoteStore } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { remoteGetPassword, remoteListKeys, remoteSetPassword } from "../../lib/tauri/remoteCommands";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import {
-  DEFAULT_SSH_PORT,
+  KIND_LABEL,
+  REMOTE_KINDS,
   SCREEN_DEFAULT_PORT,
+  capabilities,
+  defaultPortFor,
   describeForward,
   hasAddress,
   parseHostSpec,
@@ -22,6 +37,7 @@ import {
   type RemoteAuth,
   type RemoteHostRow,
   type RemoteHostSpec,
+  type RemoteKind,
   type RemoteOs,
   type ScreenProtocol,
   type SshKey,
@@ -66,6 +82,7 @@ export function HostDetailsPanel() {
   const saveHost = useRemoteStore((s) => s.saveHost);
   const closeDetails = useRemoteStore((s) => s.closeDetails);
   const openSession = useRemoteStore((s) => s.openSession);
+  const openSftp = useRemoteStore((s) => s.openSftp);
   const width = useLayoutStore((s) => s.sizes.remoteDetailsWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
@@ -179,12 +196,24 @@ export function HostDetailsPanel() {
     setter(value);
   };
 
+  // Forwards and Screen are SSH-only, so an FTP host shows two tabs rather than four. Hidden
+  // rather than disabled: a disabled tab is a promise that filling something in will enable it,
+  // and nothing about this host ever will — see `KIND_CAPABILITIES`.
+  const can = capabilities(spec);
   const TABS: { id: Tab; label: string; icon: typeof Server }[] = [
     { id: "connection", label: t("remote.tabConnection"), icon: Server },
-    { id: "forwards", label: t("remote.tabForwards"), icon: Waypoints },
-    { id: "screen", label: t("remote.tabScreen"), icon: Monitor },
+    ...(can.forwards
+      ? [{ id: "forwards" as Tab, label: t("remote.tabForwards"), icon: Waypoints }]
+      : []),
+    ...(can.screen ? [{ id: "screen" as Tab, label: t("remote.tabScreen"), icon: Monitor }] : []),
     { id: "advanced", label: t("remote.tabAdvanced"), icon: Terminal },
   ];
+
+  // Changing kind can pull the open tab out from under the panel — a host switched from SSH to FTP
+  // while Forwards is showing would otherwise render a tab that is no longer in the bar.
+  useEffect(() => {
+    if (!TABS.some((entry) => entry.id === tab)) setTab("connection");
+  }, [spec.kind]);
 
   return (
     <>
@@ -205,6 +234,7 @@ export function HostDetailsPanel() {
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
           <OsGlyph os={spec.os} size={14} />
+          <KindGlyph kind={spec.kind} size={14} />
           <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">
             {name || host.name}
           </span>
@@ -266,16 +296,24 @@ export function HostDetailsPanel() {
         {/* Pinned, and the reason the panel beats the modal: the fill-in / connect / fix loop never
             leaves this column. */}
         <div className="shrink-0 border-t border-[var(--cf-border)] p-2">
+          {/* The one action a host has, whatever it is. On a file-only host "Connect" would open a
+              shell that cannot exist, so the button opens the file browser instead — the same
+              button in the same place, doing the thing this kind actually offers. */}
           <button
             type="button"
             onClick={() => {
               flush();
-              void openSession(host.id);
+              if (can.shell) void openSession(host.id);
+              else openSftp(host.id);
             }}
             disabled={!hasAddress(spec)}
             className="w-full rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:brightness-110 disabled:opacity-40"
           >
-            {hasAddress(spec) ? t("remote.connect") : t("remote.needsAddress")}
+            {!hasAddress(spec)
+              ? t("remote.needsAddress")
+              : can.shell
+                ? t("remote.connect")
+                : t("remote.files")}
           </button>
           {passwordLoaded && spec.auth === "password" && (
             <p className="pt-1.5 text-center text-[10px] text-[var(--cf-text-muted)]">
@@ -337,6 +375,18 @@ function ConnectionTab({
     { value: "password", label: t("remote.authPassword"), hint: t("remote.authPasswordHint") },
   ];
 
+  // SSH and SFTP share a transport and therefore share every flag below; FTP and FTPS share none
+  // of them. One boolean rather than four checks against `spec.kind`.
+  const isSsh = spec.kind === "ssh" || spec.kind === "sftp";
+
+  /** One line under the type selector saying what picking it means — the four read as one set. */
+  const KIND_HINT: Record<RemoteKind, string> = {
+    ssh: t("remote.kindSshHint"),
+    sftp: t("remote.kindSftpHint"),
+    ftp: t("remote.kindFtpHint"),
+    ftps: t("remote.kindFtpsHint"),
+  };
+
   const OS: { value: RemoteOs; label: string }[] = [
     { value: "linux", label: "Linux" },
     { value: "macos", label: "macOS" },
@@ -349,46 +399,57 @@ function ConnectionTab({
       <Row label={t("remote.fieldName")}>
         <Field value={name} onChange={onName} />
       </Row>
-      <Row label={t("remote.fieldGroup")} hint={t("remote.fieldGroupHint")}>
-        <input
-          value={group}
-          list="remote-groups"
-          onChange={(e) => onGroup(e.target.value)}
-          className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+
+      {/* First, and above the address: it decides what every field below means — and which of them
+          exist at all. */}
+      <Row label={t("remote.kind")} hint={KIND_HINT[spec.kind]}>
+        <Select
+          value={spec.kind}
+          onChange={(value) => onPatch({ kind: value as RemoteKind })}
+          size="field"
+          options={REMOTE_KINDS.map((kind) => ({
+            value: kind,
+            label: KIND_LABEL[kind],
+            icon: kindIcon(kind),
+          }))}
         />
-        <datalist id="remote-groups">
-          {groups.map((entry) => (
-            <option key={entry} value={entry} />
-          ))}
-        </datalist>
       </Row>
+
+      <GroupPicker group={group} groups={groups} onGroup={onGroup} />
 
       <Row label={t("remote.fieldHost")} hint={t("remote.fieldHostHint")} wide>
         <Field value={spec.host} onChange={(host) => onPatch({ host })} mono placeholder="web-01.example.com" />
       </Row>
       <Row label={t("remote.fieldPort")}>
+        {/* The placeholder tracks the kind — 22, 21 or 990 — because an empty port means "the usual
+            one for this protocol", and a hard-coded 22 under an FTP host would name the wrong one. */}
         <Field
           type="number"
           value={spec.port === 0 ? "" : String(spec.port)}
           onChange={(value) => onPatch({ port: Number(value) || 0 })}
-          placeholder={String(DEFAULT_SSH_PORT)}
+          placeholder={String(defaultPortFor(spec))}
         />
       </Row>
       <Row label={t("remote.fieldUser")} hint={t("remote.fieldUserHint")}>
         <Field value={spec.user} onChange={(user) => onPatch({ user })} mono placeholder="—" />
       </Row>
 
-      <Row label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.auth)?.hint}>
-        <Select
-          value={spec.auth}
-          onChange={(value) => onPatch({ auth: value as RemoteAuth })}
-          options={AUTH.map(({ value, label }) => ({ value, label }))}
-        />
-      </Row>
+      {/* The whole authentication block is SSH's. FTP has exactly one scheme — a username and a
+          password on the wire — so offering it "agent" or "key" would be offering it settings the
+          protocol cannot carry. Its password field is rendered unconditionally below instead. */}
+      {isSsh && (
+        <Row label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.auth)?.hint}>
+          <Select
+            value={spec.auth}
+            onChange={(value) => onPatch({ auth: value as RemoteAuth })}
+            options={AUTH.map(({ value, label }) => ({ value, label }))}
+          />
+        </Row>
+      )}
 
-      {spec.auth === "key" && <KeyPicker spec={spec} onPatch={onPatch} />}
+      {isSsh && spec.auth === "key" && <KeyPicker spec={spec} onPatch={onPatch} />}
 
-      {spec.auth === "password" && (
+      {((isSsh && spec.auth === "password") || (!isSsh && !spec.ftp.anonymous)) && (
         <Row label={t("remote.fieldPassword")} hint={t("remote.fieldPasswordHint")} wide>
           <div className="flex w-full items-center gap-1">
             <Field
@@ -409,23 +470,31 @@ function ConnectionTab({
         </Row>
       )}
 
-      <Row label={t("remote.fieldJump")} hint={t("remote.fieldJumpHint")} wide>
-        <Field value={spec.jump} onChange={(jump) => onPatch({ jump })} mono placeholder="bastion.example.com" />
-      </Row>
+      {/* `ProxyJump` and agent forwarding are `ssh` flags with no FTP equivalent — there is no
+          config file on the other side to read them. */}
+      {isSsh && (
+        <>
+          <Row label={t("remote.fieldJump")} hint={t("remote.fieldJumpHint")} wide>
+            <Field value={spec.jump} onChange={(jump) => onPatch({ jump })} mono placeholder="bastion.example.com" />
+          </Row>
 
-      <label className="flex items-start gap-2 py-1">
-        <Checkbox
-          checked={spec.agent_forward}
-          onChange={(agent_forward) => onPatch({ agent_forward })}
-          className="mt-px"
-        />
-        <span className="min-w-0">
-          <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.fieldAgentForward")}</span>
-          <span className="block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-            {t("remote.fieldAgentForwardHint")}
-          </span>
-        </span>
-      </label>
+          <label className="flex items-start gap-2 py-1">
+            <Checkbox
+              checked={spec.agent_forward}
+              onChange={(agent_forward) => onPatch({ agent_forward })}
+              className="mt-px"
+            />
+            <span className="min-w-0">
+              <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.fieldAgentForward")}</span>
+              <span className="block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+                {t("remote.fieldAgentForwardHint")}
+              </span>
+            </span>
+          </label>
+        </>
+      )}
+
+      {!isSsh && <FtpSettings spec={spec} onPatch={onPatch} />}
 
       <Row label={t("remote.fieldTags")} hint={t("remote.fieldTagsHint")} wide>
         {/* Edited as text rather than as chips: a comma-separated line is faster to retype than a
@@ -449,6 +518,167 @@ function ConnectionTab({
       </Row>
 
       <ColorPicker color={color} onColor={onColor} />
+    </div>
+  );
+}
+
+/**
+ * The group field, as a real select over the groups that exist plus a way to make one.
+ *
+ * It used to be an `<input list>` with a `<datalist>`, which is why it looked like a browser
+ * tooltip rather than part of the app: a datalist popup is drawn by the platform, so it ignores the
+ * theme, the accent colour and every other menu in this window. `Select` is the app's own element
+ * list, already used by every other dropdown here.
+ *
+ * The one thing the old control did better was let you *type a new name*, and a plain select
+ * cannot. So "New group…" is an option: picking it swaps the trigger for a text field, and
+ * committing creates the group and moves the host into it in one step.
+ */
+function GroupPicker({
+  group,
+  groups,
+  onGroup,
+}: {
+  group: string;
+  groups: string[];
+  onGroup: (value: string) => void;
+}) {
+  const createGroup = useRemoteStore((s) => s.createGroup);
+  const [creating, setCreating] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const t = useT();
+
+  useEffect(() => {
+    if (creating) inputRef.current?.focus();
+  }, [creating]);
+
+  const commit = (value: string) => {
+    const name = value.trim();
+    setCreating(false);
+    if (!name) return;
+    // Both, and in this order: the folder row is what makes the group survive being emptied, and
+    // the host's own field is what puts it in there.
+    void createGroup(name);
+    onGroup(name);
+  };
+
+  // A group named on this host but with no row of its own — an import, or a name typed before this
+  // panel had a select — still has to appear, or the control would show a blank for a host that
+  // plainly has a group.
+  const options = [...new Set([...groups, group.trim()].filter(Boolean))].sort();
+
+  return (
+    <Row label={t("remote.fieldGroup")} hint={t("remote.fieldGroupHint")}>
+      {creating ? (
+        <input
+          ref={inputRef}
+          defaultValue=""
+          placeholder={t("remote.newGroup")}
+          onBlur={(e) => commit(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit(e.currentTarget.value);
+            if (e.key === "Escape") setCreating(false);
+          }}
+          className="w-full rounded-md border border-[var(--cf-accent)] bg-transparent px-2 py-1.5 text-[12px] outline-none"
+        />
+      ) : (
+        <Select
+          value={group.trim()}
+          onChange={(value) => (value === NEW_GROUP ? setCreating(true) : onGroup(value))}
+          size="field"
+          options={[
+            { value: "", label: t("remote.ungrouped") },
+            ...options.map((name) => ({ value: name, label: name })),
+            { value: NEW_GROUP, label: `${t("remote.newGroup")}…`, icon: FolderPlus },
+          ]}
+        />
+      )}
+    </Row>
+  );
+}
+
+/** A value no group can have, so picking it is unambiguously "make a new one". */
+const NEW_GROUP = " new";
+
+/**
+ * The FTP-only settings.
+ *
+ * Four flags, and the ordering is deliberate: the two that decide whether the connection *works*
+ * come first, and the one that decides whether it is *safe* comes last with its consequence spelled
+ * out rather than a reassuring label.
+ */
+function FtpSettings({
+  spec,
+  onPatch,
+}: {
+  spec: RemoteHostSpec;
+  onPatch: (changes: Partial<RemoteHostSpec>) => void;
+}) {
+  const t = useT();
+  const patchFtp = (changes: Partial<RemoteHostSpec["ftp"]>) =>
+    onPatch({ ftp: { ...spec.ftp, ...changes } });
+
+  const flag = (
+    checked: boolean,
+    onChange: (value: boolean) => void,
+    label: string,
+    hint: string,
+    danger = false,
+  ) => (
+    <label className="flex items-start gap-2 py-1">
+      <Checkbox checked={checked} onChange={onChange} className="mt-px" />
+      <span className="min-w-0">
+        <span className="block text-[12px] text-[var(--cf-text)]">{label}</span>
+        <span
+          className={`block text-[11px] leading-relaxed ${
+            danger && checked ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-muted)]"
+          }`}
+        >
+          {hint}
+        </span>
+      </span>
+    </label>
+  );
+
+  return (
+    <div className="space-y-1 pt-1">
+      <p className="pt-1 text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+        {t("remote.ftpSection")}
+      </p>
+
+      {flag(
+        spec.ftp.passive,
+        (passive) => patchFtp({ passive }),
+        t("remote.ftpPassive"),
+        t("remote.ftpPassiveHint"),
+      )}
+
+      {flag(
+        spec.ftp.anonymous,
+        (anonymous) => patchFtp({ anonymous }),
+        t("remote.ftpAnonymous"),
+        t("remote.ftpAnonymousHint"),
+      )}
+
+      {/* Both TLS flags are FTPS's alone — on a plain `ftp` host they would be settings with
+          nothing to act on. */}
+      {spec.kind === "ftps" && (
+        <>
+          {flag(
+            spec.ftp.implicit_tls,
+            (implicit_tls) => patchFtp({ implicit_tls }),
+            t("remote.ftpImplicitTls"),
+            t("remote.ftpImplicitTlsHint"),
+          )}
+          {flag(
+            spec.ftp.accept_invalid_certs,
+            (accept_invalid_certs) => patchFtp({ accept_invalid_certs }),
+            t("remote.ftpInsecureCerts"),
+            t("remote.ftpInsecureCertsHint"),
+            true,
+          )}
+        </>
+      )}
     </div>
   );
 }

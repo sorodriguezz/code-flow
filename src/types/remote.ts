@@ -20,6 +20,18 @@ export type ForwardKind = "local" | "remote" | "dynamic";
 
 export type ScreenProtocol = "none" | "vnc" | "rdp";
 
+/**
+ * What a host speaks, and therefore what it can be asked to do. Mirrors `remotes::RemoteKind`.
+ *
+ * Not a way to split one machine into several rows — see the Rust enum's comment. `ssh` is a
+ * machine with everything; `sftp` is the same transport narrowed to files (a `ForceCommand
+ * internal-sftp` account has no shell and never will); `ftp`/`ftps` are a different protocol
+ * entirely, with no `~/.ssh/config`, no forwards and no screen.
+ */
+export type RemoteKind = "ssh" | "sftp" | "ftp" | "ftps";
+
+export const REMOTE_KINDS: RemoteKind[] = ["ssh", "sftp", "ftp", "ftps"];
+
 /** The standard ports, applied when a screen leaves `port` at 0. */
 export const SCREEN_DEFAULT_PORT: Record<ScreenProtocol, number> = {
   none: 0,
@@ -28,6 +40,34 @@ export const SCREEN_DEFAULT_PORT: Record<ScreenProtocol, number> = {
 };
 
 export const DEFAULT_SSH_PORT = 22;
+export const DEFAULT_FTP_PORT = 21;
+export const DEFAULT_FTPS_IMPLICIT_PORT = 990;
+
+/**
+ * What each kind can do. The single source of truth for which buttons, tabs and menu items exist.
+ *
+ * Mirrored from `RemoteKind`'s methods in Rust, where the same table is enforced again before
+ * anything spawns — see `RemoteHostSpec::require_shell` and friends. Duplicated deliberately: the
+ * UI needs it to *not draw* the button, and the backend needs it so a bug in the UI can't make the
+ * button work anyway. Files are absent because every kind has them.
+ */
+export const KIND_CAPABILITIES: Record<
+  RemoteKind,
+  { shell: boolean; forwards: boolean; screen: boolean }
+> = {
+  ssh: { shell: true, forwards: true, screen: true },
+  sftp: { shell: false, forwards: false, screen: false },
+  ftp: { shell: false, forwards: false, screen: false },
+  ftps: { shell: false, forwards: false, screen: false },
+};
+
+/** What a kind is called in the UI. */
+export const KIND_LABEL: Record<RemoteKind, string> = {
+  ssh: "SSH",
+  sftp: "SFTP",
+  ftp: "FTP",
+  ftps: "FTPS",
+};
 
 export interface ForwardSpec {
   id: string;
@@ -67,7 +107,25 @@ export interface ScreenSpec {
   embedded: boolean;
 }
 
+/** The FTP-only half of a host. Ignored unless `kind` is `ftp` or `ftps`. Mirrors `FtpSpec`. */
+export interface FtpSpec {
+  /** Passive mode. On by default and should stay on — active mode asks the server to dial back to
+   *  this machine, which any NAT or firewall in between drops. */
+  passive: boolean;
+  /** TLS before a byte of FTP, rather than `AUTH TLS` on a plain connection. Moves the default
+   *  port to 990. `ftps` only. */
+  implicit_tls: boolean;
+  /** Log in as `anonymous`, ignoring the host's user and stored password. */
+  anonymous: boolean;
+  /** Accept a server certificate that doesn't verify. Off by default: an FTPS host with this on is
+   *  one anybody on the path can read, which is the state the `s` exists to avoid. */
+  accept_invalid_certs: boolean;
+}
+
 export interface RemoteHostSpec {
+  /** What this host speaks. Defaults to `ssh`, which is what every row written before this field
+   *  existed loads as. */
+  kind: RemoteKind;
   host: string;
   /** 0 means 22 — left at 0 so a `~/.ssh/config` alias can set its own. */
   port: number;
@@ -106,6 +164,8 @@ export interface RemoteHostSpec {
   directory: string;
   screen: ScreenSpec;
   forwards: ForwardSpec[];
+  /** The FTP-only settings. Meaningless unless `kind` is `ftp` or `ftps`. */
+  ftp: FtpSpec;
   notes: string;
 }
 
@@ -147,8 +207,24 @@ export interface RemoteLogEntry {
   at: string;
 }
 
+/**
+ * A folder in the host tree. Mirrors `RemoteGroupRow`.
+ *
+ * Carries no members — a host's `group_name` is still what puts it in a group. The row exists so a
+ * group can exist while *empty*, which membership alone cannot express: without it, a folder
+ * vanishes the moment you empty it, including between creating it and filling it.
+ */
+export interface RemoteGroupRow {
+  id: string;
+  workspace_id: string;
+  name: string;
+  sort_order: number;
+  created_at: string;
+}
+
 export interface RemoteWorkspaceTree {
   hosts: RemoteHostRow[];
+  groups: RemoteGroupRow[];
   snippets: RemoteSnippet[];
 }
 
@@ -243,6 +319,7 @@ export interface ImportResult {
  *  flags at all and lets the user's own configuration decide. */
 export function defaultHostSpec(): RemoteHostSpec {
   return {
+    kind: "ssh",
     host: "",
     port: 0,
     user: "",
@@ -266,6 +343,12 @@ export function defaultHostSpec(): RemoteHostSpec {
       embedded: true,
     },
     forwards: [],
+    ftp: {
+      passive: true,
+      implicit_tls: false,
+      anonymous: false,
+      accept_invalid_certs: false,
+    },
     notes: "",
   };
 }
@@ -285,6 +368,7 @@ export function parseHostSpec(row: RemoteHostRow): RemoteHostSpec {
       ...base,
       ...parsed,
       screen: { ...base.screen, ...(parsed.screen ?? {}) },
+      ftp: { ...base.ftp, ...(parsed.ftp ?? {}) },
       forwards: parsed.forwards ?? [],
       options: parsed.options ?? [],
       tags: parsed.tags ?? [],
@@ -292,6 +376,29 @@ export function parseHostSpec(row: RemoteHostRow): RemoteHostSpec {
   } catch {
     return base;
   }
+}
+
+/** What this host can be asked to do. The one place the UI should ask. */
+export function capabilities(spec: RemoteHostSpec) {
+  return KIND_CAPABILITIES[spec.kind] ?? KIND_CAPABILITIES.ssh;
+}
+
+/** The port this kind implies when a spec leaves `port` at 0 — 22, 21 or 990. */
+export function defaultPortFor(spec: RemoteHostSpec): number {
+  switch (spec.kind) {
+    case "ftp":
+      return DEFAULT_FTP_PORT;
+    case "ftps":
+      // Explicit FTPS upgrades the control connection in place, so it stays on 21.
+      return spec.ftp.implicit_tls ? DEFAULT_FTPS_IMPLICIT_PORT : DEFAULT_FTP_PORT;
+    default:
+      return DEFAULT_SSH_PORT;
+  }
+}
+
+/** The port a host actually connects on. */
+export function effectivePort(spec: RemoteHostSpec): number {
+  return spec.port || defaultPortFor(spec);
 }
 
 /**
@@ -306,13 +413,19 @@ export function hasAddress(spec: RemoteHostSpec): boolean {
   return spec.host.trim().length > 0;
 }
 
-/** The one-line summary under a host's name in the tree: what `ssh` would be given. */
+/**
+ * The one-line summary under a host's name in the tree.
+ *
+ * The port shows only when it isn't the one this kind implies — `:21` under every FTP host is noise
+ * that pushes the part worth reading off the end, and the same is true of `:22` under every SSH
+ * one. `jump` is SSH-only and simply never set on the others.
+ */
 export function describeHost(spec: RemoteHostSpec): string {
   const host = spec.host.trim();
   if (!host) return "";
   const user = spec.user.trim();
   const target = user ? `${user}@${host}` : host;
-  const port = spec.port && spec.port !== DEFAULT_SSH_PORT ? `:${spec.port}` : "";
+  const port = spec.port && spec.port !== defaultPortFor(spec) ? `:${spec.port}` : "";
   const jump = spec.jump.trim() ? ` via ${spec.jump.trim()}` : "";
   return `${target}${port}${jump}`;
 }

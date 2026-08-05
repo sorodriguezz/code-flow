@@ -14,45 +14,20 @@
 //! **One session per host, held open.** A directory listing is a round trip on an existing channel;
 //! re-establishing SSH for each one would make browsing feel like dialling up. The session lives
 //! until the host is disconnected or the workspace changes.
+//!
+//! Reached through [`super::files`], never directly: the browser in front of this also speaks FTP,
+//! and which one answers is that module's decision, not the caller's.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::FileType;
-use serde::Serialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
+use super::files::{join, mode_string, plan_upload, pump, sort_entries, Planned, RemoteFile, RemoteListing};
 use super::RemoteHostSpec;
-
-/// One entry in a remote directory.
-///
-/// `permissions` is the `drwxr-xr-x` string rather than a mode integer: it is what the user reads,
-/// it is what `ls -l` shows them, and rendering it here means the frontend never has to know about
-/// octal modes.
-#[derive(Debug, Clone, Serialize)]
-pub struct RemoteFile {
-    pub name: String,
-    /// Absolute path on the far side, so the frontend never has to join paths itself and get the
-    /// separator wrong.
-    pub path: String,
-    pub is_dir: bool,
-    /// A symlink is neither, and saying so matters: following one into a directory works, but
-    /// downloading one copies the link's target, not the link.
-    pub is_link: bool,
-    pub size: u64,
-    /// Unix epoch seconds, or 0 when the server didn't say.
-    pub modified: u64,
-    pub permissions: String,
-}
-
-/// A directory, and where it is.
-#[derive(Debug, Clone, Serialize)]
-pub struct RemoteListing {
-    pub path: String,
-    pub entries: Vec<RemoteFile>,
-}
 
 struct Session {
     sftp: SftpSession,
@@ -176,42 +151,10 @@ pub async fn list(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<Re
         })
         .collect();
 
-    // Directories first, then by name — the ordering every file browser uses, applied here rather
-    // than in the UI so both panes of a dual-pane view agree without coordinating.
-    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    sort_entries(&mut entries);
 
     Ok(RemoteListing { path: resolved, entries })
 }
-
-/// How much of a transfer is done, as the UI sees it.
-///
-/// `total` is the *whole* transfer, not the current file: a folder of two hundred files should
-/// show one bar that fills once, and a bar that resets per file is a bar that lies about how long
-/// this will take.
-#[derive(Clone, Serialize)]
-pub struct TransferProgress {
-    /// Which transfer this belongs to — the frontend runs one at a time, but an event that didn't
-    /// say would be indistinguishable from a stale one arriving late.
-    pub id: String,
-    /// The file currently moving, for the label.
-    pub name: String,
-    pub done: u64,
-    pub total: u64,
-    /// Files finished so far, and how many there are. Meaningless for a single file, which is why
-    /// the UI only shows it when `files > 1`.
-    pub file_index: u64,
-    pub files: u64,
-}
-
-/// How often progress is emitted while a file is moving.
-///
-/// Every chunk would be thousands of events for a large file — each one an IPC hop and a React
-/// render — for a bar that cannot move by a visible amount that often.
-const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
-
-/// The size of one read/write. Large enough that the syscall overhead disappears, small enough that
-/// progress still moves smoothly on a slow link.
-const CHUNK: usize = 64 * 1024;
 
 /// One file or one whole directory, from the far side to here.
 ///
@@ -290,75 +233,6 @@ pub async fn upload(
     Ok(())
 }
 
-/// One file's worth of a transfer.
-struct Planned {
-    remote: String,
-    local: String,
-    name: String,
-    size: u64,
-}
-
-/// Copies one stream to another, emitting progress on a timer rather than per chunk.
-#[allow(clippy::too_many_arguments)]
-async fn pump<R, W>(
-    app: &tauri::AppHandle,
-    id: &str,
-    source: &mut R,
-    target: &mut W,
-    name: &str,
-    done: &mut u64,
-    total: u64,
-    file_index: u64,
-    files: u64,
-) -> Result<(), String>
-where
-    R: tokio::io::AsyncRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    use tauri::Emitter;
-    let mut buffer = vec![0u8; CHUNK];
-    let mut last = std::time::Instant::now();
-    loop {
-        let read = source.read(&mut buffer).await.map_err(|e| format!("Couldn't read {name}: {e}"))?;
-        if read == 0 {
-            break;
-        }
-        target
-            .write_all(&buffer[..read])
-            .await
-            .map_err(|e| format!("Couldn't write {name}: {e}"))?;
-        *done += read as u64;
-        if last.elapsed() >= PROGRESS_INTERVAL {
-            last = std::time::Instant::now();
-            let _ = app.emit(
-                "remote:transfer",
-                TransferProgress {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    done: *done,
-                    total,
-                    file_index,
-                    files,
-                },
-            );
-        }
-    }
-    // A final event on every file, so the bar reaches the end rather than stopping wherever the
-    // last tick happened to land.
-    let _ = app.emit(
-        "remote:transfer",
-        TransferProgress {
-            id: id.to_string(),
-            name: name.to_string(),
-            done: *done,
-            total,
-            file_index: file_index + 1,
-            files,
-        },
-    );
-    Ok(())
-}
-
 /// Walks the far side, breadth-first, collecting every file under `remote_path`.
 ///
 /// Iterative rather than recursive: `async fn` recursion needs boxing, and a deep tree would be a
@@ -412,41 +286,6 @@ async fn plan_download(
     Ok(planned)
 }
 
-/// The same walk on this side. Synchronous: `std::fs` is fast enough locally that making it async
-/// buys nothing but a spawn_blocking.
-fn plan_upload(local_path: &str, remote_path: &str) -> Result<Vec<Planned>, String> {
-    let path = std::path::Path::new(local_path);
-    let metadata = std::fs::metadata(path).map_err(|e| format!("Couldn't read {local_path}: {e}"))?;
-    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-
-    if !metadata.is_dir() {
-        return Ok(vec![Planned {
-            remote: remote_path.to_string(),
-            local: local_path.to_string(),
-            name,
-            size: metadata.len(),
-        }]);
-    }
-
-    let mut planned = Vec::new();
-    let mut queue = vec![(path.to_path_buf(), remote_path.to_string())];
-    while let Some((dir, into)) = queue.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let Ok(metadata) = entry.metadata() else { continue };
-            let name = entry.file_name().to_string_lossy().to_string();
-            let remote = join(&into, &name);
-            let local = entry.path().to_string_lossy().to_string();
-            if metadata.is_dir() {
-                queue.push((entry.path(), remote));
-            } else {
-                planned.push(Planned { remote, local, name, size: metadata.len() });
-            }
-        }
-    }
-    Ok(planned)
-}
-
 pub async fn make_dir(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<(), String> {
     let session = session(host_id, spec).await?;
     session.sftp.create_dir(path).await.map_err(|e| explain(&format!("create {path}"), e))
@@ -481,89 +320,8 @@ pub async fn rename(
     session.sftp.rename(from, to).await.map_err(|e| explain(&format!("rename {from}"), e))
 }
 
-/// The *local* side of the dual pane, in the same shape as the remote side.
-///
-/// One shape rather than two, so a single component renders both columns. The alternative — a local
-/// type and a remote type that happen to have the same fields — is two renderers that drift, and a
-/// dual-pane browser whose halves look subtly different is worse than one that looks the same.
-///
-/// `fsops::list_dir` is repo-scoped and can't serve this: the local half of a file transfer starts
-/// at your home directory and goes anywhere.
-pub fn list_local(path: &str) -> Result<RemoteListing, String> {
-    let target = if path.trim().is_empty() {
-        dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
-    } else {
-        std::path::PathBuf::from(path)
-    };
-    // Canonicalized for the same reason the remote side is: the breadcrumb is built from the reply,
-    // so a `..` must be resolved here rather than guessed at by the UI. `dunce` undoes Windows'
-    // verbatim `\\?\C:\…` prefix, which is a path Rust reads happily and nothing else does.
-    let target = dunce::canonicalize(&target)
-        .map_err(|e| format!("Couldn't read {}: {e}", target.display()))?;
-
-    let mut entries = Vec::new();
-    for entry in std::fs::read_dir(&target).map_err(|e| format!("Couldn't read {}: {e}", target.display()))? {
-        let Ok(entry) = entry else { continue };
-        let Ok(metadata) = entry.metadata() else { continue };
-        let name = entry.file_name().to_string_lossy().to_string();
-        entries.push(RemoteFile {
-            path: entry.path().to_string_lossy().to_string(),
-            is_dir: metadata.is_dir(),
-            is_link: entry.file_type().map(|t| t.is_symlink()).unwrap_or(false),
-            size: metadata.len(),
-            modified: metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            permissions: local_permissions(&metadata),
-            name,
-        });
-    }
-    entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-
-    Ok(RemoteListing { path: target.to_string_lossy().to_string(), entries })
-}
-
-/// The permission string for a local entry.
-///
-/// Unix has a mode to render; Windows has no such thing, so it gets the one bit it does have. A
-/// fabricated `drwxr-xr-x` on Windows would be a lie dressed as detail.
-#[cfg(unix)]
-fn local_permissions(metadata: &std::fs::Metadata) -> String {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = metadata.permissions().mode();
-    let kind = if metadata.is_dir() { 'd' } else { '-' };
-    let bit = |shift: u32, ch: char| if mode >> shift & 1 == 1 { ch } else { '-' };
-    format!(
-        "{kind}{}{}{}{}{}{}{}{}{}",
-        bit(8, 'r'), bit(7, 'w'), bit(6, 'x'),
-        bit(5, 'r'), bit(4, 'w'), bit(3, 'x'),
-        bit(2, 'r'), bit(1, 'w'), bit(0, 'x'),
-    )
-}
-
-#[cfg(not(unix))]
-fn local_permissions(metadata: &std::fs::Metadata) -> String {
-    if metadata.permissions().readonly() { "read-only".into() } else { String::new() }
-}
-
-/// Joins a directory and a name with `/`.
-///
-/// Always `/`, never the host platform's separator: this is a *remote* path, and SFTP paths are
-/// `/`-separated even when the server is Windows — OpenSSH for Windows serves `C:/Users/...`.
-fn join(dir: &str, name: &str) -> String {
-    if dir.ends_with('/') {
-        format!("{dir}{name}")
-    } else {
-        format!("{dir}/{name}")
-    }
-}
-
-/// The `drwxr-xr-x` string, from the mode the server reported.
+/// The `drwxr-xr-x` string, from the mode the server reported. Empty when it reported none, which
+/// is the honest answer — an invented mode would be indistinguishable from a real one.
 fn permissions(metadata: &russh_sftp::protocol::FileAttributes) -> String {
     let Some(mode) = metadata.permissions else { return String::new() };
     let kind = match metadata.file_type() {
@@ -571,13 +329,7 @@ fn permissions(metadata: &russh_sftp::protocol::FileAttributes) -> String {
         FileType::Symlink => 'l',
         _ => '-',
     };
-    let bit = |shift: u32, ch: char| if mode >> shift & 1 == 1 { ch } else { '-' };
-    format!(
-        "{kind}{}{}{}{}{}{}{}{}{}",
-        bit(8, 'r'), bit(7, 'w'), bit(6, 'x'),
-        bit(5, 'r'), bit(4, 'w'), bit(3, 'x'),
-        bit(2, 'r'), bit(1, 'w'), bit(0, 'x'),
-    )
+    mode_string(kind, mode)
 }
 
 /// SFTP status codes are numbers; this puts the operation in front of one so the message names what
@@ -589,49 +341,6 @@ fn explain(operation: &str, error: russh_sftp::client::error::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn remote_paths_join_with_a_forward_slash_whatever_this_machine_uses() {
-        assert_eq!(join("/srv", "app"), "/srv/app");
-        assert_eq!(join("/", "etc"), "/etc");
-        // An OpenSSH-for-Windows server serves paths in this shape, and they are still `/`-joined.
-        assert_eq!(join("C:/Users/sam", "Desktop"), "C:/Users/sam/Desktop");
-    }
-
-    #[test]
-    fn the_local_pane_lists_directories_first_then_by_name() {
-        let dir = std::env::temp_dir().join(format!("cf-sftp-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(dir.join("zeta")).unwrap();
-        std::fs::create_dir_all(dir.join("alpha")).unwrap();
-        std::fs::write(dir.join("Beta.txt"), b"hello").unwrap();
-        std::fs::write(dir.join("aardvark.txt"), b"hi").unwrap();
-
-        let listing = list_local(&dir.to_string_lossy()).unwrap();
-        let names: Vec<&str> = listing.entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, ["alpha", "zeta", "aardvark.txt", "Beta.txt"]);
-
-        let file = listing.entries.iter().find(|e| e.name == "Beta.txt").unwrap();
-        assert_eq!(file.size, 5);
-        assert!(!file.is_dir);
-        assert!(file.path.ends_with("Beta.txt"));
-        #[cfg(unix)]
-        assert!(file.permissions.starts_with('-'), "{}", file.permissions);
-        #[cfg(unix)]
-        assert!(
-            listing.entries[0].permissions.starts_with('d'),
-            "{}",
-            listing.entries[0].permissions
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn an_empty_path_means_the_home_directory_not_the_process_cwd() {
-        let listing = list_local("").unwrap();
-        let home = dunce::canonicalize(dirs::home_dir().unwrap()).unwrap();
-        assert_eq!(listing.path, home.to_string_lossy());
-    }
 
     /// The load-bearing mechanism, exercised for real.
     ///

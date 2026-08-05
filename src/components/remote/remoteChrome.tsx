@@ -1,5 +1,15 @@
-import { Apple, AppWindow, HardDrive, Server, type LucideIcon } from "lucide-react";
-import type { RemoteOs } from "../../types/remote";
+import {
+  Apple,
+  AppWindow,
+  FolderTree,
+  Globe,
+  HardDrive,
+  Server,
+  ShieldCheck,
+  Terminal,
+  type LucideIcon,
+} from "lucide-react";
+import { KIND_LABEL, type RemoteKind, type RemoteOs } from "../../types/remote";
 
 /**
  * The Remote workspace's shared visual vocabulary, the counterpart of `dbChrome`.
@@ -11,6 +21,52 @@ import type { RemoteOs } from "../../types/remote";
 
 /** The panel fill, matching the database workspace's so the two views read as one app. */
 export const CARD = "bg-[var(--cf-surface)]";
+
+/**
+ * The glyph for what a host *speaks*, which is a different question from what it runs.
+ *
+ * Both are shown, and neither replaces the other: the OS glyph answers "what is that machine", the
+ * kind glyph answers "what can I do with it here". A Linux box reachable only over FTP is a
+ * penguin and a globe, and collapsing that to one icon would lose whichever half the user was
+ * looking for.
+ */
+export function kindIcon(kind: RemoteKind): LucideIcon {
+  switch (kind) {
+    case "sftp":
+      return FolderTree;
+    case "ftp":
+      return Globe;
+    case "ftps":
+      return ShieldCheck;
+    default:
+      return Terminal;
+  }
+}
+
+/**
+ * A tint per kind, on the same "quiet enough not to compete with the host's own colour" budget as
+ * [`osColor`] — with one deliberate exception. Plain FTP is amber because it is the one kind whose
+ * defining property is that it is *unencrypted*, and that is worth a glance costing something.
+ */
+export function kindColor(kind: RemoteKind): string {
+  switch (kind) {
+    case "sftp":
+      return "#2a9071";
+    case "ftp":
+      return "#c46720";
+    case "ftps":
+      return "#2d86c2";
+    default:
+      return "#8b8b96";
+  }
+}
+
+export function KindGlyph({ kind, size = 14 }: { kind: RemoteKind; size?: number }) {
+  const Icon = kindIcon(kind);
+  return (
+    <Icon size={size} style={{ color: kindColor(kind) }} aria-label={KIND_LABEL[kind] ?? "SSH"} />
+  );
+}
 
 export function osIcon(os: RemoteOs): LucideIcon {
   switch (os) {

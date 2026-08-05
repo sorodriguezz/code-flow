@@ -9,10 +9,17 @@ import {
   Terminal,
   Waypoints,
 } from "lucide-react";
-import { HostDot, OsGlyph, Pill } from "./remoteChrome";
+import { HostDot, KindGlyph, OsGlyph, Pill } from "./remoteChrome";
 import { allTags, hostMatches, useRemoteStore } from "../../state/remoteStore";
 import { useT } from "../../state/languageStore";
-import { describeHost, hasAddress, parseHostSpec, type RemoteHostRow } from "../../types/remote";
+import {
+  capabilities,
+  describeHost,
+  hasAddress,
+  parseHostSpec,
+  type RemoteHostRow,
+  type RemoteHostSpec,
+} from "../../types/remote";
 
 /**
  * What fills the main area when no session is open: the estate, as something to launch from.
@@ -178,6 +185,24 @@ export function TagFilterRow() {
   );
 }
 
+/**
+ * What activating a host opens: the shell where there is one, the file browser otherwise.
+ *
+ * A hook so the card and the list row share it — they are two drawings of the same object, and a
+ * double-click meaning different things in the two would be a bug nobody would think to look for.
+ */
+function useOpenPrimary() {
+  const openSession = useRemoteStore((s) => s.openSession);
+  const openSftp = useRemoteStore((s) => s.openSftp);
+  const openDetails = useRemoteStore((s) => s.openDetails);
+
+  return (host: RemoteHostRow, spec: RemoteHostSpec) => {
+    if (!hasAddress(spec)) return openDetails(host.id);
+    if (capabilities(spec).shell) void openSession(host.id);
+    else openSftp(host.id);
+  };
+}
+
 /** The three things you came to a machine for, wherever the host is drawn. */
 function HostActions({ host }: { host: RemoteHostRow }) {
   const openSession = useRemoteStore((s) => s.openSession);
@@ -189,13 +214,20 @@ function HostActions({ host }: { host: RemoteHostRow }) {
 
   const spec = parseHostSpec(host);
   const act = (run: () => void) => (hasAddress(spec) ? run() : openDetails(host.id));
+  // Same table the tree uses, for the same reason: an FTP host has files and nothing else, so it
+  // gets one action rather than four, three of which could not work.
+  const can = capabilities(spec);
 
   return (
     <span className="flex shrink-0 items-center gap-0.5">
-      <Action icon={Terminal} label={t("remote.openShell")} onClick={() => act(() => void openSession(host.id))} />
+      {can.shell && (
+        <Action icon={Terminal} label={t("remote.openShell")} onClick={() => act(() => void openSession(host.id))} />
+      )}
       <Action icon={FolderOpen} label={t("remote.files")} onClick={() => act(() => openSftp(host.id))} />
-      <Action icon={Waypoints} label={t("remote.portForwards")} onClick={() => act(() => openForwards(host.id))} />
-      {spec.screen.protocol !== "none" && (
+      {can.forwards && (
+        <Action icon={Waypoints} label={t("remote.portForwards")} onClick={() => act(() => openForwards(host.id))} />
+      )}
+      {can.screen && spec.screen.protocol !== "none" && (
         <Action icon={Monitor} label={t("remote.openScreen")} onClick={() => act(() => void openScreen(host.id))} />
       )}
       <Action icon={Settings2} label={t("remote.editHost")} onClick={() => openDetails(host.id)} />
@@ -229,9 +261,8 @@ function Action({
 }
 
 function HostCard({ host }: { host: RemoteHostRow }) {
-  const openSession = useRemoteStore((s) => s.openSession);
+  const openPrimary = useOpenPrimary();
   const selectHost = useRemoteStore((s) => s.selectHost);
-  const openDetails = useRemoteStore((s) => s.openDetails);
   const selected = useRemoteStore((s) => s.selectedHostId === host.id);
   const hasSession = useRemoteStore((s) =>
     s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited),
@@ -247,11 +278,11 @@ function HostCard({ host }: { host: RemoteHostRow }) {
       role="button"
       tabIndex={0}
       onClick={() => selectHost(host.id)}
-      onDoubleClick={() => (hasAddress(spec) ? void openSession(host.id) : openDetails(host.id))}
+      onDoubleClick={() => openPrimary(host, spec)}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          hasAddress(spec) ? void openSession(host.id) : openDetails(host.id);
+          openPrimary(host, spec);
         }
       }}
       className={`group flex cursor-default flex-col gap-1.5 rounded-lg border p-2.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
@@ -263,6 +294,7 @@ function HostCard({ host }: { host: RemoteHostRow }) {
       <div className="flex min-w-0 items-center gap-1.5">
         <HostDot session={hasSession} active={hasForward} color={host.color} />
         <OsGlyph os={spec.os} size={14} />
+        <KindGlyph kind={spec.kind} size={13} />
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">
           {host.name}
         </span>
@@ -293,9 +325,8 @@ function HostCard({ host }: { host: RemoteHostRow }) {
 }
 
 function HostListRow({ host }: { host: RemoteHostRow }) {
-  const openSession = useRemoteStore((s) => s.openSession);
+  const openPrimary = useOpenPrimary();
   const selectHost = useRemoteStore((s) => s.selectHost);
-  const openDetails = useRemoteStore((s) => s.openDetails);
   const selected = useRemoteStore((s) => s.selectedHostId === host.id);
   const hasSession = useRemoteStore((s) =>
     s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited),
@@ -309,11 +340,11 @@ function HostListRow({ host }: { host: RemoteHostRow }) {
       role="button"
       tabIndex={0}
       onClick={() => selectHost(host.id)}
-      onDoubleClick={() => (hasAddress(spec) ? void openSession(host.id) : openDetails(host.id))}
+      onDoubleClick={() => openPrimary(host, spec)}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          hasAddress(spec) ? void openSession(host.id) : openDetails(host.id);
+          openPrimary(host, spec);
         }
       }}
       className={`group flex cursor-default items-center gap-2 px-3 py-1.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${

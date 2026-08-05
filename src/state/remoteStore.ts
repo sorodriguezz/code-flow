@@ -4,8 +4,10 @@ import {
   remoteCloseFiles,
   remoteCloseHostForwards,
   remoteCloseScreen,
+  remoteCreateGroup,
   remoteCreateHost,
   remoteCreateSnippet,
+  remoteDeleteGroup,
   remoteDeleteHost,
   remoteDeleteSnippet,
   remoteDuplicateHost,
@@ -31,6 +33,7 @@ import {
   parseHostSpec,
   type ActiveForward,
   type ForwardSpec,
+  type RemoteGroupRow,
   type RemoteHostRow,
   type RemoteHostSpec,
   type RemoteSnippet,
@@ -162,6 +165,9 @@ interface RemoteState {
   workspaceId: string | null;
   loading: boolean;
   hosts: RemoteHostRow[];
+  /** Folder rows. Not the membership — that is still each host's `group_name`. These exist so a
+   *  group the user made and hasn't filled yet survives a reload; see `RemoteGroupRow`. */
+  groups: RemoteGroupRow[];
   snippets: RemoteSnippet[];
   forwards: ActiveForward[];
   /** Group names the user has collapsed. Persisted: a collapsed group is a decision about how much
@@ -242,7 +248,10 @@ interface RemoteState {
   deleteHost: (id: string) => Promise<void>;
   duplicateHost: (id: string) => Promise<RemoteHostRow | null>;
   reorderHosts: (ids: string[]) => Promise<void>;
+  createGroup: (name: string) => Promise<void>;
   renameGroup: (from: string, to: string) => Promise<void>;
+  /** Deletes the folder. Its hosts move to ungrouped — never deleted with it. */
+  deleteGroup: (name: string) => Promise<void>;
   setHostGroup: (id: string, group: string) => Promise<void>;
   /**
    * What a drop does: put `hostId` immediately before `beforeHostId` (or last in `group` when that
@@ -306,8 +315,15 @@ export function hostOf(hosts: RemoteHostRow[], hostId: string): RemoteHostRow | 
  *
  * Ungrouped first rather than last because it is where a newly created host lands, and a user who
  * has just pressed "New host" should not have to scroll past their whole estate to find it. */
-export function groupHosts(hosts: RemoteHostRow[]): [string, RemoteHostRow[]][] {
+export function groupHosts(
+  hosts: RemoteHostRow[],
+  folders: RemoteGroupRow[] = [],
+): [string, RemoteHostRow[]][] {
   const groups = new Map<string, RemoteHostRow[]>();
+  // The folder rows go in first, so a group the user created and hasn't filled still gets a
+  // heading — the whole reason those rows exist. A group named by a host but with no row of its
+  // own (an import, a drag onto a new name) is added by the loop below and reads identically.
+  for (const folder of folders) groups.set(folder.name.trim(), []);
   for (const host of hosts) {
     const key = host.group_name.trim();
     const bucket = groups.get(key);
@@ -351,6 +367,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   workspaceId: null,
   loading: false,
   hosts: [],
+  groups: [],
   snippets: [],
   forwards: [],
   collapsedGroups: [],
@@ -384,6 +401,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       workspaceId,
       loading: true,
       hosts: [],
+      groups: [],
       snippets: [],
       forwards: [],
       tabs: [],
@@ -406,6 +424,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         ]);
         set({
           hosts: tree.hosts,
+          groups: tree.groups,
           snippets: tree.snippets,
           collapsedGroups: collapsed,
           hostView: hostView === "list" ? "list" : "grid",
@@ -429,7 +448,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     if (!workspaceId) return;
     try {
       const tree = await remoteLoadTree(workspaceId);
-      set({ hosts: tree.hosts, snippets: tree.snippets });
+      set({ hosts: tree.hosts, groups: tree.groups, snippets: tree.snippets });
     } catch (error) {
       pushErrorToast(`${translate("remote.loadFailed")}: ${String(error)}`);
     }
@@ -563,15 +582,65 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     }
   },
 
+  createGroup: async (name) => {
+    const workspaceId = get().workspaceId;
+    const trimmed = name.trim();
+    // The ungrouped bucket is the absence of a group, not a group called "". Creating it would put
+    // a folder in the tree that every host without one already falls into.
+    if (!workspaceId || !trimmed) return;
+    try {
+      const row = await remoteCreateGroup(workspaceId, trimmed);
+      // Written from the reply rather than optimistically: the backend deduplicates by name, so
+      // "New group" on a name that already exists must add nothing rather than a second row.
+      set((s) => ({
+        groups: s.groups.some((group) => group.name === row.name) ? s.groups : [...s.groups, row],
+      }));
+    } catch (error) {
+      pushErrorToast(`${translate("remote.saveFailed")}: ${String(error)}`);
+      void get().refresh();
+    }
+  },
+
   renameGroup: async (from, to) => {
     const workspaceId = get().workspaceId;
-    if (!workspaceId || from === to) return;
+    if (!workspaceId || from === to || !to.trim()) return;
+    const target = to.trim();
     set((s) => ({
-      hosts: s.hosts.map((host) => (host.group_name === from ? { ...host, group_name: to } : host)),
-      collapsedGroups: s.collapsedGroups.map((name) => (name === from ? to : name)),
+      hosts: s.hosts.map((host) =>
+        host.group_name === from ? { ...host, group_name: target } : host,
+      ),
+      // Renaming onto an existing name merges, so the folder rows have to collapse the same way —
+      // otherwise the tree would briefly show the target twice.
+      groups: s.groups
+        .map((group) => (group.name === from ? { ...group, name: target } : group))
+        .filter(
+          (group, index, all) => all.findIndex((other) => other.name === group.name) === index,
+        ),
+      collapsedGroups: [
+        ...new Set(s.collapsedGroups.map((name) => (name === from ? target : name))),
+      ],
     }));
     try {
-      await remoteRenameGroup(workspaceId, from, to);
+      await remoteRenameGroup(workspaceId, from, target);
+    } catch (error) {
+      pushErrorToast(`${translate("remote.saveFailed")}: ${String(error)}`);
+      void get().refresh();
+    }
+  },
+
+  deleteGroup: async (name) => {
+    const workspaceId = get().workspaceId;
+    if (!workspaceId || name === UNGROUPED) return;
+    set((s) => ({
+      // The hosts stay; they lose the folder, not their existence.
+      hosts: s.hosts.map((host) =>
+        host.group_name === name ? { ...host, group_name: UNGROUPED } : host,
+      ),
+      groups: s.groups.filter((group) => group.name !== name),
+      collapsedGroups: s.collapsedGroups.filter((entry) => entry !== name),
+    }));
+    try {
+      await remoteDeleteGroup(workspaceId, name);
     } catch (error) {
       pushErrorToast(`${translate("remote.saveFailed")}: ${String(error)}`);
       void get().refresh();

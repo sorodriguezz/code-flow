@@ -58,6 +58,7 @@ pub fn tunnel_id(host_id: &str) -> String {
 
 /// Opens the host's screen, raising the SSH forward first if it is configured to need one.
 pub async fn open(host_id: &str, host: &RemoteHostSpec) -> Result<ScreenLaunch, String> {
+    host.require_screen()?;
     let screen = &host.screen;
     if screen.protocol == ScreenProtocol::None {
         return Err("This host has no screen configured. Open it and pick VNC or RDP.".into());

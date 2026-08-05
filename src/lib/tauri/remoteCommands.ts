@@ -5,6 +5,7 @@ import type {
   ImportResult,
   ImportedHost,
   ParsedCommand,
+  RemoteGroupRow,
   RemoteHostRow,
   RemoteHostSpec,
   RemoteSnippet,
@@ -58,8 +59,21 @@ export const remoteDuplicateHost = (id: string) =>
 
 export const remoteReorderHosts = (ids: string[]) => invoke<void>("remote_reorder_hosts", { ids });
 
+// ---------- groups ----------
+
+/** Creates an empty folder. Idempotent — the row it returns is the group that now exists, whether
+ *  this call made it or found one already carrying the name. */
+export const remoteCreateGroup = (workspaceId: string, name: string) =>
+  invoke<RemoteGroupRow>("remote_create_group", { workspaceId, name });
+
+/** Renames a group and everything in it. Renaming onto an existing name merges the two. */
 export const remoteRenameGroup = (workspaceId: string, from: string, to: string) =>
   invoke<void>("remote_rename_group", { workspaceId, from, to });
+
+/** Deletes the folder. Its hosts move to ungrouped — a folder and the machines in it are not the
+ *  same thing, and this never removes the second. */
+export const remoteDeleteGroup = (workspaceId: string, name: string) =>
+  invoke<void>("remote_delete_group", { workspaceId, name });
 
 // ---------- credentials ----------
 

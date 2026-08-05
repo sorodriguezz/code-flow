@@ -22,6 +22,7 @@ pub fn open(
     spec: &RemoteHostSpec,
 ) -> Result<String, String> {
     spec.require_host()?;
+    spec.require_shell()?;
     terminal::open_pty(app, registry, "ssh", &args(spec), None).map_err(|e| explain(spec, e))
 }
 
