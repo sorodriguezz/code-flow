@@ -255,7 +255,12 @@ export function ReviewEngineSettings() {
 
       <div className="rounded-lg border border-[var(--cf-border)] px-3 py-2">
         {config.levels.map((level) => (
-          <Group key={level.level} title={`${t("settings.engineLevel")} · ${LEVEL_LABEL[level.level] ?? level.level}`} collapsible defaultOpen={level.level === "completo"}>
+          // Shut like every other group here. "Completo" used to open on arrival because it is the
+          // level most runs use, but a panel where one section is unrolled and the other six are
+          // not reads as "this one needs your attention" — and it pushed the rest off the fold, so
+          // the first thing the panel showed was the middle of one level's knobs rather than the
+          // list of what can be tuned.
+          <Group key={level.level} title={`${t("settings.engineLevel")} · ${LEVEL_LABEL[level.level] ?? level.level}`} collapsible defaultOpen={false}>
             <NumberField
               label={t("settings.engineMinConfidence")}
               hint={t("settings.engineMinConfidenceHint")}
@@ -335,7 +340,7 @@ export function ReviewEngineSettings() {
       </div>
 
       <div className="rounded-lg border border-[var(--cf-border)] px-3 py-2">
-        <Group title={t("settings.engineGate")}>
+        <Group title={t("settings.engineGate")} collapsible defaultOpen={false}>
           <p className="mb-1 flex items-center gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
             <ShieldAlert size={12} className="shrink-0" />
             {t("settings.engineGateHint")}

@@ -4,27 +4,31 @@ import { useT } from "../../state/languageStore";
 import type { FoundRepo } from "../../lib/tauri/commands";
 
 /**
- * Which of the repositories found inside a picked folder to import.
+ * Which of the repositories a pick turned up to import.
  *
- * Shown only when the folder is not itself a repository but has repositories directly inside it —
- * the "I keep all my repos in one place" pick, which used to be registered as a single project
- * whose path was the parent. Everything downstream then pointed at that parent: `git status`
- * walking whatever enclosing repository it could find, and a *recursive* file watcher over every
- * working tree in there at once. That is the freeze this dialog exists to make impossible.
+ * Shown whenever more than one came back — from a folder that holds them, from several folders
+ * picked at once, or from both. The "I keep all my repos in one place" pick used to be registered
+ * as a single project whose path was the parent. Everything downstream then pointed at that
+ * parent: `git status` walking whatever enclosing repository it could find, and a *recursive* file
+ * watcher over every working tree in there at once. That is the freeze this dialog exists to make
+ * impossible.
  *
  * A list with checkboxes rather than an automatic import of everything found: a folder of twenty
  * repositories is rarely twenty repositories you want open, and adding them all is tidier to
  * describe than to undo.
  */
 export function ImportReposModal({
-  folder,
+  folders,
   repos,
   existingPaths,
   truncated,
   onImport,
   onClose,
 }: {
-  folder: string;
+  /** What was picked. More than one when the native dialog's multi-select was used — the list is
+   * joined on one line, with the whole of it on hover, because which folders these came from is
+   * context for the names below rather than something to read in full. */
+  folders: string[];
   repos: FoundRepo[];
   /** Paths already in this workspace. Those rows are shown, but locked and unchecked — seeing that
    * a repository is *already here* is the answer to "why isn't it in the list", which leaving it
@@ -83,8 +87,11 @@ export function ImportReposModal({
             </button>
           )}
         </div>
-        <p className="mb-3 truncate font-mono text-[11px] text-[var(--cf-text-muted)]" title={folder}>
-          {folder}
+        <p
+          className="mb-3 truncate font-mono text-[11px] text-[var(--cf-text-muted)]"
+          title={folders.join("\n")}
+        >
+          {folders.join(" · ")}
         </p>
 
         <div className="mb-2 flex items-center justify-between">

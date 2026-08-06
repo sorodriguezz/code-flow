@@ -14,12 +14,28 @@ import { engineInfo, type DbKind, type DbNode } from "../../types/database";
  *    deliberately unfinished, and the console refuses a `DELETE` with no `WHERE` at all (see
  *    `sqlGuards`). A generator that emitted a ready-to-run `DELETE FROM t` would be handing over a
  *    loaded statement one ⌘↵ away from an empty table.
+ *
+ *    `DROP` and `TRUNCATE` are the exception, and it is worth being clear about why. What makes an
+ *    unguarded `DELETE` dangerous is that it is a statement you *meant* to finish — the clause is
+ *    missing by accident. `DROP TABLE t` has no missing clause: it is exactly and only what was
+ *    asked for, so leaving it half-written would be theatre rather than a safeguard. They carry a
+ *    comment saying what they destroy, and nothing here runs on its own.
  * 2. **The dialect is respected.** Identifier quoting differs (`[x]` on SQL Server), and so does
  *    paging (`TOP` on IRIS and SQL Server, `LIMIT` elsewhere) — a draft that doesn't parse in the
  *    console it lands in has taught the user nothing.
  */
 
-export type SqlTemplate = "select" | "insert" | "update" | "delete" | "count" | "create" | "grant" | "revoke";
+export type SqlTemplate =
+  | "select"
+  | "insert"
+  | "update"
+  | "delete"
+  | "count"
+  | "create"
+  | "truncate"
+  | "drop"
+  | "grant"
+  | "revoke";
 
 /**
  * `CREATE TABLE` / `CREATE SCHEMA` drafts for a container node — a database or a schema.
@@ -99,6 +115,12 @@ export function sqlTemplate(
         return `db.${node.name}.deleteMany({ /* filter — never leave this empty */ })`;
       case "count":
         return `db.${node.name}.countDocuments({})`;
+      case "drop":
+        return `// Drops the ${node.name} collection and every document in it.\ndb.${node.name}.drop()`;
+      case "truncate":
+        // Mongo has no TRUNCATE. Emptying a collection while keeping it is a filterless
+        // `deleteMany` — the one place this module writes one, because here it is the request.
+        return `// Empties ${node.name}, keeping the collection itself.\ndb.${node.name}.deleteMany({})`;
       default:
         return `db.${node.name}.find({}).limit(50)`;
     }
@@ -127,6 +149,16 @@ export function sqlTemplate(
       return columns.length > 0
         ? `CREATE TABLE ${target} (\n${names.map((name) => `  ${name} /* type */`).join(",\n")}\n)`
         : `CREATE TABLE ${target} (\n  /* columns */\n)`;
+    case "truncate":
+      // Every row, and no clause that could narrow it — which is the whole difference from the
+      // `DELETE` above, and worth saying in the draft rather than only in a tooltip.
+      return `-- Empties ${node.name}. Every row, no WHERE; the table itself stays.\nTRUNCATE TABLE ${target}`;
+    case "drop":
+      // `DROP VIEW` on a view: the menu opens on views too, and `DROP TABLE` against one is an
+      // error on every engine here — a draft that cannot run is worse than no draft.
+      return `-- Drops ${node.name} and everything in it. Not undoable.\nDROP ${
+        node.kind === "view" ? "VIEW" : "TABLE"
+      } ${target}`;
     case "grant":
       return `GRANT SELECT, INSERT, UPDATE, DELETE\nON ${target}\nTO /* role */`;
     case "revoke":

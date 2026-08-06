@@ -9,6 +9,7 @@ import {
   EyeOff,
   Filter,
   Database,
+  Eraser,
   FileCode2,
   FolderCode,
   FolderOpen,
@@ -27,6 +28,7 @@ import {
   Search,
   Settings2,
   Table2,
+  Trash,
   Trash2,
   Wand2,
   X,
@@ -59,6 +61,7 @@ import {
   type DbConnectionRow,
   type DbConsole,
   type DbNode,
+  type DbNodeKind,
   type DbNodeRef,
 } from "../../types/database";
 
@@ -92,6 +95,8 @@ function TreeRow({
   active,
   onToggle,
   onOpen,
+  onSelect,
+  onKeyDown,
   onContextMenu,
   leading,
   color,
@@ -111,6 +116,10 @@ function TreeRow({
   active?: boolean;
   onToggle: () => void;
   onOpen?: () => void;
+  /** Single click. Only the connection rows take one — it is what the ordering arrows act on. */
+  onSelect?: () => void;
+  /** Keys the row itself doesn't handle: `Alt`+arrows on a connection, and nothing anywhere else. */
+  onKeyDown?: (e: React.KeyboardEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
   leading?: React.ReactNode;
   color?: string;
@@ -119,11 +128,14 @@ function TreeRow({
     <div
       role="treeitem"
       aria-expanded={expandable ? expanded : undefined}
+      aria-selected={active}
       title={title}
       tabIndex={0}
-      // No `onClick`: expanding is the chevron's job alone. A single click on the row used to
-      // toggle, which made every attempt to *select* a node fold or unfold it — and on a slow
-      // connection, expanding is a round trip, so brushing past a schema went and fetched it.
+      // A click *selects*, it never expands: expanding is the chevron's job alone. A single click on
+      // the row used to toggle, which made every attempt to point at a node fold or unfold it — and
+      // on a slow connection, expanding is a round trip, so brushing past a schema went and fetched
+      // it. Selecting costs nothing and reaches nothing.
+      onClick={onSelect}
       // Falls back to the chevron's job only for a node that *has* one — a folder with no open
       // action of its own. On a leaf (a column, a key) there is nothing to expand, and calling
       // toggle there would send a fetch for children that cannot exist.
@@ -143,6 +155,8 @@ function TreeRow({
         } else if (e.key === "ArrowLeft" && expandable && expanded) {
           e.preventDefault();
           onToggle();
+        } else {
+          onKeyDown?.(e);
         }
       }}
       style={{ paddingLeft: 6 + depth * 12, ...riseDelay(at) }}
@@ -447,7 +461,9 @@ function NodeSubtree({
           x={generateMenu.x}
           y={generateMenu.y}
           heading={t("db.generateSql")}
-          items={GENERATED.map((entry) => ({
+          items={GENERATED.filter(
+            (entry) => !entry.appliesTo || entry.appliesTo.includes(node.kind),
+          ).map((entry) => ({
             label: t(entry.label),
             icon: entry.icon,
             separated: entry.separated,
@@ -462,14 +478,20 @@ function NodeSubtree({
 
 /**
  * The statements the generator offers, grouped the way SQL itself is talked about: the ones that
- * read or change rows (DML), the one that defines the object (DDL), and the ones that say who may
+ * read or change rows (DML), the ones that define the object (DDL), and the ones that say who may
  * touch it (DCL).
+ *
+ * Inside the DDL group the order is not alphabetical: `CREATE` first, then the two that destroy the
+ * whole object. Being last in their group puts the most irreversible rows furthest from `SELECT` at
+ * the top, which is where the pointer arrives.
  */
 const GENERATED: {
   template: SqlTemplate;
   label: TranslationKey;
   icon: LucideIcon;
   separated?: boolean;
+  /** Node kinds the draft makes sense for. Absent means every relation this menu opens on. */
+  appliesTo?: DbNodeKind[];
 }[] = [
   { template: "select", label: "db.sql.select", icon: Search },
   { template: "count", label: "db.sql.count", icon: Hash },
@@ -477,6 +499,10 @@ const GENERATED: {
   { template: "update", label: "db.sql.update", icon: Pencil },
   { template: "delete", label: "db.sql.delete", icon: Trash2 },
   { template: "create", label: "db.sql.create", icon: FileCode2, separated: true },
+  // Not offered on a view: a view holds no rows of its own, so `TRUNCATE` against one is an error
+  // rather than a statement worth drafting. `DROP` is offered — it just becomes `DROP VIEW`.
+  { template: "truncate", label: "db.sql.truncate", icon: Eraser, appliesTo: ["table", "collection"] },
+  { template: "drop", label: "db.sql.drop", icon: Trash },
   { template: "grant", label: "db.sql.grant", icon: KeyRound, separated: true },
   { template: "revoke", label: "db.sql.revoke", icon: KeyRound },
 ];
@@ -515,15 +541,12 @@ function ConnectionBranch({
   row,
   index,
   total,
-  siblings,
 }: {
   row: DbConnectionRow;
+  /** Place among the rows it is drawn with — its group's members, or the loose list. Only for the
+   * stagger and for hiding the "move up" item on the first row; the move itself is the store's. */
   index: number;
   total: number;
-  /** The rows "move up/down" moves within — the group's members, or the whole list when the tree
-   * has no folders. Order is still stored globally, so a move inside a folder swaps the two rows'
-   * places in the full list and leaves everything else where it was. */
-  siblings: DbConnectionRow[];
 }) {
   const t = useT();
   const rootRef: DbNodeRef = { kind: "root", database: null, schema: null, name: null };
@@ -550,19 +573,9 @@ function ConnectionBranch({
   const [groupMenu, setGroupMenu] = useState<{ x: number; y: number } | null>(null);
 
   const store = useDbStore.getState();
+  const selected = useDbStore((s) => s.selectedConnectionId === row.id);
 
-  /** Moves this connection one place among its siblings, by rewriting the whole order — the backend
-   * takes a list, so there is no separate "swap" to get out of step with it. */
-  const move = (direction: -1 | 1) => {
-    const neighbour = siblings[index + direction];
-    if (!neighbour) return;
-    const ids = connections.map((c) => c.id);
-    const from = ids.indexOf(row.id);
-    const to = ids.indexOf(neighbour.id);
-    if (from < 0 || to < 0) return;
-    [ids[from], ids[to]] = [ids[to], ids[from]];
-    void store.reorderConnections(ids);
-  };
+  const move = (direction: -1 | 1) => void store.moveConnection(row.id, direction);
 
   /** Every folder the tree knows about — the rows the user made, plus any name a connection carries
    * without one — so "move to" can never be missing a group that is visibly on screen. */
@@ -664,11 +677,26 @@ function ConnectionBranch({
         expandable
         expanded={expanded}
         loading={loading}
+        active={selected}
         onToggle={() => void store.toggleNode(row.id, rootRef, key)}
         onOpen={() => store.newConsole(row.id)}
+        onSelect={() => store.selectConnection(row.id)}
+        // `Alt` rather than the bare arrows: bare up/down is how a tree moves the *cursor*, and a
+        // key that reorders the estate must not be the one a hand reaches for to look around. It is
+        // also the gesture every editor uses to move the thing under the caret.
+        onKeyDown={(e) => {
+          if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+          e.preventDefault();
+          store.selectConnection(row.id);
+          move(e.key === "ArrowUp" ? -1 : 1);
+        }}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          // Right-clicking points the toolbar's arrows at the row too: a menu about this connection
+          // that left the selection on another one would put two rows on screen claiming to be the
+          // one being acted on.
+          store.selectConnection(row.id);
           setMenu({ x: e.clientX, y: e.clientY });
         }}
         leading={<ConnectionDot kind={row.kind} connected={connected} />}
@@ -996,13 +1024,7 @@ function GroupSection({
       {!collapsed && (
         <div className="pl-3">
           {members.map((row, index) => (
-            <ConnectionBranch
-              key={row.id}
-              row={row}
-              index={index}
-              total={members.length}
-              siblings={members}
-            />
+            <ConnectionBranch key={row.id} row={row} index={index} total={members.length} />
           ))}
         </div>
       )}
@@ -1171,6 +1193,12 @@ export function DbExplorer() {
   const createGroup = useDbStore((s) => s.createGroup);
   const section = useDbStore((s) => s.section);
   const setSection = useDbStore((s) => s.setSection);
+  const selectedId = useDbStore((s) => s.selectedConnectionId);
+  const moveConnection = useDbStore((s) => s.moveConnection);
+  // Read as an action rather than as derived state on purpose: it answers from `connections`, which
+  // this component already subscribes to, so the buttons re-evaluate on every reorder without a
+  // second selector that would have to build an array to do it.
+  const canMoveConnection = useDbStore((s) => s.canMoveConnection);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const [query, setQuery] = useState("");
   /** Where the "which engine?" menu is anchored, when the `+` has expanded it. */
@@ -1219,6 +1247,27 @@ export function DbExplorer() {
           <span className="mr-auto min-w-0 truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("db.title")}
           </span>
+          {/* Ordering, on the selected connection. It was already in the row's own menu, which is
+              two clicks and a read per step — no way to nudge a connection up three places without
+              reopening the menu three times. Here it is the same move under a button that stays
+              where it is, so the list can be arranged by pressing one thing repeatedly.
+
+              Disabled rather than hidden when nothing is selected: a pair of arrows that appears
+              and disappears as you click around the tree is a pair of arrows nobody finds. */}
+          <ToolbarButton
+            onClick={() => selectedId && void moveConnection(selectedId, -1)}
+            disabled={!canMoveConnection(selectedId, -1)}
+            title={t("db.moveUp")}
+          >
+            <ArrowUp size={13} />
+          </ToolbarButton>
+          <ToolbarButton
+            onClick={() => selectedId && void moveConnection(selectedId, 1)}
+            disabled={!canMoveConnection(selectedId, 1)}
+            title={t("db.moveDown")}
+          >
+            <ArrowDown size={13} />
+          </ToolbarButton>
           {/* The whole set, not one connection: the way into "set my databases up" that doesn't
               require having a connection to right-click first. */}
           <ToolbarButton
@@ -1340,13 +1389,7 @@ export function DbExplorer() {
                 <div className="mx-1 my-1.5 border-t border-[var(--cf-border)]" />
               )}
               {loose.map((row, index) => (
-                <ConnectionBranch
-                  key={row.id}
-                  row={row}
-                  index={index}
-                  total={loose.length}
-                  siblings={loose}
-                />
+                <ConnectionBranch key={row.id} row={row} index={index} total={loose.length} />
               ))}
             </div>
           )}

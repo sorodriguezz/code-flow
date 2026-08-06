@@ -33,7 +33,7 @@ import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
-import { engineInfo, type DbNodeRef } from "../../types/database";
+import { engineInfo, type DbKind, type DbNodeRef } from "../../types/database";
 
 const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
   ...OVERFLOW_SAFE_OPTIONS,
@@ -53,14 +53,17 @@ const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
   // The provider answers synchronously (see `sqlCompletion.ts`), so there is nothing to wait for.
   quickSuggestionsDelay: 0,
   suggestOnTriggerCharacters: true,
-  // Tab completes the best match without going through the list first — what you want when the
-  // name is nearly typed and the point of the widget was never to be read.
-  tabCompletion: "on",
-  // ...and Enter stays a newline. The completion provider opens the list after a space, so the list
-  // is up far more often than it used to be, and Monaco's default would spend those Enters
-  // accepting `AND` instead of breaking the line — in the one editor where every line break is
-  // deliberate.
-  acceptSuggestionOnEnter: "off",
+  // Enter takes the highlighted row — the key everyone's hands already reach for, and the one the
+  // list itself looks like it is waiting for. `"smart"` rather than `"on"` is what keeps that from
+  // costing line breaks: it accepts only when the row would actually change the text, so Enter
+  // after a name that is already typed in full is still a newline, and the completion provider's
+  // space trigger can keep putting tables in front of you without eating the next line.
+  acceptSuggestionOnEnter: "smart",
+  // Tab goes back to indenting. With Enter accepting, `"on"` — which completes the best match
+  // without the list ever being read — is a second, invisible way to commit a name, and the two
+  // disagree about which match is best often enough to be worth losing. Tab still takes the
+  // highlighted row while the widget is open; that is Monaco's own binding, not this option.
+  tabCompletion: "off",
   // No `wordBasedSuggestions` here, and not by omission. It read as "the catalog first, words in
   // the buffer as a fallback", which is not what it does: Monaco asks completion providers in
   // priority groups and stops at the first that answers, so while the SQL provider returns anything
@@ -294,6 +297,11 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
   const t = useT();
   const store = useDbStore.getState();
   const openModal = useDbModalStore((s) => s.openDbModal);
+  /** Whose rules these fields are read by. Only the kind is needed here — the panel above already
+   *  owns everything else about the connection — and the fallback is the one `recordModel` makes
+   *  for an unknown engine, for a console whose connection was deleted while its rows were up. */
+  const kind: DbKind =
+    useDbStore((s) => s.connections.find((c) => c.id === tab.connectionId)?.kind) ?? "postgres";
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [jsonView, setJsonView] = useState(false);
   /** The same gutter selection the data grid has, for the same two reasons: export a few rows, and
@@ -424,6 +432,10 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
     openModal({
       kind: "records",
       title: t("db.queryResult"),
+      engine: kind,
+      // No keys: a console result is whatever the statement projected, and an arbitrary query has
+      // no one table to resolve a primary key or a reference against. What is still markable is
+      // what the engine names by convention — `_id`, IRIS's `ID` — and the model handles that.
       columns: active.columns,
       records: indexes.map((index) => ({ index, values: active.rows[index] ?? [] })),
     });
@@ -531,6 +543,7 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
       ) : (
         <div className="min-h-0 flex-1">
           <ResultGrid
+            engine={kind}
             columns={active.columns}
             rows={active.rows}
             selectedRows={selected}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   BookText,
   Bug,
@@ -673,6 +673,18 @@ function Collapsible({
 
 // ---------- tab 1: the story ----------
 
+/** The shortest a story block may be dragged: what it was fixed at before it could be dragged at
+ *  all. Enough to see a description has structure, and — the reason the handle exists — not enough
+ *  to read one. */
+const STORY_BLOCK_MIN = 288;
+
+/** The tallest, measured against the window rather than fixed: the point of growing the block is to
+ *  read the HU without scrolling, and a block taller than the viewport just moves the scrolling up
+ *  a level. The chrome subtracted is the pane header, the tab strip and the label above the box. */
+function storyBlockMax(): number {
+  return Math.max(STORY_BLOCK_MIN, window.innerHeight - 200);
+}
+
 /**
  * A read-only block of the work item, boxed so it reads as a quotation rather than as a field.
  *
@@ -680,15 +692,48 @@ function Collapsible({
  * `htmlToText` brings it back spelled in marks — `**IT vigente**`, `` `ServiceID` ``, a `- ` per
  * bullet — so showing the string raw meant showing the punctuation of a document instead of the
  * document. The same text goes to the model either way; only the reading of it changes.
+ *
+ * How far it goes before it scrolls is the reader's call, and it is one height for every block on
+ * the tab: they are all the same kind of thing — the item's own prose, quoted — and giving each a
+ * remembered height of its own would mean setting the same preference three times.
  */
 function StoryBlock({ label, text, empty }: { label: string; text: string; empty: string }) {
   const html = useMemo(() => renderMarkdown(escapeAngles(text)), [text]);
+  const stored = useLayoutStore((s) => s.sizes.huReviewStoryHeight);
+  const setSize = useLayoutStore((s) => s.setSize);
+  const commitSize = useLayoutStore((s) => s.commitSize);
+  const boxRef = useRef<HTMLDivElement>(null);
+  /** Whether there is anything below the fold — which is the only case a taller box would show
+   *  more of, and so the only case the handle is worth drawing. */
+  const [clipped, setClipped] = useState(false);
+
+  // Clamped on read rather than on write: the stored height outlives the window it was set in, and
+  // a value dragged on an external monitor would otherwise leave the box taller than the laptop.
+  const max = storyBlockMax();
+  const height = Math.min(stored, max);
+
+  useLayoutEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const measure = () => setClipped(box.scrollHeight > box.clientHeight + 1);
+    measure();
+    // Not only on the text and the height: the pane beside this one is draggable, and the width it
+    // leaves decides how many lines the same description wraps to.
+    const observer = new ResizeObserver(measure);
+    observer.observe(box);
+    return () => observer.disconnect();
+  }, [html, height]);
+
   return (
     <div>
       <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{label}</p>
       {/* The border says "there is something here and it goes on past the fold". Faint on purpose:
           it is a mark, not a field — nothing inside it can be typed into. */}
-      <div className="max-h-72 overflow-y-auto rounded-lg border border-[var(--cf-field-border)] bg-[color-mix(in_oklab,var(--cf-field)_45%,transparent)] px-3 py-2">
+      <div
+        ref={boxRef}
+        style={{ maxHeight: height }}
+        className="overflow-y-auto rounded-lg border border-[var(--cf-field-border)] bg-[color-mix(in_oklab,var(--cf-field)_45%,transparent)] px-3 py-2"
+      >
         {text.trim() ? (
           // The first and last child lose their margin: a rendered document opens with a paragraph
           // whose top margin is measured against the one above it, and here there is nothing above
@@ -701,6 +746,20 @@ function StoryBlock({ label, text, empty }: { label: string; text: string; empty
           <p className="text-[11.5px] italic text-[var(--cf-text-muted)]">{empty}</p>
         )}
       </div>
+      {/* Only under a box that is actually cutting text off. A block shorter than the cap sits at
+          its own height, so a handle under it would move the pointer and nothing else. */}
+      {clipped && (
+        <div className="mt-1.5">
+          <ResizeHandle
+            axis="y"
+            value={height}
+            min={STORY_BLOCK_MIN}
+            max={max}
+            onChange={(next) => setSize("huReviewStoryHeight", next)}
+            onCommit={(next) => commitSize("huReviewStoryHeight", next)}
+          />
+        </div>
+      )}
     </div>
   );
 }

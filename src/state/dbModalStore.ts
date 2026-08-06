@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { DbColumn, DbKind } from "../types/database";
+import type { DbColumn, DbForeignKey, DbKind } from "../types/database";
 
 /**
  * Which of the database workspace's modals is on screen.
@@ -35,9 +35,24 @@ export type DbModal =
   | {
       kind: "records";
       title: string;
+      /**
+       * Whose rules the fields are read by — what counts as an identity here, whether a type on a
+       * column describes the field or only the record that answered, whether references exist at
+       * all. See `lib/db/engineModel`.
+       */
+      engine: DbKind;
       columns: DbColumn[];
       /** The chosen rows, each carrying its own number in the page it came from. */
       records: { index: number; values: (string | null)[] }[];
+      /**
+       * What a catalog read knows about these fields.
+       *
+       * Absent when the rows came from a console: an arbitrary query has no one table to resolve
+       * against, so the only identity left to mark is the one the engine names by convention. The
+       * table browser has both and passes both.
+       */
+      primaryKeys?: Set<string>;
+      foreignKeys?: Map<string, DbForeignKey>;
     }
   /** The statements a pending batch of edits would run, before it runs them. */
   | { kind: "preview"; title: string; statements: string[]; onConfirm: () => void };

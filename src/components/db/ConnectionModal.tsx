@@ -3,8 +3,6 @@ import {
   CheckCircle2,
   Copy,
   Database,
-  Eye,
-  EyeOff,
   FolderOpen,
   Link2,
   Loader2,
@@ -173,7 +171,6 @@ export function ConnectionModal({
   const [mode, setMode] = useState<Mode>(first.mode);
   const [tab, setTab] = useState<Tab>("general");
   const [password, setPassword] = useState("");
-  const [revealPassword, setRevealPassword] = useState(false);
   /** Whether the keychain already holds one. Decides the placeholder and whether "clear" is shown. */
   const [hasStored, setHasStored] = useState(false);
   const [passwordTouched, setPasswordTouched] = useState(false);
@@ -298,7 +295,6 @@ export function ConnectionModal({
     setMode(next.mode);
     setPassword("");
     setPasswordTouched(false);
-    setRevealPassword(false);
     setOutcome(null);
     setHasStored(false);
     if (id) {
@@ -690,9 +686,14 @@ export function ConnectionModal({
                     }
                     hint={hasStored && !passwordTouched ? t("db.passwordStored") : t("db.passwordHint")}
                   >
+                    {/* No reveal button. It could never show the saved password — that one lives in
+                        the OS keychain and is never read back into this dialog; the field holds
+                        either nothing or what you are typing right now. So the eye offered to
+                        uncover a row of dots that stood for a value the app deliberately does not
+                        have, and on a connection you had just opened it did nothing at all. */}
                     <div className="relative flex items-center">
                       <input
-                        type={revealPassword ? "text" : "password"}
+                        type="password"
                         value={password}
                         onChange={(e) => {
                           setPassword(e.target.value);
@@ -701,16 +702,10 @@ export function ConnectionModal({
                         }}
                         placeholder={hasStored && !passwordTouched ? "••••••••" : ""}
                         autoComplete="new-password"
-                        className={`${INPUT} ${hasStored ? "pr-14" : "pr-8"}`}
+                        className={`${INPUT} ${hasStored ? "pr-8" : ""}`}
                       />
-                      <div className="absolute right-1.5 flex items-center gap-0.5">
-                        <IconButton
-                          onClick={() => setRevealPassword((current) => !current)}
-                          title={revealPassword ? t("db.hidePassword") : t("db.showPassword")}
-                        >
-                          {revealPassword ? <EyeOff size={12} /> : <Eye size={12} />}
-                        </IconButton>
-                        {hasStored && (
+                      {hasStored && (
+                        <div className="absolute right-1.5 flex items-center">
                           <IconButton
                             onClick={() => {
                               setPassword("");
@@ -720,8 +715,8 @@ export function ConnectionModal({
                           >
                             <Trash2 size={12} />
                           </IconButton>
-                        )}
-                      </div>
+                        </div>
+                      )}
                     </div>
                   </Row>
                   )}

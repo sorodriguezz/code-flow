@@ -40,10 +40,10 @@ function endsRun(prev: TextSnapshot, next: TextSnapshot): boolean {
 }
 
 /**
- * Undo and redo for a `<textarea>` whose value lives in React state.
+ * Undo and redo for an `<input>` or `<textarea>` whose value lives in React state.
  *
- * The browser gives a textarea its own undo stack for free, but only while it is the one changing
- * the text. A controlled field whose value is written back from a store — and whose toolbar rewrites
+ * The browser gives a field its own undo stack for free, but only while it is the one changing the
+ * text. A controlled field whose value is written back from a store — and whose toolbar rewrites
  * the selection wholesale — desyncs that stack the first time anything but a keystroke touches it:
  * Ctrl+Z then either does nothing or restores a version the field never showed. So the field keeps
  * its own history, and swallows the chords rather than letting the native stack answer them.
@@ -56,16 +56,32 @@ function endsRun(prev: TextSnapshot, next: TextSnapshot): boolean {
 export function useTextHistory({
   value,
   write,
-  area,
+  field,
   enabled,
   resetKey,
+  externalWrites = "step",
 }: {
   value: string;
   write: (value: string) => void;
-  area: RefObject<HTMLTextAreaElement | null>;
+  field: RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
   /** Off for a read-only field: nothing to undo, and the write would be refused anyway. */
   enabled: boolean;
   resetKey?: string | number;
+  /**
+   * What a write the field didn't make means.
+   *
+   * `"step"` records it, so an overwrite the user never typed can still be undone — what a draft
+   * something else writes into needs. `"restart"` throws the history away instead: for a field that
+   * is re-pointed at the next item without ever unmounting — the next tab's URL, the next row's
+   * header — a write it didn't make *is* the next item arriving, and a step across that boundary
+   * would put one request's URL into another. It draws the same line `resetKey` does, without an
+   * identity having to be threaded down to every caller to name it.
+   *
+   * Deliberately not conditioned on focus. A blurred field is the common way the next item lands,
+   * but not the only one: switch tabs from the keyboard and the caret never leaves, and the step
+   * that buys is exactly the one worth not having.
+   */
+  externalWrites?: "step" | "restart";
 }) {
   const state = useRef({
     past: [] as TextSnapshot[],
@@ -131,7 +147,7 @@ export function useTextHistory({
     // After React has put the restored text in the DOM — otherwise the range is set on the old text
     // and the browser clamps it.
     queueMicrotask(() => {
-      const el = area.current;
+      const el = field.current;
       if (!el) return;
       el.focus();
       el.setSelectionRange(next.start, next.end);
@@ -140,11 +156,13 @@ export function useTextHistory({
   };
 
   // Someone other than the field replaced the text — a proposal sent into the draft, a reload from
-  // the store. Kept as a step of its own, so an overwrite the user did not type can be undone.
+  // the store. Kept as a step of its own, so an overwrite the user did not type can be undone; or
+  // treated as the next item arriving, and the history dropped. See `externalWrites`.
   useEffect(() => {
     const s = state.current;
     if (value === s.now.value) return;
-    push(s.now);
+    if (externalWrites === "restart") s.past = [];
+    else push(s.now);
     s.future = [];
     s.now = { value, start: value.length, end: value.length };
     s.at = 0;
@@ -174,7 +192,7 @@ export function useTextHistory({
      * Bound to the field itself rather than to the window: these chords belong to whatever the user
      * is typing into, and the app has no business undoing a field the caret is not in.
      */
-    onKeyDown: (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    onKeyDown: (e: ReactKeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       if (!enabled) return;
       const chord = eventToChord(e.nativeEvent);
       if (!chord) return;

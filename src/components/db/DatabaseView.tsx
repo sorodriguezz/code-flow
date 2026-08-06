@@ -28,7 +28,9 @@ import { useDbModalStore } from "../../state/dbModalStore";
 import { useUiStore } from "../../state/uiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { translate, useT } from "../../state/languageStore";
-import { engineInfo, type DbColumn } from "../../types/database";
+import { referenceLabel } from "./ResultGrid";
+import { fieldFacts, recordModel } from "../../lib/db/engineModel";
+import { engineInfo, type DbColumn, type DbForeignKey, type DbKind } from "../../types/database";
 
 /**
  * The database workspace's shell: explorer, tab strip, and whichever panel the active tab wants.
@@ -415,6 +417,11 @@ function prettyJson(value: string | null): string | null {
  *
  * The row's own number is kept on each block: a record read here is worth much less if you can't
  * find the row it came from back in the grid.
+ *
+ * What is drawn beside a field name comes from the engine's own model rather than from a shared
+ * idea of what a field is — see `lib/db/engineModel`. The same block therefore marks a primary key
+ * on Postgres, a RowID on IRIS and `_id` on MongoDB, and offers to follow a reference only where
+ * the engine has references to follow.
  */
 function RecordsModal({
   modal,
@@ -422,12 +429,16 @@ function RecordsModal({
 }: {
   modal: {
     title: string;
+    engine: DbKind;
     columns: DbColumn[];
     records: { index: number; values: (string | null)[] }[];
+    primaryKeys?: Set<string>;
+    foreignKeys?: Map<string, DbForeignKey>;
   };
   onClose: () => void;
 }) {
   const t = useT();
+  const model = recordModel(modal.engine);
   const copy = () => {
     const text = modal.records
       .map((record) =>
@@ -443,7 +454,7 @@ function RecordsModal({
     <ApiModal
       icon={Rows3}
       title={modal.title}
-      subtitle={t("db.recordsN", { n: String(modal.records.length) })}
+      subtitle={t(model.countLabel, { n: String(modal.records.length) })}
       width="max-w-2xl"
       height="h-[78vh]"
       onClose={onClose}
@@ -461,18 +472,62 @@ function RecordsModal({
             className="overflow-hidden rounded-md border border-[var(--cf-border)]"
           >
             <p className="border-b border-[var(--cf-border)] bg-black/[0.03] px-2 py-1 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
-              {t("db.rowN", { n: String(record.index + 1) })}
+              {t(model.itemLabel, { n: String(record.index + 1) })}
             </p>
             <dl className="divide-y divide-[var(--cf-border)]">
               {modal.columns.map((column, index) => {
                 const value = record.values[index] ?? null;
+                const facts = fieldFacts(model, column, {
+                  primaryKeys: modal.primaryKeys,
+                  foreignKeys: modal.foreignKeys,
+                });
                 return (
                   <div key={column.name} className="grid grid-cols-[minmax(0,150px)_1fr] gap-2 px-2 py-1">
+                    {/* The type under the name, as in the grid's own headers. It used to live only
+                        in the `title`, which meant the one view built for reading a record whole
+                        was the one view that made you hover to find out what a field is. */}
                     <dt
-                      title={column.type_name ? `${column.name} · ${column.type_name}` : column.name}
-                      className="min-w-0 truncate text-[11.5px] text-[var(--cf-text-muted)]"
+                      title={facts.type ? `${column.name} · ${facts.type}` : column.name}
+                      className="min-w-0 text-[11.5px] text-[var(--cf-text-muted)]"
                     >
-                      {column.name}
+                      <span className="flex min-w-0 items-baseline gap-1">
+                        <span className="min-w-0 truncate">{column.name}</span>
+                        {/* The engine's own word, not "PK" everywhere: on a document `PK` would be
+                            naming a concept MongoDB does not have. */}
+                        {facts.identity && model.identity && (
+                          <span
+                            title={t(model.identity.label)}
+                            className="shrink-0 text-[9px] font-bold leading-none text-[var(--cf-accent)]"
+                          >
+                            {model.identity.badge}
+                          </span>
+                        )}
+                      </span>
+                      {facts.type && (
+                        <span
+                          // Italic when the type came off a value: it describes the document that
+                          // answered for this field, and the next one may well be a string where
+                          // this one was an int.
+                          title={facts.typeFromRecord ? t("db.typeFromRecord") : undefined}
+                          className={`block truncate text-[9.5px] leading-tight opacity-70 ${
+                            facts.typeFromRecord ? "italic" : ""
+                          }`}
+                        >
+                          {facts.type}
+                        </span>
+                      )}
+                      {/* Named, not followed. Opening the referenced table needs a tab to open it
+                          in, and this modal is opened from two panels that disagree about which —
+                          so it says where the field points and leaves the jump to the grid, which
+                          has the arrow for it. */}
+                      {facts.reference && (
+                        <span
+                          title={t("db.referencesField", { target: referenceLabel(facts.reference) })}
+                          className="block truncate text-[9.5px] leading-tight text-[var(--cf-accent)] opacity-80"
+                        >
+                          → {referenceLabel(facts.reference)}
+                        </span>
+                      )}
                     </dt>
                     {/* Wrapped, not truncated: the whole reason to be here is to read the value
                         the grid could only show the first line of. */}

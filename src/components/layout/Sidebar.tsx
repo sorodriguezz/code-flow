@@ -34,8 +34,8 @@ import { useUiStore } from "../../state/uiStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { usePrStore } from "../../state/prStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
-  pickFolder,
   scanFolder,
   type FoundRepo,
   revealInFileManager,
@@ -1240,6 +1240,12 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
   );
 }
 
+/** A path's last segment — what a repository is called, on either platform's separator. Falls back
+ * to the whole path for a root, which has no last segment to take. */
+function basename(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
 export function Sidebar() {
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
@@ -1252,9 +1258,9 @@ export function Sidebar() {
   const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
   const t = useT();
   const [showCloneModal, setShowCloneModal] = useState(false);
-  /** A picked folder that turned out to hold repositories, waiting for the user to choose which. */
+  /** The repositories a pick turned up, waiting for the user to choose which to import. */
   const [folderScan, setFolderScan] = useState<{
-    folder: string;
+    folders: string[];
     repos: FoundRepo[];
     truncated: boolean;
   } | null>(null);
@@ -1272,7 +1278,7 @@ export function Sidebar() {
   const importRepo = (path: string) =>
     addProject({
       workspace_id: activeWorkspaceId!,
-      name: path.split(/[\\/]/).filter(Boolean).pop() ?? path,
+      name: basename(path),
       local_path: path,
       remote_url: null,
       color: "#6366f1",
@@ -1288,55 +1294,91 @@ export function Sidebar() {
     });
 
   /**
-   * Adds a repository, after asking what the picked folder actually is.
+   * Adds repositories, after asking what each picked folder actually is.
    *
-   * Everything about an open project assumes its path is a repository *root*: `git status` and
-   * every diff run there, and the file watcher watches it **recursively**. Handed a folder full of
-   * repositories, that became a walk of every working tree in it at once — the report this
-   * replaces, where the app stopped responding entirely rather than saying no.
+   * **The picker takes as many folders as you like.** Repositories arrive in batches — a machine
+   * set up for a new project, a client's twelve services — and picking them one dialog at a time
+   * was the same six clicks repeated twelve times. Multi-select is the native dialog's own, so
+   * `⌘`/`Ctrl`-clicking and shift-ranges work the way they do everywhere else.
    *
-   * So the folder is classified first, and each answer gets its own outcome: a repository is
-   * added; a folder *containing* repositories opens the picker, because "I keep my repos here" is
-   * a real thing to point at and importing several at once is the whole point; anything else is
-   * refused out loud, which is the case that previously had no handling at all.
+   * **Every pick is classified, and only git comes out the other side.** Everything about an open
+   * project assumes its path is a repository *root*: `git status` and every diff run there, and the
+   * file watcher watches it **recursively**. Handed a folder full of repositories, that became a
+   * walk of every working tree in it at once — the report this replaces, where the app stopped
+   * responding entirely rather than saying no. So a pick that is a repository is itself a
+   * candidate, a pick that *holds* repositories contributes the ones inside it, and a pick that is
+   * neither contributes nothing and is counted, so the dialog can say how many were dropped rather
+   * than silently thinning the selection.
+   *
+   * **One repository is imported; several open the picker.** Confirming a single obvious choice is
+   * a dialog that only ever gets dismissed, and importing eleven without showing them is the one
+   * that is tidier to describe than to undo.
    */
   const handleAddProject = async () => {
     if (!activeWorkspaceId) return;
-    const folder = await pickFolder();
-    if (!folder) return;
+    const picked = await openDialog({
+      directory: true,
+      multiple: true,
+      title: t("sidebar.addProject"),
+    });
+    const folders = Array.isArray(picked) ? picked : picked ? [picked] : [];
+    if (folders.length === 0) return;
 
-    let scan;
-    try {
-      scan = await scanFolder(folder);
-    } catch (e) {
-      pushErrorToast(String(e));
+    const scans = await Promise.all(
+      folders.map(async (folder) => {
+        try {
+          return { folder, scan: await scanFolder(folder) };
+        } catch (e) {
+          pushErrorToast(String(e));
+          return null;
+        }
+      }),
+    );
+
+    const found: FoundRepo[] = [];
+    let truncated = false;
+    /** Picks that turned out to hold no repository at all — the count the toast reports. */
+    let barren = 0;
+    for (const entry of scans) {
+      if (!entry) continue;
+      truncated = truncated || entry.scan.truncated;
+      if (entry.scan.is_repo) {
+        found.push({ name: basename(entry.folder), path: entry.folder });
+      } else if (entry.scan.repos.length > 0) {
+        found.push(...entry.scan.repos);
+      } else {
+        barren += 1;
+      }
+    }
+    // By path: picking a repository *and* the folder that contains it is an easy selection to make
+    // by accident, and it would otherwise list the same repository twice.
+    const repos = [...new Map(found.map((repo) => [repo.path, repo])).values()];
+
+    if (repos.length === 0) {
+      // Told apart deliberately: "there is nothing here" and "there are things here, none of them a
+      // repository" are different mistakes, and the second is the one where the user picked a level
+      // too high and needs to know that going one deeper would work. A folder so large the scan
+      // stopped early gets its own answer rather than being reported as having no repositories —
+      // which would be a cap presented as a finding.
+      if (truncated) pushErrorToast(t("import.tooManyEntries"));
+      else if (scans.every((entry) => entry?.scan.empty)) pushErrorToast(t("import.emptyFolder"));
+      else pushErrorToast(t("import.noRepos"));
       return;
     }
 
-    if (scan.is_repo) {
-      if (projects.some((project) => project.local_path === folder)) {
+    if (barren > 0) pushErrorToast(t("import.skippedNotRepos", { count: String(barren) }));
+
+    if (repos.length === 1) {
+      const only = repos[0];
+      if (projects.some((project) => project.local_path === only.path)) {
         pushErrorToast(t("import.alreadyInWorkspace"));
         return;
       }
-      await importRepo(folder);
+      await importRepo(only.path);
       return;
     }
 
-    if (scan.repos.length > 0) {
-      setFolderScan({ folder, repos: scan.repos, truncated: scan.truncated });
-      return;
-    }
-
-    // Told apart deliberately: "there is nothing here" and "there are things here, none of them a
-    // repository" are different mistakes, and the second is the one where the user picked a level
-    // too high and needs to know that going one deeper would work. A folder so large the scan
-    // stopped early gets its own answer rather than being reported as having no repositories —
-    // which would be a cap presented as a finding.
-    if (scan.truncated) {
-      pushErrorToast(t("import.tooManyEntries"));
-      return;
-    }
-    pushErrorToast(scan.empty ? t("import.emptyFolder") : t("import.noRepos"));
+    setFolderScan({ folders, repos, truncated });
   };
 
   return (
@@ -1398,7 +1440,7 @@ export function Sidebar() {
 
         {folderScan && (
           <ImportReposModal
-            folder={folderScan.folder}
+            folders={folderScan.folders}
             repos={folderScan.repos}
             existingPaths={projects.map((project) => project.local_path)}
             truncated={folderScan.truncated}

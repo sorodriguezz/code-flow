@@ -40,12 +40,16 @@ const CATEGORIES: { kind: DbNodeKind; labelKey: TranslationKey }[] = [
   { kind: "sequence", labelKey: "db.catSequences" },
 ];
 
-type SortKey = "name" | "objectType" | "createdAt" | "modifiedAt" | "totalBytes" | "usedBytes" | "rows";
+type SortKey = "name" | "object_type" | "created_at" | "modified_at" | "total_bytes" | "used_bytes" | "rows";
 
 /** Bytes as something readable. Deliberately the same 1024 steps the explorer's own size text uses,
  * so a number does not change meaning between the tree and this grid. */
 function formatBytes(value: number | null): string {
-  if (value === null) return "";
+  // `Number.isFinite` rather than a `null` check alone: the empty cell is the panel's answer for
+  // "this engine will not say", and anything that isn't a usable number means exactly that. A
+  // missing field used to fall through to `undefined / 1024` and print `NaN KB`, which reads as a
+  // size the engine reported and got wrong.
+  if (typeof value !== "number" || !Number.isFinite(value)) return "";
   if (value < 1024) return `${value} B`;
   const units = ["KB", "MB", "GB", "TB"];
   let size = value / 1024;
@@ -58,7 +62,7 @@ function formatBytes(value: number | null): string {
 }
 
 function formatCount(value: number | null): string {
-  return value === null ? "" : value.toLocaleString();
+  return typeof value === "number" ? value.toLocaleString() : "";
 }
 
 function SortHeader({
@@ -125,10 +129,10 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
   const columns = useMemo(() => {
     const visible = objects.filter((object) => object.kind === selected);
     return {
-      created: visible.some((object) => object.createdAt),
-      modified: visible.some((object) => object.modifiedAt),
-      total: visible.some((object) => object.totalBytes !== null),
-      used: visible.some((object) => object.usedBytes !== null),
+      created: visible.some((object) => object.created_at),
+      modified: visible.some((object) => object.modified_at),
+      total: visible.some((object) => object.total_bytes !== null),
+      used: visible.some((object) => object.used_bytes !== null),
       rows: visible.some((object) => object.rows !== null),
       comment: visible.some((object) => object.comment),
     };
@@ -257,12 +261,12 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
               <thead className="sticky top-0 z-10 bg-[var(--cf-surface-raised)]">
                 <tr>
                   <SortHeader label={t("db.colName")} column="name" sort={sort} onSort={toggleSort} />
-                  <SortHeader label={t("db.colType")} column="objectType" sort={sort} onSort={toggleSort} />
+                  <SortHeader label={t("db.colType")} column="object_type" sort={sort} onSort={toggleSort} />
                   {columns.created && (
-                    <SortHeader label={t("db.colCreated")} column="createdAt" sort={sort} onSort={toggleSort} />
+                    <SortHeader label={t("db.colCreated")} column="created_at" sort={sort} onSort={toggleSort} />
                   )}
                   {columns.modified && (
-                    <SortHeader label={t("db.colModified")} column="modifiedAt" sort={sort} onSort={toggleSort} />
+                    <SortHeader label={t("db.colModified")} column="modified_at" sort={sort} onSort={toggleSort} />
                   )}
                   {columns.rows && (
                     <SortHeader label={t("db.colRows")} column="rows" sort={sort} numeric onSort={toggleSort} />
@@ -270,7 +274,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
                   {columns.total && (
                     <SortHeader
                       label={t("db.colTotalBytes")}
-                      column="totalBytes"
+                      column="total_bytes"
                       sort={sort}
                       numeric
                       onSort={toggleSort}
@@ -279,7 +283,7 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
                   {columns.used && (
                     <SortHeader
                       label={t("db.colUsedBytes")}
-                      column="usedBytes"
+                      column="used_bytes"
                       sort={sort}
                       numeric
                       onSort={toggleSort}
@@ -309,16 +313,16 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
                         </span>
                       </td>
                       <td className="whitespace-nowrap px-2.5 py-1 text-[var(--cf-text-muted)]">
-                        {object.objectType}
+                        {object.object_type}
                       </td>
                       {columns.created && (
                         <td className="whitespace-nowrap px-2.5 py-1 tabular-nums text-[var(--cf-text-muted)]">
-                          {object.createdAt ?? ""}
+                          {object.created_at ?? ""}
                         </td>
                       )}
                       {columns.modified && (
                         <td className="whitespace-nowrap px-2.5 py-1 tabular-nums text-[var(--cf-text-muted)]">
-                          {object.modifiedAt ?? ""}
+                          {object.modified_at ?? ""}
                         </td>
                       )}
                       {columns.rows && (
@@ -328,12 +332,12 @@ export function SchemaPanel({ tab }: { tab: DbSchemaTab }) {
                       )}
                       {columns.total && (
                         <td className="whitespace-nowrap px-2.5 py-1 text-right tabular-nums text-[var(--cf-text-muted)]">
-                          {formatBytes(object.totalBytes)}
+                          {formatBytes(object.total_bytes)}
                         </td>
                       )}
                       {columns.used && (
                         <td className="whitespace-nowrap px-2.5 py-1 text-right tabular-nums text-[var(--cf-text-muted)]">
-                          {formatBytes(object.usedBytes)}
+                          {formatBytes(object.used_bytes)}
                         </td>
                       )}
                       {columns.comment && (

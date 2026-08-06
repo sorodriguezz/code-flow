@@ -65,7 +65,7 @@ export function MarkdownEditor({
   const history = useTextHistory({
     value,
     write,
-    area,
+    field: area,
     enabled: !readOnly,
     resetKey: historyKey,
   });

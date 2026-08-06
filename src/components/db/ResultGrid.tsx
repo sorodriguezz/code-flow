@@ -3,7 +3,8 @@ import { ArrowDown, ArrowUp, ExternalLink, Maximize2 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useT } from "../../state/languageStore";
-import type { DbColumn, DbForeignKey } from "../../types/database";
+import { fieldFacts, recordModel } from "../../lib/db/engineModel";
+import type { DbColumn, DbForeignKey, DbKind } from "../../types/database";
 
 /** `schema.table.column`, for the tooltips that say where an arrow leads. */
 export function referenceLabel(key: DbForeignKey): string {
@@ -52,6 +53,12 @@ export interface GridEdit {
 }
 
 export interface ResultGridProps {
+  /**
+   * Whose rules these fields are read by. Required rather than optional: a grid that guesses is a
+   * grid that draws `PK` on a MongoDB document, which is the thing `lib/db/engineModel` exists to
+   * stop. Both layouts take it, so the two never disagree about what a field is.
+   */
+  engine: DbKind;
   columns: DbColumn[];
   rows: (string | null)[][];
   /** The value to show for a cell, when a staged edit should win over `rows`. */
@@ -123,6 +130,7 @@ export interface ResultGridProps {
 }
 
 export function ResultGrid({
+  engine,
   columns,
   rows,
   displayValue,
@@ -144,6 +152,7 @@ export function ResultGrid({
   onFollowForeignKey,
 }: ResultGridProps) {
   const t = useT();
+  const model = recordModel(engine);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
@@ -254,66 +263,85 @@ export function ResultGrid({
             {columns.map((column, columnIndex) => {
               const sortIndex = sort?.findIndex((key) => key.column === column.name) ?? -1;
               const sortKey = sortIndex >= 0 ? sort?.[sortIndex] : undefined;
+              const facts = fieldFacts(model, column, { primaryKeys, foreignKeys });
               return (
               <div
                 key={`${column.name}-${columnIndex}`}
                 style={{ width: widthOf(column.name) }}
-                className="relative flex shrink-0 flex-col justify-center gap-[3px] border-r border-[var(--cf-border)] px-2 py-1"
+                className="relative flex shrink-0 flex-col justify-center border-r border-[var(--cf-border)]"
               >
+                {/*
+                  The button *is* the cell — full width, full height, and it owns the padding.
+
+                  It used to be a content-sized element inside a padded box, which meant the header
+                  you saw and the header you could click were different rectangles: the two lines of
+                  padding and the whole type row below the name did nothing, so sorting a column
+                  meant hitting its name rather than its header. The visual box has to be the target,
+                  or the target has to be found by trial.
+                */}
                 <button
                   type="button"
                   onClick={(e) => onSort?.(column.name, e.shiftKey || e.metaKey || e.ctrlKey)}
                   disabled={!onSort}
                   title={onSort ? t("db.sortHint") : column.name}
-                  className="flex min-w-0 items-center gap-1 text-left disabled:cursor-default"
+                  className="flex h-full w-full min-w-0 flex-col justify-center gap-[3px] px-2 py-1 text-left disabled:cursor-default"
                 >
-                  <span className="min-w-0 flex-1 truncate text-[11px] font-semibold leading-none text-[var(--cf-text)]">
-                    {column.name}
-                  </span>
-                  {primaryKeys?.has(column.name) && (
-                    <span
-                      title={t("db.primaryKey")}
-                      className="shrink-0 text-[9px] font-bold leading-none text-[var(--cf-accent)]"
-                    >
-                      PK
+                  <span className="flex w-full min-w-0 items-center gap-1">
+                    <span className="min-w-0 flex-1 truncate text-[11px] font-semibold leading-none text-[var(--cf-text)]">
+                      {column.name}
                     </span>
-                  )}
-                  {sortKey && (
-                    <span className="flex shrink-0 items-center text-[var(--cf-accent)]">
-                      {sortKey.descending ? <ArrowDown size={10} /> : <ArrowUp size={10} />}
-                      {/* Which key this is, when there is more than one — an arrow on three
-                          columns says nothing about which of them breaks the tie. */}
-                      {(sort?.length ?? 0) > 1 && (
-                        <span className="text-[8.5px] font-bold leading-none tabular-nums">
-                          {sortIndex + 1}
-                        </span>
-                      )}
+                    {facts.identity && model.identity && (
+                      <span
+                        title={t(model.identity.label)}
+                        className="shrink-0 text-[9px] font-bold leading-none text-[var(--cf-accent)]"
+                      >
+                        {model.identity.badge}
+                      </span>
+                    )}
+                    {sortKey && (
+                      <span className="flex shrink-0 items-center text-[var(--cf-accent)]">
+                        {sortKey.descending ? <ArrowDown size={10} /> : <ArrowUp size={10} />}
+                        {/* Which key this is, when there is more than one — an arrow on three
+                            columns says nothing about which of them breaks the tie. */}
+                        {(sort?.length ?? 0) > 1 && (
+                          <span className="text-[8.5px] font-bold leading-none tabular-nums">
+                            {sortIndex + 1}
+                          </span>
+                        )}
+                      </span>
+                    )}
+                  </span>
+                  {/* The type under the name: it is what decides whether a value will be accepted,
+                      and the thing you check before typing into a cell. Inside the button rather
+                      than beside it, so the line it occupies sorts like the rest of the header. */}
+                  {facts.type && (
+                    <span
+                      // Italic when it came off a value rather than a declaration: on a document
+                      // store this is the type of the first document that had the field, and saying
+                      // it as flatly as a column type would be claiming the rest agree.
+                      className={`min-w-0 truncate text-[9px] leading-none text-[var(--cf-text-muted)] ${
+                        facts.typeFromRecord ? "italic" : ""
+                      }`}
+                    >
+                      {facts.type}
                     </span>
                   )}
                 </button>
                 {/* The arrow rides beside the name, not over it: the header's job is still to sort.
                     Its tooltip names the destination, which is the only place the referenced table
-                    is spelled out. */}
-                {foreignKeys?.get(column.name) && onFollowForeignKey && (
+                    is spelled out. A sibling of the button rather than a child — nesting one button
+                    in another is invalid, and it needs to sit above the cell-sized target anyway. */}
+                {facts.reference && onFollowForeignKey && (
                   <button
                     type="button"
-                    onClick={() => onFollowForeignKey(foreignKeys.get(column.name)!, null)}
+                    onClick={() => onFollowForeignKey(facts.reference!, null)}
                     title={t("db.openReferencedTable", {
-                      table: referenceLabel(foreignKeys.get(column.name)!),
+                      table: referenceLabel(facts.reference),
                     })}
-                    className="absolute right-2.5 top-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
+                    className="absolute right-2.5 top-1 z-10 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                   >
                     <ExternalLink size={10} />
                   </button>
-                )}
-                {/* The type under the name: it is what decides whether a value will be accepted,
-                    and the thing you check before typing into a cell. Its own line in the flow
-                    rather than an absolutely-positioned overlay, which is what used to leave it
-                    crammed against the name on a short column. */}
-                {column.type_name && (
-                  <span className="pointer-events-none min-w-0 truncate text-[9px] leading-none text-[var(--cf-text-muted)]">
-                    {column.type_name}
-                  </span>
                 )}
                 <ColumnResizer
                   width={widthOf(column.name)}

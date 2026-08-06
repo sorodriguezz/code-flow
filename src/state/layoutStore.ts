@@ -26,6 +26,7 @@ export type LayoutKey =
   | "wikiListWidth"
   | "wikiPublishWidth"
   | "huReviewSourceWidth"
+  | "huReviewStoryHeight"
   | "huReviewPublishWidth"
   | "huReviewDraftDescWidth"
   | "huReviewDraftCriteriaWidth"
@@ -58,6 +59,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   wikiListWidth: "layout_wiki_list_width",
   wikiPublishWidth: "layout_wiki_publish_width",
   huReviewSourceWidth: "layout_hu_review_source_width",
+  huReviewStoryHeight: "layout_hu_review_story_height",
   huReviewPublishWidth: "layout_hu_review_publish_width",
   huReviewDraftDescWidth: "layout_hu_review_draft_desc_width",
   huReviewDraftCriteriaWidth: "layout_hu_review_draft_criteria_width",
@@ -96,6 +98,10 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // two leave, so giving it a width of its own would mean three numbers that have to keep adding
   // up to the window — and a window resize would have to arbitrate between them.
   huReviewSourceWidth: 360,
+  // How far the Story tab's read-only blocks scroll before the pane does. Stored because how much
+  // of a description is worth seeing at once is a property of the descriptions a team writes, not
+  // of the app — and re-dragging it on every work item would make it worth nothing.
+  huReviewStoryHeight: 288,
   huReviewPublishWidth: 304,
   // The draft board's first two columns; the tasks pane takes whatever is left, for the same
   // reason the review's middle pane does — three stored widths would have to keep adding up to

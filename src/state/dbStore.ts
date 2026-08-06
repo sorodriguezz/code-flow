@@ -260,6 +260,14 @@ interface DbState {
   history: DbQueryHistoryEntry[];
   /** Connection ids with a live session. */
   connected: string[];
+  /**
+   * The connection the explorer is pointing at, or `null`.
+   *
+   * Deliberately *not* persisted and deliberately not tied to anything the tree fetches: this is
+   * "which row do the ordering buttons act on", not a second notion of "the current connection" —
+   * tabs already carry their own. A connection that goes away takes the selection with it.
+   */
+  selectedConnectionId: string | null;
   serverInfo: Record<string, DbServerInfo>;
   /** Node key → its children, as last read from the server. */
   children: Record<string, DbNode[]>;
@@ -293,6 +301,20 @@ interface DbState {
   /** Returns the copy, so a caller that has somewhere to put it — the dialog's list — can select it. */
   duplicateConnection: (id: string) => Promise<DbConnectionRow | null>;
   reorderConnections: (ids: string[]) => Promise<void>;
+  /** Points the explorer's ordering controls at a connection, or at nothing. */
+  selectConnection: (id: string | null) => void;
+  /**
+   * Moves a connection one place among the rows it is drawn with — its group's members, or the
+   * loose list when it is in no group.
+   *
+   * Order is stored globally, as one list of ids, so a move inside a folder swaps the two rows'
+   * places in the full list and leaves every other connection exactly where it was. Lives here
+   * rather than in the row that owns the "move up" menu item because the panel's toolbar needs the
+   * same move, and two implementations of "one place up" is one too many.
+   */
+  moveConnection: (id: string, direction: -1 | 1) => Promise<void>;
+  /** Whether [`moveConnection`] would do anything — what the toolbar's arrows are disabled by. */
+  canMoveConnection: (id: string | null, direction: -1 | 1) => boolean;
 
   /** Creates an empty folder. Idempotent on the name — the backend deduplicates. */
   createGroup: (name: string) => Promise<void>;
@@ -447,6 +469,35 @@ export function groupConnections(
   });
 }
 
+/**
+ * The full order with one connection and the neighbour it would trade places with swapped, or
+ * `null` when there is no such neighbour — the first row of a group asked to go up, an id that is
+ * no longer there.
+ *
+ * "Neighbour" means the next connection *in the same group*, not the next one in the list: the
+ * tree draws each folder as its own column of rows, so moving up inside one has to skip past
+ * whatever happens to sit between them globally. Returning the whole list rather than mutating is
+ * what lets the caller hand it straight to `reorderConnections`, which is a list-shaped API because
+ * the backend's is.
+ */
+function swapWithNeighbour(
+  connections: DbConnectionRow[],
+  id: string,
+  direction: -1 | 1,
+): string[] | null {
+  const row = connections.find((c) => c.id === id);
+  if (!row) return null;
+  const siblings = connections.filter((c) => c.group_name.trim() === row.group_name.trim());
+  const neighbour = siblings[siblings.findIndex((c) => c.id === id) + direction];
+  if (!neighbour) return null;
+  const ids = connections.map((c) => c.id);
+  const from = ids.indexOf(id);
+  const to = ids.indexOf(neighbour.id);
+  if (from < 0 || to < 0) return null;
+  [ids[from], ids[to]] = [ids[to], ids[from]];
+  return ids;
+}
+
 /** Identifies a node in the `children` cache. Includes the connection, so two connections'
  * identically-named schemas never share an entry. */
 export function nodeKey(connectionId: string, node: DbNodeRef): string {
@@ -515,6 +566,7 @@ export const useDbStore = create<DbState>((set, get) => ({
   consoles: [],
   history: [],
   connected: [],
+  selectedConnectionId: null,
   serverInfo: {},
   children: {},
   expanded: [],
@@ -669,6 +721,9 @@ export const useDbStore = create<DbState>((set, get) => ({
         connections: s.connections.filter((c) => c.id !== id),
         consoles: s.consoles.filter((c) => c.connection_id !== id),
         connected: s.connected.filter((c) => c !== id),
+        // A selection pointing at a row that no longer exists would leave the ordering arrows
+        // enabled and acting on nothing.
+        selectedConnectionId: s.selectedConnectionId === id ? null : s.selectedConnectionId,
         children: dropConnection(s.children, id),
         expanded: s.expanded.filter((key) => !key.startsWith(`${id}|`)),
         tabs: s.tabs.filter((tab) => tab.connectionId !== id),
@@ -699,6 +754,16 @@ export const useDbStore = create<DbState>((set, get) => ({
     }));
     await guarded(() => dbReorderConnections(ids));
   },
+
+  selectConnection: (id) => set({ selectedConnectionId: id }),
+
+  moveConnection: async (id, direction) => {
+    const swapped = swapWithNeighbour(get().connections, id, direction);
+    if (swapped) await get().reorderConnections(swapped);
+  },
+
+  canMoveConnection: (id, direction) =>
+    id !== null && swapWithNeighbour(get().connections, id, direction) !== null,
 
   // ------------------------------------------------------------------ groups
 

@@ -8,6 +8,7 @@ import {
   type ResultGridProps,
 } from "./ResultGrid";
 import { useDbModalStore } from "../../state/dbModalStore";
+import { fieldFacts, recordModel } from "../../lib/db/engineModel";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -36,6 +37,7 @@ const DEFAULT_RECORD_WIDTH = 260;
 const OVERSCAN = 4;
 
 export function RecordGrid({
+  engine,
   columns,
   rows,
   displayValue,
@@ -54,6 +56,7 @@ export function RecordGrid({
   onFollowForeignKey,
 }: ResultGridProps) {
   const t = useT();
+  const model = recordModel(engine);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollLeft, setScrollLeft] = useState(0);
   const [viewportWidth, setViewportWidth] = useState(800);
@@ -186,7 +189,9 @@ export function RecordGrid({
 
         {/* One flow row per field. The name cell is `sticky left-0`, which is what keeps the labels
             on screen however far right the records are scrolled. */}
-        {columns.map((column, columnIndex) => (
+        {columns.map((column, columnIndex) => {
+          const facts = fieldFacts(model, column, { primaryKeys, foreignKeys });
+          return (
           <div key={`${column.name}-${columnIndex}`} className="flex" style={{ height: FIELD_HEIGHT }}>
             <div
               className="sticky left-0 z-10 flex shrink-0 items-center gap-1 border-b border-r border-[var(--cf-border)] bg-[var(--cf-surface)] px-2"
@@ -195,27 +200,32 @@ export function RecordGrid({
               <span className="min-w-0 flex-1 truncate text-[11.5px] text-[var(--cf-text)]">
                 {column.name}
               </span>
-              {primaryKeys?.has(column.name) && (
+              {facts.identity && model.identity && (
                 <span
-                  title={t("db.primaryKey")}
+                  title={t(model.identity.label)}
                   className="shrink-0 text-[9px] font-bold text-[var(--cf-accent)]"
                 >
-                  PK
+                  {model.identity.badge}
                 </span>
               )}
               {/* The type shares this line: there is no second line to give it here, and a record of
                   forty fields would be twice as tall for no more meaning. */}
-              {column.type_name && (
-                <span className="max-w-[42%] shrink-0 truncate text-[9.5px] text-[var(--cf-text-muted)]">
-                  {column.type_name}
+              {facts.type && (
+                <span
+                  title={facts.typeFromRecord ? t("db.typeFromRecord") : undefined}
+                  className={`max-w-[42%] shrink-0 truncate text-[9.5px] text-[var(--cf-text-muted)] ${
+                    facts.typeFromRecord ? "italic" : ""
+                  }`}
+                >
+                  {facts.type}
                 </span>
               )}
-              {foreignKeys?.get(column.name) && onFollowForeignKey && (
+              {facts.reference && onFollowForeignKey && (
                 <button
                   type="button"
-                  onClick={() => onFollowForeignKey(foreignKeys.get(column.name)!, null)}
+                  onClick={() => onFollowForeignKey(facts.reference!, null)}
                   title={t("db.openReferencedTable", {
-                    table: referenceLabel(foreignKeys.get(column.name)!),
+                    table: referenceLabel(facts.reference),
                   })}
                   className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                 >
@@ -237,10 +247,9 @@ export function RecordGrid({
                   key={row}
                   onDoubleClick={() => editable && setEditing({ row, column: column.name })}
                   onClick={(e) => {
-                    const key = foreignKeys?.get(column.name);
-                    if (!key || !onFollowForeignKey || !(e.metaKey || e.ctrlKey)) return;
+                    if (!facts.reference || !onFollowForeignKey || !(e.metaKey || e.ctrlKey)) return;
                     e.preventDefault();
-                    onFollowForeignKey(key, value);
+                    onFollowForeignKey(facts.reference, value);
                   }}
                   style={{ width: recordWidth }}
                   className={`group/cell flex shrink-0 items-center border-b border-r border-[var(--cf-border)] px-2 ${
@@ -291,14 +300,14 @@ export function RecordGrid({
                           <Maximize2 size={10} />
                         </button>
                       )}
-                      {foreignKeys?.get(column.name) && onFollowForeignKey && (
+                      {facts.reference && onFollowForeignKey && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            onFollowForeignKey(foreignKeys.get(column.name)!, value);
+                            onFollowForeignKey(facts.reference!, value);
                           }}
                           title={t("db.followForeignKey", {
-                            table: referenceLabel(foreignKeys.get(column.name)!),
+                            table: referenceLabel(facts.reference),
                           })}
                           className="shrink-0 text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-accent)] group-hover/cell:opacity-100"
                         >
@@ -311,7 +320,8 @@ export function RecordGrid({
               );
             })}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

@@ -235,14 +235,19 @@ export type DbNodeKind =
 export interface DbObjectInfo {
   name: string;
   kind: DbNodeKind;
+  // Snake case because that is what comes over the wire: `DbObjectInfo` on the Rust side carries no
+  // `rename_all`, so these arrive exactly as they are declared there. Spelled `objectType` and
+  // `totalBytes` here, every one of them read back `undefined` — which the grid then divided by
+  // 1024 and printed as `NaN KB`, and which made the "does this engine answer this column?" check
+  // say yes for columns no engine had filled.
   /** What the engine itself calls the type — `USER_TABLE`, `MATERIALIZED VIEW`, `SEQUENCE_OBJECT`. */
-  objectType: string;
-  createdAt: string | null;
-  modifiedAt: string | null;
+  object_type: string;
+  created_at: string | null;
+  modified_at: string | null;
   /** Bytes reserved, indexes included. */
-  totalBytes: number | null;
+  total_bytes: number | null;
   /** Bytes actually holding data. */
-  usedBytes: number | null;
+  used_bytes: number | null;
   /** An estimate, never a `COUNT(*)`. */
   rows: number | null;
   comment: string;

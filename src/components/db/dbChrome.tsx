@@ -140,6 +140,21 @@ export function EngineBadge({ kind, label }: { kind: DbKind; label: string }) {
 }
 
 /** Toolbar button, sized to sit in a 20px-tall header row like the API client's. */
+/**
+ * The hairline between two groups of controls on a toolbar.
+ *
+ * A toolbar with one gap between every button is a row of eight equal things, and the eye has to
+ * read all eight to find the one it wants. The rule says which of them belong together — reload,
+ * edit, look, take away, commit — so finding "the one that applies my changes" is picking a group
+ * and then a button, not scanning a strip.
+ *
+ * Deliberately faint and short: it separates, it does not divide. A full-height rule at full
+ * strength would read as the edge of a panel and cut the bar into two bars.
+ */
+export function ToolbarSeparator() {
+  return <span aria-hidden className="mx-0.5 h-3.5 w-px shrink-0 bg-[var(--cf-border)]" />;
+}
+
 export function ToolbarButton({
   onClick,
   title,

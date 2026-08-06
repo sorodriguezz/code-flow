@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  CircleX,
   Columns3,
   Copy,
   Download,
@@ -11,7 +12,6 @@ import {
   Plus,
   Rows3,
   RefreshCw,
-  RotateCcw,
   Save,
   Square,
   Trash2,
@@ -21,7 +21,7 @@ import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { RecordGrid } from "./RecordGrid";
 import { ResultGrid } from "./ResultGrid";
 import { nodeLabel } from "./SqlConsolePanel";
-import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
+import { EngineBadge, ToolbarButton, ToolbarSeparator, formatCount, formatDuration } from "./dbChrome";
 import {
   buildEdits,
   displayCell,
@@ -37,7 +37,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
-import { engineInfo, type DbForeignKey } from "../../types/database";
+import { engineInfo, type DbForeignKey, type DbKind } from "../../types/database";
 
 const PAGE_SIZES = [50, 100, 200, 500, 1000];
 
@@ -113,6 +113,11 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
     anchor.current = null;
     kept.current = new Set();
   }, [tab.result]);
+
+  /** Whose rules the grids read these fields by. A connection deleted out from under an open tab
+   *  leaves its rows on screen, and they are better read as an ordinary relational result — the
+   *  same fallback `recordModel` makes for a kind it doesn't know — than not read at all. */
+  const engineKind: DbKind = connection?.kind ?? "postgres";
 
   const primaryKeys = useMemo(
     () =>
@@ -235,7 +240,13 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
     openModal({
       kind: "records",
       title: nodeLabel(tab.node),
+      engine: engineKind,
       columns: tab.result.columns,
+      // This tab knows its table, so the modal gets what the catalog says as well as what the
+      // engine says — which is what lets it mark the key and name the references the console's
+      // own record view has no way to resolve.
+      primaryKeys,
+      foreignKeys,
       // The row's own number travels with it: a record read on its own is worth nothing if you
       // can't find the row it came from back in the grid.
       records: indexes.map((index) => ({
@@ -411,6 +422,15 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           {nodeLabel(tab.node)}
         </span>
 
+        {/*
+          Four groups, in the order the work happens: re-read the table, change it, choose how to
+          look at it or take it away, and then decide what to do with what you changed.
+
+          The last group is the reason for the grouping. Discard used to be an icon three buttons to
+          the left of Apply, which put the two halves of one decision at opposite ends of a strip
+          with the layout toggle between them — so "undo what I just did" had to be hunted for, next
+          to controls that do nothing to the data at all. The pair now reads as one question.
+        */}
         <div className="ml-auto flex items-center gap-1">
           {tab.loading ? (
             <ToolbarButton onClick={() => void store.cancelRun(tab.id)} title={t("db.cancel")}>
@@ -421,16 +441,15 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               <RefreshCw size={12} />
             </ToolbarButton>
           )}
+
+          <ToolbarSeparator />
+
           <ToolbarButton onClick={() => store.addRow(tab.id)} title={t("db.addRow")}>
             <Plus size={13} />
           </ToolbarButton>
-          <ToolbarButton
-            onClick={() => store.revertEdits(tab.id)}
-            disabled={staged === 0}
-            title={t("db.revert")}
-          >
-            <RotateCcw size={12} />
-          </ToolbarButton>
+
+          <ToolbarSeparator />
+
           {/* How to look at the page, not what to do with a selection — which is why the "read
               these as records" action lives on the selection bar instead of beside this. */}
           <ToolbarButton
@@ -455,6 +474,23 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           >
             <Download size={12} />
           </ToolbarButton>
+
+          <ToolbarSeparator />
+
+          {/* Worded, not an icon: it is the other answer to the question Apply asks, and an icon
+              beside a labelled button reads as a lesser control rather than as the alternative.
+              `CircleX` and not a bin — nothing is deleted here. The staged edits are dropped and the
+              rows go back to what the server last said, which is a cancel, not a destruction. */}
+          <button
+            type="button"
+            onClick={() => store.revertEdits(tab.id)}
+            disabled={staged === 0}
+            title={t("db.revert")}
+            className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[12px] font-medium text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text-muted)]"
+          >
+            <CircleX size={11} />
+            {t("db.discard")}
+          </button>
           <button
             onClick={apply}
             disabled={staged === 0}
@@ -488,6 +524,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           // anything that behaved differently between them would be a bug rather than a feature.
           (() => {
             const shared = {
+              engine: engineKind,
               columns: tab.result.columns,
               rows: tab.result.rows,
               displayValue: (row: number, column: string) => displayCell(tab, row, column),
@@ -632,7 +669,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           <ChevronDown size={11} className="text-[var(--cf-text-muted)]" />
         </button>
 
-        <span className="mx-0.5 h-3.5 w-px shrink-0 bg-[var(--cf-border)]" />
+        <ToolbarSeparator />
 
         {/* The filter sits down here rather than in the toolbar above. It belongs with the pager:
             both narrow the same result set, and a predicate typed above the grid competed for the

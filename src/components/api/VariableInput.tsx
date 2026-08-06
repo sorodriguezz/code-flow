@@ -17,6 +17,7 @@ import {
   type VariableContext,
 } from "../../lib/api/variables";
 import { useApiStore } from "../../state/apiStore";
+import { useTextHistory } from "../../lib/useTextHistory";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { VariableScope } from "../../types/api";
@@ -27,8 +28,15 @@ import type { VariableScope } from "../../types/api";
  * change what one is worth without leaving the request.
  *
  * Built as a mirrored `<div>` under a real `<input>` rather than a contenteditable: an `<input>`
- * is the only element that gets caret placement, selection, undo, autofill and IME composition
- * right for free, and none of that survives being re-implemented.
+ * is the only element that gets caret placement, selection, autofill and IME composition right for
+ * free, and none of that survives being re-implemented.
+ *
+ * Undo is the one thing it does *not* get for free. The engine keeps that stack against the DOM
+ * node and against the edits it made itself, and this field is written to from the outside
+ * constantly — a completion accepted from the menu, a pasted cURL parsed into a whole request, the
+ * same component handed the next tab's URL — so ⌘Z/Ctrl+Z answered from that stack restores text
+ * the field never showed, when it answers at all. `useTextHistory` keeps the history where the
+ * value lives and swallows the chords.
  *
  * The mirror draws **only backgrounds** — the token text in it is transparent, and the visible
  * glyphs are the input's own. The obvious arrangement is the other way round (colour the mirror's
@@ -187,6 +195,18 @@ export function VariableInput({
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
 
+  // `"restart"` rather than a `resetKey`: this component is re-pointed at the next tab's URL, or
+  // the next row's header, without ever unmounting — and it is used in enough places that naming
+  // that identity would mean threading a key through every table, panel and auth field to reach it.
+  // Every write it doesn't make itself is that boundary, so there is nothing left to name.
+  const history = useTextHistory({
+    value,
+    write: onChange,
+    field: inputRef,
+    enabled: !disabled,
+    externalWrites: "restart",
+  });
+
   const segments = segment(value, variableContext);
   const names = variableContext ? variableNames(value) : [];
 
@@ -256,13 +276,22 @@ export function VariableInput({
   const accept = (name: string) => {
     if (!token) return;
     const next = `${value.slice(0, token.start)}{{${name}}}${value.slice(token.end)}`;
-    pendingCaret.current = token.start + name.length + 4;
+    const caretAfter = token.start + name.length + 4;
+    // Not merged into the run of typing that opened the menu: one accepted completion is one press,
+    // so it is one undo — back to the half-typed `{{ba`, not back past it.
+    history.record({ value: next, start: caretAfter, end: caretAfter });
+    pendingCaret.current = caretAfter;
     onChange(next);
   };
 
   const syncCaret = () => setCaret(inputRef.current?.selectionStart ?? null);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    // First, and ahead of the menu: ⌘Z belongs to the text no matter what is on screen over it.
+    // The history swallows the chords it owns, which is what `defaultPrevented` reports back.
+    history.onKeyDown(e);
+    if (e.defaultPrevented) return;
+
     if (menuOpen) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
         e.preventDefault();
@@ -347,7 +376,12 @@ export function VariableInput({
         aria-autocomplete={menuOpen ? "list" : undefined}
         onChange={(e) => {
           setDismissed(false);
-          onChange(e.target.value);
+          const next = e.target.value;
+          const start = e.target.selectionStart ?? next.length;
+          // `merge`: consecutive keystrokes collapse into one step, so ⌘Z takes back a word rather
+          // than a character. A paste or a replaced selection fails that test on its own.
+          history.record({ value: next, start, end: e.target.selectionEnd ?? start }, true);
+          onChange(next);
           setCaret(e.target.selectionStart);
         }}
         onSelect={syncCaret}
