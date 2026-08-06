@@ -18,6 +18,7 @@ import { useRepoStore } from "../../state/repoStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 
 /** Long enough that typing a word doesn't fire a walk of the repo per keystroke, short enough
  * that the results feel like they're keeping up. */
@@ -305,11 +306,12 @@ export function SearchPanel({
                 )}
               </div>
               {!isCollapsed &&
-                fileHits.map((hit) => (
+                fileHits.map((hit, at) => (
                   <button
                     key={`${hit.path}:${hit.line_no}`}
                     onClick={() => onOpenHit(hit.path, hit.line_no)}
-                    className="flex w-full items-start gap-2 rounded px-2 py-0.5 pl-7 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                    style={riseDelay(at)}
+                    className="cf-rise flex w-full items-start gap-2 rounded px-2 py-0.5 pl-7 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                   >
                     <span className="shrink-0 font-mono text-[10px] text-[var(--cf-text-muted)]">{hit.line_no}</span>
                     <span className="truncate font-mono text-[11px] text-[var(--cf-text-muted)]">

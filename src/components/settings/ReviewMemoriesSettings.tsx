@@ -36,6 +36,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import type { FpSuppression, ReviewRunDetail, ReviewRunSummary, SavedFinding } from "../../types/domain";
 import { Skeleton } from "../common/Skeleton";
 import { EmptyState } from "../common/EmptyState";
+import { riseDelay } from "../../lib/rise";
 
 /** Lifecycle state of a saved finding, as an icon rather than an emoji so it matches the icon
  * language of the rest of the app (and renders at a predictable size across platforms). */
@@ -99,8 +100,8 @@ function FpSuppressionsSection({ workspaceId }: { workspaceId: string }) {
         <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">{t("settings.fpRulesHint")}</p>
       </div>
       <div className="divide-y divide-[var(--cf-border)]">
-        {rules.map((rule) => (
-          <div key={rule.id} className="flex items-start gap-2 px-3 py-2">
+        {rules.map((rule, at) => (
+          <div key={rule.id} style={riseDelay(at)} className="cf-rise flex items-start gap-2 px-3 py-2">
             <div className="min-w-0 flex-1">
               <p className="truncate text-[12px]">
                 <span className="font-mono">{rule.categoria}</span>
@@ -417,8 +418,8 @@ export function ReviewMemoriesSettings() {
             </button>
           </div>
           <div className="divide-y divide-[var(--cf-border)]">
-            {group.runs.map((run) => (
-              <div key={run.id}>
+            {group.runs.map((run, at) => (
+              <div key={run.id} style={riseDelay(at)} className="cf-rise">
                 <div className="flex items-center gap-2 px-3 py-2 text-[12px]">
                   {/* Minutes, not seconds — the exact second is noise next to the level and counts. */}
                   <span className="shrink-0 tabular-nums text-[var(--cf-text-muted)]">

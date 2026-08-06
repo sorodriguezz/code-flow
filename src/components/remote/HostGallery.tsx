@@ -15,6 +15,7 @@ import { HostDot, KindGlyph, OsGlyph, Pill } from "./remoteChrome";
 import { useHostMenu, useNewConnectionMenu } from "./hostMenu";
 import { allTags, hostMatches, useRemoteStore } from "../../state/remoteStore";
 import { useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 import {
   capabilities,
   describeHost,
@@ -133,14 +134,14 @@ export function HostGallery() {
           // tracks and stretches those two across the whole window, which reads as a layout bug
           // rather than as a grid. `auto-fill` keeps the column rhythm at any count.
           <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
-            {visible.map((host) => (
-              <HostCard key={host.id} host={host} onMenu={setMenu} />
+            {visible.map((host, at) => (
+              <HostCard key={host.id} host={host} at={at} onMenu={setMenu} />
             ))}
           </div>
         ) : (
           <div className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-md border border-[var(--cf-border)]">
-            {visible.map((host) => (
-              <HostListRow key={host.id} host={host} onMenu={setMenu} />
+            {visible.map((host, at) => (
+              <HostListRow key={host.id} host={host} at={at} onMenu={setMenu} />
             ))}
           </div>
         )}
@@ -330,7 +331,7 @@ function Action({
   );
 }
 
-function HostCard({ host, onMenu }: { host: RemoteHostRow; onMenu: SetMenu }) {
+function HostCard({ host, at, onMenu }: { host: RemoteHostRow; at: number; onMenu: SetMenu }) {
   const openPrimary = useOpenPrimary();
   const cardMenu = useCardMenu(onMenu);
   const selectHost = useRemoteStore((s) => s.selectHost);
@@ -357,7 +358,8 @@ function HostCard({ host, onMenu }: { host: RemoteHostRow; onMenu: SetMenu }) {
           openPrimary(host, spec);
         }
       }}
-      className={`group flex cursor-default flex-col gap-1.5 rounded-lg border p-2.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+      style={riseDelay(at)}
+      className={`cf-rise group flex cursor-default flex-col gap-1.5 rounded-lg border p-2.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         selected
           ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]"
           : "border-[var(--cf-border)] hover:border-[var(--cf-accent)]/50"
@@ -396,7 +398,7 @@ function HostCard({ host, onMenu }: { host: RemoteHostRow; onMenu: SetMenu }) {
   );
 }
 
-function HostListRow({ host, onMenu }: { host: RemoteHostRow; onMenu: SetMenu }) {
+function HostListRow({ host, at, onMenu }: { host: RemoteHostRow; at: number; onMenu: SetMenu }) {
   const openPrimary = useOpenPrimary();
   const cardMenu = useCardMenu(onMenu);
   const selectHost = useRemoteStore((s) => s.selectHost);
@@ -421,7 +423,8 @@ function HostListRow({ host, onMenu }: { host: RemoteHostRow; onMenu: SetMenu })
           openPrimary(host, spec);
         }
       }}
-      className={`group flex cursor-default items-center gap-2 px-3 py-1.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+      style={riseDelay(at)}
+      className={`cf-rise group flex cursor-default items-center gap-2 px-3 py-1.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       }`}
     >

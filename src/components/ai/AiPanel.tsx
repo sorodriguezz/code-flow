@@ -1042,7 +1042,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
                 <SeverityCountBadges findings={activeFindings} />
               </div>
               <div className="space-y-2">
-                {findings.map((finding) => {
+                {findings.map((finding, at) => {
                   const mark = marks.get(finding.id) ?? null;
                   return (
                     <div key={finding.id} className="flex items-start gap-2">
@@ -1058,6 +1058,7 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
                       <div className="min-w-0 flex-1">
                         <FindingCard
                           finding={finding}
+                          at={at}
                           defaultOpen={false}
                           projectId={projectId}
                           prSourceBranch={pr.source_branch}

@@ -314,7 +314,7 @@ export function AgentTaskList({
                 </span>
               </h4>
               <div className="px-1.5">
-                {group.tasks.map((task) =>
+                {group.tasks.map((task, at) =>
                   renamingId === task.id ? (
                     <RenameRow
                       key={task.id}
@@ -329,6 +329,7 @@ export function AgentTaskList({
                     <FlatTaskRow
                       key={task.id}
                       task={task}
+                      at={at}
                       selected={task.id === selectedId}
                       onMenu={(x, y) => setMenu({ x, y, id: task.id })}
                     />
@@ -382,10 +383,12 @@ function ListEmpty({
  * are deliberately blind to the filing, so carrying its marks here would be noise. */
 function FlatTaskRow({
   task,
+  at,
   selected,
   onMenu,
 }: {
   task: AgentTask;
+  at: number;
   selected: boolean;
   onMenu: (x: number, y: number) => void;
 }) {
@@ -412,6 +415,7 @@ function FlatTaskRow({
   return (
     <Row
       selected={selected}
+      at={at}
       onMenu={onMenu}
       pinned={task.pinned}
       onClick={() => {

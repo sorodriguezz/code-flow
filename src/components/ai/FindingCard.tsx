@@ -34,6 +34,7 @@ import { notify } from "../../state/notificationStore";
 import { useT } from "../../state/languageStore";
 import { useTaskProvider } from "../../state/aiProviderStore";
 import { isAgenticProvider } from "../../lib/aiProviders";
+import { riseDelay } from "../../lib/rise";
 
 // Above this length a summary with no parsed findings is treated as an unparsed raw
 // response (the model didn't follow the expected "### finding" format) rather than a short
@@ -492,6 +493,7 @@ export function QualityGateBadges({ grades, findings }: { grades: QualityGrades 
 
 export function FindingCard({
   finding,
+  at = 0,
   defaultOpen,
   projectId,
   prSourceBranch,
@@ -501,6 +503,8 @@ export function FindingCard({
   discarding = false,
 }: {
   finding: AnalysisFinding;
+  /** Place in the list it arrives with, which is all the entry animation needs to stagger. */
+  at?: number;
   defaultOpen: boolean;
   /** Omit for a pre-commit finding (there's no PR/branch involved, no fix button shown
    * without a project to apply it to). */
@@ -533,7 +537,10 @@ export function FindingCard({
   return (
     // Dimmed rather than hidden: a rejected finding is still part of what the review said, and
     // hiding it would make the ruling impossible to revisit from the list it was made in.
-    <div className={`overflow-hidden rounded-lg border border-[var(--cf-border)] ${discarded ? "opacity-55" : ""}`}>
+    <div
+      style={riseDelay(at)}
+      className={`cf-rise overflow-hidden rounded-lg border border-[var(--cf-border)] ${discarded ? "opacity-55" : ""}`}
+    >
       <button
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-start gap-2 px-3 py-2 text-left hover:bg-black/[0.02] dark:hover:bg-white/[0.03]"

@@ -166,7 +166,13 @@ const CommitTable = memo(function CommitTable() {
         </span>
       </div>
 
-      <div className="relative min-w-full" style={{ width: totalWidth, minHeight: svgHeight }}>
+      {/* The graph rises as one block rather than row by row: the lanes and the dots are a single
+          SVG layer positioned against the rows, so a staggered row would slide out from under its
+          own commit dot on the way in. */}
+      <div
+        className="cf-rise relative min-w-full"
+        style={{ width: totalWidth, minHeight: svgHeight }}
+      >
         <svg
           width={svgWidth}
           height={svgHeight}

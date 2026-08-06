@@ -10,6 +10,7 @@ import { isRunnableAgent, useAgentsStore } from "../../state/agentsStore";
 import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 import type { WorkspaceAgent } from "../../types/domain";
 
 /**
@@ -107,7 +108,7 @@ export function AgentRosterPanel({
           </div>
         ) : (
           <div className="overflow-hidden rounded-lg border border-[var(--cf-border)] divide-y divide-[var(--cf-border)]">
-            {roster.map((agent) => {
+            {roster.map((agent, at) => {
               const runnable = isRunnableAgent(agent);
               const providerMeta = AI_PROVIDERS.find((p) => p.id === agent.provider) ?? null;
               const Icon = providerMeta?.icon ?? Bot;
@@ -119,7 +120,11 @@ export function AgentRosterPanel({
                 : t("agents.agentNoModel");
 
               return (
-                <div key={agent.id} className="group flex items-start gap-2 px-2 py-2">
+                <div
+                  key={agent.id}
+                  style={riseDelay(at)}
+                  className="cf-rise group flex items-start gap-2 px-2 py-2"
+                >
                   <span className="mt-[1px] shrink-0">
                     <Checkbox checked={agent.enabled} onChange={(checked) => void toggle(agent, checked)} />
                   </span>

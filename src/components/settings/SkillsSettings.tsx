@@ -22,6 +22,7 @@ import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
 import { Skeleton } from "../common/Skeleton";
 import { SettingsHeader } from "../api/settingsChrome";
+import { riseDelay } from "../../lib/rise";
 
 const DEFAULT_SKILL_MD = "---\nname: my-skill\ndescription: What this skill does and when to use it.\n---\n\n# My skill\n\nInstructions for the model…\n";
 
@@ -205,8 +206,8 @@ export function SkillsSettings() {
       </div>
 
       <div className="space-y-1">
-        {skills.map((s) => (
-          <div key={s.id} className="rounded-md border border-[var(--cf-border)]">
+        {skills.map((s, at) => (
+          <div key={s.id} style={riseDelay(at)} className="cf-rise rounded-md border border-[var(--cf-border)]">
             <div className="flex items-center gap-2 px-2.5 py-1.5 text-[12px]">
               <Checkbox checked={s.enabled} onChange={(enabled) => void toggle(s, enabled)} />
               <span className={`font-medium ${s.enabled ? "" : "text-[var(--cf-text-muted)] line-through"}`}>{s.skill_name}</span>

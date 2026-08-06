@@ -9,6 +9,7 @@ import { EmptyState } from "../common/EmptyState";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { confirmAction } from "../../state/confirmStore";
 import { useStoriesStore } from "../../state/storiesStore";
+import { riseDelay } from "../../lib/rise";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import type { StoryBatch } from "../../types/domain";
@@ -136,7 +137,7 @@ export function StoryBatchList({ width, onNewBatch }: { width: number; onNewBatc
           </p>
         ) : (
           <div className="px-1.5">
-            {filtered.map((batch) =>
+            {filtered.map((batch, at) =>
               renamingId === batch.id ? (
                 <RenameRow
                   key={batch.id}
@@ -151,6 +152,7 @@ export function StoryBatchList({ width, onNewBatch }: { width: number; onNewBatc
                 <BatchRow
                   key={batch.id}
                   batch={batch}
+                  at={at}
                   selected={batch.id === selectedId}
                   onMenu={(x, y) => setMenu({ x, y, id: batch.id })}
                 />
@@ -169,10 +171,12 @@ export function StoryBatchList({ width, onNewBatch }: { width: number; onNewBatc
 
 function BatchRow({
   batch,
+  at,
   selected,
   onMenu,
 }: {
   batch: StoryBatch;
+  at: number;
   selected: boolean;
   onMenu: (x: number, y: number) => void;
 }) {
@@ -212,7 +216,8 @@ function BatchRow({
         e.stopPropagation();
         onMenu(e.clientX, e.clientY);
       }}
-      className={`group relative flex w-full items-start rounded-md ${
+      style={riseDelay(at)}
+      className={`cf-rise group relative flex w-full items-start rounded-md ${
         selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       }`}
     >

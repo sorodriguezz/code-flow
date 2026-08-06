@@ -31,6 +31,7 @@ import { groupHosts, hostMatches, UNGROUPED, useRemoteStore } from "../../state/
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 import {
   capabilities,
   describeHost,
@@ -404,8 +405,8 @@ function GroupSection({
       </div>
 
       {!collapsed &&
-        hosts.map((host) => (
-          <HostRow key={host.id} host={host} onMenu={onMenu} />
+        hosts.map((host, at) => (
+          <HostRow key={host.id} host={host} at={at} onMenu={onMenu} />
         ))}
     </div>
   );
@@ -413,9 +414,11 @@ function GroupSection({
 
 function HostRow({
   host,
+  at,
   onMenu,
 }: {
   host: RemoteHostRow;
+  at: number;
   onMenu: (menu: OpenMenu | null) => void;
 }) {
   const openSession = useRemoteStore((s) => s.openSession);
@@ -522,7 +525,8 @@ function HostRow({
           items: hostMenu(host, { onRename: () => setRenamingHost(host.id) }),
         });
       }}
-      className={`group flex w-full cursor-default items-center gap-1.5 rounded-md py-[3px] pl-5 pr-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+      style={riseDelay(at)}
+      className={`cf-rise group flex w-full cursor-default items-center gap-1.5 rounded-md py-[3px] pl-5 pr-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         beingDragged ? "opacity-40" : ""
       } ${
         // A line above the row, not a fill: the drop lands *before* this host, and a filled row
@@ -748,11 +752,12 @@ function HistoryList() {
               {t("remote.noHistory")}
             </p>
           ) : (
-            history.map((entry) => (
+            history.map((entry, at) => (
               <div
                 key={entry.id}
                 title={`${entry.hostName}: ${entry.body}`}
-                className="group flex items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
+                style={riseDelay(at)}
+                className="cf-rise group flex items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
               >
                 <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text)]">
                   {entry.body}
@@ -834,7 +839,7 @@ function SnippetList() {
               {t("remote.noSnippets")}
             </p>
           ) : (
-            snippets.map((snippet) =>
+            snippets.map((snippet, at) =>
               editingId === snippet.id ? (
                 <div key={snippet.id} className="space-y-1 border-b border-[var(--cf-border)] p-2 last:border-b-0">
                   <input
@@ -869,7 +874,8 @@ function SnippetList() {
               ) : (
                 <div
                   key={snippet.id}
-                  className="group flex items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
+                  style={riseDelay(at)}
+                  className="cf-rise group flex items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
                 >
                   <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--cf-text)]">
                     {snippet.name}

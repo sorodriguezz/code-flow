@@ -39,6 +39,7 @@ import { useUiStore } from "../../state/uiStore";
 import { usePrStore } from "../../state/prStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
+import { riseDelay } from "../../lib/rise";
 import type { FileDiffInfo, FileStatusEntry, SecretHit } from "../../types/domain";
 
 const LIST_MIN = 220;
@@ -79,7 +80,8 @@ function UnpushedCommitsSection() {
           {unpushedCommits.map((c, i) => (
             <div
               key={c.id}
-              className="flex items-center gap-2 rounded-md px-1.5 py-1 text-[12px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              style={riseDelay(i)}
+              className="cf-rise flex items-center gap-2 rounded-md px-1.5 py-1 text-[12px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
             >
               <span className="flex-1 min-w-0 truncate">{c.summary}</span>
               <span className="shrink-0 font-mono text-[10px] text-[var(--cf-text-muted)]">{c.short_id}</span>
@@ -121,6 +123,7 @@ function FileRow({
   onSelect,
   actions,
   depth = 0,
+  at = 0,
   displayName,
 }: {
   entry: FileStatusEntry;
@@ -130,14 +133,16 @@ function FileRow({
   /** Tree mode nests files under their directory, so indent by depth instead of showing
    * the full path — and show just the filename, since the path is implied by the nesting. */
   depth?: number;
+  /** Place in the list it arrives with, which is all the entry animation needs to stagger. */
+  at?: number;
   displayName?: string;
 }) {
   const t = useT();
   return (
     <div
       onClick={onSelect}
-      style={depth ? { paddingLeft: depth * 14 } : undefined}
-      className={`group flex items-center gap-2 rounded-md px-2 py-1 text-[13px] cursor-pointer ${
+      style={{ ...(depth ? { paddingLeft: depth * 14 } : null), ...riseDelay(at) }}
+      className={`cf-rise group flex items-center gap-2 rounded-md px-2 py-1 text-[13px] cursor-pointer ${
         selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       }`}
     >
@@ -196,7 +201,7 @@ function FileTreeSection({
       return next;
     });
 
-  const renderNode = (node: FileTreeNode, depth: number): React.ReactNode => {
+  const renderNode = (node: FileTreeNode, depth: number, at: number): React.ReactNode => {
     if (node.type === "file") {
       return (
         <FileRow
@@ -206,6 +211,7 @@ function FileTreeSection({
           onSelect={() => onSelectEntry(node.entry)}
           actions={buildActions(node.entry)}
           depth={depth}
+          at={at}
           displayName={node.name}
         />
       );
@@ -215,19 +221,19 @@ function FileTreeSection({
       <div key={node.path}>
         <div
           onClick={() => toggleDir(node.path)}
-          style={{ paddingLeft: depth * 14 }}
-          className="flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+          style={{ paddingLeft: depth * 14, ...riseDelay(at) }}
+          className="cf-rise flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
         >
           {collapsed ? <ChevronRight size={12} className="shrink-0" /> : <ChevronDown size={12} className="shrink-0" />}
           <Folder size={12} className="shrink-0" />
           <span className="truncate">{node.name}</span>
         </div>
-        {!collapsed && node.children.map((child) => renderNode(child, depth + 1))}
+        {!collapsed && node.children.map((child, index) => renderNode(child, depth + 1, index))}
       </div>
     );
   };
 
-  return <>{tree.map((node) => renderNode(node, 0))}</>;
+  return <>{tree.map((node, index) => renderNode(node, 0, index))}</>;
 }
 
 export function ChangesPanel() {
@@ -451,10 +457,11 @@ export function ChangesPanel() {
                 buildActions={(entry) => buildStagedActions(entry)}
               />
             ) : (
-              status.staged.map((entry) => (
+              status.staged.map((entry, at) => (
                 <FileRow
                   key={entry.path}
                   entry={entry}
+                  at={at}
                   selected={selected?.path === entry.path && selected.staged}
                   onSelect={() => setSelected({ path: entry.path, staged: true })}
                   actions={buildStagedActions(entry)}
@@ -531,10 +538,11 @@ export function ChangesPanel() {
                 buildActions={(entry) => buildUnstagedActions(entry)}
               />
             ) : (
-              unstagedAndUntracked.map((entry) => (
+              unstagedAndUntracked.map((entry, at) => (
                 <FileRow
                   key={entry.path}
                   entry={entry}
+                  at={at}
                   selected={selected?.path === entry.path && !selected.staged}
                   onSelect={() => setSelected({ path: entry.path, staged: false })}
                   actions={buildUnstagedActions(entry)}

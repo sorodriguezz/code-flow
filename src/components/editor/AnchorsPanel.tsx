@@ -11,6 +11,7 @@ import {
 import { searchRepo } from "../../lib/tauri/commands";
 import { fileIconFor } from "../../lib/fileIcon";
 import { useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 
 type Scope = "file" | "project";
 
@@ -261,11 +262,12 @@ export function AnchorsPanel({
                   <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{items.length}</span>
                 </div>
               )}
-              {items.map((anchor) => (
+              {items.map((anchor, at) => (
                 <button
                   key={`${anchor.path}:${anchor.line}:${anchor.column}`}
                   onClick={() => onOpenAnchor(anchor.path, anchor.line, anchor.column)}
-                  className={`flex w-full items-baseline gap-1.5 rounded px-2 py-0.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04] ${
+                  style={riseDelay(at)}
+                  className={`cf-rise flex w-full items-baseline gap-1.5 rounded px-2 py-0.5 text-left hover:bg-black/[0.03] dark:hover:bg-white/[0.04] ${
                     scope === "project" ? "pl-6" : ""
                   }`}
                 >

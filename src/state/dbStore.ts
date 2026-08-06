@@ -415,13 +415,12 @@ export function ensureDbStoreLoaded(): Promise<void> {
 }
 
 /**
- * Connections by group, in the order the tree draws them: ungrouped first, then groups
- * alphabetically.
+ * Connections by group: the ungrouped bucket first, then the groups alphabetically.
  *
- * Ungrouped first rather than last because it is where a newly created connection lands, and a
- * user who has just pressed "New connection" should not have to scroll past their whole estate to
- * find it. The bucket is only drawn when something is in it — a tree with every connection filed
- * has no use for an empty "Ungrouped" heading, and one with no groups at all is just a flat list.
+ * The explorer splits the result rather than drawing it in this order — the folders at the top, the
+ * ungrouped connections loose underneath — so the position of the `UNGROUPED` entry is a
+ * convention for callers that read it by name, not a layout. The bucket is only present when
+ * something is in it: a tree with every connection filed has nothing ungrouped to draw.
  */
 export function groupConnections(
   connections: DbConnectionRow[],

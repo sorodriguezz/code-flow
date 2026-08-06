@@ -6,6 +6,7 @@ import { ToolbarButton, formatCount, formatDuration } from "./dbChrome";
 import { useDbStore } from "../../state/dbStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 
 /**
  * Every statement that ran, newest first.
@@ -78,12 +79,13 @@ export function DbHistoryList() {
         </div>
       ) : (
         <div className="min-h-0 flex-1 overflow-auto p-1">
-          {entries.map((entry) => {
+          {entries.map((entry, at) => {
             const stillExists = connections.some((c) => c.id === entry.connection_id);
             return (
               <div
                 key={entry.id}
-                className="group rounded-md px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                style={riseDelay(at)}
+                className="cf-rise group rounded-md px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
               >
                 <button
                   onClick={() =>

@@ -12,6 +12,7 @@ import { Select } from "../common/Select";
 import { confirmAction } from "../../state/confirmStore";
 import { editsFrom, parseVerdicts, useStoriesStore, type StoryEdits } from "../../state/storiesStore";
 import { lintStory } from "../../lib/gherkin";
+import { riseDelay } from "../../lib/rise";
 import { useT } from "../../state/languageStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
@@ -113,7 +114,10 @@ export function StoryCard({
       // list into a block of accent colour that the scores and the open-questions box then had to
       // compete with. The checkbox already says "selected"; the rail just makes it scannable down
       // the column. The 2px left border is on both states so flipping one only recolours it.
-      className={`rounded-md border border-l-2 bg-[var(--cf-bg)] transition-colors ${
+      // `index` is the story's place in the batch, which is also its place in the list — so the
+      // stagger comes free, without the card having to be told twice where it is.
+      style={riseDelay(index)}
+      className={`cf-rise rounded-md border border-l-2 bg-[var(--cf-bg)] transition-colors ${
         selected
           ? "border-[var(--cf-border)] border-l-[var(--cf-accent)]"
           : "border-[var(--cf-border)] border-l-[var(--cf-border)]"

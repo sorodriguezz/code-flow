@@ -195,7 +195,7 @@ export function TaskTree({
     setMove(null);
   };
 
-  const renderItem = (item: Item, depth: number, chip?: string) =>
+  const renderItem = (item: Item, depth: number, chip?: string, at = 0) =>
     item.kind === "chain" ? (
       <ChainGroup
         key={item.chain.id}
@@ -203,6 +203,7 @@ export function TaskTree({
         briefs={briefsByChain[item.chain.id] ?? NO_BRIEFS}
         expanded={needle !== "" || isOpen(`chain:${item.chain.id}`)}
         depth={depth}
+        at={at}
         chip={chip}
         onToggle={() => toggleOpen(`chain:${item.chain.id}`)}
         onMenu={(x, y) => setMenu({ x, y, kind: "chain", id: item.chain.id })}
@@ -224,6 +225,7 @@ export function TaskTree({
         key={item.task.id}
         task={item.task}
         depth={depth}
+        at={at}
         chip={chip}
         onMenu={(x, y) => setMenu({ x, y, kind: "task", id: item.task.id })}
       />
@@ -232,7 +234,7 @@ export function TaskTree({
   /** One saved plan, as a row or as the inline rename it is in the middle of. Lives here rather than
    * inside the templates branch so it keeps sharing this component's context menu and rename state —
    * the tab moved, the machinery behind it did not. */
-  const renderTemplate = (template: ChainTemplate) =>
+  const renderTemplate = (template: ChainTemplate, at: number) =>
     renaming?.kind === "template" && renaming.id === template.id ? (
       <RenameRow
         key={template.id}
@@ -257,6 +259,7 @@ export function TaskTree({
       <TemplateRow
         key={template.id}
         templateId={template.id}
+        at={at}
         name={template.name}
         description={template.description}
         steps={template.steps.length}
@@ -344,7 +347,7 @@ export function TaskTree({
         {projects.length === 0 ? (
           <Hint>{t("agents.projectsEmptyHint")}</Hint>
         ) : (
-          projects.map((project) => {
+          projects.map((project, at) => {
             const contents = byProject.get(project.id) ?? [];
             // A search opens everything it could have found something in. Leaving a folder shut
             // during one means the list says "no such task" by omission, from a row the user can
@@ -369,6 +372,7 @@ export function TaskTree({
                 ) : (
                   <Row
                     selected={false}
+                    at={at}
                     title={project.description || project.name}
                     label={project.name}
                     // Items, not tasks: one of these rows can be a whole chain, and counting a
@@ -396,7 +400,7 @@ export function TaskTree({
                   (contents.length === 0 ? (
                     <Hint depth={1}>{t("agents.projectEmpty")}</Hint>
                   ) : (
-                    contents.map((item) => renderItem(item, 1))
+                    contents.map((item, index) => renderItem(item, 1, undefined, index))
                   ))}
               </div>
             );
@@ -415,7 +419,7 @@ export function TaskTree({
         >
           {/* The chip carries the folder the row came from — pinning is the one act that takes a row
               out of its project, so this is where that has to be said. */}
-          {pinned.map((item) => renderItem(item, 0, projectOf(itemGroup(item))?.name))}
+          {pinned.map((item, at) => renderItem(item, 0, projectOf(itemGroup(item))?.name, at))}
         </Section>
       )}
 
@@ -425,7 +429,11 @@ export function TaskTree({
         expanded={isOpen("sec:tasks")}
         onToggle={() => toggleOpen("sec:tasks")}
       >
-        {loose.length === 0 ? <Hint>{t("agents.treeEmpty")}</Hint> : loose.map((item) => renderItem(item, 0))}
+        {loose.length === 0 ? (
+          <Hint>{t("agents.treeEmpty")}</Hint>
+        ) : (
+          loose.map((item, at) => renderItem(item, 0, undefined, at))
+        )}
       </Section>
 
       {menu && (
@@ -569,6 +577,7 @@ function ChainGroup({
   briefs,
   expanded,
   depth,
+  at,
   chip,
   onToggle,
   onMenu,
@@ -578,6 +587,7 @@ function ChainGroup({
   briefs: ChainStepBrief[];
   expanded: boolean;
   depth: number;
+  at: number;
   chip?: string;
   onToggle: () => void;
   onMenu: (x: number, y: number) => void;
@@ -595,6 +605,7 @@ function ChainGroup({
       <Row
         selected={selected}
         depth={depth}
+        at={at}
         chip={chip}
         pinned={chain.pinned}
         title={chain.goal || chain.title}
@@ -609,7 +620,7 @@ function ChainGroup({
       {expanded &&
         [...briefs]
           .sort((a, b) => a.step_index - b.step_index)
-          .map((brief) => {
+          .map((brief, step) => {
             const task = brief.task_id ? (tasks.find((candidate) => candidate.id === brief.task_id) ?? null) : null;
             if (task) {
               return (
@@ -617,6 +628,7 @@ function ChainGroup({
                   key={brief.id}
                   task={task}
                   depth={depth + 1}
+                  at={step}
                   onMenu={(x, y) => onTaskMenu(x, y, task.id)}
                 />
               );
@@ -629,6 +641,7 @@ function ChainGroup({
                 muted
                 selected={false}
                 depth={depth + 1}
+                at={step}
                 title={brief.instruction}
                 label={brief.agent_name || t("settings.sddNewAgent")}
                 meta={brief.task_id ? t("agents.stepTaskGone") : t("agents.stepGone")}
@@ -646,11 +659,13 @@ function ChainGroup({
 function TaskRow({
   task,
   depth,
+  at,
   chip,
   onMenu,
 }: {
   task: AgentTask;
   depth: number;
+  at: number;
   chip?: string;
   onMenu: (x: number, y: number) => void;
 }) {
@@ -675,6 +690,7 @@ function TaskRow({
     <Row
       selected={selected}
       depth={depth}
+      at={at}
       chip={chip}
       pinned={task.pinned}
       title={task.goal || task.title}
@@ -695,12 +711,14 @@ function TaskRow({
 
 function TemplateRow({
   templateId,
+  at,
   name,
   description,
   steps,
   onMenu,
 }: {
   templateId: string;
+  at: number;
   name: string;
   description: string;
   steps: number;
@@ -711,6 +729,7 @@ function TemplateRow({
   return (
     <Row
       selected={selected}
+      at={at}
       title={description || name}
       label={name}
       meta={t("agents.templateStepsN", { n: steps })}

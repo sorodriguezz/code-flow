@@ -4,6 +4,7 @@ import { EmptyState } from "../common/EmptyState";
 import { OsGlyph, Pill } from "./remoteChrome";
 import { useRemoteStore } from "../../state/remoteStore";
 import { useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 import {
   describeForward,
   parseHostSpec,
@@ -74,7 +75,7 @@ export function AllForwardsPanel() {
   return (
     <div className="h-full overflow-y-auto p-3">
       <div className="space-y-1.5">
-        {rows.map(({ key, host, forward, live }) => {
+        {rows.map(({ key, host, forward, live }, at) => {
           const auto = forward?.auto ?? false;
           const port = live?.listen_port ?? forward?.listen_port ?? 0;
           const kind = live?.kind ?? forward?.kind ?? "local";
@@ -83,7 +84,8 @@ export function AllForwardsPanel() {
           return (
             <div
               key={key}
-              className="flex items-center gap-2.5 rounded-md border border-[var(--cf-border)] px-3 py-2"
+              style={riseDelay(at)}
+              className="cf-rise flex items-center gap-2.5 rounded-md border border-[var(--cf-border)] px-3 py-2"
             >
               <span
                 aria-hidden

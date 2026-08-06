@@ -37,6 +37,7 @@ import { useActiveProjects } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { loadAdoConnections } from "../../lib/adoConnections";
+import { riseDelay } from "../../lib/rise";
 import {
   adoListProjects,
   adoListWikiPages,
@@ -859,7 +860,7 @@ function DocumentRow({
         e.stopPropagation();
         onMenu(e.clientX, e.clientY);
       }}
-      style={{ "--cf-rise-delay": `${Math.min(at, 8) * 45}ms` } as React.CSSProperties}
+      style={riseDelay(at)}
       className={`cf-rise group relative flex w-full items-start rounded-md transition-colors ${
         active ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       }`}

@@ -73,6 +73,7 @@ import { useUiStore } from "../../state/uiStore";
 import { loadAdoConnections } from "../../lib/adoConnections";
 import { htmlToText } from "../../lib/workItemHtml";
 import { renderInlineMarkdown, renderMarkdown } from "../../lib/markdown";
+import { riseDelay } from "../../lib/rise";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import type {
@@ -98,11 +99,6 @@ const FIELD_FULL = `${FIELD} w-full`;
  */
 const CARD_MOTION =
   "cf-rise transition-[border-color,box-shadow] duration-150 hover:border-[color-mix(in_oklab,var(--cf-accent)_40%,var(--cf-border))] hover:shadow-[var(--cf-shadow)]";
-
-/** Staggered entry: each card waits on the one above, capped so a long list doesn't crawl. */
-function riseDelay(at: number): React.CSSProperties {
-  return { "--cf-rise-delay": `${Math.min(at, 8) * 45}ms` } as React.CSSProperties;
-}
 
 /**
  * The left column's width, read from a custom property the board sets rather than from an inline

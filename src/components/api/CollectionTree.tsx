@@ -39,6 +39,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { encodeInvite, syncCollection } from "../../lib/api/sync";
+import { riseDelay } from "../../lib/rise";
 import { supabaseAnonKey } from "../../lib/tauri/apiCommands";
 import { defaultRequestSpec } from "../../types/api";
 import type { ApiFolder, ApiProtocol, ApiRequestRow, SavedExample } from "../../types/api";
@@ -296,6 +297,8 @@ function storeIndex(gap: number, draggedAt: number): number {
 interface TreeRowProps {
   node: NodeRef;
   depth: number;
+  /** Place among its siblings, which is all the entry animation needs to stagger. */
+  at?: number;
   /** Containers, and requests that have saved examples to unfold; `undefined` on a plain request. */
   expanded?: boolean;
   /** Requests only: set when the row has examples, so it gets a twisty instead of the spacer. */
@@ -327,6 +330,7 @@ interface TreeRowProps {
 function TreeRow({
   node,
   depth,
+  at = 0,
   expanded,
   onToggle,
   pinned,
@@ -387,8 +391,8 @@ function TreeRow({
         e.preventDefault();
         onMenu(e.clientX, e.clientY);
       }}
-      style={{ paddingLeft: depth * INDENT + ROW_PAD }}
-      className={`group relative flex cursor-pointer items-center gap-1.5 rounded-md py-0.5 pr-1 text-[13px] ${
+      style={{ paddingLeft: depth * INDENT + ROW_PAD, ...riseDelay(at) }}
+      className={`cf-rise group relative flex cursor-pointer items-center gap-1.5 rounded-md py-0.5 pr-1 text-[13px] ${
         // Nothing but the drop target lights up while a drag is in flight.
         isHovered && !anyDrag ? "cf-row-hover" : ""
       } ${
@@ -1246,14 +1250,16 @@ export function CollectionTree() {
         {folderRows.map((folder, i) => (
           <Fragment key={folder.id}>
             {dropLine(collectionId, parentId, "folder", i, folderRows, depth)}
-            {renderFolder(folder, depth)}
+            {renderFolder(folder, depth, i)}
           </Fragment>
         ))}
         {dropLine(collectionId, parentId, "folder", folderRows.length, folderRows, depth)}
+        {/* The requests continue the folders' count rather than starting over: they are drawn under
+            them in one column, so a stagger that restarted at zero would run twice down one list. */}
         {requestRows.map((request, i) => (
           <Fragment key={request.id}>
             {dropLine(collectionId, parentId, "request", i, requestRows, depth)}
-            {renderRequest(request, depth)}
+            {renderRequest(request, depth, folderRows.length + i)}
           </Fragment>
         ))}
         {dropLine(collectionId, parentId, "request", requestRows.length, requestRows, depth)}
@@ -1261,7 +1267,7 @@ export function CollectionTree() {
     );
   };
 
-  const renderRequest = (request: ApiRequestRow, depth: number) => {
+  const renderRequest = (request: ApiRequestRow, depth: number, at: number) => {
     const node: NodeRef = {
       kind: "request",
       id: request.id,
@@ -1275,6 +1281,7 @@ export function CollectionTree() {
       <TreeRow
         node={node}
         depth={depth}
+        at={at}
         expanded={examples ? isExpanded : undefined}
         onToggle={examples ? () => toggle(request.id) : undefined}
         protocol={request.protocol}
@@ -1313,7 +1320,7 @@ export function CollectionTree() {
     );
   };
 
-  const renderFolder = (folder: ApiFolder, depth: number) => {
+  const renderFolder = (folder: ApiFolder, depth: number, at: number) => {
     const node: NodeRef = {
       kind: "folder",
       id: folder.id,
@@ -1327,6 +1334,7 @@ export function CollectionTree() {
         <TreeRow
           node={node}
           depth={depth}
+          at={at}
           expanded={isExpanded}
           renaming={renaming?.id === folder.id}
           dragging={drag?.id === folder.id}
@@ -1350,7 +1358,7 @@ export function CollectionTree() {
         {ordered.length === 0 ? (
           <EmptyState icon={Boxes} title={t("api.noCollections")} />
         ) : (
-          ordered.map((collection) => {
+          ordered.map((collection, at) => {
             const node: NodeRef = {
               kind: "collection",
               id: collection.id,
@@ -1364,6 +1372,7 @@ export function CollectionTree() {
                 <TreeRow
                   node={node}
                   depth={0}
+                  at={at}
                   expanded={isExpanded}
                   pinned={collection.pinned}
                   onTogglePin={() => void useApiStore.getState().toggleCollectionPinned(collection.id)}

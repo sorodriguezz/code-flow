@@ -13,6 +13,7 @@ import { usePreferencesStore } from "../../state/preferencesStore";
 import { playNotificationSound, previewNotificationSound } from "../../lib/notificationSound";
 import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { riseDelay } from "../../lib/rise";
 
 const PANEL_WIDTH = 340;
 
@@ -358,10 +359,11 @@ export function NotificationBell() {
               </div>
             ) : (
               <div className="min-h-0 flex-1 overflow-y-auto">
-                {items.map((item) => (
+                {items.map((item, at) => (
                   <Row
                     key={item.id}
                     item={item}
+                    at={at}
                     locale={locale}
                     workspaceName={item.workspaceId ? (workspaceNames.get(item.workspaceId) ?? null) : null}
                     foreign={item.workspaceId !== null && item.workspaceId !== activeWorkspaceId}
@@ -386,6 +388,7 @@ export function NotificationBell() {
  */
 function Row({
   item,
+  at,
   locale,
   workspaceName,
   foreign,
@@ -393,6 +396,8 @@ function Row({
   onFollowed,
 }: {
   item: AppNotification;
+  /** Place in the list it arrives with, which is all the entry animation needs to stagger. */
+  at: number;
   locale: string;
   /** `null` when the notification predates any workspace, or when the one it names has since been
    *  deleted — the two cases the footer line has nothing to say about. */
@@ -418,7 +423,8 @@ function Row({
 
   return (
     <div
-      className={`group relative flex items-start gap-2 border-b border-[var(--cf-border)] px-3 py-2 last:border-b-0 ${
+      style={riseDelay(at)}
+      className={`cf-rise group relative flex items-start gap-2 border-b border-[var(--cf-border)] px-3 py-2 last:border-b-0 ${
         item.seen ? "" : "bg-[color-mix(in_oklab,var(--cf-accent)_6%,transparent)]"
       }`}
     >

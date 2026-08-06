@@ -5,6 +5,7 @@ import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { fileIconFor } from "../../lib/fileIcon";
 import { readFileText } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 
 /**
  * The two kinds of "come back to this line", in one list.
@@ -147,10 +148,11 @@ function Section({
                   )}
                 </button>
                 {!shut &&
-                  fileRows.map((row) => (
+                  fileRows.map((row, at) => (
                     <div
                       key={row.key}
-                      className="group flex items-center gap-1.5 py-0.5 pl-9 pr-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                      style={riseDelay(at)}
+                      className="cf-rise group flex items-center gap-1.5 py-0.5 pl-9 pr-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                     >
                       <button
                         onClick={() => onOpen(row)}

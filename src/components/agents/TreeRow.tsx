@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { MoreHorizontal, Pencil, Pin } from "lucide-react";
 import type { MenuItem } from "../api/CollectionTree";
+import { riseDelay } from "../../lib/rise";
 
 /** Where a row's menu was asked for. Only the id is kept, never the row itself: a turn landing
  * replaces the row object, and a menu built from the copy captured on right-click would go on
@@ -45,6 +46,7 @@ export function Row({
   meta,
   menuLabel,
   depth = 0,
+  at = 0,
   leading,
   chip,
   pinned = false,
@@ -60,6 +62,8 @@ export function Row({
   menuLabel: string;
   /** Levels of nesting. 0 is a section's own child. */
   depth?: number;
+  /** Position in the list it arrives with, which is all the entry animation needs to stagger. */
+  at?: number;
   /** Rendered before the glyph — the expander of a row that has children. Its own click handler
    * must stop propagating, or opening a chain would also select it. */
   leading?: ReactNode;
@@ -81,8 +85,8 @@ export function Row({
         e.stopPropagation();
         onMenu(e.clientX, e.clientY);
       }}
-      style={{ paddingLeft: depth * INDENT }}
-      className={`group relative flex w-full items-start rounded-md ${
+      style={{ paddingLeft: depth * INDENT, ...riseDelay(at) }}
+      className={`cf-rise group relative flex w-full items-start rounded-md ${
         selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       }`}
     >

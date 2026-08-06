@@ -35,7 +35,7 @@ import {
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { ActivePill } from "../common/ActivePill";
-import { CARD, ConnectionDot, ToolbarButton, nodeIcon } from "./dbChrome";
+import { CARD, ConnectionDot, ToolbarButton, engineColor, engineIcon, nodeIcon } from "./dbChrome";
 import { DbHistoryList } from "./DbHistoryList";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
 import {
@@ -52,6 +52,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { dbChildren } from "../../lib/tauri/dbCommands";
+import { riseDelay } from "../../lib/rise";
 import { createTemplate, sqlTemplate, type SqlTemplate } from "../../lib/db/sqlTemplates";
 import {
   engineInfo,
@@ -81,6 +82,7 @@ const MAX_RESULTS = 200;
 
 function TreeRow({
   depth,
+  at = 0,
   icon,
   name,
   detail,
@@ -96,6 +98,8 @@ function TreeRow({
   title,
 }: {
   depth: number;
+  /** Place among the rows it arrives with — all the entry animation needs to stagger. */
+  at?: number;
   icon: React.ReactNode;
   name: string;
   detail?: string;
@@ -141,8 +145,8 @@ function TreeRow({
           onToggle();
         }
       }}
-      style={{ paddingLeft: 6 + depth * 12 }}
-      className={`group flex w-full cursor-default items-center gap-1 rounded-md py-[3px] pr-1.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+      style={{ paddingLeft: 6 + depth * 12, ...riseDelay(at) }}
+      className={`cf-rise group flex w-full cursor-default items-center gap-1 rounded-md py-[3px] pr-1.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         active
           ? "bg-[var(--cf-accent-soft)]"
           : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
@@ -207,10 +211,12 @@ function NodeSubtree({
   connectionId,
   node,
   depth,
+  at,
 }: {
   connectionId: string;
   node: DbNode;
   depth: number;
+  at: number;
 }) {
   const t = useT();
   const nodeRef = useMemo(() => refOf(node), [node]);
@@ -388,6 +394,7 @@ function NodeSubtree({
     <>
       <TreeRow
         depth={depth}
+        at={at}
         icon={<Icon size={12} />}
         name={node.name}
         detail={node.detail}
@@ -415,12 +422,13 @@ function NodeSubtree({
       )}
       {expanded &&
         !error &&
-        children?.map((child) => (
+        children?.map((child, index) => (
           <NodeSubtree
             key={child.id}
             connectionId={connectionId}
             node={child}
             depth={depth + 1}
+            at={index}
           />
         ))}
       {expanded && !error && children?.length === 0 && (
@@ -632,11 +640,20 @@ function ConnectionBranch({
     },
   });
 
+  // The engine's own glyph, not the generic cylinder. A connection row used to carry the same
+  // `Database` icon as the `postgres` database *inside* it, so the two levels of the tree that mean
+  // the most different things looked identical — and nothing anywhere in the row said whether you
+  // were pointing at IRIS or at Mongo. This is the same glyph the engine picker and the connection
+  // dialog draw, in the same colour, so an engine looks like itself everywhere it appears.
+  const EngineIcon = engineIcon(row.kind);
+
   return (
     <>
       <TreeRow
         depth={0}
-        icon={<Database size={12} />}
+        at={index}
+        icon={<EngineIcon size={12} />}
+        color={engineColor(row.kind)}
         name={row.name}
         detail={undefined}
         // Where it points, on hover rather than on a line of its own. A connection URL is long
@@ -667,8 +684,8 @@ function ConnectionBranch({
       )}
       {expanded &&
         !error &&
-        children?.map((child) => (
-          <NodeSubtree key={child.id} connectionId={row.id} node={child} depth={1} />
+        children?.map((child, childIndex) => (
+          <NodeSubtree key={child.id} connectionId={row.id} node={child} depth={1} at={childIndex} />
         ))}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
@@ -737,8 +754,13 @@ function SavedConsolesFolder({
         </p>
       )}
       {open &&
-        consoles.map((console) => (
-          <SavedConsoleRow key={console.id} console={console} connectionId={connectionId} />
+        consoles.map((console, at) => (
+          <SavedConsoleRow
+            key={console.id}
+            console={console}
+            connectionId={connectionId}
+            at={at}
+          />
         ))}
       {menu && (
         <ContextMenu
@@ -867,12 +889,14 @@ function GroupSection({
   group,
   members,
   collapsed,
+  at,
   onToggle,
   onNewGroup,
 }: {
   group: string;
   members: DbConnectionRow[];
   collapsed: boolean;
+  at: number;
   onToggle: () => void;
   onNewGroup: () => void;
 }) {
@@ -942,7 +966,8 @@ function GroupSection({
           e.stopPropagation();
           setMenu({ x: e.clientX, y: e.clientY });
         }}
-        className="group flex w-full cursor-default items-center gap-1 rounded-md px-1.5 py-[3px] text-left outline-none hover:bg-black/[0.03] focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] dark:hover:bg-white/[0.04]"
+        style={riseDelay(at)}
+        className="cf-rise group flex w-full cursor-default items-center gap-1 rounded-md px-1.5 py-[3px] text-left outline-none hover:bg-black/[0.03] focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] dark:hover:bg-white/[0.04]"
       >
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
@@ -1001,9 +1026,11 @@ function GroupSection({
 function SavedConsoleRow({
   console: saved,
   connectionId,
+  at,
 }: {
   console: DbConsole;
   connectionId: string;
+  at: number;
 }) {
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -1036,6 +1063,7 @@ function SavedConsoleRow({
     <>
       <TreeRow
         depth={2}
+        at={at}
         icon={<FileCode2 size={12} />}
         name={saved.name}
         detail={saved.database_name}
@@ -1159,9 +1187,27 @@ export function DbExplorer() {
     () => groupConnections(connections, groups),
     [connections, groups],
   );
-  /** Whether the tree has folders at all. Without any, it stays the flat list it has always been —
-   * a lone "Ungrouped" heading over every connection is a level of structure that says nothing. */
-  const foldered = groups.length > 0 || buckets.some(([name]) => name !== UNGROUPED);
+  /**
+   * The tree in two parts: the folders, then the connections that are in none.
+   *
+   * Ungrouped used to be a folder of its own — a "Sin grupo" heading with a chevron and a count,
+   * sitting among the real groups and looking exactly like one. It isn't one: it is the absence of
+   * a group, it can't be renamed or deleted, and a heading that exists only to say "these have no
+   * heading" costs a row and a level of indentation to say nothing. The loose connections are now
+   * drawn as themselves, under the folders and behind a rule that separates the two kinds of thing
+   * without naming the second.
+   */
+  const folders = useMemo(() => buckets.filter(([name]) => name !== UNGROUPED), [buckets]);
+  const loose = useMemo(
+    () => buckets.find(([name]) => name === UNGROUPED)?.[1] ?? [],
+    [buckets],
+  );
+  /** Whether the tree has folders at all. Without any, it stays the flat list it has always been. */
+  const foldered = folders.length > 0;
+
+  /** Right-clicking the empty space below the tree — what the "Sin grupo" heading used to be the
+   * only place to reach, now that it is gone. */
+  const [treeMenu, setTreeMenu] = useState<{ x: number; y: number } | null>(null);
 
   return (
     <>
@@ -1256,7 +1302,14 @@ export function DbExplorer() {
               <p className="text-[13px] text-[var(--cf-text)]">{t("db.noConnections")}</p>
             </div>
           ) : (
-            <div role="tree" className="min-h-0 flex-1 overflow-auto p-1">
+            <div
+              role="tree"
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setTreeMenu({ x: e.clientX, y: e.clientY });
+              }}
+              className="min-h-0 flex-1 overflow-auto p-1"
+            >
               {creatingGroup && (
                 <div className="flex items-center gap-1 px-1.5 py-[3px]">
                   <FolderPlus size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
@@ -1270,26 +1323,31 @@ export function DbExplorer() {
                   />
                 </div>
               )}
-              {foldered
-                ? buckets.map(([group, members]) => (
-                    <GroupSection
-                      key={group || "__ungrouped__"}
-                      group={group}
-                      members={members}
-                      collapsed={collapsedGroups.includes(group)}
-                      onToggle={() => toggleGroup(group)}
-                      onNewGroup={() => setCreatingGroup(true)}
-                    />
-                  ))
-                : connections.map((row, index) => (
-                    <ConnectionBranch
-                      key={row.id}
-                      row={row}
-                      index={index}
-                      total={connections.length}
-                      siblings={connections}
-                    />
-                  ))}
+              {folders.map(([group, members], at) => (
+                <GroupSection
+                  key={group}
+                  group={group}
+                  members={members}
+                  at={at}
+                  collapsed={collapsedGroups.includes(group)}
+                  onToggle={() => toggleGroup(group)}
+                  onNewGroup={() => setCreatingGroup(true)}
+                />
+              ))}
+              {/* Only when there is something on both sides of it: a rule above the first connection
+                  of a tree that has no folders would be a line under nothing. */}
+              {foldered && loose.length > 0 && (
+                <div className="mx-1 my-1.5 border-t border-[var(--cf-border)]" />
+              )}
+              {loose.map((row, index) => (
+                <ConnectionBranch
+                  key={row.id}
+                  row={row}
+                  index={index}
+                  total={loose.length}
+                  siblings={loose}
+                />
+              ))}
             </div>
           )}
         </div>
@@ -1304,6 +1362,23 @@ export function DbExplorer() {
         onCommit={(value) => commitSize("dbSidebarWidth", value)}
       />
 
+      {treeMenu && (
+        <ContextMenu
+          x={treeMenu.x}
+          y={treeMenu.y}
+          items={[
+            {
+              label: `${t("db.newConnection")}…`,
+              icon: Plus,
+              // Anchored where the first menu was, so the engines open over it rather than wherever
+              // the pointer drifted to while reading.
+              onClick: () => setEngineMenu(treeMenu),
+            },
+            { label: t("db.newGroup"), icon: FolderPlus, onClick: () => setCreatingGroup(true) },
+          ]}
+          onClose={() => setTreeMenu(null)}
+        />
+      )}
       {engineMenu && (
         <EngineMenu
           x={engineMenu.x}

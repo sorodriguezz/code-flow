@@ -17,6 +17,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { SettingsHeader } from "../api/settingsChrome";
+import { riseDelay } from "../../lib/rise";
 
 /** The repository being dragged, and where it would land if the pointer were released now. */
 interface RowDrag {
@@ -285,7 +286,8 @@ export function ProjectsSettings() {
                     <div
                       key={p.id}
                       data-project-row
-                      className={`rounded-md border px-2.5 py-1.5 transition-colors ${
+                      style={riseDelay(at)}
+                      className={`cf-rise rounded-md border px-2.5 py-1.5 transition-colors ${
                         drag?.id === p.id
                           ? "border-[var(--cf-accent)] opacity-40"
                           : "border-[var(--cf-border)]"

@@ -70,6 +70,7 @@ import { StashDiffModal } from "./StashDiffModal";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
+import { riseDelay } from "../../lib/rise";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 // The hover-revealed actions on a project row: the same square chip the "clone"/"add repository"
@@ -269,7 +270,7 @@ function StashesSection() {
       )}
 
       <div className="space-y-0.5">
-        {stashes.map((s) =>
+        {stashes.map((s, at) =>
           renamingIndex === s.index ? (
             <div key={s.index} className="flex items-center gap-1 px-1.5 py-0.5">
               <input
@@ -289,7 +290,8 @@ function StashesSection() {
             <div
               key={s.index}
               onClick={() => setViewingStash(s)}
-              className="group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              style={riseDelay(at)}
+              className="cf-rise group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
             >
               <span className="flex-1 truncate text-[var(--cf-text-muted)]">{s.message}</span>
               <button
@@ -368,12 +370,13 @@ function RemoteBranchesSection({ branches }: { branches: BranchInfo[] }) {
   return (
     <CollapsibleSection icon={Cloud} title={t("sidebar.remoteBranches")}>
       <div className="space-y-0.5">
-        {remoteBranches.map((b) => {
+        {remoteBranches.map((b, at) => {
           const isCheckingOut = checkingOutBranch === b.name;
           return (
             <div
               key={b.name}
-              className="group flex items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-[13px] text-[var(--cf-text-muted)]"
+              style={riseDelay(at)}
+              className="cf-rise group flex items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-[13px] text-[var(--cf-text-muted)]"
             >
               {isCheckingOut ? (
                 <Loader2 size={10} className="shrink-0 animate-spin" />
@@ -493,10 +496,11 @@ function RemoteUrlSection() {
   return (
     <CollapsibleSection icon={Cloud} title={t("sidebar.remoteUrl")}>
       <div className="space-y-0.5">
-        {remotes.map((r) => (
+        {remotes.map((r, at) => (
           <div
             key={r.name}
-            className="group flex items-center gap-1.5 rounded-md px-1.5 py-1 leading-none text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+            style={riseDelay(at)}
+            className="cf-rise group flex items-center gap-1.5 rounded-md px-1.5 py-1 leading-none text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
           >
             <span className="shrink-0 font-medium leading-none text-[var(--cf-text-muted)]">{r.name}</span>
             <span className="flex-1 truncate font-mono text-[12px] leading-none text-[var(--cf-text-muted)]">
@@ -930,7 +934,7 @@ function PullRequestsSection({ project }: { project: Project }) {
                     would otherwise still build every row just to keep it off screen. */}
                 {open && (
                   <div className="space-y-0.5">
-                    {items.map((pr) => (
+                    {items.map((pr, at) => (
                       <button
                         key={pr.id}
                         onClick={() => {
@@ -938,7 +942,8 @@ function PullRequestsSection({ project }: { project: Project }) {
                           selectPr(pr);
                           openAiPanel();
                         }}
-                        className={`flex w-full items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[12px] ${
+                        style={riseDelay(at)}
+                        className={`cf-rise flex w-full items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[12px] ${
                           selectedPr?.id === pr.id
                             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
                             : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
@@ -972,7 +977,7 @@ function PullRequestsSection({ project }: { project: Project }) {
   );
 }
 
-function ProjectRow({ project }: { project: Project }) {
+function ProjectRow({ project, at }: { project: Project; at: number }) {
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
@@ -1019,7 +1024,8 @@ function ProjectRow({ project }: { project: Project }) {
           doing nothing. Every control inside stops propagation, so each still means only itself. */}
       <div
         onClick={select}
-        className={`group relative flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${
+        style={riseDelay(at)}
+        className={`cf-rise group relative flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${
           isActive
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
             : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
@@ -1131,10 +1137,10 @@ function ProjectRow({ project }: { project: Project }) {
               )}
               {branches
                 .filter((b) => !b.is_remote)
-                .map((b) => {
+                .map((b, at) => {
                   const isCheckingOut = checkingOutBranch === b.name;
                   return (
-                    <div key={b.name} className="group flex items-center">
+                    <div key={b.name} style={riseDelay(at)} className="cf-rise group flex items-center">
                       <button
                         onClick={() => checkoutBranch(b.name)}
                         disabled={checkingOutBranch !== null}
@@ -1381,8 +1387,8 @@ export function Sidebar() {
           </div>
 
           <div className="space-y-0.5">
-            {projects.map((project) => (
-              <ProjectRow key={project.id} project={project} />
+            {projects.map((project, at) => (
+              <ProjectRow key={project.id} project={project} at={at} />
             ))}
             {projects.length === 0 && (
               <p className="px-1.5 py-1 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noProjects")}</p>

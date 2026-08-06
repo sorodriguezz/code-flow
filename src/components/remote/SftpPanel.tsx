@@ -33,6 +33,7 @@ import {
   remoteUploadFile,
 } from "../../lib/tauri/remoteCommands";
 import type { RemoteFile, RemoteListing } from "../../types/remote";
+import { riseDelay } from "../../lib/rise";
 
 /**
  * Files, both sides at once.
@@ -448,7 +449,7 @@ function FilePane({
             {t("remote.sftpEmpty")}
           </p>
         ) : (
-          listing.entries.map((entry) => (
+          listing.entries.map((entry, at) => (
             <div
               key={entry.path}
               role="button"
@@ -473,7 +474,8 @@ function FilePane({
                   entry.is_dir ? onOpen(entry) : onSelect(entry);
                 }
               }}
-              className={`group flex cursor-default items-center gap-2 px-2 py-1 outline-none ${
+              style={riseDelay(at)}
+              className={`cf-rise group flex cursor-default items-center gap-2 px-2 py-1 outline-none ${
                 selected?.path === entry.path
                   ? "bg-[var(--cf-accent-soft)]"
                   : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"

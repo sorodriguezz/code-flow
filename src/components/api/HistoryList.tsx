@@ -6,6 +6,7 @@ import { useApiStore } from "../../state/apiStore";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 import type { ApiHistoryEntry, ApiRequestSpec, ApiResponse } from "../../types/api";
 
 /** What `api_history.snapshot` holds — enough to put the request *and* what came back on screen. */
@@ -114,12 +115,13 @@ export function HistoryList() {
               <div className="sticky top-0 z-10 bg-[var(--cf-surface)] px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
                 {dayLabel(group.key, group.when)}
               </div>
-              {group.items.map((entry) => (
+              {group.items.map((entry, at) => (
                 <div
                   key={entry.id}
                   onClick={() => restore(entry)}
                   title={entry.name ? `${entry.name}\n${entry.url}` : entry.url}
-                  className="group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  style={riseDelay(at)}
+                  className="cf-rise group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                 >
                   <MethodBadge protocol={entry.protocol} method={entry.method} />
                   <span className="min-w-0 flex-1 truncate text-[var(--cf-text)]">{entry.url}</span>

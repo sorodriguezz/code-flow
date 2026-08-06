@@ -34,6 +34,7 @@ import { useRowHoverStore } from "../../state/rowHoverStore";
 import { canDropInto, useTreeDragStore, type TreeDrag } from "../../state/treeDragStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { riseDelay } from "../../lib/rise";
 
 /** Repo-relative path of the directory holding `path` ("" for a top-level entry). */
 function parentDir(path: string): string {
@@ -167,9 +168,12 @@ function TreeNode({
   onBeginDrag,
   suppressClick,
   changedPaths,
+  at,
 }: {
   entry: FileEntry;
   depth: number;
+  /** Place among its siblings, which is all the entry animation needs to stagger. */
+  at: number;
   selectedPath: string | null;
   /** The clicked directory, when the last click landed on one — null while a file holds the
    * selection, so only ever one row reads as selected. */
@@ -253,8 +257,8 @@ function TreeNode({
           else onSelectFile(entry.path);
         }}
         onDoubleClick={() => !entry.is_dir && onOpenFile?.(entry.path)}
-        style={{ paddingLeft: depth * 14 + 6 }}
-        className={`flex w-full items-center gap-1.5 truncate rounded-md py-0.5 pr-2 text-left text-[13px] ${
+        style={{ paddingLeft: depth * 14 + 6, ...riseDelay(at) }}
+        className={`cf-rise flex w-full items-center gap-1.5 truncate rounded-md py-0.5 pr-2 text-left text-[13px] ${
           isSelected
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
             : // Nothing but the drop target is highlighted while a drag is in flight.
@@ -305,11 +309,12 @@ function TreeNode({
               onCancel={onCancelDraft}
             />
           )}
-          {children?.map((child) => (
+          {children?.map((child, index) => (
             <TreeNode
               key={child.path}
               entry={child}
               depth={depth + 1}
+              at={index}
               selectedPath={selectedPath}
               focusedDir={focusedDir}
               expanded={expanded}
@@ -822,11 +827,12 @@ export function FileTree({
             {draft?.parent === "" && (
               <DraftRow kind={draft.kind} depth={0} onSubmit={submitDraft} onCancel={cancelDraft} />
             )}
-            {rootEntries.map((entry) => (
+            {rootEntries.map((entry, index) => (
               <TreeNode
                 key={entry.path}
                 entry={entry}
                 depth={0}
+                at={index}
                 selectedPath={selectedPath}
                 focusedDir={focus.isDir ? focus.path : null}
                 expanded={expanded}
