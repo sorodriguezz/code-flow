@@ -109,7 +109,10 @@ fn push_unique(into: &mut Vec<String>, key: String) {
 pub fn secret_keys(conn: &Connection) -> Vec<String> {
     let mut keys = Vec::new();
 
-    // Azure DevOps: one PAT per organization.
+    // Azure DevOps: one PAT per organization. Both spellings of the key are listed — the case-folded
+    // one everything writes now, and the verbatim one it replaced — because an install that has not
+    // yet read a given PAT still has it filed under the old shape, and a backup that skipped it
+    // would restore a machine that cannot reach that organisation.
     let mut orgs = field_of_each(conn, "ado_connections", "org");
     if let Ok(Some(legacy)) = queries::get_setting(conn, "ado_default_org") {
         orgs.push(legacy);
@@ -117,6 +120,7 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
     orgs.extend(column(conn, "SELECT DISTINCT ado_org FROM projects"));
     for org in orgs {
         push_unique(&mut keys, secrets::ado_pat_key(org.trim()));
+        push_unique(&mut keys, secrets::ado_pat_legacy_key(org.trim()));
     }
 
     // GitHub: one token per host, github.com included whether or not it was ever listed — it is
@@ -166,9 +170,26 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
         push_unique(&mut keys, secrets::supabase_share_token(&id));
     }
 
+    // Jira: one API token per site. The e-mail it authenticates against is not a credential and
+    // travels with the rest of the connection in `app_settings`.
+    for site in field_of_each(conn, "jira_connections", "site") {
+        push_unique(&mut keys, secrets::jira_token_key(site.trim()));
+    }
+
+    // monday.com: one token per account slug. No host to key by — the token is the identity.
+    for slug in field_of_each(conn, "monday_connections", "slug") {
+        push_unique(&mut keys, secrets::monday_token_key(slug.trim()));
+    }
+
     // Database passwords — the column the schema deliberately doesn't have.
     for id in column(conn, "SELECT id FROM db_connections") {
         push_unique(&mut keys, crate::datasource::password_key(&id));
+    }
+
+    // Remote hosts, for the same reason: an SSH or FTP password is kept out of `remote_hosts` and
+    // in the credential store, keyed by the host's id.
+    for id in column(conn, "SELECT id FROM remote_hosts") {
+        push_unique(&mut keys, crate::remotes::password_key(&id));
     }
 
     keys
@@ -180,14 +201,31 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
 /// whose ACL doesn't recognise the app's signature prompts for the login password, and a user who
 /// dismisses one prompt should end up with a backup missing that credential — not with no backup.
 /// The count in the result is what tells them how many travelled.
-pub fn collect(conn: &Connection) -> Vec<SecretEntry> {
-    secret_keys(conn)
-        .into_iter()
-        .filter_map(|key| match secrets::get_secret(&key) {
-            Ok(Some(value)) if !value.is_empty() => Some(SecretEntry { key, value }),
-            _ => None,
-        })
-        .collect()
+///
+/// That reasoning survives one credential failing and no longer survives *all* of them. Since
+/// [`secrets`] keeps a single vault on macOS, one dismissed prompt is not one missing token but
+/// every token missing, and a backup that silently contains no credentials at all looks exactly
+/// like an install that had none. So the all-or-nothing case is raised instead: the caller stops,
+/// and the user is told, rather than being handed a file that will restore into a machine that
+/// cannot authenticate anywhere.
+pub fn collect(conn: &Connection) -> Result<Vec<SecretEntry>, String> {
+    let keys = secret_keys(conn);
+    let expected = keys.len();
+    let mut failures = 0usize;
+    let mut out = Vec::new();
+    for key in keys {
+        match secrets::get_secret(&key) {
+            Ok(Some(value)) if !value.is_empty() => out.push(SecretEntry { key, value }),
+            Ok(_) => {}
+            Err(e) => {
+                failures += 1;
+                if failures == expected {
+                    return Err(format!("no credential could be read: {e}"));
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Writes every credential from a backup into this machine's store, returning how many landed.
@@ -235,6 +273,12 @@ mod tests {
                 VALUES ('ado_connections', '[{"org":"fabrikam"}]');
             INSERT INTO app_settings (key, value)
                 VALUES ('github_connections', '[{"host":"github.com"}]');
+            INSERT INTO app_settings (key, value)
+                VALUES ('jira_connections', '[{"site":"acme.atlassian.net","email":"a@b.c"}]');
+            INSERT INTO app_settings (key, value)
+                VALUES ('monday_connections', '[{"slug":"acme","name":"Acme"}]');
+            INSERT INTO remote_hosts (id, workspace_id, name, spec, sort_order, created_at, updated_at)
+                VALUES ('r1', 'w1', 'build box', '{"kind":"ssh"}', 0, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
             "#,
         )
         .unwrap();
@@ -263,6 +307,12 @@ mod tests {
             // Set up in settings and shared on by nothing yet. Inferred from the shares alone it
             // would be invisible here, and the restore would bring the project back with no key.
             "supabase-anon:xyz.supabase.co",
+            // The three families that were missing entirely: a restored machine came back with the
+            // Jira site, the monday account and every SSH/FTP host listed, and none of them able to
+            // authenticate — with nothing anywhere saying so.
+            "jira-token:acme.atlassian.net",
+            "monday-token:acme",
+            "remote-password:r1",
         ] {
             assert!(keys.contains(&expected.to_string()), "missing {expected} in {keys:?}");
         }

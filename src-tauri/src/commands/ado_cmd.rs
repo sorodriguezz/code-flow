@@ -263,9 +263,16 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
                 needs_token = Some(AutoLinkResult::NeedsToken { provider: "gitlab".to_string(), identifier: detected.host });
             }
         } else if let Some(detected) = ado::detect_from_remote_url(url) {
-            if connected_ado_orgs.iter().any(|o| o.eq_ignore_ascii_case(&detected.org)) {
+            // The *connected* spelling is what gets written, not the one in the remote URL. They
+            // match case-insensitively — that is the test on this line — and Azure treats them as
+            // one organisation, but everything downstream that names an org by this column should
+            // name it the way the user connected it. Writing the URL's spelling is what used to
+            // leave a project pointing at `myorg` while Settings had `MyOrg`.
+            if let Some(connected) =
+                connected_ado_orgs.iter().find(|o| o.eq_ignore_ascii_case(&detected.org))
+            {
                 let conn = db.0.lock().map_err(|e| e.to_string())?;
-                queries::link_project_ado(&conn, &project_id, &detected.org, &detected.project, &detected.repo)
+                queries::link_project_ado(&conn, &project_id, connected, &detected.project, &detected.repo)
                     .map_err(|e| e.to_string())?;
                 let linked = queries::get_project(&conn, &project_id)
                     .map_err(|e| e.to_string())?
@@ -281,7 +288,7 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
 }
 
 pub(crate) fn pat_for_org(org: &str) -> Result<String, String> {
-    secrets::get_secret(&secrets::ado_pat_key(org))?
+    secrets::ado_pat(org)?
         .ok_or_else(|| format!("No Azure DevOps token saved for organization \"{org}\" — connect it in Settings first"))
 }
 
@@ -594,7 +601,16 @@ pub async fn resolve_pr_link(db: State<'_, Db>, url: String) -> Result<PrLinkRes
             })
         }
         crate::pr_link::PrLinkTarget::Azure { org, project: ado_project, repo, number } => {
-            let Some(pat) = secrets::get_secret(&secrets::ado_pat_key(&org))? else {
+            // The organisation as it was *connected*, when it is one of them. A pasted link carries
+            // whatever spelling the URL had — `parse_azure` even lowercases a `*.visualstudio.com`
+            // host — and this value is written into `projects.ado_org` further down. Same rule as
+            // `auto_link_project`: the column names the organisation the way Settings does, or the
+            // PAT lookup ends up asking for a key nobody wrote.
+            let org = ado_connected_orgs(&db)?
+                .into_iter()
+                .find(|known| known.eq_ignore_ascii_case(&org))
+                .unwrap_or(org);
+            let Some(pat) = secrets::ado_pat(&org)? else {
                 return Ok(PrLinkResolution::NeedsToken {
                     provider: "azure".to_string(),
                     identifier: org,

@@ -7,12 +7,12 @@ pub fn set_ado_pat(org: String, pat: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_ado_pat(org: String) -> Result<Option<String>, String> {
-    secrets::get_secret(&secrets::ado_pat_key(&org))
+    secrets::ado_pat(&org)
 }
 
 #[tauri::command]
 pub fn delete_ado_pat(org: String) -> Result<(), String> {
-    secrets::delete_secret(&secrets::ado_pat_key(&org))
+    secrets::delete_ado_pat(&org)
 }
 
 // GitHub tokens are keyed per host so github.com and one or more GitHub Enterprise Servers can

@@ -308,7 +308,11 @@ pub struct Payload {
 pub fn build_payload(conn: &Connection) -> Result<Payload, String> {
     let selection = load_settings(conn).include;
     let tables = snapshot::export(conn, &selection).map_err(|e| e.to_string())?;
-    let secrets = if selection.credentials { vault::collect(conn) } else { Vec::new() };
+    // `?`, unlike the rest of this function's tolerance for a credential that would not read: a
+    // collection that produced *nothing* is not a thin backup, it is a backup that will restore a
+    // machine unable to authenticate anywhere — and it looks identical to an install that had no
+    // credentials to begin with. Better to fail the run and say so.
+    let secrets = if selection.credentials { vault::collect(conn)? } else { Vec::new() };
     let contents = BackupContents {
         rows: tables.iter().map(|t| t.rows.len() as i64).sum(),
         secrets: secrets.len() as i64,
@@ -424,6 +428,16 @@ pub fn restore(
     // whole restore over a reconciliation would leave the user with no way to retry the rest.
     if let Err(error) = queries::recover_after_restart(conn) {
         eprintln!("restore: reconciling live state failed: {error}");
+    }
+
+    // The rows that just landed came from another install and can be as old as that install was —
+    // including `projects.ado_org` written before the spelling was aligned with the connected
+    // organisation. That alignment normally runs at open, which has already happened by now, so
+    // without this a restore is the one way to put the mismatch back and have nobody notice until
+    // a pull-request list reports a missing token. Reported rather than raised, for the same reason
+    // as the reconciliation above.
+    if let Err(error) = crate::db::migrations::align_project_ado_org_with_connections(conn) {
+        eprintln!("restore: aligning Azure DevOps organisations failed: {error}");
     }
 
     let mut report = report(summary, &header);

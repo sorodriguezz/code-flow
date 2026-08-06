@@ -1063,6 +1063,52 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_grouping_to_agent_tasks(conn)?;
     add_grouping_to_agent_chains(conn)?;
     add_group_name_to_db_connections(conn)?;
+    align_project_ado_org_with_connections(conn)?;
+    Ok(())
+}
+
+/// Rewrites `projects.ado_org` to the spelling the organisation was connected under.
+///
+/// Auto-linking matched a remote against the connected organisations case-insensitively and then
+/// stored the spelling from the *git remote URL*, so a repository could end up naming `myorg` while
+/// Settings had `MyOrg`. Nothing noticed until a token was needed: the PAT was filed under the
+/// typed spelling, the lookup asked for the detected one, and the pull-request list reported "No
+/// Azure DevOps token saved" for an organisation that was plainly connected.
+///
+/// The key is case-folded now (`secrets::ado_pat_key`), which stops it happening again — but only
+/// for what the two sides *ask* for. This is the other half: the rows already written. Pure data,
+/// no credential is read here; it runs at open, where a Keychain prompt would be unwelcome and is
+/// not needed.
+///
+/// Only spellings that differ by case are touched, and only where a connection matches. An org with
+/// no connection is left exactly as it is — that is a repository pointing at somewhere the user has
+/// not set up, and rewriting it would invent a link.
+pub(crate) fn align_project_ado_org_with_connections(conn: &Connection) -> rusqlite::Result<()> {
+    let raw: Option<String> = conn
+        .query_row("SELECT value FROM app_settings WHERE key = 'ado_connections'", [], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    let Some(raw) = raw else { return Ok(()) };
+    let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(());
+    };
+
+    for item in items {
+        let Some(org) = item.get("org").and_then(serde_json::Value::as_str) else { continue };
+        let org = org.trim();
+        if org.is_empty() {
+            continue;
+        }
+        // `= ?2 COLLATE NOCASE` and `<> ?2` together: the rows that name this organisation in some
+        // other case, and only those. A row already spelled correctly is not rewritten, so this is
+        // a no-op on every install that never had the mismatch.
+        conn.execute(
+            "UPDATE projects SET ado_org = ?1
+             WHERE ado_org IS NOT NULL AND ado_org = ?2 COLLATE NOCASE AND ado_org <> ?2",
+            (org, org),
+        )?;
+    }
     Ok(())
 }
 
@@ -1906,5 +1952,41 @@ mod tests {
         run(&conn).unwrap();
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_collections WHERE workspace_id = 'w1'"), 1);
         assert!(!table_exists(&conn, "api_collections_legacy").unwrap());
+    }
+
+    /// The spelling in `projects.ado_org` has to be the one the organisation was connected under,
+    /// or the PAT lookup asks for a key nobody wrote. Only case differences are rewritten, and only
+    /// where a connection matches — a repository pointing at an organisation the user never
+    /// connected is left exactly as it is.
+    #[test]
+    fn project_ado_org_is_aligned_with_the_connected_spelling() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        conn.execute_batch(
+            r#"
+            DELETE FROM workspaces;
+            INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                VALUES ('w1', 'Flow', 'folder', '#111', 0, '2026-01-01T00:00:00+00:00');
+            INSERT INTO projects (id, workspace_id, name, local_path, ado_org, sort_order, created_at)
+                VALUES ('p1', 'w1', 'api', '/tmp/api', 'myorg', 0, '2026-01-01T00:00:00+00:00');
+            INSERT INTO projects (id, workspace_id, name, local_path, ado_org, sort_order, created_at)
+                VALUES ('p2', 'w1', 'web', '/tmp/web', 'Unconnected', 0, '2026-01-01T00:00:00+00:00');
+            INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at)
+                VALUES ('p3', 'w1', 'plain', '/tmp/plain', 0, '2026-01-01T00:00:00+00:00');
+            INSERT OR REPLACE INTO app_settings (key, value)
+                VALUES ('ado_connections', '[{"org":"MyOrg"}]');
+            "#,
+        )
+        .unwrap();
+
+        align_project_ado_org_with_connections(&conn).unwrap();
+
+        let org = |id: &str| -> Option<String> {
+            conn.query_row("SELECT ado_org FROM projects WHERE id = ?1", [id], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(org("p1").as_deref(), Some("MyOrg"), "the connected spelling wins");
+        assert_eq!(org("p2").as_deref(), Some("Unconnected"), "no connection, no rewrite");
+        assert_eq!(org("p3"), None, "a project with no Azure link is untouched");
     }
 }
