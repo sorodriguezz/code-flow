@@ -1177,6 +1177,11 @@ function SchemasTab({
       setLoadError(String(e));
     } finally {
       setLoading(false);
+      // This button is the single densest opener of sessions in the app: the catalog walks every
+      // database on the server and each one it reaches is a session the registry keeps. Telling the
+      // explorer means the dot lights up and its menu offers Disconnect — which is the only way to
+      // hand those sessions back before the app quits.
+      void useDbStore.getState().syncConnected();
     }
   };
 

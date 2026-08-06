@@ -19,8 +19,10 @@ export const translations = {
     "import.selectAll": "Select all",
     "import.selectNone": "Clear selection",
     "import.alreadyAdded": "Already added",
+    "import.sameRepoAs": "Same repo as {name}",
     "import.importCount": "Import {count}",
-    "import.alreadyInWorkspace": "That repository is already in this workspace.",
+    "import.duplicateRepo":
+      "\"{name}\" is already in this workspace, at {path}. A repository can only be in a workspace once — open it in another workspace if you need a second copy.",
     "import.emptyFolder": "That folder is empty. Pick a git repository, or a folder that holds some.",
     "import.noRepos": "That folder is not a git repository, and none of the folders inside it is either.",
     "import.tooManyEntries": "That folder has too many entries to scan. Pick the repository itself, or a folder that holds just your repositories.",
@@ -3616,8 +3618,10 @@ export const translations = {
     "import.selectAll": "Seleccionar todos",
     "import.selectNone": "Quitar selección",
     "import.alreadyAdded": "Ya agregado",
+    "import.sameRepoAs": "Mismo repo que {name}",
     "import.importCount": "Importar {count}",
-    "import.alreadyInWorkspace": "Ese repositorio ya está en este espacio de trabajo.",
+    "import.duplicateRepo":
+      "«{name}» ya está en este espacio de trabajo, en {path}. Un repositorio solo puede estar una vez por espacio de trabajo — ábrelo en otro si necesitas una segunda copia.",
     "import.emptyFolder": "Esa carpeta está vacía. Elige un repositorio git, o una carpeta que contenga alguno.",
     "import.noRepos": "Esa carpeta no es un repositorio git, y ninguna de las carpetas que contiene lo es.",
     "import.skippedNotRepos": "{count} de las carpetas que elegiste no contienen ningún repositorio git — se dejaron fuera.",

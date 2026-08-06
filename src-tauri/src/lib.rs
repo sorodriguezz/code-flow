@@ -30,6 +30,7 @@ mod pr_link;
 mod proc;
 mod remote;
 mod remotes;
+mod repo_identity;
 mod review;
 mod review_memory;
 mod search;
@@ -149,6 +150,13 @@ pub fn run() {
                     // *dispatches* work on its own would keep launching engines with no window to
                     // show them in and no button to stop them with. An agent chain parks on this.
                     let _ = tauri::Emitter::emit(app, "app:background", ());
+                    // Database sessions are not background work — they are a connection held open on
+                    // somebody's server for a workspace that is now off screen. The ones nobody is
+                    // using go back; a query still in flight holds its session and is left alone, and
+                    // anything closed here reopens by itself on the next call, so being wrong costs
+                    // one connect. Without this, closing the window looks like quitting and holds
+                    // every session anyway, which is the worst of both.
+                    app.state::<DbRegistry>().close_idle();
                     hide_to_background(window);
                 }
             }
@@ -181,6 +189,7 @@ pub fn run() {
             commands::backup_cmd::backup_reveal_folder,
             commands::repos::pick_folder,
             commands::repos::scan_folder,
+            commands::repos::find_duplicate_projects,
             commands::repos::default_clone_dir,
             commands::repos::create_workspace,
             commands::repos::list_workspaces,
@@ -608,6 +617,21 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = _event {
                 tray::show_main_window(_app_handle);
+            }
+
+            // The last moment anything of ours runs. Every quit path — the tray's Quit, ⌘Q, the
+            // window's close button once the quitting flag is set, `reset_app_data` — ends in
+            // `AppHandle::exit`, which requests this event and then calls `std::process::exit`. No
+            // destructor runs after that: not the managed `DbRegistry`, not the `static` map holding
+            // the tunnels' child processes. So a database session left open would be discovered by
+            // the server only as a socket that stopped answering, and the `ssh -N -L` behind a
+            // tunnelled connection would not be discovered at all — it survives, holding a forwarded
+            // port and an authenticated session on the bastion, reparented to init.
+            //
+            // Blocking is correct here: the point is to finish before the process does.
+            if let tauri::RunEvent::Exit = _event {
+                let registry = _app_handle.state::<DbRegistry>();
+                tauri::async_runtime::block_on(registry.close_all());
             }
         });
 }

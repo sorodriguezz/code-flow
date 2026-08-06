@@ -1242,6 +1242,10 @@ pub struct PrDescriptionDraft {
 
 /// Splits the model's raw output ("TITLE: …" first line, then the Markdown body) into the two
 /// form fields. When no `TITLE:` marker is present, the whole text becomes the body.
+///
+/// Anything *before* the `TITLE:` line is discarded rather than kept as body: the format puts the
+/// title first, so whatever came earlier is the model narrating its way to the answer — which is
+/// what several CLIs (Gemini's `agy`, Codex, any reasoning model) print alongside it.
 fn parse_pr_draft(raw: &str) -> PrDescriptionDraft {
     let trimmed = raw.trim();
     let mut title = String::new();
@@ -1252,8 +1256,8 @@ fn parse_pr_draft(raw: &str) -> PrDescriptionDraft {
             if let Some(rest) = line.trim_start().strip_prefix("TITLE:") {
                 title = rest.trim().to_string();
                 found_title = true;
-                continue;
             }
+            continue;
         }
         body_lines.push(line);
     }
@@ -2628,6 +2632,25 @@ pub async fn act_on_pull_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The same failure the commit box had, in the PR form: engines that print the model's
+    /// deliberation alongside its answer filled the description with it. The format puts the title
+    /// first, so nothing before it is description.
+    #[test]
+    fn the_draft_starts_at_the_title_not_at_whatever_the_model_said_first() {
+        let raw = "Analizando el diff entre las ramas…\n\nTITLE: feat: agregar túnel SSH\n\n## Qué cambia\n- soporte MSSQL";
+        let draft = parse_pr_draft(raw);
+        assert_eq!(draft.title, "feat: agregar túnel SSH");
+        assert_eq!(draft.body, "## Qué cambia\n- soporte MSSQL");
+    }
+
+    /// No marker at all: the whole reply is the description, as before.
+    #[test]
+    fn a_reply_without_a_title_marker_is_all_body() {
+        let draft = parse_pr_draft("  ## Qué cambia\n- soporte MSSQL  ");
+        assert_eq!(draft.title, "");
+        assert_eq!(draft.body, "## Qué cambia\n- soporte MSSQL");
+    }
 
     fn thread(id: i64, comments: &[(&str, &str)]) -> ado::PrCommentThread {
         ado::PrCommentThread {

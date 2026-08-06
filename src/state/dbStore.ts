@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { listen } from "@tauri-apps/api/event";
 import {
   dbAddHistory,
   dbApplyEdits,
@@ -147,6 +148,15 @@ export interface DbDataTab {
   sort: DbSortKey[];
   loading: boolean;
   runId: string | null;
+  /**
+   * The row count's own run, kept separate from `runId`.
+   *
+   * The count outlives the page it was asked with — the page is an index read and the count is a
+   * full scan — so by the time it matters `runId` is already back to `null`. Without an id of its
+   * own there is nothing to cancel, and closing the tab leaves the server scanning a table for a
+   * total that has nowhere left to go.
+   */
+  countRunId: string | null;
   result: DbStatementResult | null;
   /** `null` until the count comes back — it is a separate, slower query. */
   total: number | null;
@@ -325,6 +335,8 @@ interface DbState {
   /** Files a connection under a group, or under none with `UNGROUPED`. */
   setConnectionGroup: (id: string, group: string) => Promise<void>;
   toggleGroup: (group: string) => void;
+  /** Re-reads `connected` from the backend, which owns the sessions. */
+  syncConnected: () => Promise<void>;
   connect: (id: string) => Promise<boolean>;
   disconnect: (id: string) => Promise<void>;
   testConnection: (config: DbConnectionConfig) => Promise<DbServerInfo>;
@@ -429,6 +441,16 @@ const SQL_LOG_LIMIT = 300;
  * mounting it twice, the workspace switch and a restored session), the same latch `apiStore` uses.
  */
 let pendingLoad: { workspaceId: string; promise: Promise<void> } | null = null;
+
+/**
+ * Bumped by every deliberate change to `connected`, so `syncConnected` can tell whether the answer
+ * it is holding is still about the world it asked about.
+ *
+ * `syncConnected` replaces the whole array with what the backend said a round trip ago, and it is
+ * the only writer that does — the others all derive from the current state. Without this, a sync
+ * that left before the user pressed Disconnect can land after it and put the connection back.
+ */
+let connectedEpoch = 0;
 
 export function ensureDbStoreLoaded(): Promise<void> {
   const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
@@ -694,6 +716,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       return true;
     }
 
+    connectedEpoch += 1;
     set((s) => ({
       connections: s.connections.map((c) => (c.id === next.id ? next : c)),
       // Saving closed the session on the backend, so the dot has to go with it.
@@ -717,6 +740,7 @@ export const useDbStore = create<DbState>((set, get) => ({
   deleteConnection: async (id) => {
     await guarded(async () => {
       await dbDeleteConnection(id);
+      connectedEpoch += 1;
       set((s) => ({
         connections: s.connections.filter((c) => c.id !== id),
         consoles: s.consoles.filter((c) => c.connection_id !== id),
@@ -835,9 +859,31 @@ export const useDbStore = create<DbState>((set, get) => ({
     if (workspaceId) void setSetting(collapsedKey(workspaceId), JSON.stringify(collapsed)).catch(() => {});
   },
 
+  /**
+   * Re-reads which connections the backend actually has a session for.
+   *
+   * `connected` is otherwise maintained optimistically — `connect` adds, `disconnect` removes — and
+   * the backend opens and closes sessions on its own behind that: every command reconnects lazily,
+   * the idle sweep expires, and closing the window to the background releases whatever is idle. Both
+   * kinds of drift are bad, and the second is worse than it looks: a session the explorer doesn't
+   * know about still shows the row's menu offering *Connect*, so the one command that would release
+   * it is the one the user cannot reach.
+   *
+   * Cheap enough to call freely — it is a read of a `HashMap` in the same process.
+   */
+  syncConnected: async () => {
+    const epoch = connectedEpoch;
+    const connected = await dbConnected().catch(() => null);
+    // Dropped rather than merged: what arrived describes the registry before the user's own action,
+    // and merging it would be how a connection they just released reappears as connected.
+    if (connected === null || epoch !== connectedEpoch) return;
+    set({ connected });
+  },
+
   connect: async (id) => {
     const info = await guarded(() => dbConnect(id));
     if (!info) return false;
+    connectedEpoch += 1;
     set((s) => ({
       connected: s.connected.includes(id) ? s.connected : [...s.connected, id],
       serverInfo: { ...s.serverInfo, [id]: info },
@@ -847,6 +893,7 @@ export const useDbStore = create<DbState>((set, get) => ({
 
   disconnect: async (id) => {
     await guarded(() => dbDisconnect(id));
+    connectedEpoch += 1;
     set((s) => ({
       connected: s.connected.filter((c) => c !== id),
       children: dropConnection(s.children, id),
@@ -1153,6 +1200,11 @@ export const useDbStore = create<DbState>((set, get) => ({
         running: false,
         runId: null,
       }));
+      // Running a statement is the one path that opens a session without ever touching the tree, so
+      // it is where the explorer's dot most reliably went stale: a console restored on startup would
+      // connect for real and still be drawn — and offered in the menu — as disconnected, leaving the
+      // session it just opened with no way to release it.
+      void get().syncConnected();
     }
   },
 
@@ -1182,17 +1234,25 @@ export const useDbStore = create<DbState>((set, get) => ({
         running: false,
         runId: null,
       }));
+      void get().syncConnected();
     }
   },
 
   cancelRun: async (tabId) => {
     const tab = get().tabs.find((entry) => entry.id === tabId);
-    const runId =
-      tab && (tab.kind === "console" || tab.kind === "data" || tab.kind === "diagram")
-        ? tab.runId
-        : null;
-    if (!runId) return;
-    await guarded(() => dbCancel(runId));
+    if (!tab) return;
+    // Asked structurally rather than by listing the kinds that have a `runId`. The list was
+    // `console | data | diagram` and had silently fallen behind: the schema tab grew a `runId` — its
+    // catalog read is one of the slowest things the workspace sends — and closing it cancelled
+    // nothing. A new cancellable tab kind shouldn't have to remember to come back here.
+    const runIds = [
+      "runId" in tab ? tab.runId : null,
+      // The row count is a second run of its own: on a big table it is the full scan while the page
+      // beside it was an index read, so it is the one still going when the tab is closed.
+      tab.kind === "data" ? tab.countRunId : null,
+    ].filter((id): id is string => typeof id === "string" && id.length > 0);
+    if (runIds.length === 0) return;
+    await Promise.all(runIds.map((runId) => guarded(() => dbCancel(runId))));
   },
 
   // -------------------------------------------------------------------- data
@@ -1230,6 +1290,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       sort: [],
       loading: false,
       runId: null,
+      countRunId: null,
       result: null,
       total: null,
       columns: [],
@@ -1350,12 +1411,21 @@ export const useDbStore = create<DbState>((set, get) => ({
         patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, columns }));
       }
       // Deliberately after the rows: on a large table the count is a full scan while the page is an
-      // index read, so the grid fills first and the total arrives when it arrives.
-      void dbRowCount(tab.connectionId, tab.node, tab.filter, newRunId())
+      // index read, so the grid fills first and the total arrives when it arrives. Its run id is
+      // kept on the tab so `cancelRun` can reach it — this is the one that is still going when the
+      // user gives up and closes the tab.
+      const countRunId = newRunId();
+      patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, countRunId }));
+      void dbRowCount(tab.connectionId, tab.node, tab.filter, countRunId)
         .then((total) =>
           patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, total })),
         )
-        .catch(() => {});
+        .catch(() => {})
+        .finally(() =>
+          patchTab<DbDataTab>(set, tabId, "data", (current) =>
+            current.countRunId === countRunId ? { ...current, countRunId: null } : current,
+          ),
+        );
     } catch (e) {
       patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, error: String(e) }));
       // A failed page is exactly what the log is for: the message alone rarely says which
@@ -1374,6 +1444,7 @@ export const useDbStore = create<DbState>((set, get) => ({
         loading: false,
         runId: null,
       }));
+      void get().syncConnected();
     }
   },
 
@@ -1513,6 +1584,8 @@ export const useDbStore = create<DbState>((set, get) => ({
         text: `-- ${String(e)}`,
         loading: false,
       }));
+    } finally {
+      void get().syncConnected();
     }
   },
 
@@ -1576,6 +1649,7 @@ export const useDbStore = create<DbState>((set, get) => ({
         loading: false,
         runId: null,
       }));
+      void get().syncConnected();
     }
   },
 
@@ -1639,12 +1713,17 @@ export const useDbStore = create<DbState>((set, get) => ({
         loading: false,
         runId: null,
       }));
+      void get().syncConnected();
     }
   },
 
   // -------------------------------------------------------------------- tabs
 
   closeTab: (tabId) => {
+    // Closing the tab is how people stop a query they regret — the Cancel button goes away with the
+    // panel, so anything still running would otherwise keep the server working on a result nobody
+    // can ever see, and keep the session busy for the next statement on that database.
+    void get().cancelRun(tabId);
     set((s) => {
       const tabs = s.tabs.filter((tab) => tab.id !== tabId);
       const activeTabId =
@@ -2076,6 +2155,7 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
     sort: [],
     loading: false,
     runId: null,
+    countRunId: null,
     // Deliberately not loaded on restore: reopening the app must not fire a query per restored tab
     // at a database that may be behind a VPN. The grid asks when the tab is looked at.
     result: null,
@@ -2115,3 +2195,18 @@ function newId(): string {
 function newRunId(): string {
   return `dbrun-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
+
+/**
+ * Coming back from the tray is the one moment `connected` is guaranteed to be wrong.
+ *
+ * Hiding the window releases every idle session on the backend, and the webview keeps running
+ * throughout — no remount, no reload, nothing that would otherwise re-ask. So the dots would still
+ * be lit for sessions that no longer exist, and the row menus would offer Disconnect for nothing.
+ *
+ * This event rather than the DOM's `focus`: `focus` fires on every alt-tab, which is an IPC round
+ * trip for a transition where nothing changed, and it is not guaranteed to fire on the show that
+ * follows a hide — which is the only transition that matters here.
+ */
+void listen("app:foreground", () => {
+  void useDbStore.getState().syncConnected();
+});

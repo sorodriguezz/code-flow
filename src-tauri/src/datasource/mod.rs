@@ -935,13 +935,20 @@ impl Session {
     /// False once the connection is unusable, so the registry replaces it instead of handing back
     /// a client whose every call will fail.
     ///
-    /// Postgres answers from its connection task's flag, and IRIS from whether the JVM carrying its
-    /// JDBC driver is still running. The other two find out by trying.
+    /// Each engine knows in its own way. Postgres answers from its connection task's flag, IRIS from
+    /// whether the JVM carrying its JDBC driver is still running, and SQL Server from whether the
+    /// TDS stream has already failed once — tiberius offers nothing to ask, so it is remembered.
+    ///
+    /// Mongo is the one that stays `true`, and that is not an omission: its driver owns a connection
+    /// pool with topology monitoring behind the single `Client` handle, so a server that restarted
+    /// or a socket that dropped is rediscovered and replaced *inside* the client. Throwing the
+    /// session away would discard a healthy pool to build an identical one.
     pub fn is_alive(&self) -> bool {
         match self {
             Session::Postgres(s) => s.is_alive(),
             Session::Iris(s) => s.is_alive(),
-            _ => true,
+            Session::Mssql(s) => s.is_alive(),
+            Session::Mongo(_) => true,
         }
     }
 
@@ -1080,6 +1087,17 @@ impl Session {
     pub fn poisoned_by_cancel(&self) -> bool {
         matches!(self, Session::Mssql(_))
     }
+
+    /// Records that this session is unusable, for the callers that know it before the driver does.
+    ///
+    /// Removing the entry from the registry is not enough on its own: every `Arc<Session>` already
+    /// handed out keeps working against it, and [`Self::is_alive`] would keep saying yes. This is
+    /// what makes an abandoned call visible to whoever still holds the session.
+    pub fn poison(&self) {
+        if let Session::Mssql(s) = self {
+            s.poison();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,7 +1121,14 @@ struct Live {
     connection_id: String,
     /// Milliseconds since process start, at the last time this session was handed to a caller.
     /// Monotonic and atomic, so the sweep can read it without taking the map's lock.
+    ///
+    /// **Only real use stamps this.** The keep-alive ping deliberately does not: it has its own
+    /// clock in `last_pinged`, because a ping that reset this one would hold `idle` down forever
+    /// and the auto-disconnect deadline would never be reached. See [`sweep`].
     last_used: std::sync::atomic::AtomicU64,
+    /// When the keep-alive last pinged, so the ping repeats on its own period instead of once every
+    /// [`SWEEP_INTERVAL`] for as long as the session stays idle.
+    last_pinged: std::sync::atomic::AtomicU64,
     /// Zero means off, for both.
     keep_alive: std::time::Duration,
     auto_disconnect: std::time::Duration,
@@ -1114,6 +1139,16 @@ type Sessions = Arc<Mutex<HashMap<String, Arc<Live>>>>;
 /// How often the idle sweep runs. Coarse on purpose: both settings it serves are measured in tens
 /// of seconds, and a sweep is a lock and some arithmetic per open session.
 const SWEEP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a keep-alive ping may take before it is abandoned. A ping exists to prove a quiet socket
+/// still carries traffic; one that hasn't answered in this long has told us what we needed to know,
+/// and waiting longer would only pin the task down.
+const PING_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long the exit path waits after dropping the sessions, so each driver's own task gets polled
+/// once more and writes its goodbye — a Postgres `Terminate`, IRIS's `close` into the JVM. Short:
+/// the sockets die with the process anyway, and this only buys a clean close over an abrupt one.
+const GOODBYE: std::time::Duration = std::time::Duration::from_millis(250);
 
 #[derive(Default)]
 pub struct DbRegistry {
@@ -1154,11 +1189,23 @@ impl DbRegistry {
             }
             self.forget(&key);
         }
-        let session = Arc::new(Session::open(config, database).await?);
+        let session = match Session::open(config, database).await {
+            Ok(session) => Arc::new(session),
+            Err(e) => {
+                // The tunnel goes up before the driver dials (see `Session::open`), so a driver that
+                // then fails — wrong password, wrong database — would leave an `ssh` holding a
+                // forward for a session that never existed, under a connection the sweep will never
+                // visit because it has nothing in the map.
+                self.close_tunnel_if_unused(&config.id);
+                return Err(e);
+            }
+        };
+        let now = now_millis();
         let live = Arc::new(Live {
             session: session.clone(),
             connection_id: config.id.clone(),
-            last_used: std::sync::atomic::AtomicU64::new(now_millis()),
+            last_used: std::sync::atomic::AtomicU64::new(now),
+            last_pinged: std::sync::atomic::AtomicU64::new(now),
             keep_alive: std::time::Duration::from_secs(config.keep_alive_secs as u64),
             auto_disconnect: std::time::Duration::from_secs(config.auto_disconnect_secs as u64),
         });
@@ -1166,6 +1213,39 @@ impl DbRegistry {
             map.insert(key, live);
         }
         Ok(session)
+    }
+
+    /// Runs one read against a session, reopening once if the session turned out to be dead.
+    ///
+    /// Only for the introspection the app issues on the user's behalf — listing children, reading a
+    /// catalog, counting rows. Those are pure reads that CodeFlow composed itself, so running one
+    /// twice is free of consequence, and retrying is the difference between a tree that quietly
+    /// works after the server bounced and one that shows a red row until the user finds Disconnect.
+    ///
+    /// Never for `db_execute` or `db_apply_edits`: a statement the *user* wrote may have committed
+    /// before the stream broke, and replaying it is how you get two inserts from one Run.
+    pub async fn read<T, F, Fut>(
+        &self,
+        config: &DbConnectionConfig,
+        database: Option<&str>,
+        operation: F,
+    ) -> Result<T, String>
+    where
+        F: Fn(Arc<Session>) -> Fut,
+        Fut: Future<Output = Result<T, String>>,
+    {
+        let session = self.session(config, database).await?;
+        let outcome = operation(session.clone()).await;
+        if outcome.is_ok() || session.is_alive() {
+            return outcome;
+        }
+        // Evict the dead one so `session()` dials a new one rather than handing it back — but only
+        // if it is still the one in the map. A concurrent caller may already have replaced it, and
+        // removing *that* would throw away a healthy connection to open a third.
+        self.forget_this(&session_key(&config.id, database), &session);
+        drop(session);
+        let session = self.session(config, database).await?;
+        operation(session).await
     }
 
     /// Starts the idle sweep, once. See [`sweep`] for what it does.
@@ -1192,13 +1272,124 @@ impl DbRegistry {
         }
     }
 
+    /// [`Self::forget`], but only if the entry is still the session the caller was holding.
+    fn forget_this(&self, key: &str, session: &Arc<Session>) {
+        if let Ok(mut map) = self.sessions.lock() {
+            let stale = map
+                .get(key)
+                .is_some_and(|live| Arc::ptr_eq(&live.session, session));
+            if stale {
+                map.remove(key);
+            }
+        }
+    }
+
     /// Closes every session of a connection — both the bare key and the per-database ones — and the
     /// SSH tunnel they shared, which has nothing left to carry.
+    ///
+    /// Sessions first, tunnel second. The other order cuts the forward out from under the drivers
+    /// while they are still writing their goodbye through it, which turns a clean disconnect into an
+    /// abandoned socket for the server to time out on its own.
     pub fn disconnect(&self, connection_id: &str) {
-        tunnel::close(connection_id);
         let prefix = format!("{connection_id}#");
+        let dropped: Vec<Arc<Live>> = match self.sessions.lock() {
+            Ok(mut map) => {
+                let keys: Vec<String> = map
+                    .keys()
+                    .filter(|key| *key == connection_id || key.starts_with(&prefix))
+                    .cloned()
+                    .collect();
+                keys.iter().filter_map(|key| map.remove(key)).collect()
+            }
+            Err(_) => Vec::new(),
+        };
+        drop(dropped);
+        tunnel::close(connection_id);
+    }
+
+    /// Closes the tunnel of a connection that has no sessions left.
+    ///
+    /// The guard matters: several databases of one server share a single tunnel, so a failure on the
+    /// fourth must not pull the forward out from under the three that are working — and neither must
+    /// a Test run from the edit dialog of a connection that is open and being used right now.
+    pub fn close_tunnel_if_unused(&self, connection_id: &str) {
+        let prefix = format!("{connection_id}#");
+        let still_open = self
+            .sessions
+            .lock()
+            .map(|map| {
+                map.keys()
+                    .any(|key| key == connection_id || key.starts_with(&prefix))
+            })
+            .unwrap_or(true);
+        if !still_open {
+            tunnel::close(connection_id);
+        }
+    }
+
+    /// Closes every session and every tunnel, for the app's exit path.
+    ///
+    /// This is what stops a quit from leaving state behind on the far side. Nothing else can do it:
+    /// the registry is managed state and the tunnel map is a `static`, and the process ends through
+    /// `std::process::exit`, which runs no destructor for either — so without this call the server
+    /// only ever learns the client is gone from the FIN the kernel emits, and the `ssh -N -L` child
+    /// is not even reached by that.
+    ///
+    /// The wait in the middle is what turns "the socket closed" into "the client said goodbye":
+    /// each driver's own task needs one more poll to write its `Terminate`, and IRIS's `Drop` needs
+    /// it to get its `close` as far as the JVM.
+    ///
+    /// And the tunnels go *after* that wait, which is the whole point of ordering it this way.
+    /// Dropping a session only schedules its goodbye — the write happens on a worker thread, a poll
+    /// later — while `tunnel::close_all` kills the `ssh` synchronously, right here. Closing the
+    /// tunnels first would tear down the forward the goodbye still has to travel through, and on a
+    /// tunnelled connection every clean close would silently become an abandoned socket.
+    pub async fn close_all(&self) {
+        let dropped: Vec<Arc<Live>> = match self.sessions.lock() {
+            Ok(mut map) => map.drain().map(|(_, live)| live).collect(),
+            Err(_) => Vec::new(),
+        };
+        let had_sessions = !dropped.is_empty();
+        drop(dropped);
+        if had_sessions {
+            tokio::time::sleep(GOODBYE).await;
+        }
+        // Unconditional: a connection can have raised a tunnel and never got a session onto it.
+        tunnel::close_all();
+    }
+
+    /// Closes the sessions nobody is using, and the tunnels left with nothing to carry.
+    ///
+    /// For the moment the window is closed to the background: the workspace is off screen, so every
+    /// idle session is a connection held on the server for a UI nobody is looking at. A session with
+    /// a query in flight holds a second `Arc` and is left exactly where it is — the same test the
+    /// idle sweep uses — and everything reopens by itself on the next call, so the cost of being
+    /// wrong is one connect.
+    pub fn close_idle(&self) {
+        let mut dropped: Vec<Arc<Live>> = Vec::new();
+        let mut orphaned: Vec<String> = Vec::new();
         if let Ok(mut map) = self.sessions.lock() {
-            map.retain(|key, _| key != connection_id && !key.starts_with(&prefix));
+            let idle: Vec<String> = map
+                .iter()
+                .filter(|(_, live)| Arc::strong_count(&live.session) == 1)
+                .map(|(key, _)| key.clone())
+                .collect();
+            for key in idle {
+                if let Some(live) = map.remove(&key) {
+                    let prefix = format!("{}#", live.connection_id);
+                    let still_open = map
+                        .keys()
+                        .any(|other| *other == live.connection_id || other.starts_with(&prefix));
+                    if !still_open {
+                        orphaned.push(live.connection_id.clone());
+                    }
+                    dropped.push(live);
+                }
+            }
+        }
+        drop(dropped);
+        for connection_id in orphaned {
+            tunnel::close(&connection_id);
         }
     }
 
@@ -1241,7 +1432,11 @@ impl DbRegistry {
             _ = rx => {
                 session.cancel_running().await;
                 if session.poisoned_by_cancel() {
-                    self.forget(key);
+                    // Both, and in this order: the flag reaches whoever already holds the session —
+                    // a second console on the same database, mid-statement behind the client mutex —
+                    // while dropping the entry stops the next caller being handed it at all.
+                    session.poison();
+                    self.forget_this(key, session);
                 }
                 Err(CANCELLED.to_string())
             }
@@ -1269,13 +1464,57 @@ impl DbRegistry {
 /// otherwise be closed *for* us.
 ///
 /// The two settings pull opposite ways and both are legitimate, so a session can have either, and
-/// auto-disconnect wins when it somehow has both — the connection the user asked to be let go of is
-/// not one to keep alive.
+/// auto-disconnect wins when it has both — the connection the user asked to be let go of is not one
+/// to keep alive. That priority is why the ping has a clock of its own: it used to re-stamp
+/// `last_used`, which held `idle` at zero and meant a session with the shorter keep-alive never
+/// reached its auto-disconnect deadline at all. The keep-alive silently cancelled the setting it was
+/// supposed to lose to.
 ///
-/// **A session in use is never dropped.** `Arc::strong_count == 1` means nobody but this map holds
+/// **A session in use is never touched.** `Arc::strong_count == 1` means nobody but this map holds
 /// it; a query in flight holds a second `Arc` from [`DbRegistry::session`], so the sweep skips it
 /// however idle the clock says it is. Without that check a long-running query would have the
-/// session closed out from under it at exactly the moment it looked idlest.
+/// session closed out from under it at exactly the moment it looked idlest — and, since `last_used`
+/// is stamped when a session is *handed out* rather than when the work finishes, would also collect
+/// a keep-alive ping queued behind its own statement.
+/// What one pass of [`sweep`] decides to do with one idle session.
+#[derive(Debug, PartialEq, Eq)]
+enum SweepAction {
+    /// Past its auto-disconnect deadline: close it.
+    Expire,
+    /// Quiet long enough that something between here and the server may be about to drop the
+    /// socket: send a trivial statement.
+    Ping,
+    Leave,
+}
+
+/// The decision, as arithmetic — free of the map, the clock and the sessions, so the rule the two
+/// timers follow can be stated in tests instead of inferred from behaviour against a live server.
+///
+/// `idle` is time since a caller last held the session; `quiet` is time since the last keep-alive
+/// ping. They are separate for a reason: pinging used to reset `idle` too, which pinned it below the
+/// auto-disconnect deadline forever whenever the keep-alive period was the shorter of the two — so a
+/// connection configured to be handed back after five minutes, with a thirty-second keep-alive, was
+/// never handed back at all. Zero means off, for either.
+fn sweep_action(
+    idle: u64,
+    quiet: u64,
+    keep_alive: std::time::Duration,
+    auto_disconnect: std::time::Duration,
+) -> SweepAction {
+    let past = |limit: std::time::Duration, since: u64| {
+        !limit.is_zero() && since >= limit.as_millis() as u64
+    };
+    if past(auto_disconnect, idle) {
+        // Auto-disconnect wins when a session has both: the connection the user asked to be let go
+        // of is not one to keep alive.
+        SweepAction::Expire
+    } else if past(keep_alive, idle) && past(keep_alive, quiet) {
+        SweepAction::Ping
+    } else {
+        SweepAction::Leave
+    }
+}
+
 async fn sweep(sessions: &Sessions) {
     use std::sync::atomic::Ordering;
 
@@ -1285,23 +1524,52 @@ async fn sweep(sessions: &Sessions) {
 
     if let Ok(map) = sessions.lock() {
         for (key, live) in map.iter() {
-            let idle = now.saturating_sub(live.last_used.load(Ordering::Relaxed));
-            let past = |limit: std::time::Duration| {
-                !limit.is_zero() && idle >= limit.as_millis() as u64
-            };
-            if past(live.auto_disconnect) && Arc::strong_count(&live.session) == 1 {
+            if Arc::strong_count(&live.session) != 1 {
+                // In use, so idle time starts when the last caller lets go — not when it took the
+                // session. `last_used` is stamped on acquisition, which is early enough that a query
+                // running longer than the auto-disconnect deadline would come back to a session
+                // already past it, and be closed the moment it finished.
+                live.last_used.store(now, Ordering::Relaxed);
+                continue;
+            }
+            // A session already known to be dead goes now, whatever the timers say. Nothing else
+            // collects them: the liveness check runs when a session is *handed out*, so an idle one
+            // that the keep-alive or the server killed would sit in the map — and in the explorer's
+            // connected dot — until somebody used it and got the error.
+            if !live.session.is_alive() {
                 expired.push((key.clone(), live.connection_id.clone()));
-            } else if past(live.keep_alive) {
-                due.push(live.clone());
+                continue;
+            }
+            let idle = now.saturating_sub(live.last_used.load(Ordering::Relaxed));
+            let quiet = now.saturating_sub(live.last_pinged.load(Ordering::Relaxed));
+            match sweep_action(idle, quiet, live.keep_alive, live.auto_disconnect) {
+                SweepAction::Expire => expired.push((key.clone(), live.connection_id.clone())),
+                SweepAction::Ping => due.push(live.clone()),
+                SweepAction::Leave => {}
             }
         }
     }
 
     if !expired.is_empty() {
         let mut orphaned: Vec<String> = Vec::new();
+        // Collected rather than dropped in place: a driver's destructor does real work — Mongo's
+        // takes its own locks to end sessions — and running it under this map's lock is how an
+        // unrelated caller ends up blocked behind somebody else's disconnect.
+        let mut dropped: Vec<Arc<Live>> = Vec::new();
         if let Ok(mut map) = sessions.lock() {
             for (key, connection_id) in &expired {
-                map.remove(key);
+                // Re-checked under this lock: a caller can have taken the session between the two,
+                // and evicting it then would leave that call running against a session the explorer
+                // no longer counts as connected while the next one opens a second connection.
+                let taken = map
+                    .get(key)
+                    .is_some_and(|live| Arc::strong_count(&live.session) != 1);
+                if taken {
+                    continue;
+                }
+                if let Some(live) = map.remove(key) {
+                    dropped.push(live);
+                }
                 // The tunnel belongs to the connection, not to one of its sessions, so it only goes
                 // when the last of them has.
                 let prefix = format!("{connection_id}#");
@@ -1313,6 +1581,7 @@ async fn sweep(sessions: &Sessions) {
                 }
             }
         }
+        drop(dropped);
         for connection_id in orphaned {
             tunnel::close(&connection_id);
         }
@@ -1321,9 +1590,28 @@ async fn sweep(sessions: &Sessions) {
     for live in due {
         // Stamped before the ping rather than after: a ping that is slow — which is exactly what
         // happens on the flaky link this feature exists for — must not make the next sweep think
-        // the session went idle again and send a second one.
-        live.last_used.store(now_millis(), Ordering::Relaxed);
-        let _ = live.session.ping().await;
+        // the session went quiet again and send a second one.
+        live.last_pinged.store(now_millis(), Ordering::Relaxed);
+        // Spawned rather than awaited, and bounded. The sweep is a single task, so awaiting here
+        // put every session's keep-alive *and* auto-disconnect behind the slowest ping — and on SQL
+        // Server a ping waits on the same client mutex a ten-minute query is holding.
+        //
+        // What moves in is the `Arc<Live>`, and the ping then borrows the session out of it. Cloning
+        // the `Arc<Session>` instead would raise its strong count, which is the very thing the loop
+        // above reads as "in use" — so a ping slower than one sweep would re-stamp `last_used` and
+        // push the auto-disconnect deadline away again. The keep-alive would be starving the
+        // auto-disconnect through a second door.
+        tokio::spawn(async move {
+            if tokio::time::timeout(PING_TIMEOUT, live.session.ping()).await.is_err() {
+                // Timing out is the strongest evidence there is that this socket is the black hole
+                // the keep-alive exists to detect — and it is evidence nothing else records, because
+                // an abandoned future returns no error for a driver to report. Worse, abandoning it
+                // is itself damaging on TDS: the call is dropped mid-stream, so the next statement
+                // opens by draining a socket that may never answer. Say so, and let the next sweep
+                // evict it.
+                live.session.poison();
+            }
+        });
     }
 }
 
@@ -1500,6 +1788,58 @@ fn explain_tls(host: &str, raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const fn secs(n: u64) -> std::time::Duration {
+        std::time::Duration::from_secs(n)
+    }
+    const OFF: std::time::Duration = std::time::Duration::ZERO;
+
+    /// The regression this exists for. Keep-alive used to re-stamp the same clock the auto-disconnect
+    /// measured, so a session with the shorter keep-alive was pinged back below the deadline every
+    /// time and never reached it: "hand this connection back after five minutes" quietly meant never.
+    #[test]
+    fn a_keep_alive_does_not_stop_the_auto_disconnect_from_arriving() {
+        let keep_alive = secs(30);
+        let auto_disconnect = secs(300);
+
+        // Half a minute in: quiet enough to ping, nowhere near the deadline.
+        assert_eq!(
+            sweep_action(30_000, 30_000, keep_alive, auto_disconnect),
+            SweepAction::Ping,
+        );
+        // Pinging sets `quiet` back to zero and leaves `idle` alone, so `idle` keeps climbing…
+        assert_eq!(
+            sweep_action(60_000, 0, keep_alive, auto_disconnect),
+            SweepAction::Leave,
+        );
+        // …until it arrives, ping or no ping.
+        assert_eq!(
+            sweep_action(300_000, 0, keep_alive, auto_disconnect),
+            SweepAction::Expire,
+        );
+        assert_eq!(
+            sweep_action(300_000, 300_000, keep_alive, auto_disconnect),
+            SweepAction::Expire,
+        );
+    }
+
+    /// Both clocks have to be past the period. `idle` says the session is worth pinging at all;
+    /// `quiet` is what keeps it to one ping per period instead of one per five-second sweep.
+    #[test]
+    fn a_ping_waits_for_its_own_period_and_not_just_for_the_sweep() {
+        assert_eq!(sweep_action(60_000, 1_000, secs(30), OFF), SweepAction::Leave);
+        assert_eq!(sweep_action(60_000, 30_000, secs(30), OFF), SweepAction::Ping);
+        // Freshly used: not idle enough to be worth a ping, however long ago the last one was.
+        assert_eq!(sweep_action(1_000, 600_000, secs(30), OFF), SweepAction::Leave);
+    }
+
+    /// Zero is off — the default for both, and the reason a stock install never expires anything.
+    #[test]
+    fn zero_is_off_for_either_timer() {
+        assert_eq!(sweep_action(u64::MAX, u64::MAX, OFF, OFF), SweepAction::Leave);
+        assert_eq!(sweep_action(u64::MAX, u64::MAX, secs(30), OFF), SweepAction::Ping);
+        assert_eq!(sweep_action(u64::MAX, u64::MAX, OFF, secs(300)), SweepAction::Expire);
+    }
 
     /// A private root is the normal shape of a hosted Postgres, so the advice has to lead with
     /// trusting it — and has to name a tab this dialog actually has.

@@ -78,6 +78,20 @@ pub fn close(connection_id: &str) {
     }
 }
 
+/// Closes every tunnel. For the app's exit path, and it is the only thing that gets the `ssh`
+/// children killed at all.
+///
+/// `kill_on_drop` (see [`spawn`]) fires when the [`Tunnel`] drops — but the map holding them is a
+/// `static`, and the process ends through `std::process::exit`, which runs no destructors. So
+/// without this call every quit leaves an `ssh -N -L` behind: a forwarded port still listening and
+/// an authenticated session still open on the bastion, reparented to init and belonging to nobody.
+/// Draining the map here is what makes the drop — and therefore the kill — actually happen.
+pub fn close_all() {
+    if let Ok(mut map) = tunnels().lock() {
+        map.clear();
+    }
+}
+
 fn lookup(connection_id: &str) -> Option<Arc<Tunnel>> {
     tunnels().lock().ok()?.get(connection_id).cloned()
 }

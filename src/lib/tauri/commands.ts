@@ -91,12 +91,18 @@ export const pickFolder = () => invoke<string | null>("pick_folder");
 export interface FoundRepo {
   name: string;
   path: string;
+  /** Its `origin` (or first remote), read while scanning — what says whether this is a repository
+   *  the workspace already holds somewhere else. `null` when it has no remote. */
+  remote_url: string | null;
 }
 
 /** What a picked folder turned out to be — see `scan_folder`. */
 export interface FolderScan {
   /** The folder is itself a repository root. */
   is_repo: boolean;
+  /** The picked folder's own remote, when `is_repo`. Same thing `FoundRepo` carries, for the
+   *  folder that is a repository itself rather than one holding them. */
+  remote_url: string | null;
   /** Repositories directly inside it, one level down and no further. */
   repos: FoundRepo[];
   empty: boolean;
@@ -107,6 +113,39 @@ export interface FolderScan {
 /** Asks what a picked folder actually is before anything is registered against it. Bounded on
  *  purpose: it stats one level and stops. */
 export const scanFolder = (path: string) => invoke<FolderScan>("scan_folder", { path });
+
+/** Why an incoming repository is the one the workspace already holds: literally the same folder,
+ *  or a different folder cloned from the same remote. */
+export type DuplicateReason = "path" | "remote";
+
+/** The project already in the workspace that *is* the repository being added. */
+export interface DuplicateProject {
+  id: string;
+  name: string;
+  /** Where the copy already in the workspace lives — the point being that it is somewhere other
+   *  than where the user is adding from. */
+  local_path: string;
+  reason: DuplicateReason;
+}
+
+/** A repository about to be added: where it is (or, for a clone, where it will be) and the remote
+ *  it points at, for whichever of the two the caller knows first. */
+export interface RepoCandidate {
+  path: string;
+  remote_url: string | null;
+}
+
+/**
+ * For each candidate, the project of this workspace that already is that repository — `null` at
+ * the positions with no match, lined up with what was asked.
+ *
+ * A workspace holds a repository once, and that is decided on the repository's *identity* rather
+ * than its path: the same repository imported from `~/dev/api` and cloned into CodeFlow's own
+ * `repos/api` is two folders and one repository. Ask before adding, so the refusal can name where
+ * the copy already is — and, for a clone, before anything is downloaded.
+ */
+export const findDuplicateProjects = (workspaceId: string, candidates: RepoCandidate[]) =>
+  invoke<(DuplicateProject | null)[]>("find_duplicate_projects", { workspaceId, candidates });
 
 export const defaultCloneDir = () => invoke<string>("default_clone_dir");
 

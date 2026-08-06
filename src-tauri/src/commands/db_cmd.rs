@@ -306,15 +306,26 @@ pub async fn db_connect(
             // An unsaved form still gets the keychain lookup when it names an existing connection —
             // that is what makes "change the port, test" work without re-typing the password.
             inline.resolve_password();
-            let session = Session::open(&inline, database.as_deref()).await?;
-            let info = session.info();
-            drop(session);
+            let opened = Session::open(&inline, database.as_deref()).await;
             // A test leaves nothing running. The tunnel this may have raised belongs to the
             // attempt, not to a connection that hasn't been saved yet — and an unsaved form has no
             // id, so leaving it would park an SSH process under an empty key that nothing closes.
+            //
+            // Cleared on the failing path too, and that is the path that matters: a tunnelled test
+            // with the database password still wrong raises the tunnel, fails at the driver, and
+            // used to return before reaching this line — leaving one stranded `ssh` per attempt,
+            // which is the button people press repeatedly precisely while getting it wrong.
+            //
+            // Through the registry rather than straight at the tunnel, because `inline.id` is often
+            // a *saved* connection's id: Edit → change the port → Test carries the id of whatever is
+            // already open. Closing that tunnel outright would drop the forward under the sessions
+            // the explorer is using — the tree would start failing because a test failed.
             if inline.ssh_enabled {
-                crate::datasource::tunnel::close(&inline.id);
+                registry.close_tunnel_if_unused(&inline.id);
             }
+            let session = opened?;
+            let info = session.info();
+            drop(session);
             Ok(info)
         }
         None => {
@@ -349,15 +360,22 @@ pub async fn db_children(
     node: DbNodeRef,
 ) -> Result<Vec<DbNode>, String> {
     let config = resolve_config(&db, &connection_id)?;
-    let session = registry.session(&config, node.database.as_deref()).await?;
-    let children = session.children(&node).await?;
+    // Through `read` rather than `session`: expanding the tree is the app's own question, asked the
+    // same way every time, so a session that died while the window sat idle costs a reconnect
+    // instead of a red row the user has to clear by hand.
+    let (children, current_database) = registry
+        .read(&config, node.database.as_deref(), |session| {
+            let node = node.clone();
+            async move {
+                let children = session.children(&node).await?;
+                Ok((children, session.info().database))
+            }
+        })
+        .await?;
     // The root is the only level that lists databases, and the only one where the connection's own
     // database means "start here" rather than "here is everything".
     if node.kind == DbNodeKind::Root && !config.show_all_databases {
-        return Ok(scope_to_current_database(
-            children,
-            &session.info().database,
-        ));
+        return Ok(scope_to_current_database(children, &current_database));
     }
     Ok(filter_children(&config, &node, children))
 }
@@ -382,16 +400,23 @@ pub async fn db_schema_catalog(
     connection_id: String,
 ) -> Result<Vec<DbSchemaGroup>, String> {
     let config = resolve_config(&db, &connection_id)?;
-    let session = registry.session(&config, None).await?;
     let root = DbNodeRef {
         kind: DbNodeKind::Root,
         database: None,
         schema: None,
         name: None,
     };
-    let mut databases = session.children(&root).await?;
+    let (mut databases, current_database) = registry
+        .read(&config, None, |session| {
+            let root = root.clone();
+            async move {
+                let databases = session.children(&root).await?;
+                Ok((databases, session.info().database))
+            }
+        })
+        .await?;
     if !config.show_all_databases {
-        databases = scope_to_current_database(databases, &session.info().database);
+        databases = scope_to_current_database(databases, &current_database);
     }
 
     let mut groups: Vec<DbSchemaGroup> = Vec::new();
@@ -403,10 +428,12 @@ pub async fn db_schema_catalog(
             schema: None,
             name: None,
         };
-        let children = match registry.session(&config, node.database.as_deref()).await {
-            Ok(session) => session.children(&node).await,
-            Err(e) => Err(e),
-        };
+        let children = registry
+            .read(&config, node.database.as_deref(), |session| {
+                let node = node.clone();
+                async move { session.children(&node).await }
+            })
+            .await;
         match children {
             Ok(nodes) => groups.push(DbSchemaGroup {
                 database: database.name,
@@ -508,8 +535,12 @@ pub async fn db_foreign_keys(
     node: DbNodeRef,
 ) -> Result<Vec<DbForeignKey>, String> {
     let config = resolve_config(&db, &connection_id)?;
-    let session = registry.session(&config, node.database.as_deref()).await?;
-    session.foreign_keys(&node).await
+    registry
+        .read(&config, node.database.as_deref(), |session| {
+            let node = node.clone();
+            async move { session.foreign_keys(&node).await }
+        })
+        .await
 }
 
 /// A whole container's structure, for the diagram: every relation, its columns, and every
@@ -579,8 +610,12 @@ pub async fn db_object_ddl(
     node: DbNodeRef,
 ) -> Result<String, String> {
     let config = resolve_config(&db, &connection_id)?;
-    let session = registry.session(&config, node.database.as_deref()).await?;
-    session.object_ddl(&node).await
+    registry
+        .read(&config, node.database.as_deref(), |session| {
+            let node = node.clone();
+            async move { session.object_ddl(&node).await }
+        })
+        .await
 }
 
 /// Stops a running statement. Unknown run ids are fine — a cancel legitimately races a query that

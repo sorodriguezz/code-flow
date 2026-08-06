@@ -884,13 +884,13 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     match engine.transport() {
         Transport::Ollama => {
             return tokio::select! {
-                result = crate::ollama::complete(binary, &inv) => mark_quota(result),
+                result = crate::ollama::complete(binary, &inv) => without_reasoning(mark_quota(result)),
                 _ = ai_runs::cancelled(&mut cancel) => Err(ai_runs::CANCELLED_MARKER.to_string()),
             }
         }
         Transport::OpenAiCompatible { api_key } => {
             return tokio::select! {
-                result = crate::openai::complete(binary, &api_key, &inv) => mark_quota(result),
+                result = crate::openai::complete(binary, &api_key, &inv) => without_reasoning(mark_quota(result)),
                 _ = ai_runs::cancelled(&mut cancel) => Err(ai_runs::CANCELLED_MARKER.to_string()),
             }
         }
@@ -947,13 +947,15 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     let stderr = stderr_task.await.unwrap_or_default();
     let _ = writer.await;
     // Stripped here rather than per-engine: every CLI colourizes, and no interpreter wants to see
-    // escape bytes — least of all the UI, which would render them as literal `[91m` noise.
-    engine.interpret(
+    // escape bytes — least of all the UI, which would render them as literal `[91m` noise. The
+    // same argument applies to a reasoning model's `<think>` block: no caller ever wants it, so it
+    // goes here too rather than in each engine's `interpret`.
+    without_reasoning(engine.interpret(
         status.success(),
         &status.to_string(),
         &strip_ansi(&String::from_utf8_lossy(&stdout)),
         &strip_ansi(&String::from_utf8_lossy(&stderr)),
-    )
+    ))
 }
 
 /// Runs a quick, read-only auxiliary CLI command (e.g. listing models) and captures its output,
@@ -1696,6 +1698,55 @@ pub async fn inline_edit(
     Ok(strip_code_fence(&run.text))
 }
 
+/// Tags a model can wrap its chain of thought in. `think` covers the DeepSeek-R1 family (and
+/// everything Ollama serves that copied it); the rest turn up in Qwen, GLM, and the "reasoning"
+/// variants several OpenAI-compatible gateways expose.
+const REASONING_TAGS: [&str; 6] =
+    ["think", "thinking", "thought", "reasoning", "reflection", "scratchpad"];
+
+/// Removes `<think>…</think>`-style blocks from a reply.
+///
+/// A model's chain of thought is never the answer, but plenty of CLIs and gateways print it inline
+/// with one — which is how a commit box ends up holding three paragraphs of deliberation followed
+/// by the real commit message. Applied in [`run`], the one place every engine and every transport
+/// passes through, so a provider added later gets this without knowing about it.
+///
+/// A lone *closing* tag counts too: some gateways drop the opening one, leaving
+/// `…deliberación…</think>\nfeat: x`. A lone *opening* tag is left alone — there is no answer after
+/// it to keep, and emptying the reply would turn a usable one into nothing.
+fn strip_reasoning_blocks(text: &str) -> String {
+    let mut out = text.to_string();
+    for tag in REASONING_TAGS {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        loop {
+            // `to_ascii_lowercase` rewrites only A–Z, so every byte index it reports is still a
+            // valid index (and char boundary) into `out`.
+            let lower = out.to_ascii_lowercase();
+            let end = match lower.find(&close) {
+                Some(end) => end + close.len(),
+                None => break,
+            };
+            match lower.find(&open) {
+                Some(start) if start < end => out.replace_range(start..end, ""),
+                _ => out.replace_range(..end, ""),
+            }
+        }
+    }
+    let cleaned = out.trim();
+    // A reply that was *only* reasoning leaves nothing behind; the raw text is worth more to the
+    // user (and to the error paths that read it) than an empty string.
+    if cleaned.is_empty() { text.trim().to_string() } else { cleaned.to_string() }
+}
+
+/// Applies [`strip_reasoning_blocks`] to a finished run, keeping the error path untouched.
+fn without_reasoning(result: Result<AiRun, String>) -> Result<AiRun, String> {
+    result.map(|mut run| {
+        run.text = strip_reasoning_blocks(&run.text);
+        run
+    })
+}
+
 /// Some models wrap their answer in a ```lang fence despite being told not to — strip a single
 /// outer fence so what gets written to disk is the raw file content.
 fn strip_code_fence(text: &str) -> String {
@@ -1709,6 +1760,194 @@ fn strip_code_fence(text: &str) -> String {
     };
     let body = after_open.trim_end().strip_suffix("```").unwrap_or(after_open);
     body.trim_end().to_string()
+}
+
+// ---------- reading a commit message out of a chatty reply ----------
+//
+// Claude Code reports only its final assistant message, so its reply *is* the commit message. Most
+// other CLIs print whatever the model said on the way there: `agy -p` (Gemini), `codex exec`,
+// `opencode run` and every reasoning model behind Ollama / an OpenAI-compatible gateway can all
+// emit a few paragraphs of deliberation and then the real message. Pasted straight into the commit
+// box that is unusable, and it is not something a prompt tweak reliably fixes — so the reply is
+// read here instead of trusted, provider-independently.
+
+/// The Conventional Commits types the default template asks for. Finding one of these opening a
+/// line is what says "the commit message starts here".
+const COMMIT_TYPES: [&str; 11] =
+    ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"];
+
+/// Longest line still considered a subject. The template asks for under 72; the slack is for
+/// messages that overshoot, while still rejecting a paragraph of prose that happens to open with
+/// `fix:` ("fix: creo que lo correcto aquí sería…").
+const MAX_SUBJECT_CHARS: usize = 120;
+
+fn is_fence(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
+}
+
+/// Whether `line` is a Conventional Commits subject: `<type>[(scope)][!]: <summary>`.
+///
+/// Deliberately strict about the left edge — indented or bulleted (`- fix: …`) lines are the model
+/// weighing options *about* the message, not the message.
+fn conventional_subject(line: &str) -> bool {
+    if line.starts_with(char::is_whitespace) {
+        return false;
+    }
+    // Emphasis the model added despite being told not to; it is stripped again in `tidy_message`.
+    let line = line.trim_end().trim_start_matches(['*', '`', '"', '\'']);
+    if line.chars().count() > MAX_SUBJECT_CHARS {
+        return false;
+    }
+    let type_len = line.find(|c: char| !c.is_ascii_alphabetic()).unwrap_or(line.len());
+    let (kind, mut rest) = line.split_at(type_len);
+    if !COMMIT_TYPES.iter().any(|t| kind.eq_ignore_ascii_case(t)) {
+        return false;
+    }
+    if let Some(after_open) = rest.strip_prefix('(') {
+        match after_open.find(')') {
+            Some(close) => rest = &after_open[close + 1..],
+            None => return false,
+        }
+    }
+    rest = rest.strip_prefix('!').unwrap_or(rest);
+    // A colon with nothing after it is a heading ("fix:"), not a message.
+    matches!(rest.strip_prefix(':'), Some(summary) if !summary.trim().is_empty())
+}
+
+/// Where the commit message starts inside `text`, as the remainder of the reply from that point on.
+///
+/// Two rules, in order:
+///  1. the **first** block (blank-line-separated paragraph) that *opens* with a subject line — the
+///     reasoning sits in the blocks before it, and taking the first one keeps a body that itself
+///     lists `feat:` / `fix:` lines from being mistaken for the start of the message;
+///  2. failing that, the **last** subject line anywhere — for reasoning written as one run-on
+///     block with the message on its final line.
+fn commit_slice(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut opens_block = true;
+    let mut first_in_block: Option<usize> = None;
+    let mut last_anywhere: Option<usize> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() {
+            opens_block = true;
+            continue;
+        }
+        // A fence wraps a block, it doesn't open one — the line after it is still the first thing
+        // the block says.
+        if is_fence(line) {
+            continue;
+        }
+        if conventional_subject(line) {
+            last_anywhere = Some(i);
+            if opens_block {
+                first_in_block.get_or_insert(i);
+            }
+        }
+        opens_block = false;
+    }
+
+    let start = first_in_block.or(last_anywhere)?;
+    Some(lines[start..].join("\n"))
+}
+
+/// The body of the last fenced block in `text`, if any. Only consulted when no subject line was
+/// found: a model that fences its answer after thinking out loud has marked the answer itself.
+fn last_fenced_block(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    let mut open: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if !is_fence(line) {
+            continue;
+        }
+        match open.take() {
+            Some(o) => blocks.push((o, i)),
+            None => open = Some(i),
+        }
+    }
+    // An unterminated fence runs to the end of the reply.
+    if let Some(o) = open {
+        blocks.push((o, lines.len()));
+    }
+    let (o, c) = *blocks.last()?;
+    let body = lines[o + 1..c].join("\n").trim().to_string();
+    (!body.is_empty()).then_some(body)
+}
+
+/// Cuts a reply at the last "here is the answer" label the model wrote. The final fallback, for
+/// templates customized to produce something that isn't a Conventional Commits message — there is
+/// no subject line to anchor on, so the model's own announcement is the only marker left.
+fn after_answer_label(text: &str) -> Option<String> {
+    const LABELS: [&str; 6] = [
+        "commit message",
+        "mensaje de commit",
+        "mensaje del commit",
+        "final answer",
+        "respuesta final",
+        "resultado final",
+    ];
+    let lines: Vec<&str> = text.lines().collect();
+    let cut = lines.iter().enumerate().rev().find(|(_, line)| {
+        let l = line.trim().trim_start_matches(['*', '#', '`']).trim();
+        // The label must *be* the line ("Commit message:"), not merely appear in a sentence about
+        // it — otherwise the reasoning itself would cut the reply short.
+        l.ends_with(':') && LABELS.iter().any(|label| l[..l.len() - 1].trim().to_lowercase().ends_with(label))
+    })?;
+    let rest = lines[cut.0 + 1..].join("\n");
+    (!rest.trim().is_empty()).then_some(rest)
+}
+
+/// Strips the packaging off an extracted message: wrapping fences, and the quotes/emphasis a model
+/// adds around a one-liner despite being told not to.
+fn tidy_message(text: &str) -> String {
+    let mut lines: Vec<&str> = text.lines().collect();
+    while lines.first().is_some_and(|l| l.trim().is_empty() || is_fence(l)) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|l| l.trim().is_empty() || is_fence(l)) {
+        lines.pop();
+    }
+    let joined = lines.join("\n");
+    let mut out = joined.trim();
+    // Only for a single line: a matching pair around a multi-line message is more likely to be
+    // part of it than packaging around it.
+    if !out.contains('\n') {
+        for mark in ["**", "__", "`", "\"", "'"] {
+            while out.len() > 2 * mark.len() && out.starts_with(mark) && out.ends_with(mark) {
+                let inner = out[mark.len()..out.len() - mark.len()].trim();
+                // Only a pair that wraps the *whole* line is packaging. A message that merely
+                // opens and closes on backticks ("`db_cmd` ahora usa `tunnel`") is using them.
+                if inner.contains(mark) {
+                    break;
+                }
+                out = inner;
+            }
+        }
+    }
+    out.to_string()
+}
+
+/// Pulls the commit message out of whatever the engine replied.
+///
+/// `subject_only` mirrors what was actually asked for: the built-in template says "summary line
+/// under 72 chars, no body", so anything past the first paragraph is the model explaining its
+/// answer rather than continuing it. A user who customized the template asked for whatever they
+/// asked for, and the whole message is kept.
+fn clean_commit_message(raw: &str, subject_only: bool) -> String {
+    let text = strip_reasoning_blocks(raw);
+    let message = commit_slice(&text)
+        .or_else(|| last_fenced_block(&text))
+        .or_else(|| after_answer_label(&text))
+        .unwrap_or(text);
+    let message = tidy_message(&message);
+    if !subject_only {
+        return message;
+    }
+    // The subject paragraph — a wrapped subject stays whole, the "this follows Conventional
+    // Commits and is under 72 chars" note the model appended after a blank line does not.
+    message.split("\n\n").next().unwrap_or(&message).trim().to_string()
 }
 
 // ---------- high-level, provider-neutral operations ----------
@@ -1736,7 +1975,15 @@ pub async fn generate_commit_message(
     // fast model ([`AiEngine::commit_message_model`]) when they haven't set one.
     inv.model = model;
     let run = run(engine, binary, inv).await?;
-    Ok(run.text)
+    // What lands in the commit box is the message, not the deliberation that produced it — see the
+    // "reading a commit message out of a chatty reply" section above for why that has to be read
+    // out of the reply rather than asked for.
+    let subject_only = prompt.trim() == DEFAULT_COMMIT_TEMPLATE.trim();
+    let message = clean_commit_message(&run.text, subject_only);
+    if message.is_empty() {
+        return Err("El modelo no devolvió un mensaje de commit".to_string());
+    }
+    Ok(message)
 }
 
 /// How much of a conversation is worth sending to draft a reply to it. Comment threads are prose,
@@ -3093,6 +3340,143 @@ mod tests {
         assert!(refusal_reply("Claude AI usage limit reached|1751234567"));
         assert!(refusal_reply("Error: Insufficient balance. Manage your billing here: https://x/billing"));
         assert!(!refusal_reply("error: unknown flag --nope"));
+    }
+
+    /// The reply shape the whole commit-message salvage exists for: Claude Code reports only its
+    /// final message, so it arrives clean and must come back byte for byte.
+    #[test]
+    fn a_reply_that_is_already_just_the_message_is_returned_untouched() {
+        assert_eq!(
+            clean_commit_message("feat(db): soportar túnel SSH en conexiones MSSQL", true),
+            "feat(db): soportar túnel SSH en conexiones MSSQL"
+        );
+    }
+
+    /// The bug reported against Gemini (`agy -p`), and the same for Codex / opencode: the CLI
+    /// prints the model's deliberation and the commit message together, so the commit box filled
+    /// with paragraphs of reasoning and the real message at the bottom.
+    #[test]
+    fn deliberation_before_the_message_is_dropped() {
+        let reply = concat!(
+            "Analizando el diff, veo que se agregan dos campos al modelo de conexión\n",
+            "y se ajusta el manejo del túnel SSH.\n",
+            "\n",
+            "El tipo adecuado es `feat` porque introduce una capacidad nueva.\n",
+            "\n",
+            "feat(db): soportar túnel SSH en conexiones MSSQL\n",
+        );
+        assert_eq!(clean_commit_message(reply, true), "feat(db): soportar túnel SSH en conexiones MSSQL");
+    }
+
+    /// Reasoning written as one run-on block, with the message on its last line — no blank line to
+    /// separate them, so the "first block that opens with a subject" rule finds nothing and the
+    /// last subject line is what's left to anchor on.
+    #[test]
+    fn reasoning_with_no_blank_line_still_gives_up_its_last_subject() {
+        let reply = "The diff adds a tunnel helper.\nfix(tunnel): reusar la sesión SSH entre conexiones";
+        assert_eq!(
+            clean_commit_message(reply, true),
+            "fix(tunnel): reusar la sesión SSH entre conexiones"
+        );
+    }
+
+    /// Reasoning models (DeepSeek-R1 and everything that copied it, served through Ollama or an
+    /// OpenAI-compatible gateway) tag their chain of thought. Some gateways drop the *opening* tag
+    /// when they stream, so a lone `</think>` has to cut just the same.
+    #[test]
+    fn a_reasoning_block_is_removed_whether_or_not_its_opening_tag_survived() {
+        let tagged = "<think>Hmm, esto toca el tray y el store.</think>\nchore: reordenar el tray";
+        assert_eq!(clean_commit_message(tagged, true), "chore: reordenar el tray");
+
+        let orphan_close = "Hmm, esto toca el tray.\n</THINK>\nchore: reordenar el tray";
+        assert_eq!(clean_commit_message(orphan_close, true), "chore: reordenar el tray");
+    }
+
+    /// An unclosed opening tag means the model never came back out of its reasoning: there is no
+    /// answer after it, and emptying the reply would turn something the user can read into nothing.
+    #[test]
+    fn an_unclosed_reasoning_tag_leaves_the_reply_alone() {
+        assert_eq!(strip_reasoning_blocks("<think>me quedé pensando"), "<think>me quedé pensando");
+        assert_eq!(strip_reasoning_blocks("<think>solo pensamiento</think>"), "<think>solo pensamiento</think>");
+    }
+
+    /// "No markdown" is in the prompt and models fence the answer anyway — around the whole reply,
+    /// or after thinking out loud in prose.
+    #[test]
+    fn a_fenced_answer_comes_out_of_its_fence() {
+        assert_eq!(clean_commit_message("```\nfeat: agregar explorador\n```", true), "feat: agregar explorador");
+        let after_prose = "Aquí tienes el mensaje:\n\n```text\nfeat: agregar explorador\n```";
+        assert_eq!(clean_commit_message(after_prose, true), "feat: agregar explorador");
+    }
+
+    /// Options the model weighed on its way to an answer are prose *about* the message. Bulleted
+    /// and indented candidates must not be mistaken for where it starts.
+    #[test]
+    fn candidates_the_model_listed_are_not_the_message() {
+        let reply = concat!(
+            "Opciones que consideré:\n",
+            "- fix: corregir el túnel\n",
+            "  feat: agregar túnel\n",
+            "\n",
+            "feat(db): agregar túnel SSH para MSSQL\n",
+        );
+        assert_eq!(clean_commit_message(reply, true), "feat(db): agregar túnel SSH para MSSQL");
+        assert!(!conventional_subject("- fix: corregir el túnel"));
+        assert!(!conventional_subject("  feat: agregar túnel"));
+        assert!(!conventional_subject("feat:"), "a heading is not a message");
+        assert!(conventional_subject("refactor(db)!: cambiar el contrato"));
+    }
+
+    /// A message whose *body* lists further `feat:` / `fix:` lines — a release commit, say — must
+    /// keep its subject rather than being cut down to its last line. This is why the first block
+    /// wins over the last match.
+    #[test]
+    fn a_body_that_lists_more_subjects_does_not_move_the_start() {
+        let reply = "chore(release): 1.13.5\n\nfeat: nuevo explorador de base de datos\nfix: reconexión del túnel";
+        assert_eq!(clean_commit_message(reply, false), reply);
+    }
+
+    /// What was asked for is what is kept: the built-in template says "no body", so the note the
+    /// model appended about its own answer is not part of it. A customized template asked for
+    /// whatever it asked for, and keeps everything.
+    #[test]
+    fn the_models_note_about_its_answer_is_body_only_when_a_body_was_requested() {
+        let reply = "feat(db): agregar túnel SSH\n\nEste mensaje sigue Conventional Commits y no pasa de 72 caracteres.";
+        assert_eq!(clean_commit_message(reply, true), "feat(db): agregar túnel SSH");
+        assert_eq!(clean_commit_message(reply, false), reply);
+    }
+
+    /// A subject that wrapped onto a second line is still one paragraph, so it survives whole.
+    #[test]
+    fn a_wrapped_subject_is_not_cut_in_half() {
+        let reply = "feat(db): agregar soporte de túnel SSH\npara conexiones MSSQL remotas";
+        assert_eq!(clean_commit_message(reply, true), reply);
+    }
+
+    /// "no quotes" is in the prompt too.
+    #[test]
+    fn quotes_and_emphasis_around_a_one_liner_are_packaging() {
+        assert_eq!(clean_commit_message("\"feat: agregar túnel\"", true), "feat: agregar túnel");
+        assert_eq!(clean_commit_message("**`fix: corregir el tray`**", true), "fix: corregir el tray");
+        // …but a pair the message is *using* is not packaging around it.
+        let inline_code = "`db_cmd` ahora resuelve el túnel con `tunnel`";
+        assert_eq!(clean_commit_message(inline_code, false), inline_code);
+    }
+
+    /// A template customized to produce something other than a Conventional Commits message has no
+    /// subject line to anchor on — the model's own announcement is the last marker available.
+    #[test]
+    fn a_non_conventional_message_is_found_by_the_label_the_model_wrote() {
+        let reply = "Revisé el diff y toca el explorador.\n\nMensaje de commit:\nActualiza el explorador de base de datos";
+        assert_eq!(clean_commit_message(reply, false), "Actualiza el explorador de base de datos");
+    }
+
+    /// Nothing recognisable to cut at means the reply is handed over as it stands. Guessing here
+    /// would throw away a message the user could have edited.
+    #[test]
+    fn an_unrecognisable_reply_is_left_as_the_model_wrote_it() {
+        let reply = "Actualiza el explorador de base de datos\ny ajusta el store";
+        assert_eq!(clean_commit_message(reply, false), reply);
     }
 
     /// Every wrapper a model has actually put around "respond with JSON only".

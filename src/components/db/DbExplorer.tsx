@@ -282,6 +282,9 @@ function NodeSubtree({
     if (!kind) return;
     const columnNode: DbNodeRef = { ...nodeRef, kind: "column_folder" };
     const columns = await dbChildren(connectionId, columnNode).catch(() => [] as DbNode[]);
+    // Straight to `dbChildren` rather than through `refreshNode`, so this is one of the few reads
+    // that opens a session without the store noticing. See `syncConnected`.
+    void store.syncConnected();
     store.newConsole(
       connectionId,
       node.database ?? undefined,

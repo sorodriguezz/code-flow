@@ -8,6 +8,8 @@
 //! happens, and it renders each type in the *literal syntax T-SQL would accept back* (`0x…` for
 //! binary, `1`/`0` for a bit), so a value read into the grid and written out again survives.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use futures_util::TryStreamExt;
 use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel};
 use tokio::net::TcpStream;
@@ -32,6 +34,9 @@ type TdsClient = Client<Compat<TcpStream>>;
 
 pub struct MssqlSession {
     client: Mutex<TdsClient>,
+    /// Cleared the first time the *stream* fails, so the registry throws this session away instead
+    /// of handing it back forever. See [`MssqlSession::is_alive`].
+    alive: AtomicBool,
     database: String,
     user: String,
     version: String,
@@ -75,6 +80,7 @@ impl MssqlSession {
 
         let mut session = Self {
             client: Mutex::new(client),
+            alive: AtomicBool::new(true),
             database: database.unwrap_or(&config.database).to_string(),
             user: config.user.clone(),
             version: String::new(),
@@ -106,6 +112,56 @@ impl MssqlSession {
         }
     }
 
+    /// False once the TDS stream has failed, which for this protocol is unrecoverable.
+    ///
+    /// tiberius offers no way to ask, so the answer is remembered from the last failure instead —
+    /// see [`MssqlSession::note`]. Without it the registry's liveness check is `true` forever, and a
+    /// server that restarted, timed the session out, or had it killed leaves a dead client cached:
+    /// every statement after that fails identically, with no path back except the user finding
+    /// Disconnect by hand.
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    /// Formats a driver error, and records whether it means the session is gone.
+    ///
+    /// The test is deliberately narrow — what killed the *socket*, not what merely failed. Only two
+    /// families qualify. `Io` and `Tls` are the transport itself giving out. And a `Server` token of
+    /// class 20 or above is the server announcing that it is closing the connection as it says so
+    /// (`KILL <spid>`, a fatal internal error), which reads like every other server answer and is
+    /// the one that would otherwise leave a dead client cached forever.
+    ///
+    /// Everything else stays alive on purpose. A `Server` token below class 20 is an ordinary answer
+    /// — bad syntax, no such table, permission denied — and the next statement works. The decoding
+    /// failures (`Encoding`, `Utf8`, `Utf16`, `Conversion`, `ParseInt`) are about one *value*, on a
+    /// stream whose packet framing is untouched, and tiberius resynchronises before every request:
+    /// `simple_query` opens with `flush_stream`, which truncates the local buffer and drains to the
+    /// end of the previous message. Treating those as fatal would spend a full reconnect — login,
+    /// TLS handshake and all — on a column whose collation isn't in the driver's LCID table.
+    fn note(&self, error: tiberius::error::Error) -> String {
+        use tiberius::error::Error;
+        let terminal = match &error {
+            Error::Io { .. } | Error::Tls(_) => true,
+            // 20-25 is SQL Server's "the connection is going away with this message".
+            Error::Server(token) => token.class() >= 20,
+            _ => false,
+        };
+        if terminal {
+            self.alive.store(false, Ordering::Relaxed);
+        }
+        tds_error(error)
+    }
+
+    /// Marks the session unusable from outside, for the cases the driver never gets to report.
+    ///
+    /// Abandoning a TDS call mid-stream is the one that matters: dropping the future leaves tokens
+    /// unread and `flushed` false, so the next statement opens by draining a socket that may never
+    /// answer. Nothing returns an error on that path — the future simply stops — so [`Self::note`]
+    /// never runs and the session would stay in the registry looking healthy.
+    pub fn poison(&self) {
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
     // ---------------------------------------------------------------- queries
 
     /// Runs one statement and returns every result set it produced, flattened to text.
@@ -118,14 +174,14 @@ impl MssqlSession {
         let stream = client
             .simple_query(statement.to_string())
             .await
-            .map_err(tds_error)?;
+            .map_err(|e| self.note(e))?;
         let mut stream = Box::pin(stream);
 
         let mut results: Vec<DbStatementResult> = Vec::new();
         let mut current: Option<DbStatementResult> = None;
         // `QueryItem` isn't re-exported by tiberius, so the variants are read through its
         // accessors instead of matched — same two cases, no name to import.
-        while let Some(item) = stream.try_next().await.map_err(tds_error)? {
+        while let Some(item) = stream.try_next().await.map_err(|e| self.note(e))? {
             if let Some(metadata) = item.as_metadata() {
                 // A new result set starts; whatever was being built is finished.
                 if let Some(previous) = current.take() {
@@ -188,9 +244,9 @@ impl MssqlSession {
     /// but the statement still has to be read to completion.
     async fn run_silent(&self, sql: &str) -> Result<(), String> {
         let mut client = self.client.lock().await;
-        let stream = client.simple_query(sql.to_string()).await.map_err(tds_error)?;
+        let stream = client.simple_query(sql.to_string()).await.map_err(|e| self.note(e))?;
         let mut stream = Box::pin(stream);
-        while stream.try_next().await.map_err(tds_error)?.is_some() {}
+        while stream.try_next().await.map_err(|e| self.note(e))?.is_some() {}
         Ok(())
     }
 

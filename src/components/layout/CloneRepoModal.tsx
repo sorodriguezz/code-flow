@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { GitBranchPlus, Loader2, X } from "lucide-react";
-import { defaultCloneDir, gitClone } from "../../lib/tauri/commands";
+import { defaultCloneDir, findDuplicateProjects, gitClone } from "../../lib/tauri/commands";
+import type { DuplicateProject } from "../../lib/tauri/commands";
 import { onGitProgress } from "../../lib/tauri/events";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -36,6 +37,10 @@ export function CloneRepoModal({
   const [nameEdited, setNameEdited] = useState(false);
   const [cloning, setCloning] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
+  /** The repository this workspace already holds, when the URL turns out to name it. Kept in the
+   *  modal rather than pushed as a toast: the answer is about the URL still in the field, and it
+   *  has to stay readable while the user edits it or goes to switch workspace. */
+  const [duplicate, setDuplicate] = useState<DuplicateProject | null>(null);
 
   useEffect(() => {
     void defaultCloneDir().then(setBaseDir);
@@ -44,6 +49,10 @@ export function CloneRepoModal({
   useEffect(() => {
     if (!nameEdited && url.trim()) setName(deriveName(url));
   }, [url, nameEdited]);
+
+  // A refusal is about the URL that earned it. Typing a different one clears it rather than
+  // leaving a message that now points at nothing.
+  useEffect(() => setDuplicate(null), [url]);
 
   // Falls back to the repo's own name whenever the field is left blank — whether the
   // user never touched it, or cleared it out on purpose — rather than blocking Clone.
@@ -54,6 +63,25 @@ export function CloneRepoModal({
     if (!url.trim() || !dest) return;
     setCloning(true);
     setLines([]);
+    setDuplicate(null);
+    // Asked before a byte is fetched. A workspace holds a repository once, and the copy it already
+    // holds is usually somewhere else entirely — which is the whole reason a path comparison never
+    // caught this. Finding out afterwards would mean a finished download in a folder nobody wanted
+    // and a project that can't be registered anyway.
+    try {
+      const [existing] = await findDuplicateProjects(workspaceId, [
+        { path: dest, remote_url: url.trim() },
+      ]);
+      if (existing) {
+        setDuplicate(existing);
+        setCloning(false);
+        return;
+      }
+    } catch (e) {
+      pushErrorToast(String(e));
+      setCloning(false);
+      return;
+    }
     const unlistenProgress = await onGitProgress((e) => {
       if (e.op === "clone") setLines((prev) => [...prev.slice(-200), e.line]);
     });
@@ -127,6 +155,12 @@ export function CloneRepoModal({
         <p className="mb-3 truncate font-mono text-[11px] text-[var(--cf-text-muted)]" title={dest}>
           {dest || "…"}
         </p>
+
+        {duplicate && (
+          <p className="mb-3 rounded-md border border-[var(--cf-warning)]/40 bg-[var(--cf-warning)]/[0.08] px-2 py-1.5 text-[11px] text-[var(--cf-warning)]">
+            {t("import.duplicateRepo", { name: duplicate.name, path: duplicate.local_path })}
+          </p>
+        )}
 
         {lines.length > 0 && (
           <div className="mb-3 max-h-32 overflow-auto rounded-md bg-black/[0.04] p-2 font-mono text-[11px] text-[var(--cf-text-muted)] dark:bg-white/[0.06]">

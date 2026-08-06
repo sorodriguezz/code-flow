@@ -100,7 +100,13 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             "restart" => {
                 crate::backup::auto::flush_on_exit(app);
                 app.state::<QuittingFlag>().mark_quitting();
-                app.restart();
+                // `request_restart`, not `restart`. A menu event is delivered on the main thread,
+                // and `restart` called from there says so in its own docs: it skips `ExitRequested`
+                // and `Exit` and re-execs immediately. The exit handler in `lib.rs` is what closes
+                // the database sessions and kills the tunnels' `ssh` children, so restarting the
+                // short way would leave one stranded forward behind per press — on the button
+                // people press repeatedly when something already feels stuck.
+                app.request_restart();
             }
             "quit" => {
                 // Same last step as the in-app quit: the session about to end is the one a

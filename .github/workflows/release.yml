@@ -96,13 +96,46 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not `@stable`. `rust-cache` keys its cache on the compiler's version, so a floating
+      # toolchain means that the day Rust ships a release — every six weeks, on a schedule nobody
+      # here chooses — the key changes on *both* runners at once and all 757 crates in the lockfile
+      # rebuild from zero. That is what turned the Windows job from 11 minutes into 26 on v1.13.4:
+      # the cache keys flipped from `…-8af1e26a-…` to `…-af4551b0-…` on the same day the macOS ones
+      # flipped, while the dependency hash never moved.
+      #
+      # Bumping this is a deliberate act that costs one cold build, which is the trade: one slow
+      # release you chose over a surprise one you didn't. It also makes the published binary
+      # reproducible, which `@stable` never was.
+      - uses: dtolnay/rust-toolchain@1.97.1
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
 
       - run: pnpm install --frozen-lockfile
+
+      # `jlink` and `javac` cost between 20 seconds and 2.5 minutes on a cold runner, to produce
+      # something whose inputs change about once a year.
+      #
+      # Both paths, not just the one that ships: the script's "already current" checks read stamp
+      # files it deliberately keeps *outside* `resources/iris`, because that directory is copied
+      # verbatim into the bundle and a build stamp has no business reaching users. Restore the
+      # runtime without its stamp and the script rebuilds it anyway — the cache would cost time
+      # rather than save it.
+      #
+      # No `restore-keys`. A near-miss would hand the script a runtime built from different inputs,
+      # and while its stamp check would catch that and rebuild, this directory is the one that ends
+      # up inside an installer — an exact match or nothing is the right bargain here.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/resources/iris
+            src-tauri/target/iris-build
+          # `jlink` emits a runtime for whatever platform ran it, so the OS is part of the identity,
+          # and so is the JDK that `setup-java` above pins. The script carries the driver's version
+          # and its pinned checksum and the module list, so hashing the script covers all three;
+          # `src-tauri/java` is the bridge's own source.
+          key: iris-runtime-${{ runner.os }}-jdk17-${{ hashFiles('scripts/build-iris-runtime.mjs', 'src-tauri/java/**') }}
 
       # `tauri build` runs this again through `beforeBuildCommand`, where it is an incremental
       # no-op. Doing it here first is for the log: when the Java toolchain is the thing that broke,
@@ -151,3 +184,63 @@ jobs:
           fi
           echo "Bundled runtime: $found"
           du -sh "$(dirname "$(dirname "$found")")"
+
+  # Keeps the repository under GitHub's 10 GB Actions cache quota.
+  #
+  # `rust-cache` writes a new entry whenever its key changes and never removes the old one, so the
+  # generations pile up: at v1.13.4 there were twelve entries totalling 11.23 GB — three macOS
+  # generations at ~1.96 GB and three Windows ones at ~1.23 GB, all for compilers and lockfiles no
+  # build will ask for again. Over the quota GitHub evicts by least-recently-used, which means the
+  # entry it throws away is occasionally the one the next release needed, and that release pays for
+  # a full cold build with no Rust upgrade to explain it.
+  #
+  # Runs after the builds rather than on a schedule, because that is the moment a new generation was
+  # just written and the old one became dead — a weekly sweep would leave the repo over quota for
+  # most of the week.
+  prune-caches:
+    needs: [check-version, release]
+    # `always()`: a matrix leg that failed may still have saved a cache on its way out, and this is
+    # housekeeping — it should run whether or not the release itself went through.
+    if: always() && needs.check-version.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    # Never the reason a release run goes red. Nothing downstream depends on this having worked.
+    continue-on-error: true
+    permissions:
+      actions: write
+    steps:
+      - name: Drop superseded Rust caches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # Per platform: the newest is the exact match the next build wants, and the one behind it
+          # is what `rust-cache`'s restore-keys fall back to when `Cargo.lock` moves — which turns a
+          # dependency bump from a cold build into a warm one. Two is the whole reason to keep more
+          # than one; a third has never been restored by anything.
+          KEEP: "2"
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only the Rust caches. The `node-cache-*` entries are ~60 MB each and belong to
+          # `setup-node`, which manages its own; deleting those would be meddling for no space.
+          gh api --paginate "/repos/${REPO}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | select(.key | startswith("v0-rust-")) | [.created_at, .id, .key] | @tsv' \
+            | sort -r \
+            | awk -v keep="$KEEP" -F'\t' '
+                {
+                  # The key is `…-<env hash>-<lockfile hash>`; dropping both leaves the platform,
+                  # which is the thing there should be one live generation of.
+                  group = $3
+                  sub(/-[^-]*-[^-]*$/, "", group)
+                  if (++seen[group] > keep) print $2 "\t" $3
+                }
+              ' \
+            | while IFS=$'\t' read -r id key; do
+                echo "deleting $key"
+                gh api -X DELETE "/repos/${REPO}/actions/caches/${id}" >/dev/null || \
+                  echo "::warning::could not delete cache $key"
+              done
+          # What is left, in the log — so the next person who wonders where the quota went can read
+          # it off a release run instead of going to the API.
+          echo "--- remaining ---"
+          gh api --paginate "/repos/${REPO}/actions/caches?per_page=100" \
+            --jq '.actions_caches[] | "\((.size_in_bytes/1048576)|floor) MB  \(.key)"'

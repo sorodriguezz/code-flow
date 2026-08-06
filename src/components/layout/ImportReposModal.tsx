@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { FolderGit2, GitBranch, Loader2, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
-import type { FoundRepo } from "../../lib/tauri/commands";
+import type { DuplicateProject, FoundRepo } from "../../lib/tauri/commands";
 
 /**
  * Which of the repositories a pick turned up to import.
@@ -20,7 +20,7 @@ import type { FoundRepo } from "../../lib/tauri/commands";
 export function ImportReposModal({
   folders,
   repos,
-  existingPaths,
+  duplicates,
   truncated,
   onImport,
   onClose,
@@ -30,10 +30,15 @@ export function ImportReposModal({
    * context for the names below rather than something to read in full. */
   folders: string[];
   repos: FoundRepo[];
-  /** Paths already in this workspace. Those rows are shown, but locked and unchecked — seeing that
-   * a repository is *already here* is the answer to "why isn't it in the list", which leaving it
-   * out silently is not. */
-  existingPaths: string[];
+  /** For each found repository this workspace already holds, the copy it already holds — keyed by
+   * the found repository's path. Those rows are shown, but locked and unchecked: seeing that a
+   * repository is *already here* is the answer to "why isn't it in the list", which leaving it out
+   * silently is not.
+   *
+   * Keyed to a project rather than being a list of paths because the copy already here is usually
+   * at a different path — the same repository cloned somewhere else, which is exactly the case a
+   * path comparison used to miss. Saying which one and where is what makes the lock make sense. */
+  duplicates: Map<string, DuplicateProject>;
   /** The folder had more entries than the scan looks at, so this list may not be all of them.
    * Said out loud rather than left implied: a truncated list that looks complete is worse than a
    * shorter one that admits it. */
@@ -42,8 +47,7 @@ export function ImportReposModal({
   onClose: () => void;
 }) {
   const t = useT();
-  const already = new Set(existingPaths);
-  const importable = repos.filter((repo) => !already.has(repo.path));
+  const importable = repos.filter((repo) => !duplicates.has(repo.path));
   const [selected, setSelected] = useState<string[]>(() => importable.map((repo) => repo.path));
   const [importing, setImporting] = useState(false);
 
@@ -115,17 +119,29 @@ export function ImportReposModal({
         )}
         <div className="mb-3 min-h-0 flex-1 overflow-y-auto rounded-md border border-[var(--cf-border)]">
           {repos.map((repo) => {
-            const isAlready = already.has(repo.path);
+            const duplicate = duplicates.get(repo.path);
             return (
               <label
                 key={repo.path}
+                // The two locks read differently on purpose. "Already added" is this very folder,
+                // and needs no explanation. A repository the workspace holds *somewhere else* is
+                // the surprising one — so that row names the copy and where it is, on the row and
+                // in full on hover, rather than looking like an unexplained refusal.
+                title={
+                  duplicate && duplicate.reason === "remote"
+                    ? t("import.duplicateRepo", {
+                        name: duplicate.name,
+                        path: duplicate.local_path,
+                      })
+                    : undefined
+                }
                 className={`flex items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5 last:border-b-0 ${
-                  isAlready ? "opacity-50" : "cursor-pointer hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  duplicate ? "opacity-50" : "cursor-pointer hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                 }`}
               >
                 <input
                   type="checkbox"
-                  disabled={isAlready || importing}
+                  disabled={!!duplicate || importing}
                   checked={selected.includes(repo.path)}
                   onChange={() => toggle(repo.path)}
                   className="shrink-0 accent-[var(--cf-accent)]"
@@ -134,9 +150,11 @@ export function ImportReposModal({
                 <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
                   {repo.name}
                 </span>
-                {isAlready && (
-                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-                    {t("import.alreadyAdded")}
+                {duplicate && (
+                  <span className="min-w-0 max-w-[55%] shrink-0 truncate text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
+                    {duplicate.reason === "remote"
+                      ? t("import.sameRepoAs", { name: duplicate.name })
+                      : t("import.alreadyAdded")}
                   </span>
                 )}
               </label>

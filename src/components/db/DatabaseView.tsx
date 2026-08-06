@@ -53,6 +53,18 @@ export function DatabaseView() {
     void ensureDbStoreLoaded();
   }, []);
 
+  // The backend owns the sessions and opens and closes them without asking: every command dials
+  // lazily, and the idle sweep expires. `ensureDbStoreLoaded` can't re-read that — it short-circuits
+  // on the workspace it already loaded — so the view asks directly whenever it comes back into
+  // sight. Both directions of drift matter, and the awkward one is a live session drawn as
+  // disconnected: the row's menu then offers *Connect*, and the command that would release the
+  // session isn't reachable at all. (The hide/show cycle is covered separately, by the
+  // `app:foreground` listener in `dbStore`.)
+  useEffect(() => {
+    if (activeView !== "api" || apiWorkspace !== "database") return;
+    void useDbStore.getState().syncConnected();
+  }, [activeView, apiWorkspace]);
+
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
 
   // Scoped to this workspace: the API client's request builder binds the same keys, and an unscoped

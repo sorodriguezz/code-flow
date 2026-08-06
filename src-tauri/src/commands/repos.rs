@@ -5,6 +5,7 @@ use tauri_plugin_dialog::DialogExt;
 
 use crate::db::{models::*, queries, Db};
 use crate::paths;
+use crate::repo_identity::{primary_remote, DuplicateReason, RepoIdentity};
 
 /// Non-async `#[tauri::command]`s run on the main thread, and `blocking_pick_folder`
 /// parks the calling thread on a rendezvous channel until the picker answers — but on
@@ -28,6 +29,12 @@ pub struct FoundRepo {
     /// The directory's own name, which is what the project gets called.
     pub name: String,
     pub path: String,
+    /// Its `origin`, or its first remote when there is no `origin` — see
+    /// [`crate::repo_identity::primary_remote`]. Read here rather than left for the import to look
+    /// up later: it is what says whether this repository is one the workspace already holds at
+    /// some other path, and it is nearly free while the folder is being walked anyway. `None` for
+    /// a repository with no remote configured.
+    pub remote_url: Option<String>,
 }
 
 /// What a picked folder turned out to be.
@@ -35,6 +42,10 @@ pub struct FoundRepo {
 pub struct FolderScan {
     /// The folder is itself a repository — add it and nothing else.
     pub is_repo: bool,
+    /// The picked folder's own remote, when [`Self::is_repo`]. The repositories *inside* a folder
+    /// carry theirs on [`FoundRepo`]; this is the same thing for the folder that is one itself, so
+    /// that a single picked repository can be checked for being one the workspace already holds.
+    pub remote_url: Option<String>,
     /// Repositories sitting directly inside it. Only ever one level down; see [`scan_folder`].
     pub repos: Vec<FoundRepo>,
     /// The folder has nothing in it at all, which is worth saying differently from "nothing here
@@ -82,7 +93,13 @@ pub fn scan_folder(path: String) -> Result<FolderScan, String> {
         return Err(format!("{path} is not a folder"));
     }
     if is_repo_root(root) {
-        return Ok(FolderScan { is_repo: true, repos: Vec::new(), empty: false, truncated: false });
+        return Ok(FolderScan {
+            is_repo: true,
+            remote_url: primary_remote(&path),
+            repos: Vec::new(),
+            empty: false,
+            truncated: false,
+        });
     }
 
     let mut repos = Vec::new();
@@ -103,11 +120,16 @@ pub fn scan_folder(path: String) -> Result<FolderScan, String> {
             continue;
         }
         let Some(name) = child.file_name().and_then(|n| n.to_str()) else { continue };
-        repos.push(FoundRepo { name: name.to_string(), path: child.to_string_lossy().to_string() });
+        let child_path = child.to_string_lossy().to_string();
+        repos.push(FoundRepo {
+            name: name.to_string(),
+            remote_url: primary_remote(&child_path),
+            path: child_path,
+        });
     }
     repos.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
-    Ok(FolderScan { is_repo: false, repos, empty: seen == 0, truncated })
+    Ok(FolderScan { is_repo: false, remote_url: None, repos, empty: seen == 0, truncated })
 }
 
 /// Where a "Clone repository" flow should default to: `C:\CodeFlow\repos\<name>` on
@@ -154,8 +176,106 @@ pub fn rename_workspace(db: State<Db>, id: String, name: String) -> Result<(), S
     queries::rename_workspace(&conn, &id, trimmed).map_err(|e| e.to_string())
 }
 
+/// One repository about to be added, as the duplicate check needs to see it.
+#[derive(serde::Deserialize)]
+pub struct RepoCandidate {
+    /// Where it is — or, for a clone, where it is *about to be*. A destination that doesn't exist
+    /// yet still compares against the paths already registered.
+    pub path: String,
+    /// The remote it points at, when the caller knows it before the working copy does: a clone has
+    /// its URL and nothing on disk, an import has the reverse. Folded in on top of whatever the
+    /// folder itself reports.
+    pub remote_url: Option<String>,
+}
+
+/// The project a workspace already holds that *is* the repository being added.
+#[derive(serde::Serialize)]
+pub struct DuplicateProject {
+    pub id: String,
+    pub name: String,
+    /// Where the copy already in the workspace lives — the thing worth saying out loud, since the
+    /// whole confusion is that it is somewhere other than where the user is adding from.
+    pub local_path: String,
+    pub reason: DuplicateReason,
+}
+
+/// Reads every project of `workspace_id` once, with its identity resolved from disk.
+///
+/// Separated out because both callers need the same list and it is the expensive half: one git
+/// open per project, which is worth doing once per user action and not once per candidate.
+fn workspace_identities(db: &State<Db>, workspace_id: &str) -> Result<Vec<(Project, RepoIdentity)>, String> {
+    let projects = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::list_projects(&conn, workspace_id).map_err(|e| e.to_string())?
+    };
+    Ok(projects
+        .into_iter()
+        .map(|project| {
+            let identity = RepoIdentity::read(&project.local_path, project.remote_url.as_deref());
+            (project, identity)
+        })
+        .collect())
+}
+
+fn duplicate_of(
+    existing: &[(Project, RepoIdentity)],
+    candidate: &RepoIdentity,
+) -> Option<DuplicateProject> {
+    existing.iter().find_map(|(project, other)| {
+        candidate.duplicate_of(other).map(|reason| DuplicateProject {
+            id: project.id.clone(),
+            name: project.name.clone(),
+            local_path: project.local_path.clone(),
+            reason,
+        })
+    })
+}
+
+/// For each candidate, the project of `workspace_id` that already *is* that repository — `None` at
+/// the positions with no match, so the answers line up with what was asked.
+///
+/// **A workspace holds a repository once.** That has to be decided on the repository's identity
+/// rather than on its path: a repository imported from `~/dev/api` and the same one cloned into
+/// CodeFlow's own `repos/api` are two folders and one repository, and comparing paths — which is
+/// all that was ever compared — called them different. That is how a workspace ended up listing
+/// the same repository twice, from two origins. Having it open twice at once is what a *second
+/// workspace* is for; see [`crate::repo_identity`].
+///
+/// Every candidate in one call, because the answer needs each existing project's remotes read off
+/// disk: doing that once for a folder of thirty repositories rather than thirty times is the
+/// difference between instant and a stall the user can see.
+#[tauri::command]
+pub fn find_duplicate_projects(
+    db: State<Db>,
+    workspace_id: String,
+    candidates: Vec<RepoCandidate>,
+) -> Result<Vec<Option<DuplicateProject>>, String> {
+    let existing = workspace_identities(&db, &workspace_id)?;
+    Ok(candidates
+        .iter()
+        .map(|candidate| {
+            let identity = RepoIdentity::read(&candidate.path, candidate.remote_url.as_deref());
+            duplicate_of(&existing, &identity)
+        })
+        .collect())
+}
+
+/// Registers a repository, refusing one the workspace already holds.
+///
+/// The refusal is the last gate rather than the first: every caller asks
+/// [`find_duplicate_projects`] beforehand, because only the caller can name the repository that is
+/// already there and offer somewhere else to put this one. This is what keeps the invariant true
+/// when a caller forgets to — including a new one written later.
 #[tauri::command]
 pub fn create_project(db: State<Db>, input: NewProject) -> Result<Project, String> {
+    let existing = workspace_identities(&db, &input.workspace_id)?;
+    let identity = RepoIdentity::read(&input.local_path, input.remote_url.as_deref());
+    if let Some(duplicate) = duplicate_of(&existing, &identity) {
+        return Err(format!(
+            "\"{}\" is already in this workspace, at {}. A repository can only be in a workspace once — open it in another workspace if you need a second copy.",
+            duplicate.name, duplicate.local_path
+        ));
+    }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::create_project(&conn, input).map_err(|e| e.to_string())
 }
@@ -291,6 +411,38 @@ mod tests {
         let scan = full.scan();
         assert!(!scan.empty);
         assert!(scan.repos.is_empty());
+    }
+
+    /// The scan carries each repository's remote out with it. Without this an import registers a
+    /// project with no remote recorded — the state every imported project used to be in, and the
+    /// reason the same repository could be added a second time from another folder without
+    /// anything noticing.
+    #[test]
+    fn a_scan_reports_each_repositorys_origin() {
+        let temp = Temp::new();
+        let repo = git2::Repository::init(temp.0.join("api")).unwrap();
+        repo.remote("origin", "git@github.com:acme/api.git").unwrap();
+        // A `.git` that is a directory but not a repository: found, but with nothing to report.
+        temp.repo("hollow");
+
+        let scan = temp.scan();
+        let api = scan.repos.iter().find(|r| r.name == "api").unwrap();
+        assert_eq!(api.remote_url.as_deref(), Some("git@github.com:acme/api.git"));
+        let hollow = scan.repos.iter().find(|r| r.name == "hollow").unwrap();
+        assert_eq!(hollow.remote_url, None);
+    }
+
+    /// A picked folder that *is* a repository never appears in `repos`, so without its own field
+    /// the single-repository import would be the one route with no identity to check.
+    #[test]
+    fn a_picked_repository_reports_its_own_origin() {
+        let temp = Temp::new();
+        let repo = git2::Repository::init(&temp.0).unwrap();
+        repo.remote("origin", "https://github.com/acme/api.git").unwrap();
+
+        let scan = temp.scan();
+        assert!(scan.is_repo);
+        assert_eq!(scan.remote_url.as_deref(), Some("https://github.com/acme/api.git"));
     }
 
     #[test]

@@ -37,6 +37,8 @@ import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   scanFolder,
+  findDuplicateProjects,
+  type DuplicateProject,
   type FoundRepo,
   revealInFileManager,
   openInVsCode,
@@ -1263,6 +1265,10 @@ export function Sidebar() {
     folders: string[];
     repos: FoundRepo[];
     truncated: boolean;
+    /** Which of `repos` this workspace already holds, keyed by the found repository's path. Not a
+     *  list of paths: the copy already here is usually at a *different* path, which is the thing
+     *  the modal has to be able to say. */
+    duplicates: Map<string, DuplicateProject>;
   } | null>(null);
 
   useEffect(() => {
@@ -1274,13 +1280,17 @@ export function Sidebar() {
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
 
   /** Registers one repository. The path is always a verified repository root by the time it gets
-   *  here — see `handleAddProject`. */
-  const importRepo = (path: string) =>
+   *  here — see `handleAddProject`.
+   *
+   *  The remote is recorded rather than left `null`, which is what it always used to be: it is
+   *  what identifies this repository as the one a workspace already holds at some other path, and
+   *  a row without it can only ever be compared by folder. */
+  const importRepo = (repo: FoundRepo) =>
     addProject({
       workspace_id: activeWorkspaceId!,
-      name: basename(path),
-      local_path: path,
-      remote_url: null,
+      name: basename(repo.path),
+      local_path: repo.path,
+      remote_url: repo.remote_url,
       color: "#6366f1",
       icon: "git-branch",
       ado_org: null,
@@ -1343,7 +1353,11 @@ export function Sidebar() {
       if (!entry) continue;
       truncated = truncated || entry.scan.truncated;
       if (entry.scan.is_repo) {
-        found.push({ name: basename(entry.folder), path: entry.folder });
+        found.push({
+          name: basename(entry.folder),
+          path: entry.folder,
+          remote_url: entry.scan.remote_url,
+        });
       } else if (entry.scan.repos.length > 0) {
         found.push(...entry.scan.repos);
       } else {
@@ -1368,17 +1382,46 @@ export function Sidebar() {
 
     if (barren > 0) pushErrorToast(t("import.skippedNotRepos", { count: String(barren) }));
 
-    if (repos.length === 1) {
-      const only = repos[0];
-      if (projects.some((project) => project.local_path === only.path)) {
-        pushErrorToast(t("import.alreadyInWorkspace"));
-        return;
-      }
-      await importRepo(only.path);
+    // Every candidate in one round trip. The answer reads each project already in this workspace
+    // off disk to find out which repository it *is*, so asking per candidate would redo that whole
+    // pass for every repository in the folder.
+    let duplicates: (DuplicateProject | null)[];
+    try {
+      duplicates = await findDuplicateProjects(
+        activeWorkspaceId,
+        repos.map((repo) => ({ path: repo.path, remote_url: repo.remote_url })),
+      );
+    } catch (e) {
+      pushErrorToast(String(e));
       return;
     }
 
-    setFolderScan({ folders, repos, truncated });
+    if (repos.length === 1) {
+      const [only] = repos;
+      const [duplicate] = duplicates;
+      if (duplicate) {
+        pushErrorToast(
+          t("import.duplicateRepo", { name: duplicate.name, path: duplicate.local_path }),
+        );
+        return;
+      }
+      await importRepo(only);
+      return;
+    }
+
+    setFolderScan({
+      folders,
+      repos,
+      truncated,
+      duplicates: new Map(
+        repos
+          .map((repo, at) => [repo.path, duplicates[at]] as const)
+          // `!= null` rather than `!== null`: a short answer would otherwise slip an `undefined`
+          // through the cast and into the map, where every reader treats a key's presence as
+          // meaning there *is* a duplicate to name.
+          .filter((pair): pair is readonly [string, DuplicateProject] => pair[1] != null),
+      ),
+    });
   };
 
   return (
@@ -1442,13 +1485,13 @@ export function Sidebar() {
           <ImportReposModal
             folders={folderScan.folders}
             repos={folderScan.repos}
-            existingPaths={projects.map((project) => project.local_path)}
+            duplicates={folderScan.duplicates}
             truncated={folderScan.truncated}
             onImport={async (picked) => {
               // Sequential rather than `Promise.all`: each add writes the project list and the
               // last one wins as the active project, and a race decides which. In order, "the
               // last one you picked is the one you land on" is at least a rule.
-              for (const repo of picked) await importRepo(repo.path);
+              for (const repo of picked) await importRepo(repo);
             }}
             onClose={() => setFolderScan(null)}
           />
