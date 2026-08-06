@@ -62,7 +62,9 @@ export function MoveProjectModal({ project, onClose }: { project: Project; onClo
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="cf-fade-in max-h-[calc(100vh-2rem)] w-[420px] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
+        // Matched to the other dialogs that draw the flow diagram — its two pills carry workspace
+        // names here, which run as long as branch names do.
+        className="cf-fade-in max-h-[calc(100vh-2rem)] w-[520px] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]"
       >
         <div className="mb-3 flex items-start gap-3">
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">

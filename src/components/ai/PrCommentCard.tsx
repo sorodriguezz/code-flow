@@ -4,6 +4,7 @@ import type { PrCommentThread, ThreadCloseOutcome } from "../../types/domain";
 import { Skeleton } from "../common/Skeleton";
 import { draftPrCommentReply } from "../../lib/tauri/commands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
+import { withExtraInstructions } from "../../lib/parseAnalysis";
 import { pushErrorToast } from "../../state/toastStore";
 import { notify } from "../../state/notificationStore";
 import { useT } from "../../state/languageStore";
@@ -213,7 +214,7 @@ export function PrCommentCard({
             resolution={resolution}
             runId={runId}
             runStartedAt={runStartedAt}
-            onClick={() => void resolve(buildFixPrompt(thread))}
+            onClick={(extra) => void resolve(withExtraInstructions(buildFixPrompt(thread), extra))}
             onClear={clearResolution}
             trailing={
               onResolveThread && (

@@ -1,9 +1,10 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   ChevronDown,
   ChevronRight,
   Clock,
   Code2,
+  Columns2,
   FileText,
   Folder,
   FolderTree,
@@ -236,7 +237,38 @@ function FileTreeSection({
   return <>{tree.map((node, index) => renderNode(node, 0, index))}</>;
 }
 
-export function ChangesPanel() {
+/**
+ * The Changes screen: staged and unstaged lists, the row actions that move files between them,
+ * and the commit box.
+ *
+ * Rendered in two places, and the callbacks are what tell them apart. On its own screen it takes
+ * no props and owns the whole flow — clicking a row opens that file's diff in the pane beside the
+ * list. Docked in the editor (`EditorView`'s right panel) it gets `onOpenFile`/`onOpenDiff` and
+ * hands both off instead: the editor already *is* a place to read a file, so a diff pane squeezed
+ * into a 300px dock would be a worse copy of the one next door. Everything else — the sections,
+ * the stage/discard buttons, the AI message, the secret scan — is the same component either way,
+ * which is the point of doing it with two props rather than a second panel.
+ */
+export function ChangesPanel({
+  onOpenFile,
+  onOpenDiff,
+  headerAction,
+}: {
+  /** Open this file in the editor, at its first changed line. Its presence is what puts the panel
+   * in docked mode: rows navigate instead of selecting, and the built-in diff pane never opens. */
+  onOpenFile?: (path: string, line?: number) => void;
+  /** Open this file's before/after side-by-side view. Only offered alongside `onOpenFile`. */
+  onOpenDiff?: (path: string) => void;
+  /**
+   * A control for the container, rendered at the end of the header row.
+   *
+   * The editor's dock uses it for its own close button. That button used to live in a rail beside
+   * the panel, which cost a permanent 36px column of nothing down the full height of the window
+   * and held the panel off the edge it's docked to. A panel's close control belongs in the panel.
+   */
+  headerAction?: ReactNode;
+} = {}) {
+  const docked = !!onOpenFile;
   const repoPath = useRepoStore((s) => s.repoPath);
   const status = useRepoStore((s) => s.status);
   const workingDiff = useRepoStore((s) => s.workingDiff);
@@ -296,11 +328,30 @@ export function ChangesPanel() {
 
   // Open the file in the app's own Editor tab (at the first changed line) instead of handing it
   // to the OS default app — the point is to inspect the change in place, not to leave the app.
+  // Docked, the editor is already on screen and hands us the opener, so it takes the file straight
+  // into the group the user is working in rather than switching views to reach itself.
   const openFile = (relPath: string, staged: boolean) => {
     const pool = staged ? stagedDiff : workingDiff;
     const files = pool.filter((f) => (f.new_path ?? f.old_path) === relPath);
-    openInEditor(relPath, firstChangedLine(files));
+    const line = firstChangedLine(files);
+    if (onOpenFile) onOpenFile(relPath, line);
+    else openInEditor(relPath, line);
   };
+
+  /** What clicking the row itself does. Selecting drives the diff pane beside the list, which
+   * only exists on the standalone screen; docked, the click is the "open it" gesture. */
+  const selectRow = (entry: FileStatusEntry, staged: boolean) => {
+    if (docked) openFile(entry.path, staged);
+    else setSelected({ path: entry.path, staged });
+  };
+
+  /** Leads every row's actions. On the standalone screen the row click already opens the diff
+   * beside the list, so the odd one out is "open the file"; docked those swap over — the click
+   * opens the file, and this is how you get to the before/after. */
+  const leadAction = (entry: FileStatusEntry, staged: boolean): RowAction =>
+    docked
+      ? { icon: Columns2, title: t("changes.openDiff"), onClick: () => onOpenDiff?.(entry.path) }
+      : { icon: Code2, title: t("changes.openInEditor"), onClick: () => openFile(entry.path, staged) };
 
   if (!status) {
     return <EmptyState icon={FileText} title={t("changes.noRepo")} />;
@@ -310,7 +361,7 @@ export function ChangesPanel() {
     const isPending = pending?.path === entry.path;
     const blocked = pending !== null && !isPending;
     return [
-      { icon: Code2, title: t("changes.openInEditor"), onClick: () => openFile(entry.path, true) },
+      leadAction(entry, true),
       {
         icon: Minus,
         title: t("changes.unstage"),
@@ -325,7 +376,7 @@ export function ChangesPanel() {
     const isPending = pending?.path === entry.path;
     const blocked = pending !== null && !isPending;
     return [
-      { icon: Code2, title: t("changes.openInEditor"), onClick: () => openFile(entry.path, false) },
+      leadAction(entry, false),
       {
         icon: Plus,
         title: t("changes.stage"),
@@ -402,27 +453,38 @@ export function ChangesPanel() {
           selected ? "shrink-0" : "min-w-0 flex-1"
         }`}
       >
-        <div className="flex items-center justify-between border-b border-[var(--cf-border)] px-3 py-2">
-          <span className="text-[12px] font-semibold text-[var(--cf-text-muted)]">{t("changes.changes")}</span>
-          <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
-            <button
-              onClick={() => setViewMode("list")}
-              title={t("changes.listView")}
-              className={`flex h-5 w-5 items-center justify-center rounded ${
-                viewMode === "list" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-              }`}
-            >
-              <List size={12} />
-            </button>
-            <button
-              onClick={() => setViewMode("tree")}
-              title={t("changes.treeView")}
-              className={`flex h-5 w-5 items-center justify-center rounded ${
-                viewMode === "tree" ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
-              }`}
-            >
-              <FolderTree size={12} />
-            </button>
+        <div className="flex items-center justify-between gap-1.5 border-b border-[var(--cf-border)] px-3 py-2">
+          <span className="min-w-0 truncate text-[12px] font-semibold text-[var(--cf-text-muted)]">
+            {t("changes.changes")}
+          </span>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
+              <button
+                onClick={() => setViewMode("list")}
+                title={t("changes.listView")}
+                className={`flex h-5 w-5 items-center justify-center rounded ${
+                  viewMode === "list"
+                    ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                    : "text-[var(--cf-text-muted)]"
+                }`}
+              >
+                <List size={12} />
+              </button>
+              <button
+                onClick={() => setViewMode("tree")}
+                title={t("changes.treeView")}
+                className={`flex h-5 w-5 items-center justify-center rounded ${
+                  viewMode === "tree"
+                    ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                    : "text-[var(--cf-text-muted)]"
+                }`}
+              >
+                <FolderTree size={12} />
+              </button>
+            </div>
+            {/* Last in the row, so "close this panel" sits where a panel's close control belongs —
+                see `headerAction`. Nothing on the standalone screen passes one. */}
+            {headerAction}
           </div>
         </div>
 
@@ -453,7 +515,7 @@ export function ChangesPanel() {
               <FileTreeSection
                 entries={status.staged}
                 isSelected={(entry) => selected?.path === entry.path && !!selected.staged}
-                onSelectEntry={(entry) => setSelected({ path: entry.path, staged: true })}
+                onSelectEntry={(entry) => selectRow(entry, true)}
                 buildActions={(entry) => buildStagedActions(entry)}
               />
             ) : (
@@ -463,7 +525,7 @@ export function ChangesPanel() {
                   entry={entry}
                   at={at}
                   selected={selected?.path === entry.path && selected.staged}
-                  onSelect={() => setSelected({ path: entry.path, staged: true })}
+                  onSelect={() => selectRow(entry, true)}
                   actions={buildStagedActions(entry)}
                 />
               ))
@@ -534,7 +596,7 @@ export function ChangesPanel() {
               <FileTreeSection
                 entries={unstagedAndUntracked}
                 isSelected={(entry) => selected?.path === entry.path && !selected.staged}
-                onSelectEntry={(entry) => setSelected({ path: entry.path, staged: false })}
+                onSelectEntry={(entry) => selectRow(entry, false)}
                 buildActions={(entry) => buildUnstagedActions(entry)}
               />
             ) : (
@@ -544,7 +606,7 @@ export function ChangesPanel() {
                   entry={entry}
                   at={at}
                   selected={selected?.path === entry.path && !selected.staged}
-                  onSelect={() => setSelected({ path: entry.path, staged: false })}
+                  onSelect={() => selectRow(entry, false)}
                   actions={buildUnstagedActions(entry)}
                 />
               ))

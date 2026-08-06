@@ -405,7 +405,9 @@ function AgentMessage({ message }: { message: ChatMessage }) {
   return (
     <div className="space-y-1">
       <div
-        className={`group relative rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
+        // Same reason as the AI panel's bubble: a message that isn't markdown-rendered would
+        // otherwise be the only one you couldn't select part of.
+        className={`group relative select-text rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
           message.role === "user"
             ? "ml-auto max-w-[85%] whitespace-pre-wrap border border-[color-mix(in_oklab,var(--cf-accent)_30%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_14%,var(--cf-surface))] text-[var(--cf-text)]"
             : "mr-auto max-w-[85%] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] text-[var(--cf-text)]"

@@ -61,7 +61,11 @@ export function CreateBranchModal({ branches, onClose }: { branches: BranchInfo[
     // Centred, like every other dialog in this family, with the height capped so a short window
     // scrolls the dialog's own content instead of pushing its buttons off screen.
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
-      <div className="cf-fade-in max-h-[calc(100vh-2rem)] w-[460px] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]">
+      {/* Sized for the names it has to show, not for the form: three of its four rows — the name
+          field, the start-point select and both pills of the diagram — hold branch names, and
+          conventional ones (`feature/TICKET-123-short-description`) run past what a narrower
+          dialog fits. */}
+      <div className="cf-fade-in max-h-[calc(100vh-2rem)] w-[560px] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)]">
         <h3 className="mb-3 text-[13px] font-semibold">{t("branch.createModalTitle")}</h3>
 
         <label className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">

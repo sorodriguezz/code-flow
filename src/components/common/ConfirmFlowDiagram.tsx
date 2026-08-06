@@ -67,8 +67,17 @@ function Node({
       }}
     >
       <Icon size={12} className="shrink-0" style={{ color: emphasis ? tone : "var(--cf-text-muted)" }} />
+      {/* Wraps rather than truncates.
+       *
+       * These pills each get about half the dialog, and the whole job of the diagram is telling
+       * two branch names apart — which an ellipsis defeats exactly when the names are long enough
+       * to be confusable. `feature/CU-1234-user-profile` and `feature/CU-1234-user-settings` both
+       * come out as `feature/CU-123…` in a fixed line. Slashes and hyphens are natural break
+       * opportunities so a real branch name wraps tidily at its own segments; `break-words` is
+       * only there for the pathological unbroken run. Growing taller costs nothing here: the
+       * dialogs are short and already scroll if a window is small enough to need it. */}
       <span
-        className="min-w-0 flex-1 truncate font-mono text-[11px]"
+        className="min-w-0 flex-1 break-words font-mono text-[11px] leading-snug"
         style={{ color: emphasis ? "var(--cf-text)" : "var(--cf-text-muted)" }}
       >
         {label}

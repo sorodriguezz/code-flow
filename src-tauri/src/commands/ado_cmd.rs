@@ -292,6 +292,33 @@ pub(crate) fn pat_for_org(org: &str) -> Result<String, String> {
         .ok_or_else(|| format!("No Azure DevOps token saved for organization \"{org}\" — connect it in Settings first"))
 }
 
+/// Checks an organization + token pair against Azure DevOps and answers with the display name of
+/// the account the token belongs to.
+///
+/// Takes the PAT as an argument rather than reading the saved one, because the point is to run
+/// *before* anything is stored: saving first and verifying after would mean a bad token
+/// overwriting a good one that was already there, and a rollback path to get it back.
+///
+/// `connectionData` is the endpoint for this. It is org-scoped, so a typo'd organization fails
+/// here rather than at the first PR listing; it needs no scope of its own, so it can't pass for a
+/// token that is merely missing one it needs; and it names the account, which turns "saved" into
+/// "connected as Sofía Rodríguez" — the difference between a form that accepted your input and one
+/// that actually reached the server.
+#[tauri::command]
+pub async fn ado_verify_pat(org: String, pat: String) -> Result<String, String> {
+    ado::authenticated_user_name(&org, &pat).await
+}
+
+/// The same check as [`ado_verify_pat`], for an organization whose token is *already* saved —
+/// answering the question "is this connection still good?" without asking the user to paste the
+/// token again. A PAT expires (Azure caps them at a year, and the default is 30 days), so a row
+/// that was genuinely connected when it was added can stop being so on its own.
+#[tauri::command]
+pub async fn ado_check_org(org: String) -> Result<String, String> {
+    let pat = pat_for_org(&org)?;
+    ado::authenticated_user_name(&org, &pat).await
+}
+
 #[tauri::command]
 pub async fn ado_list_projects(org: String) -> Result<Vec<ado::AdoProject>, String> {
     let pat = pat_for_org(&org)?;

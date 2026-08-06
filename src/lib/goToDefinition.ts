@@ -99,8 +99,9 @@ async function findDefinition(
   });
   if (ranked.length === 0) return null;
 
-  // Every survivor is returned, best first: Monaco jumps straight there when there's one and
-  // shows its own picker when there are several, which is the honest thing to do with a guess.
+  // Every survivor is returned, best first. The editor is configured to jump to the first one
+  // rather than peek (`gotoLocation.multipleDefinitions` in `EditorPane`), so the order here is
+  // the answer; the rest stay available to a deliberate Peek Definition.
   return ranked.slice(0, 12).map((hit) => ({
     uri: monaco.Uri.parse(modelPathFor(project, hit.path)),
     range: new monaco.Range(hit.line, columnOf(hit.text, symbol), hit.line, columnOf(hit.text, symbol) + symbol.length),

@@ -310,6 +310,10 @@ export function Select({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
+        // The trigger is one line and elides, as a select should — but what it elides is often the
+        // tail of a path-like value (`origin/feature/TICKET-123-…`), where the tail is the part
+        // that identifies it. The tooltip is how you read the whole of what you picked.
+        title={label}
         onClick={() => (open ? setOpen(false) : openMenu())}
         onKeyDown={onKeyDown}
         className={`flex w-full items-center justify-between gap-2 rounded-md border bg-[var(--cf-surface)] text-left outline-none disabled:cursor-not-allowed disabled:opacity-50 ${

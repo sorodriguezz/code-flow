@@ -25,10 +25,11 @@ export function ConfirmModal() {
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4" onClick={() => respond(false)}>
       <div
         onClick={(e) => e.stopPropagation()}
-        // Wider with a diagram than without: the two branch pills need room to show enough of a
-        // long branch name to be told apart.
+        // Wider with a diagram than without: the two branch pills split the width between them,
+        // so each one only ever gets half of it — and a name that wraps to three lines in a pill
+        // is harder to read than the same name on one.
         className={`cf-fade-in max-h-[calc(100vh-2rem)] max-w-[90vw] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4 shadow-[var(--cf-shadow)] ${
-          request.flow ? "w-[460px]" : "w-[380px]"
+          request.flow ? "w-[560px]" : "w-[380px]"
         }`}
       >
         <div className="mb-4 flex items-start gap-3">

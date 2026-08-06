@@ -269,8 +269,10 @@ function StepRow({ step, isGate }: { step: AgentChainStep; isGate: boolean }) {
           >
             {open ? "▾" : "▸"} {t("agents.stepOutput")}
           </button>
+          {/* The step's own answer — selectable, since the reason to expand it is to take
+              something out of it and feed it somewhere else. */}
           {open && (
-            <p className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-black/[0.03] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
+            <p className="mt-1 max-h-40 select-text overflow-auto whitespace-pre-wrap rounded-md bg-black/[0.03] px-2 py-1.5 text-[11px] leading-relaxed text-[var(--cf-text-muted)] dark:bg-white/[0.04]">
               {step.output_text}
             </p>
           )}

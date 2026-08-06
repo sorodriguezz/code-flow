@@ -31,7 +31,9 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
     >
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[60vh] w-96 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+        // Every row here is a branch name and nothing else, so the width is the number of
+        // characters you can tell apart — narrower, `feature/…` rows all truncate to the same text.
+        className="flex max-h-[60vh] w-[520px] max-w-[90vw] flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
       >
         <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
           <input
@@ -62,7 +64,11 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
                   }`}
                 >
                   <GitBranch size={13} className="shrink-0" />
-                  <span className="min-w-0 flex-1 truncate">{b.name}</span>
+                  {/* A list stays one row per branch, so this one still truncates — the `title`
+                      is what makes the tail of an over-long name reachable. */}
+                  <span className="min-w-0 flex-1 truncate" title={b.name}>
+                    {b.name}
+                  </span>
                   {/* A locked branch reads as locked wherever branches are listed, not only in
                       the sidebar row that owns the toggle. */}
                   {b.is_locked && (
@@ -85,7 +91,11 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
                   className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
                 >
                   <Cloud size={13} className="shrink-0" />
-                  <span className="truncate">{b.name}</span>
+                  {/* `min-w-0 flex-1` as well as `truncate`: without the floor a flex item won't
+                      shrink below its content, so the name overflowed the row instead of eliding. */}
+                  <span className="min-w-0 flex-1 truncate" title={b.name}>
+                    {b.name}
+                  </span>
                 </button>
               ))}
             </div>

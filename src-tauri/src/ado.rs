@@ -122,6 +122,12 @@ pub fn detect_from_remote_url(remote_url: &str) -> Option<DetectedAdoRepo> {
     None
 }
 
+/// What a rejected token actually means, in words a user can act on. Worth a constant because the
+/// server's own answer says none of it — see the 203 handling in [`get_json`].
+pub(crate) const BAD_CREDENTIALS: &str = "Azure DevOps rejected the credentials — check that the \
+organization name is right and that the personal access token is valid, not expired, and has the \
+scopes CodeFlow needs (Code, Project and Team, and Work Items / Wiki if you use those)";
+
 pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, pat: &str) -> Result<T, String> {
     let res = client()
         .get(url)
@@ -134,6 +140,23 @@ pub(crate) async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, pat: &str)
         let body = res.text().await.unwrap_or_default();
         return Err(format!("Azure DevOps returned {status}: {body}"));
     }
+
+    // The trap this exists for: a wrong or expired PAT does **not** get a 401 out of
+    // `dev.azure.com`. The service treats the request as anonymous and answers the browser
+    // sign-in page — `203 Non-Authoritative Information`, `Content-Type: text/html`. `203` passes
+    // `is_success()`, so the check above waves it through and the only symptom left is the JSON
+    // decode below failing on `<!DOCTYPE html>`: "unexpected response from Azure DevOps", which
+    // reads like a bug in this app rather than "your token is wrong". Both signals are checked
+    // because either alone would be a guess about undocumented behaviour.
+    let is_html = res
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim_start().starts_with("text/html"));
+    if status.as_u16() == 203 || is_html {
+        return Err(BAD_CREDENTIALS.to_string());
+    }
+
     res.json::<T>().await.map_err(|e| format!("unexpected response from Azure DevOps: {e}"))
 }
 

@@ -9,8 +9,8 @@
  * That covers the overwhelming majority of jumps (an imported function, a class, a type, a local
  * helper) across every language the editor opens, at the cost of being defeated by the things a
  * grep is always defeated by: re-exports through several hops, overloads, and two unrelated files
- * declaring the same name. Ambiguity is handled by *ranking* rather than by picking blindly — and
- * when more than one candidate survives, they're all returned so Monaco shows the picker.
+ * declaring the same name. Ambiguity is handled by *ranking* rather than by picking blindly: every
+ * survivor is returned, best first, and the editor jumps to the best one instead of asking.
  */
 
 /** Extensions tried when an import omits one, in resolution order. */
@@ -174,10 +174,12 @@ export interface DefinitionHit {
  * Orders candidates so the first one is the jump a developer would have made.
  *
  * The ranking *is* the feature: a grep for a common name returns noise, and picking the first
- * result would send you somewhere arbitrary. In order of weight: the file the symbol was actually
- * imported from beats everything; then a real declaration keyword over a bare assignment; then an
- * exported one; then proximity to the file you're in. `self` matches — the line the cursor is
- * already on — are dropped, since "go to definition" that doesn't move is a dead end.
+ * result would send you somewhere arbitrary — and the editor jumps to the top-ranked hit rather
+ * than asking, so this order is the answer, not a suggestion. In order of weight: the file the
+ * symbol was actually imported from beats everything; then a declaration in the file you're
+ * already in, because a name that resolves locally resolves locally; then a real declaration
+ * keyword over a bare assignment; then an exported one; then proximity. `self` matches — the line
+ * the cursor is already on — are dropped, since "go to definition" that doesn't move is a dead end.
  */
 export function rankDefinitions(
   hits: readonly DefinitionHit[],
@@ -195,7 +197,12 @@ export function rankDefinitions(
       if (options.importedFrom && hit.path === options.importedFrom) score += 100;
       if (declarationKeyword.test(hit.text)) score += 40;
       if (/\bexport\b|\bpub\b|\bpublic\b/.test(hit.text)) score += 15;
-      if (hit.path === options.fromPath) score += 10;
+      // Big, because scope beats popularity: a helper declared right here is the answer even when
+      // some other file exports a better-looking declaration of the same name, and at the old
+      // weight it lost to one (`export function x` elsewhere outscored a local `function x`).
+      // Deliberately below the import bonus — an explicit `import { x }` means x is *not* declared
+      // in this file, so a same-file match is then a coincidence and the import still wins.
+      if (hit.path === options.fromPath) score += 70;
       else if (dirOf(hit.path) === fromDir) score += 5;
       // An import line naming the symbol is where it was *brought in*, not declared — useful as
       // a last resort, actively wrong as a first answer.

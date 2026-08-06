@@ -20,7 +20,9 @@ export function AiErrorBanner({ error, compact = false }: { error: ClaudeErrorIn
       : t("changes.quotaMessage");
 
   return (
-    <div className="rounded-lg border border-[var(--cf-danger)]/30 bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] p-4">
+    // Selectable: a provider error is the text most likely to be pasted into a search or an
+    // issue, and it's the one place the app has no copy button of its own.
+    <div className="select-text rounded-lg border border-[var(--cf-danger)]/30 bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] p-4">
       <p className={`whitespace-pre-wrap break-words ${size} text-[var(--cf-danger)]`}>{headline}</p>
 
       {error.isQuotaExceeded && (

@@ -279,7 +279,12 @@ export default function App() {
         <Sidebar />
         <div className="flex min-w-0 flex-1 flex-col">
           <TabBar />
-          <div className="cf-ambient-bg min-h-0 flex-1 overflow-hidden">
+          {/* A floor, not `min-h-0`, now that the terminal dock below yields space instead of
+              overflowing: without one, a dock taller than the window would win the whole column
+              and leave the view it docks *into* at zero height. This is the point past which the
+              dock shrinks instead. Still far below the content's own height, so the item shrinks
+              freely — which is all `min-h-0` was ever here for. */}
+          <div className="cf-ambient-bg min-h-[120px] flex-1 overflow-hidden">
             <MainContent />
           </div>
           <AnimatePresence initial={false}>

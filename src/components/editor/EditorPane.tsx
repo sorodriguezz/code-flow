@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
+import Editor, { DiffEditor, type Monaco, type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS, IRange } from "monaco-editor";
 import {
   Camera,
@@ -8,6 +8,7 @@ import {
   Columns2,
   Eye,
   FileCode,
+  GitCompare,
   Loader2,
   Save,
   SplitSquareHorizontal,
@@ -22,6 +23,7 @@ import { modelPathFor } from "../../lib/editorModel";
 import { languageForPath } from "../../lib/monacoLanguage";
 import { fileIconFor } from "../../lib/fileIcon";
 import { parseDbml } from "../../lib/dbml";
+import { reconstructSides } from "../../lib/diffText";
 import { anchorColor, anchorTagClass, parseAnchors } from "../../lib/anchors";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { useBookmarkStore } from "../../state/bookmarkStore";
@@ -33,7 +35,10 @@ import { EmptyState } from "../common/EmptyState";
 import type { FileDiffInfo, Project } from "../../types/domain";
 
 export type PreviewKind = "markdown" | "dbml" | null;
-export type ViewMode = "code" | "preview" | "split";
+/** `preview`/`split` are the rendered-output modes, and only mean anything for a file with a
+ * `PreviewKind`. `diff` is orthogonal to both: any file with uncommitted changes can be shown as
+ * before-vs-after, so it's offered on its own toggle rather than as a fourth button in that group. */
+export type ViewMode = "code" | "preview" | "split" | "diff";
 
 /** One open file, shared by every group showing it — content, dirtiness and load state belong to
  * the *file*, not to the pane looking at it, which is why splitting a file into two groups gives
@@ -214,9 +219,18 @@ export function EditorPane({
   const activeTab = useMemo(() => tabs.find((tab) => tab.path === activePath) ?? null, [tabs, activePath]);
   const content = activeTab?.content ?? "";
   const dirty = activeTab ? activeTab.content !== activeTab.originalContent : false;
-  const viewMode = activeTab?.viewMode ?? "code";
   const previewKind = previewKindFor(activePath);
   const dbmlSchema = useMemo(() => (previewKind === "dbml" ? parseDbml(content) : null), [previewKind, content]);
+  /** The file's uncommitted change, when it has one — what the diff mode shows both sides of. */
+  const activeDiff = activePath ? fileDiffFor(activePath) : undefined;
+  // A tab left in diff mode whose change then goes away — committed, discarded, staged from
+  // under it — falls back to the code rather than to an empty pane.
+  const viewMode: ViewMode =
+    activeTab?.viewMode === "diff" && !activeDiff ? "code" : (activeTab?.viewMode ?? "code");
+  const diffSides = useMemo(() => (viewMode === "diff" && activeDiff ? reconstructSides(activeDiff) : null), [
+    viewMode,
+    activeDiff,
+  ]);
 
   const tRef = useRef(t);
   useEffect(() => {
@@ -601,6 +615,23 @@ export function EditorPane({
           minimap: { enabled: true },
           fontSize: 13,
           automaticLayout: true,
+          /**
+           * Ctrl/Cmd+click jumps, it never opens the peek list.
+           *
+           * Monaco's default is `peek`: one result navigates, several pop the peek panel open and
+           * make you choose. But the choice is Monaco's to offer only because our lookup is a
+           * ranked guess (see `rankDefinitions`) that returns every survivor — and the first one is
+           * the jump a developer would have made, so making them confirm it is a click for nothing.
+           * `goto` takes the top-ranked result and moves the caret there, same as VS Code with
+           * `editor.gotoLocation.multipleDefinitions` set to `goto`. Peek is still reachable
+           * deliberately, via Alt+F12 / the context menu, which is where it belongs.
+           */
+          gotoLocation: {
+            multipleDefinitions: "goto",
+            multipleDeclarations: "goto",
+            multipleTypeDefinitions: "goto",
+            multipleImplementations: "goto",
+          },
           // Without a glyph margin there is nowhere to click for a breakpoint, and nowhere to
           // draw one.
           glyphMargin: true,
@@ -670,6 +701,23 @@ export function EditorPane({
                     ))}
                   </div>
                 )}
+                {/* Only for a file that has something to compare. A toggle rather than a mode in
+                    the group above it: the answer to "and back to what?" is always the code, so
+                    pressing it twice is the way out. */}
+                {activeDiff && (
+                  <button
+                    onClick={() => onViewMode(activeTab.path, viewMode === "diff" ? "code" : "diff")}
+                    title={t("editor.viewDiff")}
+                    aria-label={t("editor.viewDiff")}
+                    className={`flex h-5 w-5 items-center justify-center rounded-md ${
+                      viewMode === "diff"
+                        ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                        : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                    }`}
+                  >
+                    <GitCompare size={12} />
+                  </button>
+                )}
                 <button
                   onClick={captureSnapshot}
                   disabled={activeTab.loading}
@@ -719,6 +767,26 @@ export function EditorPane({
               <div className="flex h-full items-center justify-center">
                 <BouncingDots />
               </div>
+            ) : viewMode === "diff" && diffSides ? (
+              /* Read-only on purpose: this is the change as git has it, and the editable copy is
+                 one click away on the same toolbar. `renderSideBySide` is the whole request —
+                 before on the left, now on the right — so it never falls back to inline. */
+              <DiffEditor
+                height="100%"
+                language={languageForPath(activeTab.path)}
+                original={diffSides.original}
+                modified={diffSides.modified}
+                theme={monacoTheme}
+                options={{
+                  readOnly: true,
+                  fontSize: 13,
+                  renderSideBySide: true,
+                  useInlineViewWhenSpaceIsLimited: false,
+                  automaticLayout: true,
+                  maxComputationTime: 2000,
+                  scrollBeyondLastLine: false,
+                }}
+              />
             ) : viewMode === "preview" ? (
               previewKind === "markdown" ? (
                 <MarkdownPreview content={content} />

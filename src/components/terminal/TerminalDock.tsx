@@ -9,6 +9,7 @@ import { useUiStore } from "../../state/uiStore";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { TerminalPane } from "./TerminalPane";
 import { useT } from "../../state/languageStore";
+import { useShortcutHint } from "../../lib/useShortcutHint";
 import { EmptyState } from "../common/EmptyState";
 import { listShellProfiles } from "../../lib/tauri/commands";
 import type { ShellProfile } from "../../types/domain";
@@ -141,6 +142,7 @@ function ProfileMenu({ onPick, disabled }: { onPick: (profileId: string) => void
 /** Rendered by App.tsx inside an `AnimatePresence` so mount/unmount slides the dock in/out. */
 export function TerminalDock() {
   const t = useT();
+  const shortcutHint = useShortcutHint();
   const project = useWorkspaceStore((s) => s.activeProject());
   const byProject = useTerminalStore((s) => s.byProject);
   const openNew = useTerminalStore((s) => s.openNew);
@@ -197,7 +199,14 @@ export function TerminalDock() {
       // No `border-t`. The handle below draws the seam already, and a border here put a second line
       // 3.5px above it — a doubled divider whose top half was the static one and whose bottom half
       // was the one that lights up. One line, and it is the one you can grab.
-      className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
+      //
+      // Shrinkable, which it used not to be, and that was the bug: at `shrink-0` a dock taller than
+      // the room left in the column simply overflowed it, and what sits directly below is the
+      // status bar — a positioned element, so it painted *over* the overflow. The bottom rows of
+      // the terminal, which is where the prompt and everything you just typed are, went under the
+      // bar. Now the height is what it asks for when there's room and what's left when there
+      // isn't. `min-h-0` is the other half: without it this can't shrink past its own content.
+      className="flex min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
     >
       <ResizeHandle
         axis="y"
@@ -278,7 +287,10 @@ export function TerminalDock() {
         <button
           onClick={() => project && void openNew(project.id, project.local_path)}
           disabled={!project}
-          title={t("terminal.new")}
+          // The chord comes from the binding registry, not from a hand-written string beside the
+          // label: it's rebindable in Settings › Shortcuts, and a literal would go stale silently.
+          title={shortcutHint("terminal.new", t("terminal.new"))}
+          aria-label={t("terminal.new")}
           className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:opacity-40 dark:hover:bg-white/[0.08]"
         >
           <Plus size={13} />

@@ -10,6 +10,7 @@ import {
   Info,
   Loader2,
   MapPin,
+  MessageSquarePlus,
   Undo2,
   Wand2,
   X,
@@ -18,6 +19,7 @@ import {
   computeQualityGatePassed,
   formatFindingAsFixPrompt,
   locationLabel,
+  withExtraInstructions,
   type AnalysisFinding,
   type QualityGrades,
 } from "../../lib/parseAnalysis";
@@ -176,7 +178,12 @@ export function useResolveWithAi(
 
 /** The button + result text for `useResolveWithAi` — identical markup in `FindingCard` and
  * `PrCommentCard`, just pulled out so the two don't drift. Once resolved the button flips to
- * "resolve again" and the outcome is shown in a persistent, dismissable "resolved" card. */
+ * "resolve again" and the outcome is shown in a persistent, dismissable "resolved" card.
+ *
+ * Beside it is the note field: anything typed there is handed to `onClick` and appended to the
+ * generated prompt (see [`withExtraInstructions`]). Collapsed until asked for, because most fixes
+ * need nothing said about them — but the run writes to the working tree and takes minutes, so the
+ * cheapest possible moment to correct it is before it starts. */
 export function ResolveWithAiButton({
   resolving,
   resolution,
@@ -193,7 +200,8 @@ export function ResolveWithAiButton({
   runId?: string | null;
   /** When that run began — the card can be reopened long after, and the timer has to say so. */
   runStartedAt?: number | null;
-  onClick: () => void;
+  /** Receives whatever the user typed in the note field, already trimmed and `""` when empty. */
+  onClick: (extraInstructions: string) => void;
   onClear?: () => void;
   /** An extra action sharing this row — a PR comment's "resolve the thread on the host", which
    * belongs beside the fix that earned it rather than on a line of its own. */
@@ -203,27 +211,61 @@ export function ResolveWithAiButton({
 }) {
   const t = useT();
   const [logExpanded, setLogExpanded] = useState(false);
+  /** Extra instructions for the fix, kept whether the field is open or shut — collapsing it is
+   * "I'm done typing", not "throw that away", and a re-run usually wants the same note. */
+  const [extra, setExtra] = useState("");
+  const [noteOpen, setNoteOpen] = useState(false);
   // "Fix with AI" needs a write-capable agentic engine — hidden entirely for local models (Ollama)
   // so there's no dead button, unless there's already a resolution to show from an earlier run.
   // Keyed on the *fix* task's provider, which routing may point somewhere other than the default.
   const providerId = useTaskProvider("fix");
   const hideAi = !showAi || (!isAgenticProvider(providerId) && !resolution);
+  const hasNote = extra.trim().length > 0;
   if (hideAi && !trailing) return null;
   return (
     <>
       <div className="flex flex-wrap items-center gap-2 pt-1">
         {!hideAi && (
-          <button
-            onClick={onClick}
-            disabled={resolving}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
-          >
-            {resolving ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
-            {resolving ? t("finding.resolving") : resolution ? t("finding.resolveAgain") : t("finding.resolve")}
-          </button>
+          <>
+            <button
+              onClick={() => onClick(extra.trim())}
+              disabled={resolving}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] disabled:opacity-50 dark:hover:bg-white/[0.04]"
+            >
+              {resolving ? <Loader2 size={11} className="animate-spin" /> : <Wand2 size={11} />}
+              {resolving ? t("finding.resolving") : resolution ? t("finding.resolveAgain") : t("finding.resolve")}
+            </button>
+            <button
+              onClick={() => setNoteOpen((open) => !open)}
+              disabled={resolving}
+              title={t("finding.addInstructionsHint")}
+              aria-expanded={noteOpen}
+              className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-medium disabled:opacity-50 ${
+                // Shut over a note that's been written, the button is the only thing still saying
+                // the fix isn't the plain one — so it carries the accent instead of sitting quiet.
+                hasNote
+                  ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] text-[var(--cf-accent)]"
+                  : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+              }`}
+            >
+              <MessageSquarePlus size={11} />
+              {hasNote ? t("finding.instructionsAdded") : t("finding.addInstructions")}
+            </button>
+          </>
         )}
         {trailing}
       </div>
+      {!hideAi && noteOpen && (
+        <textarea
+          value={extra}
+          onChange={(e) => setExtra(e.target.value)}
+          disabled={resolving}
+          rows={3}
+          autoFocus
+          placeholder={t("finding.instructionsPlaceholder")}
+          className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
+        />
+      )}
       {resolving && runId && (
         <AiRunLog
           runId={runId}
@@ -239,7 +281,7 @@ export function ResolveWithAiButton({
             <Check size={11} />
             {t("finding.resolved")}
           </span>
-          <p className="text-[12px] leading-relaxed text-[var(--cf-text)]">{resolution}</p>
+          <p className="select-text text-[12px] leading-relaxed text-[var(--cf-text)]">{resolution}</p>
           {onClear && (
             <button
               onClick={onClear}
@@ -585,7 +627,10 @@ export function FindingCard({
       </button>
 
       {open && (
-        <div className="space-y-2 border-t border-[var(--cf-border)] px-3 py-2.5 text-[12px]">
+        // The substance of the finding — the reasoning, the suggestion, the example — is the part
+        // worth quoting into a commit message or a reply, so the whole body is selectable rather
+        // than just the fields that happen to render through the markdown class.
+        <div className="select-text space-y-2 border-t border-[var(--cf-border)] px-3 py-2.5 text-[12px]">
           {finding.why && (
             <p>
               <span className="font-medium text-[var(--cf-text)]">💭 {t("analyze.why")}: </span>
@@ -613,7 +658,7 @@ export function FindingCard({
               resolution={resolution}
               runId={runId}
               runStartedAt={runStartedAt}
-              onClick={() => void resolve(formatFindingAsFixPrompt(finding))}
+              onClick={(extra) => void resolve(withExtraInstructions(formatFindingAsFixPrompt(finding), extra))}
               onClear={clearResolution}
             />
           )}

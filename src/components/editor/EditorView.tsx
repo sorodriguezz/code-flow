@@ -1,6 +1,17 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
-import { Bookmark, Bug, FileCode, FileSearch, Files, Keyboard, Search, Tags } from "lucide-react";
+import {
+  Bookmark,
+  Bug,
+  FileCode,
+  FileSearch,
+  Files,
+  GitBranch,
+  Keyboard,
+  PanelRightClose,
+  Search,
+  Tags,
+} from "lucide-react";
 import { FileTree, type ExplorerCommand } from "./FileTree";
 import { FilePalette } from "./FilePalette";
 import { SearchPanel } from "./SearchPanel";
@@ -9,6 +20,7 @@ import { BookmarksPanel } from "./BookmarksPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
 import { EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
+import { ChangesPanel } from "../git/ChangesPanel";
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
 import { setDefinitionContext } from "../../lib/goToDefinition";
 import {
@@ -44,6 +56,10 @@ import { useShortcutHint } from "../../lib/useShortcutHint";
 
 const TREE_MIN = 200;
 const TREE_MAX = 480;
+/** The docked Changes panel. Wider floor than the file tree: its rows carry a status letter, a
+ * path and three action buttons, and the commit box under them has to fit a message. */
+const CHANGES_MIN = 240;
+const CHANGES_MAX = 560;
 const GROUP_MAX = 2000;
 /** Matches the `w-px` on `ResizeHandle`, which the even-split maths has to account for. */
 const HANDLE_WIDTH = 1;
@@ -92,8 +108,20 @@ export function EditorView() {
   const pendingEditorLine = useUiStore((s) => s.pendingEditorLine);
   const clearPendingEditorPath = useUiStore((s) => s.clearPendingEditorPath);
   const treeWidth = useLayoutStore((s) => s.sizes.editorTreeWidth);
+  const changesWidth = useLayoutStore((s) => s.sizes.editorChangesWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
+  /** Files with something uncommitted, counted the way the Changes tab counts them — one per
+   * path, however many lists it appears in. Shown on the toggle so a closed panel still says
+   * there's something in it. */
+  const uncommittedCount = useMemo(() => {
+    if (!status) return 0;
+    const paths = new Set<string>();
+    for (const list of [status.staged, status.unstaged, status.untracked, status.conflicted]) {
+      for (const entry of list) paths.add(entry.path);
+    }
+    return paths.size;
+  }, [status]);
 
   /** Every open file, once, however many groups are showing it. */
   const [tabs, setTabs] = useState<OpenTab[]>([]);
@@ -102,6 +130,9 @@ export function EditorView() {
   const [saving, setSaving] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<"files" | "search" | "anchors" | "bookmarks" | "debug">("files");
+  /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
+   * step into while committing, not a layout preference — the editor's resting state is code. */
+  const [changesOpen, setChangesOpen] = useState(false);
   /** The snapshot being composed, or `null` when the dialog is closed. */
   const [codeSnap, setCodeSnap] = useState<CodeSnapTarget | null>(null);
   /** Which group should jump where. Scoped to a group because "go to this search hit" means the
@@ -438,6 +469,27 @@ export function EditorView() {
       void openFile(path, { pin: true });
     },
     [openFile],
+  );
+
+  /** Opens a changed file's before/after in the focused group. A real tab rather than a dialog:
+   * it's the same file the code tab shows, in the other of the two ways of reading it, so the
+   * toolbar's diff toggle is the way back and the tab can be left open beside the others. */
+  const openDiffTab = useCallback(
+    async (path: string) => {
+      await openFile(path, { pin: true });
+      patchTab(path, { viewMode: "diff" });
+    },
+    [openFile, patchTab],
+  );
+
+  /** A row click in the docked panel: the file, at its first change. Falls back to a plain open
+   * for a file the diff couldn't place a line in — a new file, or one that's only been renamed. */
+  const openChangedFile = useCallback(
+    (path: string, line?: number) => {
+      if (line) openHit(path, line);
+      else void openFile(path, { pin: true });
+    },
+    [openHit, openFile],
   );
 
   // Ctrl/Cmd+click "go to definition" is registered globally on Monaco, so it needs telling which
@@ -792,6 +844,66 @@ export function EditorView() {
             );
           })}
         </div>
+        {/* The Changes dock: the same panel the Changes screen is, on the other side of the code.
+            Its rows open files here instead of into a diff pane of their own — see `ChangesPanel`
+            — which is what makes it a companion to the editor rather than a second copy of a
+            screen the app already has.
+
+            Open, it runs flush to the window edge and its close button rides in its own header.
+            Shut, a narrow rail holds the button instead. One or the other, never both: a rail kept
+            up alongside the open panel was a full-height column of empty surface that pushed the
+            panel a button's width off the edge it is docked to. */}
+        {changesOpen ? (
+          <>
+            <ResizeHandle
+              axis="x"
+              value={changesWidth}
+              min={CHANGES_MIN}
+              max={CHANGES_MAX}
+              // Anchored to the right, so dragging left — toward the code — has to grow it.
+              invert
+              onChange={(w) => setSize("editorChangesWidth", w)}
+              onCommit={(w) => commitSize("editorChangesWidth", w)}
+            />
+            <div
+              style={{ width: changesWidth }}
+              className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
+            >
+              <ChangesPanel
+                onOpenFile={openChangedFile}
+                onOpenDiff={(path) => void openDiffTab(path)}
+                headerAction={
+                  <button
+                    onClick={() => setChangesOpen(false)}
+                    title={t("editor.toggleChanges")}
+                    aria-label={t("editor.toggleChanges")}
+                    aria-expanded
+                    className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                  >
+                    <PanelRightClose size={13} />
+                  </button>
+                }
+              />
+            </div>
+          </>
+        ) : (
+          <div className="flex w-9 shrink-0 flex-col items-center gap-1 bg-[var(--cf-surface)] py-1.5">
+            <button
+              onClick={() => setChangesOpen(true)}
+              title={t("editor.toggleChanges")}
+              aria-label={t("editor.toggleChanges")}
+              aria-expanded={false}
+              className="relative flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+            >
+              <GitBranch size={15} className="relative" />
+              {/* Only while shut — which is the only state this rail has. Open, the panel itself is
+                  the count, and a badge over it would be the same number twice. */}
+              {uncommittedCount > 0 && (
+                <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />
+              )}
+            </button>
+          </div>
+        )}
       </div>
       {paletteOpen && (
         <FilePalette

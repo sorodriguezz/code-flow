@@ -161,7 +161,9 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
           ) : (
             <div className="flex flex-col items-center justify-center gap-2 py-10 text-center">
               <ShieldCheck size={28} className="text-[var(--cf-success)]" />
-              <p className="max-w-xs text-[13px] text-[var(--cf-text-muted)]">
+              {/* `summary` here is the model's own one-liner verdict, short enough to have
+                  skipped the markdown treatment — still its words, so still selectable. */}
+              <p className="max-w-xs select-text text-[13px] text-[var(--cf-text-muted)]">
                 {summary || t("analyze.noFindings")}
               </p>
             </div>

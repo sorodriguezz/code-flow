@@ -348,6 +348,8 @@ pub fn run() {
             commands::checkpoint_cmd::list_ai_checkpoints,
             commands::checkpoint_cmd::restore_ai_checkpoint,
             commands::checkpoint_cmd::delete_ai_checkpoint,
+            commands::ado_cmd::ado_verify_pat,
+            commands::ado_cmd::ado_check_org,
             commands::ado_cmd::ado_list_projects,
             commands::ado_cmd::ado_list_repos,
             commands::ado_cmd::auto_link_project,

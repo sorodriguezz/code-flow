@@ -884,6 +884,19 @@ export const sendChatMessage = (
 
 // ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------
 
+/**
+ * Checks an org + PAT pair against Azure DevOps *before* it is saved, resolving to the display
+ * name of the account the token belongs to and rejecting with why it didn't work.
+ *
+ * The token is passed in rather than read from the keychain precisely so this can gate the save:
+ * storing first would let a bad token overwrite a good one.
+ */
+export const adoVerifyPat = (org: string, pat: string) => invoke<string>("ado_verify_pat", { org, pat });
+
+/** The same check for an org whose token is already in the keychain — resolves to the account
+ * name, rejects with why the saved connection no longer works (typically an expired PAT). */
+export const adoCheckOrg = (org: string) => invoke<string>("ado_check_org", { org });
+
 export const adoListProjects = (org: string) => invoke<AdoProject[]>("ado_list_projects", { org });
 
 export const adoListRepos = (org: string, project: string) =>

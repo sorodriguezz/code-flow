@@ -6,6 +6,7 @@ import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
 import { useThemeStore } from "../../state/themeStore";
 import { languageForPath } from "../../lib/monacoLanguage";
+import { reconstructSides } from "../../lib/diffText";
 import { fileStatusLabelKey, fileStatusColor as statusColor } from "../../lib/fileStatus";
 
 type ViewMode = "unified" | "split";
@@ -14,26 +15,6 @@ function lineClasses(origin: string): string {
   if (origin === "+") return "bg-[color-mix(in_oklab,var(--cf-success)_14%,transparent)] text-[var(--cf-text)]";
   if (origin === "-") return "bg-[color-mix(in_oklab,var(--cf-danger)_14%,transparent)] text-[var(--cf-text)]";
   return "text-[var(--cf-text-muted)]";
-}
-
-/** Rebuilds the two full-text sides of a file's diff from its hunks — the diff commands
- * already run with (near-)unlimited context lines, so for anything but a huge commit-view
- * diff this reproduces the whole original/modified file, which is what the side-by-side
- * Monaco DiffEditor needs (it diffs two full texts itself, not a hunk list). */
-function reconstructSides(file: FileDiffInfo): { original: string; modified: string } {
-  const original: string[] = [];
-  const modified: string[] = [];
-  for (const hunk of file.hunks) {
-    for (const line of hunk.lines) {
-      if (line.origin === "-") original.push(line.content);
-      else if (line.origin === "+") modified.push(line.content);
-      else {
-        original.push(line.content);
-        modified.push(line.content);
-      }
-    }
-  }
-  return { original: original.join("\n"), modified: modified.join("\n") };
 }
 
 const MIN_SPLIT_HEIGHT = 120;
@@ -211,9 +192,10 @@ function DiffViewImpl({
     return <EmptyState icon={FileDiff} title={t("diff.noChanges")} subtitle={t("diff.noChangesHint")} />;
   }
 
-  /** Shared by both modes, so the close button can't exist in one view and not the other. */
+  /** Shared by both modes, so the close button can't exist in one view and not the other. Sits
+   * outside the scroll container in both, so it stays put while the diff scrolls under it. */
   const toolbar = (
-    <div className="flex items-center justify-end gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5">
+    <div className="flex shrink-0 items-center justify-end gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5">
       <div className="flex items-center gap-0.5 rounded-md border border-[var(--cf-border)] p-0.5">
         <button
           onClick={() => setMode("unified")}
@@ -249,9 +231,44 @@ function DiffViewImpl({
 
   if (mode === "split") {
     return (
-      <div className="flex h-full">
+      <div className="flex h-full flex-col">
+        {toolbar}
+        <div className="flex min-h-0 flex-1">
+          <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
+            <div className="divide-y divide-[var(--cf-border)]">
+              {files.map((file, i) => {
+                const color = statusColor(file.status);
+                return (
+                  <div key={i}>
+                    <div
+                      className="sticky top-0 z-10 flex items-center gap-2 border-b-2 bg-[var(--cf-surface-raised)] px-3 py-2 text-[12px] font-semibold shadow-sm"
+                      style={{ borderBottomColor: color, willChange: "transform", contain: "paint" }}
+                    >
+                      <span
+                        className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
+                        style={{ background: `color-mix(in oklab, ${color} 18%, transparent)`, color }}
+                      >
+                        {t(fileStatusLabelKey(file.status))}
+                      </span>
+                      <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
+                    </div>
+                    <SplitFileDiff file={file} height={splitHeightOf(file)} />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <ChangeMap files={files} containerRef={scrollRef} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      {toolbar}
+      <div className="flex min-h-0 flex-1">
         <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
-          {toolbar}
           <div className="divide-y divide-[var(--cf-border)]">
             {files.map((file, i) => {
               const color = statusColor(file.status);
@@ -269,7 +286,29 @@ function DiffViewImpl({
                     </span>
                     <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
                   </div>
-                  <SplitFileDiff file={file} height={splitHeightOf(file)} />
+                  {file.hunks.map((hunk, hIdx) => (
+                    // `select-text` re-enables selection here (the app-wide `body { user-select: none }`
+                    // otherwise makes this custom-rendered diff feel like an image). The line-number
+                    // gutters keep `select-none`, so a copy grabs the code without the line numbers —
+                    // matching what the Monaco-backed split view already allows.
+                    <div key={hIdx} className="select-text font-mono text-[12px] leading-5">
+                      <div className="bg-[var(--cf-accent-soft)] px-3 py-1 text-[var(--cf-accent)]">{hunk.header}</div>
+                      {hunk.lines.map((line, lIdx) => (
+                        <div key={lIdx} className={`flex gap-3 px-3 ${lineClasses(line.origin)}`}>
+                          <span className="w-8 shrink-0 select-none text-right text-[var(--cf-text-muted)]">
+                            {line.old_lineno ?? ""}
+                          </span>
+                          <span className="w-8 shrink-0 select-none text-right text-[var(--cf-text-muted)]">
+                            {line.new_lineno ?? ""}
+                          </span>
+                          <span className="whitespace-pre-wrap break-all">
+                            {line.origin === "+" || line.origin === "-" ? line.origin : " "}
+                            {line.content}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
                 </div>
               );
             })}
@@ -277,59 +316,6 @@ function DiffViewImpl({
         </div>
         <ChangeMap files={files} containerRef={scrollRef} />
       </div>
-    );
-  }
-
-  return (
-    <div className="flex h-full">
-      <div ref={scrollRef} className="min-w-0 flex-1 overflow-auto">
-        {toolbar}
-        <div className="divide-y divide-[var(--cf-border)]">
-          {files.map((file, i) => {
-            const color = statusColor(file.status);
-            return (
-              <div key={i}>
-                <div
-                  className="sticky top-0 z-10 flex items-center gap-2 border-b-2 bg-[var(--cf-surface-raised)] px-3 py-2 text-[12px] font-semibold shadow-sm"
-                  style={{ borderBottomColor: color, willChange: "transform", contain: "paint" }}
-                >
-                  <span
-                    className="rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide"
-                    style={{ background: `color-mix(in oklab, ${color} 18%, transparent)`, color }}
-                  >
-                    {t(fileStatusLabelKey(file.status))}
-                  </span>
-                  <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
-                </div>
-                {file.hunks.map((hunk, hIdx) => (
-                  // `select-text` re-enables selection here (the app-wide `body { user-select: none }`
-                  // otherwise makes this custom-rendered diff feel like an image). The line-number
-                  // gutters keep `select-none`, so a copy grabs the code without the line numbers —
-                  // matching what the Monaco-backed split view already allows.
-                  <div key={hIdx} className="select-text font-mono text-[12px] leading-5">
-                    <div className="bg-[var(--cf-accent-soft)] px-3 py-1 text-[var(--cf-accent)]">{hunk.header}</div>
-                    {hunk.lines.map((line, lIdx) => (
-                      <div key={lIdx} className={`flex gap-3 px-3 ${lineClasses(line.origin)}`}>
-                        <span className="w-8 shrink-0 select-none text-right text-[var(--cf-text-muted)]">
-                          {line.old_lineno ?? ""}
-                        </span>
-                        <span className="w-8 shrink-0 select-none text-right text-[var(--cf-text-muted)]">
-                          {line.new_lineno ?? ""}
-                        </span>
-                        <span className="whitespace-pre-wrap break-all">
-                          {line.origin === "+" || line.origin === "-" ? line.origin : " "}
-                          {line.content}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      <ChangeMap files={files} containerRef={scrollRef} />
     </div>
   );
 }

@@ -81,7 +81,9 @@ export function AiRunLog({
   const body = expanded && lines.length > 0 && (
     <div
       ref={scrollRef}
-      className="max-h-48 overflow-auto border-t border-[var(--cf-border)] px-2.5 py-1.5 font-mono text-[10px] leading-[1.5]"
+      // Selectable: this is the run's own output, and the reason anyone expands it is to take a
+      // stack trace or a path out of it and go look.
+      className="max-h-48 select-text overflow-auto border-t border-[var(--cf-border)] px-2.5 py-1.5 font-mono text-[10px] leading-[1.5]"
     >
       {lines.map((line, i) => (
         <div

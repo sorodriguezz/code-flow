@@ -1484,7 +1484,10 @@ function ChatBubble({ message }: { message: ChatMessage }) {
   return (
     <div className="space-y-1">
       <div
-        className={`group relative rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
+        // Selectable as a bubble rather than only through the markdown class inside it: a plain
+        // (non-markdown) message — a user's own turn, a cancelled run's text — renders as a bare
+        // string here and would otherwise be the one kind of message you couldn't quote back.
+        className={`group relative select-text rounded-lg px-2.5 py-1.5 text-[12px] leading-relaxed ${
           message.role === "user"
             ? "ml-auto max-w-[85%] whitespace-pre-wrap border border-[color-mix(in_oklab,var(--cf-accent)_30%,transparent)] bg-[color-mix(in_oklab,var(--cf-accent)_14%,var(--cf-surface))] text-[var(--cf-text)]"
             : "mr-auto max-w-[85%] bg-[color-mix(in_oklab,var(--cf-accent)_6%,var(--cf-surface))] text-[var(--cf-text)]"

@@ -732,6 +732,25 @@ body.cf-dragging * {
   background: var(--cf-border);
 }
 
+/* Rendered prose is selectable, wherever it appears.
+ *
+ * `body` turns selection off app-wide, which is right for chrome — a click-drag across a file tree
+ * or a tab strip should be a drag, not a smear of highlighted labels. Prose is the opposite case:
+ * an AI answer, a review finding, a release note and a markdown preview are all *text the reader
+ * came for*, and the first thing anyone does with a useful paragraph is take part of it. The copy
+ * buttons dotted around only ever offer the whole message, which is not the same thing.
+ *
+ * Both markdown classes carry it, so it follows the rendering rather than the screen: anything
+ * routed through `renderMarkdown`/`renderInlineMarkdown` is selectable by construction, and a new
+ * panel gets it without knowing this rule exists. `user-select` inherits, so the class on the
+ * container covers every element inside it. The `-webkit-` pair is not optional here — the app runs
+ * in a WKWebView on macOS. */
+.cf-markdown-preview,
+.cf-markdown-inline {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 .cf-markdown-preview {
   color: var(--cf-text);
   font-size: 13.5px;

@@ -27,6 +27,7 @@ export type ShortcutId =
   | "panel.sidebar"
   | "panel.ai"
   | "panel.terminal"
+  | "terminal.new"
   | "view.graph"
   | "view.changes"
   | "view.editor"
@@ -223,6 +224,24 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "shortcuts.cmdTerminal",
     defaultChord: "Mod+J",
     run: () => useTerminalStore.getState().togglePanel(),
+  },
+  {
+    id: "terminal.new",
+    group: "panels",
+    labelKey: "shortcuts.cmdTerminalNew",
+    // What VS Code binds "Create New Terminal" to, and distinct from Mod+J above: that one shows
+    // and hides the dock, this one puts a shell in it.
+    defaultChord: "Mod+Shift+`",
+    run: () => {
+      // A shell is opened *in* a repository — there's no sensible cwd without one, and the `+`
+      // button in the dock is disabled for the same reason.
+      const project = useWorkspaceStore.getState().activeProject();
+      if (!project) return;
+      // No profile id: that's what makes this honour the default chosen in Settings › Terminal,
+      // resolved back in `shell_profiles::choose` (requested → configured → platform default).
+      // `openNew` raises the dock itself, so this works with the panel closed.
+      void useTerminalStore.getState().openNew(project.id, project.local_path);
+    },
   },
 
   {

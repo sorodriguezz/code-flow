@@ -204,6 +204,22 @@ export function formatFindingAsFixPrompt(finding: AnalysisFinding): string {
   return lines.join("\n");
 }
 
+/**
+ * Folds the user's own words into a generated fix prompt.
+ *
+ * A finding is the model's reading of the diff, and it is regularly *nearly* right — correct
+ * about the defect, wrong about the remedy, or missing the one constraint that isn't in the diff
+ * ("that helper is deprecated", "keep the signature, callers are outside this repo"). Without
+ * somewhere to say it the only options are accepting a fix you know is wrong or writing it by
+ * hand, so this goes last and is labelled as taking precedence: it is the one part of the prompt
+ * a human actually typed.
+ */
+export function withExtraInstructions(prompt: string, extra: string): string {
+  const trimmed = extra.trim();
+  if (!trimmed) return prompt;
+  return `${prompt}\n\nInstrucciones adicionales del usuario (tienen prioridad si contradicen lo anterior):\n${trimmed}`;
+}
+
 /** The **fix-pack**: the review's findings as an actionable JSON artifact (schema
  * `pr-review-fixpack/v1`) another agent can consume to apply the fixes — fields renamed to action
  * terms (`problema`/`causa`/`correccion`) rather than the review's own. Provider-neutral: it's a
