@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, Plus, ShieldAlert, X } from "lucide-react";
+import { Boxes, ChevronDown, Folder, Plus, ShieldAlert, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
-import { useApiStore, type ApiTab } from "../../state/apiStore";
+import { useApiStore, type ApiEntityTab, type ApiTab } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore } from "../../state/collabStore";
 import { useRowHoverStore } from "../../state/rowHoverStore";
@@ -22,6 +22,8 @@ import { API_PROTOCOLS, type ApiProtocol } from "../../types/api";
 export function RequestTabs() {
   const t = useT();
   const openTabs = useApiStore((s) => s.openTabs);
+  const entityTabs = useApiStore((s) => s.entityTabs);
+  const tabOrder = useApiStore((s) => s.tabOrder);
   const activeTabId = useApiStore((s) => s.activeTabId);
   const setActiveTab = useApiStore((s) => s.setActiveTab);
   const closeTab = useApiStore((s) => s.closeTab);
@@ -55,13 +57,26 @@ export function RequestTabs() {
     el.scrollLeft += e.deltaY;
   };
 
-  const requestClose = async (tab: ApiTab) => {
+  const requestClose = async (tab: ApiTab | ApiEntityTab) => {
     if (tab.dirty) {
       const name = tab.name || t("api.untitledRequest");
       if (!(await confirmAction(t("editor.closeDirtyConfirm", { name })))) return;
     }
     closeTab(tab.id);
   };
+
+  /**
+   * One strip, two lists. `tabOrder` is the only thing that knows how they interleave — a tab is
+   * looked up in whichever list holds it, so a collection opened between two requests stays where
+   * it was opened rather than being herded to one end.
+   */
+  type StripEntry = { kind: "request"; tab: ApiTab } | { kind: "entity"; tab: ApiEntityTab };
+  const strip = tabOrder.flatMap<StripEntry>((id) => {
+    const request = openTabs.find((tab) => tab.id === id);
+    if (request) return [{ kind: "request", tab: request }];
+    const entity = entityTabs.find((tab) => tab.id === id);
+    return entity ? [{ kind: "entity", tab: entity }] : [];
+  });
 
   return (
     <div className="flex shrink-0 items-stretch border-b border-[var(--cf-border)] bg-[var(--cf-bg)]">
@@ -71,7 +86,7 @@ export function RequestTabs() {
         role="tablist"
         className="cf-tab-strip flex min-w-0 flex-1 items-stretch overflow-x-auto"
       >
-        {openTabs.map((tab) => {
+        {strip.map(({ kind, tab }) => {
           const active = tab.id === activeTabId;
           const hoverKey = `apitab:${tab.id}`;
           // A frozen record is the one thing on this strip that is not about the tab's own state:
@@ -81,9 +96,12 @@ export function RequestTabs() {
           // `staleAgainst` catches the case it structurally cannot see — a change that arrived while
           // this tab held unsaved edits. To the person looking at the tab they are the same
           // sentence: someone else touched this, and you have to say which version wins.
+          // Settings tabs are outside all of this: the sync layer freezes requests, and a
+          // collection's own row is last-write-wins with no decision to owe anyone.
           const inConflict =
-            tab.staleAgainst !== undefined ||
-            (tab.requestId !== null && conflicted.has(tab.requestId));
+            kind === "request" &&
+            (tab.staleAgainst !== undefined ||
+              (tab.requestId !== null && conflicted.has(tab.requestId)));
           return (
             <div
               key={tab.id}
@@ -93,7 +111,7 @@ export function RequestTabs() {
               }}
               role="tab"
               aria-selected={active}
-              title={tab.draft.url || tab.name || t("api.untitledRequest")}
+              title={kind === "request" ? tab.draft.url || tab.name || t("api.untitledRequest") : tab.name}
               onPointerEnter={() => useRowHoverStore.getState().enter(hoverKey)}
               onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
               // Kills press-and-sweep text selection without costing the `click` that follows.
@@ -117,14 +135,20 @@ export function RequestTabs() {
                   }`}
                 />
               )}
-              <span
-                className="shrink-0 font-mono text-[10px] font-semibold"
-                style={{ color: badgeColor(tab.draft.protocol, tab.draft.method) }}
-              >
-                {badgeLabel(tab.draft.protocol, tab.draft.method)}
-              </span>
+              {kind === "request" ? (
+                <span
+                  className="shrink-0 font-mono text-[10px] font-semibold"
+                  style={{ color: badgeColor(tab.draft.protocol, tab.draft.method) }}
+                >
+                  {badgeLabel(tab.draft.protocol, tab.draft.method)}
+                </span>
+              ) : tab.kind === "collection" ? (
+                <Boxes size={12} className="shrink-0 text-[var(--cf-accent)]" />
+              ) : (
+                <Folder size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+              )}
               <span className={`truncate ${tab.dirty ? "italic" : ""}`}>
-                {tab.name || t("api.untitledRequest")}
+                {tab.name || t(kind === "request" ? "api.untitledRequest" : "api.untitledCollection")}
               </span>
               {inConflict && (
                 <button

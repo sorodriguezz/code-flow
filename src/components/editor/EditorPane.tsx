@@ -21,7 +21,7 @@ import { InlineEditWidget } from "./InlineEditWidget";
 import type { CodeSnapTarget } from "./CodeSnapModal";
 import { modelPathFor } from "../../lib/editorModel";
 import { languageForPath } from "../../lib/monacoLanguage";
-import { fileIconFor } from "../../lib/fileIcon";
+import { FileGlyph } from "../common/FileGlyph";
 import { parseDbml } from "../../lib/dbml";
 import { reconstructSides } from "../../lib/diffText";
 import { anchorColor, anchorTagClass, parseAnchors } from "../../lib/anchors";
@@ -30,6 +30,8 @@ import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useTabDragStore, type TabDrag } from "../../state/tabDragStore";
 import { useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
+import { installEditorShortcuts } from "../../lib/editorKeybindings";
+import { useShortcutsStore } from "../../state/shortcutsStore";
 import { BouncingDots } from "../common/BouncingDots";
 import { EmptyState } from "../common/EmptyState";
 import type { FileDiffInfo, Project } from "../../types/domain";
@@ -105,7 +107,6 @@ function changedLineRanges(fileDiff: FileDiffInfo | undefined): { start: number;
 function Breadcrumb({ path, dirty, loading }: { path: string; dirty: boolean; loading: boolean }) {
   const segments = path.split("/");
   const name = segments.pop()!;
-  const { Icon, color } = fileIconFor(path);
   return (
     <div className="flex h-6 shrink-0 items-center gap-0.5 overflow-hidden border-b border-[var(--cf-border)] px-3 text-[11px] text-[var(--cf-text-muted)]">
       {segments.map((segment, i) => (
@@ -114,7 +115,9 @@ function Breadcrumb({ path, dirty, loading }: { path: string; dirty: boolean; lo
           <ChevronRight size={11} className="opacity-60" />
         </span>
       ))}
-      <Icon size={11} className="mr-1 shrink-0" style={{ color }} />
+      <span className="mr-1 flex shrink-0 items-center">
+        <FileGlyph path={path} size={11} />
+      </span>
       <span className="truncate text-[var(--cf-text)]">{name}</span>
       {dirty && <span className="ml-1 shrink-0 text-[var(--cf-warning)]">•</span>}
       {loading && <Loader2 size={11} className="ml-1 shrink-0 animate-spin" />}
@@ -437,26 +440,31 @@ export function EditorPane({
     // Typing or clicking in a pane is what makes it the active group — the same "focus follows
     // the editor you touched" rule VS Code uses to decide where the next file opens.
     editorInstance.onDidFocusEditorWidget(() => onFocusRef.current());
-    // Ctrl+I is registered on the editor rather than on `window` so it only ever fires with the
-    // caret in the code — and so Monaco's own keybinding service swallows it before the browser
-    // or another panel sees it.
-    editorInstance.addCommand(monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.KeyI, () => {
-      const model = editorInstance.getModel();
-      const selection = editorInstance.getSelection();
-      if (!model || !selection) return;
-      // With nothing selected, the current line is the implied target — asking someone to select
-      // a line before rewriting it is a step the editor can take for them.
-      const range = selection.isEmpty()
-        ? new monacoInstance.Range(
-            selection.startLineNumber,
-            1,
-            selection.startLineNumber,
-            model.getLineMaxColumn(selection.startLineNumber),
-          )
-        : selection;
-      const text = model.getValueInRange(range);
-      if (!text.trim()) return;
-      setInlineEdit({ selection: text, range });
+    // An action with an id rather than `addCommand` with a chord baked in. Still registered on the
+    // editor, so it only ever fires with the caret in the code and Monaco swallows it before the
+    // browser or another panel sees it — but the *key* now comes from the shortcut registry via
+    // `applyEditorKeybindings`, which is what makes it rebindable like everything else.
+    editorInstance.addAction({
+      id: "cf-inline-edit",
+      label: tRef.current("shortcuts.inlineEdit"),
+      run: () => {
+        const model = editorInstance.getModel();
+        const selection = editorInstance.getSelection();
+        if (!model || !selection) return;
+        // With nothing selected, the current line is the implied target — asking someone to select
+        // a line before rewriting it is a step the editor can take for them.
+        const range = selection.isEmpty()
+          ? new monacoInstance.Range(
+              selection.startLineNumber,
+              1,
+              selection.startLineNumber,
+              model.getLineMaxColumn(selection.startLineNumber),
+            )
+          : selection;
+        const text = model.getValueInRange(range);
+        if (!text.trim()) return;
+        setInlineEdit({ selection: text, range });
+      },
     });
     // Registered as a Monaco action rather than a plain command so it also appears in the
     // right-click menu, next to copy — which is where anyone looking for "copy this as an
@@ -497,6 +505,17 @@ export function EditorPane({
     });
     setEditorReady((n) => n + 1);
   };
+
+  // Re-installed on every change to the overrides rather than once at mount: rebinding ⌘D in
+  // settings has to reach an editor that is already open, and the disposable is what takes the
+  // previous handler back out before the next one goes in.
+  const overrides = useShortcutsStore((s) => s.overrides);
+  useEffect(() => {
+    const monacoInstance = monacoRef.current;
+    if (!monacoInstance) return;
+    const applied = installEditorShortcuts(monacoInstance, overrides);
+    return () => applied.dispose();
+  }, [overrides, editorReady]);
 
   /** Applies an AI rewrite through Monaco's edit stack, so it joins the undo history and shows
    * up as an ordinary unsaved change instead of appearing from nowhere. */

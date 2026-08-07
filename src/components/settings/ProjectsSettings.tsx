@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ColorSwatchPicker } from "../common/ColorSwatchPicker";
+import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 import { useToastStore } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -349,7 +350,7 @@ export function ProjectsSettings() {
         <button
           disabled={!newName.trim()}
           onClick={async () => {
-            await addWorkspace(newName.trim(), "briefcase", "#6366f1");
+            await addWorkspace(newName.trim(), "briefcase", DEFAULT_WORKSPACE_COLOR);
             setNewName("");
           }}
           className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"

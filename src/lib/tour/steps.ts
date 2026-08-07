@@ -1,5 +1,7 @@
+import { Bot, ClipboardList, Database, MonitorSmartphone, Send, type LucideIcon } from "lucide-react";
 import type { TranslationKey } from "../i18n/translations";
 import type { Chord } from "../keys";
+import type { ApiWorkspace, MainView } from "../../state/uiStore";
 import type { TourStage } from "./stage";
 
 /** Where the card goes relative to whatever the step is pointing at. */
@@ -15,7 +17,7 @@ export type TourPlacement =
 
 export interface TourStep {
   id: string;
-  /** Which chapter the progress chip names. Steps are grouped so 22 of them read as five parts. */
+  /** Which chapter the progress chip names. Steps are grouped so a tour reads as a few parts. */
   chapterKey: TranslationKey;
   titleKey: TranslationKey;
   bodyKey: TranslationKey;
@@ -24,10 +26,10 @@ export interface TourStep {
    * wins.
    *
    * A list rather than one selector because several of these controls only exist under conditions
-   * the tour can't manufacture: the pre-commit review button appears once there is something
-   * uncommitted, and a user taking the tour on a clean checkout has nothing for it to point at. The
-   * fallback is the tab that holds it, which always exists, so the step still lands somewhere real
-   * instead of degrading to a floating card.
+   * the tour can't manufacture: the request builder appears once a request is open, the roster rail
+   * once the workspace has an agent, and a user taking a tour on an empty workspace has nothing for
+   * them to point at. The fallback is the view that holds them, which always exists, so the step
+   * still lands somewhere real instead of degrading to a floating card.
    */
   anchors?: string[];
   placement?: TourPlacement;
@@ -48,14 +50,30 @@ export interface TourStep {
 }
 
 /**
- * The tour, in the order it is walked.
+ * Which tour is being walked.
  *
- * The order is the argument. It goes **outside in**: what a workspace is, then what goes in it,
- * then the panels around the work, then the AI that reads the work, then the workspace-wide tools,
- * and only at the end the settings — because settings is where you go once you know what you are
- * configuring, and a tour that opens with a preferences dialog has taught nothing yet.
+ * **There is one tour for the main window and one per workspace app, rather than a single tour over
+ * everything.** The single one covered all of it and was, by the only measure that counts, too
+ * long: people skipped it, and skipping is all-or-nothing — the reader who bailed at step 20 also
+ * lost the four settings steps they had not reached yet. Splitting it puts the length in the
+ * reader's hands. The main tour is what the app opens with and is scoped to the window it opens on;
+ * everything inside an app is behind that app's own launcher, taken when and if that app is the one
+ * you are about to use.
  */
-export const TOUR_STEPS: TourStep[] = [
+export type TourId = "main" | "api" | "db" | "agents" | "stories" | "remote";
+
+/**
+ * The one-screen tour of the main window.
+ *
+ * The order goes **outside in**: what a workspace is, then the repositories in it, then the three
+ * views onto one repository, then the panels around the work, then the workspace apps as a set, and
+ * only at the end the settings — because settings is where you go once you know what you are
+ * configuring, and a tour that opens with a preferences dialog has taught nothing yet.
+ *
+ * What is deliberately *not* here: anything that lives inside one of the five workspace apps. Those
+ * are one step each at most, naming the app and saying it has a tour of its own.
+ */
+const MAIN_TOUR: TourStep[] = [
   {
     id: "welcome",
     chapterKey: "tour.chapter.start",
@@ -71,28 +89,22 @@ export const TOUR_STEPS: TourStep[] = [
     anchors: ['[data-tour="workspace-switcher"]'],
   },
   {
-    id: "projects",
-    chapterKey: "tour.chapter.start",
-    titleKey: "tour.projects.title",
-    bodyKey: "tour.projects.body",
-    anchors: ['[data-tour="projects-panel"]'],
-  },
-  {
     id: "addRepo",
-    chapterKey: "tour.chapter.start",
+    chapterKey: "tour.chapter.repos",
     titleKey: "tour.addRepo.title",
     bodyKey: "tour.addRepo.body",
     anchors: ['[data-tour="projects-actions"]'],
     padding: 6,
   },
   {
-    id: "sidebarToggle",
-    chapterKey: "tour.chapter.workspace",
-    titleKey: "tour.sidebarToggle.title",
-    bodyKey: "tour.sidebarToggle.body",
-    anchors: ['[data-tour="sidebar-toggle"]'],
-    padding: 6,
+    id: "projects",
+    chapterKey: "tour.chapter.repos",
+    titleKey: "tour.projects.title",
+    bodyKey: "tour.projects.body",
+    anchors: ['[data-tour="projects-panel"]'],
   },
+  // One card for the three tabs rather than one card each: the tabs are a set, and what a reader
+  // needs at this point is which of the three to click, not a tour of any of them.
   {
     id: "repoTabs",
     chapterKey: "tour.chapter.workspace",
@@ -100,90 +112,35 @@ export const TOUR_STEPS: TourStep[] = [
     bodyKey: "tour.repoTabs.body",
     anchors: ['[data-tour="repo-tabs"]'],
   },
+  // The editor is the one of the three that is a workbench rather than a screen, so it keeps a card
+  // of its own — folded down from four to one, since the two things nobody finds unaided (the
+  // rail's panels and the inline AI edit, which has no button at all) fit in a paragraph.
   {
-    id: "precommit",
+    id: "editor",
     chapterKey: "tour.chapter.workspace",
-    titleKey: "tour.precommit.title",
-    bodyKey: "tour.precommit.body",
-    // The review button when there is something to review; the Changes tab that holds it otherwise.
-    anchors: ['[data-tour="changes-analyze"]', '[data-tour="tab-changes"]'],
-    padding: 6,
-    stage: { view: "changes" },
-  },
-  // The editor closes the repository chapter, and gets four steps for the same reason Specs does:
-  // it is not one screen but a workbench, and the two things people never find on their own — the
-  // rail's five panels and the inline AI edit, which has no button at all — are inside it.
-  {
-    id: "editorOpen",
-    chapterKey: "tour.chapter.workspace",
-    titleKey: "tour.editorOpen.title",
-    bodyKey: "tour.editorOpen.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
-    stage: { view: "editor" },
-  },
-  {
-    id: "editorRail",
-    chapterKey: "tour.chapter.workspace",
-    titleKey: "tour.editorRail.title",
-    bodyKey: "tour.editorRail.body",
-    // The rail only exists once a repository is open; the view itself is the fallback for a
-    // workspace that has none yet.
-    anchors: ['[data-tour="editor-rail"]', '[data-tour="main-content"]'],
-    stage: { view: "editor" },
-  },
-  {
-    id: "editorTree",
-    chapterKey: "tour.chapter.workspace",
-    titleKey: "tour.editorTree.title",
-    bodyKey: "tour.editorTree.body",
-    anchors: ['[data-tour="editor-tree"]', '[data-tour="main-content"]'],
-    stage: { view: "editor" },
-  },
-  {
-    id: "editorAi",
-    chapterKey: "tour.chapter.workspace",
-    titleKey: "tour.editorAi.title",
-    bodyKey: "tour.editorAi.body",
-    // Not rebindable, so the literal chord is the truth here — it is one of `EDITOR_RESERVED`,
-    // which the settings screen refuses to let an app action take.
+    titleKey: "tour.editor.title",
+    bodyKey: "tour.editor.body",
     chord: "Mod+I",
     anchors: ['[data-tour="main-content"]'],
     placement: "inside",
     stage: { view: "editor" },
   },
-  // Closes the chapter on the bar the next one starts from. Fetch/pull/push are the only repository
-  // actions that talk to the network, and the only place in the app where "nothing happened" is
-  // usually the right answer — so the card is mostly about how to read them.
-  {
-    id: "gitActions",
-    chapterKey: "tour.chapter.workspace",
-    titleKey: "tour.gitActions.title",
-    bodyKey: "tour.gitActions.body",
-    anchors: ['[data-tour="git-actions"]'],
-    padding: 6,
-  },
-  {
-    id: "aiToggle",
-    chapterKey: "tour.chapter.ai",
-    titleKey: "tour.aiToggle.title",
-    bodyKey: "tour.aiToggle.body",
-    anchors: ['[data-tour="toggle-ai-panel"]'],
-    padding: 6,
-  },
+  // The panel is opened behind the spotlight, but the spotlight stays on the button that opens it:
+  // "what is in here" is answered by the card, and "how do I get it back" only by pointing.
   {
     id: "aiPanel",
     chapterKey: "tour.chapter.ai",
     titleKey: "tour.aiPanel.title",
     bodyKey: "tour.aiPanel.body",
-    anchors: ['[data-tour="ai-panel"]'],
+    anchors: ['[data-tour="toggle-ai-panel"]', '[data-tour="ai-panel"]'],
+    padding: 6,
     stage: { ai: true },
   },
   {
-    id: "prLink",
+    id: "prReview",
     chapterKey: "tour.chapter.ai",
-    titleKey: "tour.prLink.title",
-    bodyKey: "tour.prLink.body",
+    titleKey: "tour.prReview.title",
+    bodyKey: "tour.prReview.body",
     anchors: ['[data-tour="pr-link"]'],
     padding: 6,
   },
@@ -192,118 +149,22 @@ export const TOUR_STEPS: TourStep[] = [
     chapterKey: "tour.chapter.tools",
     titleKey: "tour.terminal.title",
     bodyKey: "tour.terminal.body",
-    anchors: ['[data-tour="terminal-dock"]', '[data-tour="toggle-terminal"]'],
+    anchors: ['[data-tour="toggle-terminal"]', '[data-tour="terminal-dock"]'],
+    padding: 6,
     stage: { terminal: true },
   },
+  // Also the handover, which is why it is staged on an app rather than left on the graph: the
+  // spotlight takes in the menu *and* the graduation cap beside it, and the cap only exists while
+  // one of the five is open. Two adjacent controls under one ring, because they are one sentence —
+  // here are the apps, and here is how each one explains itself.
   {
-    id: "notifications",
+    id: "workspaceApps",
     chapterKey: "tour.chapter.tools",
-    titleKey: "tour.notifications.title",
-    bodyKey: "tour.notifications.body",
-    anchors: ['[data-tour="notification-bell"]'],
+    titleKey: "tour.workspaceApps.title",
+    bodyKey: "tour.workspaceApps.body",
+    anchors: ['[data-tour="workspace-tools"]', '[data-tour="workspace-menu"]'],
     padding: 6,
-  },
-  {
-    id: "workspaceMenu",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.workspaceMenu.title",
-    bodyKey: "tour.workspaceMenu.body",
-    anchors: ['[data-tour="workspace-menu"]'],
-  },
-  {
-    id: "toolApi",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.toolApi.title",
-    bodyKey: "tour.toolApi.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
     stage: { view: "api", apiWorkspace: "requests" },
-  },
-  // Straight after the API client rather than down in the settings chapter: sharing a collection
-  // is something you decide about the collection you were just shown, and the screen it is
-  // configured on is two levels into settings — which is exactly why it needs pointing at.
-  {
-    id: "collab",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.collab.title",
-    bodyKey: "tour.collab.body",
-    anchors: ['[data-tour="settings-panel"]'],
-    placement: "inside",
-    radius: 16,
-    stage: { settings: "api", apiSettingsTab: "collab" },
-  },
-  {
-    id: "toolDb",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.toolDb.title",
-    bodyKey: "tour.toolDb.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
-    stage: { view: "api", apiWorkspace: "database" },
-  },
-  {
-    id: "toolAgents",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.toolAgents.title",
-    bodyKey: "tour.toolAgents.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
-    stage: { view: "agents" },
-  },
-  // Specs gets four steps where the other tools get one, because it is the only one of them that
-  // is three tools: the strip first, so the three names are on screen before any of them is
-  // explained, then one step per direction with that tab actually open behind it.
-  {
-    id: "toolStories",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.toolStories.title",
-    bodyKey: "tour.toolStories.body",
-    anchors: ['[data-tour="stories-modes"]', '[data-tour="main-content"]'],
-    stage: { view: "stories", storiesMode: "batches" },
-  },
-  {
-    id: "storiesWrite",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.storiesWrite.title",
-    bodyKey: "tour.storiesWrite.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
-    stage: { view: "stories", storiesMode: "batches" },
-  },
-  {
-    id: "storiesReview",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.storiesReview.title",
-    bodyKey: "tour.storiesReview.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
-    stage: { view: "stories", storiesMode: "review" },
-  },
-  {
-    id: "storiesWiki",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.storiesWiki.title",
-    bodyKey: "tour.storiesWiki.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
-    stage: { view: "stories", storiesMode: "wiki" },
-  },
-  {
-    id: "toolRemote",
-    chapterKey: "tour.chapter.tools",
-    titleKey: "tour.toolRemote.title",
-    bodyKey: "tour.toolRemote.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
-    stage: { view: "remote" },
-  },
-  {
-    id: "settingsOpen",
-    chapterKey: "tour.chapter.settings",
-    titleKey: "tour.settingsOpen.title",
-    bodyKey: "tour.settingsOpen.body",
-    anchors: ['[data-tour="open-settings"]'],
-    padding: 6,
   },
   {
     id: "settingsAi",
@@ -357,3 +218,478 @@ export const TOUR_STEPS: TourStep[] = [
     padding: 6,
   },
 ];
+
+/**
+ * Every app tour ends the same way: on its own launcher, having just said where the app is
+ * configured.
+ *
+ * Both halves are the point. A reader who has just been walked through the API client is one click
+ * from wanting it again, and the button that does that is a graduation cap they have seen exactly
+ * once. And "where is this configured" is the question an app tour exists to answer — the settings
+ * for four of the five are two levels into a dialog that is not on screen while you use them.
+ */
+function closingStep(
+  id: TourId,
+  chapterKey: TranslationKey,
+  // Spelled out rather than built from `id`: a template literal would need a cast to
+  // `TranslationKey`, and the cast is precisely what would stop the compiler noticing a body key
+  // that was never added to the dictionary.
+  titleKey: TranslationKey,
+  bodyKey: TranslationKey,
+  stage: TourStage,
+): TourStep {
+  return {
+    id: `${id}.done`,
+    chapterKey,
+    titleKey,
+    bodyKey,
+    anchors: ['[data-tour="app-tour-launcher"]', '[data-tour="workspace-menu"]'],
+    padding: 6,
+    stage,
+  };
+}
+
+/** The API client's own stage: this app, on the requests side of the tab it shares with databases. */
+const API_STAGE: TourStage = { view: "api", apiWorkspace: "requests" };
+
+const API_TOUR: TourStep[] = [
+  {
+    id: "api.intro",
+    chapterKey: "tour.chapter.api",
+    titleKey: "tour.api.intro.title",
+    bodyKey: "tour.api.intro.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: API_STAGE,
+  },
+  {
+    id: "api.sidebar",
+    chapterKey: "tour.chapter.api",
+    titleKey: "tour.api.sidebar.title",
+    bodyKey: "tour.api.sidebar.body",
+    anchors: ['[data-tour="api-sidebar"]', '[data-tour="main-content"]'],
+    stage: API_STAGE,
+  },
+  {
+    id: "api.actions",
+    chapterKey: "tour.chapter.api",
+    titleKey: "tour.api.actions.title",
+    bodyKey: "tour.api.actions.body",
+    anchors: ['[data-tour="api-sidebar-actions"]', '[data-tour="api-sidebar"]'],
+    padding: 6,
+    stage: API_STAGE,
+  },
+  {
+    id: "api.builder",
+    chapterKey: "tour.chapter.api",
+    titleKey: "tour.api.builder.title",
+    bodyKey: "tour.api.builder.body",
+    // Only exists once a request is open; the view is the fallback for an empty workspace.
+    anchors: ['[data-tour="api-builder"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: API_STAGE,
+  },
+  {
+    id: "api.protocols",
+    chapterKey: "tour.chapter.api",
+    titleKey: "tour.api.protocols.title",
+    bodyKey: "tour.api.protocols.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: API_STAGE,
+  },
+  {
+    id: "api.response",
+    chapterKey: "tour.chapter.api",
+    titleKey: "tour.api.response.title",
+    bodyKey: "tour.api.response.body",
+    anchors: ['[data-tour="api-response"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: API_STAGE,
+  },
+  {
+    id: "api.env",
+    chapterKey: "tour.chapter.api",
+    titleKey: "tour.api.env.title",
+    bodyKey: "tour.api.env.body",
+    anchors: ['[data-tour="api-env"]', '[data-tour="api-sidebar"]'],
+    stage: API_STAGE,
+  },
+  {
+    id: "api.snippet",
+    chapterKey: "tour.chapter.api",
+    titleKey: "tour.api.snippet.title",
+    bodyKey: "tour.api.snippet.body",
+    anchors: ['[data-tour="api-snippet"]', '[data-tour="main-content"]'],
+    stage: API_STAGE,
+  },
+  {
+    id: "api.settings",
+    chapterKey: "tour.chapter.settings",
+    titleKey: "tour.api.settings.title",
+    bodyKey: "tour.api.settings.body",
+    anchors: ['[data-tour="settings-panel"]'],
+    placement: "inside",
+    radius: 16,
+    stage: { ...API_STAGE, settings: "api", apiSettingsTab: "network" },
+  },
+  {
+    id: "api.collab",
+    chapterKey: "tour.chapter.settings",
+    titleKey: "tour.api.collab.title",
+    bodyKey: "tour.api.collab.body",
+    anchors: ['[data-tour="settings-panel"]'],
+    placement: "inside",
+    radius: 16,
+    stage: { ...API_STAGE, settings: "api", apiSettingsTab: "collab" },
+  },
+  closingStep("api", "tour.chapter.api", "tour.api.done.title", "tour.api.done.body", API_STAGE),
+];
+
+/** The database client's stage: the other side of the same tab. */
+const DB_STAGE: TourStage = { view: "api", apiWorkspace: "database" };
+
+const DB_TOUR: TourStep[] = [
+  {
+    id: "db.intro",
+    chapterKey: "tour.chapter.db",
+    titleKey: "tour.db.intro.title",
+    bodyKey: "tour.db.intro.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: DB_STAGE,
+  },
+  {
+    id: "db.connect",
+    chapterKey: "tour.chapter.db",
+    titleKey: "tour.db.connect.title",
+    bodyKey: "tour.db.connect.body",
+    anchors: ['[data-tour="db-explorer-actions"]', '[data-tour="db-explorer"]'],
+    padding: 6,
+    stage: DB_STAGE,
+  },
+  // The dialog itself, not just the button that opens it. Everything a connection *is* — engine,
+  // host, credentials, the SSH tunnel, the read-only guard — exists only in here, and it is the one
+  // screen of that app a reader cannot stumble into from the tree.
+  {
+    id: "db.sources",
+    chapterKey: "tour.chapter.db",
+    titleKey: "tour.db.sources.title",
+    bodyKey: "tour.db.sources.body",
+    anchors: ['[data-tour="db-data-sources"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    radius: 12,
+    stage: { ...DB_STAGE, dbDataSources: true },
+  },
+  {
+    id: "db.explorer",
+    chapterKey: "tour.chapter.db",
+    titleKey: "tour.db.explorer.title",
+    bodyKey: "tour.db.explorer.body",
+    anchors: ['[data-tour="db-explorer"]', '[data-tour="main-content"]'],
+    stage: DB_STAGE,
+  },
+  {
+    id: "db.console",
+    chapterKey: "tour.chapter.db",
+    titleKey: "tour.db.console.title",
+    bodyKey: "tour.db.console.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: DB_STAGE,
+  },
+  {
+    id: "db.grid",
+    chapterKey: "tour.chapter.db",
+    titleKey: "tour.db.grid.title",
+    bodyKey: "tour.db.grid.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: DB_STAGE,
+  },
+  {
+    id: "db.tools",
+    chapterKey: "tour.chapter.db",
+    titleKey: "tour.db.tools.title",
+    bodyKey: "tour.db.tools.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: DB_STAGE,
+  },
+  closingStep("db", "tour.chapter.db", "tour.db.done.title", "tour.db.done.body", DB_STAGE),
+];
+
+const AGENTS_STAGE: TourStage = { view: "agents" };
+
+const AGENTS_TOUR: TourStep[] = [
+  {
+    id: "agents.intro",
+    chapterKey: "tour.chapter.agents",
+    titleKey: "tour.agents.intro.title",
+    bodyKey: "tour.agents.intro.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: AGENTS_STAGE,
+  },
+  {
+    id: "agents.tree",
+    chapterKey: "tour.chapter.agents",
+    titleKey: "tour.agents.tree.title",
+    bodyKey: "tour.agents.tree.body",
+    anchors: ['[data-tour="agents-tree"]', '[data-tour="main-content"]'],
+    stage: AGENTS_STAGE,
+  },
+  {
+    id: "agents.actions",
+    chapterKey: "tour.chapter.agents",
+    titleKey: "tour.agents.actions.title",
+    bodyKey: "tour.agents.actions.body",
+    anchors: ['[data-tour="agents-tree-actions"]', '[data-tour="agents-tree"]'],
+    padding: 6,
+    stage: AGENTS_STAGE,
+  },
+  {
+    id: "agents.task",
+    chapterKey: "tour.chapter.agents",
+    titleKey: "tour.agents.task.title",
+    bodyKey: "tour.agents.task.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: AGENTS_STAGE,
+  },
+  {
+    id: "agents.chains",
+    chapterKey: "tour.chapter.agents",
+    titleKey: "tour.agents.chains.title",
+    bodyKey: "tour.agents.chains.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: AGENTS_STAGE,
+  },
+  // The one step that needs a panel the app keeps closed by default, which is exactly why it is
+  // worth a step: the roster is where an agent *is defined*, and nothing on the default screen
+  // says so.
+  {
+    id: "agents.roster",
+    chapterKey: "tour.chapter.agents",
+    titleKey: "tour.agents.roster.title",
+    bodyKey: "tour.agents.roster.body",
+    anchors: ['[data-tour="agents-roster"]', '[data-tour="main-content"]'],
+    stage: { ...AGENTS_STAGE, agentsRoster: true },
+  },
+  {
+    id: "agents.settings",
+    chapterKey: "tour.chapter.settings",
+    titleKey: "tour.agents.settings.title",
+    bodyKey: "tour.agents.settings.body",
+    anchors: ['[data-tour="settings-panel"]'],
+    placement: "inside",
+    radius: 16,
+    stage: { ...AGENTS_STAGE, settings: "claude" },
+  },
+  closingStep(
+    "agents",
+    "tour.chapter.agents",
+    "tour.agents.done.title",
+    "tour.agents.done.body",
+    AGENTS_STAGE,
+  ),
+];
+
+const STORIES_STAGE: TourStage = { view: "stories", storiesMode: "batches" };
+
+const STORIES_TOUR: TourStep[] = [
+  {
+    id: "stories.intro",
+    chapterKey: "tour.chapter.stories",
+    titleKey: "tour.stories.intro.title",
+    bodyKey: "tour.stories.intro.body",
+    anchors: ['[data-tour="stories-modes"]', '[data-tour="main-content"]'],
+    stage: STORIES_STAGE,
+  },
+  {
+    id: "stories.write",
+    chapterKey: "tour.chapter.stories",
+    titleKey: "tour.stories.write.title",
+    bodyKey: "tour.stories.write.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: STORIES_STAGE,
+  },
+  {
+    id: "stories.list",
+    chapterKey: "tour.chapter.stories",
+    titleKey: "tour.stories.list.title",
+    bodyKey: "tour.stories.list.body",
+    anchors: ['[data-tour="stories-list"]', '[data-tour="main-content"]'],
+    stage: STORIES_STAGE,
+  },
+  {
+    id: "stories.publish",
+    chapterKey: "tour.chapter.stories",
+    titleKey: "tour.stories.publish.title",
+    bodyKey: "tour.stories.publish.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: STORIES_STAGE,
+  },
+  {
+    id: "stories.review",
+    chapterKey: "tour.chapter.stories",
+    titleKey: "tour.stories.review.title",
+    bodyKey: "tour.stories.review.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: { view: "stories", storiesMode: "review" },
+  },
+  {
+    id: "stories.wiki",
+    chapterKey: "tour.chapter.stories",
+    titleKey: "tour.stories.wiki.title",
+    bodyKey: "tour.stories.wiki.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: { view: "stories", storiesMode: "wiki" },
+  },
+  {
+    id: "stories.settings",
+    chapterKey: "tour.chapter.settings",
+    titleKey: "tour.stories.settings.title",
+    bodyKey: "tour.stories.settings.body",
+    anchors: ['[data-tour="settings-panel"]'],
+    placement: "inside",
+    radius: 16,
+    stage: { ...STORIES_STAGE, settings: "azure" },
+  },
+  closingStep(
+    "stories",
+    "tour.chapter.stories",
+    "tour.stories.done.title",
+    "tour.stories.done.body",
+    STORIES_STAGE,
+  ),
+];
+
+const REMOTE_STAGE: TourStage = { view: "remote" };
+
+const REMOTE_TOUR: TourStep[] = [
+  {
+    id: "remote.intro",
+    chapterKey: "tour.chapter.remote",
+    titleKey: "tour.remote.intro.title",
+    bodyKey: "tour.remote.intro.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: REMOTE_STAGE,
+  },
+  {
+    id: "remote.hosts",
+    chapterKey: "tour.chapter.remote",
+    titleKey: "tour.remote.hosts.title",
+    bodyKey: "tour.remote.hosts.body",
+    anchors: ['[data-tour="remote-hosts"]', '[data-tour="main-content"]'],
+    stage: REMOTE_STAGE,
+  },
+  {
+    id: "remote.connect",
+    chapterKey: "tour.chapter.remote",
+    titleKey: "tour.remote.connect.title",
+    bodyKey: "tour.remote.connect.body",
+    anchors: ['[data-tour="remote-connect"]', '[data-tour="main-content"]'],
+    padding: 6,
+    stage: REMOTE_STAGE,
+  },
+  {
+    id: "remote.session",
+    chapterKey: "tour.chapter.remote",
+    titleKey: "tour.remote.session.title",
+    bodyKey: "tour.remote.session.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: REMOTE_STAGE,
+  },
+  {
+    id: "remote.files",
+    chapterKey: "tour.chapter.remote",
+    titleKey: "tour.remote.files.title",
+    bodyKey: "tour.remote.files.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: REMOTE_STAGE,
+  },
+  {
+    id: "remote.forwards",
+    chapterKey: "tour.chapter.remote",
+    titleKey: "tour.remote.forwards.title",
+    bodyKey: "tour.remote.forwards.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: REMOTE_STAGE,
+  },
+  {
+    id: "remote.screen",
+    chapterKey: "tour.chapter.remote",
+    titleKey: "tour.remote.screen.title",
+    bodyKey: "tour.remote.screen.body",
+    anchors: ['[data-tour="main-content"]'],
+    placement: "inside",
+    stage: REMOTE_STAGE,
+  },
+  closingStep(
+    "remote",
+    "tour.chapter.remote",
+    "tour.remote.done.title",
+    "tour.remote.done.body",
+    REMOTE_STAGE,
+  ),
+];
+
+export const TOURS: Record<TourId, TourStep[]> = {
+  main: MAIN_TOUR,
+  api: API_TOUR,
+  db: DB_TOUR,
+  agents: AGENTS_TOUR,
+  stories: STORIES_TOUR,
+  remote: REMOTE_TOUR,
+};
+
+/**
+ * Which app tour belongs to the screen you are looking at.
+ *
+ * The launcher in the tab bar is one button that changes what it starts, rather than five buttons
+ * bolted into five different panel headers. Those five headers are five different shapes — the API
+ * client has no header row at all — and a control that moves and resizes depending on which app is
+ * open is a control nobody learns the position of. Beside the workspace menu, which is what names
+ * the app you are in, it is always in the same place and always about the thing that menu says.
+ */
+export interface AppTour {
+  tour: TourId;
+  view: MainView;
+  /** For the tab that holds two apps; `undefined` when the view is the whole app. */
+  workspace?: ApiWorkspace;
+  /** The app's own name, for the button's tooltip — the tour is "of this app", not "of the app". */
+  labelKey: TranslationKey;
+  /** The same glyph the workspace menu gives the app, so a tour is recognisable as belonging to the
+   * row that opens it. Carried here rather than looked up per caller: two lists of the five apps
+   * drift, and the one in Settings is far from the one in the menu. */
+  icon: LucideIcon;
+}
+
+/** The five, in the order the workspace menu lists them — Settings offers them in that order too,
+ * because a reader who knows where an app sits in the menu should not have to re-find it here. */
+export const APP_TOURS: AppTour[] = [
+  { tour: "api", view: "api", workspace: "requests", labelKey: "tabbar.api", icon: Send },
+  { tour: "db", view: "api", workspace: "database", labelKey: "tabbar.databases", icon: Database },
+  { tour: "agents", view: "agents", labelKey: "tabbar.agents", icon: Bot },
+  { tour: "stories", view: "stories", labelKey: "tabbar.stories", icon: ClipboardList },
+  { tour: "remote", view: "remote", labelKey: "tabbar.remote", icon: MonitorSmartphone },
+];
+
+/** The app tour for the current view, or `null` on the three repository views — which are what the
+ * main tour is about, and so have no second tour to offer. */
+export function appTourFor(view: MainView, workspace: ApiWorkspace): AppTour | null {
+  return (
+    APP_TOURS.find((entry) => entry.view === view && (entry.workspace ?? workspace) === workspace) ??
+    null
+  );
+}

@@ -324,9 +324,13 @@ function tick() {
   const shares = activeShares();
   if (shares.length === 0) return;
 
-  // The collection behind the request on screen is the one whose latency anyone can feel.
+  // The collection behind whatever is on screen is the one whose latency anyone can feel —
+  // a request's, or the one whose own settings are open.
   const tabs = useApiStore.getState();
-  const focused = tabs.openTabs.find((tab) => tab.id === tabs.activeTabId)?.collectionId ?? null;
+  const focused =
+    tabs.openTabs.find((tab) => tab.id === tabs.activeTabId)?.collectionId ??
+    tabs.entityTabs.find((tab) => tab.id === tabs.activeTabId)?.collectionId ??
+    null;
 
   const queue = shares.filter((id) => id !== focused);
   const turn: string[] = focused !== null && shares.includes(focused) ? [focused] : [];

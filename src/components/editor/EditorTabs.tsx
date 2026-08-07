@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "
 import { createPortal } from "react-dom";
 import { ClipboardCopy, Pin, PinOff, SplitSquareHorizontal, X } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
-import { fileIconFor } from "../../lib/fileIcon";
+import { FileGlyph } from "../common/FileGlyph";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { useTabDragStore, type TabDrag, type TabDropTarget } from "../../state/tabDragStore";
@@ -214,7 +214,6 @@ export function EditorTabs({
         {tabs.map((tab, index) => {
           const active = tab.path === activePath;
           const hoverKey = `tab:${groupId}:${tab.path}`;
-          const { Icon, color } = fileIconFor(tab.path);
           const suffix = suffixes.get(tab.path);
           return (
             <Fragment key={tab.path}>
@@ -262,7 +261,7 @@ export function EditorTabs({
                 } ${draggingHere && drag?.path === tab.path ? "opacity-40" : ""}`}
               >
                 {active && <span className="absolute inset-x-0 top-0 h-[2px] bg-[var(--cf-accent)]" />}
-                <Icon size={13} className="shrink-0" style={{ color }} />
+                <FileGlyph path={tab.path} />
                 <span className={`truncate ${tab.preview ? "italic" : ""}`}>{baseName(tab.path)}</span>
                 {suffix && (
                   <span className="truncate text-[10px] text-[var(--cf-text-muted)] opacity-70">{suffix}</span>

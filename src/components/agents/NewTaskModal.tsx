@@ -5,7 +5,7 @@ import { Note } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { Field } from "../settings/modelPicker";
-import { AI_PROVIDERS, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import { isRunnableAgent, useAgentsStore } from "../../state/agentsStore";
 import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
@@ -159,6 +159,12 @@ export function NewTaskModal({
           <Note tone="warning">{`${t("agents.noProjects")} — ${t("agents.noProjectsHint")}`}</Note>
         )}
         {providerMissing && <Note tone="warning">{t("settings.providerMissing")}</Note>}
+        {/* Only once a text-only engine has been picked. It is not a block — a local model is a
+            perfectly good thing to think out loud with — but a task expecting files to change is a
+            task that would otherwise finish green having changed nothing. */}
+        {agent !== null && !isAgenticProvider(agent.provider) && (
+          <Note tone="warning">{t("agents.agentTextOnly", { name: providerDisplayLabel(agent.provider, t) })}</Note>
+        )}
 
         {/* The role rides the agent field rather than sitting at the foot of the form: down there
             it read as a note about the goal, which is the one thing it is not. */}

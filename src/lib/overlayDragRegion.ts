@@ -21,10 +21,25 @@ import { toggleMaximize } from "./windowControls";
  * The one behaviour this trades away is closing a dialog by clicking the backdrop *in the title bar
  * strip*, which now drags instead. That is the same bargain every native window makes: the top of
  * the window belongs to the window.
+ *
+ * The buttons at the other end of the bar are the same bargain seen from the other side: minimize,
+ * maximize and close are the window's, not the app's, and a covered one is handed its press back
+ * rather than losing it to the backdrop.
  */
 
 /** Tags that swallow a press instead of dragging with it — Tauri's list, verbatim. */
 const CLICKABLE_TAGS = new Set(["A", "BUTTON", "INPUT", "SELECT", "TEXTAREA", "LABEL", "SUMMARY"]);
+
+/**
+ * The window's own buttons, marked in the title bar so a backdrop over them can tell them apart
+ * from the app's controls — which stay blocked, because a dialog is up precisely so the app is not
+ * used until it is answered.
+ *
+ * macOS has none of these elements: its traffic lights are real AppKit buttons painted above the
+ * webview, and nothing in the DOM can cover them. This is Windows and Linux, where the bar and its
+ * buttons are ours.
+ */
+const WINDOW_CONTROL = "[data-window-control]";
 
 const INTERACTIVE_ROLES = new Set([
   "button",
@@ -87,8 +102,12 @@ function isBackdrop(el: Element): boolean {
   return covers && getComputedStyle(el).position === "fixed";
 }
 
+/** What a press under a backdrop turns out to belong to, or `null` for "the app's, leave it". */
+type CoveredPress = { kind: "drag" } | { kind: "control"; control: HTMLElement };
+
 /**
- * Whether this press is a drag of the window that Tauri's own handler couldn't see.
+ * Whether this press belongs to the window rather than to whatever is covering it — a drag of the
+ * title bar, or one of the window's own buttons — in a way Tauri's own handler couldn't see.
  *
  * Everything the pointer is over is asked in turn, nearest first, and the first element with an
  * opinion settles it. Only a backdrop is stepped past — anything else that has no opinion ends the
@@ -97,28 +116,47 @@ function isBackdrop(el: Element): boolean {
  * the one the AI menu hangs inside the bar's `data-tauri-drag-region="false"` wrapper — still says
  * no on behalf of everything it covers.
  */
-function hitsCoveredDragRegion(event: MouseEvent): boolean {
+function coveredWindowPress(event: MouseEvent): CoveredPress | null {
   // Tauri stops its own events dead, so anything still arriving here it declined to handle. The
   // walk below re-derives that decision rather than assuming it: "declined" covers both "nothing
   // claimed this" and "something said no", and only the first may be looked past.
-  if (event.defaultPrevented || event.button !== 0) return false;
+  if (event.defaultPrevented || event.button !== 0) return null;
 
   // The element the event was delivered to goes first, and settles all but one case — which is
   // what keeps this off the hot path: an ordinary press anywhere in the app is answered by a walk
   // up its own ancestors, and never pays for a hit test.
   const target = event.target;
-  if (!(target instanceof HTMLElement)) return false;
+  if (!(target instanceof HTMLElement)) return null;
   const claim = resolve(pathOf(target));
-  if (claim !== "none") return claim === "drag";
-  if (!isBackdrop(target)) return false;
+  if (claim !== "none") return claim === "drag" ? { kind: "drag" } : null;
+  if (!isBackdrop(target)) return null;
 
   for (const el of document.elementsFromPoint(event.clientX, event.clientY)) {
-    if (!(el instanceof HTMLElement) || el === target) continue;
+    if (el === target) continue;
+    // Ahead of `resolve`, which would only ever call a button "blocked": these three are the one
+    // kind of control a backdrop is not entitled to block. Asked on every element rather than on
+    // HTML ones only, because the pointer usually lands on the button's `<svg>` icon.
+    const control = el.closest<HTMLElement>(WINDOW_CONTROL);
+    if (control) return { kind: "control", control };
+    if (!(el instanceof HTMLElement)) continue;
     const decision = resolve(pathOf(el));
-    if (decision !== "none") return decision === "drag";
-    if (!isBackdrop(el)) return false;
+    if (decision !== "none") return decision === "drag" ? { kind: "drag" } : null;
+    if (!isBackdrop(el)) return null;
   }
-  return false;
+  return null;
+}
+
+/**
+ * Whether a press is the window's rather than the app's.
+ *
+ * For the overlays that deliberately swallow every press — the guided tour, which only holds
+ * together if the app stays on the step it was put on. They ask this *before* calling
+ * `preventDefault`, because the handler below reads an already-defaulted press as one the app
+ * declined and stops there: without the check, an overlay that pauses the app also freezes the
+ * window it is drawn in.
+ */
+export function pressBelongsToWindow(event: MouseEvent): boolean {
+  return coveredWindowPress(event) !== null;
 }
 
 export function startOverlayDragRegion() {
@@ -128,7 +166,19 @@ export function startOverlayDragRegion() {
 
   document.addEventListener("mousedown", (event) => {
     if (event.detail !== 1 && event.detail !== 2) return;
-    if (!hitsCoveredDragRegion(event)) return;
+    const press = coveredWindowPress(event);
+    if (!press) return;
+
+    if (press.kind === "control") {
+      // The press can't reach the button — the backdrop is over it — so it is replayed as a click
+      // instead. Swallowed here too, so the backdrop doesn't also count it as a click of its own
+      // and dismiss whatever it belongs to. Only the first of a double-click is forwarded: two
+      // minimizes are one more than anybody meant.
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.detail === 1) press.control.click();
+      return;
+    }
 
     if (isMac() && event.detail === 2) {
       zoomAnchor = { x: event.clientX, y: event.clientY };
@@ -161,7 +211,7 @@ export function startOverlayDragRegion() {
     if (!anchor || event.detail !== 2) return;
     // Moved between press and release: that was a drag, and macOS cancels the zoom.
     if (event.clientX !== anchor.x || event.clientY !== anchor.y) return;
-    if (!hitsCoveredDragRegion(event)) return;
+    if (coveredWindowPress(event)?.kind !== "drag") return;
     void toggleMaximize().catch((e: unknown) => console.error("toggleMaximize", e));
   });
 }

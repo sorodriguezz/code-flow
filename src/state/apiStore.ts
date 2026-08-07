@@ -36,7 +36,7 @@ import { useLanguageStore } from "./languageStore";
 import { useApiRuntimeStore } from "./apiRuntimeStore";
 import { useApiModalStore } from "./apiModalStore";
 import { useWorkspaceStore } from "./workspaceStore";
-import { defaultApiSettings, defaultRequestSpec } from "../types/api";
+import { defaultApiSettings, defaultAuth, defaultRequestSpec } from "../types/api";
 import type {
   ApiCollection,
   ApiCookie,
@@ -96,8 +96,59 @@ export interface ApiTab {
   staleAgainst?: string;
 }
 
+/**
+ * The editable state of a collection or folder open in a tab.
+ *
+ * Not the `ApiCollection`/`ApiFolder` row itself: those also carry ids, timestamps and tree
+ * position, none of which this screen edits, and a draft holding them would have to be reconciled
+ * field by field on save. What is here is exactly what the settings view writes back.
+ */
+export interface EntityDraft {
+  description: string;
+  auth: AuthConfig;
+  preScript: string;
+  postScript: string;
+  /** Collections only — a folder has no variable scope of its own, so it stays empty there. */
+  variables: ApiVariable[];
+}
+
+/**
+ * A collection or folder open for editing, alongside the request tabs.
+ *
+ * Kept in its own list rather than as a variant of `ApiTab`: most of the API client reads
+ * `tab.draft` as a request spec, and a union would force every one of those call sites to narrow
+ * for a case it has nothing to say about. The two lists share one id space, one `tabOrder` and one
+ * `activeTabId` — so a component that looks the active id up in `openTabs` simply finds nothing
+ * while a settings tab is focused, which is the state it already renders for.
+ */
+export interface ApiEntityTab {
+  id: string;
+  kind: "collection" | "folder";
+  /** The row this tab edits. */
+  entityId: string;
+  /** The collection it lives in — itself, for a collection. Scopes the variable context. */
+  collectionId: string;
+  /**
+   * The row's name. Deliberately outside `draft`: renaming happens in the tree, not here, so the
+   * tab label follows the row even while the settings below it hold unsaved edits.
+   */
+  name: string;
+  dirty: boolean;
+  draft: EntityDraft;
+}
+
 /** Persisted shape of `api_open_tabs`. Versioned so a later change can be migrated, not guessed. */
 interface PersistedTabs {
+  version: 2;
+  tabs: ApiTab[];
+  entityTabs: ApiEntityTab[];
+  /** Both kinds, in the order they sit in the strip. */
+  order: string[];
+  activeTabId: string | null;
+}
+
+/** What version 1 wrote, before collections and folders could be opened: request tabs only. */
+interface PersistedTabsV1 {
   version: 1;
   tabs: ApiTab[];
   activeTabId: string | null;
@@ -116,6 +167,10 @@ interface ApiState {
   cookies: ApiCookie[];
   settings: ApiSettings;
   openTabs: ApiTab[];
+  /** Collections and folders open for editing; see `ApiEntityTab` for why they are a second list. */
+  entityTabs: ApiEntityTab[];
+  /** Every open tab's id, both kinds, in strip order — the only place that order lives. */
+  tabOrder: string[];
   activeTabId: string | null;
   loading: boolean;
 
@@ -180,6 +235,16 @@ interface ApiState {
 
   openRequest: (requestId: string) => void;
   openScratchTab: (protocol?: ApiProtocol, target?: { collectionId: string; folderId: string | null }) => string;
+  /**
+   * Opens a collection or folder's settings, or focuses the tab already showing them.
+   *
+   * Returns the tab id, or `null` when the row is gone — the tree can race a delete from a
+   * teammate's pull.
+   */
+  openEntityTab: (kind: "collection" | "folder", entityId: string) => string | null;
+  updateEntityDraft: (tabId: string, patch: Partial<EntityDraft>) => void;
+  /** Writes the draft back to the row. The only way auth, scripts or variables reach a parent. */
+  saveEntityTab: (tabId: string) => Promise<void>;
   closeTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
   renameTab: (tabId: string, name: string) => void;
@@ -261,6 +326,8 @@ export const useApiStore = create<ApiState>((set, get) => ({
   cookies: [],
   settings: defaultApiSettings(),
   openTabs: [],
+  entityTabs: [],
+  tabOrder: [],
   activeTabId: null,
   loading: false,
 
@@ -295,10 +362,23 @@ export const useApiStore = create<ApiState>((set, get) => ({
       // no longer selected must not be the one that gets to publish its data.
       if (get().workspaceId !== workspaceId) return;
 
-      const restored = parseJson<PersistedTabs | null>(rawTabs, null);
-      const openTabs = restored?.version === 1 ? restored.tabs.map(rehydrateTab) : [];
+      const restored = parseJson<PersistedTabs | PersistedTabsV1 | null>(rawTabs, null);
+      const openTabs =
+        restored?.version === 1 || restored?.version === 2 ? restored.tabs.map(rehydrateTab) : [];
+      // A collection or folder that was deleted while this workspace was closed leaves a tab with
+      // nothing to edit, so the restore drops it rather than waiting for the first save to fail.
+      const entityTabs =
+        restored?.version === 2
+          ? restored.entityTabs.filter(
+              (tab) =>
+                (tab.kind === "collection" ? tree.collections : tree.folders).some(
+                  (row) => row.id === tab.entityId,
+                ),
+            )
+          : [];
+      const tabOrder = orderedTabIds(restored?.version === 2 ? restored.order : [], openTabs, entityTabs);
       const activeTabId =
-        openTabs.find((tab) => tab.id === restored?.activeTabId)?.id ?? openTabs[0]?.id ?? null;
+        tabOrder.find((id) => id === restored?.activeTabId) ?? tabOrder[0] ?? null;
 
       set({
         collections: tree.collections,
@@ -311,6 +391,8 @@ export const useApiStore = create<ApiState>((set, get) => ({
         cookies,
         settings,
         openTabs,
+        entityTabs,
+        tabOrder,
         activeTabId,
       });
       // The tabs were restored from disk and the tree was just read: a request one of them points
@@ -345,6 +427,8 @@ export const useApiStore = create<ApiState>((set, get) => ({
       history: [],
       cookies: [],
       openTabs: [],
+      entityTabs: [],
+      tabOrder: [],
       activeTabId: null,
     });
 
@@ -367,6 +451,9 @@ export const useApiStore = create<ApiState>((set, get) => ({
     if (workspaceId === null) return;
     const tree = await apiLoadTree(workspaceId);
     set({ collections: tree.collections, folders: tree.folders, requests: tree.requests });
+    // The rows an open settings tab edits were just replaced wholesale — including, on an import
+    // or a deep duplicate, by rows that no longer exist.
+    syncEntityTabs(set, get);
   },
 
   reloadEnvironments: async () => {
@@ -413,6 +500,9 @@ export const useApiStore = create<ApiState>((set, get) => ({
         collections: s.collections.map((c) => (c.id === collection.id ? collection : c)),
       }));
     });
+    // Catches the rename done in the tree and the collection variables a script wrote, both of
+    // which land here and would otherwise leave an open settings tab showing the old row.
+    syncEntityTabs(set, get);
     // The share carries its own display name — it is what a guest sees while accepting an
     // invitation, before the collection exists on their machine. Best-effort: a rename is not worth
     // failing over a project that happens to be unreachable, and the next round corrects it.
@@ -434,6 +524,8 @@ export const useApiStore = create<ApiState>((set, get) => ({
         requests: s.requests.filter((r) => r.collection_id !== id),
       }));
       detachTabs(set, get, orphaned);
+      // The cascade took the collection's folders too, so their settings tabs go as well.
+      syncEntityTabs(set, get);
     });
   },
 
@@ -472,6 +564,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
       await apiUpdateFolder(folder);
       set((s) => ({ folders: s.folders.map((f) => (f.id === folder.id ? folder : f)) }));
     });
+    syncEntityTabs(set, get);
   },
 
   deleteFolder: async (id) => {
@@ -486,6 +579,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
         requests: s.requests.filter((r) => r.folder_id === null || !removed.has(r.folder_id)),
       }));
       detachTabs(set, get, orphaned);
+      syncEntityTabs(set, get);
     });
   },
 
@@ -699,7 +793,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
       folderId: row.folder_id,
       rowUpdatedAt: row.updated_at,
     };
-    set((s) => ({ openTabs: [...s.openTabs, tab], activeTabId: tab.id }));
+    set((s) => ({ openTabs: [...s.openTabs, tab], tabOrder: [...s.tabOrder, tab.id], activeTabId: tab.id }));
     persistTabs(get);
   },
 
@@ -713,20 +807,91 @@ export const useApiStore = create<ApiState>((set, get) => ({
       collectionId: target?.collectionId ?? null,
       folderId: target?.folderId ?? null,
     };
-    set((s) => ({ openTabs: [...s.openTabs, tab], activeTabId: tab.id }));
+    set((s) => ({ openTabs: [...s.openTabs, tab], tabOrder: [...s.tabOrder, tab.id], activeTabId: tab.id }));
     persistTabs(get);
     return tab.id;
   },
 
+  openEntityTab: (kind, entityId) => {
+    const existing = get().entityTabs.find((tab) => tab.kind === kind && tab.entityId === entityId);
+    if (existing) {
+      get().setActiveTab(existing.id);
+      return existing.id;
+    }
+    const fresh = readEntity(get(), kind, entityId);
+    if (fresh === null) return null;
+    const tab: ApiEntityTab = { id: newId(), kind, entityId, dirty: false, ...fresh };
+    set((s) => ({
+      entityTabs: [...s.entityTabs, tab],
+      tabOrder: [...s.tabOrder, tab.id],
+      activeTabId: tab.id,
+    }));
+    persistTabs(get);
+    return tab.id;
+  },
+
+  updateEntityDraft: (tabId, patch) => {
+    set((s) => ({
+      entityTabs: s.entityTabs.map((tab) =>
+        tab.id === tabId ? { ...tab, draft: { ...tab.draft, ...patch }, dirty: true } : tab,
+      ),
+    }));
+    schedulePersistTabs(get);
+  },
+
+  saveEntityTab: async (tabId) => {
+    const tab = get().entityTabs.find((entry) => entry.id === tabId);
+    if (!tab) return;
+    const { description, auth, preScript, postScript, variables } = tab.draft;
+    // An `inherit` at this level configures nothing, which is exactly what the empty string means
+    // in the column — writing the config out would make the level a decision the chain stops at.
+    const authJson = auth.type === "inherit" ? "" : JSON.stringify(auth);
+
+    if (tab.kind === "collection") {
+      const collection = get().collections.find((c) => c.id === tab.entityId);
+      if (!collection) return;
+      await get().updateCollection({
+        ...collection,
+        description,
+        auth: authJson,
+        pre_script: preScript,
+        post_script: postScript,
+        variables: JSON.stringify(variables),
+      });
+    } else {
+      const folder = get().folders.find((f) => f.id === tab.entityId);
+      if (!folder) return;
+      await get().updateFolder({
+        ...folder,
+        description,
+        auth: authJson,
+        pre_script: preScript,
+        post_script: postScript,
+      });
+    }
+
+    set((s) => ({
+      entityTabs: s.entityTabs.map((entry) =>
+        // Identity, not `id` alone: anything typed while the write was in flight replaced the
+        // draft object, and clearing the flag then would mark those keystrokes saved without
+        // them ever having been written.
+        entry.id === tabId && entry.draft === tab.draft ? { ...entry, dirty: false } : entry,
+      ),
+    }));
+    persistTabs(get);
+  },
+
   closeTab: (tabId) => {
-    const index = get().openTabs.findIndex((tab) => tab.id === tabId);
+    const index = get().tabOrder.indexOf(tabId);
     if (index < 0) return;
-    const openTabs = get().openTabs.filter((tab) => tab.id !== tabId);
+    const tabOrder = get().tabOrder.filter((id) => id !== tabId);
     // Focus the neighbour that visually takes the closed tab's place, browser-style.
-    const successor = openTabs[Math.min(index, openTabs.length - 1)];
+    const successor = tabOrder[Math.min(index, tabOrder.length - 1)];
     set({
-      openTabs,
-      activeTabId: get().activeTabId === tabId ? (successor?.id ?? null) : get().activeTabId,
+      openTabs: get().openTabs.filter((tab) => tab.id !== tabId),
+      entityTabs: get().entityTabs.filter((tab) => tab.id !== tabId),
+      tabOrder,
+      activeTabId: get().activeTabId === tabId ? (successor ?? null) : get().activeTabId,
     });
     persistTabs(get);
     releaseTab(tabId);
@@ -883,9 +1048,13 @@ export const useApiStore = create<ApiState>((set, get) => ({
       };
     });
 
-    if (!touched) return;
-    set({ openTabs: next });
-    persistTabs(get);
+    if (touched) {
+      set({ openTabs: next });
+      persistTabs(get);
+    }
+    // Outside the guard: the settings tabs have their own idea of what changed, and a pull that
+    // only touched a collection's auth leaves `touched` false here.
+    syncEntityTabs(set, get);
   },
 
   takeRemoteVersion: (tabId) => {
@@ -987,9 +1156,15 @@ function persistTabs(get: () => ApiState) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
-  const { workspaceId, openTabs, activeTabId } = get();
+  const { workspaceId, openTabs, entityTabs, tabOrder, activeTabId } = get();
   if (workspaceId === null) return;
-  const payload: PersistedTabs = { version: 1, tabs: openTabs, activeTabId };
+  const payload: PersistedTabs = {
+    version: 2,
+    tabs: openTabs,
+    entityTabs,
+    order: tabOrder,
+    activeTabId,
+  };
   void setSetting(openTabsKey(workspaceId), JSON.stringify(payload)).catch(() => {});
 }
 
@@ -1073,6 +1248,110 @@ function migrateSettings(stored: StoredSettings): ApiSettings | null {
 /** A tab written by an older version can be missing spec fields the editor now reads. */
 function rehydrateTab(tab: ApiTab): ApiTab {
   return { ...tab, draft: { ...defaultRequestSpec(tab.draft?.protocol ?? "http"), ...tab.draft } };
+}
+
+/**
+ * The strip order, repaired against the tabs that actually survived the restore.
+ *
+ * The stored order is authoritative for the tabs it still names; anything it has lost (a v1 blob,
+ * which has no order at all) falls in behind it. Without the second half a tab would exist in the
+ * store and render nowhere, which reads as data loss.
+ */
+function orderedTabIds(stored: string[], tabs: ApiTab[], entityTabs: ApiEntityTab[]): string[] {
+  const live = new Set<string>([...tabs.map((t) => t.id), ...entityTabs.map((t) => t.id)]);
+  const order = stored.filter((id) => live.has(id));
+  const placed = new Set(order);
+  for (const id of live) if (!placed.has(id)) order.push(id);
+  return order;
+}
+
+/**
+ * The current settings of a collection or folder, in the shape a tab edits them in.
+ *
+ * The auth default differs by kind on purpose. A folder sits under something, so "nothing
+ * configured here" is `inherit` — keep looking upwards. A collection is the top of the chain, so
+ * the same empty column means `none`: there is nothing above it to inherit from, and offering the
+ * word would promise a lookup that cannot happen.
+ */
+function readEntity(
+  state: ApiState,
+  kind: "collection" | "folder",
+  entityId: string,
+): { name: string; collectionId: string; draft: EntityDraft } | null {
+  if (kind === "collection") {
+    const row = state.collections.find((c) => c.id === entityId);
+    if (!row) return null;
+    const stored = parseAuth(row.auth);
+    return {
+      name: row.name,
+      collectionId: row.id,
+      draft: {
+        description: row.description,
+        // An `inherit` here can only have come from an import that carried one; folded into
+        // `none` so the type picker never shows a value it doesn't offer.
+        auth: stored === null || stored.type === "inherit" ? defaultAuth("none") : stored,
+        preScript: row.pre_script,
+        postScript: row.post_script,
+        variables: parseVariables(row.variables),
+      },
+    };
+  }
+  const row = state.folders.find((f) => f.id === entityId);
+  if (!row) return null;
+  return {
+    name: row.name,
+    collectionId: row.collection_id,
+    draft: {
+      description: row.description,
+      auth: parseAuth(row.auth) ?? defaultAuth("inherit"),
+      preScript: row.pre_script,
+      postScript: row.post_script,
+      // A folder has no variable scope of its own; the tab never shows the panel.
+      variables: [],
+    },
+  };
+}
+
+/**
+ * Brings the open settings tabs back in line with the tree.
+ *
+ * Same contract as `adoptRemoteChanges` has for requests, with one difference: the name is not
+ * part of the draft, so it follows the row even on a dirty tab — renaming happens in the tree, and
+ * a tab still labelled with the old name after a rename looks like a second, stale copy.
+ *
+ * A tab whose row is gone is closed rather than detached. There is no scratch equivalent of a
+ * collection to fall back to, and a draft with nothing to save into is not worth keeping on screen.
+ */
+function syncEntityTabs(set: (partial: Partial<ApiState>) => void, get: () => ApiState) {
+  if (get().entityTabs.length === 0) return;
+
+  // Removal first, and through `closeTab`, so the strip order and the focused tab are picked by
+  // the one function that knows how — then the refresh below only sees survivors.
+  for (const tab of get().entityTabs) {
+    if (readEntity(get(), tab.kind, tab.entityId) === null) get().closeTab(tab.id);
+  }
+
+  let touched = false;
+  const next = get().entityTabs.map((tab) => {
+    const fresh = readEntity(get(), tab.kind, tab.entityId);
+    if (fresh === null) return tab;
+    if (tab.dirty) {
+      if (tab.name === fresh.name) return tab;
+      touched = true;
+      return { ...tab, name: fresh.name };
+    }
+    // Compared before replacing: an identical draft swapped for an identical draft re-renders the
+    // whole settings view for nothing, which a sync heartbeat would turn into a flicker.
+    if (tab.name === fresh.name && JSON.stringify(tab.draft) === JSON.stringify(fresh.draft)) {
+      return tab;
+    }
+    touched = true;
+    return { ...tab, name: fresh.name, collectionId: fresh.collectionId, draft: fresh.draft };
+  });
+
+  if (!touched) return;
+  set({ entityTabs: next });
+  persistTabs(get);
 }
 
 /**

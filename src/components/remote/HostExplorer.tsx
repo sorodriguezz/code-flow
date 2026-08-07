@@ -72,7 +72,11 @@ export function HostExplorer({ onImport }: { onImport: () => void }) {
 
   return (
     <>
-      <div style={{ width }} className={`flex shrink-0 flex-col overflow-hidden ${CARD}`}>
+      <div
+        data-tour="remote-hosts"
+        style={{ width }}
+        className={`flex shrink-0 flex-col overflow-hidden ${CARD}`}
+      >
         <HostList onImport={onImport} />
         <HistoryList />
         <SnippetList />
@@ -651,6 +655,11 @@ function RowAction({
         e.stopPropagation();
         onClick();
       }}
+      // Same reason the db explorer's chevron stops its own press: the host row captures the
+      // pointer on `pointerdown` to tell a click from a drag, and a captured pointer delivers the
+      // `click` to whatever holds the capture. Without this the row swallowed all three of these
+      // buttons — they highlighted on hover and did nothing at all when pressed.
+      onPointerDown={(e) => e.stopPropagation()}
       className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.08]"
     >
       <Icon size={12} />

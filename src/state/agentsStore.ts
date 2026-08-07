@@ -141,6 +141,10 @@ interface AgentsState {
   /** Adds a task created outside this store (a chain step). Unlike `create` it does **not** touch
    * `selectedId`: a background step must not yank the detail pane out from under the user. */
   adopt: (task: AgentTask) => void;
+  /** Drops tasks the store no longer owns, **without deleting anything**. For rows the backend has
+   * already removed — a chain deleted takes its step tasks with it — where calling `remove` would
+   * mean a second delete of something that is gone. */
+  forget: (taskIds: string[]) => void;
   send: (taskId: string, message: string) => void;
   /** `send` without its guards, for a caller that has already decided. Always settles. */
   runTurn: (
@@ -330,6 +334,19 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       ) ?? null
     );
   },
+
+  forget: (taskIds) =>
+    set((s) => {
+      const gone = new Set(taskIds);
+      if (!s.tasks.some((task) => gone.has(task.id))) return s;
+      const live = { ...s.live };
+      for (const id of gone) delete live[id];
+      return {
+        tasks: s.tasks.filter((task) => !gone.has(task.id)),
+        live,
+        selectedId: s.selectedId && gone.has(s.selectedId) ? null : s.selectedId,
+      };
+    }),
 
   adopt: (task) =>
     set((s) => {

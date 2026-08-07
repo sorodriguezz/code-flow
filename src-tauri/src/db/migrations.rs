@@ -1262,6 +1262,11 @@ fn add_ai_usage(conn: &Connection) -> rusqlite::Result<()> {
             -- when neither was known, which is a real state: the CLI picked for itself and did not
             -- report it.
             model              TEXT NOT NULL DEFAULT '',
+            -- Which feature spent it: 'chat', 'inline', 'review-pr', 'stories', 'commit', … See
+            -- `ai::AiTaskLabel`. Empty only on rows written before this column existed — a meter
+            -- that cannot say *what* was counted cannot be checked for gaps, which is the one
+            -- question anybody actually asks of it.
+            task               TEXT NOT NULL DEFAULT '',
             input_tokens       INTEGER NOT NULL DEFAULT 0,
             output_tokens      INTEGER NOT NULL DEFAULT 0,
             -- Prompt tokens served from the provider's cache, kept apart from `input_tokens`
@@ -1276,7 +1281,22 @@ fn add_ai_usage(conn: &Connection) -> rusqlite::Result<()> {
          -- an append at the newest end.
          CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);
          CREATE INDEX IF NOT EXISTS idx_ai_usage_provider ON ai_usage(provider, created_at);",
-    )
+    )?;
+    add_task_to_ai_usage(conn)
+}
+
+/// Which feature each recorded run belongs to.
+///
+/// Added late: the table shipped knowing only *which engine* spent the tokens, which is enough for
+/// a status-bar total and useless for the question that follows it — "is my PR review being counted
+/// at all?". Without this the only way to answer was to reason about the call graph. Rows written
+/// before it keep an empty task and read as "unknown", which is honest: nothing recorded what they
+/// were.
+fn add_task_to_ai_usage(conn: &Connection) -> rusqlite::Result<()> {
+    if has_column(conn, "ai_usage", "task")? {
+        return Ok(());
+    }
+    conn.execute_batch("ALTER TABLE ai_usage ADD COLUMN task TEXT NOT NULL DEFAULT '';")
 }
 
 /// A chain stopped being about one repository.

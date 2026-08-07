@@ -21,6 +21,7 @@ import { DdlPanel } from "./DdlPanel";
 import { DiagramPanel } from "./DiagramPanel";
 import { SchemaPanel } from "./SchemaPanel";
 import { ConnectionModal } from "./ConnectionModal";
+import { ObjectFilterModal } from "./TableFilterModal";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
 import { CARD, EngineBadge, nodeIcon } from "./dbChrome";
 import { ensureDbStoreLoaded, pendingCount, useDbStore, type DbTab } from "../../state/dbStore";
@@ -119,6 +120,13 @@ export function DatabaseView() {
           connectionId={modal.kind === "connection" ? modal.connectionId : null}
           newEngine={modal.kind === "newConnection" ? modal.engine : null}
           newGroup={modal.kind === "newConnection" ? modal.group ?? "" : ""}
+          onClose={closeModal}
+        />
+      )}
+      {modal?.kind === "objectFilter" && (
+        <ObjectFilterModal
+          connectionId={modal.connectionId}
+          schema={modal.schema}
           onClose={closeModal}
         />
       )}

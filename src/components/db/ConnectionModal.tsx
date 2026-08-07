@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ApiModal, GhostButton } from "../api/ApiModal";
+import { INPUT, Row } from "./dbChrome";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
 import { Select, type SelectItems } from "../common/Select";
@@ -36,6 +37,7 @@ import {
   engineInfo,
   type DbAuthMethod,
   type DbConnectionConfig,
+  type DbSchemaObjectFilter,
   type DbConnectionRow,
   type DbKind,
   type DbSchemaGroup,
@@ -75,10 +77,6 @@ import {
  * connection in the list is not a discard, so that one asks.
  */
 
-/** Shared with `Field` in `ApiModal`, so a local input styled here can't drift from the rest. */
-const INPUT =
-  "w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:opacity-50";
-
 type Mode = "fields" | "url";
 type Tab = "general" | "options" | "ssh" | "schemas" | "advanced";
 
@@ -114,6 +112,12 @@ function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
     a.connect_timeout_ms === b.connect_timeout_ms &&
     a.show_all_databases === b.show_all_databases &&
     a.object_filter === b.object_filter &&
+    a.schema_object_filters.length === b.schema_object_filters.length &&
+    a.schema_object_filters.every(
+      (entry, i) =>
+        b.schema_object_filters[i]?.schema === entry.schema &&
+        b.schema_object_filters[i]?.pattern === entry.pattern,
+    ) &&
     a.keep_alive_secs === b.keep_alive_secs &&
     a.auto_disconnect_secs === b.auto_disconnect_secs &&
     a.startup_script === b.startup_script &&
@@ -419,6 +423,7 @@ export function ConnectionModal({
       icon={Database}
       title={t("db.dataSources")}
       subtitle={nothingSelected ? undefined : engine.label}
+      tourAnchor="db-data-sources"
       width="max-w-4xl"
       height="h-[78vh]"
       busy={saving}
@@ -907,6 +912,7 @@ export function ConnectionModal({
                   visible={config.visible_schemas}
                   filtered={config.schemas_filtered}
                   objectFilter={config.object_filter}
+                  schemaFilters={config.schema_object_filters}
                   onChange={patch}
                 />
               ) : (
@@ -1096,6 +1102,7 @@ function SchemasTab({
   visible,
   filtered: isFiltered,
   objectFilter,
+  schemaFilters,
   onChange,
 }: {
   connectionId: string | null;
@@ -1103,6 +1110,8 @@ function SchemasTab({
   /** Whether the list is being used as a filter at all. See `schemas_filtered`. */
   filtered: boolean;
   objectFilter: string;
+  /** Schemas that carry a filter of their own, set from the tree or edited here. */
+  schemaFilters: DbSchemaObjectFilter[];
   onChange: (partial: Partial<DbConnectionConfig>) => void;
 }) {
   const t = useT();
@@ -1360,7 +1369,57 @@ function SchemasTab({
           spellCheck={false}
           className={INPUT}
         />
+        <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {t("db.objectFilterGrammar")}
+        </p>
       </Row>
+
+      {/* The overrides written from the tree, editable here too. Without this the dialog would be
+          the one place that claims to hold a connection's visibility while quietly not showing a
+          filter somebody set with a right-click — and a schema listing three of its ninety tables
+          for no visible reason is the worst bug this feature could have. */}
+      {schemaFilters.length > 0 && (
+        <Row label={t("db.objectFilterPerSchema")}>
+          <div className="rounded-md border border-[var(--cf-border)]">
+            {schemaFilters.map((entry) => (
+              <div
+                key={entry.schema}
+                className="flex items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5 last:border-b-0"
+              >
+                <span className="min-w-0 shrink-0 truncate text-[12px] font-medium text-[var(--cf-text)]">
+                  {entry.schema}
+                </span>
+                <input
+                  value={entry.pattern}
+                  onChange={(e) =>
+                    onChange({
+                      schema_object_filters: schemaFilters.map((candidate) =>
+                        candidate.schema === entry.schema
+                          ? { ...candidate, pattern: e.target.value }
+                          : candidate,
+                      ),
+                    })
+                  }
+                  spellCheck={false}
+                  className={`${INPUT} font-mono`}
+                />
+                <GhostButton
+                  onClick={() =>
+                    onChange({
+                      schema_object_filters: schemaFilters.filter(
+                        (candidate) => candidate.schema !== entry.schema,
+                      ),
+                    })
+                  }
+                  title={t("db.objectFilterRemove")}
+                >
+                  <Trash2 size={12} />
+                </GhostButton>
+              </div>
+            ))}
+          </div>
+        </Row>
+      )}
     </div>
   );
 }
@@ -1486,30 +1545,6 @@ function ModeSwitch({ mode, onChange }: { mode: Mode; onChange: (mode: Mode) => 
         );
       })}
     </div>
-  );
-}
-
-function Row({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="mb-1 block text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-        {label}
-      </span>
-      {children}
-      {hint && (
-        <span className="mt-1 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
-          {hint}
-        </span>
-      )}
-    </label>
   );
 }
 

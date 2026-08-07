@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { listRepoFiles } from "../../lib/tauri/commands";
-import { fileIconFor } from "../../lib/fileIcon";
+import { FileGlyph } from "../common/FileGlyph";
 import { useT } from "../../state/languageStore";
 
 /** How many rows the list renders. Filtering happens over the whole repo; only the top slice is
@@ -134,7 +134,6 @@ export function FilePalette({
             <p className="px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("titlebar.noResults")}</p>
           ) : (
             matches.map((path, index) => {
-              const { Icon, color } = fileIconFor(path);
               const name = path.slice(path.lastIndexOf("/") + 1);
               const dir = path.slice(0, path.length - name.length - 1);
               return (
@@ -150,7 +149,7 @@ export function FilePalette({
                     index === active ? "bg-[var(--cf-accent-soft)]" : ""
                   }`}
                 >
-                  <Icon size={13} className="shrink-0" style={{ color }} />
+                  <FileGlyph path={path} />
                   <span className="shrink-0 text-[13px] text-[var(--cf-text)]">{name}</span>
                   <span className="truncate text-[11px] text-[var(--cf-text-muted)]">{dir}</span>
                 </button>

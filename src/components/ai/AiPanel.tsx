@@ -94,6 +94,7 @@ import { CheckpointsModal } from "./CheckpointsModal";
 import { AnalyzeSection } from "./AnalyzeSection";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { ReviewLevelSelector } from "./ReviewLevelSelector";
+import { ReviewEngineTag } from "./ReviewEngineTag";
 import { AiErrorBanner } from "./AiErrorBanner";
 import type { PrDecision, PullRequestSummary, PrCommentThread, SavedFinding } from "../../types/domain";
 
@@ -1112,6 +1113,10 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
                   three words select. */}
               <span className="shrink-0 text-[11px] text-[var(--cf-text-muted)]">{t("pr.levelLabel")}</span>
               <ReviewLevelSelector value={reviewLevel} onChange={setReviewLevel} disabled={loading} />
+              {/* Rides the level row rather than taking one of its own: it is a label, not a
+                  control, and the answer to "what is about to run" is worth exactly the space a
+                  tag takes. Pushed right so the level selector keeps the eye. */}
+              <ReviewEngineTag />
             </div>
             <div className="flex items-center gap-1.5">
               {reviewText && !loading && (

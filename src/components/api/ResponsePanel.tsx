@@ -177,7 +177,7 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
   const testsPassed = response.tests.filter((test) => test.passed).length;
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[var(--cf-surface)]">
+    <div data-tour="api-response" className="flex h-full min-h-0 flex-col bg-[var(--cf-surface)]">
       {exampleView && (
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-accent-soft)] px-3 py-1 text-[11px] text-[var(--cf-accent)]">
           <Bookmark size={12} className="shrink-0" />

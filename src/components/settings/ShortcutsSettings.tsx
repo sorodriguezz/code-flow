@@ -5,7 +5,6 @@ import { useShortcutsStore, activeChords, bindingFor } from "../../state/shortcu
 import {
   SHORTCUT_COMMANDS,
   SHORTCUT_GROUP_LABELS,
-  reservedBy,
   type ShortcutGroup,
   type ShortcutId,
 } from "../../lib/shortcuts";
@@ -95,19 +94,19 @@ export function ShortcutsSettings() {
     const chord = bindingFor(id, overrides);
     const recording = recordingId === id;
     const customized = id in overrides;
-    const editorConflict = chord ? reservedBy(chord) : null;
     const duplicate = chord ? assigned.get(chord) !== id : false;
 
     return (
       <div key={id} className="flex items-center gap-3 border-b border-[var(--cf-border)]/60 py-1.5 last:border-0">
         <div className="min-w-0 flex-1">
           <p className="truncate text-[13px] text-[var(--cf-text)]">{t(command.labelKey)}</p>
-          {(editorConflict || duplicate) && !recording && (
+          {/* One warning now, because there is one kind of collision. The editor's chords used to
+              be a separate list that could only be warned about; they are ordinary commands in the
+              same table, so the duplicate check that always covered app actions covers them too. */}
+          {duplicate && !recording && (
             <p className="mt-0.5 flex items-center gap-1 text-[11px] text-[var(--cf-warning)]">
               <AlertTriangle size={11} />
-              {duplicate
-                ? t("shortcuts.conflict")
-                : t("shortcuts.conflictEditor", { name: t(editorConflict!) })}
+              {t("shortcuts.conflict")}
             </p>
           )}
         </div>

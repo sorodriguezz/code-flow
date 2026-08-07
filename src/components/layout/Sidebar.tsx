@@ -74,6 +74,7 @@ import { useT } from "../../state/languageStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { riseDelay } from "../../lib/rise";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 
 // The hover-revealed actions on a project row: the same square chip the "clone"/"add repository"
 // buttons above the list wear, so every icon-only control in the sidebar answers the pointer the
@@ -127,7 +128,7 @@ function WorkspaceSwitcher() {
       >
         <span
           className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white"
-          style={{ background: active?.color ?? "#6366f1" }}
+          style={{ background: active?.color ?? DEFAULT_WORKSPACE_COLOR }}
         >
           <Briefcase size={13} />
         </span>
@@ -1291,7 +1292,7 @@ export function Sidebar() {
       name: basename(repo.path),
       local_path: repo.path,
       remote_url: repo.remote_url,
-      color: "#6366f1",
+      color: DEFAULT_WORKSPACE_COLOR,
       icon: "git-branch",
       ado_org: null,
       ado_project: null,

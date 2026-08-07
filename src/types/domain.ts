@@ -1330,6 +1330,19 @@ export interface ModelStat {
   costed_runs: number;
 }
 
+/**
+ * One feature's slice of a window — which *part of the app* spent the tokens, as opposed to which
+ * engine answered. `task` is one of the ids in `AI_TASK_LABELS`, or empty for rows recorded before
+ * the app labelled them.
+ */
+export interface TaskStat {
+  task: string;
+  runs: number;
+  tokens: number;
+  cost_usd: number;
+  costed_runs: number;
+}
+
 /** One column of the usage chart, closed at `start` and open at the next one. */
 export interface UsageBucket {
   start: string;
@@ -1348,6 +1361,8 @@ export interface UsageStats {
   series: UsageBucket[];
   providers: ProviderStat[];
   models: ModelStat[];
+  /** Busiest first. A feature missing from here spent nothing in the window. */
+  tasks: TaskStat[];
   /** The busiest single bucket, as tokens — the chart's scale. */
   peak_tokens: number;
   since: string;

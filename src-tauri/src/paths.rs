@@ -80,6 +80,15 @@ pub fn workspace_skills_dir(workspace_id: &str) -> PathBuf {
     base_dir().join("workspaces").join(workspace_id).join("skills")
 }
 
+/// Where one chain's memory notes actually live.
+///
+/// Consolidated here rather than in a repository for the same reason the skills are: a repository
+/// can be deleted, moved or renamed, and a chain's record of what it did should not go with it.
+/// What each repository gets is a *mirror* — see `chain_memory`.
+pub fn chain_memory_dir(chain_id: &str) -> PathBuf {
+    base_dir().join("chain-memory").join(chain_id)
+}
+
 pub fn ensure_dirs() -> std::io::Result<()> {
     std::fs::create_dir_all(base_dir())?;
     std::fs::create_dir_all(logs_dir())?;

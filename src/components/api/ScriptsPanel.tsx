@@ -114,15 +114,46 @@ if (!registry.__cfApiScriptCompletions) {
 // Panel
 // ---------------------------------------------------------------------------
 
+/** A request tab's scripts. Collections and folders use `ScriptEditor` directly. */
 export function ScriptsPanel({ tabId, kind }: { tabId: string; kind: "pre" | "post" }) {
-  const t = useT();
   const tab = useApiStore((s) => s.openTabs.find((entry) => entry.id === tabId));
   const updateDraft = useApiStore((s) => s.updateDraft);
+
+  if (!tab) return <div className="h-full" />;
+
+  return (
+    <ScriptEditor
+      kind={kind}
+      bufferKey={tabId}
+      value={kind === "pre" ? tab.draft.preScript : tab.draft.postScript}
+      onChange={(next) =>
+        updateDraft(tabId, kind === "pre" ? { preScript: next } : { postScript: next })
+      }
+    />
+  );
+}
+
+/**
+ * The editor and its snippet rail, over a plain value.
+ *
+ * `bufferKey` only has to be unique — it names the Monaco model, so two editors sharing one would
+ * share an undo stack and a cursor.
+ */
+export function ScriptEditor({
+  kind,
+  bufferKey,
+  value,
+  onChange,
+}: {
+  kind: "pre" | "post";
+  bufferKey: string;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  const t = useT();
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
   const [filter, setFilter] = useState("");
-
-  const value = (kind === "pre" ? tab?.draft.preScript : tab?.draft.postScript) ?? "";
 
   const onMount: OnMount = (instance) => {
     editorRef.current = instance;
@@ -147,8 +178,6 @@ export function ScriptsPanel({ tabId, kind }: { tabId: string; kind: "pre" | "po
   const query = filter.trim().toLowerCase();
   const snippets = query === "" ? SCRIPT_SNIPPETS : SCRIPT_SNIPPETS.filter((s) => s.label.toLowerCase().includes(query));
 
-  if (!tab) return <div className="h-full" />;
-
   return (
     <div className="flex h-full min-h-0">
       <div className="flex min-w-0 flex-1 flex-col">
@@ -163,13 +192,11 @@ export function ScriptsPanel({ tabId, kind }: { tabId: string; kind: "pre" | "po
           <Editor
             height="100%"
             language="javascript"
-            path={`${SCRIPT_SCHEME}:/${tabId}/${kind}.js`}
+            path={`${SCRIPT_SCHEME}:/${bufferKey}/${kind}.js`}
             value={value}
             theme={monacoTheme}
             onMount={onMount}
-            onChange={(next) =>
-              updateDraft(tabId, kind === "pre" ? { preScript: next ?? "" } : { postScript: next ?? "" })
-            }
+            onChange={(next) => onChange(next ?? "")}
             options={{
             ...OVERFLOW_SAFE_OPTIONS,
               minimap: { enabled: false },

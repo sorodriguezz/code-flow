@@ -41,8 +41,14 @@ export function useGlobalShortcuts(): void {
       // bookmark, the way JetBrains binds it) are pressed with the caret in the code. Without this
       // they were bindable in settings and then silently dead in the only place they were for.
       if (!usesMod(chord) && !isFunctionKey(chord) && isTypingTarget(e.target)) return;
+      // A command whose behaviour lives in Monaco has no `run`: inside the editor Monaco already
+      // handled the chord and this handler never saw it, and outside the editor there is nothing
+      // to do. Letting it fall through — rather than swallowing the key — is what keeps ⌘Z undoing
+      // text in an ordinary input.
+      const command = SHORTCUT_BY_ID.get(id);
+      if (!command?.run) return;
       e.preventDefault();
-      SHORTCUT_BY_ID.get(id)?.run();
+      command.run();
     };
 
     window.addEventListener("keydown", handler);

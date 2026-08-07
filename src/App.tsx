@@ -43,6 +43,7 @@ import { useUpdateStore, CHECK_INTERVAL_MS } from "./state/updateStore";
 import { useNavigationStore } from "./state/navigationStore";
 import { useTerminalStore } from "./state/terminalStore";
 import { useShortcutsStore } from "./state/shortcutsStore";
+import { useIconRulesStore } from "./state/iconRulesStore";
 import { useTourStore } from "./state/tourStore";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { startWindowBoundsTracking } from "./lib/windowControls";
@@ -121,6 +122,7 @@ export default function App() {
   const initTerminal = useTerminalStore((s) => s.init);
   const initAiProvider = useAiProviderStore((s) => s.init);
   const initShortcuts = useShortcutsStore((s) => s.init);
+  const initIconRules = useIconRulesStore((s) => s.init);
   const initTour = useTourStore((s) => s.init);
   const project = useWorkspaceStore((s) => s.activeProject());
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
@@ -154,6 +156,9 @@ export default function App() {
         initTerminal(),
         initAiProvider(),
         initShortcuts(),
+        // Read with the rest of the look-and-feel settings: the explorer paints its first tree
+        // within a frame or two of this batch, and rules arriving after it would repaint every row.
+        initIconRules(),
         // Reads whether the guided tour has already been run, and — if it hasn't — arms the
         // first-launch opening. Deliberately inside this batch: the tour rearranges panels, and
         // it must not start before the layout and language it rearranges have loaded.
@@ -173,6 +178,7 @@ export default function App() {
     initTerminal,
     initAiProvider,
     initShortcuts,
+    initIconRules,
     initTour,
   ]);
 

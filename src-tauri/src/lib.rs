@@ -6,6 +6,7 @@ mod ai_locks;
 mod ai_runs;
 mod ai_usage;
 mod backup;
+mod chain_memory;
 mod boards;
 mod claude;
 mod commands;
@@ -287,6 +288,7 @@ pub fn run() {
             commands::agents_cmd::delete_chain,
             commands::agents_cmd::harvest_chain_step,
             commands::agents_cmd::run_chain_step_check,
+            commands::agents_cmd::rerun_chain_from,
             commands::agents_cmd::create_continuation_chain,
             commands::agents_cmd::list_chain_templates,
             commands::agents_cmd::upsert_chain_template,
@@ -444,6 +446,7 @@ pub fn run() {
             commands::fs_cmd::write_file_text,
             commands::fs_cmd::write_file_bytes,
             commands::fs_cmd::move_path,
+            commands::fs_cmd::copy_into_repo,
             commands::fs_cmd::create_dir,
             commands::fs_cmd::create_file,
             commands::fs_cmd::rename_path,

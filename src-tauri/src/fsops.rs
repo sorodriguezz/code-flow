@@ -144,6 +144,107 @@ pub fn move_path(repo_path: &str, from_rel: &str, dest_dir: &str) -> Result<Stri
         .replace('\\', "/"))
 }
 
+/// What a drop from the file manager actually did.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImportOutcome {
+    /// Repo-relative paths of everything that landed, in the order it was dropped.
+    pub copied: Vec<String>,
+    /// The names left alone because the destination already had one. Reported rather than
+    /// overwritten, and rather than failing the other twenty files dropped alongside them.
+    pub skipped: Vec<String>,
+}
+
+/// Copies files and folders **into** the repo from anywhere on disk — dragging a selection out of
+/// Finder or Explorer and dropping it on the editor.
+///
+/// The sources are absolute paths handed over by the platform's own drag, and that drag is the
+/// authorisation, the same way the save dialog is for `write_file_bytes`: nothing gets read that
+/// the user didn't pick up themselves. The *destination* is this app's to guard, and it is:
+/// - resolved inside the repo, so no drop can write outside the project;
+/// - never overwritten — a name already taken is skipped and reported back, because a drop is one
+///   flick of the wrist away from being the wrong folder and a replaced file has no trash to come
+///   back from;
+/// - never a folder's own descendant, which would copy the folder into itself until the disk
+///   filled up.
+pub fn copy_into(
+    repo_path: &str,
+    dest_dir: &str,
+    sources: &[String],
+) -> Result<ImportOutcome, String> {
+    let base = Path::new(repo_path)
+        .canonicalize()
+        .map_err(|e| format!("invalid repo path: {e}"))?;
+    let dest = if dest_dir.trim().is_empty() {
+        base.clone()
+    } else {
+        resolve_within_repo(repo_path, dest_dir)?
+    };
+    if !dest.is_dir() {
+        return Err(format!("{dest_dir} is not a folder"));
+    }
+
+    let mut outcome = ImportOutcome {
+        copied: Vec::new(),
+        skipped: Vec::new(),
+    };
+    for source in sources {
+        let source = Path::new(source)
+            .canonicalize()
+            .map_err(|e| format!("{source}: {e}"))?;
+        let name = source
+            .file_name()
+            .ok_or_else(|| format!("cannot copy {}", source.display()))?
+            .to_owned();
+        // Canonical at both ends, so a symlinked route into the subtree is caught too.
+        if source.is_dir() && dest.starts_with(&source) {
+            return Err(format!(
+                "cannot copy {} into itself",
+                name.to_string_lossy()
+            ));
+        }
+        let target = dest.join(&name);
+        if target.exists() {
+            outcome.skipped.push(name.to_string_lossy().to_string());
+            continue;
+        }
+        if source.is_dir() {
+            copy_tree(&source, &target)?;
+        } else {
+            std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
+        }
+        outcome.copied.push(
+            target
+                .strip_prefix(&base)
+                .map_err(|_| "copied outside the repository".to_string())?
+                .to_string_lossy()
+                .replace('\\', "/"),
+        );
+    }
+    Ok(outcome)
+}
+
+/// Recursive copy of a directory, for `copy_into`.
+///
+/// Links are not followed as links. `file_type` reports what the entry *is* rather than what it
+/// points at, so a link to a file is copied as the file it names — which is what dropping that
+/// file directly would have done — and a link to a directory is left behind, since following one
+/// can walk a cycle straight back into the folder being copied.
+fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(from).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let kind = entry.file_type().map_err(|e| e.to_string())?;
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_tree(&source, &target)?;
+        } else if kind.is_file() || source.is_file() {
+            std::fs::copy(&source, &target).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolves the target of a *creation*, which by definition doesn't exist yet — so
 /// `resolve_within_repo`'s canonicalize-based containment check can't see through a `..`
 /// segment. Requiring every component to be a plain name is the equivalent guard here, and
@@ -360,6 +461,48 @@ mod tests {
         assert!(move_path(&root, "a.ts", "..").is_err());
 
         std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// The editor's external drop. Same shape of risk as a move — one gesture, a whole folder —
+    /// so the test is again mostly about what it refuses to do.
+    #[test]
+    fn copies_dropped_paths_in_and_never_overwrites() {
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+        create_dir(&root, "assets").unwrap();
+        create_file(&root, "taken.txt").unwrap();
+
+        // A folder of loose files, somewhere else entirely — what Finder hands over.
+        let outside = temp_repo();
+        std::fs::create_dir_all(outside.join("icons/svg")).unwrap();
+        std::fs::write(outside.join("icons/logo.png"), b"png").unwrap();
+        std::fs::write(outside.join("icons/svg/mark.svg"), b"svg").unwrap();
+        std::fs::write(outside.join("taken.txt"), b"newer").unwrap();
+        let dropped = |name: &str| outside.join(name).to_string_lossy().to_string();
+
+        // A whole tree into a subfolder, contents and all.
+        let outcome = copy_into(&root, "assets", &[dropped("icons")]).unwrap();
+        assert_eq!(outcome.copied, vec!["assets/icons"]);
+        assert!(outcome.skipped.is_empty());
+        assert!(repo.join("assets/icons/logo.png").is_file());
+        assert_eq!(read_file_text(&root, "assets/icons/svg/mark.svg").unwrap(), "svg");
+
+        // A name already taken at the root is reported, not replaced — and the rest of the same
+        // drop still lands.
+        let outcome = copy_into(&root, "", &[dropped("taken.txt"), dropped("icons/logo.png")]).unwrap();
+        assert_eq!(outcome.copied, vec!["logo.png"]);
+        assert_eq!(outcome.skipped, vec!["taken.txt"]);
+        assert_eq!(read_file_text(&root, "taken.txt").unwrap(), "");
+
+        // Dropping a folder onto itself, or into something inside it, would recurse forever.
+        let inside = repo.join("assets").to_string_lossy().to_string();
+        assert!(copy_into(&root, "assets/icons", &[inside]).is_err());
+        // And nothing may land outside the repository.
+        assert!(copy_into(&root, "..", &[dropped("icons/logo.png")]).is_err());
+        assert!(!repo.parent().unwrap().join("logo.png").exists());
+
+        std::fs::remove_dir_all(&repo).ok();
+        std::fs::remove_dir_all(&outside).ok();
     }
 
     /// Renaming is deliberately narrower than moving, so the test is mostly about what it refuses.

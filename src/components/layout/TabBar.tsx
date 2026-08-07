@@ -4,6 +4,7 @@ import { useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ActivePill } from "../common/ActivePill";
+import { TourLauncher } from "../tour/TourLauncher";
 import { WorkspaceMenu } from "./WorkspaceMenu";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -126,7 +127,14 @@ export function TabBar() {
         ))}
       </div>
 
-      <div className="ml-auto flex shrink-0 items-center">
+      {/* Left of the menu rather than right of it: the menu is the widest control on the bar and
+          the one that grows with the workspace's name, so anything past it moves every time the
+          workspace changes. Here the cap keeps one position.
+
+          The pair is anchored as one, because one step of the main tour is about both at once —
+          these are the workspace's apps, and this is how each of them explains itself. */}
+      <div data-tour="workspace-tools" className="ml-auto flex shrink-0 items-center gap-1">
+        <TourLauncher />
         <WorkspaceMenu />
       </div>
     </div>

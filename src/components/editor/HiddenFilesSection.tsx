@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight, Eye, EyeOff, Folder } from "lucide-react";
 import { useHiddenFilesStore } from "../../state/hiddenFilesStore";
-import { fileIconFor } from "../../lib/fileIcon";
+import { FileGlyph } from "../common/FileGlyph";
 import { useT } from "../../state/languageStore";
 
 /** Splits a repo-relative path into the folders leading to it and its own name, so the name can be
@@ -14,7 +14,6 @@ function split(path: string): { dir: string; name: string } {
 function HiddenRow({ path, isDir, onShow }: { path: string; isDir: boolean; onShow: () => void }) {
   const t = useT();
   const { dir, name } = split(path);
-  const { Icon, color } = fileIconFor(path);
 
   return (
     <button
@@ -28,7 +27,7 @@ function HiddenRow({ path, isDir, onShow }: { path: string; isDir: boolean; onSh
       {isDir ? (
         <Folder size={13} className="shrink-0" />
       ) : (
-        <Icon size={13} className="shrink-0" style={{ color }} />
+        <FileGlyph path={path} />
       )}
       {/* The folders it sits in stay dimmer than the name: two entries called `index.ts` are only
           told apart by the path, so it has to be there — but it is not what you read first. */}

@@ -3,8 +3,6 @@ import {
   Check,
   Copy,
   Download,
-  Eye,
-  EyeOff,
   Globe,
   Layers,
   Plus,
@@ -13,11 +11,10 @@ import {
   Trash2,
   Upload,
   Wand2,
-  X,
 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
-import { Select } from "../common/Select";
-import { ApiModal, Field, GhostButton } from "./ApiModal";
+import { ApiModal, GhostButton } from "./ApiModal";
+import { VariableTable } from "./VariableTable";
 import { useApiStore } from "../../state/apiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -31,8 +28,6 @@ import type { ApiEnvironment, ApiVariable } from "../../types/api";
 /** How long an edit sits in the draft before it reaches SQLite. */
 const COMMIT_DEBOUNCE_MS = 400;
 
-const GRID = "24px minmax(0,1fr) 96px minmax(0,1.3fr) minmax(0,1.3fr) minmax(0,1fr) 46px";
-
 function parseVariables(json: string | undefined): ApiVariable[] {
   if (!json) return [];
   try {
@@ -41,10 +36,6 @@ function parseVariables(json: string | undefined): ApiVariable[] {
   } catch {
     return [];
   }
-}
-
-function newVariableId(): string {
-  return `var-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 /** What a variable is actually worth right now — the same rule `variables.ts` resolves by. */
@@ -71,7 +62,6 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<"variables" | "dynamic">("variables");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [rows, setRows] = useState<ApiVariable[]>([]);
-  const [revealed, setRevealed] = useState<Set<string>>(new Set());
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
@@ -123,7 +113,6 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
       flush();
       setSelectedId(id);
       setRows(parseVariables(useApiStore.getState().environments.find((e) => e.id === id)?.variables));
-      setRevealed(new Set());
     },
     [flush, selectedId],
   );
@@ -134,33 +123,7 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
     const fallback = ordered(environments).find((e) => e.is_global) ?? ordered(environments)[0];
     setSelectedId(fallback?.id ?? null);
     setRows(parseVariables(fallback?.variables));
-    setRevealed(new Set());
   }, [environments, selectedId]);
-
-  const updateRow = (id: string, patch: Partial<ApiVariable>) =>
-    commit(rows.map((row) => (row.id === id ? { ...row, ...patch } : row)));
-
-  const addRow = () =>
-    commit([
-      ...rows,
-      {
-        id: newVariableId(),
-        key: "",
-        initialValue: "",
-        currentValue: "",
-        secret: false,
-        enabled: true,
-        description: "",
-      },
-    ]);
-
-  const toggleReveal = (id: string) =>
-    setRevealed((previous) => {
-      const next = new Set(previous);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
 
   const createNew = async () => {
     flush();
@@ -477,99 +440,14 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
                 <p className="mb-2 text-[11px] text-[var(--cf-text-muted)]">{t("api.env.globalsHint")}</p>
               )}
 
-              <div
-                className="grid items-center gap-2 border-b border-[var(--cf-border)] pb-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
-                style={{ gridTemplateColumns: GRID }}
-              >
-                <span />
-                <span>{t("api.env.variable")}</span>
-                <span>{t("api.env.type")}</span>
-                <span>{t("api.env.initialValue")}</span>
-                <span>{t("api.env.currentValue")}</span>
-                <span>{t("api.description")}</span>
-                <span />
-              </div>
-
-              {rows.length === 0 && (
-                <p className="py-4 text-[12px] text-[var(--cf-text-muted)]">{t("api.env.noVariables")}</p>
-              )}
-
-              {rows.map((row) => {
-                const masked = row.secret && !revealed.has(row.id);
-                return (
-                  <div
-                    key={row.id}
-                    className="grid items-center gap-2 border-b border-[var(--cf-border)] py-1"
-                    style={{ gridTemplateColumns: GRID }}
-                  >
-                    <Checkbox
-                      checked={row.enabled}
-                      onChange={(enabled) => updateRow(row.id, { enabled })}
-                    />
-                    <Field
-                      mono
-                      value={row.key}
-                      placeholder={t("api.key")}
-                      onChange={(key) => updateRow(row.id, { key })}
-                    />
-                    <Select
-                      size="sm"
-                      value={row.secret ? "secret" : "default"}
-                      onChange={(type) => updateRow(row.id, { secret: type === "secret" })}
-                      options={[
-                        { value: "default", label: t("api.env.default") },
-                        { value: "secret", label: t("api.env.secret") },
-                      ]}
-                      ariaLabel={t("api.env.type")}
-                    />
-                    <Field
-                      mono
-                      type={masked ? "password" : "text"}
-                      value={row.initialValue}
-                      placeholder={t("api.env.initialValue")}
-                      onChange={(initialValue) => updateRow(row.id, { initialValue })}
-                    />
-                    <Field
-                      mono
-                      type={masked ? "password" : "text"}
-                      value={row.currentValue}
-                      placeholder={row.initialValue || t("api.env.currentValue")}
-                      onChange={(currentValue) => updateRow(row.id, { currentValue })}
-                    />
-                    <Field
-                      value={row.description}
-                      placeholder={t("api.description")}
-                      onChange={(description) => updateRow(row.id, { description })}
-                    />
-                    <span className="flex items-center justify-end gap-0.5">
-                      {row.secret && (
-                        <button
-                          onClick={() => toggleReveal(row.id)}
-                          title={masked ? t("api.env.reveal") : t("api.env.hide")}
-                          className="rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-                        >
-                          {masked ? <Eye size={12} /> : <EyeOff size={12} />}
-                        </button>
-                      )}
-                      <button
-                        onClick={() => commit(rows.filter((r) => r.id !== row.id))}
-                        title={t("api.removeRow")}
-                        className="rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)]"
-                      >
-                        <X size={12} />
-                      </button>
-                    </span>
-                  </div>
-                );
-              })}
-
-              <button
-                onClick={addRow}
-                className="mt-2 flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-              >
-                <Plus size={12} />
-                {t("api.env.addVariable")}
-              </button>
+              {/* Keyed by environment so switching brings the new list up with its secrets masked
+                  rather than inheriting whatever the previous one had revealed. */}
+              <VariableTable
+                key={selected.id}
+                rows={rows}
+                onChange={commit}
+                emptyLabel={t("api.env.noVariables")}
+              />
             </div>
           )}
         </div>

@@ -1,18 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  Download,
-  FileSpreadsheet,
-  GripVertical,
-  Loader2,
-  Play,
-  Square,
-  X,
-  XCircle,
-} from "lucide-react";
+import { Download, FileSpreadsheet, GripVertical, Play, Square, X } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { ApiModal, Field, GhostButton, PrimaryButton } from "./ApiModal";
+import { RunnerResults } from "./RunnerResults";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useApiStore } from "../../state/apiStore";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
@@ -30,11 +20,12 @@ import type {
   ApiRequestSpec,
   ApiResponse,
   HttpResponse,
+  ResolvedBody,
   ResolvedRequest,
+  RunnerCapture,
   RunnerConfig,
   RunnerReport,
   RunnerResultItem,
-  TestResult,
 } from "../../types/api";
 
 /**
@@ -48,6 +39,17 @@ const EXECUTION_CAP = 2000;
 const RUNNABLE: ApiProtocol[] = ["http", "graphql"];
 
 const DATA_EXTENSIONS = ["csv", "json", "tsv", "txt"];
+
+/**
+ * How much of one response body the report keeps, and how much of them all it keeps together.
+ *
+ * The results pane shows the response of whichever row is selected, so the run has to hold them —
+ * but a long run against a chatty API would otherwise pin its entire traffic in memory for the
+ * sake of a pane that displays one body at a time. Past the total budget the run stops retaining
+ * bodies and says so on the row rather than showing an empty one.
+ */
+const CAPTURE_BODY_LIMIT = 128 * 1024;
+const CAPTURE_TOTAL_BUDGET = 8 * 1024 * 1024;
 
 function parseSpec(row: ApiRequestRow): ApiRequestSpec {
   const fallback = defaultRequestSpec(row.protocol);
@@ -95,6 +97,54 @@ function flattenRequests(
 
   visit(rootFolderId);
   return out;
+}
+
+/**
+ * Folder names from the run's root down to the request, outermost first.
+ *
+ * It stops at `rootFolderId` because a run started on a folder is already scoped to it: repeating
+ * that folder on every row would spend the breadcrumb's width saying the thing the title bar
+ * already says. `seen` is the same cycle guard `flattenRequests` carries — a corrupted `parent_id`
+ * chain must not hang the results view.
+ */
+function folderPathOf(
+  folders: ApiFolder[],
+  folderId: string | null,
+  rootFolderId: string | null,
+): string[] {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  let current = folderId;
+  while (current !== null && current !== rootFolderId && !seen.has(current)) {
+    seen.add(current);
+    const folder = byId.get(current);
+    if (folder === undefined) break;
+    out.unshift(folder.name);
+    current = folder.parent_id;
+  }
+  return out;
+}
+
+/**
+ * The request body as text for the detail pane. A multipart or file body has no textual form on
+ * the wire that would mean anything here, so it's summarised by its parts rather than faked.
+ */
+function bodyPreview(body: ResolvedBody): string {
+  switch (body.kind) {
+    case "text":
+      return body.text;
+    case "urlencoded":
+      return body.pairs.map(([key, value]) => `${key}=${value}`).join("&");
+    case "formdata":
+      return body.parts
+        .map((part) => `${part.name}: ${part.file_path ?? part.value ?? ""}`)
+        .join("\n");
+    case "file":
+      return body.path;
+    default:
+      return "";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -384,6 +434,10 @@ export function RunnerModal({
     const runtime = useApiRuntimeStore.getState();
     const { settings, cookies, activeEnvironmentId } = store;
     const seed = store.variableContext(collectionId);
+    const environmentName =
+      store.environments.find(
+        (candidate) => candidate.id === activeEnvironmentId && !candidate.is_global,
+      )?.name ?? null;
 
     const config: RunnerConfig = {
       collectionId,
@@ -416,6 +470,9 @@ export function RunnerModal({
       global: seed.global.map((variable) => ({ ...variable })),
     };
 
+    /** Response text retained so far, against `CAPTURE_TOTAL_BUDGET`. */
+    let captured = 0;
+
     const execute = async (
       row: ApiRequestRow,
       iteration: number,
@@ -432,6 +489,7 @@ export function RunnerModal({
         iteration,
         requestId: row.id,
         name: row.name,
+        folderPath: folderPathOf(folders, row.folder_id, folderId),
         method: spec.method,
         url: spec.url,
         status: null,
@@ -439,6 +497,7 @@ export function RunnerModal({
         sizeBytes: 0,
         tests: [],
         error: null,
+        capture: null,
       };
 
       let resolved: ResolvedRequest;
@@ -449,6 +508,17 @@ export function RunnerModal({
       }
       item.method = resolved.method;
       item.url = resolved.url;
+      // Filled in the moment the request exists, so a row that never got a response still shows
+      // what it tried to send — which is the half of the exchange that explains most failures.
+      const capture: RunnerCapture = {
+        statusText: "",
+        requestHeaders: resolved.headers,
+        requestBody: bodyPreview(resolved.body),
+        responseHeaders: [],
+        responseBody: "",
+        bodyNotice: null,
+      };
+      item.capture = capture;
 
       let next: string | null = null;
 
@@ -471,6 +541,20 @@ export function RunnerModal({
       item.status = http.status;
       item.durationMs = http.duration_ms;
       item.sizeBytes = http.size_bytes;
+
+      capture.statusText = http.status_text;
+      capture.responseHeaders = http.headers;
+      const binary = http.body_base64 !== null && http.body_base64 !== "";
+      if (binary) {
+        capture.bodyNotice = "binary";
+      } else if (captured >= CAPTURE_TOTAL_BUDGET) {
+        capture.bodyNotice = http.body_text === "" ? null : "dropped";
+      } else {
+        const clipped = http.body_text.length > CAPTURE_BODY_LIMIT;
+        capture.responseBody = clipped ? http.body_text.slice(0, CAPTURE_BODY_LIMIT) : http.body_text;
+        capture.bodyNotice = clipped ? "truncated" : null;
+        captured += capture.responseBody.length;
+      }
 
       if (spec.postScript.trim() !== "") {
         const response: ApiResponse = {
@@ -536,6 +620,8 @@ export function RunnerModal({
           setReport({
             startedAt,
             finishedAt: Date.now(),
+            iterations: config.iterations,
+            environmentName,
             items: [...items],
             totalRequests: items.length,
             totalAssertions: items.reduce((n, entry) => n + entry.tests.length, 0),
@@ -574,6 +660,8 @@ export function RunnerModal({
     const finished: RunnerReport = {
       startedAt,
       finishedAt: Date.now(),
+      iterations: config.iterations,
+      environmentName,
       items,
       totalRequests: items.length,
       totalAssertions: items.reduce((n, entry) => n + entry.tests.length, 0),
@@ -624,9 +712,15 @@ export function RunnerModal({
   const exportReport = async () => {
     if (!report) return;
     try {
+      // Captures are dropped from the file on purpose: this is a test report, and folding up to
+      // 8 MB of response bodies into it turns a document you can diff between runs into a dump.
       const path = await apiSaveFile(
         `${collectionName || "collection"}-run.json`,
-        JSON.stringify(report, null, 2),
+        JSON.stringify(
+          { ...report, items: report.items.map(({ capture: _capture, ...item }) => item) },
+          null,
+          2,
+        ),
       );
       if (path) pushToast(t("api.export.done", { path }), "success");
     } catch (e) {
@@ -641,7 +735,9 @@ export function RunnerModal({
       icon={Play}
       title={t("api.runner.title")}
       subtitle={collectionName}
-      width="max-w-4xl"
+      // The results view carries a metric strip, a list and a response pane side by side; setup is
+      // two columns of form. Sizing both to the wider one would leave the setup pane mostly empty.
+      width={view === "results" ? "max-w-6xl" : "max-w-4xl"}
       height="h-[80vh]"
       busy={running}
       onClose={onClose}
@@ -818,91 +914,12 @@ export function RunnerModal({
           </div>
         </div>
       ) : (
-        <div className="min-h-0 flex-1 overflow-auto p-3">
-          {capped && (
-            <p className="mb-2 flex items-center gap-1.5 rounded-md border border-[var(--cf-warning)] bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-2 py-1.5 text-[11px] text-[var(--cf-text)]">
-              <AlertTriangle size={12} className="shrink-0 text-[var(--cf-warning)]" />
-              {t("api.runner.capReached", { n: EXECUTION_CAP })}
-            </p>
-          )}
-
-          {!report ? (
-            <p className="p-3 text-[12px] text-[var(--cf-text-muted)]">
-              {running ? (
-                <span className="flex items-center gap-1.5">
-                  <Loader2 size={12} className="animate-spin" />
-                  {t("api.runner.running")}
-                </span>
-              ) : (
-                t("api.runner.noResults")
-              )}
-            </p>
-          ) : (
-            <div className="overflow-hidden rounded-md border border-[var(--cf-border)]">
-              {report.items.map((item, index) => {
-                const failedTests = item.tests.filter((test) => !test.passed);
-                const ok = item.error === null && failedTests.length === 0;
-                return (
-                  <div
-                    key={`${item.iteration}-${item.requestId}-${index}`}
-                    className={index === 0 ? "" : "border-t border-[var(--cf-border)]"}
-                  >
-                    <div className="flex items-center gap-2 px-2.5 py-1.5">
-                      {ok ? (
-                        <CheckCircle2 size={13} className="shrink-0 text-[var(--cf-success)]" />
-                      ) : (
-                        <XCircle size={13} className="shrink-0 text-[var(--cf-danger)]" />
-                      )}
-                      <span className="w-[68px] shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
-                        {t("api.runner.iteration", { n: item.iteration + 1 })}
-                      </span>
-                      <span className="w-[44px] shrink-0 font-mono text-[10px] font-semibold uppercase text-[var(--cf-accent)]">
-                        {item.method}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
-                        {item.name}
-                      </span>
-                      <span className="w-[44px] shrink-0 text-right font-mono text-[11px] text-[var(--cf-text-muted)]">
-                        {item.status ?? "—"}
-                      </span>
-                      <span className="w-[64px] shrink-0 text-right font-mono text-[11px] text-[var(--cf-text-muted)]">
-                        {item.durationMs} ms
-                      </span>
-                      <span className="w-[76px] shrink-0 text-right text-[11px] text-[var(--cf-text-muted)]">
-                        {item.tests.length > 0
-                          ? t("api.response.testsPassed", {
-                              passed: item.tests.length - failedTests.length,
-                              total: item.tests.length,
-                            })
-                          : ""}
-                      </span>
-                    </div>
-
-                    {item.error !== null && (
-                      <p className="px-2.5 pb-1.5 pl-[38px] text-[11px] leading-snug text-[var(--cf-danger)]">
-                        {item.error}
-                      </p>
-                    )}
-
-                    {failedTests.length > 0 && (
-                      <ul className="px-2.5 pb-1.5 pl-[38px]">
-                        {failedTests.map((test: TestResult, testIndex) => (
-                          <li
-                            key={testIndex}
-                            className="text-[11px] leading-snug text-[var(--cf-text-muted)]"
-                          >
-                            <span className="text-[var(--cf-danger)]">{test.name}</span>
-                            {test.error && ` — ${test.error}`}
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
+        <RunnerResults
+          report={report}
+          running={running}
+          capped={capped}
+          cappedMessage={t("api.runner.capReached", { n: EXECUTION_CAP })}
+        />
       )}
     </ApiModal>
   );

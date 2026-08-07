@@ -31,7 +31,7 @@ import {
   setSetting,
   setWorkspacePrompt,
 } from "../../lib/tauri/commands";
-import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
+import { modelRouteLabel } from "../ai/ModelTag";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
@@ -545,13 +545,10 @@ export function PromptTemplates() {
     persisted.current[tpl.key] = entry.fallback.trim();
   };
 
-  /** "Claude Code · Opus 5" for the engine that will run this template, per current routing. */
-  const engineFor = (task: string) => {
-    const providerId = taskProviders[task]?.trim() || defaultProvider;
-    const provider = AI_PROVIDERS.find((p) => p.id === providerId);
-    const label = provider ? (provider.label ?? (provider.labelKey ? t(provider.labelKey) : providerId)) : providerId;
-    return `${label} · ${modelDisplayLabel(providerId, taskModels[task] ?? "", t)}`;
-  };
+  /** "Claude Code · Opus 5" for the engine that will run this template, per current routing. Not
+   * the hook, because this is called once per template inside a map. */
+  const engineFor = (task: string) =>
+    modelRouteLabel(taskProviders[task]?.trim() || defaultProvider, taskModels[task] ?? "", t);
 
   if (!loaded) {
     return (

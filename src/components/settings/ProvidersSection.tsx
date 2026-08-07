@@ -61,6 +61,9 @@ const TOOL_OPTIONS: ToolOption[] = [
   { id: "Edit", descriptionKey: "settings.toolEditDesc" },
   { id: "Write", descriptionKey: "settings.toolWriteDesc" },
   { id: "NotebookEdit", descriptionKey: "settings.toolNotebookEditDesc" },
+  // Last, and not recommended, because it is the only one here that multiplies the others: a turn
+  // that may spawn sub-agents is a turn whose cost and whose reach are both decided by the model.
+  { id: "Task", descriptionKey: "settings.toolTaskDesc" },
 ];
 
 const KNOWN_TOOL_IDS = new Set(TOOL_OPTIONS.map((tool) => tool.id));
@@ -297,9 +300,13 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
       const parsed = parseModel(storedModel, modelOptionsFor(provider.id, []).map((o) => o.id));
       setChoice(parsed.choice);
       setCustom(parsed.custom);
-      setTools(
-        storedTools ? storedTools.split(",").map((s) => s.trim()).filter(Boolean) : defaultToolsFor(provider.id),
-      );
+      // **Empty when unset, and that is not the same as "nothing is allowed".** The backend only
+      // passes `--allowedTools` when this list is non-empty, so an absent setting means the engine
+      // runs with its own full tool set. Seeding the checkboxes with a recommendation here — which
+      // is what this used to do — drew three ticked boxes over a restriction that did not exist:
+      // the pane showed a read-only agent while the agent could write, and the difference only
+      // appeared the first time you touched anything, because touching it is what wrote the list.
+      setTools(storedTools ? storedTools.split(",").map((s) => s.trim()).filter(Boolean) : []);
       setLoaded(true);
     })();
     return () => {
@@ -527,6 +534,52 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                     {t("settings.allowedTools")}
                   </label>
                   <p className="mb-2 text-[11px] text-[var(--cf-text-muted)]">{t("settings.allowedToolsHint")}</p>
+                  {/* What an empty list actually means, said where the empty list is. Without this
+                      the checklist reads as "nothing is permitted" — the opposite of the truth —
+                      and the recommended set stays discoverable as a button rather than as three
+                      ticks that were never saved. */}
+                  {/* The second state is the one the honest empty list created. Ticking a single box
+                      used to inherit the three that were pre-ticked; now it means exactly itself,
+                      which is truthful and can leave an engine holding `Bash` and no way to open a
+                      file. Rather than silently ticking boxes nobody asked for, the pane says what
+                      the current list actually amounts to and keeps the one-click fix on screen.
+                      Keyed on `Read` alone: it is the tool whose absence stops everything, while a
+                      list without Edit or Write is an ordinary read-only choice and warning about
+                      it would be noise. */}
+                  {(tools.length === 0 || !tools.includes("Read")) && (
+                    <div className="mb-2 flex flex-wrap items-center gap-2 rounded-md border border-[var(--cf-warning)]/40 bg-[color-mix(in_oklab,var(--cf-warning)_8%,transparent)] px-2.5 py-2">
+                      <span className="min-w-0 flex-1 text-[11.5px] leading-relaxed text-[var(--cf-text-muted)]">
+                        {t(tools.length === 0 ? "settings.toolsUnrestricted" : "settings.toolsNoRead")}
+                      </span>
+                      <button
+                        onClick={() =>
+                          void saveTools(
+                            tools.length === 0
+                              ? defaultToolsFor(provider.id)
+                              : // Added to what is already ticked rather than replacing it: the user
+                                // chose those, and a fix that discarded a deliberate `Bash` to
+                                // install a recommendation would be the silent rewrite this whole
+                                // change exists to stop.
+                                [...new Set([...defaultToolsFor(provider.id), ...tools])],
+                          )
+                        }
+                        className="shrink-0 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+                      >
+                        {t(tools.length === 0 ? "settings.toolsUseRecommended" : "settings.toolsAddRecommended")}
+                      </button>
+                    </div>
+                  )}
+                  {/* The way back out. A user who ticked one box has created a restriction that also
+                      governs their agent tasks, and without this the only route back to "no limit"
+                      is unticking every box one at a time and guessing that empty means open. */}
+                  {tools.length > 0 && (
+                    <button
+                      onClick={() => void saveTools([])}
+                      className="mb-2 text-[11px] text-[var(--cf-text-muted)] underline hover:text-[var(--cf-accent)]"
+                    >
+                      {t("settings.toolsClearRestriction")}
+                    </button>
+                  )}
                   {(
                     <div className="space-y-1.5 rounded-lg border border-[var(--cf-border)] p-2.5">
                       {TOOL_OPTIONS.map((tool) => (

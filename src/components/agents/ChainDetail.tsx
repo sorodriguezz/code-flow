@@ -6,6 +6,7 @@ import {
   GitCompare,
   Link2,
   Play,
+  RotateCcw,
   SkipForward,
   Square,
   TerminalSquare,
@@ -188,7 +189,12 @@ export function ChainDetail({ chainId }: { chainId: string }) {
                   {t(step.phase === "analyze" ? "agents.storyPhaseAnalyze" : "agents.storyPhaseImplement")}
                 </p>
               )}
-              <StepRow step={step} isGate={gated && step.id === waiting?.id} showRepo={chain.repo_count > 1} />
+              <StepRow
+                step={step}
+                isGate={gated && step.id === waiting?.id}
+                showRepo={chain.repo_count > 1}
+                idle={chain.status !== "running" && chain.status !== "queued"}
+              />
               {next && (
                 <StepRail
                   carried={step.status === "done"}
@@ -321,9 +327,13 @@ function StepRow({
   step,
   isGate,
   showRepo,
+  idle,
 }: {
   step: AgentChainStep;
   isGate: boolean;
+  /** Whether the plan is standing still. Re-running from a step while another one is mid-turn would
+   * be asking two agents for the same working copy. */
+  idle: boolean;
   /** Only when the chain has more than one: with one repository every step runs there, and a badge
    * repeating it on every row is noise. */
   showRepo: boolean;
@@ -331,6 +341,9 @@ function StepRow({
   const t = useT();
   const [open, setOpen] = useState(false);
   const [logOpen, setLogOpen] = useState(false);
+  /** The re-run note being typed, or `null` when the box is closed. `""` is a real value — a
+   * re-run with nothing to add is a legitimate thing to ask for. */
+  const [rerun, setRerun] = useState<string | null>(null);
   const select = useAgentsStore((s) => s.select);
   const taskExists = useAgentsStore((s) => s.tasks.some((task) => task.id === step.task_id));
   // Whether the run behind this step is still ours. A step marked `running` with no live run is
@@ -398,7 +411,50 @@ function StepRow({
         {step.task_id !== "" && !taskExists && (
           <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{t("agents.stepTaskGone")}</span>
         )}
+        {/* Only while nothing is running, and on every step rather than only the failed ones: the
+            common reason to send a plan back is not that it broke but that you have looked at what
+            it did and want it done differently. */}
+        {idle && (
+          <button
+            type="button"
+            onClick={() => setRerun((current) => (current === null ? "" : null))}
+            title={t("agents.rerunFromHere")}
+            aria-label={t("agents.rerunFromHere")}
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-accent)] dark:hover:bg-white/[0.08]"
+          >
+            <RotateCcw size={12} />
+          </button>
+        )}
       </div>
+
+      {rerun !== null && (
+        <div className="mt-1.5 flex items-center gap-1.5">
+          <input
+            autoFocus
+            value={rerun}
+            onChange={(e) => setRerun(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setRerun(null);
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              void useChainStore.getState().rerunFrom(step.chain_id, step.step_index, rerun);
+              setRerun(null);
+            }}
+            placeholder={t("agents.rerunNotePlaceholder")}
+            className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[11px] outline-none focus:border-[var(--cf-accent)]"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              void useChainStore.getState().rerunFrom(step.chain_id, step.step_index, rerun);
+              setRerun(null);
+            }}
+            className="shrink-0 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[11px] font-medium text-white hover:brightness-110"
+          >
+            {t("agents.rerunGo")}
+          </button>
+        </div>
+      )}
 
       {step.status === "running" && step.run_id && live && (
         <div className="mt-1.5">

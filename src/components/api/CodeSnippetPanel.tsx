@@ -203,6 +203,7 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
         invert
       />
       <div
+        data-tour="api-snippet"
         style={{ width }}
         className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
       >

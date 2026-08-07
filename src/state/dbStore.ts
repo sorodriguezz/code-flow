@@ -334,6 +334,9 @@ interface DbState {
   deleteGroup: (name: string) => Promise<void>;
   /** Files a connection under a group, or under none with `UNGROUPED`. */
   setConnectionGroup: (id: string, group: string) => Promise<void>;
+  /** A dragged connection released somewhere: into `group`, ahead of `beforeConnectionId` (or last
+   * in that group when it is `null`). Reorder and move-between-groups are the same gesture. */
+  dropConnection: (id: string, group: string, beforeConnectionId: string | null) => Promise<void>;
   toggleGroup: (group: string) => void;
   /** Re-reads `connected` from the backend, which owns the sessions. */
   syncConnected: () => Promise<void>;
@@ -370,6 +373,9 @@ interface DbState {
   /** Rewrites which schemas a connection's tree lists. See the implementation for what the
    * updater is handed when nothing has been filtered yet. */
   setVisibleSchemas: (connectionId: string, update: (current: string[]) => string[]) => Promise<void>;
+  /** Rewrites the name filter over tables, views and routines — for one schema, or (with `null`)
+   * for the whole connection. An empty pattern removes the filter rather than matching nothing. */
+  setObjectFilter: (connectionId: string, schema: string | null, pattern: string) => Promise<void>;
   updateData: (tabId: string, patch: Partial<DbDataTab>) => void;
   loadData: (tabId: string) => Promise<void>;
   setCell: (tabId: string, row: number, column: string, value: string | null) => void;
@@ -848,6 +854,39 @@ export const useDbStore = create<DbState>((set, get) => ({
       connections: s.connections.map((c) => (c.id === id ? { ...c, group_name: target } : c)),
     }));
     await guarded(() => dbSetConnectionGroup(id, target));
+  },
+
+  /**
+   * Where a drag ends.
+   *
+   * The order the backend keeps is one flat list for the whole workspace, and the groups are drawn
+   * over it — so a move is expressed as "take this row out and put it back at that index", and the
+   * group is a separate field written alongside. Both, in that order: `reorder` writes positions,
+   * and doing the group second would leave a frame where the row sits in its new place under its
+   * old heading.
+   *
+   * Applied locally first, in one `set`, so the row never blinks through an intermediate list —
+   * the same reason `reorderConnections` does it.
+   */
+  dropConnection: async (id, group, beforeConnectionId) => {
+    const connections = get().connections;
+    const moving = connections.find((c) => c.id === id);
+    if (!moving || id === beforeConnectionId) return;
+
+    const target = group.trim();
+    const without = connections.filter((c) => c.id !== id);
+    const moved = { ...moving, group_name: target };
+    const at = beforeConnectionId ? without.findIndex((c) => c.id === beforeConnectionId) : -1;
+    const next =
+      at >= 0
+        ? [...without.slice(0, at), moved, ...without.slice(at)]
+        : [...without, moved];
+    set({ connections: next });
+
+    if (moving.group_name !== target) {
+      await guarded(() => dbSetConnectionGroup(id, target));
+    }
+    await guarded(() => dbReorderConnections(next.map((c) => c.id)));
   },
 
   toggleGroup: (group) => {
@@ -1355,6 +1394,40 @@ export const useDbStore = create<DbState>((set, get) => ({
     await state.saveConnection(
       row,
       { ...config, visible_schemas: update(current), schemas_filtered: true },
+      null,
+    );
+  },
+
+  /**
+   * Rewrites the object filter, connection-wide or for one schema.
+   *
+   * Blank clears rather than filters, in both scopes: a pattern that matches nothing has a way to
+   * be written on purpose (`!*`), and an empty box is what someone types to undo — a tree emptied
+   * by deleting the text would be the worst possible reading of that gesture.
+   *
+   * A cleared schema entry is dropped from the list instead of kept as an empty string, so the
+   * schema falls back to the connection's filter and the dialog stops listing an override that
+   * does nothing.
+   */
+  setObjectFilter: async (connectionId, schema, pattern) => {
+    const state = get();
+    const row = state.connections.find((c) => c.id === connectionId);
+    const config = row ? parseSpec(row) : null;
+    if (!row || !config) return;
+    const trimmed = pattern.trim();
+    if (schema === null) {
+      await state.saveConnection(row, { ...config, object_filter: trimmed }, null);
+      return;
+    }
+    const rest = config.schema_object_filters.filter(
+      (entry) => entry.schema.toLowerCase() !== schema.toLowerCase(),
+    );
+    await state.saveConnection(
+      row,
+      {
+        ...config,
+        schema_object_filters: trimmed ? [...rest, { schema, pattern: trimmed }] : rest,
+      },
       null,
     );
   },

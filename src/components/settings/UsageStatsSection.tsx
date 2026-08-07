@@ -4,7 +4,8 @@ import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { aiUsageStats } from "../../lib/tauri/commands";
 import { compactTokens, formatCost } from "../../state/usageStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import type { ModelStat, ProviderStat, UsageStats } from "../../types/domain";
+import type { ModelStat, ProviderStat, TaskStat, UsageStats } from "../../types/domain";
+import type { TranslationKey } from "../../lib/i18n/translations";
 
 /** The windows the picker offers, in hours. Mirrors nothing on the backend — it takes whatever it
  * is given and buckets accordingly — so the set is a product decision, not a constraint. */
@@ -148,6 +149,8 @@ export function UsageStatsSection() {
           <ProviderSplit providers={stats.providers} total={totals.tokens} />
 
           <ModelTable models={stats.models} />
+
+          <TaskTable tasks={stats.tasks} />
         </>
       )}
 
@@ -307,6 +310,78 @@ function ProviderSplit({ providers, total }: { providers: ProviderStat[]; total:
       </div>
     </div>
   );
+}
+
+/**
+ * Which part of the app spent it.
+ *
+ * The one breakdown that can be read for a *gap* rather than a total: every other table here answers
+ * "where did my tokens go", and none of them can answer "is my PR review being counted at all". A
+ * feature that ran and is missing from this list is a hole in the meter, and now it is visible
+ * instead of having to be reasoned about.
+ */
+function TaskTable({ tasks }: { tasks: TaskStat[] }) {
+  const t = useT();
+  if (tasks.length === 0) return null;
+  const peak = Math.max(...tasks.map((task) => task.tokens), 1);
+
+  return (
+    <div className="rounded-lg border border-[var(--cf-border)] p-3">
+      <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        {t("usage.byTask")}
+      </p>
+      <div className="space-y-1.5">
+        {tasks.map((task) => (
+          <div key={task.task || "unknown"}>
+            <div className="flex items-center gap-1.5 text-[12px]">
+              <span className="min-w-0 flex-1 truncate">{taskLabel(task.task, t)}</span>
+              <span className="shrink-0 tabular-nums text-[var(--cf-text-muted)]">
+                {t("usage.runsN", { n: task.runs })}
+              </span>
+              <span className="w-14 shrink-0 text-right tabular-nums">{compactTokens(task.tokens)}</span>
+              <span className="w-16 shrink-0 text-right tabular-nums text-[var(--cf-text-muted)]">
+                {task.costed_runs > 0 ? formatCost(task.cost_usd) : t("usage.noCost")}
+              </span>
+            </div>
+            <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-black/[0.07] dark:bg-white/[0.1]">
+              <div
+                className="h-full rounded-full bg-[var(--cf-accent)]"
+                style={{ width: `${Math.max((task.tokens / peak) * 100, 2)}%` }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** The `ai::task` ids, as something to read. An id with no entry is shown raw rather than hidden —
+ * a flow added on the Rust side should show up here the day it starts spending, not the day
+ * somebody remembers to translate it. */
+const TASK_LABELS: Record<string, TranslationKey> = {
+  chat: "usage.task.chat",
+  inline: "usage.task.inline",
+  commit: "usage.task.commit",
+  analyze: "usage.task.analyze",
+  "review-pr": "usage.task.reviewPr",
+  "fix-finding": "usage.task.fixFinding",
+  "pr-description": "usage.task.prDescription",
+  "comment-reply": "usage.task.commentReply",
+  conflict: "usage.task.conflict",
+  stories: "usage.task.stories",
+  "stories-verify": "usage.task.storiesVerify",
+  "work-item-review": "usage.task.workItemReview",
+  "repo-doc": "usage.task.repoDoc",
+  "workspace-doc": "usage.task.workspaceDoc",
+  "repair-json": "usage.task.repairJson",
+  other: "usage.task.other",
+};
+
+function taskLabel(id: string, t: (key: TranslationKey) => string): string {
+  if (id === "") return t("usage.task.unlabelled");
+  const key = TASK_LABELS[id];
+  return key ? t(key) : id;
 }
 
 /** The per-model split — where an engine routed across two models stops reading as one average. */

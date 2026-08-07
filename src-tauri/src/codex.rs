@@ -182,6 +182,21 @@ fn session_id_from_preamble(stderr: &str) -> Option<String> {
     })
 }
 
+/// The model `codex exec` announced it was going to use, from the same banner.
+///
+/// Worth reading even though this engine reports no tokens: with a blank `codex_model` setting the
+/// CLI picks for itself, and without this the usage meter files the run under an empty model — a
+/// row that reads as "unknown" next to the ones that name themselves. `model: gpt-5.3-codex` is
+/// printed on every run, so the answer is there for free.
+fn model_from_preamble(stderr: &str) -> Option<String> {
+    stderr.lines().find_map(|line| {
+        let line = line.trim();
+        let rest = line.to_ascii_lowercase().starts_with("model:").then(|| &line["model:".len()..])?;
+        let model = rest.trim();
+        (!model.is_empty()).then(|| model.to_string())
+    })
+}
+
 /// `codex exec` puts the agent's final message on stdout and its progress log on stderr, so the
 /// reply is just stdout. Mirrors the other engines' error/quota contract.
 fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &str) -> Result<AiRun, String> {
@@ -214,7 +229,11 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
     Ok(AiRun {
         text: text.to_string(),
         session_id: session_id_from_preamble(stderr),
-        model: None,
+        model: model_from_preamble(stderr),
+        // Plain-text `codex exec` reports no token counts anywhere — not on stdout, not in the
+        // banner — and there is no `export`-style subcommand to ask afterwards the way opencode
+        // has. So codex runs are recorded by *this engine and model* with nothing to count, which
+        // the meter shows as a provider that reports nothing rather than as a free one.
         usage: None,
     })
 }
@@ -249,6 +268,20 @@ mod tests {
     fn captures_the_rollout_id_from_the_stderr_preamble() {
         let run = interpret_output(true, "exit status: 0", "done", PREAMBLE).unwrap();
         assert_eq!(run.session_id.as_deref(), Some("019ce7d6-5962-7f21-9f20-95ebe6504c32"));
+    }
+
+    /// The banner is also the only place a codex run says which model answered, which is what
+    /// keeps it out of the usage meter's "unknown model" bucket when nothing was forced.
+    #[test]
+    fn captures_the_model_from_the_stderr_preamble() {
+        let run = interpret_output(true, "exit status: 0", "done", PREAMBLE).unwrap();
+        assert_eq!(run.model.as_deref(), Some("gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn reports_no_model_when_the_preamble_omits_it() {
+        let run = interpret_output(true, "exit status: 0", "done", "OpenAI Codex v0.1\n").unwrap();
+        assert_eq!(run.model, None);
     }
 
     /// A preamble without the id must report no session rather than a placeholder: `None` makes the

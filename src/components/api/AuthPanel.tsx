@@ -233,17 +233,63 @@ const GRANTS: {
 // ---------------------------------------------------------------------------
 
 export function AuthPanel({ tabId }: { tabId: string }) {
-  const t = useT();
   const tab = useApiStore((s) => s.openTabs.find((entry) => entry.id === tabId));
   const updateDraft = useApiStore((s) => s.updateDraft);
   const collections = useApiStore((s) => s.collections);
   const folders = useApiStore((s) => s.folders);
-  const environments = useApiStore((s) => s.environments);
-  const activeEnvironmentId = useApiStore((s) => s.activeEnvironmentId);
-  const variableContext = useApiStore((s) => s.variableContext);
 
   const collectionId = tab?.collectionId ?? null;
   const folderId = tab?.folderId ?? null;
+
+  /** The same walk `apiStore.authChainForTab` does, but keeping each level's name so the panel
+   * can say *which* folder or collection the inherited config came from. */
+  const ancestors = useMemo(
+    () => authAncestors(folders, collections, collectionId, folderId),
+    [folders, collections, collectionId, folderId],
+  );
+
+  if (!tab) return <div className="h-full" />;
+
+  return (
+    <AuthEditor
+      auth={tab.draft.auth}
+      onChange={(next) => updateDraft(tabId, { auth: next })}
+      ancestors={ancestors}
+      collectionId={collectionId}
+      bufferKey={tabId}
+    />
+  );
+}
+
+/**
+ * The auth form itself, over a plain value — a request tab's draft, or a collection's or folder's.
+ *
+ * `ancestors` is what everything above this level configures, innermost first; it is empty for a
+ * collection, which is the top of the chain. `bufferKey` only has to be unique: it names the
+ * Monaco models behind the JWT editors.
+ */
+export function AuthEditor({
+  auth,
+  onChange,
+  ancestors,
+  collectionId,
+  bufferKey,
+  types = TYPE_ORDER,
+}: {
+  auth: AuthConfig;
+  onChange: (next: AuthConfig) => void;
+  ancestors: { name: string; auth: AuthConfig | null }[];
+  /** Scopes the `{{variable}}` highlighting; `null` for a request that isn't in a collection yet. */
+  collectionId: string | null;
+  bufferKey: string;
+  /** Trimmed to drop `inherit` for a collection, which has nothing above it to inherit from. */
+  types?: AuthType[];
+}) {
+  const t = useT();
+  const collections = useApiStore((s) => s.collections);
+  const environments = useApiStore((s) => s.environments);
+  const activeEnvironmentId = useApiStore((s) => s.activeEnvironmentId);
+  const variableContext = useApiStore((s) => s.variableContext);
 
   const ctx = useMemo(
     // `variableContext` reads the environment and collection lists out of the store itself, so
@@ -251,18 +297,6 @@ export function AuthPanel({ tabId }: { tabId: string }) {
     () => variableContext(collectionId),
     [variableContext, collectionId, collections, environments, activeEnvironmentId],
   );
-
-  /** The same walk `apiStore.authChainForTab` does, but keeping each level's name so the panel
-   * can say *which* folder or collection the inherited config came from. */
-  const ancestors = useMemo(
-    () => ancestorAuths(folders, collections, collectionId, folderId),
-    [folders, collections, collectionId, folderId],
-  );
-
-  const auth = tab?.draft.auth ?? defaultAuth("inherit");
-  const patch = (next: AuthConfig) => updateDraft(tabId, { auth: next });
-
-  if (!tab) return <div className="h-full" />;
 
   const source = ancestors.find((entry) => entry.auth !== null && entry.auth.type !== "inherit") ?? null;
   const inherited = resolveEffectiveAuth(ancestors.map((entry) => entry.auth));
@@ -276,8 +310,8 @@ export function AuthPanel({ tabId }: { tabId: string }) {
             className="max-w-[240px]"
             ariaLabel={t("api.auth.type")}
             value={auth.type}
-            onChange={(value) => patch({ ...auth, type: value as AuthType })}
-            options={TYPE_ORDER.map((type) => ({ value: type, label: t(TYPE_LABELS[type]) }))}
+            onChange={(value) => onChange({ ...auth, type: value as AuthType })}
+            options={types.map((type) => ({ value: type, label: t(TYPE_LABELS[type]) }))}
           />
         </Row>
       </Grid>
@@ -292,21 +326,24 @@ export function AuthPanel({ tabId }: { tabId: string }) {
                 <span className="text-[var(--cf-text-muted)]">· {t(TYPE_LABELS[inherited.type])}</span>
               </p>
               <Note>{t("api.auth.inheritedReadOnly")}</Note>
-              <AuthFields auth={inherited} onChange={() => {}} ctx={ctx} tabId={tabId} readOnly />
+              <AuthFields auth={inherited} onChange={() => {}} ctx={ctx} bufferKey={bufferKey} readOnly />
             </>
           ) : (
             <Note>{t("api.auth.inheritedNone")}</Note>
           )}
         </div>
       ) : (
-        <AuthFields auth={auth} onChange={patch} ctx={ctx} tabId={tabId} readOnly={false} />
+        <AuthFields auth={auth} onChange={onChange} ctx={ctx} bufferKey={bufferKey} readOnly={false} />
       )}
     </div>
   );
 }
 
+/** Every auth type except `inherit` — for a collection, where there is nothing above to inherit. */
+export const ROOT_AUTH_TYPES: AuthType[] = TYPE_ORDER.filter((type) => type !== "inherit");
+
 /** Request → folders (innermost first) → collection, each with the name to blame it on. */
-function ancestorAuths(
+export function authAncestors(
   folders: ApiFolder[],
   collections: ApiCollection[],
   collectionId: string | null,
@@ -344,13 +381,13 @@ function AuthFields({
   auth,
   onChange,
   ctx,
-  tabId,
+  bufferKey,
   readOnly,
 }: {
   auth: AuthConfig;
   onChange: (next: AuthConfig) => void;
   ctx: VariableContext;
-  tabId: string;
+  bufferKey: string;
   readOnly: boolean;
 }) {
   const t = useT();
@@ -433,7 +470,7 @@ function AuthFields({
           jwt={auth.jwt}
           onChange={(jwt) => onChange({ ...auth, jwt })}
           ctx={ctx}
-          tabId={tabId}
+          bufferKey={bufferKey}
           readOnly={readOnly}
         />
       );
@@ -490,13 +527,13 @@ function JwtFields({
   jwt,
   onChange,
   ctx,
-  tabId,
+  bufferKey,
   readOnly,
 }: {
   jwt: JwtAuth;
   onChange: (next: JwtAuth) => void;
   ctx: VariableContext;
-  tabId: string;
+  bufferKey: string;
   readOnly: boolean;
 }) {
   const t = useT();
@@ -509,7 +546,7 @@ function JwtFields({
         language="json"
         // Its own scheme, like `cf-editor:` for repo files, so an API-client buffer is never
         // confused with an open file by anything walking Monaco's models.
-        path={`cf-api-auth:/${tabId}/jwt-${kind}.json`}
+        path={`cf-api-auth:/${bufferKey}/jwt-${kind}.json`}
         value={value}
         theme={monacoTheme}
         onChange={(next) => set(next ?? "")}

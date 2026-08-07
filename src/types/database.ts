@@ -28,6 +28,12 @@ export type DbSslMode = "disable" | "require" | "verify_full";
  */
 export type DbAuthMethod = "password" | "entra_cli" | "entra_service_principal";
 
+/** One schema's own object filter. See `DbConnectionConfig.schema_object_filters`. */
+export interface DbSchemaObjectFilter {
+  schema: string;
+  pattern: string;
+}
+
 export interface DbConnectionConfig {
   id: string;
   kind: DbKind;
@@ -71,8 +77,20 @@ export interface DbConnectionConfig {
    * last box must mean what it says instead of silently reverting to all 348.
    */
   schemas_filtered: boolean;
-  /** A substring every table, view and routine name must contain to be listed. */
+  /**
+   * Which table, view, routine and sequence names the tree lists. Empty means all of them.
+   *
+   * Comma-separated terms, any of which is enough. A term with `*` or `?` is a pattern matched
+   * against the whole name (`App*`, `*_log`, `t?ble`); a term without either is a substring, which
+   * is what this field meant before patterns existed and what every filter saved back then still
+   * means. A term starting with `!` excludes, and exclusion wins. Case-insensitive. The matching
+   * lives in the backend (`object_filter_matches`) — it is applied where the tree is read, so this
+   * is the one description of the grammar on this side.
+   */
   object_filter: string;
+  /** Schemas with a filter of their own, overriding `object_filter` inside them. Written from the
+   * tree: right-click a schema, filter what is under it. */
+  schema_object_filters: DbSchemaObjectFilter[];
 
   /** Seconds of idleness before a trivial statement is sent to hold the connection open. 0 is off. */
   keep_alive_secs: number;
@@ -503,6 +521,7 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     visible_schemas: [],
     schemas_filtered: false,
     object_filter: "",
+    schema_object_filters: [],
     keep_alive_secs: 0,
     auto_disconnect_secs: 0,
     startup_script: "",

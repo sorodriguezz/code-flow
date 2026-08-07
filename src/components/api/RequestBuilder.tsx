@@ -677,7 +677,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
     t(id === "body" && protocol === "graphql" ? "api.tab.query" : PANEL_LABELS[id]);
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div data-tour="api-builder" className="flex h-full min-h-0 flex-col">
       {/* Only ever shown for a tab with unsaved edits: a clean tab has already taken the incoming
           version, silently and correctly, because it had nothing of its own to lose. */}
       {tab.staleAgainst !== undefined && (

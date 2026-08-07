@@ -69,7 +69,7 @@ function AccentSummary() {
 }
 
 /** Accent swatches plus a live preview of the three places the accent actually lands: a solid
- * button, a soft-tinted selection, and a link. Picking a color from eight identical dots is
+ * button, a soft-tinted selection, and a link. Picking a color from a row of identical dots is
  * guesswork; seeing what it does to the UI isn't. */
 function AccentPicker() {
   const t = useT();

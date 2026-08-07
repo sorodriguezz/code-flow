@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Bookmark, ChevronDown, ChevronRight, Circle, Trash2, X } from "lucide-react";
 import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
-import { fileIconFor } from "../../lib/fileIcon";
+import { FileGlyph } from "../common/FileGlyph";
 import { readFileText } from "../../lib/tauri/commands";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
@@ -116,7 +116,6 @@ function Section({
           </p>
         ) : (
           groups.map(([path, fileRows]) => {
-            const { Icon, color } = fileIconFor(path);
             const shut = folded.has(path);
             return (
               <div key={path}>
@@ -135,7 +134,7 @@ function Section({
                   ) : (
                     <ChevronDown size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
                   )}
-                  <Icon size={11} className="shrink-0" style={{ color }} />
+                  <FileGlyph path={path} size={11} />
                   <span className="shrink-0 text-[11px] text-[var(--cf-text)]">{fileName(path)}</span>
                   <span className="min-w-0 truncate text-[10px] text-[var(--cf-text-muted)]">
                     {path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ""}

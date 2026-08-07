@@ -1225,11 +1225,43 @@ fn clamp_handoff(text: &str) -> (String, bool) {
 ///
 /// The objective is repeated on every step because every step is a fresh engine session that has
 /// no memory of the chain (see `claim_next_chain_step`).
+/// The shared-memory block, and the standing instructions that make it worth having.
+///
+/// **These are the app's words, not the user's.** "Read what came before, and write down where you
+/// left things" is true of every chain ever authored, and asking each user to remember to put it in
+/// every agent's role was asking them to rediscover the feature. The role is for *who the agent is*;
+/// this is for how a chain works.
+///
+/// The path is the same relative one in **every** repository of the plan, because the folder is
+/// mirrored into each of them: a step running in the third repository opens `.codeflow/memory/<id>/`
+/// exactly as the step in the first did, and finds the same notes there.
+fn compose_memory_block(chain_id: &str, notes: &[(i64, String)], own_note: &str) -> String {
+    let folder = crate::chain_memory::relative_dir(chain_id);
+    let mut out = format!("## Shared memory — `{folder}/`\n");
+    if notes.is_empty() {
+        out.push_str("Nothing has been written here yet. You are the first step.\n");
+    } else {
+        out.push_str("Notes from the steps before you, in plan order. Open the ones you need — do not assume this message contains all of them:\n\n");
+        for (index, name) in notes {
+            out.push_str(&format!("- `{folder}/{name}` — step {}\n", index + 1));
+        }
+    }
+    out.push_str(&format!(
+        "\nWhen you finish, your answer is filed as `{folder}/{own_note}`. Write it for the agent \
+that comes next, who has none of your context and cannot see your reasoning: name the files you \
+touched and the symbols inside them, say what is done and what is left, and give paths precise \
+enough to open without searching. If you needed something that was not in memory, say where you \
+found it so nobody has to look twice.\n\n"
+    ));
+    out
+}
+
 fn compose_chain_input(
     goal: &str,
     instruction: &str,
     previous: Option<(&str, i64, &str)>,
     feedback: &str,
+    memory: &str,
 ) -> String {
     let mut out = String::new();
     if !goal.trim().is_empty() {
@@ -1251,9 +1283,31 @@ fn compose_chain_input(
         out.push_str(feedback.trim());
         out.push_str("\n\nFix what is described above. Do not start over from scratch.\n\n");
     }
+    out.push_str(memory);
     out.push_str("## Your task\n");
     out.push_str(instruction.trim());
     out
+}
+
+/// The notes that exist for a chain, as the steps that wrote them — read from the plan rather than
+/// from the folder.
+///
+/// The database is the honest index: it knows which steps answered and under which agent, so the
+/// listing is right even if a note failed to be written, and composing a message never has to touch
+/// a disk that might be slow or gone. A step is listed once it has produced output, which is
+/// exactly when `chain_memory::write_note` filed it.
+fn memory_notes(conn: &Connection, chain_id: &str, before: i64) -> rusqlite::Result<Vec<(i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT step_index, agent_name FROM agent_chain_steps
+          WHERE chain_id = ?1 AND step_index < ?2 AND status = 'done' AND output_text <> ''
+          ORDER BY step_index",
+    )?;
+    let rows = stmt.query_map(params![chain_id, before], |row| {
+        let index: i64 = row.get(0)?;
+        let agent: String = row.get(1)?;
+        Ok((index, crate::chain_memory::note_name(index, &agent)))
+    })?;
+    rows.collect()
 }
 
 /// Appended rather than placed after `goal` where the table carries them, for the reason spelled
@@ -1969,11 +2023,17 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
     if step.gate && !step.gate_cleared {
         if step.pending_input.is_empty() {
             let previous = previous_output(conn, chain_id, step.step_index, &step.project_id)?;
+            let memory = compose_memory_block(
+                chain_id,
+                &memory_notes(conn, chain_id, step.step_index)?,
+                &crate::chain_memory::note_name(step.step_index, &step.agent_name),
+            );
             let message = compose_chain_input(
                 &chain.goal,
                 &step.instruction,
                 previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
                 &step.feedback,
+                &memory,
             );
             conn.execute(
                 "UPDATE agent_chain_steps SET pending_input = ?2, updated_at = ?3 WHERE id = ?1",
@@ -2048,11 +2108,17 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
 
     let message = if step.pending_input.is_empty() {
         let previous = previous_output(&tx, chain_id, step.step_index, &step.project_id)?;
+        let memory = compose_memory_block(
+            chain_id,
+            &memory_notes(&tx, chain_id, step.step_index)?,
+            &crate::chain_memory::note_name(step.step_index, &step.agent_name),
+        );
         compose_chain_input(
             &chain.goal,
             &step.instruction,
             previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
             &step.feedback,
+            &memory,
         )
     } else {
         step.pending_input.clone()
@@ -2155,6 +2221,58 @@ fn jump_to(
         )?;
     }
     Ok(())
+}
+
+/// The three facts a note is named and filed by, read before the outcome is applied.
+pub fn chain_step_note(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<(String, i64, String)>> {
+    conn.query_row(
+        "SELECT chain_id, step_index, agent_name FROM agent_chain_steps WHERE id = ?1",
+        params![step_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+}
+
+/// Every working copy a chain's memory is mirrored into: **all** of its repositories, not just the
+/// first, so a step running in the third can read what the step in the first wrote.
+///
+/// Repositories that have left the workspace drop out rather than appearing as empty paths — there
+/// is nowhere to mirror to, which is not an error, just one fewer copy.
+pub fn chain_repo_paths(conn: &Connection, chain_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT p.local_path FROM agent_chain_repos r JOIN projects p ON p.id = r.project_id
+          WHERE r.chain_id = ?1 AND p.local_path <> '' ORDER BY r.position",
+    )?;
+    let rows = stmt.query_map(params![chain_id], |row| row.get(0))?;
+    rows.collect()
+}
+
+/// The repository a given step ran in, by name — the one fact a note's header carries that the step
+/// row alone does not spell out.
+pub fn step_repo_name(conn: &Connection, step_id: &str) -> rusqlite::Result<String> {
+    conn.query_row(
+        "SELECT COALESCE(p.name, '') FROM agent_chain_steps s LEFT JOIN projects p ON p.id = s.project_id
+          WHERE s.id = ?1",
+        params![step_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|name| name.unwrap_or_default())
+}
+
+/// Every step of a plan as the summary writes it: position, agent, how it ended, what it said.
+pub fn chain_summary_sections(
+    conn: &Connection,
+    chain_id: &str,
+) -> rusqlite::Result<Vec<(i64, String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT step_index, agent_name, status, output_text FROM agent_chain_steps
+          WHERE chain_id = ?1 ORDER BY step_index",
+    )?;
+    let rows = stmt.query_map(params![chain_id], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    })?;
+    rows.collect()
 }
 
 /// What a step's check needs in order to run: the command, and the working copy to run it in.
@@ -2367,6 +2485,46 @@ pub fn retry_chain_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<O
 
 /// Hands a parked chain back to the scheduler. Only from a state the user parked it in — a failed
 /// chain goes through `retry_chain_step`, which is where the attempt cap lives.
+/// Runs the plan again from one step, with something the user wants said to it.
+///
+/// The mechanism is the loop from `on_fail`, pointed by hand instead of by a failed check — which
+/// is the whole reason it costs almost nothing to have: [`jump_to`] already knows how to put a plan
+/// back to an earlier step and hand that step a note, so "re-run the implementer, but this time
+/// use the existing helper" is that same move with the note coming from a person.
+///
+/// It works on a **finished** chain as much as on a stopped one, which is the point: the memory
+/// folder is still there, the steps still hold their answers, and the second pass opens knowing
+/// everything the first one learned rather than starting from an empty repository again.
+///
+/// The dispatch budget is deliberately *not* reset. A plan you have re-run four times has cost four
+/// plans' worth of engine sessions, and the counter is what keeps that visible.
+pub fn rerun_chain_from(
+    conn: &Connection,
+    chain_id: &str,
+    step_index: i64,
+    note: &str,
+) -> rusqlite::Result<Option<AgentChain>> {
+    let Some(chain) = chain_row(conn, chain_id)? else { return Ok(None) };
+    if chain.status == "running" {
+        return Ok(Some(chain));
+    }
+    // Attempts start over, and only here. Every other reset in this file is the plan recovering
+    // from its own trouble, where the count is the bound; this one is a person deciding to spend
+    // more, which is a decision the app has no business overriding.
+    conn.execute(
+        "UPDATE agent_chain_steps SET attempts = 0 WHERE chain_id = ?1 AND step_index >= ?2",
+        params![chain_id, step_index],
+    )?;
+    let note = if note.trim().is_empty() {
+        String::new()
+    } else {
+        format!("The user has asked for this step to be done again, with this change:\n\n{}", note.trim())
+    };
+    jump_to(conn, chain_id, i64::MAX, step_index, &note)?;
+    set_chain_state(conn, chain_id, "queued", "")?;
+    chain_row(conn, chain_id)
+}
+
 pub fn resume_chain(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<AgentChain>> {
     let Some(chain) = chain_row(conn, chain_id)? else { return Ok(None) };
     if chain.status == "paused" {
@@ -2380,9 +2538,34 @@ pub fn abort_chain(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option
     chain_row(conn, chain_id)
 }
 
+/// Deletes the plan **and the tasks its steps produced**.
+///
+/// The tasks are the bug this fixes. `agent_chain_steps.task_id` deliberately carries no foreign
+/// key — a step has to outlive its task in order to be able to report that the task is gone — and
+/// the consequence was that the cascade which takes the steps could not take these. Deleting a
+/// chain left its turns behind as free-standing tasks in the tree, filed under a folder, belonging
+/// to a plan that no longer existed and with no way left to tell where they came from.
+///
+/// One transaction, tasks first: a half-applied delete that removed the chain and left the tasks
+/// would be the exact state this exists to make impossible.
 pub fn delete_chain(conn: &Connection, chain_id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM agent_chains WHERE id = ?1", params![chain_id])?;
-    Ok(())
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM agent_tasks WHERE id IN
+            (SELECT task_id FROM agent_chain_steps WHERE chain_id = ?1 AND task_id <> '')",
+        params![chain_id],
+    )?;
+    tx.execute("DELETE FROM agent_chains WHERE id = ?1", params![chain_id])?;
+    tx.commit()
+}
+
+/// The ids of the tasks a chain owns, for a caller that has to forget them before they are gone.
+pub fn chain_task_ids(conn: &Connection, chain_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT task_id FROM agent_chain_steps WHERE chain_id = ?1 AND task_id <> ''",
+    )?;
+    let rows = stmt.query_map(params![chain_id], |row| row.get(0))?;
+    rows.collect()
 }
 
 /// The turn a dispatched step wrote, found by **ordinal** rather than by recency.
@@ -4285,6 +4468,72 @@ mod tests {
     }
 
 
+    /// Deleting a chain takes its steps' tasks with it.
+    ///
+    /// The bug: `agent_chain_steps.task_id` carries no foreign key on purpose, so the cascade that
+    /// removed the steps could not touch the tasks. A deleted plan left its turns behind as
+    /// free-standing rows in the tree, belonging to nothing.
+    #[test]
+    fn deleting_a_chain_deletes_the_tasks_its_steps_produced() {
+        let (conn, project) = fixture();
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+        let chain_id = queued_chain(&conn, &project, 2).chain.id;
+
+        let first = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        complete_chain_step(&conn, &first.id, "done", "hecho", "").unwrap();
+        claim_next_chain_step(&conn, &chain_id, "run-2").unwrap();
+        assert_eq!(list_agent_tasks(&conn, &workspace).unwrap().len(), 2, "two steps, two tasks");
+
+        delete_chain(&conn, &chain_id).unwrap();
+        assert!(list_agent_tasks(&conn, &workspace).unwrap().is_empty(), "and none of them outlive the plan");
+    }
+
+    /// A task the user made by hand is not the chain's to delete, however the two are filed.
+    #[test]
+    fn deleting_a_chain_leaves_tasks_that_were_never_its_own() {
+        let (conn, project) = fixture();
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+        let chain_id = queued_chain(&conn, &project, 1).chain.id;
+        claim_next_chain_step(&conn, &chain_id, "run-1").unwrap();
+        let mine =
+            create_agent_task(&conn, &workspace, &project, "a", "Bot", "claude", "sonnet", "", "mi tarea", "mi tarea", "")
+                .unwrap();
+
+        delete_chain(&conn, &chain_id).unwrap();
+        let left = list_agent_tasks(&conn, &workspace).unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].id, mine.id);
+    }
+
+    /// Re-running from a step is the loop pointed by hand: the plan goes back, that step is told
+    /// what the user wants different, and the message it opens with actually carries it.
+    #[test]
+    fn rerunning_from_a_step_carries_the_users_words_into_it() {
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 2).chain.id;
+        for at in 1..=2 {
+            let step = claim_next_chain_step(&conn, &chain_id, &format!("run-{at}")).unwrap().step.unwrap();
+            complete_chain_step(&conn, &step.id, "done", "primera pasada", "").unwrap();
+        }
+        assert_eq!(chain_row(&conn, &chain_id).unwrap().unwrap().status, "done");
+
+        let chain = rerun_chain_from(&conn, &chain_id, 1, "usa el helper que ya existe").unwrap().unwrap();
+        assert_eq!(chain.status, "queued", "a finished plan can be sent back");
+
+        let claim = claim_next_chain_step(&conn, &chain_id, "run-3").unwrap();
+        let step = claim.step.unwrap();
+        assert_eq!(step.step_index, 1, "from where it was asked, not from the top");
+        assert_eq!(step.attempts, 1, "attempts start over — this is a person spending, not a retry");
+        assert!(claim.message.contains("usa el helper que ya existe"));
+
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[0].status, "done", "the step before it was left alone");
+    }
+
     /// The loop. A later step rejects the work and the plan goes **back**, which is the thing a
     /// chain could not express at all before `on_fail` existed.
     ///
@@ -4470,19 +4719,21 @@ pub fn record_ai_usage(
     conn: &Connection,
     provider: &str,
     model: &str,
+    task: &str,
     usage: &crate::ai::AiUsage,
 ) -> rusqlite::Result<()> {
     if usage.is_empty() {
         return Ok(());
     }
     conn.execute(
-        "INSERT INTO ai_usage (id, provider, model, input_tokens, output_tokens, cache_read_tokens,
+        "INSERT INTO ai_usage (id, provider, model, task, input_tokens, output_tokens, cache_read_tokens,
             cache_write_tokens, cost_usd, has_cost, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             Uuid::new_v4().to_string(),
             provider,
             model,
+            task,
             usage.input_tokens,
             usage.output_tokens,
             usage.cache_read_tokens,
@@ -4642,6 +4893,28 @@ pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    // Uncapped, unlike the model table: the vocabulary is closed (`ai::task`) and short, and the
+    // whole point of this breakdown is that a feature missing from it means something.
+    let mut stmt = conn.prepare(
+        "SELECT task, COUNT(*),
+                COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN has_cost THEN 1 ELSE 0 END), 0)
+         FROM ai_usage WHERE created_at >= ?1
+         GROUP BY task ORDER BY tokens DESC",
+    )?;
+    let tasks = stmt
+        .query_map(params![cutoff], |row| {
+            Ok(crate::ai_usage::TaskStat {
+                task: row.get(0)?,
+                runs: row.get(1)?,
+                tokens: row.get(2)?,
+                cost_usd: row.get(3)?,
+                costed_runs: row.get(4)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
     let since: Option<String> = conn
         .query_row("SELECT MIN(created_at) FROM ai_usage", [], |row| row.get(0))
         .optional()?
@@ -4653,6 +4926,7 @@ pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<
         series,
         providers,
         models,
+        tasks,
         peak_tokens,
         since: since.unwrap_or_default(),
     })

@@ -76,7 +76,11 @@ export function StoryBatchList({ width, onNewBatch }: { width: number; onNewBatc
   ];
 
   return (
-    <div style={{ width }} className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}>
+    <div
+      data-tour="stories-list"
+      style={{ width }}
+      className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
+    >
       <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1">
         <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("stories.batches")}

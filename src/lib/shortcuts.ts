@@ -55,6 +55,19 @@ export type ShortcutId =
   | "editor.newFolder"
   | "editor.renamePath"
   | "editor.deletePath"
+  | "editor.save"
+  | "editor.closeTab"
+  | "editor.nextTab"
+  | "editor.prevTab"
+  | "editor.inlineEdit"
+  | "editor.find"
+  | "editor.goToLine"
+  | "editor.toggleComment"
+  | "editor.selectNextOccurrence"
+  | "editor.moveLineUp"
+  | "editor.moveLineDown"
+  | "editor.deleteLine"
+  | "editor.undo"
   | "nav.back"
   | "nav.forward"
   | "project.switcher"
@@ -75,7 +88,21 @@ export interface ShortcutCommand {
   labelKey: TranslationKey;
   /** Written with `Mod`, so one default serves both platforms (⌘ on macOS, Ctrl elsewhere). */
   defaultChord: Chord;
-  run: () => void;
+  /**
+   * The Monaco action this chord fires, for the commands whose behaviour lives inside the editor.
+   *
+   * These used to be `EDITOR_RESERVED`: a list of chords the settings screen could only *warn*
+   * about, because the actions behind them are Monaco's and the app had no way to move them. It
+   * does now — `applyEditorKeybindings` rewrites Monaco's own keybinding table from this registry —
+   * so they are ordinary rebindable commands, and the special case they needed is gone. That also
+   * means collisions between an editor chord and an app chord are caught by the same duplicate
+   * check as every other pair, instead of by a second mechanism that only knew about a fixed list.
+   *
+   * A command with one of these has **no `run`**: pressing it inside the editor is handled by
+   * Monaco, and outside the editor there is nothing to handle.
+   */
+  monacoCommand?: string;
+  run?: () => void;
 }
 
 export const SHORTCUT_GROUP_LABELS: Record<ShortcutGroup, TranslationKey> = {
@@ -426,6 +453,91 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
   },
 
   /*
+   * The editor's own keys — everything that used to be `EDITOR_RESERVED`.
+   *
+   * They were unrebindable for two different reasons, and both are now dealt with rather than
+   * documented. The first four were hard-coded `keydown` listeners inside `EditorView` comparing
+   * `e.key` to literals — the same shape this file already replaced once for the file-tree actions,
+   * and the same fix: they send through `editorCommandStore` like every other editor action. The
+   * rest are **Monaco's**, and are carried by `monacoCommand` into `applyEditorKeybindings`, which
+   * rewrites the editor's own keybinding table to match whatever the user set here.
+   *
+   * The defaults are unchanged, and deliberately: they are VS Code's, which is the point of them.
+   * What changes is that somebody who wants their JetBrains or Vim muscle memory back can now have
+   * it, and the settings screen tells them when a choice collides instead of a fixed list of chords
+   * nobody could move.
+   */
+  {
+    id: "editor.save",
+    group: "editor",
+    labelKey: "editor.save",
+    defaultChord: "Mod+S",
+    run: () => useEditorCommandStore.getState().send("save"),
+  },
+  {
+    id: "editor.closeTab",
+    group: "editor",
+    labelKey: "editor.closeTab",
+    defaultChord: "Mod+W",
+    run: () => useEditorCommandStore.getState().send("closeTab"),
+  },
+  {
+    id: "editor.nextTab",
+    group: "editor",
+    labelKey: "shortcuts.nextTab",
+    defaultChord: "Mod+PageDown",
+    run: () => useEditorCommandStore.getState().send("nextTab"),
+  },
+  {
+    id: "editor.prevTab",
+    group: "editor",
+    labelKey: "shortcuts.prevTab",
+    defaultChord: "Mod+PageUp",
+    run: () => useEditorCommandStore.getState().send("prevTab"),
+  },
+  // Registered on the Monaco instance rather than on `window`, so it only fires with the caret in
+  // the code — but the chord it is registered *with* now comes from here.
+  {
+    id: "editor.inlineEdit",
+    group: "editor",
+    labelKey: "shortcuts.inlineEdit",
+    defaultChord: "Mod+I",
+    monacoCommand: "cf-inline-edit",
+  },
+  { id: "editor.find", group: "editor", labelKey: "shortcuts.findInFile", defaultChord: "Mod+F", monacoCommand: "actions.find" },
+  { id: "editor.goToLine", group: "editor", labelKey: "shortcuts.goToLine", defaultChord: "Mod+G", monacoCommand: "editor.action.gotoLine" },
+  { id: "editor.toggleComment", group: "editor", labelKey: "shortcuts.toggleComment", defaultChord: "Mod+/", monacoCommand: "editor.action.commentLine" },
+  {
+    id: "editor.selectNextOccurrence",
+    group: "editor",
+    labelKey: "shortcuts.selectNextOccurrence",
+    defaultChord: "Mod+D",
+    monacoCommand: "editor.action.addSelectionToNextFindMatch",
+  },
+  {
+    id: "editor.moveLineUp",
+    group: "editor",
+    labelKey: "shortcuts.moveLineUp",
+    defaultChord: "Alt+ArrowUp",
+    monacoCommand: "editor.action.moveLinesUpAction",
+  },
+  {
+    id: "editor.moveLineDown",
+    group: "editor",
+    labelKey: "shortcuts.moveLineDown",
+    defaultChord: "Alt+ArrowDown",
+    monacoCommand: "editor.action.moveLinesDownAction",
+  },
+  {
+    id: "editor.deleteLine",
+    group: "editor",
+    labelKey: "shortcuts.deleteLine",
+    defaultChord: "Mod+Shift+K",
+    monacoCommand: "editor.action.deleteLines",
+  },
+  { id: "editor.undo", group: "editor", labelKey: "shortcuts.undo", defaultChord: "Mod+Z", monacoCommand: "undo" },
+
+  /*
    * The database workspace's actions.
    *
    * `Mod+Alt+…` throughout, because the unmodified pairs are taken by things people press far more
@@ -568,27 +680,3 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
 
 export const SHORTCUT_BY_ID = new Map(SHORTCUT_COMMANDS.map((c) => [c.id, c]));
 
-/**
- * Chords the editor owns. They aren't configurable here — some belong to Monaco itself — but the
- * settings screen warns before a user assigns one of them to an app action, since the app action
- * would only ever fire outside the editor and feel broken inside it.
- */
-export const EDITOR_RESERVED: { chord: Chord; labelKey: TranslationKey }[] = [
-  { chord: "Mod+F", labelKey: "shortcuts.findInFile" },
-  { chord: "Mod+G", labelKey: "shortcuts.goToLine" },
-  { chord: "Mod+S", labelKey: "editor.save" },
-  { chord: "Mod+W", labelKey: "editor.closeTab" },
-  { chord: "Mod+PageDown", labelKey: "shortcuts.nextTab" },
-  { chord: "Mod+PageUp", labelKey: "shortcuts.prevTab" },
-  { chord: "Mod+I", labelKey: "shortcuts.inlineEdit" },
-  { chord: "Mod+/", labelKey: "shortcuts.toggleComment" },
-  { chord: "Mod+D", labelKey: "shortcuts.selectNextOccurrence" },
-  { chord: "Alt+ArrowUp", labelKey: "shortcuts.moveLine" },
-  { chord: "Alt+ArrowDown", labelKey: "shortcuts.moveLine" },
-  { chord: "Mod+Shift+K", labelKey: "shortcuts.deleteLine" },
-  { chord: "Mod+Z", labelKey: "shortcuts.undo" },
-];
-
-export function reservedBy(chord: Chord): TranslationKey | null {
-  return EDITOR_RESERVED.find((r) => r.chord === chord)?.labelKey ?? null;
-}

@@ -30,6 +30,18 @@ pub fn move_path(repo_path: String, from_rel: String, dest_dir: String) -> Resul
     fsops::move_path(&repo_path, &from_rel, &dest_dir)
 }
 
+/// Copies files and folders dropped in from Finder/Explorer into the project — the editor's
+/// external drop. `dest_dir` is repo-relative (`""` for the root); `sources` are the absolute
+/// paths the platform handed over with the drag. Returns what landed and what was left alone.
+#[tauri::command]
+pub fn copy_into_repo(
+    repo_path: String,
+    dest_dir: String,
+    sources: Vec<String>,
+) -> Result<fsops::ImportOutcome, String> {
+    fsops::copy_into(&repo_path, &dest_dir, &sources)
+}
+
 #[tauri::command]
 pub fn create_dir(repo_path: String, rel_path: String) -> Result<(), String> {
     fsops::create_dir(&repo_path, &rel_path)

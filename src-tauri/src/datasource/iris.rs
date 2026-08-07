@@ -1140,6 +1140,7 @@ mod tests {
             visible_schemas: Vec::new(),
             schemas_filtered: false,
             object_filter: String::new(),
+            schema_object_filters: Vec::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,
             startup_script: String::new(),

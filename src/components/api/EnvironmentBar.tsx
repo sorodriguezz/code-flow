@@ -201,6 +201,7 @@ export function EnvironmentBar() {
   const activeEnvironmentId = useApiStore((s) => s.activeEnvironmentId);
   const setActiveEnvironment = useApiStore((s) => s.setActiveEnvironment);
   const openTabs = useApiStore((s) => s.openTabs);
+  const entityTabs = useApiStore((s) => s.entityTabs);
   const activeTabId = useApiStore((s) => s.activeTabId);
 
   const options = useMemo(
@@ -213,10 +214,18 @@ export function EnvironmentBar() {
     [environments, t],
   );
 
-  const collectionId = openTabs.find((tab) => tab.id === activeTabId)?.collectionId ?? null;
+  // A settings tab counts too: with a collection open, its own variables are the collection scope
+  // the picker should be showing.
+  const collectionId =
+    openTabs.find((tab) => tab.id === activeTabId)?.collectionId ??
+    entityTabs.find((tab) => tab.id === activeTabId)?.collectionId ??
+    null;
 
   return (
-    <div className="flex shrink-0 items-center gap-1 border-t border-[var(--cf-border)] px-1.5 py-1.5">
+    <div
+      data-tour="api-env"
+      className="flex shrink-0 items-center gap-1 border-t border-[var(--cf-border)] px-1.5 py-1.5"
+    >
       <div className="min-w-0 flex-1">
         <Select
           size="sm"

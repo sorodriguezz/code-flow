@@ -15,6 +15,7 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
+import type { ReactNode } from "react";
 import type { DbKind, DbNodeKind } from "../../types/database";
 
 /**
@@ -35,6 +36,37 @@ import type { DbKind, DbNodeKind } from "../../types/database";
  * fall. The only structure between panels is that 1px seam.
  */
 export const CARD = "bg-[var(--cf-surface)]";
+
+/** Every text input in this workspace's dialogs. Shared with `Field` in `ApiModal`, so a box styled
+ * here can't drift from the rest of the app's. */
+export const INPUT =
+  "w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] text-[var(--cf-text)] outline-none transition-colors placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)] disabled:opacity-50";
+
+/** A labelled control with an optional line of explanation under it — the density the connection
+ * dialogs use. Here rather than in one of them because two of them need it. */
+export function Row({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-1 block text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+        {label}
+      </span>
+      {children}
+      {hint && (
+        <span className="mt-1 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {hint}
+        </span>
+      )}
+    </label>
+  );
+}
 
 /** Icons follow the *shape* of the thing, not the engine: a Mongo collection and a SQL table are
  * both "rows of records", so both get the table icon. What differs between engines is the label. */

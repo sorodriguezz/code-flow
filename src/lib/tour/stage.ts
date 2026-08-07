@@ -1,4 +1,6 @@
+import { useAgentsStore } from "../../state/agentsStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
+import { useDbModalStore, type DbModal } from "../../state/dbModalStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import {
   useUiStore,
@@ -29,6 +31,19 @@ export interface TourStage {
    * choice inside one view, and resetting it from a step about the terminal would move a tab
    * nothing on screen is pointing at. */
   storiesMode?: StoriesMode;
+  /** The agent console's roster rail, for the one step that is about defining an agent rather than
+   * about running one. Default `false`, like the other two panels — a stage is applied whole, so a
+   * rail opened by one step has to be closed again by every step that doesn't ask for it. */
+  agentsRoster?: boolean;
+  /**
+   * The database workspace's Data sources dialog, open on the whole set.
+   *
+   * The only dialog any tour opens, and it earns it: connections are the one thing in that app that
+   * is configured nowhere else — not in Settings, not in a panel — so a tour that only points at
+   * the gear that opens this has described the door and not the room. Default `false`, so every
+   * other step closes it again.
+   */
+  dbDataSources?: boolean;
   /** AI panel docked open. Default `false`. */
   ai?: boolean;
   /** Terminal dock open. Default `false`. */
@@ -57,6 +72,8 @@ export interface AppSnapshot {
   settingsSection: SettingsSectionId;
   apiSettingsTab: ApiSettingsTab | undefined;
   terminalOpen: boolean;
+  agentsRosterOpen: boolean;
+  dbModal: DbModal | null;
 }
 
 export function captureAppState(): AppSnapshot {
@@ -71,6 +88,8 @@ export function captureAppState(): AppSnapshot {
     settingsSection: ui.settingsSection,
     apiSettingsTab: ui.apiSettingsTab,
     terminalOpen: useTerminalStore.getState().panelOpen,
+    agentsRosterOpen: useAgentsStore.getState().rosterOpen,
+    dbModal: useDbModalStore.getState().modal,
   };
 }
 
@@ -86,6 +105,8 @@ export function restoreAppState(snapshot: AppSnapshot): void {
     apiSettingsTab: snapshot.apiSettingsTab,
   });
   useTerminalStore.setState({ panelOpen: snapshot.terminalOpen });
+  useAgentsStore.setState({ rosterOpen: snapshot.agentsRosterOpen });
+  useDbModalStore.setState({ modal: snapshot.dbModal });
 }
 
 /**
@@ -112,4 +133,8 @@ export function applyStage(stage: TourStage | undefined): void {
     apiSettingsTab: stage?.apiSettingsTab ?? current.apiSettingsTab,
   });
   useTerminalStore.setState({ panelOpen: stage?.terminal ?? false });
+  useAgentsStore.setState({ rosterOpen: stage?.agentsRoster ?? false });
+  // `kind: "connections"` is the dialog opened from the workspace rather than from one connection's
+  // menu — nothing preselected, which is the state a tour wants: the list first, then the form.
+  useDbModalStore.setState({ modal: stage?.dbDataSources ? { kind: "connections" } : null });
 }

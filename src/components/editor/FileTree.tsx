@@ -7,7 +7,6 @@ import {
   ClipboardCopy,
   EyeOff,
   FilePlus,
-  Folder,
   FolderOpen,
   FolderPlus,
   PenLine,
@@ -30,7 +29,7 @@ import { useHiddenFilesStore } from "../../state/hiddenFilesStore";
 import { SkeletonRows } from "../common/Skeleton";
 import type { FileEntry } from "../../types/domain";
 import { fileStatusColor, fileStatusLabelKey } from "../../lib/fileStatus";
-import { fileIconFor } from "../../lib/fileIcon";
+import { FileGlyph } from "../common/FileGlyph";
 import { useRepoStore } from "../../state/repoStore";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRowHoverStore } from "../../state/rowHoverStore";
@@ -40,16 +39,18 @@ import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
 
 /** Repo-relative path of the directory holding `path` ("" for a top-level entry). */
-function parentDir(path: string): string {
+export function parentDir(path: string): string {
   const i = path.lastIndexOf("/");
   return i < 0 ? "" : path.slice(0, i);
 }
 
 type DraftKind = "file" | "dir";
 
-/** The explorer actions a keybinding can ask for. They all act on the focused row, which is why
- * they live here rather than in the shortcut registry: the registry has no view of the tree. */
-export type ExplorerCommand = "newFile" | "newFolder" | "rename" | "delete";
+/** The explorer actions something outside the tree can ask for. Four of them are keybindings, and
+ * they all act on the focused row — which is why they live here rather than in the shortcut
+ * registry: the registry has no view of the tree. `reveal` is the odd one out: it carries a
+ * directory, and is what an external file drop uses to show what just landed. */
+export type ExplorerCommand = "newFile" | "newFolder" | "rename" | "delete" | "reveal";
 
 /** An in-progress "new file"/"new folder" entry: the inline input VS Code shows inside the
  * target directory, rather than a modal. */
@@ -101,7 +102,7 @@ function DraftRow({
   const t = useT();
   const [name, setName] = useState(initial);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { Icon: FileIcon, color } = fileIconFor(name || "file.txt");
+
 
   // Renaming opens with the *stem* selected rather than the whole name: the extension is almost
   // never the part being changed, and having to un-select it before typing is the difference
@@ -122,11 +123,9 @@ function DraftRow({
       className="flex items-center gap-1.5 py-0.5 pr-2 text-[13px]"
     >
       <span className="w-3 shrink-0" />
-      {kind === "dir" ? (
-        <Folder size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-      ) : (
-        <FileIcon size={13} className="shrink-0" style={{ color }} />
-      )}
+      {/* Follows what is being typed, so a rule that claims `.spec.ts` shows its icon before the
+          file exists — which is also the fastest way to check a rule you just wrote. */}
+      <FileGlyph path={name || (kind === "dir" ? "folder" : "file.txt")} isFolder={kind === "dir"} />
       <input
         ref={inputRef}
         autoFocus
@@ -228,7 +227,7 @@ function TreeNode({
     entry.is_dir && !ownStatus && [...changedPaths.keys()].some((p) => p.startsWith(`${entry.path}/`));
   const status = ownStatus ?? (hasChangedDescendant ? "modified" : undefined);
   const color = status ? fileStatusColor(status) : undefined;
-  const { Icon: FileIcon, color: iconColor } = fileIconFor(entry.path);
+
   const draftHere = draft && draft.parent === entry.path ? draft : null;
 
   // Renaming replaces the row rather than floating over it, so the name stays where the eye
@@ -284,14 +283,21 @@ function TreeNode({
             ) : (
               <ChevronRight size={12} className="shrink-0" />
             )}
-            <Folder size={13} className="shrink-0" style={!isSelected && color ? { color } : undefined} />
+            <FileGlyph
+              path={entry.path}
+              isFolder
+              open={isExpanded}
+              color={!isSelected && color ? color : undefined}
+            />
           </>
         ) : (
           <>
             <span className="w-3 shrink-0" />
             {/* Git status wins over the language color: a modified file has to read as
-                modified first, the same way it does in the Changes tab. */}
-            <FileIcon size={13} className="shrink-0" style={{ color: isSelected ? undefined : (color ?? iconColor) }} />
+                modified first, the same way it does in the Changes tab. A custom icon is the one
+                exception — it carries its own brand colours and tinting it would make an Angular
+                file that changed look like neither. */}
+            <FileGlyph path={entry.path} color={isSelected ? undefined : (color ?? undefined)} />
           </>
         )}
         <span className="truncate" style={!isSelected && color ? { color } : undefined}>
@@ -380,9 +386,10 @@ export function FileTree({
   /** A file or folder is gone from disk. The editor closes any tab that was showing it, rather
    * than leaving one aimed at a path that will fail the next time it's read. */
   onPathRemoved?: (path: string) => void;
-  /** A keybinding asking for one of the explorer's actions, forwarded by `EditorView`. The nonce
-   * is what lets the same key fire twice in a row — see `editorCommandStore`. */
-  command?: { command: ExplorerCommand; nonce: number } | null;
+  /** One of the explorer's actions, asked for from outside and forwarded by `EditorView`. The
+   * nonce is what lets the same key fire twice in a row — see `editorCommandStore`. `path` is
+   * only read by `reveal`, and names the directory to open and re-list. */
+  command?: { command: ExplorerCommand; nonce: number; path?: string } | null;
   changedPaths: Map<string, string>;
 }) {
   const t = useT();
@@ -797,10 +804,39 @@ export function FileTree({
   const startRenameRef = useRef(startRename);
   startRenameRef.current = startRename;
 
-  const commandNonce = useRef(-1);
+  /**
+   * Re-lists a directory and opens it, along with every folder on the way down to it.
+   *
+   * What an external drop calls once its files are on disk. Opening the ancestors is the point:
+   * dropping into a collapsed folder deep in the tree would otherwise land the files somewhere the
+   * user is told about but can't see, which reads as nothing having happened.
+   */
+  const revealDir = useCallback(
+    (dir: string) => {
+      if (dir) {
+        const parts = dir.split("/");
+        setExpanded((prev) => {
+          const next = new Set(prev);
+          for (let i = 1; i <= parts.length; i++) next.add(parts.slice(0, i).join("/"));
+          return next;
+        });
+      }
+      void loadDir(dir);
+    },
+    [loadDir],
+  );
+  const revealDirRef = useRef(revealDir);
+  revealDirRef.current = revealDir;
+
+  // Guarded on the request object rather than its nonce: two callers now share this channel — the
+  // keybinding store, which numbers its own requests, and the drop handler, which doesn't — and a
+  // number that means different things to each is a number that eventually collides. Identity also
+  // still absorbs the double-invoked effect that StrictMode runs in development, which is what the
+  // guard was for.
+  const handled = useRef<typeof command>(null);
   useEffect(() => {
-    if (!command || command.nonce === commandNonce.current) return;
-    commandNonce.current = command.nonce;
+    if (!command || command === handled.current) return;
+    handled.current = command;
     switch (command.command) {
       case "newFile":
         startDraftRef.current("file");
@@ -813,6 +849,9 @@ export function FileTree({
         break;
       case "delete":
         void deleteFocusedRef.current();
+        break;
+      case "reveal":
+        revealDirRef.current(command.path ?? "");
         break;
     }
   }, [command]);

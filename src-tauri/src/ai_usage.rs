@@ -33,14 +33,16 @@ pub fn attach(app: AppHandle) {
 }
 
 /// Files one finished run's usage. Never fails and never blocks the caller.
-pub fn record(provider: &str, model: &str, usage: &AiUsage) {
+///
+/// `task` is the feature that spent it — one of [`crate::ai::task`]'s constants.
+pub fn record(provider: &str, model: &str, task: &str, usage: &AiUsage) {
     if usage.is_empty() {
         return;
     }
     let Some(app) = APP.get() else { return };
     let Ok(db) = app.try_state::<Db>().ok_or(()) else { return };
     let Ok(conn) = db.0.lock() else { return };
-    let _ = queries::record_ai_usage(&conn, provider, model, usage);
+    let _ = queries::record_ai_usage(&conn, provider, model, task, usage);
 }
 
 /// One engine's consumption over one window.
@@ -114,6 +116,21 @@ pub struct ModelStat {
     pub costed_runs: i64,
 }
 
+/// One feature's slice of a window — the answer to "is my PR review being counted at all?".
+///
+/// Kept apart from [`ProviderStat`] because they answer opposite questions: that one says which
+/// *engine* the spend went to, this one says which *part of the app* asked for it. A meter with
+/// only the first can be read for a total and cannot be read for a gap.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskStat {
+    /// One of [`crate::ai::task`]'s constants, or empty for rows written before they existed.
+    pub task: String,
+    pub runs: i64,
+    pub tokens: i64,
+    pub cost_usd: f64,
+    pub costed_runs: i64,
+}
+
 /// One column of the chart. The bucket is closed at `start` and open at the next one.
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageBucket {
@@ -135,6 +152,9 @@ pub struct UsageStats {
     pub series: Vec<UsageBucket>,
     pub providers: Vec<ProviderStat>,
     pub models: Vec<ModelStat>,
+    /// Every feature that spent anything in the window, busiest first. A feature absent from here
+    /// spent nothing — which is either true, or the bug.
+    pub tasks: Vec<TaskStat>,
     /// The busiest single bucket, as tokens. Zero for an empty window — the chart needs a scale
     /// and dividing by the maximum is the only one that does not need a quota to exist.
     pub peak_tokens: i64,

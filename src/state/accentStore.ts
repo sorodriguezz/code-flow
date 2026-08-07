@@ -21,6 +21,14 @@ export const ACCENT_OPTIONS: AccentOption[] = [
   { id: "amber", label: "Amber", light: "#d97706", dark: "#fbbf24" },
   { id: "rose", label: "Rose", light: "#e11d48", dark: "#fb7185" },
   { id: "purple", label: "Purple", light: "#9333ea", dark: "#c084fc" },
+  // The hue the first eight left out: everything between purple and rose. Fuchsia is the one warm
+  // pink that survives being a button fill — pink-500 and rose-400 both fall under 4.5:1 against
+  // the white text that sits on `--cf-accent`.
+  { id: "magenta", label: "Magenta", light: "#c026d3", dark: "#e879f9" },
+  // The one that isn't a hue at all. Every other option tints the whole window with an opinion, and
+  // some people want the chrome to stay out of the way of the code — which is also what makes this
+  // the only accent that cannot clash with an editor theme, since it agrees with all of them.
+  { id: "graphite", label: "Graphite", light: "#475569", dark: "#94a3b8" },
 ];
 
 const KEY = "accent_color";

@@ -1,24 +1,29 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   Bookmark,
   Bug,
+  Palette,
   FileCode,
   FileSearch,
   Files,
+  FolderInput,
   GitBranch,
   Keyboard,
   PanelRightClose,
   Search,
   Tags,
 } from "lucide-react";
-import { FileTree, type ExplorerCommand } from "./FileTree";
+import { FileTree, parentDir, type ExplorerCommand } from "./FileTree";
 import { FilePalette } from "./FilePalette";
 import { SearchPanel } from "./SearchPanel";
 import { AnchorsPanel } from "./AnchorsPanel";
 import { BookmarksPanel } from "./BookmarksPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
+import { IconRulesPanel } from "./IconRulesPanel";
 import { EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
 import { ChangesPanel } from "../git/ChangesPanel";
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
@@ -34,7 +39,7 @@ import {
   togglePinInGroups,
   type EditorGroup,
 } from "../../lib/editorGroups";
-import { readFileText, writeFileText } from "../../lib/tauri/commands";
+import { copyIntoRepo, readFileText, writeFileText } from "../../lib/tauri/commands";
 import { onRepoFsChanged } from "../../lib/tauri/events";
 import { findTheme } from "../../lib/codeThemes";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -46,8 +51,9 @@ import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useEditorCommandStore } from "../../state/editorCommandStore";
 import type { TabDrag } from "../../state/tabDragStore";
+import { useTreeDragStore } from "../../state/treeDragStore";
 import { confirmAction } from "../../state/confirmStore";
-import { pushErrorToast } from "../../state/toastStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
@@ -129,7 +135,9 @@ export function EditorView() {
   const [activeGroupId, setActiveGroupId] = useState<string>(() => groups[0].id);
   const [saving, setSaving] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [sidePanel, setSidePanel] = useState<"files" | "search" | "anchors" | "bookmarks" | "debug">("files");
+  const [sidePanel, setSidePanel] = useState<
+    "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons"
+  >("files");
   /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
    * step into while committing, not a layout preference — the editor's resting state is code. */
   const [changesOpen, setChangesOpen] = useState(false);
@@ -144,7 +152,11 @@ export function EditorView() {
   const [explorerCommand, setExplorerCommand] = useState<{
     command: ExplorerCommand;
     nonce: number;
+    path?: string;
   } | null>(null);
+  /** The folder a drag out of Finder/Explorer is currently hovering, or `null` when there is no
+   * drop in flight over the editor. `""` is the project root. */
+  const [dropDir, setDropDir] = useState<string | null>(null);
   /** Width of every group but the last, which flexes. Session-only: a split is a transient
    * arrangement, not a setting. */
   const [groupWidths, setGroupWidths] = useState<number[]>([]);
@@ -163,6 +175,17 @@ export function EditorView() {
   groupsRef.current = groups;
   const activeGroupIdRef = useRef(activeGroupId);
   activeGroupIdRef.current = activeGroupId;
+  // Read by the tab commands, which arrive from the shortcut registry rather than from a listener
+  // this component re-registers whenever the visible view changes.
+  const activeViewRef = useRef(activeView);
+  activeViewRef.current = activeView;
+  // Read by the file-drop listener, which is registered once and must not be torn down and
+  // re-registered every time the open project changes.
+  const projectRef = useRef(project);
+  projectRef.current = project;
+  /** Numbers this view's own requests to the explorer, which share a channel with the keybinding
+   * store's — see the guard in `FileTree`. */
+  const dropNonce = useRef(0);
 
   const activeGroup = useMemo(
     () => groups.find((g) => g.id === activeGroupId) ?? groups[0],
@@ -355,44 +378,32 @@ export function EditorView() {
     [project],
   );
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-        e.preventDefault();
-        const current = groupsRef.current.find((g) => g.id === activeGroupIdRef.current)?.activePath;
-        if (current) void save(current);
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [save]);
-
-  // Tab shortcuts are gated on the Editor tab actually being the visible view — this panel
-  // stays mounted in the background once opened, and Ctrl+W closing an invisible file while
-  // the user is reading the graph would be baffling. They act on the focused group.
-  useEffect(() => {
-    if (activeView !== "editor") return;
-    const handler = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey)) return;
-      const group = groupsRef.current.find((g) => g.id === activeGroupIdRef.current);
-      if (!group) return;
-      if (e.key === "w" || e.key === "W") {
-        e.preventDefault();
-        if (group.activePath) void closeTab(group.id, group.activePath);
-        return;
-      }
-      if (e.key === "PageDown" || e.key === "PageUp") {
-        if (group.paths.length < 2 || !group.activePath) return;
-        e.preventDefault();
-        const index = group.paths.indexOf(group.activePath);
-        const delta = e.key === "PageDown" ? 1 : -1;
-        const target = group.paths[(index + delta + group.paths.length) % group.paths.length];
-        setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, activePath: target } : g)));
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [activeView, closeTab]);
+  /**
+   * Save, close and the two tab moves used to be `keydown` listeners right here, comparing
+   * `e.key` to `"s"`, `"w"` and `"PageUp"`. That is what made the four keys anyone uses most in
+   * an editor the only ones in the app nobody could rebind — and it is the same shape this file
+   * already moved away from once for the explorer's actions.
+   *
+   * They arrive through `editorCommandStore` now, from the same registry as everything else, so
+   * the settings screen owns their chords and the duplicate check covers them. What is kept is the
+   * gating: tab moves only mean something while the Editor is the visible view, because this panel
+   * stays mounted in the background and closing an invisible file while somebody reads the graph
+   * would be baffling.
+   */
+  const tabCommand = (command: "closeTab" | "nextTab" | "prevTab") => {
+    if (activeViewRef.current !== "editor") return;
+    const group = groupsRef.current.find((g) => g.id === activeGroupIdRef.current);
+    if (!group) return;
+    if (command === "closeTab") {
+      if (group.activePath) void closeTab(group.id, group.activePath);
+      return;
+    }
+    if (group.paths.length < 2 || !group.activePath) return;
+    const index = group.paths.indexOf(group.activePath);
+    const delta = command === "nextTab" ? 1 : -1;
+    const target = group.paths[(index + delta + group.paths.length) % group.paths.length];
+    setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, activePath: target } : g)));
+  };
 
   // Otherwise switching projects leaves the previous repo's files open — everything else
   // (branch, file tree, status) points at the new repo. Done during render rather than in
@@ -569,8 +580,117 @@ export function EditorView() {
       case "bookmarkToggle":
         bookmarkToggleRef.current?.();
         break;
+      // Save is not gated on the Editor being visible: a file with unsaved edits is worth saving
+      // from wherever you happen to be looking, which is what the old listener did too.
+      case "save": {
+        const current = groupsRef.current.find((g) => g.id === activeGroupIdRef.current)?.activePath;
+        if (current) void save(current);
+        break;
+      }
+      case "closeTab":
+      case "nextTab":
+      case "prevTab":
+        tabCommand(editorCommand.command);
+        break;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editorCommand, splitGroup]);
+
+  /**
+   * Dropping files and folders in from Finder or Explorer copies them into the project.
+   *
+   * The drop arrives on Tauri's native webview channel rather than as a DOM `drop` event: the
+   * platform's own drag handler consumes those before the page ever sees them, which is the same
+   * reason the tree's row dragging is pointer-driven. That channel is window-wide, so where the
+   * files land is worked out here — the folder row under the pointer, a file row's folder, or the
+   * project root anywhere else in the editor.
+   *
+   * A drop outside the editor resolves to nothing and is left alone. `elementFromPoint` is what
+   * makes that hold without a list of exceptions: another tab isn't drawn, and a dialog over the
+   * editor answers with its own backdrop rather than with the tree underneath it.
+   */
+  const importDropped = useCallback(
+    async (destDir: string, sources: string[]) => {
+      const repo = projectRef.current;
+      if (!repo || sources.length === 0) return;
+      try {
+        const outcome = await copyIntoRepo(repo.local_path, destDir, sources);
+        if (outcome.copied.length > 0) {
+          // The tree is told where to look rather than asked to re-read itself: only one
+          // directory changed, and it may well be one that was never expanded.
+          setExplorerCommand({ command: "reveal", path: destDir, nonce: dropNonce.current++ });
+          // Everything that landed is untracked, and both the tree's colouring and the Changes
+          // tab read that from the store — refreshed here rather than waiting on the watcher.
+          void useRepoStore.getState().refreshStatus();
+          useToastStore.getState().pushToast(
+            tRef.current("editor.dropCopied", {
+              n: outcome.copied.length,
+              dir: destDir || repo.name,
+            }),
+            "success",
+          );
+        }
+        // Reported separately, and as an error: a name that was already taken is the one outcome
+        // where what the user dropped is not what they now have.
+        if (outcome.skipped.length > 0) {
+          pushErrorToast(tRef.current("editor.dropSkipped", { names: outcome.skipped.join(", ") }));
+        }
+      } catch (e) {
+        pushErrorToast(String(e));
+      }
+    },
+    [],
+  );
+  const importDroppedRef = useRef(importDropped);
+  importDroppedRef.current = importDropped;
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+    let disposed = false;
+    /** The destination for a drop at this point, or `null` if it isn't the editor's to take.
+     * Positions come in physical pixels — the platform's, not the page's. */
+    const dirAt = (px: number, py: number): string | null => {
+      const ratio = window.devicePixelRatio || 1;
+      const el = document.elementFromPoint(px / ratio, py / ratio);
+      if (!el?.closest("[data-cf-editor-drop]")) return null;
+      const row = el.closest<HTMLElement>("[data-cf-treepath]");
+      const path = row?.dataset.cfTreepath;
+      if (path === undefined) return "";
+      return row?.dataset.cfTreedir === "1" ? path : parentDir(path);
+    };
+
+    /** Both halves of the affordance move together: the banner below, and the ring the tree
+     * already draws around a drop target — the same one its own row dragging lights up, so an
+     * external drop aims exactly like an internal one. */
+    const aimAt = (dir: string | null) => {
+      setDropDir(dir);
+      useTreeDragStore.getState().hover(dir);
+    };
+
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        const payload = event.payload;
+        if (payload.type === "leave") {
+          aimAt(null);
+          return;
+        }
+        const dir = dirAt(payload.position.x, payload.position.y);
+        if (payload.type !== "drop") {
+          aimAt(dir);
+          return;
+        }
+        aimAt(null);
+        if (dir !== null) void importDroppedRef.current(dir, payload.paths);
+      })
+      .then((fn) => {
+        if (disposed) void fn();
+        else unlisten = fn;
+      });
+    return () => {
+      disposed = true;
+      if (unlisten) void unlisten();
+    };
+  }, []);
 
   const registerCapture = useCallback((capture: () => void) => {
     captureRef.current = capture;
@@ -697,7 +817,11 @@ export function EditorView() {
   return (
     // No header strip: the project and branch it used to repeat are already in the status bar,
     // and the row it occupied is worth more as editor.
-    <div className="flex h-full min-h-0 flex-col">
+    //
+    // `data-cf-editor-drop` marks how far the file drop reaches: everything the editor draws, rail
+    // and tree included. It is a marker rather than a handler because the drop is delivered by the
+    // platform, off the DOM event path — see the listener above.
+    <div data-cf-editor-drop className="relative flex h-full min-h-0 flex-col">
       <div className="flex min-h-0 flex-1">
         {/* Activity rail: the panel toggles up top, one-shot actions pinned to the bottom the
             way an editor keeps its settings gear there. */}
@@ -718,11 +842,14 @@ export function EditorView() {
               { id: "bookmarks", shortcut: "editor.bookmarks", icon: Bookmark, label: t("bookmarks.title") },
               { id: "debug", shortcut: "editor.debug", icon: Bug, label: t("debug.title") },
             ] as const
-          ).map(({ id, shortcut, icon: Icon, label }) => (
+          ).map(({ id, icon: Icon, label, ...entry }) => (
+            // `shortcut` is optional: the icon panel is opened by clicking it, not by a chord. One
+            // more binding for a screen you visit twice a year would be a line in the cheat sheet
+            // that costs everyone reading it more than it saves its user.
             <button
               key={id}
               onClick={() => setSidePanel(id)}
-              title={shortcutHint(shortcut, label)}
+              title={"shortcut" in entry ? shortcutHint(entry.shortcut, label) : label}
               aria-label={label}
               className={`relative flex h-7 w-7 items-center justify-center rounded-md ${
                 sidePanel === id
@@ -742,13 +869,29 @@ export function EditorView() {
               )}
             </button>
           ))}
+          {/* Below the panels, above the actions. The five above read the code; this one only
+              changes how the tree draws it, so grouping it with them put a preference among five
+              views of the repository. `mt-auto` moves here with it — this is now the first item of
+              the bottom cluster. */}
+          <button
+            onClick={() => setSidePanel("icons")}
+            title={t("icons.title")}
+            aria-label={t("icons.title")}
+            className={`mt-auto flex h-7 w-7 items-center justify-center rounded-md ${
+              sidePanel === "icons"
+                ? "text-[var(--cf-accent)]"
+                : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            }`}
+          >
+            <Palette size={15} />
+          </button>
           {/* Go to file lives here rather than in a strip of its own: it's an action, not a
               panel, and it has to be reachable with no file open — which the tab bar isn't. */}
           <button
             onClick={() => setPaletteOpen(true)}
             title={shortcutHint("editor.goToFile", t("editor.goToFile"))}
             aria-label={t("editor.goToFile")}
-            className="mt-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
           >
             <FileSearch size={15} />
           </button>
@@ -783,6 +926,8 @@ export function EditorView() {
             />
           ) : sidePanel === "bookmarks" ? (
             <BookmarksPanel repoPath={project.local_path} onOpen={openHit} />
+          ) : sidePanel === "icons" ? (
+            <IconRulesPanel />
           ) : sidePanel === "debug" ? (
             <DebugPanel
               repoPath={project.local_path}
@@ -909,6 +1054,22 @@ export function EditorView() {
           </div>
         )}
       </div>
+      {/* The drop affordance: an outline around what will take the files, and a banner naming the
+          folder they will land in — named rather than merely lit, because the same gesture lands
+          somewhere different depending on which row the pointer is over, and a copy that went to
+          the wrong folder is only discovered later. Nothing is dimmed: the tree underneath is what
+          the drop is being aimed with. `pointer-events-none` so this can never become what the
+          next hit test finds under the cursor. */}
+      {dropDir !== null && (
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-end justify-center pb-8 ring-2 ring-inset ring-[var(--cf-accent)]">
+          <div className="flex items-center gap-2.5 rounded-xl border border-[var(--cf-accent)] bg-[var(--cf-surface-raised)] px-4 py-2.5 shadow-[var(--cf-shadow)]">
+            <FolderInput size={16} className="shrink-0 text-[var(--cf-accent)]" />
+            <span className="text-[13px] font-medium text-[var(--cf-text)]">
+              {t("editor.dropHint", { dir: dropDir || project.name })}
+            </span>
+          </div>
+        </div>
+      )}
       {paletteOpen && (
         <FilePalette
           repoPath={project.local_path}

@@ -4,6 +4,7 @@ import { ApiSidebar } from "./ApiSidebar";
 import { DatabaseView } from "../db/DatabaseView";
 import { RequestTabs } from "./RequestTabs";
 import { RequestBuilder } from "./RequestBuilder";
+import { EntitySettingsView } from "./EntitySettingsView";
 import { CodeSnippetPanel } from "./CodeSnippetPanel";
 import { EnvironmentModal } from "./EnvironmentModal";
 import { ImportModal } from "./ImportModal";
@@ -95,6 +96,8 @@ function ApiEmptyState() {
 export function ApiView() {
   const t = useT();
   const openTabs = useApiStore((s) => s.openTabs);
+  const entityTabs = useApiStore((s) => s.entityTabs);
+  const tabOrder = useApiStore((s) => s.tabOrder);
   const activeTabId = useApiStore((s) => s.activeTabId);
   const activeView = useUiStore((s) => s.activeView);
   const apiWorkspace = useUiStore((s) => s.apiWorkspace);
@@ -106,10 +109,13 @@ export function ApiView() {
   }, []);
 
   const activeTab = openTabs.find((tab) => tab.id === activeTabId) ?? null;
+  const activeEntity = entityTabs.find((tab) => tab.id === activeTabId) ?? null;
 
   const closeActiveTab = useCallback(async () => {
     const store = useApiStore.getState();
-    const tab = store.openTabs.find((candidate) => candidate.id === store.activeTabId);
+    const tab =
+      store.openTabs.find((candidate) => candidate.id === store.activeTabId) ??
+      store.entityTabs.find((candidate) => candidate.id === store.activeTabId);
     if (!tab) return;
     if (tab.dirty) {
       const name = tab.name || t("api.untitledRequest");
@@ -130,6 +136,17 @@ export function ApiView() {
       if (useApiModalStore.getState().modal !== null) return;
       const tabId = useApiStore.getState().activeTabId;
       if (!tabId) return;
+      // A settings tab has no `TabActions` — its save is one store call, with none of the script
+      // running and scope writing that makes a request's save worth registering.
+      const entity = useApiStore.getState().entityTabs.some((tab) => tab.id === tabId);
+      if (entity) {
+        if (e.key === "s" || e.key === "w") {
+          e.preventDefault();
+          if (e.key === "s") void useApiStore.getState().saveEntityTab(tabId);
+          else void closeActiveTab();
+        }
+        return;
+      }
       if (e.key === "s") {
         e.preventDefault();
         tabActions(tabId)?.save();
@@ -166,9 +183,15 @@ export function ApiView() {
             <ApiSidebar />
 
             <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD}`}>
-              {openTabs.length > 0 && <RequestTabs />}
+              {tabOrder.length > 0 && <RequestTabs />}
               <div className="min-h-0 flex-1">
-                {activeTab ? <RequestBuilder tabId={activeTab.id} /> : <ApiEmptyState />}
+                {activeTab ? (
+                  <RequestBuilder tabId={activeTab.id} />
+                ) : activeEntity ? (
+                  <EntitySettingsView tabId={activeEntity.id} />
+                ) : (
+                  <ApiEmptyState />
+                )}
               </div>
             </div>
 

@@ -23,6 +23,10 @@ export type DbModal =
   /** The connection dialog with nothing in particular selected — "manage my connections", which is
    * how it opens from the workspace rather than from one connection's menu. */
   | { kind: "connections" }
+  /** The name filter over tables, views and routines. `schema` is the one it is being written for,
+   * or `null` for the connection as a whole — which is the same choice the dialog offers, opened on
+   * whichever the user right-clicked. */
+  | { kind: "objectFilter"; connectionId: string; schema: string | null }
   /** One cell's full value, for the ones a grid row can't show. */
   | { kind: "cell"; column: string; value: string | null; editable: boolean; onSave?: (value: string | null) => void }
   /**

@@ -224,6 +224,7 @@ export function ApiSidebar() {
   const createCollection = useApiStore((s) => s.createCollection);
   const collections = useApiStore((s) => s.collections);
   const openTabs = useApiStore((s) => s.openTabs);
+  const entityTabs = useApiStore((s) => s.entityTabs);
   const activeTabId = useApiStore((s) => s.activeTabId);
   const openModal = useApiModalStore((s) => s.openApiModal);
   const conflicts = useCollabStore((s) => s.conflicts);
@@ -245,10 +246,14 @@ export function ApiSidebar() {
     }
   };
 
-  // The runner always runs *something*: whatever collection the open request belongs to, or the
-  // first one, so the button doesn't need a picker of its own.
+  // The runner always runs *something*: whatever collection the focused tab belongs to — a
+  // request's, or the one whose settings are open — or the first one, so the button doesn't need
+  // a picker of its own.
   const runnerCollectionId =
-    openTabs.find((tab) => tab.id === activeTabId)?.collectionId ?? collections[0]?.id ?? null;
+    openTabs.find((tab) => tab.id === activeTabId)?.collectionId ??
+    entityTabs.find((tab) => tab.id === activeTabId)?.collectionId ??
+    collections[0]?.id ??
+    null;
 
   const overflowItems: MenuItem[] = [
     { label: t("api.cookies"), icon: Cookie, onClick: () => openModal({ kind: "cookies" }) },
@@ -262,10 +267,14 @@ export function ApiSidebar() {
   return (
     <>
       <div
+        data-tour="api-sidebar"
         style={{ width }}
         className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
       >
-        <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1">
+        <div
+          data-tour="api-sidebar-actions"
+          className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1"
+        >
           <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("api.title")}
           </span>

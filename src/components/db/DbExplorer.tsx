@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowDown,
@@ -8,6 +8,7 @@ import {
   Copy,
   EyeOff,
   Filter,
+  FilterX,
   Database,
   Eraser,
   FileCode2,
@@ -44,11 +45,14 @@ import {
   describeConnection,
   groupConnections,
   nodeKey,
+  parseSpec,
   UNGROUPED,
   useDbStore,
   type DbSidebarSection,
 } from "../../state/dbStore";
 import { useDbModalStore } from "../../state/dbModalStore";
+import { useDbDragStore } from "../../state/dbDragStore";
+import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -63,6 +67,7 @@ import {
   type DbNode,
   type DbNodeKind,
   type DbNodeRef,
+  type DbSchemaObjectFilter,
 } from "../../types/database";
 
 const WIDTH_MIN = 220;
@@ -101,6 +106,8 @@ function TreeRow({
   leading,
   color,
   title,
+  drag,
+  dropTarget,
 }: {
   depth: number;
   /** Place among the rows it arrives with — all the entry animation needs to stagger. */
@@ -123,6 +130,16 @@ function TreeRow({
   onContextMenu: (e: React.MouseEvent) => void;
   leading?: React.ReactNode;
   color?: string;
+  /** Pointer plumbing for the rows that can be dragged — only the connections. Spread onto the row
+   * rather than handled here, so a row that isn't draggable carries no handlers at all. */
+  drag?: {
+    onPointerDown: (e: React.PointerEvent) => void;
+    onPointerMove: (e: React.PointerEvent) => void;
+    onPointerEnter: () => void;
+    onPointerUp: () => void;
+  };
+  /** Drawn as the line a drop would land on. */
+  dropTarget?: boolean;
 }) {
   return (
     <div
@@ -131,6 +148,7 @@ function TreeRow({
       aria-selected={active}
       title={title}
       tabIndex={0}
+      {...drag}
       // A click *selects*, it never expands: expanding is the chevron's job alone. A single click on
       // the row used to toggle, which made every attempt to point at a node fold or unfold it — and
       // on a slow connection, expanding is a round trip, so brushing past a schema went and fetched
@@ -160,7 +178,16 @@ function TreeRow({
         }
       }}
       style={{ paddingLeft: 6 + depth * 12, ...riseDelay(at) }}
+      // The insertion point is the row's own top border rather than a floating line: the tree has
+      // no spare pixels between rows, and a border that is transparent when idle keeps every row
+      // exactly where it was — a drag that shifted the list under the pointer would move the target
+      // out from under it.
       className={`cf-rise group flex w-full cursor-default items-center gap-1 rounded-md py-[3px] pr-1.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+        // Only the rows that can be dropped onto carry the border, transparent or not: giving it to
+        // every row would add a pixel to each of the hundreds a schema can hold, for a line that
+        // only ever draws on a connection.
+        drag ? (dropTarget ? "border-t border-[var(--cf-accent)]" : "border-t border-transparent") : ""
+      } ${
         active
           ? "bg-[var(--cf-accent-soft)]"
           : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
@@ -175,6 +202,13 @@ function TreeRow({
           onToggle();
         }}
         onDoubleClick={(e) => e.stopPropagation()}
+        // The *press* stops here too, and it has to: a draggable row captures the pointer on
+        // `pointerdown`, and a captured pointer retargets the `click` to whatever holds the capture
+        // — so the chevron's own click was being delivered to the row instead, and toggling never
+        // ran. That left the connection rows with no way to expand at all: theirs is the one level
+        // of the tree whose double click opens a console rather than falling back to the chevron.
+        // The cost is that the chevron is not a drag handle, which is the right way round anyway.
+        onPointerDown={(e) => e.stopPropagation()}
         aria-hidden={!expandable}
         className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)] ${
           expandable ? "cursor-pointer hover:text-[var(--cf-text)]" : ""
@@ -221,6 +255,30 @@ function refOf(node: DbNode): DbNodeRef {
   };
 }
 
+/**
+ * A drag released over a row or a heading.
+ *
+ * One helper rather than the logic inlined at both call sites, because ending the drag is the part
+ * that must happen whatever the drop turns out to be — including the drop onto itself, which is the
+ * commonest one: a click that travelled five pixels.
+ */
+function useDbDrop() {
+  const dropConnection = useDbStore((s) => s.dropConnection);
+  const endDrag = useDbDragStore((s) => s.end);
+
+  return (group: string, beforeConnectionId: string | null) => {
+    const drag = useDbDragStore.getState().drag;
+    endDrag();
+    setDragCursor(false);
+    if (!drag || drag.connectionId === beforeConnectionId) return;
+    void dropConnection(drag.connectionId, group, beforeConnectionId);
+  };
+}
+
+/** One shared empty list, so a connection with no per-schema filters yields the same reference
+ * every time it is derived. A fresh `[]` would make every comparison below report a change. */
+const EMPTY_FILTERS: DbSchemaObjectFilter[] = [];
+
 function NodeSubtree({
   connectionId,
   node,
@@ -239,6 +297,23 @@ function NodeSubtree({
   const loading = useDbStore((s) => s.loadingNodes.includes(key));
   const children = useDbStore((s) => s.children[key]);
   const error = useDbStore((s) => s.nodeErrors[key]);
+  const openModal = useDbModalStore((s) => s.openDbModal);
+  /** Which schemas of this connection carry a filter of their own — only so the menu can offer to
+   * clear the one it is standing on. Subscribed rather than read from `getState`, so clearing a
+   * filter takes the row out of the menu the next time it opens.
+   *
+   * The subscription is to the *row*, and the parse happens outside it. `parseSpec` runs
+   * `JSON.parse` and spreads the defaults over it, so it hands back a new object — and a new
+   * `schema_object_filters` array — on every single call. A selector that returned it was a
+   * snapshot that never compared equal to itself, which is `useSyncExternalStore`'s definition of
+   * an infinite loop: render, "the store changed", render. It took the whole tree down with
+   * "Maximum update depth exceeded" as soon as one node mounted. `find` returns the row object
+   * itself, which is stable until the connection is actually rewritten. */
+  const row = useDbStore((s) => s.connections.find((c) => c.id === connectionId) ?? null);
+  const schemaFilters = useMemo(
+    () => (row ? parseSpec(row) : null)?.schema_object_filters ?? EMPTY_FILTERS,
+    [row],
+  );
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   /** The second menu: which statement to draft, once "Generate SQL" has been picked. */
   const [generateMenu, setGenerateMenu] = useState<{ x: number; y: number } | null>(null);
@@ -379,6 +454,22 @@ function NodeSubtree({
   // Filtering from the tree, on the schema you are looking at — which is where you realise you
   // never want to see it again. The dialog's Schemas tab is the same list, for editing it as a set.
   if (node.kind === "schema") {
+    // Narrowing what is *inside* the schema, above the two that hide the schema itself: the tables
+    // are what you are looking at when you right-click, and a hundred of them is the far commoner
+    // complaint than a schema too many.
+    menuItems.push({
+      label: t("db.filterTables"),
+      icon: Filter,
+      separated: true,
+      onClick: () => openModal({ kind: "objectFilter", connectionId, schema: node.name }),
+    });
+    if (schemaFilters.some((entry) => entry.schema.toLowerCase() === node.name.toLowerCase())) {
+      menuItems.push({
+        label: t("db.clearTableFilter"),
+        icon: FilterX,
+        onClick: () => void store.setObjectFilter(connectionId, node.name, ""),
+      });
+    }
     menuItems.push({
       label: t("db.onlyThisSchema"),
       icon: Filter,
@@ -552,6 +643,11 @@ function ConnectionBranch({
   total: number;
 }) {
   const t = useT();
+  const press = useDbDragStore((s) => s.press);
+  const begin = useDbDragStore((s) => s.begin);
+  const hoverDrag = useDbDragStore((s) => s.hover);
+  const isDropTarget = useDbDragStore((s) => s.drag !== null && s.overConnectionId === row.id);
+  const commitDrop = useDbDrop();
   const rootRef: DbNodeRef = { kind: "root", database: null, schema: null, name: null };
   const key = nodeKey(row.id, rootRef);
   const expanded = useDbStore((s) => s.expanded.includes(key));
@@ -668,6 +764,29 @@ function ConnectionBranch({
       <TreeRow
         depth={0}
         at={index}
+        drag={{
+          onPointerDown: (e) => {
+            // Left button only. A right-click opens the menu, and picking the row up under it would
+            // leave the tree dragging something the user never grabbed.
+            if (e.button !== 0) return;
+            e.currentTarget.setPointerCapture(e.pointerId);
+            press(row.id, row.group_name, e.clientX, e.clientY);
+          },
+          onPointerMove: (e) => {
+            const origin = useDbDragStore.getState().origin;
+            if (!origin || useDbDragStore.getState().drag) return;
+            // The threshold is what keeps a click from being a one-pixel drag.
+            if (Math.hypot(e.clientX - origin.x, e.clientY - origin.y) < DRAG_THRESHOLD) return;
+            begin();
+            setDragCursor(true);
+            // Capture is released so the rows the pointer crosses receive their own enter events —
+            // with it held, every move would keep reporting this row.
+            e.currentTarget.releasePointerCapture(e.pointerId);
+          },
+          onPointerEnter: () => hoverDrag(row.id, row.group_name),
+          onPointerUp: () => commitDrop(row.group_name, row.id),
+        }}
+        dropTarget={isDropTarget}
         icon={<EngineIcon size={12} />}
         color={engineColor(row.kind)}
         name={row.name}
@@ -933,6 +1052,11 @@ function GroupSection({
   const t = useT();
   const store = useDbStore.getState();
   const openModal = useDbModalStore((s) => s.openDbModal);
+  const hoverDrag = useDbDragStore((s) => s.hover);
+  const isDropTarget = useDbDragStore(
+    (s) => s.drag !== null && s.overGroup === group && s.overConnectionId === null,
+  );
+  const commitDrop = useDbDrop();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
   const [renaming, setRenaming] = useState(false);
@@ -984,6 +1108,10 @@ function GroupSection({
         role="treeitem"
         aria-expanded={!collapsed}
         tabIndex={0}
+        // Dropping on the heading means "into this group, at the end" — the move that has no row to
+        // aim at, and the only way into a group that is empty or collapsed.
+        onPointerEnter={() => hoverDrag(null, group)}
+        onPointerUp={() => commitDrop(group, null)}
         onClick={onToggle}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -997,7 +1125,11 @@ function GroupSection({
           setMenu({ x: e.clientX, y: e.clientY });
         }}
         style={riseDelay(at)}
-        className="cf-rise group flex w-full cursor-default items-center gap-1 rounded-md px-1.5 py-[3px] text-left outline-none hover:bg-black/[0.03] focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] dark:hover:bg-white/[0.04]"
+        className={`cf-rise group flex w-full cursor-default items-center gap-1 rounded-md px-1.5 py-[3px] text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+          isDropTarget
+            ? "bg-[var(--cf-accent-soft)] ring-1 ring-[var(--cf-accent)]"
+            : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        }`}
       >
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
@@ -1201,6 +1333,30 @@ export function DbExplorer() {
   const [engineMenu, setEngineMenu] = useState<{ x: number; y: number } | null>(null);
   /** The unnamed folder being typed into, if the user just asked for one. */
   const [creatingGroup, setCreatingGroup] = useState(false);
+  const dragging = useDbDragStore((s) => s.drag !== null);
+  const ungroupHover = useDbDragStore((s) => s.hover);
+  const ungroupTarget = useDbDragStore(
+    (s) => s.drag !== null && s.overGroup === UNGROUPED && s.overConnectionId === null,
+  );
+  const ungroupDrop = useDbDrop();
+
+  // Released over the search box, the toolbar, or off the window entirely: none of those are drop
+  // targets, but every one of them still ends the drag. Without this the body keeps `cf-dragging`
+  // and the next click lands on a tree that thinks it is still being dragged.
+  useEffect(() => {
+    const cancel = () => {
+      const state = useDbDragStore.getState();
+      if (!state.drag && !state.origin) return;
+      state.end();
+      setDragCursor(false);
+    };
+    window.addEventListener("pointerup", cancel);
+    window.addEventListener("pointercancel", cancel);
+    return () => {
+      window.removeEventListener("pointerup", cancel);
+      window.removeEventListener("pointercancel", cancel);
+    };
+  }, []);
 
   const sections: { id: DbSidebarSection; label: string }[] = [
     { id: "explorer", label: t("db.explorer") },
@@ -1236,10 +1392,14 @@ export function DbExplorer() {
   return (
     <>
       <div
+        data-tour="db-explorer"
         style={{ width }}
         className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
       >
-        <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1">
+        <div
+          data-tour="db-explorer-actions"
+          className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1"
+        >
           <span className="mr-auto min-w-0 truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("db.title")}
           </span>
@@ -1364,9 +1524,27 @@ export function DbExplorer() {
               {foldered && loose.length > 0 && (
                 <div className="mx-1 my-1.5 border-t border-[var(--cf-border)]" />
               )}
-              {loose.map((row, index) => (
-                <ConnectionBranch key={row.id} row={row} index={index} total={loose.length} />
-              ))}
+              {/* The loose connections are also the way *out* of a group. Every other target is a
+                  row or a heading, and "no group" has neither — so the area they live in is the
+                  target, and while a drag is live it says so rather than being an invisible band of
+                  nothing. Without this, a connection dragged into a folder could only be taken back
+                  out through the row menu. */}
+              <div
+                onPointerEnter={() => ungroupHover(null, UNGROUPED)}
+                onPointerUp={() => ungroupDrop(UNGROUPED, null)}
+                className={`rounded-md ${
+                  ungroupTarget ? "bg-[var(--cf-accent-soft)] ring-1 ring-[var(--cf-accent)]" : ""
+                }`}
+              >
+                {loose.map((row, index) => (
+                  <ConnectionBranch key={row.id} row={row} index={index} total={loose.length} />
+                ))}
+                {dragging && loose.length === 0 && (
+                  <p className="px-2 py-3 text-center text-[11px] text-[var(--cf-text-muted)]">
+                    {t("db.dropToUngroup")}
+                  </p>
+                )}
+              </div>
             </div>
           )}
         </div>

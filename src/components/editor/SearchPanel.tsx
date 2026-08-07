@@ -13,7 +13,7 @@ import {
   X,
 } from "lucide-react";
 import { replaceInRepo, searchRepo, type SearchHit, type SearchOptions } from "../../lib/tauri/commands";
-import { fileIconFor } from "../../lib/fileIcon";
+import { FileGlyph } from "../common/FileGlyph";
 import { useRepoStore } from "../../state/repoStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -275,7 +275,6 @@ export function SearchPanel({
           </p>
         )}
         {grouped.map(([path, fileHits]) => {
-          const { Icon, color } = fileIconFor(path);
           const isCollapsed = collapsed[path];
           return (
             <div key={path} className="group/file pb-1">
@@ -289,7 +288,7 @@ export function SearchPanel({
                   ) : (
                     <ChevronDown size={10} className="shrink-0 text-[var(--cf-text-muted)]" />
                   )}
-                  <Icon size={12} className="shrink-0" style={{ color }} />
+                  <FileGlyph path={path} size={12} />
                   <span className="truncate text-[11px] text-[var(--cf-text)]">{path}</span>
                   <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{fileHits.length}</span>
                 </button>

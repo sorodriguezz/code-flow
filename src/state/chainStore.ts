@@ -17,6 +17,7 @@ import {
   listChainTemplates,
   listWorkspaceChainSteps,
   resumeChain,
+  rerunChainFrom,
   retryChainStep,
   setChainGroup,
   setChainPinned,
@@ -124,6 +125,8 @@ interface ChainState {
   approve: (chainId: string, input: string) => Promise<void>;
   skip: (chainId: string) => Promise<void>;
   retry: (chainId: string) => Promise<void>;
+  /** "Do that again, but…" — back to one step, carrying the user's own words, and moving. */
+  rerunFrom: (chainId: string, stepIndex: number, note: string) => Promise<void>;
   resume: (chainId: string) => Promise<void>;
   abort: (chainId: string) => Promise<void>;
   remove: (chainId: string) => Promise<void>;
@@ -361,6 +364,13 @@ export const useChainStore = create<ChainState>((set, get) => ({
     void get().pump(chainId);
   },
 
+  rerunFrom: async (chainId, stepIndex, note) => {
+    const chain = await rerunChainFrom(chainId, stepIndex, note);
+    if (chain) applyChain(chain, set);
+    await get().refresh(chainId);
+    if (chain?.status === "queued") void get().pump(chainId);
+  },
+
   resume: async (chainId) => {
     const chain = await resumeChain(chainId);
     if (chain) applyChain(chain, set);
@@ -379,7 +389,11 @@ export const useChainStore = create<ChainState>((set, get) => ({
 
   remove: async (chainId) => {
     await get().abort(chainId);
-    await deleteChain(chainId);
+    // The step tasks go with the chain now — the backend deletes them in the same transaction, and
+    // hands back which ones so the task list can forget them here rather than keep drawing rows for
+    // work whose plan is gone.
+    const orphaned = await deleteChain(chainId);
+    if (orphaned.length > 0) useAgentsStore.getState().forget(orphaned);
     set((s) => {
       const { [chainId]: _dropped, ...stepsByChain } = s.stepsByChain;
       const { [chainId]: _droppedBriefs, ...briefsByChain } = s.briefsByChain;

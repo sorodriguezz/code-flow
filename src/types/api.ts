@@ -990,10 +990,31 @@ export interface RunnerConfig {
   stopOnError: boolean;
 }
 
+/**
+ * What one runner row keeps of the exchange it performed, so the results view can show the
+ * response side by side with the assertions instead of only their verdicts.
+ *
+ * It is capped rather than complete, and that's the whole point of the type existing separately:
+ * a 2000-request run against an API that answers in megabytes would otherwise hold every byte of
+ * the run's traffic in memory at once, while the pane only ever shows one row. `bodyNotice` names
+ * why a body is short or missing — an empty pane with no explanation reads as "the server sent
+ * nothing", which is a different and wrong story.
+ */
+export interface RunnerCapture {
+  statusText: string;
+  requestHeaders: [string, string][];
+  requestBody: string;
+  responseHeaders: [string, string][];
+  responseBody: string;
+  bodyNotice: "truncated" | "dropped" | "binary" | null;
+}
+
 export interface RunnerResultItem {
   iteration: number;
   requestId: string;
   name: string;
+  /** Enclosing folder names from the run root down, outermost first — the row's breadcrumb. */
+  folderPath: string[];
   method: string;
   url: string;
   status: number | null;
@@ -1001,11 +1022,17 @@ export interface RunnerResultItem {
   sizeBytes: number;
   tests: TestResult[];
   error: string | null;
+  /** The exchange itself, once the request resolved and while the run still had capture budget. */
+  capture: RunnerCapture | null;
 }
 
 export interface RunnerReport {
   startedAt: number;
   finishedAt: number;
+  /** Iterations the run was configured for — a run stopped early never reaches all of them. */
+  iterations: number;
+  /** Environment selected when the run started; null when none was. */
+  environmentName: string | null;
   items: RunnerResultItem[];
   totalRequests: number;
   totalAssertions: number;

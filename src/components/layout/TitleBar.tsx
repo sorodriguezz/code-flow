@@ -62,9 +62,14 @@ function WindowsControls() {
   }, []);
 
   return (
+    // `data-window-control` on each button: these three belong to the window rather than to the
+    // app, and a modal backdrop or the tour's veil laid over them hands their presses back instead
+    // of swallowing them. See `overlayDragRegion` — on macOS the traffic lights are AppKit's and
+    // need none of this.
     <div className="flex items-center">
       <button
         aria-label="Minimize"
+        data-window-control="minimize"
         onClick={() => win.minimize()}
         className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-black/10"
       >
@@ -72,6 +77,7 @@ function WindowsControls() {
       </button>
       <button
         aria-label={maximized ? "Restore" : "Maximize"}
+        data-window-control="maximize"
         // Rejections are logged rather than dropped: every window command here is gated by the
         // capability file, and a missing one fails as a rejected promise with nothing on screen
         // to show for it — which is exactly how this button shipped doing nothing at all.
@@ -82,6 +88,7 @@ function WindowsControls() {
       </button>
       <button
         aria-label="Close"
+        data-window-control="close"
         onClick={() => win.close()}
         className="flex h-9 w-11 items-center justify-center text-[var(--cf-text)]/70 hover:bg-red-500 hover:text-white"
       >

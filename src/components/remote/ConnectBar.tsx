@@ -80,7 +80,7 @@ export function ConnectBar() {
   };
 
   return (
-    <div className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
+    <div data-tour="remote-connect" className="shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
       <div className="flex items-center gap-2">
         <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 focus-within:border-[var(--cf-accent)]">
           <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />

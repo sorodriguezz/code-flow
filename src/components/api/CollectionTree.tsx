@@ -17,6 +17,7 @@ import {
   Link2,
   PauseCircle,
   RefreshCw,
+  Settings2,
   Share2,
   ShieldAlert,
   Star,
@@ -825,6 +826,19 @@ export function CollectionTree() {
   const expand = (id: string) =>
     setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
 
+  /**
+   * What clicking a container does: unfold it *and* put its settings on screen.
+   *
+   * Both, not one or the other. Unfolding alone is what the tree did before, and it left the
+   * auth, variables and scripts of every collection unreachable; opening the tab alone would cost
+   * the single most common gesture in the sidebar. The tab is reused, so a second click on the
+   * same row folds it back without piling up tabs.
+   */
+  const activateContainer = (kind: "collection" | "folder", id: string) => {
+    toggle(id);
+    useApiStore.getState().openEntityTab(kind, id);
+  };
+
   // ---------- mutations ----------
 
   const startDraft = (kind: "folder" | "request", collectionId: string, parentId: string | null) => {
@@ -977,9 +991,16 @@ export function CollectionTree() {
         onClick: () => startDraft("folder", node.collectionId, parentId),
       });
       items.push({
+        label: t("api.entity.settings"),
+        icon: Settings2,
+        separated: true,
+        // Reachable by clicking the row too. It is here because that click also folds the row,
+        // so "open the settings without touching what is expanded" needs its own way in.
+        onClick: () => useApiStore.getState().openEntityTab(node.kind === "collection" ? "collection" : "folder", node.id),
+      });
+      items.push({
         label: t("api.runner.run"),
         icon: Play,
-        separated: true,
         onClick: () => openModal({ kind: "runner", collectionId: node.collectionId, folderId: parentId }),
       });
     }
@@ -1339,7 +1360,7 @@ export function CollectionTree() {
           renaming={renaming?.id === folder.id}
           dragging={drag?.id === folder.id}
           dropInto={over?.mode === "into" && over.parentId === folder.id}
-          onActivate={() => toggle(folder.id)}
+          onActivate={() => activateContainer("folder", folder.id)}
           onMenu={(x, y) => setMenu({ x, y, node })}
           onQuickAdd={() => startDraft("request", folder.collection_id, folder.id)}
           onBeginDrag={(e) => beginDrag(e, node)}
@@ -1380,7 +1401,7 @@ export function CollectionTree() {
                   renaming={renaming?.id === collection.id}
                   dragging={false}
                   dropInto={over?.mode === "into" && over.parentId === null && over.collectionId === collection.id}
-                  onActivate={() => toggle(collection.id)}
+                  onActivate={() => activateContainer("collection", collection.id)}
                   onMenu={(x, y) => setMenu({ x, y, node })}
                   onQuickAdd={() => startDraft("request", collection.id, null)}
                   onRename={(name) => void commitRename(node, name)}

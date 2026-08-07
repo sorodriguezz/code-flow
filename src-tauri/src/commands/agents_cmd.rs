@@ -302,6 +302,12 @@ pub fn claim_next_chain_step(db: State<Db>, chain_id: String, run_id: String) ->
     queries::claim_next_chain_step(&conn, &chain_id, &run_id).map_err(|e| e.to_string())
 }
 
+/// Records how a step ended, and — when it answered — files that answer into the chain's memory.
+///
+/// The note is written **after** the database has taken the outcome, and its failure is nobody's
+/// problem: `agent_chain_steps.output_text` is the system of record, and the folder is a copy that
+/// exists so the *next* agent can read it with its own tools. A repository that has gone read-only
+/// must not turn a completed engine run into a failed one.
 #[tauri::command]
 pub fn complete_chain_step(
     db: State<Db>,
@@ -311,7 +317,26 @@ pub fn complete_chain_step(
     reason: String,
 ) -> Result<Option<AgentChain>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::complete_chain_step(&conn, &step_id, &outcome, &output_text, &reason).map_err(|e| e.to_string())
+    // Read before the write: `complete_chain_step` can send the plan backwards, and a backward jump
+    // resets this step to `pending`, which would leave nothing to name the note after.
+    let filed = queries::chain_step_note(&conn, &step_id).map_err(|e| e.to_string())?;
+    let chain = queries::complete_chain_step(&conn, &step_id, &outcome, &output_text, &reason)
+        .map_err(|e| e.to_string())?;
+
+    if let (Some((chain_id, step_index, agent_name)), true) = (filed, !output_text.trim().is_empty()) {
+        let repos = queries::chain_repo_paths(&conn, &chain_id).unwrap_or_default();
+        let repo_name = queries::step_repo_name(&conn, &step_id).unwrap_or_default();
+        crate::chain_memory::write_note(&chain_id, step_index, &agent_name, &repo_name, &output_text, &repos);
+        // The plan is over: leave behind the one file that answers "what did all of this do?"
+        // without opening eight of them.
+        if chain.as_ref().is_some_and(|c| c.status == "done" || c.status == "failed") {
+            if let Ok(sections) = queries::chain_summary_sections(&conn, &chain_id) {
+                let title = chain.as_ref().map(|c| c.title.clone()).unwrap_or_default();
+                crate::chain_memory::write_summary(&chain_id, &title, &sections, &repos);
+            }
+        }
+    }
+    Ok(chain)
 }
 
 #[tauri::command]
@@ -332,6 +357,18 @@ pub fn retry_chain_step(db: State<Db>, chain_id: String) -> Result<Option<AgentC
     queries::retry_chain_step(&conn, &chain_id).map_err(|e| e.to_string())
 }
 
+/// "Do that again, but…" — the plan from one step onward, carrying the user's own words into it.
+#[tauri::command]
+pub fn rerun_chain_from(
+    db: State<Db>,
+    chain_id: String,
+    step_index: i64,
+    note: String,
+) -> Result<Option<AgentChain>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::rerun_chain_from(&conn, &chain_id, step_index, &note).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn resume_chain(db: State<Db>, chain_id: String) -> Result<Option<AgentChain>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -344,10 +381,22 @@ pub fn abort_chain(db: State<Db>, chain_id: String) -> Result<Option<AgentChain>
     queries::abort_chain(&conn, &chain_id).map_err(|e| e.to_string())
 }
 
+/// Deletes the plan, the tasks its steps produced, and its memory.
+///
+/// **This is the only thing that erases a chain's notes.** They survive the plan finishing, the app
+/// restarting and every step in between, because the point of them is to still be there when
+/// somebody asks what happened. Deleting the chain is the user saying they are done asking.
 #[tauri::command]
-pub fn delete_chain(db: State<Db>, chain_id: String) -> Result<(), String> {
+pub fn delete_chain(db: State<Db>, chain_id: String) -> Result<Vec<String>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::delete_chain(&conn, &chain_id).map_err(|e| e.to_string())
+    // Both read before the delete, which takes the rows they are read from.
+    let orphans = queries::chain_task_ids(&conn, &chain_id).map_err(|e| e.to_string())?;
+    let repos = queries::chain_repo_paths(&conn, &chain_id).unwrap_or_default();
+    queries::delete_chain(&conn, &chain_id).map_err(|e| e.to_string())?;
+    crate::chain_memory::forget(&chain_id, &repos);
+    // Handed back so the frontend can drop the same tasks out of its own list, rather than
+    // discovering them missing on the next workspace load.
+    Ok(orphans)
 }
 
 /// Polled for a step whose run outlived the webview. `None` means its turn has not landed yet.

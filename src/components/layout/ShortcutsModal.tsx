@@ -3,7 +3,7 @@ import { Keyboard, Settings, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import { useShortcutsStore, bindingFor } from "../../state/shortcutsStore";
-import { SHORTCUT_COMMANDS, SHORTCUT_GROUP_LABELS, EDITOR_RESERVED, type ShortcutGroup } from "../../lib/shortcuts";
+import { SHORTCUT_COMMANDS, SHORTCUT_GROUP_LABELS, type ShortcutGroup } from "../../lib/shortcuts";
 import { chordKeycaps } from "../../lib/keys";
 
 const GROUP_ORDER: ShortcutGroup[] = [
@@ -56,8 +56,6 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
   const openSettings = useUiStore((s) => s.openSettings);
   const scope = useUiStore((s) => s.shortcutsModalGroups);
   const groups = scope ?? GROUP_ORDER;
-  // Monaco's own bindings belong to the editor group, so they follow it in or out of scope.
-  const showBuiltIns = groups.includes("editor");
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -111,19 +109,6 @@ export function ShortcutsModal({ onClose }: { onClose: () => void }) {
             );
           })}
 
-          {showBuiltIns && (
-          <div>
-            <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("shortcuts.groupEditorBuiltIn")}
-            </p>
-            <p className="mb-1.5 text-[11px] text-[var(--cf-text-muted)]">{t("shortcuts.editorFixedHint")}</p>
-            <div className="space-y-1">
-              {EDITOR_RESERVED.map((entry) => (
-                <Row key={entry.chord} label={t(entry.labelKey)} chord={entry.chord} />
-              ))}
-            </div>
-          </div>
-          )}
         </div>
       </div>
     </div>

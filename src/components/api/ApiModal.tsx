@@ -47,6 +47,7 @@ export function ApiModal({
   busy = false,
   dismissOnBackdrop = true,
   raised = false,
+  tourAnchor,
   onClose,
   toolbar,
   footer,
@@ -65,6 +66,9 @@ export function ApiModal({
   /** Set when the dialog is opened from *inside* a root overlay — Settings, chiefly — so it lands
    * above it instead of behind it. See the layer ladder above. */
   raised?: boolean;
+  /** `data-tour` for the panel, for the dialogs a guided tour spotlights. On the panel rather than
+   * the backdrop: the backdrop is the whole window, and a spotlight cut to it is no spotlight. */
+  tourAnchor?: string;
   onClose: () => void;
   /** Rendered at the right of the header, before the close button. */
   toolbar?: ReactNode;
@@ -113,6 +117,7 @@ export function ApiModal({
           cap, and because the backdrop centers it the overflow is split between both edges: the
           left of the panel ends up off-screen instead of merely scrolling. */}
       <div
+        data-tour={tourAnchor}
         className={`flex max-h-[80vh] w-full min-w-0 flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)] ${width} ${height ?? ""}`}
       >
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-4 py-2.5">

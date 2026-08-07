@@ -27,7 +27,14 @@ export type EditorCommand =
   | "newFile"
   | "newFolder"
   | "renamePath"
-  | "deletePath";
+  | "deletePath"
+  // The four the editor chrome owns. They were `keydown` listeners in `EditorView` comparing
+  // `e.key` to literals, which is what made them the only editor keys nobody could rebind; they
+  // come through here now like everything else.
+  | "save"
+  | "closeTab"
+  | "nextTab"
+  | "prevTab";
 
 /**
  * Commands worth switching to the Editor for.

@@ -7,6 +7,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { Project } from "../../types/domain";
+import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 
 function deriveName(url: string): string {
   const trimmed = url.trim().replace(/\/+$/, "");
@@ -92,7 +93,7 @@ export function CloneRepoModal({
         name: effectiveName,
         local_path: dest,
         remote_url: url.trim(),
-        color: "#6366f1",
+        color: DEFAULT_WORKSPACE_COLOR,
         icon: "git-branch",
         ado_org: null,
         ado_project: null,

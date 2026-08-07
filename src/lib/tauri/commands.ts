@@ -544,6 +544,12 @@ export const completeChainStep = (
 export const runChainStepCheck = (stepId: string) =>
   invoke<StepCheck>("run_chain_step_check", { stepId });
 
+/** Runs the plan again from one step, with a note from the user folded into that step's opening
+ * message. Works on a finished chain: its memory folder and every step's answer are still there, so
+ * the second pass starts knowing what the first one learned. */
+export const rerunChainFrom = (chainId: string, stepIndex: number, note: string) =>
+  invoke<AgentChain | null>("rerun_chain_from", { chainId, stepIndex, note });
+
 export const approveChainGate = (chainId: string, input: string) =>
   invoke<AgentChain | null>("approve_chain_gate", { chainId, input });
 
@@ -555,7 +561,11 @@ export const resumeChain = (chainId: string) => invoke<AgentChain | null>("resum
 
 export const abortChain = (chainId: string) => invoke<AgentChain | null>("abort_chain", { chainId });
 
-export const deleteChain = (chainId: string) => invoke<void>("delete_chain", { chainId });
+/** Deletes the plan, the tasks its steps produced, and its memory folder. Returns the ids of those
+ * tasks so the caller can drop the same rows out of its own list — they are gone from the database
+ * by the time this resolves, and a list still holding them would be showing work that no longer
+ * exists until the next workspace load. */
+export const deleteChain = (chainId: string) => invoke<string[]>("delete_chain", { chainId });
 
 /** For a step whose run outlived the webview: `null` until its turn lands. */
 export const harvestChainStep = (stepId: string) =>
@@ -1158,6 +1168,20 @@ export const writeFileBytes = (path: string, contents: Uint8Array) =>
  * name. Returns the new repo-relative path. */
 export const movePath = (repoPath: string, fromRel: string, destDir: string) =>
   invoke<string>("move_path", { repoPath, fromRel, destDir });
+
+/** What an external drop landed, and what it deliberately didn't. */
+export interface ImportOutcome {
+  /** Repo-relative paths of everything copied in. */
+  copied: string[];
+  /** Names left alone because the destination already had one — never overwritten. */
+  skipped: string[];
+}
+
+/** Copies files and folders from anywhere on disk into `destDir` (repo-relative; `""` is the repo
+ * root) — what dragging a selection out of Finder/Explorer onto the editor does. `sources` are the
+ * absolute paths the platform handed over with the drag. */
+export const copyIntoRepo = (repoPath: string, destDir: string, sources: string[]) =>
+  invoke<ImportOutcome>("copy_into_repo", { repoPath, destDir, sources });
 
 /** Creates a folder, and any missing parents — so `a/b/c` typed into one box works in one go. */
 export const createDir = (repoPath: string, relPath: string) =>

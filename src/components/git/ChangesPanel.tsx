@@ -28,6 +28,7 @@ import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { generateCommitMessage, scanStagedSecrets } from "../../lib/tauri/commands";
+import { useTaskModelLabel } from "../ai/ModelTag";
 import { diffToText } from "../../lib/diffText";
 import { parseClaudeError, type ClaudeErrorInfo } from "../../lib/claudeError";
 import { confirmAction } from "../../state/confirmStore";
@@ -301,6 +302,10 @@ export function ChangesPanel({
     null,
   );
   const t = useT();
+  /** The engine and model the ✨ button will use, from the routing table — see `useTaskModelLabel`.
+   * `"commit"` is the key Rust's `AiTask::Commit` reports, which is what `generate_commit_message`
+   * loads its config from; naming any other task here would put a confident lie in the tooltip. */
+  const commitModel = useTaskModelLabel("commit");
 
   // Feedback for the row action buttons is otherwise invisible until refreshStatus() comes
   // back (stage/unstage/discard all trigger a full status+diff refresh) — set the pending
@@ -628,7 +633,14 @@ export function ChangesPanel({
             <button
               onClick={generateWithAi}
               disabled={aiBusy || status.staged.length === 0}
-              title={status.staged.length === 0 ? t("changes.stageFirst") : t("changes.generateWithAi")}
+              // Which engine is about to write the message, on the second line. Routing lives in
+              // Settings → AI, three screens from here, so the only place this is answerable is the
+              // button itself — and "why is this message suddenly terrible" is a question about the
+              // model far more often than about the diff.
+              title={[
+                status.staged.length === 0 ? t("changes.stageFirst") : t("changes.generateWithAi"),
+                commitModel,
+              ].join("\n")}
               className="absolute right-1.5 top-1.5 flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)] disabled:opacity-30"
             >
               {aiBusy ? <Loader2 size={13} className="animate-spin" /> : <Sparkles size={13} />}

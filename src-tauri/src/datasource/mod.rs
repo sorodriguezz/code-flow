@@ -134,6 +134,13 @@ impl DbAuthMethod {
 // Connection configuration
 // ---------------------------------------------------------------------------
 
+/// One schema's own object filter. See [`DbConnectionConfig::schema_object_filters`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbSchemaObjectFilter {
+    pub schema: String,
+    pub pattern: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbConnectionConfig {
     pub id: String,
@@ -204,10 +211,24 @@ pub struct DbConnectionConfig {
     /// silently reverting to all 348.
     #[serde(default)]
     pub schemas_filtered: bool,
-    /// A substring every table, view and routine name must contain to be listed. Empty means no
-    /// filter. Matched case-insensitively, since no engine here agrees with another about case.
+    /// Which table, view, routine and sequence names the tree lists. Empty means all of them.
+    ///
+    /// See [`object_filter_matches`] for the grammar. Matched case-insensitively, since no engine
+    /// here agrees with another about case.
     #[serde(default)]
     pub object_filter: String,
+    /// The same thing, for one schema, overriding [`Self::object_filter`] inside it.
+    ///
+    /// A list and not a map because it is written from the tree — right-click a schema, filter what
+    /// is under it — and that gesture is about *that* schema. A connection-wide pattern is the right
+    /// answer when every schema holds the same kind of noise (`tmp_*` everywhere) and the wrong one
+    /// the moment two schemas differ, which in a warehouse they always do.
+    ///
+    /// Overrides rather than intersects: "filter this schema" said while looking at one schema means
+    /// what it says, and two patterns silently ANDed is a tree that empties for reasons no single
+    /// field explains.
+    #[serde(default)]
+    pub schema_object_filters: Vec<DbSchemaObjectFilter>,
 
     // ----------------------------------------------------------------- session
 
@@ -594,11 +615,113 @@ pub fn filter_children(
             | DbNodeKind::RoutineFolder
             | DbNodeKind::SequenceFolder
     );
-    if named && !config.object_filter.is_empty() {
-        let needle = config.object_filter.to_lowercase();
-        nodes.retain(|child| child.name.to_lowercase().contains(&needle));
+    if named {
+        let filter = config.object_filter_for(node.schema());
+        if !filter.trim().is_empty() {
+            nodes.retain(|child| object_filter_matches(filter, &child.name));
+        }
     }
     nodes
+}
+
+impl DbConnectionConfig {
+    /// The object filter in force inside one schema: its own if it has one, the connection's
+    /// otherwise. `None` — a level with no schema, which is only Mongo — takes the connection's.
+    pub fn object_filter_for(&self, schema: Option<&str>) -> &str {
+        schema
+            .and_then(|name| {
+                self.schema_object_filters
+                    .iter()
+                    .find(|entry| entry.schema.eq_ignore_ascii_case(name))
+            })
+            .map(|entry| entry.pattern.as_str())
+            .unwrap_or(&self.object_filter)
+    }
+}
+
+/// Whether one object name survives a filter.
+///
+/// The grammar, which is as small as it can be while still being worth typing:
+///
+/// - **Comma-separated terms**, any of which is enough to keep a name. `app_*, cfg_*` is "either".
+/// - **A term with `*` or `?` is a pattern**, matched against the whole name: `App*` is everything
+///   that starts with App, `*_log` everything that ends with it, `*tmp*` everything containing it.
+///   `?` stands for exactly one character.
+/// - **A term without either is a substring**, which is what this field has always meant and what
+///   every filter saved before patterns existed still means. That compatibility is the reason for
+///   the rule rather than anchoring everything and asking people to rewrite `invoice` as `*invoice*`.
+/// - **A term starting with `!` excludes**, and exclusion wins: `!tmp_*` on its own is "everything
+///   except the temporary ones", and `app_*, !app_old_*` is the useful combination.
+/// - Blank between commas is ignored, so a trailing comma while typing doesn't hide the world.
+///
+/// Case-insensitive throughout: the five engines disagree about case, and a filter that matched
+/// `Invoice` on Postgres and not on SQL Server would be a filter nobody could trust.
+pub fn object_filter_matches(filter: &str, name: &str) -> bool {
+    let name = name.to_lowercase();
+    let mut any_positive = false;
+    let mut hit_positive = false;
+    for raw in filter.split(',') {
+        let term = raw.trim();
+        if term.is_empty() {
+            continue;
+        }
+        let (negated, body) = match term.strip_prefix('!') {
+            Some(rest) => (true, rest.trim()),
+            None => (false, term),
+        };
+        if body.is_empty() {
+            continue;
+        }
+        let body = body.to_lowercase();
+        let matched = if body.contains('*') || body.contains('?') {
+            glob_matches(&body, &name)
+        } else {
+            name.contains(&body)
+        };
+        if negated {
+            if matched {
+                return false;
+            }
+            continue;
+        }
+        any_positive = true;
+        hit_positive |= matched;
+    }
+    // Only exclusions listed: everything they didn't name stays. That is what makes `!tmp_*`
+    // usable on its own, which is the shape people reach for first.
+    !any_positive || hit_positive
+}
+
+/// `*` (any run, including empty) and `?` (exactly one) against a whole string.
+///
+/// Iterative with a backtrack point rather than recursion: the input is a user-typed pattern and a
+/// catalog name, and `*a*a*a*…` against a long name is a stack the recursive version would climb
+/// for no reason. Both sides are already lower-cased by the caller.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let name: Vec<char> = name.chars().collect();
+    let (mut p, mut n) = (0usize, 0usize);
+    // Where to resume from if the current `*` turns out to have swallowed too little.
+    let mut star: Option<usize> = None;
+    let mut resume = 0usize;
+    while n < name.len() {
+        if p < pattern.len() && (pattern[p] == '?' || pattern[p] == name[n]) {
+            p += 1;
+            n += 1;
+        } else if p < pattern.len() && pattern[p] == '*' {
+            star = Some(p);
+            resume = n;
+            p += 1;
+        } else if let Some(at) = star {
+            // Give the last `*` one more character and try the rest of the pattern again.
+            p = at + 1;
+            resume += 1;
+            n = resume;
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|c| *c == '*')
 }
 
 // ---------------------------------------------------------------------------
@@ -1945,6 +2068,7 @@ mod tests {
             visible_schemas: Vec::new(),
             schemas_filtered: false,
             object_filter: String::new(),
+            schema_object_filters: Vec::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,
             startup_script: String::new(),
@@ -2035,6 +2159,80 @@ mod tests {
         assert_eq!(filter_children(&config, &db, schemas).len(), 2);
     }
 
+    /// The grammar of the name filter, term by term. A plain word still means "contains", which is
+    /// what every filter saved before patterns existed means — breaking that would silently empty
+    /// the tree of everyone who had one.
+    #[test]
+    fn the_name_filter_understands_patterns() {
+        let keep = |filter: &str, name: &str| object_filter_matches(filter, name);
+
+        // Bare text: unchanged, a substring anywhere in the name.
+        assert!(keep("invoice", "invoice_line"));
+        assert!(keep("invoice", "old_invoices"));
+        assert!(!keep("invoice", "orders"));
+
+        // A star anchors what is around it.
+        assert!(keep("app*", "app_users"));
+        assert!(keep("app*", "AppUsers"), "case must not decide this");
+        assert!(!keep("app*", "my_app_users"));
+        assert!(keep("*_log", "audit_log"));
+        assert!(!keep("*_log", "log_audit"));
+        assert!(keep("*tmp*", "a_tmp_b"));
+
+        // `?` is exactly one character, and a pattern with no star is still anchored.
+        assert!(keep("t?ble", "table"));
+        assert!(!keep("t?ble", "the_table"));
+
+        // Several terms are alternatives.
+        assert!(keep("app_*, cfg_*", "cfg_values"));
+        assert!(!keep("app_*, cfg_*", "sys_values"));
+        // A term left blank by a trailing comma is ignored rather than matching nothing.
+        assert!(keep("app_*,", "app_users"));
+
+        // Exclusions win, and on their own mean "everything but".
+        assert!(!keep("!tmp_*", "tmp_import"));
+        assert!(keep("!tmp_*", "invoice"));
+        assert!(keep("app_*, !app_old_*", "app_users"));
+        assert!(!keep("app_*, !app_old_*", "app_old_users"));
+
+        // A star that has to give ground: the backtrack the two-pointer walk exists for.
+        assert!(keep("*a*b", "aaab"));
+        assert!(!keep("*a*b", "aaa"));
+    }
+
+    /// A filter written on one schema stops at that schema, and replaces the connection-wide one
+    /// inside it rather than being ANDed with it.
+    #[test]
+    fn a_schema_can_override_the_connection_filter() {
+        let folder = |schema: &str| DbNodeRef {
+            kind: DbNodeKind::TableFolder,
+            database: Some("app".into()),
+            schema: Some(schema.into()),
+            name: None,
+        };
+        let mut config = config_for_tests();
+        config.object_filter = "invoice".into();
+        config.schema_object_filters = vec![DbSchemaObjectFilter {
+            schema: "Audit".into(),
+            pattern: "app_*".into(),
+        }];
+
+        let tables = || vec![table_node("invoice_line"), table_node("app_users"), table_node("orders")];
+        // The schema with its own pattern takes it — including a schema name that differs in case.
+        let kept = filter_children(&config, &folder("audit"), tables());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].name, "app_users");
+        // Every other schema keeps the connection's.
+        let kept = filter_children(&config, &folder("public"), tables());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].name, "invoice_line");
+
+        // An override cleared to empty is an override that no longer exists: the schema falls back
+        // to the connection's filter instead of showing everything.
+        config.schema_object_filters = Vec::new();
+        assert_eq!(filter_children(&config, &folder("audit"), tables()).len(), 1);
+    }
+
     /// Two databases differing only in case are two databases — the exact one wins rather than both
     /// surviving on the loose comparison.
     #[test]
@@ -2067,6 +2265,7 @@ mod tests {
             visible_schemas: Vec::new(),
             schemas_filtered: false,
             object_filter: String::new(),
+            schema_object_filters: Vec::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,
             startup_script: String::new(),

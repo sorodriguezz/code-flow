@@ -1,10 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ACCENT_OPTIONS } from "../../state/accentStore";
+import { WORKSPACE_COLORS } from "../../lib/workspaceColors";
 
-// Reuses the same curated, contrast-checked palette as the accent color setting —
-// one set of "safe" colors for the whole app instead of a freeform picker.
-const ICON_COLORS = ACCENT_OPTIONS.map((opt) => opt.light);
+// A curated palette rather than a freeform picker, for the reason `workspaceColors` documents at
+// length: one hex has to hold up on both themes, and most of the colour space doesn't.
 
 const GAP = 4;
 const EDGE = 8;
@@ -83,9 +82,12 @@ export function ColorSwatchPicker({ value, onChange }: { value: string; onChange
               left: pos?.left ?? 0,
               visibility: pos ? "visible" : "hidden",
             }}
-            className="fixed z-[9999] flex w-[92px] flex-wrap gap-1.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 shadow-[var(--cf-shadow)]"
+            // A grid rather than a wrapping row: the palette is ordered by hue, and six to a line
+            // is what turns that order into rows you can scan — a wrap would re-flow the bands
+            // every time the list grew or the swatch size changed.
+            className="fixed z-[9999] grid w-[130px] grid-cols-6 gap-1.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 shadow-[var(--cf-shadow)]"
           >
-            {ICON_COLORS.map((color) => (
+            {WORKSPACE_COLORS.map((color) => (
               <button
                 key={color}
                 title={color}

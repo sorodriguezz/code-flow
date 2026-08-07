@@ -73,6 +73,28 @@ Un paso que aprueba también puede saltar hacia adelante, y lo que se salta qued
 
 Lo que evita que esto se vaya de las manos son dos números, no la forma del plan: **128 ejecuciones por cadena** y **3 ejecuciones por paso**. Un bucle da tres vueltas y se detiene solo.
 
+### La memoria de la cadena
+
+Cada cadena tiene una carpeta de notas en **\`~/CodeFlow/chain-memory/<id>/\`** (\`C:\\CodeFlow\\…\` en Windows), espejada dentro de **cada** repositorio que la cadena toca en \`.codeflow/memory/<id>/\`. **La escribe la app, no el modelo**: cuando un paso responde, su respuesta queda ahí como \`01-analista.md\`, \`02-implementador.md\`, etc.
+
+Las dos mitades hacen falta. La de \`~/CodeFlow\` es la que dura: puedes borrar, mover o volver a clonar un repositorio y el registro de lo que hizo la cadena no se va con él. Los espejos son los que leen los agentes, porque salir del directorio de trabajo no es portable entre motores y una carpeta dentro de él no necesita permiso de nadie.
+
+Eso resuelve lo que antes se perdía: el paso 4 solo veía la respuesta del 3. Ahora el mensaje de cada paso trae el índice de todas las notas anteriores, y el agente abre las que necesite con sus propias herramientas — sin flags ni permisos, porque la carpeta está dentro del directorio de trabajo en el que ya corre. Funciona igual con Claude, Codex, agy u opencode.
+
+La app también le pide, en el mensaje base y no en tu rol, que escriba para quien viene después: rutas de fichero, símbolos, qué queda pendiente, y dónde encontró lo que faltaba.
+
+Al terminar el plan queda un \`SUMMARY.md\` con lo que hizo cada agente, armado por la app y no por otro turno.
+
+La carpeta **vive mientras viva la cadena** — sobrevive a que termine y a reiniciar la app. Solo se borra al eliminar la cadena, y entonces se va entera. Está registrada en \`.git/info/exclude\`, así que no aparece en tus cambios ni acaba en un commit.
+
+> Con varios repositorios cada uno recibe el **juego completo**, así que un paso que corre en el tercero lee lo que escribió el del primero.
+
+### Volver a ejecutar
+
+Cualquier paso tiene un **↻** cuando la cadena está parada, incluso si terminó bien. Escribes qué debería ser distinto y la cadena vuelve ahí con tu instrucción dentro, con la memoria intacta y los intentos a cero. Es el mismo mecanismo que el bucle, apuntado por ti en vez de por una verificación fallida.
+
+Y **eliminar una cadena elimina sus tareas** y su memoria. Antes las tareas quedaban sueltas en el árbol.
+
 Cada paso es su propia conversación, así que **puedes encadenar motores distintos** (Claude → Codex). El precio es que cada paso relee el repositorio desde cero.
 
 ### Varios repositorios
@@ -179,6 +201,28 @@ When it fails, you choose where the plan goes:
 A step that passes can also jump forward, and whatever it steps over is marked *skipped*.
 
 What keeps this from running away is two numbers rather than the shape of the plan: **128 runs per chain** and **3 runs per step**. A loop goes round three times and stops on its own.
+
+### The chain's memory
+
+Every chain has a folder of notes at **\`~/CodeFlow/chain-memory/<id>/\`** (\`C:\\CodeFlow\\…\` on Windows), mirrored into **every** repository the chain touches at \`.codeflow/memory/<id>/\`. **The app writes them, not the model**: when a step answers, its answer is filed as \`01-analyst.md\`, \`02-implementer.md\`, and so on.
+
+Both halves earn their keep. The \`~/CodeFlow\` copy is the one that lasts: you can delete, move or re-clone a repository and the chain's record of what it did does not go with it. The mirrors are what the agents read, because reaching outside the working directory is not portable between engines and a folder inside it needs nobody's permission.
+
+That fixes what used to be lost: step 4 only ever saw step 3's answer. Now every step's message carries an index of all the earlier notes, and the agent opens the ones it needs with its own tools — no flags, no permissions, because the folder is inside the working directory it already runs in. It works the same on Claude, Codex, agy or opencode.
+
+The app also asks it, in the base message rather than in your role, to write for whoever comes next: file paths, symbols, what is left, and where it found anything that was missing.
+
+When the plan ends, a \`SUMMARY.md\` is left behind with what each agent did — assembled by the app, not by another turn.
+
+The folder **lives as long as the chain does**: it survives the plan finishing and the app restarting. Deleting the chain is the only thing that erases it, and then it goes entirely. It is registered in \`.git/info/exclude\`, so it never shows in your changes and never lands in a commit.
+
+> Across several repositories each one gets the **whole set**, so a step running in the third reads what the step in the first wrote.
+
+### Running it again
+
+Every step has a **↻** while the chain is standing still, including one that finished cleanly. Write what should be different and the plan goes back there with your instruction folded in, memory intact and attempts reset. It is the same mechanism as the loop, pointed by you instead of by a failed check.
+
+And **deleting a chain deletes its tasks** and its memory. They used to be left behind in the tree.
 
 Every step is its own conversation, so **you can chain different engines** (Claude → Codex). The price is that each step re-reads the repository from scratch.
 

@@ -455,6 +455,48 @@ pub struct AiInvocation<'a> {
     /// [`json_answer`]; everywhere else it stays off, because a free-text stage forced into JSON
     /// would come back as an object nobody reads.
     pub expects_json: bool,
+    /// Which feature is spending the tokens — one of [`task`]'s constants.
+    ///
+    /// Recorded alongside the usage, and *only* used for that. Every operation in this file sets
+    /// it, which is why it is a field on the invocation rather than an argument threaded through
+    /// [`run`]: a new flow that forgets shows up as [`task::OTHER`] in the meter instead of
+    /// silently joining whatever the last caller happened to be doing.
+    pub task: &'static str,
+}
+
+/// The feature labels recorded against a run's usage.
+///
+/// Deliberately their own vocabulary rather than [`crate::commands::claude_cmd::AiTask`]'s keys:
+/// that enum is about *routing* (which provider answers), and several distinct features share one
+/// routing bucket — a PR review, a pre-commit review and a story review all route as `review` but
+/// are three different questions when you are asking where your tokens went.
+pub mod task {
+    /// A run that predates this labelling, or a caller that has not been given one yet.
+    pub const OTHER: &str = "other";
+    pub const CHAT: &str = "chat";
+    /// The editor's inline edit — ⌘I / Ctrl+I.
+    pub const INLINE: &str = "inline";
+    pub const COMMIT: &str = "commit";
+    /// Working-copy analysis: the pre-commit review.
+    pub const ANALYZE: &str = "analyze";
+    /// A pull-request review — one chunk of a chunked one, or a whole small PR in a single pass;
+    /// both go through `review_chunk`, so both count here.
+    pub const REVIEW_PR: &str = "review-pr";
+    /// Applying a proposed fix to one finding.
+    pub const FIX_FINDING: &str = "fix-finding";
+    pub const PR_DESCRIPTION: &str = "pr-description";
+    pub const COMMENT_REPLY: &str = "comment-reply";
+    pub const CONFLICT: &str = "conflict";
+    /// Generating user stories / work items.
+    pub const STORIES: &str = "stories";
+    /// Checking generated stories against the code.
+    pub const STORIES_VERIFY: &str = "stories-verify";
+    /// Reviewing one work item (analyze / description / criteria / tasks).
+    pub const WORK_ITEM_REVIEW: &str = "work-item-review";
+    pub const REPO_DOC: &str = "repo-doc";
+    pub const WORKSPACE_DOC: &str = "workspace-doc";
+    /// The retry that asks a model to repair its own malformed JSON.
+    pub const REPAIR_JSON: &str = "repair-json";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -472,6 +514,7 @@ impl<'a> AiInvocation<'a> {
             resume_session_id: None,
             auto_approve_edits: false,
             expects_json: false,
+            task: task::OTHER,
         }
     }
 }
@@ -1053,8 +1096,9 @@ fn record_usage(
 ) {
     let Ok(run) = outcome else { return };
     let model = run.model.clone().unwrap_or_else(|| inv.model.to_string());
+    let task = inv.task;
     if let Some(usage) = &run.usage {
-        crate::ai_usage::record(engine.id(), &model, usage);
+        crate::ai_usage::record(engine.id(), &model, task, usage);
         return;
     }
     // Nothing on the run itself. Some CLIs will say if asked separately — detached, because the
@@ -1070,7 +1114,7 @@ fn record_usage(
         let Ok(output) = capture(&probe_binary, &args).await else { return };
         let stdout = String::from_utf8_lossy(&output.stdout);
         if let Some(usage) = engine_for(engine_id).parse_usage_probe(&stdout) {
-            crate::ai_usage::record(engine_id, &model, &usage);
+            crate::ai_usage::record(engine_id, &model, task, &usage);
         }
     });
 }
@@ -1811,6 +1855,7 @@ pub async fn inline_edit(
     let mut inv = AiInvocation::new("Reescribe el fragmento seleccionado según la instrucción.", &stdin_payload);
     inv.system_prompt = Some(DEFAULT_INLINE_EDIT_PROMPT);
     inv.model = model;
+    inv.task = task::INLINE;
     let run = run(engine, binary, inv).await?;
     Ok(strip_code_fence(&run.text))
 }
@@ -2091,6 +2136,7 @@ pub async fn generate_commit_message(
     // `model` is resolved by the caller: the user's per-task commit override, or the engine's
     // fast model ([`AiEngine::commit_message_model`]) when they haven't set one.
     inv.model = model;
+    inv.task = task::COMMIT;
     let run = run(engine, binary, inv).await?;
     // What lands in the commit box is the message, not the deliberation that produced it — see the
     // "reading a commit message out of a chatty reply" section above for why that has to be read
@@ -2148,6 +2194,7 @@ pub async fn draft_comment_reply(
 
     let mut inv = AiInvocation::new(DRAFT_REPLY_PROMPT, &stdin_payload);
     inv.model = model;
+    inv.task = task::COMMENT_REPLY;
     let run = run(engine, binary, inv).await?;
     // Some engines wrap prose in a fence when asked for "only the text" — the fence is never part
     // of the comment the user meant to leave.
@@ -2182,6 +2229,7 @@ pub async fn generate_pr_description(
 
     let mut inv = AiInvocation::new(prompt, &stdin_payload);
     inv.model = model;
+    inv.task = task::PR_DESCRIPTION;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }
@@ -2276,6 +2324,7 @@ pub async fn generate_user_stories(
     let mut inv = AiInvocation::new(prompt, &stdin_payload);
     inv.model = model;
     inv.expects_json = true;
+    inv.task = task::STORIES;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }
@@ -2328,6 +2377,7 @@ pub async fn verify_stories_against_code(
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
     inv.expects_json = true;
+    inv.task = task::STORIES_VERIFY;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }
@@ -2411,6 +2461,7 @@ pub async fn review_work_item(
     inv.expects_json = true;
     // The whole run, not just its text: the caller stamps the answer with the model that actually
     // produced it, which is the only place the CLI's own choice is reported when none was forced.
+    inv.task = task::WORK_ITEM_REVIEW;
     run(engine, binary, inv).await
 }
 
@@ -2725,6 +2776,7 @@ pub async fn generate_repo_doc(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
+    inv.task = task::REPO_DOC;
     run(engine, binary, inv).await
 }
 
@@ -2787,6 +2839,7 @@ pub async fn synthesize_workspace_doc(
     // only let it wander into whichever repository happened to be the process's cwd.
     let mut inv = AiInvocation::new(prompt, &truncated);
     inv.model = model;
+    inv.task = task::WORKSPACE_DOC;
     run(engine, binary, inv).await
 }
 
@@ -2826,6 +2879,7 @@ pub async fn repair_json(
     let mut inv = AiInvocation::new(&prompt, &stdin_payload);
     inv.model = model;
     inv.expects_json = true;
+    inv.task = task::REPAIR_JSON;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }
@@ -3186,6 +3240,7 @@ pub async fn resolve_conflict(
 
     let mut inv = AiInvocation::new(prompt, &stdin_payload);
     inv.model = model;
+    inv.task = task::CONFLICT;
     let run = run(engine, binary, inv).await?;
     Ok(strip_code_fence(&run.text))
 }
@@ -3213,6 +3268,7 @@ pub async fn review_chunk(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
+    inv.task = task::REVIEW_PR;
     run(engine, binary, inv).await
 }
 
@@ -3314,6 +3370,7 @@ pub async fn analyze_changes(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
+    inv.task = task::ANALYZE;
     let run = run(engine, binary, inv).await?;
     Ok(stamp_footer(&run.text, "análisis pre-commit", engine.label(), run.model.as_deref().unwrap_or(model)))
 }
@@ -3388,6 +3445,7 @@ pub async fn chat_with_repo(
     // (unanswerable, headless) permission prompt. Running commands still needs the shell tool
     // enabled in Settings.
     inv.auto_approve_edits = true;
+    inv.task = task::CHAT;
     run(engine, binary, inv).await
 }
 
@@ -3416,6 +3474,7 @@ pub async fn apply_finding_fix(
     inv.allowed_tools = &tools;
     inv.cwd = Some(cwd);
     inv.auto_approve_edits = true;
+    inv.task = task::FIX_FINDING;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }

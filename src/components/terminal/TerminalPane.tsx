@@ -98,7 +98,6 @@ export function TerminalPane({
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
-    fitAddon.fit();
     termRef.current = term;
     fitRef.current = fitAddon;
     clipboardKeys(term, sessionId);
@@ -120,7 +119,15 @@ export function TerminalPane({
       unlistenExit = await onTerminalExit((e) => {
         if (e.id === sessionId) term.write("\r\n[process exited]\r\n");
       });
-      void resizeTerminal(sessionId, term.cols, term.rows);
+      // Measured here, not captured earlier. This used to send `term.cols/rows` read from the
+      // synchronous `fit()` above — and that fit ran while the dock was still at the `height: 0`
+      // its open animation starts from, so it produced **one row** and told the shell so. The
+      // `ResizeObserver` then corrected xterm as the dock grew, but this call landed *after* those
+      // awaits and re-told the PTY the stale geometry. bash drew its prompt for a terminal one row
+      // shorter than the one on screen, which is why the last line sat half under the status bar
+      // and why making the dock shrinkable did not finish the job: the misalignment was never in
+      // the layout, it was in what the shell had been told about it.
+      fitAndReport(term, fitAddon);
     })();
 
     return () => {
@@ -138,11 +145,27 @@ export function TerminalPane({
     if (termRef.current) termRef.current.options.theme = resolved === "dark" ? DARK_THEME : LIGHT_THEME;
   }, [resolved]);
 
+  /**
+   * Fits xterm to its box and tells the PTY — but only once the box has one.
+   *
+   * The guard is the point. `FitAddon` divides the available height by the cell height and floors
+   * it, so a container measuring zero yields `rows: 1`; a terminal that reports one row to the
+   * shell gets a prompt drawn for one row, and every redraw after that is offset. A dock opening
+   * from `height: 0`, a pane behind a `hidden` class and a window being restored all pass through
+   * exactly that state, and none of them is a moment worth measuring.
+   */
+  const fitAndReport = (term: Terminal, fitAddon: FitAddon) => {
+    const box = containerRef.current;
+    if (!box || box.clientHeight < 1 || box.clientWidth < 1) return;
+    fitAddon.fit();
+    void resizeTerminal(sessionId, term.cols, term.rows);
+  };
+
   const refit = () => {
     if (!visible) return;
-    fitRef.current?.fit();
     const term = termRef.current;
-    if (term) void resizeTerminal(sessionId, term.cols, term.rows);
+    const fitAddon = fitRef.current;
+    if (term && fitAddon) fitAndReport(term, fitAddon);
   };
 
   // Panes hidden via CSS report zero size, so xterm needs an explicit refit right when it

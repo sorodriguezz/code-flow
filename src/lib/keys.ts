@@ -11,8 +11,26 @@ import { isMac } from "./platform";
  */
 export type Chord = string;
 
-/** Base keys are derived from `KeyboardEvent.code` (physical position) rather than `.key`, so a
- * binding recorded on a Spanish layout still fires on a US one — and vice versa. */
+/**
+ * How the base key of a chord is decided, which is two rules and not one.
+ *
+ * **Keys that carry a character — punctuation — are read as the character the user's layout
+ * produces** (`KeyboardEvent.key`), not as the position they occupy (`.code`). That is the whole
+ * point: on a Spanish keyboard the key beside Enter types `ç`, and the key that types `\` is
+ * somewhere else entirely, so "the key at the backslash position" and "the backslash key" are two
+ * different keys. Monaco resolves its own keybindings by character, so reading position here meant
+ * the app and the editor bound different keys on every non-US layout and the shortcut silently did
+ * nothing — see `chordToMonaco`.
+ *
+ * **Keys that carry no character — letters, digits, arrows, F-keys, the numpad — are read by
+ * position** (`.code`). Two reasons. Every layout that reshuffles punctuation (Spanish, Latin
+ * American, Portuguese, Italian, UK, German) is still QWERTY, so for letters position and character
+ * are the same key and there is nothing to gain; and on macOS `.key` under Option is the *alternate*
+ * glyph — `⌥N` reports `˜` — which would record a chord nobody can read back.
+ *
+ * `CODE_SYMBOLS` survives as the fallback for the layouts and input methods that report no usable
+ * character at all.
+ */
 const CODE_SYMBOLS: Record<string, string> = {
   Minus: "-",
   Equal: "=",
@@ -63,21 +81,46 @@ const MODIFIER_CODES = new Set([
 function baseKey(e: KeyboardEvent): string | null {
   const code = e.code;
   if (code && MODIFIER_CODES.has(code)) return null;
+
+  const key = e.key;
+  const printable = !!key && key.length === 1;
+
+  // **By character, first**, for anything that types a symbol. This has to come before the position
+  // rules below and not after: on a Spanish layout `/` is ⇧7 and on Latin American `\` is ⌥7, so a
+  // `Digit7` test would claim the key before the character it produced was ever looked at — which
+  // is how `⌘⇧7` on those keyboards and `⌘/` on a US one ended up as two chords for one keystroke.
+  //
+  // Option is *not* special-cased here, though macOS does rewrite ⌥+letter into an alternate glyph.
+  // Two things already cover it and a guard did more harm than good: on the Latin layouts those
+  // glyphs are dead keys (`⌥N` → `˜`, `⌥E` → `´`), which report `key === "Dead"` and are refused
+  // below; and the printable ones (`⌥A` → `å`) come out modifier-less once Option is folded into the
+  // character, so `isBindable` turns them down. Guarding on `altKey` instead cost the whole Latin
+  // American punctuation set — `\ | { } [ ] @ #` all live behind Option there — which is exactly
+  // the keys anyone would want to bind.
+  if (printable && !/[a-z0-9]/i.test(key) && key !== " ") return key;
+
+  // **By position**, for letters, digits and the keys that carry no character for a layout to move.
   if (code) {
     if (code.startsWith("Key")) return code.slice(3);
     if (code.startsWith("Digit")) return code.slice(5);
     if (code.startsWith("Numpad")) return `Numpad${code.slice(6)}`;
     if (/^F\d{1,2}$/.test(code)) return code;
-    if (CODE_SYMBOLS[code]) return CODE_SYMBOLS[code];
     if (NAMED_CODES.has(code)) return code;
   }
-  // Layouts and input methods that report no usable `code` (and the odd exotic key) still get a
-  // workable binding from `key`.
-  const key = e.key;
-  if (!key || key.length === 0) return null;
-  if (["Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock", "Dead"].includes(key)) return null;
-  if (key === " ") return "Space";
-  return key.length === 1 ? key.toUpperCase() : key;
+
+  // Nothing above matched — some IMEs, remote sessions and exotic keys report no usable `code`.
+  // A dead key (`´`, `` ` ``, `¨` on the Latin layouts) is half of a character and says only
+  // "Dead", so it is refused rather than guessed at.
+  if (key && !["Shift", "Control", "Alt", "Meta", "AltGraph", "CapsLock", "Dead"].includes(key)) {
+    if (key === " ") return "Space";
+    return key.length === 1 ? key.toUpperCase() : key;
+  }
+  return (code && CODE_SYMBOLS[code]) ?? null;
+}
+
+/** Whether the chord's base is a symbol rather than a letter, a digit or a named key. */
+function isSymbolKey(base: string): boolean {
+  return base.length === 1 && !/[A-Z0-9]/.test(base);
 }
 
 /**
@@ -103,11 +146,25 @@ export function eventToChord(e: KeyboardEvent): Chord | null {
   const key = baseKey(e);
   if (!key) return null;
 
+  /**
+   * On a symbol, the modifiers that *produced* the character are not modifiers at all.
+   *
+   * On a Spanish layout `/` is literally ⇧7 and `}` is ⌥⇧ of another key; on Latin American, half
+   * the punctuation a developer reaches for — `\ | { } [ ] @ #` — is behind Option. Recording those
+   * as `Mod+Shift+/` or `Mod+Alt+}` would describe a keystroke that needs Shift (or Option) twice,
+   * and would never match the `Mod+/` the same intent produces on a US keyboard. Dropping them is
+   * what makes one stored chord mean one keystroke everywhere.
+   *
+   * Only on macOS for Option: on Windows and Linux, Alt does not change the character, so `Alt+/`
+   * there is a real and different chord. (AltGr, which does, is refused outright — see
+   * `isAltGraphText`.)
+   */
+  const symbol = isSymbolKey(key);
   const parts: string[] = [];
   if (mac ? e.metaKey : e.ctrlKey) parts.push("Mod");
   if (mac && e.ctrlKey) parts.push("Ctrl");
-  if (e.altKey) parts.push("Alt");
-  if (e.shiftKey) parts.push("Shift");
+  if (e.altKey && !(symbol && mac)) parts.push("Alt");
+  if (e.shiftKey && !symbol) parts.push("Shift");
   parts.push(key);
   return parts.join("+");
 }

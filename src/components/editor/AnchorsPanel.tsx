@@ -9,7 +9,7 @@ import {
   type Anchor,
 } from "../../lib/anchors";
 import { searchRepo } from "../../lib/tauri/commands";
-import { fileIconFor } from "../../lib/fileIcon";
+import { FileGlyph } from "../common/FileGlyph";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
 
@@ -250,14 +250,13 @@ export function AnchorsPanel({
         )}
 
         {grouped.map(([path, items]) => {
-          const { Icon, color } = fileIconFor(path);
           return (
             <div key={path} className="pb-1">
               {/* The current-file scope has exactly one group, and repeating the name of the file
                   already named in the breadcrumb above would be noise. */}
               {scope === "project" && (
                 <div className="flex items-center gap-1.5 px-2 py-0.5">
-                  <Icon size={12} className="shrink-0" style={{ color }} />
+                  <FileGlyph path={path} size={12} />
                   <span className="truncate text-[11px] text-[var(--cf-text)]">{path}</span>
                   <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)]">{items.length}</span>
                 </div>

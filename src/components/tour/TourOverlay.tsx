@@ -2,8 +2,9 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import { ArrowLeft, ArrowRight, PartyPopper, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
-import { TOUR_LENGTH, tourStep, useTourStore } from "../../state/tourStore";
+import { tourLength, tourStep, useTourStore } from "../../state/tourStore";
 import { chordLabel } from "../../lib/keys";
+import { pressBelongsToWindow } from "../../lib/overlayDragRegion";
 import type { TourPlacement } from "../../lib/tour/steps";
 import { Confetti } from "./Confetti";
 
@@ -172,6 +173,7 @@ function Arrow({ side, at }: { side: Exclude<Side, null>; at: number }) {
 export function TourOverlay() {
   const active = useTourStore((s) => s.active);
   const celebrating = useTourStore((s) => s.celebrating);
+  const tourId = useTourStore((s) => s.tourId);
   const index = useTourStore((s) => s.index);
   const next = useTourStore((s) => s.next);
   const back = useTourStore((s) => s.back);
@@ -179,14 +181,15 @@ export function TourOverlay() {
   const endCelebration = useTourStore((s) => s.endCelebration);
   const t = useT();
 
-  const step = tourStep(index);
+  const total = tourLength(tourId);
+  const step = tourStep(tourId, index);
   const cardRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState<Box | null>(null);
   const [card, setCard] = useState<Size>({ w: CARD_WIDTH, h: 220 });
   const [vp, setVp] = useState<Size>(() => ({ w: window.innerWidth, h: window.innerHeight }));
 
   const isFirst = index === 0;
-  const isLast = index === TOUR_LENGTH - 1;
+  const isLast = index === total - 1;
 
   // Re-measure the anchor, and the window, on every frame the tour is up. `staleFrames` is what
   // stops the spotlight blinking out while a panel this step just asked for is still mounting:
@@ -290,7 +293,7 @@ export function TourOverlay() {
 
   const placement = placeCard(box, step.placement ?? "auto", card, vp);
   const radius = step.radius ?? 10;
-  const progress = ((index + 1) / TOUR_LENGTH) * 100;
+  const progress = ((index + 1) / total) * 100;
 
   return createPortal(
     <>
@@ -301,9 +304,19 @@ export function TourOverlay() {
         aria-describedby="cf-tour-body"
         // Above every menu and modal in the app, which top out at `z-[9999]`.
         className="fixed inset-0 z-[100000]"
-        // Swallows clicks meant for the app underneath. Not a skip gesture: at 22 steps a
-        // misplaced click would end the tour with no warning and no way back to where it was.
-        onMouseDown={(e) => e.preventDefault()}
+        // Swallows clicks meant for the app underneath. Not a skip gesture: a misplaced click
+        // would end the tour with no warning and no way back to where it was.
+        //
+        // The window's own chrome is the exception. The tour pauses the *app*; the window it is
+        // drawn in still has to move, zoom, minimize and close, and one that does none of those
+        // for the length of a tour reads as hung rather than as busy. What has to be
+        // skipped is the `preventDefault` itself: `overlayDragRegion` — which resolves the press
+        // against the title bar this veil is covering — treats an already-defaulted press as one
+        // the app declined, and stops.
+        onMouseDown={(e) => {
+          if (pressBelongsToWindow(e.nativeEvent)) return;
+          e.preventDefault();
+        }}
       >
         {box ? (
           <>
@@ -352,7 +365,7 @@ export function TourOverlay() {
               {t(step.chapterKey)}
             </span>
             <span className="ml-auto text-[11px] tabular-nums text-[var(--cf-text-muted)]">
-              {t("tour.stepOf", { n: index + 1, total: TOUR_LENGTH })}
+              {t("tour.stepOf", { n: index + 1, total })}
             </span>
             <button
               onClick={skip}

@@ -204,8 +204,15 @@ export function AgentTaskList({
   const nothingYet = tasks.length === 0 && chains.length === 0;
 
   return (
-    <div style={{ width }} className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}>
-      <div className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1">
+    <div
+      data-tour="agents-tree"
+      style={{ width }}
+      className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
+    >
+      <div
+        data-tour="agents-tree-actions"
+        className="flex shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2 py-1"
+      >
         <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("agents.tasks")}
         </span>

@@ -1,15 +1,18 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
-import { TOUR_STEPS, type TourStep } from "../lib/tour/steps";
+import { TOURS, type TourId, type TourStep } from "../lib/tour/steps";
 import { applyStage, captureAppState, restoreAppState, type AppSnapshot } from "../lib/tour/stage";
 
 /**
  * Where "the user has already been through this" is recorded.
  *
- * **The tour opens by itself exactly once: the first time the app is launched after being
+ * **The main tour opens by itself exactly once: the first time the app is launched after being
  * installed.** After that it is only ever reached on purpose, from the title bar or from
  * Settings → General. There is deliberately no mechanism for showing it again on its own — not on
  * an update, not on a new version, not after any length of time.
+ *
+ * The per-app tours are never opened automatically at all, and never write this flag: they are
+ * offered by a button inside the app they describe, and taken by whoever wants one.
  *
  * That holds because this is a row in `codeflow.db`, which lives in `~/CodeFlow` (or
  * `C:\CodeFlow`) — **beside** the app rather than inside it. An update replaces the application
@@ -27,6 +30,14 @@ const FIRST_RUN_DELAY_MS = 1100;
 interface TourState {
   /** The overlay is up and driving the app. */
   active: boolean;
+  /**
+   * Which of the tours is on screen.
+   *
+   * Only `"main"` is ever opened by the app itself, and only `"main"` writes the flag that retires
+   * that opening: an app tour is something the user went looking for, and finishing one must not be
+   * mistaken for having been shown the app.
+   */
+  tourId: TourId;
   index: number;
   /** Confetti is flying. Outlives `active` — the celebration plays over the restored app, not over
    * the tour, which is the point of finishing it. */
@@ -44,9 +55,10 @@ interface TourState {
   /** Where the app was before the tour started rearranging it. */
   snapshot: AppSnapshot | null;
   init: () => Promise<void>;
-  /** `firstRun` is set only by the post-install opening in `init`; every button that opens the
-   * tour by hand leaves it false, and therefore ends without the confetti. */
-  start: (options?: { firstRun?: boolean }) => void;
+  /** `firstRun` is set only by the post-install opening in `init`; every button that opens a
+   * tour by hand leaves it false, and therefore ends without the confetti. `tour` defaults to the
+   * main one, so the two callers that only ever want that one don't have to name it. */
+  start: (options?: { firstRun?: boolean; tour?: TourId }) => void;
   next: () => void;
   back: () => void;
   goTo: (index: number) => void;
@@ -55,10 +67,13 @@ interface TourState {
   endCelebration: () => void;
 }
 
-export const TOUR_LENGTH = TOUR_STEPS.length;
+export function tourLength(tourId: TourId): number {
+  return TOURS[tourId].length;
+}
 
-export function tourStep(index: number): TourStep {
-  return TOUR_STEPS[Math.min(Math.max(index, 0), TOUR_STEPS.length - 1)];
+export function tourStep(tourId: TourId, index: number): TourStep {
+  const steps = TOURS[tourId];
+  return steps[Math.min(Math.max(index, 0), steps.length - 1)];
 }
 
 /** Retires the automatic opening for good. Fire-and-forget: a failed write means the tour offers
@@ -70,6 +85,7 @@ function rememberSeen(): void {
 
 export const useTourStore = create<TourState>((set, get) => ({
   active: false,
+  tourId: "main",
   index: 0,
   celebrating: false,
   firstRun: false,
@@ -94,10 +110,16 @@ export const useTourStore = create<TourState>((set, get) => ({
   },
 
   start: (options) => {
-    const snapshot = captureAppState();
-    applyStage(TOUR_STEPS[0]?.stage);
+    const tourId = options?.tour ?? "main";
+    // Captured *before* the first stage is applied, and only when a tour isn't already running.
+    // Both launchers are spotlighted by a step near the end of the main tour, so starting a second
+    // tour from inside the first has to keep the *original* snapshot — capturing again here would
+    // record the tour's own arrangement as the thing to put back.
+    const snapshot = get().snapshot ?? captureAppState();
+    applyStage(TOURS[tourId][0]?.stage);
     set({
       active: true,
+      tourId,
       index: 0,
       celebrating: false,
       firstRun: options?.firstRun ?? false,
@@ -106,22 +128,29 @@ export const useTourStore = create<TourState>((set, get) => ({
   },
 
   goTo: (index) => {
-    const clamped = Math.min(Math.max(index, 0), TOUR_STEPS.length - 1);
-    applyStage(TOUR_STEPS[clamped]?.stage);
+    const steps = TOURS[get().tourId];
+    const clamped = Math.min(Math.max(index, 0), steps.length - 1);
+    applyStage(steps[clamped]?.stage);
     set({ index: clamped });
   },
 
   next: () => {
-    const { index, snapshot, firstRun } = get();
-    if (index < TOUR_STEPS.length - 1) {
+    const { index, snapshot, firstRun, tourId } = get();
+    if (index < TOURS[tourId].length - 1) {
       get().goTo(index + 1);
       return;
     }
     // Walked to the end: put the app back the way it was, then — on the post-install run, and only
     // that one — celebrate over it.
     if (snapshot) restoreAppState(snapshot);
-    rememberSeen();
-    set({ active: false, celebrating: firstRun, firstRun: false, seen: true, snapshot: null });
+    if (tourId === "main") rememberSeen();
+    set({
+      active: false,
+      celebrating: firstRun,
+      firstRun: false,
+      snapshot: null,
+      ...(tourId === "main" ? { seen: true } : {}),
+    });
   },
 
   back: () => {
@@ -130,10 +159,18 @@ export const useTourStore = create<TourState>((set, get) => ({
   },
 
   skip: () => {
-    const { snapshot } = get();
+    const { snapshot, tourId } = get();
     if (snapshot) restoreAppState(snapshot);
-    rememberSeen();
-    set({ active: false, celebrating: false, firstRun: false, seen: true, snapshot: null });
+    // Leaving an app tour says nothing about whether the app has been introduced, so it must not
+    // retire the first-run opening of the main one.
+    if (tourId === "main") rememberSeen();
+    set({
+      active: false,
+      celebrating: false,
+      firstRun: false,
+      snapshot: null,
+      ...(tourId === "main" ? { seen: true } : {}),
+    });
   },
 
   endCelebration: () => set({ celebrating: false }),
