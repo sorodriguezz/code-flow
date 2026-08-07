@@ -26,6 +26,16 @@ export function ChainStrip({ taskId }: { taskId: string }) {
     if (!ownerId) return -1;
     return (s.stepsByChain[ownerId] ?? []).find((step) => step.task_id === taskId)?.step_index ?? -1;
   });
+  /**
+   * Every step's state, as one character each — `"ddrpp"`.
+   *
+   * A **string** and not an array, for the reason in the note above: a selector returning a fresh
+   * array is a selector that re-renders forever. Compressing the statuses into a primitive keeps
+   * the comparison by value, and the first letters happen to be distinct across all six.
+   */
+  const marks = useChainStore((s) =>
+    ownerId ? (s.stepsByChain[ownerId] ?? []).map((step) => step.status[0]).join("") : "",
+  );
   const chain = useChainStore((s) => s.chains.find((c) => c.id === ownerId) ?? null);
 
   if (!chain || stepIndex < 0) return null;
@@ -41,13 +51,25 @@ export function ChainStrip({ taskId }: { taskId: string }) {
       <span className="shrink-0 tabular-nums text-[var(--cf-text-muted)]">
         · {t("agents.stepN", { n: owner.index + 1, total: owner.total })}
       </span>
-      {/* Dots for the siblings: cheap, and it turns "step 2 of 3" from a number into a shape. */}
+      {/* Dots for the siblings: cheap, and it turns "step 2 of 3" from a number into a shape — one
+          that fills in as the plan advances, so a task opened mid-chain says how much of the work
+          around it is already behind it without going back to the chain. The dot you are standing
+          on is drawn as the current one whatever its state says, because that is the question this
+          strip answers. */}
       <span className="flex shrink-0 items-center gap-1">
         {Array.from({ length: owner.total }, (_, i) => (
           <span
             key={i}
             className={`h-1.5 w-1.5 rounded-full ${
-              i === owner.index ? "bg-[var(--cf-accent)]" : "bg-[var(--cf-text-muted)]/30"
+              i === owner.index
+                ? "bg-[var(--cf-accent)]"
+                : marks[i] === "d"
+                  ? "bg-[var(--cf-success)]"
+                  : marks[i] === "r"
+                    ? "bg-[var(--cf-accent)]/60"
+                    : marks[i] === "e"
+                      ? "bg-[var(--cf-danger)]"
+                      : "bg-[var(--cf-text-muted)]/30"
             }`}
           />
         ))}

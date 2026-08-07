@@ -196,6 +196,7 @@ export function TerminalDock() {
       // Off while dragging, for the reason spelled out in `AiPanel`: `animate` eases toward every
       // height the drag hands it, so the dock trailed the pointer by the whole duration.
       transition={resizing ? { duration: 0 } : { duration: 0.18, ease: "easeOut" }}
+      data-tour="terminal-dock"
       // No `border-t`. The handle below draws the seam already, and a border here put a second line
       // 3.5px above it — a doubled divider whose top half was the static one and whose bottom half
       // was the one that lights up. One line, and it is the one you can grab.

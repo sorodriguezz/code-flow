@@ -70,6 +70,7 @@ function TabButton({ tab, active, badge }: { tab: Tab; active: boolean; badge?: 
   return (
     <button
       onClick={() => setActiveView(tab.id)}
+      data-tour={`tab-${tab.id}`}
       aria-current={active ? "page" : undefined}
       className={`relative flex h-8 items-center gap-1.5 rounded-md px-3 text-[13px] font-medium transition-colors ${
         active
@@ -114,7 +115,7 @@ export function TabBar() {
             : t("tabbar.scopeRepositoryNone")
         }
       />
-      <div className="flex min-w-0 items-center gap-1">
+      <div data-tour="repo-tabs" className="flex min-w-0 items-center gap-1">
         {TABS.map((tab) => (
           <TabButton
             key={tab.id}

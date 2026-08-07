@@ -696,9 +696,8 @@ function ConnectionBranch({
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          // Right-clicking points the toolbar's arrows at the row too: a menu about this connection
-          // that left the selection on another one would put two rows on screen claiming to be the
-          // one being acted on.
+          // Right-clicking selects too: a menu about this connection that left the selection on
+          // another one would put two rows on screen claiming to be the one being acted on.
           store.selectConnection(row.id);
           setMenu({ x: e.clientX, y: e.clientY });
         }}
@@ -1196,12 +1195,6 @@ export function DbExplorer() {
   const createGroup = useDbStore((s) => s.createGroup);
   const section = useDbStore((s) => s.section);
   const setSection = useDbStore((s) => s.setSection);
-  const selectedId = useDbStore((s) => s.selectedConnectionId);
-  const moveConnection = useDbStore((s) => s.moveConnection);
-  // Read as an action rather than as derived state on purpose: it answers from `connections`, which
-  // this component already subscribes to, so the buttons re-evaluate on every reorder without a
-  // second selector that would have to build an array to do it.
-  const canMoveConnection = useDbStore((s) => s.canMoveConnection);
   const openModal = useDbModalStore((s) => s.openDbModal);
   const [query, setQuery] = useState("");
   /** Where the "which engine?" menu is anchored, when the `+` has expanded it. */
@@ -1250,29 +1243,9 @@ export function DbExplorer() {
           <span className="mr-auto min-w-0 truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("db.title")}
           </span>
-          {/* Ordering, on the selected connection. It was already in the row's own menu, which is
-              two clicks and a read per step — no way to nudge a connection up three places without
-              reopening the menu three times. Here it is the same move under a button that stays
-              where it is, so the list can be arranged by pressing one thing repeatedly.
-
-              Disabled rather than hidden when nothing is selected: a pair of arrows that appears
-              and disappears as you click around the tree is a pair of arrows nobody finds. */}
-          <ToolbarButton
-            onClick={() => selectedId && void moveConnection(selectedId, -1)}
-            disabled={!canMoveConnection(selectedId, -1)}
-            title={t("db.moveUp")}
-          >
-            <ArrowUp size={13} />
-          </ToolbarButton>
-          <ToolbarButton
-            onClick={() => selectedId && void moveConnection(selectedId, 1)}
-            disabled={!canMoveConnection(selectedId, 1)}
-            title={t("db.moveDown")}
-          >
-            <ArrowDown size={13} />
-          </ToolbarButton>
           {/* The whole set, not one connection: the way into "set my databases up" that doesn't
-              require having a connection to right-click first. */}
+              require having a connection to right-click first — including arranging the order,
+              which is a pair of arrows in there rather than a permanent pair up here. */}
           <ToolbarButton
             onClick={() => openModal({ kind: "connections" })}
             title={t("db.manageConnections")}

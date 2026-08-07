@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::collections::BTreeMap;
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
+use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, AiUsage, QUOTA_MARKER};
 
 /// Commit-message generation always runs on Haiku regardless of the user's configured review
 /// model — it's a small, mechanical task that doesn't need a bigger model.
@@ -21,6 +21,10 @@ impl AiEngine for ClaudeEngine {
     /// payload would be telling it something it already knows.
     fn reads_claude_skills(&self) -> bool {
         true
+    }
+
+    fn id(&self) -> &'static str {
+        "claude"
     }
 
     fn label(&self) -> &'static str {
@@ -85,12 +89,49 @@ struct ClaudeCliResult {
     /// report a concrete version when no `--model` was passed and the CLI picked for itself.
     #[serde(default, rename = "modelUsage")]
     model_usage: BTreeMap<String, serde_json::Value>,
+    /// The turn's own token counts, as the CLI reports them on its result envelope.
+    #[serde(default)]
+    usage: Option<ClaudeUsage>,
+    #[serde(default)]
+    total_cost_usd: Option<f64>,
+}
+
+/// The `usage` object of a `--output-format json` result.
+///
+/// Every field is defaulted: the CLI has added fields to this object across versions and will add
+/// more, and a strict shape here would turn "Claude reported its usage in a slightly newer format"
+/// into "the whole turn failed to parse".
+#[derive(Default, Deserialize)]
+struct ClaudeUsage {
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+    #[serde(default)]
+    cache_read_input_tokens: i64,
+    #[serde(default)]
+    cache_creation_input_tokens: i64,
 }
 
 fn model_used(parsed: &ClaudeCliResult) -> Option<String> {
     match parsed.model_usage.len() {
         1 => parsed.model_usage.keys().next().cloned(),
         _ => None,
+    }
+}
+
+fn usage_of(parsed: &ClaudeCliResult) -> Option<AiUsage> {
+    let usage = parsed.usage.as_ref()?;
+    let reported = AiUsage {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens,
+        cache_read_tokens: usage.cache_read_input_tokens,
+        cache_write_tokens: usage.cache_creation_input_tokens,
+        cost_usd: parsed.total_cost_usd,
+    };
+    match reported.is_empty() {
+        true => None,
+        false => Some(reported),
     }
 }
 
@@ -152,10 +193,12 @@ fn interpret_output(
             return Err(text.to_string());
         }
         let model = parsed.as_ref().and_then(model_used);
+        let usage = parsed.as_ref().and_then(usage_of);
         return Ok(AiRun {
             text: text.to_string(),
             session_id: parsed.and_then(|p| p.session_id),
             model,
+            usage,
         });
     }
 
@@ -182,7 +225,7 @@ fn interpret_output(
     if refusal_reply(fallback) {
         return Err(format!("{QUOTA_MARKER}{fallback}"));
     }
-    Ok(AiRun { text: fallback.to_string(), session_id: None, model: None })
+    Ok(AiRun { text: fallback.to_string(), session_id: None, model: None, usage: None })
 }
 
 #[cfg(test)]

@@ -701,7 +701,10 @@ export function EditorView() {
       <div className="flex min-h-0 flex-1">
         {/* Activity rail: the panel toggles up top, one-shot actions pinned to the bottom the
             way an editor keeps its settings gear there. */}
-        <div className="flex w-9 shrink-0 flex-col items-center gap-1 bg-[var(--cf-surface)] py-1.5">
+        <div
+          data-tour="editor-rail"
+          className="flex w-9 shrink-0 flex-col items-center gap-1 bg-[var(--cf-surface)] py-1.5"
+        >
           {/* The chord in each tooltip comes from the binding registry, not from a string next to
               the label: two of these used to carry a hand-written "(Ctrl+Shift+F)" that said Ctrl
               on a Mac and went stale the moment anyone rebound it, and the other three said
@@ -762,6 +765,7 @@ export function EditorView() {
         </div>
         <div
           style={{ width: treeWidth }}
+          data-tour="editor-tree"
           // The tree owns its own scroll area now (below its toolbar), so this wrapper only
           // clips — scrolling it too would carry the toolbar out of view.
           className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"

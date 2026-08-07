@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
   CheckCircle2,
   Copy,
   Database,
@@ -23,7 +25,7 @@ import { EmptyState } from "../common/EmptyState";
 import { Select, type SelectItems } from "../common/Select";
 import { EngineGlyph } from "./dbChrome";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
-import { parseSpec, redactUrl, useDbStore } from "../../state/dbStore";
+import { UNGROUPED, parseSpec, redactUrl, useDbStore } from "../../state/dbStore";
 import { dbHasPassword, dbSchemaCatalog } from "../../lib/tauri/dbCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -466,6 +468,25 @@ export function ConnectionModal({
             <IconButton onClick={() => void clone()} title={t("db.duplicate")}>
               <Copy size={12} />
             </IconButton>
+            {/* Ordering lives here rather than on the sidebar's own header: the order of the estate
+                is something you set once while arranging it, not something the panel you browse
+                databases from needs a permanent pair of buttons for. Arranging it is what this
+                dialog is. The tree keeps the two ways that are about *one* row — its context menu
+                and `Alt`+arrows — which is where a single nudge belongs. */}
+            <IconButton
+              onClick={() => selected && void store.moveConnection(selected, -1)}
+              disabled={!store.canMoveConnection(selected, -1)}
+              title={t("db.moveUp")}
+            >
+              <ArrowUp size={13} />
+            </IconButton>
+            <IconButton
+              onClick={() => selected && void store.moveConnection(selected, 1)}
+              disabled={!store.canMoveConnection(selected, 1)}
+              title={t("db.moveDown")}
+            >
+              <ArrowDown size={13} />
+            </IconButton>
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto p-1">
@@ -474,7 +495,13 @@ export function ConnectionModal({
                 key={entry.id}
                 glyph={<EngineGlyph kind={entry.kind} />}
                 name={entry.name}
-                detail={parseSpec(entry)?.host ?? ""}
+                // The folder rides the host line, and only when there is one. This list is flat
+                // while the tree is not, and moving is *within a folder* — so without naming it, a
+                // connection stepping over a neighbour that happens to be filed elsewhere reads as
+                // the arrows skipping a row.
+                detail={[parseSpec(entry)?.host ?? "", entry.group_name.trim()]
+                  .filter((part) => part !== UNGROUPED)
+                  .join(" · ")}
                 active={entry.id === selected}
                 onClick={() => void select(entry.id, null)}
               />

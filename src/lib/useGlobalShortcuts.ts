@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useShortcutsStore, activeChords } from "../state/shortcutsStore";
+import { useTourStore } from "../state/tourStore";
 import { SHORTCUT_BY_ID } from "./shortcuts";
 import { eventToChord, isFunctionKey, isTypingTarget, usesMod } from "./keys";
 
@@ -13,11 +14,17 @@ import { eventToChord, isFunctionKey, isTypingTarget, usesMod } from "./keys";
 export function useGlobalShortcuts(): void {
   const overrides = useShortcutsStore((s) => s.overrides);
   const recording = useShortcutsStore((s) => s.recordingId !== null);
+  const tourActive = useTourStore((s) => s.active);
 
   useEffect(() => {
     // While a row in settings is capturing keys, the app must not also *act* on them — otherwise
     // recording ⌘B would toggle the sidebar on the way in.
     if (recording) return;
+    // Same reasoning during the guided tour, which drives these panels from its own steps: ⌘J in
+    // the middle of it would open a terminal dock the current step doesn't mention and the next
+    // step would silently close again. The tour's own keys are bound in the capture phase, ahead
+    // of this handler, so Escape and the arrows keep working.
+    if (tourActive) return;
     const chords = activeChords(overrides);
 
     const handler = (e: KeyboardEvent) => {
@@ -40,5 +47,5 @@ export function useGlobalShortcuts(): void {
 
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [overrides, recording]);
+  }, [overrides, recording, tourActive]);
 }

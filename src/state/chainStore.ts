@@ -5,8 +5,10 @@ import {
   approveChainGate,
   claimNextChainStep,
   completeChainStep,
+  runChainStepCheck,
   createAgentChain,
   createContinuationChain,
+  createStoryChain,
   deleteChain,
   deleteChainTemplate,
   getChainDetail,
@@ -18,6 +20,8 @@ import {
   retryChainStep,
   setChainGroup,
   setChainPinned,
+  setChainStepInput,
+  setChainStepSkipped,
   skipChainStep,
   upsertChainTemplate,
 } from "../lib/tauri/commands";
@@ -30,9 +34,11 @@ import type {
   AgentChain,
   AgentChainStep,
   ChainDetail,
+  ChainRepo,
   ChainStepBrief,
   ChainTemplate,
   NewChainStep,
+  NewStoryWorkItem,
 } from "../types/domain";
 
 /** How often a step whose run outlived the webview is re-checked for its turn landing. */
@@ -65,6 +71,9 @@ interface ChainState {
   /** Every chain's steps, slim — what the task list needs to draw a chain as a group and to give
    * its icon a state. `stepsByChain` stays the full, single-chain load the detail pane reads. */
   briefsByChain: Record<string, ChainStepBrief[]>;
+  /** The repository set of whichever chains have been opened. Loaded with the detail, like the
+   * steps: the list draws a count, which rides on the chain row itself. */
+  reposByChain: Record<string, ChainRepo[]>;
   selectedId: string | null;
   /** The template open in the middle column, if any. Mutually exclusive with a chain and a task. */
   selectedTemplateId: string | null;
@@ -77,13 +86,39 @@ interface ChainState {
   selectTemplate: (templateId: string | null) => void;
   refresh: (chainId: string) => Promise<void>;
   create: (input: {
-    projectId: string;
+    /** The whole repository set, first one first. */
+    projectIds: string[];
     title: string;
     goal: string;
     steps: NewChainStep[];
     agentProjectId: string;
     start: boolean;
   }) => Promise<ChainDetail>;
+  /** A story run: 2N steps built in Rust from the work item, parked before the first one that
+   * writes anything. */
+  createStory: (input: {
+    projectIds: string[];
+    title: string;
+    notes: string;
+    analystAgentId: string;
+    implementerAgentId: string;
+    agentProjectId: string;
+    workItem: NewStoryWorkItem;
+    start: boolean;
+  }) => Promise<ChainDetail>;
+  /**
+   * Approves a story run's plan: which repositories go ahead, and with what written into each.
+   *
+   * The order is the whole of it. Dropping a repository takes its step out of `pending` *before*
+   * the gate is approved, so `approve_chain_gate` — which acts on whatever is pending next — can
+   * never clear a gate onto a step the user just said no to. With every repository dropped there is
+   * nothing pending left and the chain lands on `done`, which is the honest outcome of "none of
+   * these need to change".
+   */
+  approvePlan: (
+    chainId: string,
+    decisions: Array<{ stepId: string; include: boolean; input: string }>,
+  ) => Promise<void>;
   /** Advances a chain by at most one step. Safe to call repeatedly and concurrently. */
   pump: (chainId: string) => Promise<void>;
   approve: (chainId: string, input: string) => Promise<void>;
@@ -135,6 +170,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
   templates: [],
   stepsByChain: {},
   briefsByChain: {},
+  reposByChain: {},
   selectedId: null,
   selectedTemplateId: null,
   background: false,
@@ -147,6 +183,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
       templates: [],
       stepsByChain: {},
       briefsByChain: {},
+      reposByChain: {},
       selectedId: null,
       selectedTemplateId: null,
     });
@@ -188,23 +225,13 @@ export const useChainStore = create<ChainState>((set, get) => ({
       chains: s.chains.map((c) => (c.id === chainId ? detail.chain : c)),
       stepsByChain: { ...s.stepsByChain, [chainId]: detail.steps },
       briefsByChain: { ...s.briefsByChain, [chainId]: detail.steps.map(briefOf) },
+      reposByChain: { ...s.reposByChain, [chainId]: detail.repos },
     }));
   },
 
-  create: async ({ projectId, title, goal, steps, agentProjectId, start }) => {
-    const detail = await createAgentChain(projectId, title, goal, steps, agentProjectId);
-    set((s) => ({
-      // Filtered rather than blindly prepended: the workspace subscription can have reloaded the
-      // list while the create was in flight, and a chain listed twice is a duplicate React key —
-      // which does not fail loudly, it silently drops one of the two.
-      chains: [detail.chain, ...s.chains.filter((c) => c.id !== detail.chain.id)],
-      stepsByChain: { ...s.stepsByChain, [detail.chain.id]: detail.steps },
-      briefsByChain: { ...s.briefsByChain, [detail.chain.id]: detail.steps.map(briefOf) },
-      selectedId: detail.chain.id,
-      // A chain started from a template is authored with that template still open; the new chain
-      // is what the user is now looking at.
-      selectedTemplateId: null,
-    }));
+  create: async ({ projectIds, title, goal, steps, agentProjectId, start }) => {
+    const detail = await createAgentChain(projectIds, title, goal, steps, agentProjectId);
+    adoptDetail(detail, set);
     // Created parked, then queued in a separate call: nothing in this app starts an engine as a
     // side effect of writing a row.
     if (start) {
@@ -212,6 +239,51 @@ export const useChainStore = create<ChainState>((set, get) => ({
       void get().pump(detail.chain.id);
     }
     return detail;
+  },
+
+  createStory: async ({
+    projectIds,
+    title,
+    notes,
+    analystAgentId,
+    implementerAgentId,
+    agentProjectId,
+    workItem,
+    start,
+  }) => {
+    const detail = await createStoryChain({
+      projectIds,
+      title,
+      notes,
+      analystAgentId,
+      implementerAgentId,
+      agentProjectId,
+      workItem,
+    });
+    adoptDetail(detail, set);
+    if (start) {
+      await resumeChain(detail.chain.id).then((chain) => chain && applyChain(chain, set));
+      void get().pump(detail.chain.id);
+    }
+    return detail;
+  },
+
+  approvePlan: async (chainId, decisions) => {
+    // Sequential, and dropped before kept: `approve_chain_gate` reads "the next pending step", so
+    // every no has to be off the board before the yes is recorded.
+    for (const decision of decisions.filter((d) => !d.include)) {
+      await setChainStepSkipped(decision.stepId, true).catch(() => undefined);
+    }
+    const kept = decisions.filter((d) => d.include);
+    for (const decision of kept) {
+      // Re-included: a repository the user had unticked and then thought better of is still
+      // `skipped` on disk, and a step that is not pending is one the input write below ignores.
+      await setChainStepSkipped(decision.stepId, false).catch(() => undefined);
+      await setChainStepInput(decision.stepId, decision.input).catch(() => undefined);
+    }
+    // `""`, deliberately: the message for the gated step was just written by the loop above, and
+    // approving with an empty input is what tells the backend to send exactly that.
+    await get().approve(chainId, "");
   },
 
   pump: async (chainId) => {
@@ -311,17 +383,26 @@ export const useChainStore = create<ChainState>((set, get) => ({
     set((s) => {
       const { [chainId]: _dropped, ...stepsByChain } = s.stepsByChain;
       const { [chainId]: _droppedBriefs, ...briefsByChain } = s.briefsByChain;
+      const { [chainId]: _droppedRepos, ...reposByChain } = s.reposByChain;
       return {
         chains: s.chains.filter((c) => c.id !== chainId),
         stepsByChain,
         briefsByChain,
+        reposByChain,
         selectedId: s.selectedId === chainId ? null : s.selectedId,
       };
     });
   },
 
   abortForProject: async (projectId) => {
-    const doomed = get().chains.filter((c) => c.project_id === projectId && !isTerminal(c.status));
+    // Every chain with a step in that repository, not only the ones whose *primary* it is. The
+    // database cascades the latter away with the project; the former survive it, and one of them
+    // could have a turn running in the working copy that is about to disappear.
+    const touched = (chainId: string) =>
+      (get().briefsByChain[chainId] ?? []).some((brief) => brief.project_id === projectId);
+    const doomed = get().chains.filter(
+      (c) => (c.project_id === projectId || touched(c.id)) && !isTerminal(c.status),
+    );
     for (const chain of doomed) await get().abort(chain.id);
     set((s) => ({ chains: s.chains.filter((c) => c.project_id !== projectId) }));
     // The database cascades these away with the project; the stores would otherwise keep showing
@@ -387,13 +468,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
 
   continueFrom: async ({ sourceTaskId, title, goal, steps, agentProjectId, start }) => {
     const detail = await createContinuationChain(sourceTaskId, title, goal, steps, agentProjectId);
-    set((s) => ({
-      chains: [detail.chain, ...s.chains.filter((c) => c.id !== detail.chain.id)],
-      stepsByChain: { ...s.stepsByChain, [detail.chain.id]: detail.steps },
-      briefsByChain: { ...s.briefsByChain, [detail.chain.id]: detail.steps.map(briefOf) },
-      selectedId: detail.chain.id,
-      selectedTemplateId: null,
-    }));
+    adoptDetail(detail, set);
     // The seeded step is already `done`, so starting goes straight to the agent the user picked —
     // it never re-runs the task it came from.
     if (start) {
@@ -423,7 +498,28 @@ function briefOf(step: AgentChainStep): ChainStepBrief {
     gate: step.gate,
     task_id: step.task_id,
     status: step.status,
+    project_id: step.project_id,
+    project_name: step.project_name,
+    phase: step.phase,
   };
+}
+
+/** Files a freshly created chain into all four maps and opens it.
+ *
+ * Filtered rather than blindly prepended: the workspace subscription can have reloaded the list
+ * while the create was in flight, and a chain listed twice is a duplicate React key — which does
+ * not fail loudly, it silently drops one of the two. */
+function adoptDetail(detail: ChainDetail, set: SetState) {
+  set((s) => ({
+    chains: [detail.chain, ...s.chains.filter((c) => c.id !== detail.chain.id)],
+    stepsByChain: { ...s.stepsByChain, [detail.chain.id]: detail.steps },
+    briefsByChain: { ...s.briefsByChain, [detail.chain.id]: detail.steps.map(briefOf) },
+    reposByChain: { ...s.reposByChain, [detail.chain.id]: detail.repos },
+    selectedId: detail.chain.id,
+    // A chain started from a template is authored with that template still open; the new chain is
+    // what the user is now looking at.
+    selectedTemplateId: null,
+  }));
 }
 
 /** Buckets the workspace-wide load by chain. The backend already ordered it by chain then step
@@ -452,7 +548,18 @@ async function settleStep(
 ) {
   let chain: AgentChain | null = null;
   if (outcome.kind === "ok") {
-    chain = await completeChainStep(stepId, "done", outcome.text, "").catch(() => null);
+    // The turn answered. Whether that counts as having *worked* is the check's to say, and it is
+    // the one fact in a chain no agent authored — so it is asked before the step is recorded, not
+    // after. A step with no check comes back `ran: false` and the line below is what it always was.
+    //
+    // A check that throws is treated as no check at all rather than as a failure: the command
+    // itself already reports a missing binary or an unreadable directory as a failed verdict, so
+    // anything reaching here is the IPC call breaking, and failing the step for that would punish
+    // the agent for the app's problem.
+    const verdict = await runChainStepCheck(stepId).catch(() => null);
+    chain = verdict?.ran && !verdict.passed
+      ? await completeChainStep(stepId, "check_failed", outcome.text, verdict.output).catch(() => null)
+      : await completeChainStep(stepId, "done", outcome.text, "").catch(() => null);
   } else if (outcome.kind === "cancelled") {
     chain = await completeChainStep(stepId, "cancelled", "", "chain.stopped").catch(() => null);
   } else if (outcome.busy) {
@@ -478,8 +585,11 @@ async function settleStep(
       detail: chain.title,
     });
   }
-  // Only `queued` continues. A gate, a failure or a stop all wait for the user — nothing retries
-  // by itself anywhere in this file.
+  // Only `queued` continues, and this line is also the whole of the retry loop: a turn that failed
+  // with attempts left comes back from `complete_chain_step` as `queued` rather than `failed`, so
+  // it is picked up here like any other move. Which attempt it is on is counted in Rust, by the
+  // claim — this side never decides to retry, it only carries out a chain that is ready to move.
+  // A gate, an exhausted step or a stop all still wait for the user.
   if (chain?.status === "queued") void get().pump(chainId);
 }
 
@@ -538,11 +648,23 @@ useWorkspaceStore.subscribe((state, previous) => {
 });
 
 /** The app's first real queue: after *any* agent turn in a repository — chained or hand-typed —
- * every chain waiting on that repository gets another go. */
+ * every chain waiting on that repository gets another go.
+ *
+ * "Waiting on that repository" is a question about the chain's *steps*, not about the chain: on a
+ * multi-repo plan the next step routinely runs somewhere other than the repository the chain is
+ * filed under, and matching on `chain.project_id` alone left those parked until something else
+ * happened to nudge them. A chain whose briefs have not loaded yet is pumped anyway — the claim
+ * refuses whatever is not runnable, so the cost of asking is one round trip. */
 onTurnSettled((projectId) => {
   const store = useChainStore.getState();
   for (const chain of store.chains) {
-    if (chain.project_id === projectId && chain.status === "queued") void store.pump(chain.id);
+    if (chain.status !== "queued") continue;
+    const briefs = store.briefsByChain[chain.id];
+    const waiting =
+      chain.project_id === projectId ||
+      briefs === undefined ||
+      briefs.some((brief) => brief.project_id === projectId && brief.status === "pending");
+    if (waiting) void store.pump(chain.id);
   }
 });
 

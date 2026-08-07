@@ -160,6 +160,7 @@ export function SettingsView() {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20">
       <div
         onClick={(e) => e.stopPropagation()}
+        data-tour="settings-panel"
         // 1040 rather than the 880 it was: the nav takes 208 and the content its own padding, which
         // used to leave the API client's section about 430px once its rail was in — narrow enough
         // that a project URL showed a dozen characters and a truncation, which is the wrong end of

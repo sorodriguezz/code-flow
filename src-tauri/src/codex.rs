@@ -45,6 +45,10 @@ const POINTER: &str =
 pub struct CodexEngine;
 
 impl AiEngine for CodexEngine {
+    fn id(&self) -> &'static str {
+        "codex"
+    }
+
     fn label(&self) -> &'static str {
         "Codex"
     }
@@ -207,7 +211,12 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
     if refusal_reply(text) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
-    Ok(AiRun { text: text.to_string(), session_id: session_id_from_preamble(stderr), model: None })
+    Ok(AiRun {
+        text: text.to_string(),
+        session_id: session_id_from_preamble(stderr),
+        model: None,
+        usage: None,
+    })
 }
 
 #[cfg(test)]

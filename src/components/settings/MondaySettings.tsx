@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { TokenHowTo } from "./TokenHowTo";
 import { deleteMondayToken, mondayWhoami, setMondayToken } from "../../lib/tauri/commands";
 import {
   loadMondayConnections,
@@ -19,6 +20,11 @@ import { useT } from "../../state/languageStore";
  * a verification that the token works at all. A token that can't reach monday is rejected here,
  * where the user is still looking at the field, rather than at the first publish.
  */
+/** The docs rather than the token page, and deliberately: monday files the personal token under
+ * the account's own subdomain, which is exactly the thing this form does not know yet — the whole
+ * reason saving one calls monday to ask who it belongs to. */
+const MONDAY_TOKEN_PAGE = "https://developer.monday.com/api-reference/docs/authentication";
+
 export function MondaySettings() {
   const t = useT();
   const [connections, setConnections] = useState<MondayConnection[]>([]);
@@ -133,6 +139,18 @@ export function MondaySettings() {
           </button>
         </div>
       </div>
+
+      <TokenHowTo
+        title={t("settings.apiTokenHowTo")}
+        steps={[
+          t("settings.mondayTokenStep1"),
+          t("settings.mondayTokenStep2"),
+          t("settings.mondayTokenStep3"),
+          t("settings.mondayTokenStep4"),
+        ]}
+        linkLabel={t("settings.mondayTokenOpenPage")}
+        url={MONDAY_TOKEN_PAGE}
+      />
     </section>
   );
 }

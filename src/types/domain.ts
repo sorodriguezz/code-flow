@@ -342,9 +342,17 @@ export type ChainStatus = "queued" | "running" | "gated" | "paused" | "failed" |
  * its edits and only a human can say what to do. */
 export type ChainStepStatus = "pending" | "running" | "done" | "error" | "interrupted" | "skipped";
 
-/** An ordered plan of agent steps against one repository. */
+/** What a chain was made by. Both run through the same scheduler; only the panes differ. */
+export type ChainKind = "chain" | "story";
+
+/** Which half of a story run a step belongs to. `""` on every step of an ordinary chain. */
+export type ChainStepPhase = "" | "analyze" | "implement";
+
+/** An ordered plan of agent steps across one or more repositories. */
 export interface AgentChain {
   id: string;
+  /** The **first** repository of the set, and the one a step that names none falls back to. Every
+   * workspace-scoped query joins `projects` through this column. */
   project_id: string;
   title: string;
   goal: string;
@@ -357,14 +365,41 @@ export interface AgentChain {
   step_count: number;
   /** A translation key (`chain.interrupted`, `chain.repoBusy`, …) or a raw engine error. */
   last_reason: string;
+  /** Step runs started, ever — the budget a looping plan spends. `step_count` stopped being the
+   * bound once a step could send the plan backwards. */
+  dispatches: number;
   created_at: string;
   updated_at: string;
+  kind: ChainKind;
+  /** The work item a `story` chain was built from. Empty on every ordinary chain. */
+  work_item_provider: string;
+  work_item_org: string;
+  work_item_id: number;
+  work_item_key: string;
+  work_item_url: string;
+  work_item_title: string;
+  /** How many repositories the chain works across. A count, not the list — the tree draws a badge
+   * and the detail pane asks for the names. */
+  repo_count: number;
+}
+
+/** One repository a chain works across. `name` is empty once it has left the workspace. */
+export interface ChainRepo {
+  project_id: string;
+  name: string;
+  position: number;
 }
 
 export interface AgentChainStep {
   id: string;
   chain_id: string;
   step_index: number;
+  /** Which repository *this* step runs in. Always set — a chain across three repositories is three
+   * sets of steps, each naming its own. */
+  project_id: string;
+  /** That repository's name, joined at read time. Empty once it has left the workspace. */
+  project_name: string;
+  phase: ChainStepPhase;
   /** Snapshotted off the roster when the chain was authored — see `AgentTask`. */
   agent_id: string;
   agent_name: string;
@@ -385,6 +420,15 @@ export interface AgentChainStep {
   status: ChainStepStatus;
   attempts: number;
   last_error: string;
+  /** See `NewChainStep.check_command`. */
+  check_command: string;
+  /** See `NewChainStep.on_pass`. Already remapped to real step indices. */
+  on_pass: number;
+  /** See `NewChainStep.on_fail`. Already remapped to real step indices. */
+  on_fail: number;
+  /** Why the plan was sent back here, written by the step that rejected the work. Cleared when this
+   * step passes. */
+  feedback: string;
   created_at: string;
   updated_at: string;
 }
@@ -400,6 +444,37 @@ export interface ChainStepBrief {
   gate: boolean;
   task_id: string;
   status: ChainStepStatus;
+  /** Which repository this step runs in. The id as well as the name, because deleting a repository
+   * has to find every chain with a step in it — including the ones that survive the cascade. */
+  project_id: string;
+  project_name: string;
+  phase: ChainStepPhase;
+}
+
+/** Every repository, for a step that should run in all of them. Expanded into one row per
+ * repository when the chain is created, so the plan on disk stays a flat list. */
+export const ALL_REPOS = "*";
+
+/**
+ * A blank authored step, with whatever the caller wants to differ patched over it.
+ *
+ * A factory rather than an object literal at each site, because of one field: `on_pass`/`on_fail`
+ * default to **-1** — "the following step" and "retry this one" — and `0` does not mean "unset", it
+ * means *jump to the first step*. A site that forgot them and let TypeScript fill in zeroes would
+ * author a plan that loops forever, and would compile.
+ */
+export function blankChainStep(patch: Partial<NewChainStep> = {}): NewChainStep {
+  return {
+    agent_id: "",
+    instruction: "",
+    gate: false,
+    project_id: "",
+    phase: "",
+    check_command: "",
+    on_pass: -1,
+    on_fail: -1,
+    ...patch,
+  };
 }
 
 /** One step as the dialog authors it, before anything is snapshotted. */
@@ -407,6 +482,43 @@ export interface NewChainStep {
   agent_id: string;
   instruction: string;
   gate: boolean;
+  /** A repository id, `""` for the chain's first one, or `ALL_REPOS` for every one it has. */
+  project_id: string;
+  phase: ChainStepPhase;
+  /** A shell command run in this step's repository once the turn lands. Exit code 0 is the whole
+   * verdict. `""` is a step with no check, which advances on having answered. */
+  check_command: string;
+  /** Where to continue when the check passes, as a position in the plan *as authored*. `-1` is the
+   * next step. Expansion of an "every repository" step remaps these, so they always mean the row
+   * the dialog shows. */
+  on_pass: number;
+  /** Where to continue when the check fails. `-1` retries this step. A value below its own position
+   * is the loop — the reviewer sending the implementer back. */
+  on_fail: number;
+}
+
+/** What a step's declared check said when it ran.
+ *
+ * `ran: false` covers both "this step has no check" and "its repository is gone", and is kept
+ * distinct from `passed` on purpose: a chain that reported every unchecked step as verified would
+ * be worse than one with no checks at all. */
+export interface StepCheck {
+  ran: boolean;
+  passed: boolean;
+  /** The process's own stdout and stderr, which is what gets fed back to the agent asked to fix it. */
+  output: string;
+}
+
+/** The work item a story run is built from, as the dialog resolves it. `body` is the story's prose
+ * already flattened to text — the board clients answer in HTML, and the renderer lives here. */
+export interface NewStoryWorkItem {
+  provider: string;
+  org: string;
+  id: number;
+  key: string;
+  url: string;
+  title: string;
+  body: string;
 }
 
 /** What the backend hands back when asked what happens next. `kind: "idle"` still carries a fresh
@@ -422,6 +534,8 @@ export interface ChainClaim {
 export interface ChainDetail {
   chain: AgentChain;
   steps: AgentChainStep[];
+  /** Every repository the chain works across, in the order they were picked. Never empty. */
+  repos: ChainRepo[];
 }
 
 /** A reusable chain plan. Configuration rather than history: it belongs to the workspace, carries
@@ -445,6 +559,11 @@ export interface ChainTemplateStep {
   agent_id: string;
   instruction: string;
   gate: boolean;
+  /** Kept by a template, unlike the repository: a check command and "if this fails go back to step
+   * 2" mean the same thing in any workspace. */
+  check_command: string;
+  on_pass: number;
+  on_fail: number;
 }
 
 export interface WorkspaceSkill {
@@ -1162,4 +1281,74 @@ export interface WorkItemReviewRow {
   version: string;
   created_at: string;
   updated_at: string;
+}
+
+/** One engine's measured consumption over one window. Reported by the CLIs themselves — nothing
+ * here is estimated from a price table, and none of it is a provider *quota*. */
+export interface UsageWindow {
+  provider: string;
+  /** Runs that reported anything. `0` distinguishes "idle" from "reports nothing". */
+  runs: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  /** Summed over the runs that reported a cost only. */
+  cost_usd: number;
+  /** How many those were — `0` with a non-zero `runs` means this engine never prices its turns. */
+  costed_runs: number;
+}
+
+export interface UsageSummary {
+  /** The last five hours. */
+  session: UsageWindow[];
+  /** The last seven days. */
+  week: UsageWindow[];
+  /** RFC 3339 of the oldest row still kept, or `""` when nothing has been recorded. */
+  since: string;
+}
+
+/** One engine's slice of a statistics window. */
+export interface ProviderStat {
+  provider: string;
+  runs: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  costed_runs: number;
+}
+
+/** One model of one engine. `model` is empty when the CLI picked for itself and never said which. */
+export interface ModelStat {
+  provider: string;
+  model: string;
+  runs: number;
+  tokens: number;
+  cost_usd: number;
+  costed_runs: number;
+}
+
+/** One column of the usage chart, closed at `start` and open at the next one. */
+export interface UsageBucket {
+  start: string;
+  runs: number;
+  tokens: number;
+  cost_usd: number;
+}
+
+/** Everything the statistics screen draws, for one window. */
+export interface UsageStats {
+  /** Echoed back so a late answer cannot be drawn under the heading of a window the user has since
+   * moved away from. */
+  window_hours: number;
+  bucket_minutes: number;
+  /** Gap-filled: every bucket of the window is present, including the empty ones. */
+  series: UsageBucket[];
+  providers: ProviderStat[];
+  models: ModelStat[];
+  /** The busiest single bucket, as tokens — the chart's scale. */
+  peak_tokens: number;
+  since: string;
 }

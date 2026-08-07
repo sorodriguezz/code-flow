@@ -539,6 +539,73 @@ body {
   }
 }
 
+/* ==================================================================
+ * A chain, moving (src/components/agents/ChainDetail.tsx)
+ *
+ * The step rows were a stack of separate cards: a list of things that happen to
+ * be numbered, which is not what a chain is. These draw the thing the feature is
+ * named after — the segment between two steps, carrying the answer of one into
+ * the opening message of the next.
+ *
+ * Three states, and the middle one is the whole point: a rail behind a step that
+ * has not run yet is muted, behind one that has is solid, and *while the next
+ * one is running* a light travels down it. That is the only moment in a chain
+ * where something is genuinely in transit, so it is the only one that moves.
+ * Vertical twin of `cf-flow-beam`, and transform-only for the same reason.
+ * ================================================================== */
+@keyframes cf-chain-beam {
+  from {
+    transform: translateY(-100%);
+  }
+  to {
+    transform: translateY(300%);
+  }
+}
+
+.cf-chain-rail {
+  position: relative;
+  width: 2px;
+  overflow: hidden;
+  border-radius: 1px;
+  background: color-mix(in oklab, var(--cf-text-muted) 25%, transparent);
+}
+
+.cf-chain-rail-done {
+  background: color-mix(in oklab, var(--cf-success) 45%, transparent);
+}
+
+.cf-chain-beam {
+  position: absolute;
+  inset-inline: 0;
+  height: 40%;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in oklab, var(--cf-accent) 90%, transparent),
+    transparent
+  );
+  animation: cf-chain-beam 1.5s ease-in-out infinite;
+}
+
+/* The plan's own progress, under the chain header. Determinate — unlike a single run, a chain
+   genuinely knows how many steps it has — so the width is the number and only the sheen moves. */
+.cf-chain-progress {
+  height: 2px;
+  background: color-mix(in oklab, var(--cf-accent) 85%, transparent);
+  transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cf-chain-beam {
+    animation: none;
+    height: 100%;
+    opacity: 0.45;
+  }
+  .cf-chain-progress {
+    transition: none;
+  }
+}
+
 /* Tailwind v4's preflight gives buttons `cursor: default`, which left most of the app's icon
    buttons looking like decoration. In `base` on purpose: any explicit `cursor-*` utility on an
    element still wins, since utilities are a later layer. */
@@ -904,4 +971,91 @@ body.cf-dragging * {
  * `monaco-editor/esm/vs/platform/hover/browser/hoverWidget.js`, where the class is added. */
 .workbench-hover {
   display: none !important;
+}
+
+/* ── Guided tour ────────────────────────────────────────────────────────────────────────────────
+ *
+ * The dim is one element, not four. A hole in a dark screen is normally cut with four rectangles
+ * around the target, which cannot round its corners and drifts apart by a pixel whenever the
+ * target lands on a fractional coordinate. Casting a single enormous `box-shadow` *outward* from
+ * the target's own box does the same job with one element: everything outside is covered, the hole
+ * inherits `border-radius` exactly, and the whole thing moves as one when the step changes.
+ *
+ * `transition` on the geometry is what makes the spotlight glide from one control to the next
+ * rather than teleport — and, since the overlay re-measures every frame, it also smooths the
+ * spotlight over a panel that is still animating open underneath it. */
+.cf-tour-spot {
+  box-shadow: 0 0 0 9999px color-mix(in oklab, #05060f 62%, transparent);
+  transition:
+    top 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    left 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    height 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 0.26s ease-out;
+}
+
+/* The accent outline around the hole, plus a breathing halo. Separate from the mask above because
+ * box-shadows on one element all stack outward from the same box — declared together, the 9999px
+ * dim would paint straight over a 2px ring. */
+.cf-tour-ring {
+  pointer-events: none;
+  border: 2px solid var(--cf-accent);
+  animation: cf-tour-halo 2.4s ease-in-out infinite;
+  transition:
+    top 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    left 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    width 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    height 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    border-radius 0.26s ease-out;
+}
+
+@keyframes cf-tour-halo {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--cf-accent) 42%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 7px color-mix(in oklab, var(--cf-accent) 0%, transparent);
+  }
+}
+
+/* The steps with nothing to point at — the welcome and the finale — dim the whole window instead. */
+.cf-tour-veil {
+  background: color-mix(in oklab, #05060f 62%, transparent);
+  animation: cf-fade-in 0.2s ease-out;
+}
+
+.cf-tour-card {
+  animation: cf-tour-card-in 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  transition:
+    top 0.26s cubic-bezier(0.22, 1, 0.36, 1),
+    left 0.26s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes cf-tour-card-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Everything above is decoration on top of a spotlight that still works without it. The halo is
+ * the one part that repeats forever, so it is the one that has to stop. */
+@media (prefers-reduced-motion: reduce) {
+  .cf-tour-spot,
+  .cf-tour-ring,
+  .cf-tour-card {
+    transition: none;
+  }
+  .cf-tour-ring {
+    animation: none;
+  }
+  .cf-tour-card,
+  .cf-tour-veil {
+    animation: none;
+  }
 }

@@ -327,6 +327,7 @@ export function WorkspaceMenu() {
             : undefined
         }
         aria-label={t("tabbar.workspaceTools")}
+        data-tour="workspace-menu"
         title={scopeHint}
         onClick={() => (open ? setOpen(false) : openMenu())}
         onKeyDown={onKeyDown}

@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown,
   ChevronRight,
   ChevronsDownUp,
   ClipboardCopy,
+  EyeOff,
   FilePlus,
   Folder,
   FolderOpen,
@@ -23,7 +24,9 @@ import {
   revealInFileManager,
 } from "../../lib/tauri/commands";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { HiddenFilesSection } from "./HiddenFilesSection";
 import { confirmAction } from "../../state/confirmStore";
+import { useHiddenFilesStore } from "../../state/hiddenFilesStore";
 import { SkeletonRows } from "../common/Skeleton";
 import type { FileEntry } from "../../types/domain";
 import { fileStatusColor, fileStatusLabelKey } from "../../lib/fileStatus";
@@ -155,6 +158,7 @@ function TreeNode({
   focusedDir,
   expanded,
   childrenByDir,
+  hiddenCountByDir,
   draft,
   renaming,
   onToggleDir,
@@ -179,8 +183,12 @@ function TreeNode({
    * selection, so only ever one row reads as selected. */
   focusedDir: string | null;
   expanded: Set<string>;
-  /** Cached `listDir` results, keyed by directory ("" = repo root). */
+  /** Cached `listDir` results with the hidden rows already removed, keyed by directory
+   *  ("" = repo root). */
   childrenByDir: Map<string, FileEntry[]>;
+  /** How many rows the filter above took out of each directory, so a folder that only *looks*
+   *  empty can say which of the two it is. */
+  hiddenCountByDir: Map<string, number>;
   draft: Draft | null;
   /** The path being renamed in place, if it's this one. */
   renaming: string | null;
@@ -319,6 +327,7 @@ function TreeNode({
               focusedDir={focusedDir}
               expanded={expanded}
               childrenByDir={childrenByDir}
+              hiddenCountByDir={hiddenCountByDir}
               draft={draft}
               renaming={renaming}
               onToggleDir={onToggleDir}
@@ -336,7 +345,11 @@ function TreeNode({
           ))}
           {children && children.length === 0 && !draftHere && (
             <p style={{ paddingLeft: (depth + 1) * 14 + 6 }} className="text-[11px] text-[var(--cf-text-muted)]">
-              {t("editor.empty")}
+              {/* "Empty" would be a lie about a folder whose every entry is hidden — and the kind
+                  of lie that gets reported as a missing file. */}
+              {(hiddenCountByDir.get(entry.path) ?? 0) > 0
+                ? t("editor.allHiddenHere", { n: hiddenCountByDir.get(entry.path) ?? 0 })
+                : t("editor.empty")}
             </p>
           )}
         </div>
@@ -393,10 +406,17 @@ export function FileTree({
   // Listings are async, so a switch to another project can land while one is in flight —
   // every write compares against this before touching state.
   const activeRepoRef = useRef(repoPath);
+  const hiddenEntries = useHiddenFilesStore((s) => s.entries);
+  const loadHidden = useHiddenFilesStore((s) => s.load);
+  const hideEntry = useHiddenFilesStore((s) => s.hide);
 
   useEffect(() => {
     childrenRef.current = childrenByDir;
   }, [childrenByDir]);
+
+  useEffect(() => {
+    void loadHidden(repoPath);
+  }, [repoPath, loadHidden]);
 
   const loadDir = useCallback(
     async (path: string) => {
@@ -630,6 +650,21 @@ export function FileTree({
           },
         );
       }
+      if (entry) {
+        // Its own group, away from Delete: the two are the actions most easily confused here, and
+        // the one that touches the disk must not sit next to the one that only stops drawing a row.
+        items.push({
+          label: t("editor.hide"),
+          icon: EyeOff,
+          separated: true,
+          onClick: () => {
+            hideEntry({ path: entry.path, isDir: entry.is_dir });
+            // The focused row decides where "new file" lands; leaving the focus on something that
+            // is no longer drawn would aim the next creation at an invisible folder.
+            setFocus({ path: "", isDir: true });
+          },
+        });
+      }
       items.push({
         label: t("sidebar.revealInFileManager"),
         icon: FolderOpen,
@@ -648,7 +683,7 @@ export function FileTree({
       }
       return items;
     },
-    [t, revealInOs, copyToClipboard, repoPath],
+    [t, revealInOs, copyToClipboard, repoPath, hideEntry],
   );
 
   const handleSelectFile = useCallback(
@@ -782,7 +817,30 @@ export function FileTree({
     }
   }, [command]);
 
-  const rootEntries = childrenByDir.get("") ?? null;
+  /**
+   * The listings with the hidden rows taken out, plus how many were taken out of each directory.
+   *
+   * Filtered here rather than at `listDir`, deliberately: the cache stays the truth about what is
+   * on disk, so restoring an entry redraws it immediately instead of needing the folder re-listed.
+   * The count is what lets a folder whose every child is hidden say so, rather than claiming to be
+   * empty — which is the one way this feature could read as a bug.
+   */
+  const { visibleByDir, hiddenCountByDir } = useMemo(() => {
+    const hidden = new Set(hiddenEntries.map((entry) => entry.path));
+    if (hidden.size === 0) {
+      return { visibleByDir: childrenByDir, hiddenCountByDir: new Map<string, number>() };
+    }
+    const visible = new Map<string, FileEntry[]>();
+    const counts = new Map<string, number>();
+    for (const [dir, entries] of childrenByDir) {
+      const kept = entries.filter((entry) => !hidden.has(entry.path));
+      visible.set(dir, kept);
+      if (kept.length !== entries.length) counts.set(dir, entries.length - kept.length);
+    }
+    return { visibleByDir: visible, hiddenCountByDir: counts };
+  }, [childrenByDir, hiddenEntries]);
+
+  const rootEntries = visibleByDir.get("") ?? null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -836,7 +894,8 @@ export function FileTree({
                 selectedPath={selectedPath}
                 focusedDir={focus.isDir ? focus.path : null}
                 expanded={expanded}
-                childrenByDir={childrenByDir}
+                childrenByDir={visibleByDir}
+                hiddenCountByDir={hiddenCountByDir}
                 draft={draft}
                 renaming={renaming}
                 onToggleDir={toggleDir}
@@ -855,6 +914,10 @@ export function FileTree({
           </>
         )}
       </div>
+
+      {/* Below the tree and outside its scroller: it is the only place a hidden entry still exists,
+          so it must not be something you have to scroll to the bottom of a repository to find. */}
+      <HiddenFilesSection />
 
       {/* Portalled so no ancestor's `overflow` clips it, and click-through so it never becomes
           the element `elementFromPoint` finds under the cursor. */}

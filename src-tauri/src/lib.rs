@@ -4,6 +4,7 @@ mod api;
 mod appmenu;
 mod ai_locks;
 mod ai_runs;
+mod ai_usage;
 mod backup;
 mod boards;
 mod claude;
@@ -124,6 +125,10 @@ pub fn run() {
         .manage(tray::QuittingFlag::default())
         .setup(|app| {
             tray::setup(&app.handle())?;
+            // The usage meter's way to the database. Set here because `setup` is the only place
+            // with an `AppHandle`, and the recording point is deep inside `ai::run`, where threading
+            // one down would mean an extra argument on every operation in `ai.rs`.
+            ai_usage::attach(app.handle().clone());
             appmenu::setup(&app.handle())?;
             // The IRIS driver reaches its bundled Java runtime through this. Recorded here because
             // `setup` is the only place with an `AppHandle`, and the datasource layer deliberately
@@ -267,6 +272,11 @@ pub fn run() {
             commands::agents_cmd::list_agent_chains,
             commands::agents_cmd::get_chain_detail,
             commands::agents_cmd::create_agent_chain,
+            commands::agents_cmd::create_story_chain,
+            commands::app_cmd::ai_usage_summary,
+            commands::app_cmd::ai_usage_stats,
+            commands::agents_cmd::set_chain_step_input,
+            commands::agents_cmd::set_chain_step_skipped,
             commands::agents_cmd::claim_next_chain_step,
             commands::agents_cmd::complete_chain_step,
             commands::agents_cmd::approve_chain_gate,
@@ -276,6 +286,7 @@ pub fn run() {
             commands::agents_cmd::abort_chain,
             commands::agents_cmd::delete_chain,
             commands::agents_cmd::harvest_chain_step,
+            commands::agents_cmd::run_chain_step_check,
             commands::agents_cmd::create_continuation_chain,
             commands::agents_cmd::list_chain_templates,
             commands::agents_cmd::upsert_chain_template,

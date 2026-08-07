@@ -351,8 +351,36 @@ pub struct AgentChain {
     pub step_count: i64,
     /// A translation key (`chain.interrupted`, `chain.repoBusy`, …) or a raw engine error.
     pub last_reason: String,
+    /// Step runs started, ever. Bounded by `queries::MAX_CHAIN_DISPATCHES` — `step_count` stopped
+    /// being the bound once a step could send the plan backwards.
+    pub dispatches: i64,
     pub created_at: String,
     pub updated_at: String,
+    /// `chain` for one a user authored step by step, `story` for one the story realizer built out
+    /// of a work item. The scheduler treats both identically; only the panes differ.
+    pub kind: String,
+    /// The work item a `story` chain was built from — empty on every ordinary chain. Kept as the
+    /// same four opaque strings every other board caller uses (`provider`, `org`, `id`, `key`), so
+    /// a link back to the board needs no second lookup.
+    pub work_item_provider: String,
+    pub work_item_org: String,
+    pub work_item_id: i64,
+    pub work_item_key: String,
+    pub work_item_url: String,
+    pub work_item_title: String,
+    /// How many repositories the chain works across. A count and not the list: the task list draws
+    /// one badge per chain and would otherwise pay a query per row for names it never shows.
+    pub repo_count: i64,
+}
+
+/// One repository a chain works across, with the name to draw it by.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainRepo {
+    pub project_id: String,
+    /// Empty when the repository has been removed from the workspace since — the chain keeps the
+    /// row so the plan can still say where a finished step ran.
+    pub name: String,
+    pub position: i64,
 }
 
 /// One step of a chain. The agent's identity and routing are snapshotted at creation — see the
@@ -362,6 +390,16 @@ pub struct AgentChainStep {
     pub id: String,
     pub chain_id: String,
     pub step_index: i64,
+    /// Which repository *this* step runs in. Always written — a chain across three repositories is
+    /// three sets of steps, each naming its own — and backfilled to the chain's own `project_id`
+    /// for every row that predates multi-repo chains.
+    pub project_id: String,
+    /// The repository's name, joined at read time. Empty when it has left the workspace.
+    pub project_name: String,
+    /// `` for a step of an ordinary chain; `analyze` | `implement` for the two halves of a story
+    /// realizer run. What lets the detail pane group the plan into the two phases the user asked
+    /// for rather than into 2N flat rows.
+    pub phase: String,
     pub agent_id: String,
     pub agent_name: String,
     pub provider: String,
@@ -380,6 +418,18 @@ pub struct AgentChainStep {
     pub status: String,
     pub attempts: i64,
     pub last_error: String,
+    /// A shell command run in [`Self::project_id`]'s working copy once the turn lands. Exit code 0
+    /// is the whole verdict. Empty means this step has no check and advances on having answered,
+    /// which is what every step did before checks existed.
+    pub check_command: String,
+    /// Step index to continue at when the check passes. `-1` is the next step.
+    pub on_pass: i64,
+    /// Step index to continue at when the check fails. `-1` stops the plan. A value **below**
+    /// [`Self::step_index`] is a loop.
+    pub on_fail: i64,
+    /// What the step that jumped here said and why its check failed — written onto the target so a
+    /// backward jump arrives knowing what it is fixing. Cleared once this step passes.
+    pub feedback: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -398,6 +448,13 @@ pub struct ChainStepBrief {
     pub gate: bool,
     pub task_id: String,
     pub status: String,
+    /// Which repository this step runs in. The id as well as the name, because deleting a
+    /// repository has to find every chain with a step in it — including the ones whose *primary*
+    /// repository is something else and which therefore survive the cascade.
+    pub project_id: String,
+    pub project_name: String,
+    /// See [`AgentChainStep::phase`].
+    pub phase: String,
 }
 
 /// One step as the frontend authors it, before anything is snapshotted or persisted.
@@ -406,6 +463,70 @@ pub struct NewChainStep {
     pub agent_id: String,
     pub instruction: String,
     pub gate: bool,
+    /// Which of the chain's repositories this step runs in.
+    ///
+    /// Three spellings, and the third is the one that makes a multi-repo chain worth authoring:
+    /// a project id runs the step there, `""` runs it in the chain's first repository, and `"*"`
+    /// means *every* repository the chain was given — which
+    /// [`queries::create_agent_chain`](crate::db::queries::create_agent_chain) expands into one
+    /// consecutive row per repository at creation, so the plan on disk stays the flat list the
+    /// scheduler knows how to walk.
+    #[serde(default)]
+    pub project_id: String,
+    /// See [`AgentChainStep::phase`]. Empty for everything a user authors by hand.
+    #[serde(default)]
+    pub phase: String,
+    /// See [`AgentChainStep::check_command`]. `#[serde(default)]` on all three of these is what
+    /// keeps an older frontend — or a saved template written before they existed — able to author
+    /// a chain: absent means no check and the linear defaults.
+    #[serde(default)]
+    pub check_command: String,
+    /// See [`AgentChainStep::on_pass`]. Authored against the step positions of the plan as typed,
+    /// which is why a `"*"` step cannot carry one: expansion turns one authored step into N rows
+    /// and there is no single index left to point at.
+    #[serde(default = "minus_one")]
+    pub on_pass: i64,
+    /// See [`AgentChainStep::on_fail`].
+    #[serde(default = "minus_one")]
+    pub on_fail: i64,
+}
+
+/// `-1` — "the default target", which is not what `i64::default()` gives.
+fn minus_one() -> i64 {
+    -1
+}
+
+/// Hand-written for exactly that reason: `#[derive(Default)]` would make `on_pass`/`on_fail` zero,
+/// which is not "no target" but "jump to the first step" — a plan that loops forever, arrived at by
+/// deriving a trait.
+impl Default for NewChainStep {
+    fn default() -> Self {
+        Self {
+            agent_id: String::new(),
+            instruction: String::new(),
+            gate: false,
+            project_id: String::new(),
+            phase: String::new(),
+            check_command: String::new(),
+            on_pass: -1,
+            on_fail: -1,
+        }
+    }
+}
+
+/// The verdict on one step: what its declared check said when it ran.
+///
+/// `ran: false` is the ordinary case and covers both a step with no check and a repository that has
+/// gone missing — the caller then completes the step exactly as it always did, on having answered.
+/// Keeping "there was nothing to check" distinct from "the check passed" is what stops a chain
+/// silently reporting every unverified step as verified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepCheck {
+    pub ran: bool,
+    pub passed: bool,
+    /// stdout and stderr together, in the order the process wrote them to each. Fed back to the
+    /// agent being asked to fix it, so it is the process's own words and not a summary.
+    pub output: String,
 }
 
 /// What [`queries::claim_next_chain_step`] hands back: the chain as it now stands, plus — only
@@ -429,6 +550,29 @@ pub struct ChainClaim {
 pub struct ChainDetail {
     pub chain: AgentChain,
     pub steps: Vec<AgentChainStep>,
+    /// Every repository the chain works across, in the order they were picked. Always at least
+    /// one, and for a single-repo chain exactly the one `chain.project_id` names.
+    pub repos: Vec<ChainRepo>,
+}
+
+/// The work item a story chain is built from, as the dialog hands it over.
+///
+/// The prose arrives already flattened to text by the caller: the board clients answer in HTML, and
+/// the Markdown renderer that turns it back into something an engine should read lives on the
+/// frontend, beside the review screen that already does it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NewStoryWorkItem {
+    pub provider: String,
+    pub org: String,
+    pub id: i64,
+    #[serde(default)]
+    pub key: String,
+    #[serde(default)]
+    pub url: String,
+    pub title: String,
+    /// Title, narrative, description and acceptance criteria as one block of plain text. This is
+    /// what every step of the run reads as its objective.
+    pub body: String,
 }
 
 /// A reusable chain plan. Configuration, not history — see the table comment in `migrations.rs`.
@@ -454,6 +598,16 @@ pub struct ChainTemplateStep {
     pub agent_id: String,
     pub instruction: String,
     pub gate: bool,
+    /// See [`AgentChainStep::check_command`]. Kept by a template because it is workspace-neutral,
+    /// unlike the repository a step runs in.
+    #[serde(default)]
+    pub check_command: String,
+    /// See [`AgentChainStep::on_pass`], against the template's own step positions.
+    #[serde(default = "minus_one")]
+    pub on_pass: i64,
+    /// See [`AgentChainStep::on_fail`].
+    #[serde(default = "minus_one")]
+    pub on_fail: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

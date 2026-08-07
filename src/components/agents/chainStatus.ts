@@ -91,6 +91,8 @@ const REASON_KEYS = new Set<string>([
   "chain.projectGone",
   "chain.agentNotRoutable",
   "chain.attemptsExhausted",
+  "chain.checkFailed",
+  "chain.dispatchesExhausted",
   "chain.emptyOutput",
   "chain.stopped",
   "chain.timedOut",

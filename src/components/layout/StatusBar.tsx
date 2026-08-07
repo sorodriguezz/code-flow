@@ -1,5 +1,6 @@
 import { ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, Lock, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
 import { NotificationBell } from "./NotificationBell";
+import { UsageMeter } from "./UsageMeter";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
@@ -94,6 +95,7 @@ export function StatusBar() {
   const settingsButton = (
     <button
       onClick={toggleSettings}
+      data-tour="open-settings"
       title={hint("app.settings", t("statusbar.settings"))}
       className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
         settingsOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
@@ -106,6 +108,7 @@ export function StatusBar() {
   const terminalButton = (
     <button
       onClick={toggleTerminalPanel}
+      data-tour="toggle-terminal"
       title={hint("panel.terminal", t("terminal.toggle"))}
       className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
         terminalPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
@@ -118,6 +121,7 @@ export function StatusBar() {
   const aiPanelButton = (
     <button
       onClick={toggleAiPanel}
+      data-tour="toggle-ai-panel"
       title={hint("panel.ai", t("statusbar.aiPanel"))}
       className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
         aiPanelOpen ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
@@ -136,7 +140,8 @@ export function StatusBar() {
         <span>{t("statusbar.openProject")}</span>
         {/* Also here, with no project open: agent runs, generations and API work are scoped to the
             workspace, not to a repository, so they can finish while this bar is in its empty state. */}
-        <div className="ml-auto flex items-center">
+        <div className="ml-auto flex items-center gap-1">
+          <UsageMeter />
           <NotificationBell />
         </div>
       </footer>
@@ -208,7 +213,7 @@ export function StatusBar() {
 
       {/* Their own row within the bar, tighter than the bar's `gap-3`: three buttons that do
           neighbouring things read as one control. */}
-      <div className="flex shrink-0 items-center gap-0.5">
+      <div data-tour="git-actions" className="flex shrink-0 items-center gap-0.5">
         <GitAction
           icon={
             remoteOp === "fetch" ? (
@@ -288,7 +293,10 @@ export function StatusBar() {
       {/* The one thing on the right. It is not a git action — it reports on agent runs, generations
           and API work, which are the workspace's business rather than this repository's — and it is
           the only control here that speaks while you are looking somewhere else. */}
-      <div className="ml-auto flex shrink-0 items-center">
+      {/* Beside the bell, and for the same reason it is here rather than in a settings screen:
+          both report on work the app did while you were looking somewhere else. */}
+      <div className="ml-auto flex shrink-0 items-center gap-1">
+        <UsageMeter />
         <NotificationBell />
       </div>
     </footer>

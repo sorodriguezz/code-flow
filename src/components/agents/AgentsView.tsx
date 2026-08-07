@@ -9,6 +9,7 @@ import { AgentsHelpModal } from "./AgentsHelpModal";
 import { ChainDetail } from "./ChainDetail";
 import { NewChainModal } from "./NewChainModal";
 import { NewTaskModal } from "./NewTaskModal";
+import { StoryRealizerModal } from "./StoryRealizerModal";
 import { TemplateDetail } from "./TemplateDetail";
 import { useChainStore } from "../../state/chainStore";
 import { CARD } from "../api/panelChrome";
@@ -66,6 +67,9 @@ export function AgentsView() {
    * boolean because "which folder" is part of what the dialog was opened *for*. */
   const [composing, setComposing] = useState<string | null>(null);
   const [chaining, setChaining] = useState<ChainDraft | null>(null);
+  /** The folder a new story run should land in, or `null` when the dialog is closed. Same
+   * convention as `composing` — a string, because "which folder" is part of what it was opened for. */
+  const [storying, setStorying] = useState<string | null>(null);
   const [helping, setHelping] = useState(false);
   const selectedChainId = useChainStore((s) => s.selectedId);
   const selectedTemplateId = useChainStore((s) => s.selectedTemplateId);
@@ -91,6 +95,7 @@ export function AgentsView() {
       if (
         composing !== null ||
         chaining !== null ||
+        storying !== null ||
         editing !== null ||
         editingProject !== null ||
         useUiStore.getState().settingsOpen
@@ -102,7 +107,7 @@ export function AgentsView() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [activeView, composing, chaining, editing, editingProject]);
+  }, [activeView, composing, chaining, storying, editing, editingProject]);
 
   if (!workspaceId) {
     return (
@@ -129,6 +134,7 @@ export function AgentsView() {
             width={listWidth}
             onNewTask={(agentProjectId) => setComposing(agentProjectId)}
             onNewChain={(agentProjectId) => setChaining({ agentProjectId, templateId: null })}
+            onNewStory={setStorying}
             onNewAgent={() => setEditing("new")}
             onNewProject={() => setEditingProject("new")}
             onEditProject={setEditingProject}
@@ -203,6 +209,13 @@ export function AgentsView() {
           initialAgentProjectId={chaining.agentProjectId}
           templateId={chaining.templateId}
           onClose={() => setChaining(null)}
+          onManageAgents={() => setEditing("new")}
+        />
+      )}
+      {storying !== null && (
+        <StoryRealizerModal
+          initialAgentProjectId={storying}
+          onClose={() => setStorying(null)}
           onManageAgents={() => setEditing("new")}
         />
       )}

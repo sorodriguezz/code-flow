@@ -19,7 +19,9 @@ import { OpenQuestionsModal } from "./OpenQuestionsModal";
 import { StoryCard } from "./StoryCard";
 import { SOURCE_KIND } from "./storyStatus";
 import { AiRunLog } from "../ai/AiRunLog";
+import { ModelTag } from "../ai/ModelTag";
 import { CARD } from "../api/panelChrome";
+import { relativeTime } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -80,6 +82,7 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
     verifyRepos.length > 0 &&
     list.some((story) => parseCriteria(story.acceptance_criteria).length > 0);
   const { icon: SourceIcon } = SOURCE_KIND[batch.source_kind];
+  const generatedOn = Boolean(batch.generated_at && batch.provider);
 
   const generate = () => void useStoriesStore.getState().generate(batchId);
 
@@ -116,14 +119,36 @@ export function StoryBatchDetail({ batchId }: { batchId: string }) {
             <span className="block truncate text-[13px] font-semibold text-[var(--cf-text)]">
               {batch.title || t("stories.untitled")}
             </span>
-            <button
-              type="button"
-              onClick={() => setShowSource((open) => !open)}
-              title={t("stories.toggleSource")}
-              className="block max-w-full truncate text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-            >
-              {batch.source_ref || t(SOURCE_KIND[batch.source_kind].labelKey)}
-            </button>
+            <span className="flex min-w-0 items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShowSource((open) => !open)}
+                title={t("stories.toggleSource")}
+                className="min-w-0 shrink truncate text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+              >
+                {batch.source_ref || t(SOURCE_KIND[batch.source_kind].labelKey)}
+              </button>
+              {/* Which model wrote these stories — the one question the screen could not answer,
+                  and the first one worth asking when a set comes back thin, generic or in the
+                  wrong language. Frozen on the batch, so it keeps naming the model that actually
+                  ran even after the routing in Settings has moved on. Absent until a generation
+                  has succeeded: the chip by the Generate button already says what would run. */}
+              {generatedOn && (
+                <ModelTag
+                  providerId={batch.provider}
+                  model={batch.model}
+                  title={t("stories.generatedWithHint", {
+                    when:
+                      relativeTime(batch.generated_at, {
+                        now: t("ai.justNow"),
+                        minutes: t("ai.minutesAgo"),
+                        hours: t("ai.hoursAgo"),
+                        days: t("ai.daysAgo"),
+                      }) || batch.generated_at,
+                  })}
+                />
+              )}
+            </span>
           </span>
 
           {generating ? (

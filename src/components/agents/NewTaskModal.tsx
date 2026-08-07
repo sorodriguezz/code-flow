@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Bot, Plus } from "lucide-react";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { Note } from "../api/settingsChrome";
+import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { Field } from "../settings/modelPicker";
 import { AI_PROVIDERS, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
@@ -9,6 +10,11 @@ import { isRunnableAgent, useAgentsStore } from "../../state/agentsStore";
 import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
+import type { AgentTask } from "../../types/domain";
+
+/** Mirrors `queries::MAX_CHAIN_REPOS`, and for the same reason rather than by coincidence: what a
+ * ceiling here bounds is how many engine sessions one press of a button starts. */
+const MAX_REPOS = 12;
 
 /**
  * Air's first step, as a dialog: who does the work, where, and what the work is.
@@ -18,6 +24,13 @@ import { useT } from "../../state/languageStore";
  * for them up front is what keeps the task detail from having to explain why they are greyed out.
  * The folder is the odd one out: it can be changed from the list whenever, and is asked for here
  * only so that opening this dialog from inside a folder lands the task in it.
+ *
+ * **One task, one repository — so N repositories are N tasks.** An engine session sees a single
+ * working directory, which is why a task's repository is fixed once it has turns; ticking several
+ * here is therefore shorthand for "the same assignment, once per repository" and creates one
+ * sibling task in each, not one task that somehow spans them. They start together and actually run
+ * together: the one-agent-per-repository guard is per repository, and these are all in different
+ * ones.
  *
  * Starting the task also sends the goal as its first turn. A task that exists but has said nothing
  * is a row that looks like work and isn't; if the user wanted to think about it longer they can
@@ -51,9 +64,14 @@ export function NewTaskModal({
   const runnable = useMemo(() => roster.filter(isRunnableAgent), [roster]);
 
   const [agentId, setAgentId] = useState(() => runnable[0]?.id ?? "");
-  const [projectId, setProjectId] = useState(
-    () => (activeProjectId && projects.some((p) => p.id === activeProjectId) ? activeProjectId : projects[0]?.id) ?? "",
-  );
+  /** The repositories to assign this work in, in the order they were ticked — that order is the
+   * order the tasks are created in, and the first is the one the detail pane lands on. Starts as
+   * the repository the user is already in, so the single-repository case is unchanged. */
+  const [projectIds, setProjectIds] = useState<string[]>(() => {
+    const first =
+      (activeProjectId && projects.some((p) => p.id === activeProjectId) ? activeProjectId : projects[0]?.id) ?? "";
+    return first ? [first] : [];
+  });
   const [agentProjectId, setAgentProjectId] = useState(() =>
     agentProjects.some((p) => p.id === initialAgentProjectId) ? initialAgentProjectId : "",
   );
@@ -71,17 +89,38 @@ export function NewTaskModal({
     if (!runnable.some((a) => a.id === agentId)) setAgentId(runnable[0]?.id ?? "");
   }, [runnable, agentId]);
 
+  const toggleRepo = (id: string) =>
+    setProjectIds((current) => {
+      if (current.includes(id)) return current.filter((kept) => kept !== id);
+      return current.length >= MAX_REPOS ? current : [...current, id];
+    });
+
   const agent = runnable.find((a) => a.id === agentId) ?? null;
   const providerMissing = agent !== null && !isProviderReady(statuses, agent.provider);
   const canStart =
-    !starting && agent !== null && projectId !== "" && goal.trim() !== "" && workspaceId !== null && !providerMissing;
+    !starting &&
+    agent !== null &&
+    projectIds.length > 0 &&
+    goal.trim() !== "" &&
+    workspaceId !== null &&
+    !providerMissing;
 
   const start = async () => {
     if (!agent || !canStart) return;
     setStarting(true);
     try {
-      const task = await useAgentsStore.getState().create({ projectId, agent, goal, agentProjectId });
-      useAgentsStore.getState().send(task.id, goal);
+      const store = useAgentsStore.getState();
+      // Created first, sent afterwards. Sending inside the loop would leave a half-made set behind
+      // a failed create with turns already running in it; this way the only thing a failure can
+      // leave is tasks that have said nothing, which is what closing the dialog leaves anyway.
+      const created: AgentTask[] = [];
+      for (const projectId of projectIds) {
+        created.push(await store.create({ projectId, agent, goal, agentProjectId }));
+      }
+      for (const task of created) store.send(task.id, goal);
+      // `create` selects whatever it just made, so the pane would otherwise open on the repository
+      // ticked last. The first one is the one the user started from.
+      if (created.length > 1) void store.select(created[0].id);
       onClose();
     } finally {
       setStarting(false);
@@ -108,7 +147,7 @@ export function NewTaskModal({
               {t("common.cancel")}
             </GhostButton>
             <PrimaryButton onClick={() => void start()} disabled={!canStart}>
-              {t("agents.start")}
+              {projectIds.length > 1 ? t("agents.startN", { n: projectIds.length }) : t("agents.start")}
             </PrimaryButton>
           </span>
         </>
@@ -143,14 +182,39 @@ export function NewTaskModal({
           />
         </Field>
 
-        <Field label={t("agents.repository")} hint={t("agents.repositoryHint")}>
-          <Select
-            size="field"
-            value={projectId}
-            ariaLabel={t("agents.repository")}
-            onChange={setProjectId}
-            options={projects.map((p) => ({ value: p.id, label: p.name }))}
-          />
+        {/* Checkboxes rather than a select, the same call the chain dialog makes: the list is the
+            workspace's repositories, short enough to read at a glance, and which ones are ticked is
+            the whole question. With one ticked this is the field it always was; the hint only
+            changes once ticking a second one has stopped meaning "instead of". */}
+        <Field
+          label={projectIds.length > 1 ? t("agents.repositories") : t("agents.repository")}
+          hint={projectIds.length > 1 ? t("agents.taskReposMultiHint") : t("agents.repositoryHint")}
+        >
+          <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-[var(--cf-border)] px-2 py-1.5">
+            {projects.map((repo) => {
+              const at = projectIds.indexOf(repo.id);
+              return (
+                <label
+                  key={repo.id}
+                  className="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text)]"
+                >
+                  <Checkbox
+                    checked={at !== -1}
+                    disabled={at === -1 && projectIds.length >= MAX_REPOS}
+                    onChange={() => toggleRepo(repo.id)}
+                  />
+                  <span className="min-w-0 truncate">{repo.name}</span>
+                  {/* Only the first one is called out, and only once there is more than one: it is
+                      the task the dialog leaves open, which is otherwise invisible. */}
+                  {at === 0 && projectIds.length > 1 && (
+                    <span className="shrink-0 rounded bg-black/[0.05] px-1.5 py-[1px] text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.07]">
+                      {t("agents.repoPrimary")}
+                    </span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
         </Field>
 
         {/* Filing, never routing — and directly under the field that *is* routing, which is the one

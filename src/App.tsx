@@ -25,6 +25,7 @@ import { UpdateAlert } from "./components/layout/UpdateAlert";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
 import { ConfirmModal } from "./components/common/ConfirmModal";
+import { TourOverlay } from "./components/tour/TourOverlay";
 import { useThemeStore } from "./state/themeStore";
 import { useUiStore, type MainView } from "./state/uiStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
@@ -42,6 +43,7 @@ import { useUpdateStore, CHECK_INTERVAL_MS } from "./state/updateStore";
 import { useNavigationStore } from "./state/navigationStore";
 import { useTerminalStore } from "./state/terminalStore";
 import { useShortcutsStore } from "./state/shortcutsStore";
+import { useTourStore } from "./state/tourStore";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
@@ -119,6 +121,7 @@ export default function App() {
   const initTerminal = useTerminalStore((s) => s.init);
   const initAiProvider = useAiProviderStore((s) => s.init);
   const initShortcuts = useShortcutsStore((s) => s.init);
+  const initTour = useTourStore((s) => s.init);
   const project = useWorkspaceStore((s) => s.activeProject());
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
@@ -151,6 +154,10 @@ export default function App() {
         initTerminal(),
         initAiProvider(),
         initShortcuts(),
+        // Reads whether the guided tour has already been run, and — if it hasn't — arms the
+        // first-launch opening. Deliberately inside this batch: the tour rearranges panels, and
+        // it must not start before the layout and language it rearranges have loaded.
+        initTour(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
         startWindowBoundsTracking(),
@@ -166,6 +173,7 @@ export default function App() {
     initTerminal,
     initAiProvider,
     initShortcuts,
+    initTour,
   ]);
 
   // Re-apply the chosen accent whenever the resolved theme or the accent selection changes,
@@ -284,7 +292,7 @@ export default function App() {
               and leave the view it docks *into* at zero height. This is the point past which the
               dock shrinks instead. Still far below the content's own height, so the item shrinks
               freely — which is all `min-h-0` was ever here for. */}
-          <div className="cf-ambient-bg min-h-[120px] flex-1 overflow-hidden">
+          <div data-tour="main-content" className="cf-ambient-bg min-h-[120px] flex-1 overflow-hidden">
             <MainContent />
           </div>
           <AnimatePresence initial={false}>
@@ -311,6 +319,9 @@ export default function App() {
       <UpdateNotesModal />
       <ToastContainer />
       <ConfirmModal />
+      {/* Last, and above everything: the guided tour dims the whole window and drives the panels
+          above from its own steps, so it has to outrank every modal it walks the user through. */}
+      <TourOverlay />
     </div>
   );
 }

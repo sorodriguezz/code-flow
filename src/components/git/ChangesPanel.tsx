@@ -545,6 +545,7 @@ export function ChangesPanel({
                       useAnalyzeUiStore.getState().show();
                       openAiPanel();
                     }}
+                    data-tour="changes-analyze"
                     title={t("analyze.button")}
                     className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                   >

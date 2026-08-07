@@ -5,6 +5,7 @@ import {
   ChevronRight,
   Copy,
   Glasses,
+  GraduationCap,
   MessageCircle,
   Minus,
   Search,
@@ -19,6 +20,7 @@ import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useNavigationStore } from "../../state/navigationStore";
 import { usePrStore } from "../../state/prStore";
+import { useTourStore } from "../../state/tourStore";
 import { useT } from "../../state/languageStore";
 import { goHistory } from "../../lib/shortcuts";
 import { useShortcutHint } from "../../lib/useShortcutHint";
@@ -164,6 +166,11 @@ export function TitleBar() {
   const t = useT();
   const hint = useShortcutHint();
   const [showAiMenu, setShowAiMenu] = useState(false);
+  const startTour = useTourStore((s) => s.start);
+  const tourActive = useTourStore((s) => s.active);
+  /** Unlit once the tour has been finished or skipped. Until then the button wears the accent, so
+   * the one control that explains all the others is the one control that stands out. */
+  const tourSeen = useTourStore((s) => s.seen);
 
   return (
     <header
@@ -179,6 +186,7 @@ export function TitleBar() {
         {isMac ? <MacControlsSpacer /> : <div className="w-2" />}
         <button
           onClick={toggleSidebar}
+          data-tour="sidebar-toggle"
           title={hint("panel.sidebar", t("titlebar.toggleSidebar"))}
           className="flex h-7 w-7 items-center justify-center rounded-md text-black/60 hover:bg-black/10 dark:text-white/70"
         >
@@ -212,6 +220,30 @@ export function TitleBar() {
       </div>
 
       <div className="flex items-center gap-2">
+        {/* The way in to the guided tour, and the only control here that advertises itself: until
+            the tour has been run once it sits in the accent with a dot on it, because an app this
+            wide is one where the feature that explains the rest has to be the findable one. */}
+        {/* Not disabled while the tour is running, deliberately: the last step spotlights this
+            button, and a greyed-out control under a highlight reads as "this is unavailable" —
+            the opposite of what that step is saying. The overlay swallows the click anyway. */}
+        <button
+          // Wrapped rather than passed straight through: `start` takes an options object, and
+          // handing it the click event would make React's synthetic event the tour's options.
+          onClick={() => startTour()}
+          data-tour="tour-launcher"
+          title={t("tour.launch")}
+          aria-label={t("tour.launch")}
+          className={`relative flex h-7 w-7 items-center justify-center rounded-md hover:bg-black/10 ${
+            tourSeen === false || tourActive
+              ? "text-[var(--cf-accent)]"
+              : "text-black/60 dark:text-white/70"
+          }`}
+        >
+          <GraduationCap size={16} />
+          {tourSeen === false && (
+            <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />
+          )}
+        </button>
         {/* Opted out of the header's drag region: the open menu hangs a full-screen backdrop and a
             popover off this wrapper, and both are plain divs — under `deep` they would turn a press
             anywhere on screen into a window drag instead of closing the menu. */}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { TokenHowTo } from "./TokenHowTo";
 import { deleteGitlabToken, gitlabAuthenticatedUser, setGitlabToken } from "../../lib/tauri/commands";
 import {
   GITLAB_COM,
@@ -21,6 +22,13 @@ import type { GitlabConnection } from "../../types/domain";
  * hostname is the part that is easy to get wrong, and a token saved against the wrong one is what
  * would later look like "GitLab doesn't work".
  */
+/** GitLab's personal access token page for whichever host is in the field. Self-managed instances
+ * mount the same path, so one shape covers gitlab.com and every private install. */
+function tokenPageUrl(host: string): string {
+  const clean = normalizeGitlabHost(host) || GITLAB_COM;
+  return `https://${clean}/-/user_settings/personal_access_tokens`;
+}
+
 export function GitLabSettings() {
   const t = useT();
   const [connections, setConnections] = useState<GitlabConnection[]>([]);
@@ -148,6 +156,18 @@ export function GitLabSettings() {
           </button>
         </div>
       </div>
+
+      <TokenHowTo
+        title={t("settings.tokenHowTo")}
+        steps={[
+          t("settings.gitlabPatStep1"),
+          t("settings.gitlabPatStep2"),
+          t("settings.gitlabPatStep3"),
+          t("settings.gitlabPatStep4"),
+        ]}
+        linkLabel={t("settings.gitlabPatOpenPage")}
+        url={tokenPageUrl(host)}
+      />
     </section>
   );
 }

@@ -4,10 +4,10 @@ use uuid::Uuid;
 
 use super::models::{
     ActivityLogEntry, AgentChain, AgentChainStep, AgentProject, AgentTask, ChainClaim, ChainDetail,
-    ChainStepBrief, ChainTemplate, ChainTemplateStep, ChatConversationSummary, DocPage, JobHistoryEntry,
-    NewChainStep, NewProject, Project, ReviewContext, ReviewRunDetail, ReviewRunSummary, StoryBatch,
-    StoryBatchDetail, StoryDraft, Workspace, WorkspaceActivityEntry, WorkspaceAgent,
-    WorkspaceSkill, WorkItemReviewRow,
+    ChainRepo, ChainStepBrief, ChainTemplate, ChainTemplateStep, ChatConversationSummary, DocPage,
+    JobHistoryEntry, NewChainStep, NewProject, NewStoryWorkItem, Project, ReviewContext, ReviewRunDetail,
+    ReviewRunSummary, StoryBatch, StoryBatchDetail, StoryDraft, Workspace, WorkspaceActivityEntry,
+    WorkspaceAgent, WorkspaceSkill, WorkItemReviewRow,
 };
 
 /// The timestamp every record is stamped with, truncated to **microseconds**.
@@ -1141,38 +1141,80 @@ pub fn delete_agent_task(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 
 // ---------- agent chains ----------
 
-/// A chain is a list, never a graph — there is no back-edge column anywhere, so it cannot loop by
-/// construction. These two are the belt to that pair of braces: a plan nobody meant to author, and
-/// a step that keeps failing, both stop on their own.
-pub const MAX_CHAIN_STEPS: usize = 8;
+/// A chain **is** a graph now — `on_pass`/`on_fail` can point backwards, which is the loop the
+/// feature spent its whole life without. What used to make a runaway impossible was the shape of
+/// the data; what makes it impossible now is [`MAX_CHAIN_DISPATCHES`], and these two are what keep
+/// a plan nobody meant to author, and a step that keeps failing, from getting that far.
+///
+/// 16 rather than 8: with a reviewer able to send work back, a plan is no longer one pass down a
+/// list, and eight was a number chosen when it was.
+pub const MAX_CHAIN_STEPS: usize = 16;
 const MAX_STEP_ATTEMPTS: i64 = 3;
+
+/// The hard bound on a chain: how many step runs it may dispatch in its whole life, however many
+/// times its steps send each other backwards.
+///
+/// This is the one number that has to exist. Every other cap here bounds the *plan* — how much can
+/// be written down — and a plan with a back-edge is a program, so the plan's size stopped being
+/// the bound the moment loops became expressible. A step run is a whole engine session against a
+/// real working copy, so the ceiling is deliberately something a person would notice reaching
+/// rather than something generous: 128 is a twelve-step plan going round ten times, which is well
+/// past the point where the loop is the problem.
+pub const MAX_CHAIN_DISPATCHES: i64 = 128;
+
+/// How many repositories one chain may work across.
+///
+/// The ceiling is not the database's, it is the clock's: the steps of a chain run one after another
+/// and each is a whole engine session against a real working copy, so a plan fanned out over
+/// thirty repositories is one nobody watches to the end. Raised to 16 rather than to something
+/// round, because this is the one cap that nothing in this change made cheaper — an engine still
+/// sees one working directory, and steps still run in series. It moves when worktrees do.
+pub const MAX_CHAIN_REPOS: usize = 16;
+
+/// The cap on **rows**, after a `"*"` step has been expanded into one per repository.
+///
+/// [`MAX_CHAIN_STEPS`] limits what a user writes; this limits what that turns into. It is no longer
+/// the runaway guard — [`MAX_CHAIN_DISPATCHES`] is, because rows stopped predicting runs the day a
+/// step could be visited twice — so what it bounds now is how big a *plan* may be: how much there
+/// is to read in the detail pane, and how long one lap takes. 64 is one lap the length of an
+/// afternoon, and the dispatch budget is what stops the second lap being a week.
+pub const MAX_CHAIN_ROWS: usize = 64;
 
 /// How much of a step's answer is carried into the next step's opening message.
 ///
-/// 6k and not 60k, and this is the least obvious constraint in the codebase: `claude.rs` passes the
-/// composed message as **one argv element** (`cmd.arg("-p").arg(inv.prompt)`), and on Windows a
-/// provider installed through npm resolves to a `.cmd` shim, which routes the whole command line
-/// through cmd.exe — whose ceiling is 8191 characters, not 32767. Nothing else in the app
-/// systematically builds prompts this large, so the limit belongs to this feature.
+/// **This used to be 6k, and the reason was the command line, not the model.** The composed message
+/// rode `-p` as one argv element, and on Windows an npm-installed provider resolves to a `.cmd`
+/// shim that routes the command line through cmd.exe — ceiling 8191 characters. A whole design
+/// existed around that number: "for anything bigger, have one step write `docs/plan.md` and the
+/// next read it."
 ///
-/// For anything bigger the channel is the working copy itself: have one step write `docs/plan.md`
-/// and the next read it. That is a convention, and the authoring dialog says so.
-const HANDOFF_MAX: usize = 6_000;
-const HANDOFF_HEAD: usize = 4_000;
-const HANDOFF_TAIL: usize = 2_000;
+/// That ceiling is gone. `ai::chat_with_repo` now delivers any message past `INLINE_ASK_LIMIT` as
+/// **data** rather than as an argument, which every engine already knows how to carry, so what is
+/// left to ration here is the next agent's context window and nothing else. 60k characters is
+/// roughly fifteen thousand tokens — a full plan, a full review, a stack trace with its code —
+/// while still being a bound rather than a promise that a runaway answer will be pasted whole into
+/// every step that follows it.
+const HANDOFF_MAX: usize = 60_000;
 
 /// Head **and** tail, because a plan's conclusion is at the bottom: keeping only the first N
-/// characters would hand the next agent the throat-clearing and drop the decision. Cut on
-/// `chars()` so a fixed offset can never split a code point.
-fn clamp_handoff(text: &str) -> (String, bool) {
+/// characters would hand the next agent the throat-clearing and drop the decision. Two thirds from
+/// the front, one third from the back. Cut on `chars()` so a fixed offset can never split a code
+/// point.
+fn clamp_to(text: &str, max: usize) -> (String, bool) {
     let chars: Vec<char> = text.chars().collect();
-    if chars.len() <= HANDOFF_MAX {
+    if chars.len() <= max {
         return (text.to_string(), false);
     }
-    let omitted = chars.len() - HANDOFF_HEAD - HANDOFF_TAIL;
-    let head: String = chars[..HANDOFF_HEAD].iter().collect();
-    let tail: String = chars[chars.len() - HANDOFF_TAIL..].iter().collect();
+    let head_len = max * 2 / 3;
+    let tail_len = max - head_len;
+    let omitted = chars.len() - head_len - tail_len;
+    let head: String = chars[..head_len].iter().collect();
+    let tail: String = chars[chars.len() - tail_len..].iter().collect();
     (format!("{head}\n\n…[{omitted} characters omitted]…\n\n{tail}"), true)
+}
+
+fn clamp_handoff(text: &str) -> (String, bool) {
+    clamp_to(text, HANDOFF_MAX)
 }
 
 /// The message a step opens with.
@@ -1183,7 +1225,12 @@ fn clamp_handoff(text: &str) -> (String, bool) {
 ///
 /// The objective is repeated on every step because every step is a fresh engine session that has
 /// no memory of the chain (see `claim_next_chain_step`).
-fn compose_chain_input(goal: &str, instruction: &str, previous: Option<(&str, i64, &str)>) -> String {
+fn compose_chain_input(
+    goal: &str,
+    instruction: &str,
+    previous: Option<(&str, i64, &str)>,
+    feedback: &str,
+) -> String {
     let mut out = String::new();
     if !goal.trim().is_empty() {
         out.push_str("## Objective\n");
@@ -1195,6 +1242,15 @@ fn compose_chain_input(goal: &str, instruction: &str, previous: Option<(&str, i6
         out.push_str(output.trim());
         out.push_str("\n\n");
     }
+    // Last before the task and deliberately loud. This block only exists when the plan was sent
+    // *back* here by a later step whose check failed, and the whole value of a loop is that the
+    // second pass knows something the first did not — an agent that re-received its original
+    // instruction verbatim would produce its original answer verbatim.
+    if !feedback.trim().is_empty() {
+        out.push_str("## This is a retry — the previous attempt was rejected\n");
+        out.push_str(feedback.trim());
+        out.push_str("\n\nFix what is described above. Do not start over from scratch.\n\n");
+    }
     out.push_str("## Your task\n");
     out.push_str(instruction.trim());
     out
@@ -1202,14 +1258,21 @@ fn compose_chain_input(goal: &str, instruction: &str, previous: Option<(&str, i6
 
 /// Appended rather than placed after `goal` where the table carries them, for the reason spelled
 /// out on [`AGENT_TASK_COLUMNS`].
+/// Trailed by the repository count, which is a correlated subquery rather than a column: it is the
+/// only thing about a chain's repository set that every list of chains needs, and a join would
+/// multiply the chain row by its repositories.
 const CHAIN_COLUMNS: &str = "id, project_id, title, goal, status, current_step, step_count, last_reason, \
-     created_at, updated_at, agent_project_id, pinned";
+     created_at, updated_at, agent_project_id, pinned, kind, work_item_provider, work_item_org, \
+     work_item_id, work_item_key, work_item_url, work_item_title, dispatches, \
+     (SELECT COUNT(*) FROM agent_chain_repos r WHERE r.chain_id = agent_chains.id)";
 
 /// The same columns qualified for the join in [`list_agent_chains`]. Written out rather than
 /// derived from [`CHAIN_COLUMNS`] by string substitution — a `replace("id,", "c.id,")` also
 /// rewrites the `id` inside `project_id`, and the result compiles perfectly and fails at runtime.
 const CHAIN_COLUMNS_QUALIFIED: &str = "c.id, c.project_id, c.title, c.goal, c.status, c.current_step, \
-     c.step_count, c.last_reason, c.created_at, c.updated_at, c.agent_project_id, c.pinned";
+     c.step_count, c.last_reason, c.created_at, c.updated_at, c.agent_project_id, c.pinned, c.kind, \
+     c.work_item_provider, c.work_item_org, c.work_item_id, c.work_item_key, c.work_item_url, \
+     c.work_item_title, c.dispatches, (SELECT COUNT(*) FROM agent_chain_repos r WHERE r.chain_id = c.id)";
 
 fn map_chain(row: &rusqlite::Row) -> rusqlite::Result<AgentChain> {
     Ok(AgentChain {
@@ -1225,37 +1288,61 @@ fn map_chain(row: &rusqlite::Row) -> rusqlite::Result<AgentChain> {
         updated_at: row.get(9)?,
         agent_project_id: row.get(10)?,
         pinned: row.get(11)?,
+        kind: row.get(12)?,
+        work_item_provider: row.get(13)?,
+        work_item_org: row.get(14)?,
+        work_item_id: row.get(15)?,
+        work_item_key: row.get(16)?,
+        work_item_url: row.get(17)?,
+        work_item_title: row.get(18)?,
+        dispatches: row.get(19)?,
+        repo_count: row.get(20)?,
     })
 }
 
-const STEP_COLUMNS: &str = "id, chain_id, step_index, agent_id, agent_name, provider, model, prompt, \
-     instruction, gate, gate_cleared, pending_input, task_id, run_id, log_count_at_dispatch, \
-     output_text, output_truncated, status, attempts, last_error, created_at, updated_at";
+/// Aliased `s`, and paired with [`STEP_FROM`]: a step now reports the *name* of the repository it
+/// runs in, which lives in another table. Every read of a step goes through the two together.
+const STEP_COLUMNS: &str = "s.id, s.chain_id, s.step_index, s.project_id, COALESCE(p.name, ''), s.phase, \
+     s.agent_id, s.agent_name, s.provider, s.model, s.prompt, s.instruction, s.gate, s.gate_cleared, \
+     s.pending_input, s.task_id, s.run_id, s.log_count_at_dispatch, s.output_text, s.output_truncated, \
+     s.status, s.attempts, s.last_error, s.check_command, s.on_pass, s.on_fail, s.feedback, \
+     s.created_at, s.updated_at";
+
+/// LEFT, not INNER: a repository removed from the workspace must not make the steps that ran in it
+/// disappear out of a finished plan.
+const STEP_FROM: &str = "FROM agent_chain_steps s LEFT JOIN projects p ON p.id = s.project_id";
 
 fn map_step(row: &rusqlite::Row) -> rusqlite::Result<AgentChainStep> {
     Ok(AgentChainStep {
         id: row.get(0)?,
         chain_id: row.get(1)?,
         step_index: row.get(2)?,
-        agent_id: row.get(3)?,
-        agent_name: row.get(4)?,
-        provider: row.get(5)?,
-        model: row.get(6)?,
-        prompt: row.get(7)?,
-        instruction: row.get(8)?,
-        gate: row.get(9)?,
-        gate_cleared: row.get(10)?,
-        pending_input: row.get(11)?,
-        task_id: row.get(12)?,
-        run_id: row.get(13)?,
-        log_count_at_dispatch: row.get(14)?,
-        output_text: row.get(15)?,
-        output_truncated: row.get(16)?,
-        status: row.get(17)?,
-        attempts: row.get(18)?,
-        last_error: row.get(19)?,
-        created_at: row.get(20)?,
-        updated_at: row.get(21)?,
+        project_id: row.get(3)?,
+        project_name: row.get(4)?,
+        phase: row.get(5)?,
+        agent_id: row.get(6)?,
+        agent_name: row.get(7)?,
+        provider: row.get(8)?,
+        model: row.get(9)?,
+        prompt: row.get(10)?,
+        instruction: row.get(11)?,
+        gate: row.get(12)?,
+        gate_cleared: row.get(13)?,
+        pending_input: row.get(14)?,
+        task_id: row.get(15)?,
+        run_id: row.get(16)?,
+        log_count_at_dispatch: row.get(17)?,
+        output_text: row.get(18)?,
+        output_truncated: row.get(19)?,
+        status: row.get(20)?,
+        attempts: row.get(21)?,
+        last_error: row.get(22)?,
+        check_command: row.get(23)?,
+        on_pass: row.get(24)?,
+        on_fail: row.get(25)?,
+        feedback: row.get(26)?,
+        created_at: row.get(27)?,
+        updated_at: row.get(28)?,
     })
 }
 
@@ -1268,9 +1355,31 @@ fn chain_row(conn: &Connection, id: &str) -> rusqlite::Result<Option<AgentChain>
     .optional()
 }
 
+fn step_row(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<AgentChainStep>> {
+    conn.query_row(
+        &format!("SELECT {STEP_COLUMNS} {STEP_FROM} WHERE s.id = ?1"),
+        params![step_id],
+        map_step,
+    )
+    .optional()
+}
+
+/// Every repository the chain works across, in the order they were picked.
+pub fn chain_repos(conn: &Connection, chain_id: &str) -> rusqlite::Result<Vec<ChainRepo>> {
+    let mut stmt = conn.prepare(
+        "SELECT r.project_id, COALESCE(p.name, ''), r.position
+         FROM agent_chain_repos r LEFT JOIN projects p ON p.id = r.project_id
+         WHERE r.chain_id = ?1 ORDER BY r.position",
+    )?;
+    let rows = stmt.query_map(params![chain_id], |row| {
+        Ok(ChainRepo { project_id: row.get(0)?, name: row.get(1)?, position: row.get(2)? })
+    })?;
+    rows.collect()
+}
+
 fn steps_of(conn: &Connection, chain_id: &str) -> rusqlite::Result<Vec<AgentChainStep>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE chain_id = ?1 ORDER BY step_index"
+        "SELECT {STEP_COLUMNS} {STEP_FROM} WHERE s.chain_id = ?1 ORDER BY s.step_index"
     ))?;
     let rows = stmt.query_map(params![chain_id], map_step)?;
     rows.collect()
@@ -1280,8 +1389,8 @@ fn steps_of(conn: &Connection, chain_id: &str) -> rusqlite::Result<Vec<AgentChai
 fn next_pending_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<AgentChainStep>> {
     conn.query_row(
         &format!(
-            "SELECT {STEP_COLUMNS} FROM agent_chain_steps
-             WHERE chain_id = ?1 AND status = 'pending' ORDER BY step_index LIMIT 1"
+            "SELECT {STEP_COLUMNS} {STEP_FROM}
+             WHERE s.chain_id = ?1 AND s.status = 'pending' ORDER BY s.step_index LIMIT 1"
         ),
         params![chain_id],
         map_step,
@@ -1291,11 +1400,33 @@ fn next_pending_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<Opti
 
 /// The nearest earlier step that actually produced something, walking backwards — so a skipped or
 /// output-less step degrades into "no context" instead of handing the next agent an empty block.
+///
+/// **The same repository first.** A chain fanned out over three repositories interleaves three
+/// independent lines of work, and the answer step 4 needs is the one step 1 gave about *its* tree,
+/// not whatever step 3 happened to say about somebody else's. Only when this repository has no
+/// earlier answer at all does it fall back to the plan-wide one, which is what carries a shared
+/// analysis into the repository that is about to act on it.
+///
+/// For a chain with one repository the two queries pick the same row, so this is exactly the
+/// behaviour every chain written before multi-repo had.
 fn previous_output(
     conn: &Connection,
     chain_id: &str,
     step_index: i64,
+    project_id: &str,
 ) -> rusqlite::Result<Option<(String, i64, String)>> {
+    let same_repo = conn
+        .query_row(
+            "SELECT agent_name, step_index, output_text FROM agent_chain_steps
+             WHERE chain_id = ?1 AND step_index < ?2 AND output_text <> '' AND project_id = ?3
+             ORDER BY step_index DESC LIMIT 1",
+            params![chain_id, step_index, project_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if same_repo.is_some() {
+        return Ok(same_repo);
+    }
     conn.query_row(
         "SELECT agent_name, step_index, output_text FROM agent_chain_steps
          WHERE chain_id = ?1 AND step_index < ?2 AND output_text <> ''
@@ -1335,10 +1466,12 @@ pub fn list_workspace_chain_steps(
     workspace_id: &str,
 ) -> rusqlite::Result<Vec<ChainStepBrief>> {
     let mut stmt = conn.prepare(
-        "SELECT s.id, s.chain_id, s.step_index, s.agent_name, s.instruction, s.gate, s.task_id, s.status
+        "SELECT s.id, s.chain_id, s.step_index, s.agent_name, s.instruction, s.gate, s.task_id,
+                s.status, s.project_id, COALESCE(sp.name, ''), s.phase
          FROM agent_chain_steps s
          JOIN agent_chains c ON c.id = s.chain_id
          JOIN projects p ON p.id = c.project_id
+         LEFT JOIN projects sp ON sp.id = s.project_id
          WHERE p.workspace_id = ?1
          ORDER BY s.chain_id, s.step_index",
     )?;
@@ -1352,6 +1485,9 @@ pub fn list_workspace_chain_steps(
             gate: row.get(5)?,
             task_id: row.get(6)?,
             status: row.get(7)?,
+            project_id: row.get(8)?,
+            project_name: row.get(9)?,
+            phase: row.get(10)?,
         })
     })?;
     rows.collect()
@@ -1360,7 +1496,64 @@ pub fn list_workspace_chain_steps(
 pub fn get_chain_detail(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<ChainDetail>> {
     let Some(chain) = chain_row(conn, chain_id)? else { return Ok(None) };
     let steps = steps_of(conn, chain_id)?;
-    Ok(Some(ChainDetail { chain, steps }))
+    let repos = chain_repos(conn, chain_id)?;
+    Ok(Some(ChainDetail { chain, steps, repos }))
+}
+
+/// Turns the plan a user authored into the flat list of rows the scheduler walks.
+///
+/// The only thing that happens here is the `"*"` expansion: a step that says "every repository"
+/// becomes one row per repository, consecutively, sharing everything but the tree they run in. The
+/// gate rides the **first** row of an expansion and not all of them — "review before this step"
+/// is one decision about one phase of the plan, and parking three times to approve the same thing
+/// three times is not what the checkbox says.
+///
+/// A step naming a repository the chain was not given falls back to the first one rather than
+/// failing: the dialog can only offer what the chain has, so this is a stale window, and a chain
+/// that runs somewhere defensible beats a create that vanishes.
+fn expand_steps(steps: &[NewChainStep], project_ids: &[String]) -> Vec<(NewChainStep, String)> {
+    let primary = project_ids.first().cloned().unwrap_or_default();
+    let mut rows = Vec::with_capacity(steps.len());
+    // Where each authored step lands once expanded. `on_pass`/`on_fail` are written against the
+    // plan as *typed* — "if this fails, go back to step 2" means the second row of the dialog — and
+    // one authored step can become N rows, so the targets have to be translated or a jump would
+    // land on whatever happens to sit at that index afterwards.
+    let mut starts: Vec<i64> = Vec::with_capacity(steps.len());
+    for step in steps {
+        let targets: Vec<String> = match step.project_id.as_str() {
+            "*" => project_ids.to_vec(),
+            "" => vec![primary.clone()],
+            named if project_ids.iter().any(|id| id == named) => vec![named.to_string()],
+            _ => vec![primary.clone()],
+        };
+        starts.push(rows.len() as i64);
+        for (at, target) in targets.into_iter().enumerate() {
+            let mut row = step.clone();
+            row.gate = step.gate && at == 0;
+            rows.push((row, target));
+        }
+    }
+
+    // The *first* row of the authored step, which for a fanned-out one means a backward jump
+    // re-runs the whole fan rather than its tail. That is what "go back to the analysis" means when
+    // the analysis was one instruction across five repositories.
+    //
+    // Out-of-range targets degrade to the default rather than failing the chain: a saved template
+    // authored against a longer plan is a plan somebody shortened, not a plan to refuse.
+    let translate = |target: i64| -> i64 {
+        if target < 0 { -1 } else { starts.get(target as usize).copied().unwrap_or(-1) }
+    };
+    for (row, _) in rows.iter_mut() {
+        row.on_pass = translate(row.on_pass);
+        row.on_fail = translate(row.on_fail);
+    }
+    rows
+}
+
+/// How many rows [`create_agent_chain`] would write for this plan. The command layer checks it
+/// against [`MAX_CHAIN_ROWS`] before anything is inserted.
+pub fn expanded_step_count(steps: &[NewChainStep], project_ids: &[String]) -> usize {
+    expand_steps(steps, project_ids).len()
 }
 
 /// Writes the plan. Every step's agent is snapshotted here, at authoring time — not at dispatch —
@@ -1368,17 +1561,40 @@ pub fn get_chain_detail(conn: &Connection, chain_id: &str) -> rusqlite::Result<O
 ///
 /// Created `paused`: nothing in this app starts an engine the user did not just ask it to. The
 /// frontend queues it in a second call, which is also what makes "create then decide" possible.
+///
+/// `project_ids` is the whole repository set, first one first. That first repository is also
+/// written to `agent_chains.project_id`, which is what every workspace-scoped query joins through
+/// and what a step that names no repository of its own falls back to.
 pub fn create_agent_chain(
     conn: &Connection,
-    project_id: &str,
+    project_ids: &[String],
     title: &str,
     goal: &str,
     steps: &[NewChainStep],
     agent_project_id: &str,
 ) -> rusqlite::Result<ChainDetail> {
+    create_chain_inner(conn, project_ids, title, goal, steps, agent_project_id, "chain", None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_chain_inner(
+    conn: &Connection,
+    project_ids: &[String],
+    title: &str,
+    goal: &str,
+    steps: &[NewChainStep],
+    agent_project_id: &str,
+    kind: &str,
+    work_item: Option<&NewStoryWorkItem>,
+) -> rusqlite::Result<ChainDetail> {
+    let Some(project_id) = project_ids.first() else {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    };
     let workspace_id: String =
         conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project_id], |r| r.get(0))?;
     let roster = list_workspace_agents(conn, &workspace_id)?;
+    let rows = expand_steps(steps, project_ids);
+    let item = work_item.cloned().unwrap_or_default();
 
     let tx = conn.unchecked_transaction()?;
     let stamp = now();
@@ -1391,15 +1607,25 @@ pub fn create_agent_chain(
         pinned: false,
         status: "paused".to_string(),
         current_step: 0,
-        step_count: steps.len() as i64,
+        step_count: rows.len() as i64,
         last_reason: String::new(),
+        dispatches: 0,
         created_at: stamp.clone(),
         updated_at: stamp.clone(),
+        kind: kind.to_string(),
+        work_item_provider: item.provider.clone(),
+        work_item_org: item.org.clone(),
+        work_item_id: item.id,
+        work_item_key: item.key.clone(),
+        work_item_url: item.url.clone(),
+        work_item_title: item.title.clone(),
+        repo_count: project_ids.len() as i64,
     };
     tx.execute(
         "INSERT INTO agent_chains (id, project_id, title, goal, status, current_step, step_count,
-            last_reason, created_at, updated_at, agent_project_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            last_reason, created_at, updated_at, agent_project_id, kind, work_item_provider,
+            work_item_org, work_item_id, work_item_key, work_item_url, work_item_title)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             chain.id,
             chain.project_id,
@@ -1412,21 +1638,41 @@ pub fn create_agent_chain(
             chain.created_at,
             chain.updated_at,
             chain.agent_project_id,
+            chain.kind,
+            chain.work_item_provider,
+            chain.work_item_org,
+            chain.work_item_id,
+            chain.work_item_key,
+            chain.work_item_url,
+            chain.work_item_title,
         ],
     )?;
 
-    for (index, step) in steps.iter().enumerate() {
+    // `INSERT OR IGNORE`, so the same repository picked twice is one repository rather than a
+    // primary-key failure that loses the whole chain.
+    for (position, id) in project_ids.iter().enumerate() {
+        tx.execute(
+            "INSERT OR IGNORE INTO agent_chain_repos (chain_id, project_id, position)
+             VALUES (?1, ?2, ?3)",
+            params![chain.id, id, position as i64],
+        )?;
+    }
+
+    for (index, (step, target)) in rows.iter().enumerate() {
         let agent = roster.iter().find(|a| a.id == step.agent_id);
         tx.execute(
-            "INSERT INTO agent_chain_steps (id, chain_id, step_index, agent_id, agent_name, provider,
-                model, prompt, instruction, gate, gate_cleared, pending_input, task_id, run_id,
-                log_count_at_dispatch, output_text, output_truncated, status, attempts, last_error,
-                created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, '', '', '', -1, '', 0, 'pending', 0, '', ?11, ?11)",
+            "INSERT INTO agent_chain_steps (id, chain_id, step_index, project_id, phase, agent_id,
+                agent_name, provider, model, prompt, instruction, gate, gate_cleared, pending_input,
+                task_id, run_id, log_count_at_dispatch, output_text, output_truncated, status,
+                attempts, last_error, check_command, on_pass, on_fail, feedback, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, '', '', '', -1, '', 0,
+                'pending', 0, '', ?14, ?15, ?16, '', ?13, ?13)",
             params![
                 Uuid::new_v4().to_string(),
                 chain.id,
                 index as i64,
+                target,
+                step.phase,
                 step.agent_id,
                 agent.map(|a| a.name.clone()).unwrap_or_default(),
                 agent.map(|a| a.provider.clone()).unwrap_or_default(),
@@ -1435,12 +1681,16 @@ pub fn create_agent_chain(
                 step.instruction,
                 step.gate,
                 stamp,
+                step.check_command.trim(),
+                step.on_pass,
+                step.on_fail,
             ],
         )?;
     }
     tx.commit()?;
     let steps = steps_of(conn, &chain.id)?;
-    Ok(ChainDetail { chain, steps })
+    let repos = chain_repos(conn, &chain.id)?;
+    Ok(ChainDetail { chain, steps, repos })
 }
 
 /// "Carry on from here": a chain whose first step is an existing task, already finished.
@@ -1476,10 +1726,16 @@ pub fn create_continuation_chain(
         agent_id: task.agent_id.clone(),
         instruction: task.goal.clone(),
         gate: false,
+        project_id: String::new(),
+        phase: String::new(),
+        ..Default::default()
     };
     let mut plan = vec![seed];
     plan.extend(steps.iter().cloned());
-    let detail = create_agent_chain(conn, &task.project_id, title, goal, &plan, agent_project_id)?;
+    // One repository: the task's own. Continuing from a task is continuing in the tree that task
+    // already edited, and a second repository here would have nothing to do with what came before.
+    let repos = [task.project_id.clone()];
+    let detail = create_agent_chain(conn, &repos, title, goal, &plan, agent_project_id)?;
 
     let (output, truncated) = clamp_handoff(answer.unwrap_or_default().trim());
     if let Some(first) = detail.steps.first() {
@@ -1491,6 +1747,182 @@ pub fn create_continuation_chain(
         )?;
     }
     get_chain_detail(conn, &detail.chain.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+// ---------- the story realizer ----------
+//
+// Two phases over N repositories, and no third concept: a story run *is* a chain, so it recovers
+// after a kill, parks at its gate and reports its steps through exactly the code every other chain
+// already goes through. What is special about it lives in three places and nowhere else — the
+// objective is a work item rather than a sentence somebody typed, the plan is generated instead of
+// authored, and the review in the middle is the point of the whole thing.
+
+/// How much of the work item's own text travels in **every** step's opening message.
+///
+/// Still smaller than [`HANDOFF_MAX`], and still for the same shape of reason — the objective is
+/// repeated on every step *in addition to* the previous step's answer — but no longer for the argv
+/// one, which is why this could rise with it. A work item with more than 12k characters of
+/// description is one whose detail belongs in the repository rather than in every prompt.
+const STORY_BRIEF_MAX: usize = 12_000;
+
+/// How much of a failed check's own output travels back to the agent being asked to fix it.
+///
+/// Smaller than a handoff and on purpose: a failing suite prints hundreds of passing lines around
+/// the handful that matter, and [`clamp_to`] keeps both ends, which for test output is the summary
+/// and the first failure.
+const CHECK_OUTPUT_MAX: usize = 8_000;
+
+/// Phase one, run once per candidate repository.
+///
+/// Deliberately read-only and deliberately shaped. The verdict line is what the review screen reads
+/// to pre-tick the repositories the story actually touches, so it has to be a fixed token on a line
+/// of its own rather than a sentence the model phrases its own way; everything under it is for the
+/// human.
+const STORY_ANALYZE_INSTRUCTION: &str = "\
+Read the user story in the objective above and inspect THIS repository — only this one.
+
+Decide whether this repository has to change for the story to be delivered, and if it does, plan \
+exactly what changes. Ground every claim in something you actually opened: name the files, the \
+symbols, the endpoints.
+
+**Do not edit, create or delete any file. This is a read-only pass.**
+
+Answer in Markdown, in this shape and starting with these three lines:
+
+VERDICT: TOUCHES | DOES NOT TOUCH
+CONFIDENCE: high | medium | low
+WHY: one or two sentences, naming the evidence you found.
+
+## Plan
+One bullet per change, each naming the file it lands in and what happens there. Leave this section \
+empty when the verdict is DOES NOT TOUCH.
+
+## Risks
+Anything that could break, anything you could not verify, and anything the story does not say.";
+
+/// Phase two, run once per repository the user kept.
+///
+/// The plan it carries out is whatever survived the review, which may be nothing like what phase one
+/// proposed — so this says the plan is the specification and refuses to improvise past it.
+const STORY_IMPLEMENT_INSTRUCTION: &str = "\
+Carry out the plan above in THIS repository. The plan is the specification, including any edit the \
+user made to it — where it is silent, follow this repository's own conventions rather than \
+inventing a new one.
+
+Change nothing the plan does not call for. If a step of it turns out to be wrong or impossible, \
+stop and say so instead of substituting a different change.
+
+Finish with a short summary: the files you changed, and why each one.";
+
+/// The objective every step of a story run opens with: the work item, then whatever the user added.
+fn compose_story_goal(item: &NewStoryWorkItem, notes: &str) -> String {
+    let mut out = String::new();
+    out.push_str("## User story\n");
+    let name = match item.key.trim().is_empty() {
+        true => format!("#{}", item.id),
+        false => item.key.trim().to_string(),
+    };
+    out.push_str(&format!("{name} — {}\n", item.title.trim()));
+    if !item.url.trim().is_empty() {
+        out.push_str(&format!("{}\n", item.url.trim()));
+    }
+    let (body, _) = clamp_to(item.body.trim(), STORY_BRIEF_MAX);
+    if !body.is_empty() {
+        out.push('\n');
+        out.push_str(&body);
+        out.push('\n');
+    }
+    if !notes.trim().is_empty() {
+        out.push_str("\n## Extra instructions from the user\n");
+        out.push_str(notes.trim());
+        out.push('\n');
+    }
+    out
+}
+
+/// A story run: analyse every candidate repository, stop for the user, then implement.
+///
+/// The plan is 2N rows — N analyses and N implementations — and the gate rides the **first**
+/// implementation. That is the whole two-phase shape the feature promises: nothing is written to any
+/// working copy until somebody has read what every repository proposed and said which of them go
+/// ahead.
+#[allow(clippy::too_many_arguments)]
+pub fn create_story_chain(
+    conn: &Connection,
+    project_ids: &[String],
+    title: &str,
+    notes: &str,
+    analyst_agent_id: &str,
+    implementer_agent_id: &str,
+    agent_project_id: &str,
+    work_item: &NewStoryWorkItem,
+) -> rusqlite::Result<ChainDetail> {
+    let goal = compose_story_goal(work_item, notes);
+    let mut steps: Vec<NewChainStep> = Vec::with_capacity(project_ids.len() * 2);
+    for id in project_ids {
+        steps.push(NewChainStep {
+            agent_id: analyst_agent_id.to_string(),
+            instruction: STORY_ANALYZE_INSTRUCTION.to_string(),
+            gate: false,
+            project_id: id.clone(),
+            phase: "analyze".to_string(),
+            ..Default::default()
+        });
+    }
+    for (at, id) in project_ids.iter().enumerate() {
+        steps.push(NewChainStep {
+            agent_id: implementer_agent_id.to_string(),
+            instruction: STORY_IMPLEMENT_INSTRUCTION.to_string(),
+            gate: at == 0,
+            project_id: id.clone(),
+            phase: "implement".to_string(),
+            ..Default::default()
+        });
+    }
+    create_chain_inner(
+        conn,
+        project_ids,
+        title,
+        &goal,
+        &steps,
+        agent_project_id,
+        "story",
+        Some(work_item),
+    )
+}
+
+/// Freezes the message one particular step will be sent.
+///
+/// [`approve_chain_gate`] does this for the step the chain is parked at; this does it for the ones
+/// behind it, which is what lets the review screen approve a plan for six repositories in one press
+/// instead of stopping at each. Refused once the step has left `pending` — rewriting the input of a
+/// step that has already run would be a lie about what produced its answer.
+pub fn set_chain_step_input(conn: &Connection, step_id: &str, input: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_chain_steps SET pending_input = ?2, updated_at = ?3
+         WHERE id = ?1 AND status = 'pending'",
+        params![step_id, input, now()],
+    )?;
+    Ok(())
+}
+
+/// Takes one step out of the plan, or puts it back.
+///
+/// The chain-wide [`skip_chain_step`] only reaches the step the plan is currently waiting on, which
+/// is the right shape for "I don't want this one to run now". This is the other shape: the review
+/// screen deciding, before any of them runs, that four of the six repositories are not part of this
+/// story after all. Only ever moves between `pending` and `skipped`, so it can never rewrite the
+/// history of a step that already ran.
+pub fn set_chain_step_skipped(conn: &Connection, step_id: &str, skipped: bool) -> rusqlite::Result<()> {
+    let (from, to) = match skipped {
+        true => ("pending", "skipped"),
+        false => ("skipped", "pending"),
+    };
+    conn.execute(
+        "UPDATE agent_chain_steps SET status = ?2, updated_at = ?3 WHERE id = ?1 AND status = ?4",
+        params![step_id, to, now(), from],
+    )?;
+    Ok(())
 }
 
 fn idle_claim(chain: AgentChain) -> ChainClaim {
@@ -1511,12 +1943,19 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
         return Ok(idle_claim(chain));
     }
 
+    let Some(step) = next_pending_step(conn, chain_id)? else {
+        set_chain_state(conn, chain_id, "done", "")?;
+        return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
+    };
+
     // The repository can be gone even though the chain is not: `projects` cascades to
-    // `agent_chains`, but a claim racing the delete would otherwise create a task in a vacuum.
+    // `agent_chains` through the chain's *primary* repository only, so any other one in the set can
+    // be removed from the workspace while a plan is parked at a gate. Read off the step rather than
+    // off the chain — a claim racing that delete would otherwise create a task in a vacuum.
     let project: Option<(String, String)> = conn
         .query_row(
             "SELECT workspace_id, local_path FROM projects WHERE id = ?1",
-            params![chain.project_id],
+            params![step.project_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -1525,20 +1964,16 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
         return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
     };
 
-    let Some(step) = next_pending_step(conn, chain_id)? else {
-        set_chain_state(conn, chain_id, "done", "")?;
-        return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
-    };
-
     // A gate parks the chain *before* the step, and freezes the message while it waits — so what
     // the user approves is byte-for-byte what runs, however long they take to look at it.
     if step.gate && !step.gate_cleared {
         if step.pending_input.is_empty() {
-            let previous = previous_output(conn, chain_id, step.step_index)?;
+            let previous = previous_output(conn, chain_id, step.step_index, &step.project_id)?;
             let message = compose_chain_input(
                 &chain.goal,
                 &step.instruction,
                 previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
+                &step.feedback,
             );
             conn.execute(
                 "UPDATE agent_chain_steps SET pending_input = ?2, updated_at = ?3 WHERE id = ?1",
@@ -1572,6 +2007,14 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
         return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
     }
 
+    // The loop's stop. Checked here rather than where the jump is decided because this is the only
+    // place work is actually handed out — a budget enforced at the branch would be a budget that a
+    // recovered step, a manual retry or a resumed chain each walk around by a different door.
+    if chain.dispatches >= MAX_CHAIN_DISPATCHES {
+        set_chain_state(conn, chain_id, "failed", "chain.dispatchesExhausted")?;
+        return Ok(idle_claim(chain_row(conn, chain_id)?.unwrap_or(chain)));
+    }
+
     let tx = conn.unchecked_transaction()?;
 
     // The workspace is read live off `projects`, so a repository moved between workspaces files
@@ -1590,7 +2033,7 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
             create_agent_task(
                 &tx,
                 &workspace_id,
-                &chain.project_id,
+                &step.project_id,
                 &step.agent_id,
                 &step.agent_name,
                 &step.provider,
@@ -1604,11 +2047,12 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
     };
 
     let message = if step.pending_input.is_empty() {
-        let previous = previous_output(&tx, chain_id, step.step_index)?;
+        let previous = previous_output(&tx, chain_id, step.step_index, &step.project_id)?;
         compose_chain_input(
             &chain.goal,
             &step.instruction,
             previous.as_ref().map(|(name, index, text)| (name.as_str(), *index, text.as_str())),
+            &step.feedback,
         )
     } else {
         step.pending_input.clone()
@@ -1619,7 +2063,7 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
     // hand it forward as though it were the plan.
     let log_count: i64 = tx.query_row(
         "SELECT COUNT(*) FROM activity_log WHERE project_id = ?1 AND session_id = ?2",
-        params![chain.project_id, task.conversation_id],
+        params![task.project_id, task.conversation_id],
         |row| row.get(0),
     )?;
 
@@ -1630,19 +2074,111 @@ pub fn claim_next_chain_step(conn: &Connection, chain_id: &str, run_id: &str) ->
         params![step.id, task.id, run_id, message, log_count, now()],
     )?;
     tx.execute(
-        "UPDATE agent_chains SET status = 'running', current_step = ?2, last_reason = '', updated_at = ?3
+        "UPDATE agent_chains SET status = 'running', current_step = ?2, last_reason = '',
+            dispatches = dispatches + 1, updated_at = ?3
          WHERE id = ?1",
         params![chain_id, step.step_index, now()],
     )?;
     tx.commit()?;
 
     let chain = chain_row(conn, chain_id)?.unwrap_or(chain);
-    let step = conn.query_row(
-        &format!("SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE id = ?1"),
-        params![step.id],
-        map_step,
-    )?;
+    let step = step_row(conn, &step.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     Ok(ChainClaim { chain, kind: "run".to_string(), task: Some(task), step: Some(step), message })
+}
+
+/// What the step that sent the plan backwards has to say for itself, as the next attempt will read
+/// it: its own answer, and the output of the command that rejected it.
+///
+/// Both halves, because they answer different questions. The check's output is *what* is wrong — a
+/// failing test name, a compiler error — and is the part a machine produced, so it is quoted as
+/// found. The step's answer is *what was attempted*, which is what stops the next pass from
+/// redoing the same thing a slightly different way.
+fn rejection_note(step: &AgentChainStep, answer: &str, check_output: &str) -> String {
+    let mut note = format!("Step {} ({}) rejected this work.\n", step.step_index + 1, step.agent_name);
+    if !step.check_command.trim().is_empty() {
+        note.push_str(&format!("\nThe check that failed was: `{}`\n", step.check_command.trim()));
+    }
+    if !check_output.trim().is_empty() {
+        // Its own budget rather than the handoff's: a failing test suite prints far more than
+        // anyone needs, and the useful part is at both ends.
+        let (clamped, _) = clamp_to(check_output.trim(), CHECK_OUTPUT_MAX);
+        note.push_str(&format!("\n```\n{clamped}\n```\n"));
+    }
+    if !answer.trim().is_empty() {
+        note.push_str(&format!("\nWhat that step reported:\n\n{}\n", answer.trim()));
+    }
+    note
+}
+
+/// Moves the plan to `target`, in whichever direction that turns out to be.
+///
+/// **This is the whole of the graph, and it is why there is no edge table.** Forward is marking
+/// what was jumped over as `skipped`; backward is putting everything from the target onwards back
+/// to `pending`. Either way exactly one row is left for [`next_pending_step`] to find, so the
+/// selector that used to walk a list walks a graph without a line changing: the rows around the
+/// cursor are told the truth, and the cursor falls out of them.
+///
+/// What a backward jump clears is chosen by what would otherwise be a lie on the second lap:
+/// `pending_input` because a frozen message is last lap's message, `gate_cleared` because an
+/// approval was given for work that has since been rejected, `last_error` because it belongs to a
+/// run that is being redone. What it deliberately does **not** clear is `attempts` — a step that
+/// has run three times has run three times, whether that was three crashes or three rejections,
+/// and each one cost an engine session against a real working copy.
+fn jump_to(
+    conn: &Connection,
+    chain_id: &str,
+    from_index: i64,
+    target: i64,
+    feedback: &str,
+) -> rusqlite::Result<()> {
+    if target > from_index {
+        // Forward: everything stepped over is `skipped` rather than left `pending`, or the
+        // selector would simply hand back the first of them and the branch would do nothing.
+        conn.execute(
+            "UPDATE agent_chain_steps SET status = 'skipped', updated_at = ?4
+             WHERE chain_id = ?1 AND step_index > ?2 AND step_index < ?3 AND status = 'pending'",
+            params![chain_id, from_index, target, now()],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE agent_chain_steps SET status = 'pending', pending_input = '', gate_cleared = 0,
+                run_id = '', last_error = '', updated_at = ?3
+             WHERE chain_id = ?1 AND step_index >= ?2",
+            params![chain_id, target, now()],
+        )?;
+    }
+    if !feedback.trim().is_empty() {
+        conn.execute(
+            "UPDATE agent_chain_steps SET feedback = ?3, updated_at = ?4
+             WHERE chain_id = ?1 AND step_index = ?2",
+            params![chain_id, target, feedback, now()],
+        )?;
+    }
+    Ok(())
+}
+
+/// What a step's check needs in order to run: the command, and the working copy to run it in.
+///
+/// Both come off the *step* rather than off the chain — a multi-repo plan runs each step somewhere
+/// else, and a check that ran in the chain's primary repository while its step edited another would
+/// pass or fail on the wrong tree. `None` when there is no check, or when the repository it named
+/// has left the workspace.
+pub fn chain_step_check(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<(String, String)>> {
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT s.check_command, p.local_path
+               FROM agent_chain_steps s LEFT JOIN projects p ON p.id = s.project_id
+              WHERE s.id = ?1",
+            params![step_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((command, Some(path))) if !command.trim().is_empty() && !path.trim().is_empty() => {
+            Some((command.trim().to_string(), path))
+        }
+        _ => None,
+    })
 }
 
 /// Records how a dispatched step ended, and decides where the chain goes next.
@@ -1657,25 +2193,27 @@ pub fn complete_chain_step(
     output_text: &str,
     reason: &str,
 ) -> rusqlite::Result<Option<AgentChain>> {
-    let step: Option<AgentChainStep> = conn
-        .query_row(
-            &format!("SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE id = ?1"),
-            params![step_id],
-            map_step,
-        )
-        .optional()?;
-    let Some(step) = step else { return Ok(None) };
+    let Some(step) = step_row(conn, step_id)? else { return Ok(None) };
     let chain_id = step.chain_id.clone();
 
     match outcome {
         "done" => {
             let (clamped, truncated) = clamp_handoff(output_text.trim());
+            // `feedback` is cleared here and only here: it described the rejection that sent the
+            // plan back to this step, and this step has now passed. Leaving it would make the next
+            // lap of an unrelated loop open with a complaint about work that was already fixed.
             conn.execute(
                 "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3,
-                    run_id = '', last_error = '', updated_at = ?4
+                    run_id = '', last_error = '', feedback = '', updated_at = ?4
                  WHERE id = ?1",
                 params![step.id, clamped, truncated, now()],
             )?;
+            // A pass may still be a jump: `on_pass` is how a plan branches forward past steps that
+            // this one made unnecessary. `-1` and "the next one" are the same thing and neither
+            // needs the rows around it touched.
+            if step.on_pass >= 0 && step.on_pass != step.step_index + 1 {
+                jump_to(conn, &chain_id, step.step_index, step.on_pass, "")?;
+            }
             match next_pending_step(conn, &chain_id)? {
                 None => set_chain_state(conn, &chain_id, "done", "")?,
                 Some(next) => {
@@ -1694,13 +2232,50 @@ pub fn complete_chain_step(
                 }
             }
         }
-        "error" => {
+        // A failed turn goes back in the queue while there are attempts left, instead of stopping
+        // the plan and waiting for somebody to press Retry.
+        //
+        // The old behaviour made a chain only as autonomous as the person watching it: one flaky
+        // turn — a rate limit, a dropped connection, an engine that came back empty on a bad
+        // minute — parked eight steps of work until a human noticed. Nothing about that first
+        // failure needed a decision, and the decision it asked for was always "try again".
+        //
+        // This cannot spin. `claim_next_chain_step` increments `attempts` before it dispatches and
+        // refuses outright at [`MAX_STEP_ATTEMPTS`], so the retries are counted by the same code
+        // that hands the work out; the step is `pending` rather than `error` because that is what
+        // makes it eligible, and `queued` is the one chain state the frontend driver continues on.
+        // The reason travels either way, so a chain retrying says *why* while it does it rather
+        // than looking idle.
+        // The step answered and then its own declared check came back non-zero. **This is the one
+        // outcome the feature never had**: every other branch here is about whether a turn
+        // happened, and this is the first that is about whether what it produced is any good.
+        //
+        // Deliberately not a failure of the turn. The answer is recorded — it is what the next
+        // attempt has to work from — and where the plan goes is `on_fail`'s to say: back to an
+        // earlier step (the loop), or, with no target, this step again with the check's own output
+        // told to it. Nothing decides here whether that is allowed; `claim_next_chain_step` refuses
+        // an exhausted step and an exhausted budget, and it is the only place that hands work out.
+        "check_failed" => {
+            let (clamped, truncated) = clamp_handoff(output_text.trim());
             conn.execute(
-                "UPDATE agent_chain_steps SET status = 'error', run_id = '', last_error = ?2, updated_at = ?3
+                "UPDATE agent_chain_steps SET output_text = ?2, output_truncated = ?3, run_id = '',
+                    last_error = 'chain.checkFailed', updated_at = ?4
                  WHERE id = ?1",
-                params![step.id, reason, now()],
+                params![step.id, clamped, truncated, now()],
             )?;
-            set_chain_state(conn, &chain_id, "failed", reason)?;
+            let target = if step.on_fail >= 0 { step.on_fail } else { step.step_index };
+            let note = rejection_note(&step, &clamped, reason);
+            jump_to(conn, &chain_id, step.step_index, target, &note)?;
+            set_chain_state(conn, &chain_id, "queued", "chain.checkFailed")?;
+        }
+        "error" => {
+            let retryable = step.attempts < MAX_STEP_ATTEMPTS;
+            conn.execute(
+                "UPDATE agent_chain_steps SET status = ?2, run_id = '', last_error = ?3, updated_at = ?4
+                 WHERE id = ?1",
+                params![step.id, if retryable { "pending" } else { "error" }, reason, now()],
+            )?;
+            set_chain_state(conn, &chain_id, if retryable { "queued" } else { "failed" }, reason)?;
         }
         // Back to `pending`, never to `error`: the turn was either stopped (never persisted) or
         // refused before it ran (the repository was busy), so re-sending the identical message
@@ -1741,9 +2316,9 @@ pub fn skip_chain_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<Op
     let target: Option<AgentChainStep> = conn
         .query_row(
             &format!(
-                "SELECT {STEP_COLUMNS} FROM agent_chain_steps
-                 WHERE chain_id = ?1 AND status IN ('pending', 'error', 'interrupted')
-                 ORDER BY step_index LIMIT 1"
+                "SELECT {STEP_COLUMNS} {STEP_FROM}
+                 WHERE s.chain_id = ?1 AND s.status IN ('pending', 'error', 'interrupted')
+                 ORDER BY s.step_index LIMIT 1"
             ),
             params![chain_id],
             map_step,
@@ -1768,8 +2343,9 @@ pub fn retry_chain_step(conn: &Connection, chain_id: &str) -> rusqlite::Result<O
     let target: Option<AgentChainStep> = conn
         .query_row(
             &format!(
-                "SELECT {STEP_COLUMNS} FROM agent_chain_steps
-                 WHERE chain_id = ?1 AND status IN ('error', 'interrupted') ORDER BY step_index LIMIT 1"
+                "SELECT {STEP_COLUMNS} {STEP_FROM}
+                 WHERE s.chain_id = ?1 AND s.status IN ('error', 'interrupted')
+                 ORDER BY s.step_index LIMIT 1"
             ),
             params![chain_id],
             map_step,
@@ -1839,14 +2415,7 @@ fn harvest_row(conn: &Connection, step: &AgentChainStep) -> rusqlite::Result<Opt
 /// Polled by the frontend for a step whose run outlived the webview. Completes it the moment its
 /// turn lands, so a reload costs the log but never the work.
 pub fn harvest_chain_step(conn: &Connection, step_id: &str) -> rusqlite::Result<Option<AgentChain>> {
-    let step: Option<AgentChainStep> = conn
-        .query_row(
-            &format!("SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE id = ?1"),
-            params![step_id],
-            map_step,
-        )
-        .optional()?;
-    let Some(step) = step else { return Ok(None) };
+    let Some(step) = step_row(conn, step_id)? else { return Ok(None) };
     if step.status != "running" {
         return chain_row(conn, &step.chain_id);
     }
@@ -1870,7 +2439,7 @@ pub fn harvest_chain_step(conn: &Connection, step_id: &str) -> rusqlite::Result<
 pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
     let running: Vec<AgentChainStep> = {
         let mut stmt = conn.prepare(&format!(
-            "SELECT {STEP_COLUMNS} FROM agent_chain_steps WHERE status = 'running'"
+            "SELECT {STEP_COLUMNS} {STEP_FROM} WHERE s.status = 'running'"
         ))?;
         let rows = stmt.query_map([], map_step)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -1934,7 +2503,7 @@ pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
 
 fn template_steps(conn: &Connection, template_id: &str) -> rusqlite::Result<Vec<ChainTemplateStep>> {
     let mut stmt = conn.prepare(
-        "SELECT id, template_id, step_index, agent_id, instruction, gate
+        "SELECT id, template_id, step_index, agent_id, instruction, gate, check_command, on_pass, on_fail
          FROM workspace_chain_template_steps WHERE template_id = ?1 ORDER BY step_index",
     )?;
     let rows = stmt.query_map(params![template_id], |row| {
@@ -1945,6 +2514,9 @@ fn template_steps(conn: &Connection, template_id: &str) -> rusqlite::Result<Vec<
             agent_id: row.get(3)?,
             instruction: row.get(4)?,
             gate: row.get(5)?,
+            check_command: row.get(6)?,
+            on_pass: row.get(7)?,
+            on_fail: row.get(8)?,
         })
     })?;
     rows.collect()
@@ -2007,15 +2579,19 @@ pub fn upsert_chain_template(
     tx.execute("DELETE FROM workspace_chain_template_steps WHERE template_id = ?1", params![template_id])?;
     for (index, step) in steps.iter().enumerate() {
         tx.execute(
-            "INSERT INTO workspace_chain_template_steps (id, template_id, step_index, agent_id, instruction, gate)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO workspace_chain_template_steps (id, template_id, step_index, agent_id,
+                instruction, gate, check_command, on_pass, on_fail)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 Uuid::new_v4().to_string(),
                 template_id,
                 index as i64,
                 step.agent_id,
                 step.instruction,
-                step.gate
+                step.gate,
+                step.check_command.trim(),
+                step.on_pass,
+                step.on_fail,
             ],
         )?;
     }
@@ -3662,4 +4238,422 @@ mod tests {
         assert_eq!(left.len(), 1, "the workspace document survives; the repository one does not");
         assert_eq!(left[0].scope, "workspace");
     }
+
+    /// A chain of `steps` instructions, queued and ready to be claimed, plus the routable agent
+    /// every step is snapshotted from — without provider *and* model the scheduler refuses to
+    /// dispatch at all, which would make any test below pass for the wrong reason.
+    /// A plan whose steps carry a check and a failure target, queued and ready to claim.
+    fn queued_plan(conn: &Connection, project: &str, plan: &[(&str, i64)]) -> ChainDetail {
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+        let agent =
+            upsert_workspace_agent(conn, None, &workspace, "Bot", "role", "claude", "sonnet", "", true).unwrap();
+        let steps: Vec<NewChainStep> = plan
+            .iter()
+            .enumerate()
+            .map(|(at, (check, on_fail))| NewChainStep {
+                agent_id: agent.id.clone(),
+                instruction: format!("step {at}"),
+                check_command: check.to_string(),
+                on_fail: *on_fail,
+                ..Default::default()
+            })
+            .collect();
+        let detail = create_agent_chain(conn, &[project.to_string()], "plan", "objetivo", &steps, "").unwrap();
+        resume_chain(conn, &detail.chain.id).unwrap();
+        detail
+    }
+
+    fn queued_chain(conn: &Connection, project: &str, steps: usize) -> ChainDetail {
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+                .unwrap();
+        let agent =
+            upsert_workspace_agent(conn, None, &workspace, "Bot", "role", "claude", "sonnet", "", true).unwrap();
+        let plan: Vec<NewChainStep> = (0..steps)
+            .map(|at| NewChainStep {
+                agent_id: agent.id.clone(),
+                instruction: format!("step {at}"),
+                ..Default::default()
+            })
+            .collect();
+        let detail =
+            create_agent_chain(conn, &[project.to_string()], "plan", "objetivo", &plan, "").unwrap();
+        resume_chain(conn, &detail.chain.id).unwrap();
+        detail
+    }
+
+
+    /// The loop. A later step rejects the work and the plan goes **back**, which is the thing a
+    /// chain could not express at all before `on_fail` existed.
+    ///
+    /// What it checks beyond "it went back" is the part that makes the loop worth having: the step
+    /// it lands on is `pending` again with its frozen message cleared, and it is carrying the
+    /// rejection. A second lap that re-received its original instruction verbatim would produce its
+    /// original answer verbatim, and the plan would go round forever getting nowhere.
+    #[test]
+    fn a_failed_check_sends_the_plan_back_and_tells_it_why() {
+        let (conn, project) = fixture();
+        // Step 0 implements, step 1 reviews and sends it back to 0 when its check fails.
+        let chain_id = queued_plan(&conn, &project, &[("", -1), ("exit 1", 0)]).chain.id;
+
+        let first = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        complete_chain_step(&conn, &first.id, "done", "primer intento", "").unwrap();
+        let reviewer = claim_next_chain_step(&conn, &chain_id, "run-2").unwrap().step.unwrap();
+        assert_eq!(reviewer.step_index, 1);
+
+        let chain = complete_chain_step(&conn, &reviewer.id, "check_failed", "no me gusta", "FAIL: 2 tests")
+            .unwrap()
+            .unwrap();
+        assert_eq!(chain.status, "queued", "a rejection keeps the plan moving, it does not park it");
+        assert_eq!(chain.last_reason, "chain.checkFailed");
+
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[0].status, "pending", "step 0 runs again");
+        assert_eq!(steps[1].status, "pending", "and so does everything after it");
+        assert_eq!(steps[0].pending_input, "", "last lap's frozen message is gone");
+        assert!(steps[0].feedback.contains("FAIL: 2 tests"), "the check's own output travels back");
+        assert!(steps[0].feedback.contains("no me gusta"), "and so does what the reviewer said");
+
+        // And the second lap actually opens with it, rather than merely storing it.
+        let again = claim_next_chain_step(&conn, &chain_id, "run-3").unwrap();
+        assert_eq!(again.step.unwrap().step_index, 0);
+        assert!(again.message.contains("FAIL: 2 tests"), "the message the agent gets carries the rejection");
+    }
+
+    /// The same rejection with nowhere to send it: the step retries **itself**, which is what makes
+    /// a check useful on a plan with only one step in it.
+    #[test]
+    fn a_failed_check_with_no_target_retries_the_step_that_failed_it() {
+        let (conn, project) = fixture();
+        let chain_id = queued_plan(&conn, &project, &[("exit 1", -1), ("", -1)]).chain.id;
+
+        let step = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        complete_chain_step(&conn, &step.id, "check_failed", "hecho", "boom").unwrap();
+
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[0].status, "pending");
+        assert!(steps[0].feedback.contains("boom"));
+        assert_eq!(steps[1].status, "pending", "the plan never got past the step that failed");
+
+        let again = claim_next_chain_step(&conn, &chain_id, "run-2").unwrap().step.unwrap();
+        assert_eq!(again.step_index, 0, "the same step, not the one behind it");
+        assert_eq!(again.attempts, 2, "and it costs an attempt, which is what bounds this");
+    }
+
+    /// Forward is the other direction the same mechanism gives: a step that passes can declare the
+    /// work behind it unnecessary. What is jumped over must end up `skipped` rather than left
+    /// `pending`, or the selector would simply hand back the first of them and the branch would
+    /// quietly do nothing at all.
+    #[test]
+    fn a_step_can_branch_forward_past_work_it_made_unnecessary() {
+        let (conn, project) = fixture();
+        let chain_id = queued_plan(&conn, &project, &[("", -1), ("", -1), ("", -1)]).chain.id;
+        conn.execute(
+            "UPDATE agent_chain_steps SET on_pass = 2 WHERE chain_id = ?1 AND step_index = 0",
+            params![chain_id],
+        )
+        .unwrap();
+
+        let first = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        complete_chain_step(&conn, &first.id, "done", "ya está", "").unwrap();
+
+        let landed = claim_next_chain_step(&conn, &chain_id, "run-2").unwrap().step.unwrap();
+        assert_eq!(landed.step_index, 2, "it went where it was told");
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[1].status, "skipped", "and what it stepped over says so");
+    }
+
+    /// The stop on the loop, walked all the way to the end.
+    ///
+    /// A plan that can send itself backwards is a program, and a program with no bound is one that
+    /// runs an engine against a real working copy until somebody notices. This drives an
+    /// unconditional loop as far as it will go and asserts it lands on a **failed** chain rather
+    /// than on a chain that is still, quietly, `queued`.
+    #[test]
+    fn an_unconditional_loop_runs_out_of_budget_instead_of_running_forever() {
+        let (conn, project) = fixture();
+        let chain_id = queued_plan(&conn, &project, &[("", -1), ("exit 1", 0)]).chain.id;
+
+        // Far more laps than either bound allows; the assertion is that it stops on its own.
+        let mut dispatched = 0;
+        for at in 0..64 {
+            let claim = claim_next_chain_step(&conn, &chain_id, &format!("run-{at}")).unwrap();
+            let Some(step) = claim.step else { break };
+            dispatched += 1;
+            let outcome = if step.check_command.is_empty() { "done" } else { "check_failed" };
+            complete_chain_step(&conn, &step.id, outcome, "algo", "rechazado").unwrap();
+        }
+
+        let chain = chain_row(&conn, &chain_id).unwrap().unwrap();
+        assert_eq!(chain.status, "failed", "the loop stopped itself");
+        assert!(dispatched < 64, "and it stopped before the test ran out of patience");
+        assert!(
+            chain.dispatches <= MAX_CHAIN_DISPATCHES,
+            "never over budget: {} dispatches",
+            chain.dispatches
+        );
+    }
+
+    /// The auto-retry, and the half of it that matters: that it **stops**.
+    ///
+    /// A retry loop whose bound lives anywhere other than the code handing the work out is a retry
+    /// loop that can spin, and a spinning chain here does not merely burn tokens — every attempt is
+    /// an engine session against a real working copy. So this walks the whole thing: three failures
+    /// are three dispatches, the fourth claim is refused, and the plan is left `failed` rather than
+    /// quietly `queued` forever.
+    #[test]
+    fn a_failed_step_is_retried_by_itself_and_then_gives_up() {
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 2).chain.id;
+
+        for attempt in 1..=MAX_STEP_ATTEMPTS {
+            let claim = claim_next_chain_step(&conn, &chain_id, &format!("run-{attempt}")).unwrap();
+            assert_eq!(claim.kind, "run", "attempt {attempt} should have been dispatched");
+            let step = claim.step.unwrap();
+            assert_eq!(step.attempts, attempt, "the claim is what counts the attempts");
+
+            let chain = complete_chain_step(&conn, &step.id, "error", "", "boom").unwrap().unwrap();
+            if attempt < MAX_STEP_ATTEMPTS {
+                assert_eq!(chain.status, "queued", "with attempts left the plan keeps itself moving");
+                assert_eq!(chain.last_reason, "boom", "and says why while it does");
+            } else {
+                assert_eq!(chain.status, "failed", "the last attempt stops the plan");
+            }
+        }
+
+        // The one that would have been the fourth. `claim_next_chain_step` refuses a chain that is
+        // not `queued`, so this is idle either way — what it proves is that nothing put it back.
+        let after = claim_next_chain_step(&conn, &chain_id, "run-4").unwrap();
+        assert_eq!(after.kind, "idle");
+        assert_eq!(after.chain.status, "failed");
+
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[0].status, "error", "the exhausted step is finally an error, not pending");
+        assert_eq!(steps[1].status, "pending", "and the plan never reached the step behind it");
+    }
+
+    /// The other half: a retried step that *works* carries on into the rest of the plan, rather
+    /// than the retry being a dead end that only ever ends in `failed`.
+    #[test]
+    fn a_step_that_fails_once_and_then_answers_carries_the_plan_on() {
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 2).chain.id;
+
+        let first = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        complete_chain_step(&conn, &first.id, "error", "", "flaky").unwrap();
+
+        let retried = claim_next_chain_step(&conn, &chain_id, "run-2").unwrap().step.unwrap();
+        assert_eq!(retried.id, first.id, "the same step, not the one behind it");
+        let chain = complete_chain_step(&conn, &retried.id, "done", "el plan", "").unwrap().unwrap();
+        assert_eq!(chain.status, "queued");
+
+        let second = claim_next_chain_step(&conn, &chain_id, "run-3").unwrap().step.unwrap();
+        assert_eq!(second.step_index, 1, "the plan moved on");
+
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[0].status, "done");
+        assert_eq!(steps[0].output_text, "el plan", "the failed attempt left no residue on it");
+    }
+}
+
+// ---------- what the engines have spent ----------
+//
+// One row per finished run that reported anything. Global rather than per workspace: an engine's
+// consumption is an account's, and splitting it by which folder happened to be open would answer a
+// question nobody is asking of a status bar.
+
+/// Files one run's report. Silently a no-op for a run that reported nothing worth keeping — the
+/// caller checks too, and a meter is never worth failing a turn over.
+pub fn record_ai_usage(
+    conn: &Connection,
+    provider: &str,
+    model: &str,
+    usage: &crate::ai::AiUsage,
+) -> rusqlite::Result<()> {
+    if usage.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO ai_usage (id, provider, model, input_tokens, output_tokens, cache_read_tokens,
+            cache_write_tokens, cost_usd, has_cost, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            Uuid::new_v4().to_string(),
+            provider,
+            model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+            usage.cost_usd.unwrap_or(0.0),
+            usage.cost_usd.is_some(),
+            now(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Everything recorded since `cutoff`, one row per provider.
+///
+/// `cost_usd` sums only the runs that actually reported a cost, and `costed_runs` says how many
+/// those were — an engine that never reports one must read as "not reported" and not as free.
+fn usage_since(conn: &Connection, cutoff: &str) -> rusqlite::Result<Vec<crate::ai_usage::UsageWindow>> {
+    let mut stmt = conn.prepare(
+        "SELECT provider, COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
+                COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN has_cost THEN 1 ELSE 0 END), 0)
+         FROM ai_usage WHERE created_at >= ?1
+         GROUP BY provider ORDER BY provider",
+    )?;
+    let rows = stmt.query_map(params![cutoff], |row| {
+        Ok(crate::ai_usage::UsageWindow {
+            provider: row.get(0)?,
+            runs: row.get(1)?,
+            input_tokens: row.get(2)?,
+            output_tokens: row.get(3)?,
+            cache_read_tokens: row.get(4)?,
+            cache_write_tokens: row.get(5)?,
+            cost_usd: row.get(6)?,
+            costed_runs: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// The two windows the status bar draws, and a sweep of anything too old to be in either.
+///
+/// The sweep rides on the read rather than on a timer: this table is written to on every AI turn,
+/// the bar reads it every few seconds while the app is open, and a `DELETE` bounded by an index is
+/// cheaper than the machinery a scheduled job would need.
+pub fn ai_usage_summary(conn: &Connection) -> rusqlite::Result<crate::ai_usage::UsageSummary> {
+    let stamp = |ago: chrono::Duration| (Utc::now() - ago).trunc_subsecs(6).to_rfc3339();
+    conn.execute(
+        "DELETE FROM ai_usage WHERE created_at < ?1",
+        params![stamp(chrono::Duration::days(crate::ai_usage::KEEP_DAYS))],
+    )?;
+    let session = usage_since(conn, &stamp(chrono::Duration::hours(crate::ai_usage::SESSION_HOURS)))?;
+    let week = usage_since(conn, &stamp(chrono::Duration::days(crate::ai_usage::WEEK_DAYS)))?;
+    let since: Option<String> = conn
+        .query_row("SELECT MIN(created_at) FROM ai_usage", [], |row| row.get(0))
+        .optional()?
+        .flatten();
+    Ok(crate::ai_usage::UsageSummary { session, week, since: since.unwrap_or_default() })
+}
+
+/// Everything the statistics screen draws, for one window.
+///
+/// Bucketing is done in SQL, on the timestamp string. That works because `now()` writes RFC 3339 in
+/// UTC with a fixed shape, so `strftime` reads it and the buckets are real instants rather than
+/// row-order approximations — and because a month of turns is thousands of rows the frontend has no
+/// business folding itself.
+///
+/// The series is **gap-filled** afterwards: SQL only returns the buckets that have a row in them,
+/// and a chart drawn from those alone would silently close up the quiet hours and show a week of
+/// steady work where there was a burst and four idle days.
+pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<crate::ai_usage::UsageStats> {
+    let hours = window_hours.clamp(1, 24 * 90);
+    let bucket_minutes = crate::ai_usage::bucket_minutes_for(hours);
+    let bucket_seconds = bucket_minutes * 60;
+    let now = Utc::now().trunc_subsecs(6);
+    let from = now - chrono::Duration::hours(hours);
+    let cutoff = from.to_rfc3339();
+
+    // Aligned to the epoch rather than to "now minus N": a bucket boundary that moves every time
+    // the screen is opened makes two readings of the same window disagree about which column a
+    // turn belongs in.
+    let mut stmt = conn.prepare(
+        "SELECT CAST(strftime('%s', created_at) AS INTEGER) / ?2 AS bucket,
+                COUNT(*),
+                COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0),
+                COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0)
+         FROM ai_usage WHERE created_at >= ?1
+         GROUP BY bucket ORDER BY bucket",
+    )?;
+    let rows = stmt.query_map(params![cutoff, bucket_seconds], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, f64>(3)?))
+    })?;
+    let filled: std::collections::HashMap<i64, (i64, i64, f64)> =
+        rows.map(|r| r.map(|(bucket, runs, tokens, cost)| (bucket, (runs, tokens, cost)))).collect::<rusqlite::Result<_>>()?;
+
+    let first = from.timestamp() / bucket_seconds;
+    let last = now.timestamp() / bucket_seconds;
+    let mut series = Vec::with_capacity((last - first + 1).max(0) as usize);
+    let mut peak_tokens = 0;
+    for bucket in first..=last {
+        let (runs, tokens, cost) = filled.get(&bucket).copied().unwrap_or((0, 0, 0.0));
+        peak_tokens = peak_tokens.max(tokens);
+        series.push(crate::ai_usage::UsageBucket {
+            start: chrono::DateTime::from_timestamp(bucket * bucket_seconds, 0)
+                .map(|stamp| stamp.to_rfc3339())
+                .unwrap_or_default(),
+            runs,
+            tokens,
+            cost_usd: cost,
+        });
+    }
+
+    let mut stmt = conn.prepare(
+        "SELECT provider, COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
+                COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN has_cost THEN 1 ELSE 0 END), 0)
+         FROM ai_usage WHERE created_at >= ?1
+         GROUP BY provider
+         ORDER BY SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC",
+    )?;
+    let providers = stmt
+        .query_map(params![cutoff], |row| {
+            Ok(crate::ai_usage::ProviderStat {
+                provider: row.get(0)?,
+                runs: row.get(1)?,
+                input_tokens: row.get(2)?,
+                output_tokens: row.get(3)?,
+                cache_read_tokens: row.get(4)?,
+                cache_write_tokens: row.get(5)?,
+                cost_usd: row.get(6)?,
+                costed_runs: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Capped: a workspace that routes per task across many models would otherwise turn the table
+    // into the whole screen, and the tail of it is never the answer to anything.
+    let mut stmt = conn.prepare(
+        "SELECT provider, model, COUNT(*),
+                COALESCE(SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens), 0) AS tokens,
+                COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN has_cost THEN 1 ELSE 0 END), 0)
+         FROM ai_usage WHERE created_at >= ?1
+         GROUP BY provider, model ORDER BY tokens DESC LIMIT 24",
+    )?;
+    let models = stmt
+        .query_map(params![cutoff], |row| {
+            Ok(crate::ai_usage::ModelStat {
+                provider: row.get(0)?,
+                model: row.get(1)?,
+                runs: row.get(2)?,
+                tokens: row.get(3)?,
+                cost_usd: row.get(4)?,
+                costed_runs: row.get(5)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let since: Option<String> = conn
+        .query_row("SELECT MIN(created_at) FROM ai_usage", [], |row| row.get(0))
+        .optional()?
+        .flatten();
+
+    Ok(crate::ai_usage::UsageStats {
+        window_hours: hours,
+        bucket_minutes,
+        series,
+        providers,
+        models,
+        peak_tokens,
+        since: since.unwrap_or_default(),
+    })
 }

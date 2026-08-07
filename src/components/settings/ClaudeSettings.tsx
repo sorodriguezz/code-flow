@@ -1,26 +1,30 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { Cpu, FileText, Server, type LucideIcon } from "lucide-react";
+import { ChartColumn, Cpu, FileText, Server, type LucideIcon } from "lucide-react";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import { useT } from "../../state/languageStore";
 import { PromptTemplates } from "./PromptTemplates";
 import { ProvidersSection } from "./ProvidersSection";
 import { TaskRouting } from "./TaskRouting";
+import { UsageStatsSection } from "./UsageStatsSection";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
 
-type AiTab = "providers" | "routing" | "templates";
+type AiTab = "providers" | "routing" | "templates" | "usage";
 
 /**
- * The three groups, in the order you'd actually set them up:
+ * The groups, in the order you'd actually set them up:
  *   1. **Providers** — which engines exist, whether they're installed, how each is configured.
  *   2. **Model per task** — which of those engines (and model) handles each action.
  *   3. **Prompt templates** — shared instructions, independent of who runs them.
+ *   4. **Usage** — what all of that has actually spent. Last because it is the only one that
+ *      configures nothing: it reads back the consequences of the three above.
  */
 const TABS: { id: AiTab; labelKey: TranslationKey; hintKey: TranslationKey; icon: LucideIcon }[] = [
   { id: "providers", labelKey: "settings.providersTitle", hintKey: "settings.providersHint", icon: Server },
   { id: "routing", labelKey: "settings.taskRoutingTitle", hintKey: "settings.taskRoutingHint", icon: Cpu },
   { id: "templates", labelKey: "settings.templatesTitle", hintKey: "settings.templatesSharedHint", icon: FileText },
+  { id: "usage", labelKey: "usage.statsTitle", hintKey: "usage.statsHint", icon: ChartColumn },
 ];
 
 /**
@@ -114,6 +118,7 @@ export function ClaudeSettings() {
             {tab === "providers" && <ProvidersSection />}
             {tab === "routing" && <TaskRouting />}
             {tab === "templates" && <PromptTemplates />}
+            {tab === "usage" && <UsageStatsSection />}
           </Panel>
         </div>
       </div>

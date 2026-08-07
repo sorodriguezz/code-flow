@@ -20,6 +20,7 @@ import {
   UploadCloud,
   X,
 } from "lucide-react";
+import { TaskModelTag } from "../ai/ModelTag";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { Checkbox } from "../common/Checkbox";
@@ -1039,6 +1040,13 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
         className={`${FIELD} min-w-[12rem] max-w-md flex-1`}
       />
 
+      {/* Pushed to the right so it reads as part of the Generate control rather than as another
+          field: this button rewrites the whole document, and which model does it is the one thing
+          the toolbar could not say. `wiki` is the task `generate_doc_page` routes to in Rust. */}
+      <span className="ml-auto flex min-w-0 items-center">
+        <TaskModelTag task="wiki" title={t("docs.modelTagHint")} />
+      </span>
+
       <button
         type="button"
         onClick={() => {
@@ -1057,14 +1065,17 @@ function GenerationBar({ page, body }: { page: DocPage; body: string }) {
           });
         }}
         title={running ? t("docs.stopHint") : t("docs.generateHint")}
-        className={`ml-auto flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-[filter] ${
+        // Icon only: the toolbar has four controls competing for one row, and this is the one whose
+        // label can go without losing meaning — the glyph already carries the state the words did
+        // (play against stop), and the name of the action stays in the tooltip and the aria-label.
+        aria-label={running ? t("docs.stop") : body.trim() ? t("docs.regenerate") : t("docs.generate")}
+        className={`flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-md transition-[filter] ${
           running
             ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)]"
             : "bg-[var(--cf-accent)] text-white hover:brightness-110"
         }`}
       >
-        {running ? <Square size={11} /> : <Play size={11} />}
-        {running ? t("docs.stop") : body.trim() ? t("docs.regenerate") : t("docs.generate")}
+        {running ? <Square size={12} /> : <Play size={12} />}
       </button>
     </div>
   );

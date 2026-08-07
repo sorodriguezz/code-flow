@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { BookText, ClipboardList, FileText, FolderGit2, ListChecks, Search, Sparkles } from "lucide-react";
+import { TaskModelTag } from "../ai/ModelTag";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { Note } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
@@ -225,14 +226,21 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
       dismissOnBackdrop={false}
       onClose={onClose}
       footer={
-        <span className="ml-auto flex items-center gap-2">
-          <GhostButton onClick={onClose} disabled={starting}>
-            {t("common.cancel")}
-          </GhostButton>
-          <PrimaryButton onClick={() => void start()} disabled={!ready}>
-            {starting ? t("stories.preparing") : t("stories.createAndGenerate")}
-          </PrimaryButton>
-        </span>
+        <>
+          {/* In the footer rather than in a tab, because it is true of all three: the source
+              changes what the model reads, never which model reads it. This is the only place the
+              choice is visible before the run starts — the routing itself lives in Settings — and
+              a backlog generated on the wrong model is discovered an entire generation too late. */}
+          <TaskModelTag task="stories" title={t("stories.modelTagHint")} />
+          <span className="ml-auto flex items-center gap-2">
+            <GhostButton onClick={onClose} disabled={starting}>
+              {t("common.cancel")}
+            </GhostButton>
+            <PrimaryButton onClick={() => void start()} disabled={!ready}>
+              {starting ? t("stories.preparing") : t("stories.createAndGenerate")}
+            </PrimaryButton>
+          </span>
+        </>
       }
     >
       <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">

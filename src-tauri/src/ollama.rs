@@ -15,7 +15,7 @@
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::ai::{AiEngine, AiInvocation, AiRun, Transport};
+use crate::ai::{AiEngine, AiInvocation, AiRun, AiUsage, Transport};
 
 /// Where Ollama listens out of the box. Shown as the default in Settings; the user can point it at
 /// a remote/alternate host by editing the endpoint field.
@@ -24,6 +24,10 @@ pub const DEFAULT_ENDPOINT: &str = "http://localhost:11434";
 pub struct OllamaEngine;
 
 impl AiEngine for OllamaEngine {
+    fn id(&self) -> &'static str {
+        "ollama"
+    }
+
     fn label(&self) -> &'static str {
         "Ollama"
     }
@@ -68,6 +72,12 @@ impl AiEngine for OllamaEngine {
 #[derive(Deserialize)]
 struct ChatResponse {
     message: ChatMessage,
+    /// Tokens of the prompt Ollama actually evaluated — cache hits excluded, since a local server
+    /// re-reads the whole context every turn and has no provider cache to hit.
+    #[serde(default)]
+    prompt_eval_count: i64,
+    #[serde(default)]
+    eval_count: i64,
 }
 
 #[derive(Deserialize)]
@@ -101,7 +111,17 @@ pub async fn complete(base_url: &str, inv: &AiInvocation<'_>) -> Result<AiRun, S
     messages.push(serde_json::json!({ "role": "user", "content": user }));
 
     let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({ "model": model, "messages": messages, "stream": false });
+    let mut body = serde_json::json!({ "model": model, "messages": messages, "stream": false });
+    // The one thing a local server can do that a CLI cannot: `format: "json"` constrains decoding
+    // to a valid JSON document, so the stages that parse the answer get one. Without it, the usual
+    // failure with a small local model is not malformed JSON — it is prose ("Hola, ¿en qué puedo
+    // ayudarte?"), which no repair pass can rescue because there is nothing in it to repair.
+    //
+    // Only sent when the caller says the answer must be JSON: forcing it on a commit message or a
+    // chat turn would turn a sentence into an object nobody reads.
+    if inv.expects_json {
+        body["format"] = serde_json::json!("json");
+    }
 
     let res = reqwest::Client::new()
         .post(&url)
@@ -136,7 +156,22 @@ pub async fn complete(base_url: &str, inv: &AiInvocation<'_>) -> Result<AiRun, S
         .resume_session_id
         .map(str::to_string)
         .unwrap_or_else(|| format!("ollama-{}", uuid::Uuid::new_v4()));
-    Ok(AiRun { text, session_id: Some(session_id), model: Some(model.to_string()) })
+    // Local inference reports tokens and, of course, no price. `None` rather than `Some(0.0)`:
+    // the meter's distinction is "reported" against "not reported", and a zero here would put
+    // Ollama in the same column as a paid engine that happened to bill nothing.
+    let usage = AiUsage {
+        input_tokens: parsed.prompt_eval_count,
+        output_tokens: parsed.eval_count,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cost_usd: None,
+    };
+    Ok(AiRun {
+        text,
+        session_id: Some(session_id),
+        model: Some(model.to_string()),
+        usage: Some(usage).filter(|u| !u.is_empty()),
+    })
 }
 
 #[derive(Deserialize)]

@@ -11,6 +11,7 @@ import { useChainStore } from "../../state/chainStore";
 import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { blankChainStep } from "../../types/domain";
 
 /**
  * "Carry on from here" — the smallest useful chain, and the one people actually reach for.
@@ -49,7 +50,9 @@ export function ContinueWithModal({ taskId, onClose }: { taskId: string; onClose
         sourceTaskId: taskId,
         title: task.title,
         goal: task.goal,
-        steps: [{ agent_id: agent.id, instruction, gate }],
+        // No repository of its own: a continuation runs in the tree the source task already edited,
+        // which is the only repository the chain is given.
+        steps: [blankChainStep({ agent_id: agent.id, instruction, gate })],
         // The chain carries on the task's work, so it is filed where that task was — asking again
         // here would be asking the same question twice about one piece of work.
         agentProjectId: task.agent_project_id,

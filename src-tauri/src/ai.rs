@@ -382,6 +382,39 @@ pub struct AiRun {
     /// Model the CLI actually ran, when it reported exactly one. `None` when the run fanned out
     /// across several models or the CLI didn't say — callers fall back to the configured setting.
     pub model: Option<String>,
+    /// What the run cost, as the engine itself reported it. `None` when the CLI said nothing —
+    /// which is a different fact from "it cost nothing", and the usage meter shows it as such.
+    pub usage: Option<AiUsage>,
+}
+
+/// One finished run's own account of what it spent.
+///
+/// **Reported, never computed.** Nothing here is derived from a price table: a per-token price this
+/// app kept would go stale the week a provider changed one, and would be quietly wrong for every
+/// user on a plan rather than on metered billing. What is recorded is what the engine printed, and
+/// an engine that prints nothing contributes nothing rather than an estimate.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AiUsage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    /// Prompt tokens served from the provider's cache. Kept apart from `input_tokens` because they
+    /// are the cheap ones, and a total that folded them in would read as five times the work.
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    /// What the CLI said the turn cost in US dollars, when it said. `None` is unreported.
+    pub cost_usd: Option<f64>,
+}
+
+impl AiUsage {
+    /// Whether there is anything here worth recording. An all-zero report from an engine that
+    /// answered is a row that would only dilute the meter.
+    pub fn is_empty(&self) -> bool {
+        self.input_tokens == 0
+            && self.output_tokens == 0
+            && self.cache_read_tokens == 0
+            && self.cache_write_tokens == 0
+            && self.cost_usd.unwrap_or(0.0) == 0.0
+    }
 }
 
 /// One headless invocation, described in provider-neutral terms. Each [`AiEngine`] translates
@@ -413,6 +446,15 @@ pub struct AiInvocation<'a> {
     /// Runs are headless (no TTY), so an interactive permission prompt can never be answered —
     /// the write-capable flows (chat, "fix with AI") set this so they can actually change files.
     pub auto_approve_edits: bool,
+    /// The answer to this run has to be a JSON object, not prose.
+    ///
+    /// The prompt already says so, and a CLI engine has nothing better than that — which is why
+    /// this is a hint rather than a contract. The HTTP transports do have something better:
+    /// Ollama's `format` constrains decoding to valid JSON, so a model that would have answered
+    /// "Hola, ¿en qué puedo ayudarte?" cannot. Set it on the stages whose reply goes through
+    /// [`json_answer`]; everywhere else it stays off, because a free-text stage forced into JSON
+    /// would come back as an object nobody reads.
+    pub expects_json: bool,
 }
 
 impl<'a> AiInvocation<'a> {
@@ -429,6 +471,7 @@ impl<'a> AiInvocation<'a> {
             skills_note: String::new(),
             resume_session_id: None,
             auto_approve_edits: false,
+            expects_json: false,
         }
     }
 }
@@ -453,6 +496,10 @@ pub enum Transport {
 /// A headless AI CLI. Implementors describe how to launch their binary and how to read its
 /// output; everything else (spawning, piping stdin, quota handling) is shared in [`run`].
 pub trait AiEngine: Send + Sync {
+    /// The provider id this engine answers to in [`engine_for`] and in the `ai_provider` setting —
+    /// `"claude"`, `"gemini"`, `"codex"`… The stable key, as opposed to [`AiEngine::label`], which
+    /// is what a person reads and may be renamed.
+    fn id(&self) -> &'static str;
     /// Human label for footers and the chat chip, e.g. `"Claude Code"`.
     fn label(&self) -> &'static str;
     /// Binary to run when the user hasn't configured a path.
@@ -497,6 +544,23 @@ pub trait AiEngine: Send + Sync {
     /// CLI already keeps on disk. Checked before [`AiEngine::list_models_args`], so an engine with
     /// no listing subcommand can still offer a current list.
     fn cached_models(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Arguments of a second, read-only command that reports what the run just spent — for the CLIs
+    /// that do not say so on the run itself.
+    ///
+    /// Only consulted when [`AiRun::usage`] came back empty, and only when the run reported a
+    /// session to ask about. **It is run detached, after the reply is already on its way back**, so
+    /// an engine that needs a whole second process to account for itself costs the user no latency
+    /// for it — the usage meter is eventually consistent by construction and can afford to be a
+    /// second late. `None`, the default, means this engine has nothing more to say.
+    fn usage_probe_args(&self, _session_id: &str) -> Option<Vec<String>> {
+        None
+    }
+
+    /// Turns that command's stdout into the usage of the run that just finished.
+    fn parse_usage_probe(&self, _stdout: &str) -> Option<AiUsage> {
         None
     }
 
@@ -883,16 +947,25 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     // dropping the in-flight request.
     match engine.transport() {
         Transport::Ollama => {
-            return tokio::select! {
+            let outcome = tokio::select! {
                 result = crate::ollama::complete(binary, &inv) => without_reasoning(mark_quota(result)),
                 _ = ai_runs::cancelled(&mut cancel) => Err(ai_runs::CANCELLED_MARKER.to_string()),
-            }
+            };
+            // Recorded here as well as at the bottom, and that is the whole reason this branch is
+            // written out rather than left as a bare `return`: an HTTP engine never reaches the
+            // subprocess path, so a recorder that lived only down there could never see one. Ollama
+            // spent nothing in money and real tokens, and a meter that omits it is a meter that
+            // silently answers "which engine am I using" wrongly.
+            record_usage(engine, &inv, &outcome, None);
+            return outcome;
         }
         Transport::OpenAiCompatible { api_key } => {
-            return tokio::select! {
+            let outcome = tokio::select! {
                 result = crate::openai::complete(binary, &api_key, &inv) => without_reasoning(mark_quota(result)),
                 _ = ai_runs::cancelled(&mut cancel) => Err(ai_runs::CANCELLED_MARKER.to_string()),
-            }
+            };
+            record_usage(engine, &inv, &outcome, None);
+            return outcome;
         }
         Transport::Subprocess => {}
     }
@@ -950,12 +1023,56 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     // escape bytes — least of all the UI, which would render them as literal `[91m` noise. The
     // same argument applies to a reasoning model's `<think>` block: no caller ever wants it, so it
     // goes here too rather than in each engine's `interpret`.
-    without_reasoning(engine.interpret(
+    let outcome = without_reasoning(engine.interpret(
         status.success(),
         &status.to_string(),
         &strip_ansi(&String::from_utf8_lossy(&stdout)),
         &strip_ansi(&String::from_utf8_lossy(&stderr)),
-    ))
+    ));
+    // Filed here because this is the one place every subprocess engine passes through, so nothing
+    // that spends tokens can forget to say so. Only successful runs: a refused or crashed one has
+    // no account of itself, and recording a zero for it would make the meter read as though the
+    // work had been free rather than as though it had not happened.
+    record_usage(engine, &inv, &outcome, Some(&program));
+    outcome
+}
+
+/// Files what a finished run spent, whichever transport produced it.
+///
+/// Only successful runs: a refused or crashed one has no account of itself, and recording a zero
+/// for it would make the meter read as though the work had been free rather than as though it had
+/// not happened.
+///
+/// `probe_binary` is the resolved executable, and is `None` for the HTTP engines — they have no
+/// second command to ask, and would have nothing to run it with if they did.
+fn record_usage(
+    engine: &dyn AiEngine,
+    inv: &AiInvocation<'_>,
+    outcome: &Result<AiRun, String>,
+    probe_binary: Option<&str>,
+) {
+    let Ok(run) = outcome else { return };
+    let model = run.model.clone().unwrap_or_else(|| inv.model.to_string());
+    if let Some(usage) = &run.usage {
+        crate::ai_usage::record(engine.id(), &model, usage);
+        return;
+    }
+    // Nothing on the run itself. Some CLIs will say if asked separately — detached, because the
+    // reply is what the caller is waiting for and the meter is not.
+    let (Some(session), Some(binary)) = (run.session_id.as_deref(), probe_binary) else { return };
+    let Some(args) = engine.usage_probe_args(session) else { return };
+    // The engine is rebuilt inside the task rather than moved into it: it is borrowed here and
+    // `engine_for` is a match on a `&'static str`. Only ever reached for an engine that offered a
+    // probe in the first place.
+    let engine_id = engine.id();
+    let probe_binary = binary.to_string();
+    tokio::spawn(async move {
+        let Ok(output) = capture(&probe_binary, &args).await else { return };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(usage) = engine_for(engine_id).parse_usage_probe(&stdout) {
+            crate::ai_usage::record(engine_id, &model, &usage);
+        }
+    });
 }
 
 /// Runs a quick, read-only auxiliary CLI command (e.g. listing models) and captures its output,
@@ -2158,6 +2275,7 @@ pub async fn generate_user_stories(
 
     let mut inv = AiInvocation::new(prompt, &stdin_payload);
     inv.model = model;
+    inv.expects_json = true;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }
@@ -2209,6 +2327,7 @@ pub async fn verify_stories_against_code(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
+    inv.expects_json = true;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }
@@ -2289,6 +2408,7 @@ pub async fn review_work_item(
         None => &[],
     };
     inv.cwd = cwd;
+    inv.expects_json = true;
     // The whole run, not just its text: the caller stamps the answer with the model that actually
     // produced it, which is the only place the CLI's own choice is reported when none was forced.
     run(engine, binary, inv).await
@@ -2705,6 +2825,7 @@ pub async fn repair_json(
 
     let mut inv = AiInvocation::new(&prompt, &stdin_payload);
     inv.model = model;
+    inv.expects_json = true;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
 }
@@ -3197,6 +3318,26 @@ pub async fn analyze_changes(
     Ok(stamp_footer(&run.text, "análisis pre-commit", engine.label(), run.model.as_deref().unwrap_or(model)))
 }
 
+/// Above this many characters a turn's message stops riding `-p` and is delivered as **data**,
+/// with a fixed one-line ask in its place.
+///
+/// `-p` is a single argv element, and on Windows a CLI installed through npm resolves to a `.cmd`
+/// shim that routes the whole command line through cmd.exe — whose ceiling is 8191 characters, not
+/// 32767. Nothing a person types by hand comes near that; what does is a **chain handoff**, which
+/// carries the previous agent's entire answer, and it is why that handoff used to be clamped to 6k
+/// before it ever reached here.
+///
+/// Moving it costs nothing, because every engine already folds `stdin_content` back into whatever
+/// it builds: `claude` and `codex` pipe it on stdin, `gemini`/`grok`/`opencode` concatenate it into
+/// their brief (and spill that to a temp file past their own inline limit), and the API engines
+/// make it part of the user message. So this is one switch here rather than six engine changes.
+const INLINE_ASK_LIMIT: usize = 4_000;
+
+/// What `-p` says when the real message went into the data instead. Single-line and ASCII, so it
+/// survives every shim between here and the engine — the same shape `codex.rs` has always used.
+const BULK_ASK: &str =
+    "Your instructions for this turn are in the input provided with this message. Read all of it and carry it out.";
+
 /// Open-ended, multi-turn chat about the currently open repository — unlike review/analyze this
 /// isn't a one-shot call, so it resumes the same CLI session across turns (via `session_id`)
 /// instead of re-explaining the whole conversation each message.
@@ -3226,7 +3367,18 @@ pub async fn chat_with_repo(
 
     let system_prompt = if needs_context { Some(DEFAULT_CHAT_SYSTEM_PROMPT) } else { None };
 
-    let mut inv = AiInvocation::new(message, &stdin_payload);
+    // A short message stays where it reads best — `-p` is the ask, and an engine's own logs show it
+    // there. A long one moves into the data, which is the only part of an invocation with no length
+    // ceiling. Counted in `chars()` and not bytes so the switch cannot land mid-code-point.
+    let bulky = message.chars().count() > INLINE_ASK_LIMIT;
+    if bulky {
+        if !stdin_payload.is_empty() {
+            stdin_payload.push('\n');
+        }
+        stdin_payload.push_str(message);
+    }
+
+    let mut inv = AiInvocation::new(if bulky { BULK_ASK } else { message }, &stdin_payload);
     inv.system_prompt = system_prompt;
     inv.model = model;
     inv.allowed_tools = allowed_tools;

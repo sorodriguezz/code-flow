@@ -1128,6 +1128,38 @@ export const translations = {
     "statusbar.detachedHead": "detached HEAD",
 
     "notifications.title": "Notifications",
+
+    // The usage meter, beside the bell. Wording matters here: it measures, it does not forecast,
+    // and the last string is the one that keeps it from being read as a plan gauge.
+    "usage.title": "AI usage",
+    "usage.session": "Last 5 hours",
+    "usage.week": "Last 7 days",
+    "usage.quietWindow": "Nothing in this window.",
+    "usage.noCost": "no price",
+    "usage.breakdown": "{runs} run(s) · in {input} · out {output} · cached {cached}",
+    // The statistics screen. Same honesty as the meter, more room to spend on it.
+    "usage.statsTitle": "Usage",
+    "usage.statsHint":
+      "What every engine has actually spent, over the window you pick. Measured from what each CLI reported — an engine that reports nothing is absent rather than shown at zero.",
+    "usage.statsLoading": "Reading the history…",
+    "usage.window5h": "5 hours",
+    "usage.window24h": "24 hours",
+    "usage.window7d": "7 days",
+    "usage.window30d": "30 days",
+    "usage.totalTokens": "Tokens",
+    "usage.runs": "Runs",
+    "usage.totalCost": "Cost",
+    "usage.costedOf": "{n} of {total} runs priced",
+    "usage.cacheShare": "From cache",
+    "usage.cacheShareNote": "Prompt tokens the provider served from its cache.",
+    "usage.overTime": "Over time",
+    "usage.byProvider": "By engine",
+    "usage.byModel": "By model",
+    "usage.modelUnnamed": "model not reported",
+    "usage.runsN": "{n} run(s)",
+    "usage.peakN": "busiest bucket: {n}",
+    "usage.since": "History kept since {date}. Anything older than 30 days is dropped.",
+    "usage.notAQuota": "Measured from what each CLI reported, not from your plan.",
     "notifications.sourceChat": "Assistant",
     "notifications.unseen": "{n} unread",
     "notifications.empty": "Nothing here yet",
@@ -1328,7 +1360,43 @@ export const translations = {
     "settings.saveToken": "Save token",
     "settings.savingToken": "Saving…",
     "settings.adoOrgPlaceholder": "e.g. my-company (from dev.azure.com/my-company)",
-    "settings.adoPatHowTo": "How to get a personal access token",
+    // The header of the collapsible under each connection form. Two titles rather than one because
+    // Jira and monday do not issue a *personal access token* — calling theirs one would send the
+    // user looking for a page that does not exist.
+    "settings.tokenHowTo": "How to get a personal access token",
+    "settings.apiTokenHowTo": "How to get an API token",
+
+    "settings.githubPatStep1": "In GitHub, open Settings → Developer settings → Personal access tokens.",
+    "settings.githubPatStep2":
+      "Tokens (classic) → Generate new token, or Fine-grained tokens if your organisation requires them.",
+    "settings.githubPatStep3":
+      "Scopes: repo covers repositories, pull requests and comments. Add read:org when the repositories belong to an organisation.",
+    "settings.githubPatStep4": "Generate, then copy the token — GitHub only shows it once — and paste it below.",
+    "settings.githubPatOpenPage": "Open the token page on GitHub",
+
+    "settings.gitlabPatStep1": "In GitLab, open your avatar → Edit profile → Access tokens.",
+    "settings.gitlabPatStep2": "Add new token — name it and pick an expiry date.",
+    "settings.gitlabPatStep3":
+      "Scopes: api covers projects, merge requests and comments. read_api alone is enough if you only want to read.",
+    "settings.gitlabPatStep4": "Create, then copy the token — GitLab only shows it once — and paste it below.",
+    "settings.gitlabPatOpenPage": "Open the token page on GitLab",
+
+    "settings.jiraTokenStep1": "Sign in at id.atlassian.com and open Security → API tokens.",
+    "settings.jiraTokenStep2": "Create API token — give it a label you will recognise later.",
+    "settings.jiraTokenStep3":
+      "There are no scopes to pick: the token carries your own permissions on every site the account can reach.",
+    "settings.jiraTokenStep4":
+      "Copy it — Atlassian only shows it once — and paste it below, along with the e-mail of that same account.",
+    "settings.jiraTokenOpenPage": "Open the API tokens page on Atlassian",
+
+    "settings.mondayTokenStep1":
+      "In monday.com, open your avatar at the bottom left and choose Developers (or Administration → API).",
+    "settings.mondayTokenStep2": "My access tokens → copy the personal API token (v2).",
+    "settings.mondayTokenStep3":
+      "There are no scopes to pick: the token carries your own permissions over the boards.",
+    "settings.mondayTokenStep4":
+      "Paste it below. CodeFlow asks monday who it belongs to, and takes the account from the answer.",
+    "settings.mondayTokenOpenPage": "Open the monday API documentation",
     "settings.adoPatStep1": "In Azure DevOps, open the user menu at the top right and choose Personal access tokens.",
     "settings.adoPatStep2": "New Token — pick the organization you want to connect and an expiry date.",
     "settings.adoPatStep3":
@@ -2008,6 +2076,18 @@ export const translations = {
     "editor.copyPath": "Copy Path",
     "editor.copyRelativePath": "Copy Relative Path",
 
+    // Hiding entries from the explorer. The wording carries the one thing that matters about this
+    // feature — that it is only about what is drawn — because the alternative reading is "delete".
+    "editor.hide": "Hide from the explorer",
+    "editor.hiddenSection": "Hidden",
+    "editor.hiddenHint":
+      "Entries taken out of the explorer. Nothing has been deleted — the files are still on disk, still in git and still searchable. Click one to bring it back.",
+    "editor.hiddenShow": "Show again",
+    "editor.hiddenShowAll": "Show all",
+    // Shown in place of "Empty" — this message only appears when the folder does have contents and
+    // every one of them is hidden, so it can say exactly that rather than counting into a plural.
+    "editor.allHiddenHere": "Everything here is hidden ({n})",
+
     "terminal.noProject": "No project open",
     "terminal.emptyHint": "No terminals open — click + to start one.",
     "terminal.new": "New terminal",
@@ -2631,6 +2711,8 @@ export const translations = {
     "docs.generate": "Generate",
     "docs.regenerate": "Regenerate",
     "docs.generateHint": "Reads the code and writes the document. It replaces what is here.",
+    "docs.modelTagHint":
+      "The engine and model Generate will run on. Change it in Settings → AI assistant → Documentation.",
     "docs.generated": "Document generated",
     "docs.regenerateConfirm": "Regenerate this document? What it says now is replaced, and there is no going back to it. Anything already published to the wiki stays as it is until you publish again.",
     "docs.stop": "Stop",
@@ -2951,6 +3033,10 @@ export const translations = {
 
     "stories.newBatchTitle": "New set of stories",
     "stories.newBatchSubtitle": "Pick the documentation to derive the backlog from",
+    "stories.modelTagHint":
+      "The engine and model this generation will run on, whichever source you pick. Change it in Settings → AI assistant → Stories.",
+    "stories.generatedWithHint":
+      "The engine and model that wrote these stories, {when}. The next generation runs on whatever Settings → AI assistant routes stories to today.",
     "stories.createAndGenerate": "Create and generate",
     "stories.preparing": "Reading the source…",
     "stories.newBatchNote":
@@ -3106,7 +3192,7 @@ export const translations = {
     // ---------------- Agents workspace ----------------
     "agents.tasks": "Tasks",
     "agents.roster": "Agents",
-    "agents.rosterHint": "The same roster as Settings → SDD and the AI chat's agent picker.",
+    "agents.rosterHint": "One roster per workspace. Tasks, chains and the story realizer all run as one of these.",
     "agents.manageAgents": "Manage agents",
     "agents.help": "How this works",
     "agents.helpSubtitle": "What you can do here, how to use it, and what it cannot do.",
@@ -3117,9 +3203,12 @@ export const translations = {
     "agents.pickAgent": "Pick an agent",
     "agents.repository": "Repository",
     "agents.repositoryHint": "The agent runs in this repository's working copy.",
+    "agents.taskReposMultiHint":
+      "One task per repository — same agent, same goal, each in its own working copy. They start together and run at the same time.",
     "agents.goal": "Goal",
     "agents.goalPlaceholder": "Describe the task — what should change, and what done looks like.",
     "agents.start": "Start task",
+    "agents.startN": "Start {n} tasks",
     "agents.searchPlaceholder": "Search tasks…",
     "agents.groupTree": "Tasks",
     "agents.groupStatus": "Status",
@@ -3213,6 +3302,16 @@ export const translations = {
     "agents.chainComposerLocked": "The chain is running this step; its answer is what gets handed on.",
     "agents.outputTruncated": "The handoff was too long and was cut in the middle.",
     "agents.stepRecovered": "running (recovered)",
+    "agents.stepRetrying": "retrying — attempt {n}/{max}",
+    "agents.stepCheckPlaceholder": "Check command — npm test, cargo build… (optional)",
+    "agents.stepCheckHint":
+      "Run in this step's repository once it answers. Exit code 0 is the whole verdict — nothing reads the output to decide.",
+    "agents.stepOnFail": "If the check fails",
+    "agents.stepOnFailRetry": "try this step again",
+    "agents.stepOnFailGoto": "go back to step {n} — {name}",
+    "agents.stepCheck": "check",
+    "agents.stepLoopsTo": "on failure → step {n}",
+    "agents.stepRejected": "rejected — sent back",
     "agents.stepTaskGone": "task deleted",
     "agents.chainStatusQueued": "Waiting to start",
     "agents.chainStatusRunning": "Running",
@@ -3221,6 +3320,52 @@ export const translations = {
     "agents.chainStatusFailed": "Failed",
     "agents.chainStatusDone": "Done",
     "agents.chainStatusAborted": "Aborted",
+
+    // Chains across more than one repository.
+    "agents.repositories": "Repositories",
+    "agents.repositoriesMultiHint":
+      "A step runs in one repository at a time. Pick which one below, or set a step to every repository and it becomes one run per repository.",
+    "agents.repoPrimary": "first",
+    "agents.stepRepository": "Repository for this step",
+    "agents.stepRepoAll": "Every repository ({n})",
+    "agents.expandsToRuns": "→ {n}/{max} runs",
+    "agents.chainRepos": "{n} repositories",
+    "agents.stepIn": "in {name}",
+
+    // The story realizer.
+    "agents.newStory": "Realize a story",
+    "agents.newStoryTitle": "Realize a user story",
+    "agents.newStorySubtitle":
+      "One work item, the repositories it might touch, and two agents: one reads and plans, you decide, the other writes.",
+    "agents.storyRef": "Work item",
+    "agents.storyRefPlaceholder": "A link, or an id — 4821, PROJ-123, or a pasted URL",
+    "agents.storyLoad": "Load",
+    "agents.storyLoadFirst": "Load the work item before starting.",
+    "agents.storyCandidates": "Candidate repositories",
+    "agents.storyCandidatesHint":
+      "Every one of these is read and judged. Which of them are actually changed is your call, after you have seen what each proposed.",
+    "agents.storyAnalyst": "Reads and plans",
+    "agents.storyAnalystHint": "Runs once per repository and writes nothing. Its answer is the plan you review.",
+    "agents.storyImplementer": "Writes the code",
+    "agents.storyImplementerHint": "Runs only on the repositories you approve, with the plan you approved.",
+    "agents.storyNotes": "Anything to add",
+    "agents.storyNotesPlaceholder": "What the story does not say — a convention, a branch, something to leave alone.",
+    "agents.storyStartAnalysis": "Start the analysis",
+    "agents.storyCreateOnly": "Create without starting",
+    "agents.storyPhaseAnalyze": "Analysis",
+    "agents.storyPhaseImplement": "Implementation",
+    "agents.storyPlanTitle": "What each repository proposed",
+    "agents.storyPlanHint":
+      "Untick a repository to leave it alone. What you type here is exactly what that repository's agent is sent.",
+    "agents.storyApprove": "Approve and implement",
+    "agents.storyApproveNone": "Finish without changing anything",
+    "agents.storyApproveN": "Approve and implement ({n})",
+    "agents.storyVerdictTouches": "has to change",
+    "agents.storyVerdictClear": "no change needed",
+    "agents.storyVerdictUnknown": "undecided",
+    "agents.storyNoAnalysis": "Not analysed — its analysis was skipped or failed.",
+    "agents.storyOpenBoard": "Open on the board",
+    "agents.storyNoBoards": "Connect Azure DevOps, Jira or monday in Settings to load a work item.",
 
     // ---------------- Agent task tree ----------------
     "agents.sectionProjects": "Projects",
@@ -3258,6 +3403,7 @@ export const translations = {
     "agents.pinnedEmpty": "Nothing pinned",
     "agents.newTaskHere": "New task here",
     "agents.newChainHere": "New chain here",
+    "agents.newStoryHere": "Realize a story here",
     "agents.projectItemsN": "{n} items",
     "agents.chainTask1": "1 task",
     "agents.chainProgress": "{done}/{total} done",
@@ -3285,11 +3431,15 @@ export const translations = {
     "chain.projectGone": "the repository is gone",
     "chain.agentNotRoutable": "a step's agent has no provider and model",
     "chain.attemptsExhausted": "the step failed too many times",
+    "chain.checkFailed": "a step's check failed — sending the work back",
+    "chain.dispatchesExhausted": "the plan ran out of its step budget — it is looping",
     "chain.emptyOutput": "a step returned nothing — check before continuing",
     "chain.stopped": "you stopped it",
     "chain.timedOut": "the step took too long and was stopped",
     "chain.noSteps": "A chain needs at least one step.",
     "chain.tooManySteps": "A chain can hold at most 8 steps.",
+    "chain.noRepos": "Pick at least one repository.",
+    "chain.tooManyRepos": "That is more repositories than one chain can work across.",
     "agents.agentNoModel": "No model",
 
     // ---------------- Database workspace ----------------
@@ -3619,6 +3769,160 @@ export const translations = {
     "toast.mondaySaveFailed": "Couldn't connect monday.com: {error}",
     "toast.mondayRemoved": "monday.com connection removed",
     "toast.mondayRemoveFailed": "Couldn't remove the monday.com connection: {error}",
+
+    // ── Guided tour ──────────────────────────────────────────────────────────────────────────
+    // Written for someone who has just installed the app and may not be a developer. Each body is
+    // one paragraph that answers three questions in order: what this is, what it does for you, and
+    // the one thing that isn't obvious from looking at it.
+    "tour.launch": "Guided tour",
+    "tour.restart": "Take the guided tour",
+    "tour.settingsTitle": "Guided tour",
+    "tour.settingsHint":
+      "A walk through CodeFlow's main areas — the repository list, the AI panel, the terminal, the workspace tools and where everything is configured. It runs over the real app and puts every panel back the way you left it.",
+    "tour.skip": "Skip",
+    "tour.back": "Back",
+    "tour.next": "Continue",
+    "tour.finish": "Finish",
+    "tour.stepOf": "{n} of {total}",
+
+    "tour.chapter.start": "Getting started",
+    "tour.chapter.workspace": "Your workspace",
+    "tour.chapter.ai": "AI",
+    "tour.chapter.tools": "Tools",
+    "tour.chapter.settings": "Settings",
+    "tour.chapter.done": "All set",
+
+    "tour.welcome.title": "Welcome to CodeFlow",
+    "tour.welcome.body":
+      "This is a quick walk through the app — about two minutes. Everything you see is the real thing, not screenshots: panels will open and close as we go, and they all go back the way you left them at the end. Use Continue and Back to move around, or Skip to leave at any point.",
+
+    "tour.workspaces.title": "Workspaces: the outermost box",
+    "tour.workspaces.body":
+      "A workspace groups everything that belongs to one context — a client, a product, a team. Repositories, API collections, database connections, agents and servers all live inside one. Click here to switch between them or create a new one; nothing is shared across workspaces, so you can keep unrelated work cleanly apart.",
+
+    "tour.projects.title": "Your repositories",
+    "tour.projects.body":
+      "Every repository in the active workspace is listed here. Click one to make it the current repository: branches, history, pending changes and pull requests all follow whichever you pick. Expand a row to reach its branches, stashes, remote URL and pull requests without leaving the list.",
+
+    "tour.addRepo.title": "Adding a repository",
+    "tour.addRepo.body":
+      "Three ways in, left to right. The glasses review a pull request from a pasted link. The branch icon clones a repository from a URL. The plus adds repositories already on your disk — pick one folder or several at once, and CodeFlow works out which of them are git repositories and leaves the rest out.",
+
+    "tour.sidebarToggle.title": "Hiding the repository list",
+    "tour.sidebarToggle.body":
+      "This button collapses the panel on the left, and brings it back. Useful when you need the width — a wide diff, a full-screen editor — and the repository list isn't telling you anything you need right now. Its width is remembered, so reopening returns to the size you dragged it to.",
+
+    "tour.repoTabs.title": "Three views of the same repository",
+    "tour.repoTabs.body":
+      "History shows the commit graph and what each commit changed. Changes is where you stage files, write a message and commit — the number beside it counts the files waiting. Editor is the built-in code editor. All three follow whichever repository is selected in the list on the left.",
+
+    "tour.precommit.title": "Reviewing before you commit",
+    "tour.precommit.body":
+      "This shield runs an AI review over what you have not committed yet. It reads your working changes the way a reviewer would and reports what it finds — bugs, leftover debug code, risky edits — before the commit exists, which is the cheapest possible moment to fix any of it. The result opens in the AI panel; then commit, keep editing, or ignore it entirely.",
+
+    "tour.editorOpen.title": "The editor",
+    "tour.editorOpen.body":
+      "A real code editor inside the git client, so reading a diff and fixing what it turned up don't happen in two different apps. Tabs across the top, a pane you can split in two to compare files side by side, and a view mode per file — the code, a rendered preview for Markdown, or the diff against what is committed. Like the other two tabs, it follows whichever repository is selected on the left.",
+
+    "tour.editorRail.title": "The strip on the left",
+    "tour.editorRail.body":
+      "Five panels share the column beside the code, and this strip is how you switch between them. Explorer is the file tree. Search looks through every file in the repository at once. Anchors collects the TODO- and FIXME-style comments the code itself carries. Bookmarks are your own notes about where you were working. Debug runs and steps through the code. The two icons at the bottom are actions rather than panels: jump to a file by name, and the list of the editor's keyboard shortcuts.",
+
+    "tour.editorTree.title": "The file tree, and hiding what you don't need",
+    "tour.editorTree.body":
+      "The repository's files, coloured by git status, with the usual right-click: new file, rename, delete, copy path. It also hides things — right-click anything you would rather not see, like node_modules or a lockfile, and pick \"Hide from the explorer\". Nothing is deleted: the file stays on disk, git still reports it and search still finds it, it simply stops being drawn here. A \"Hidden\" section appears under the tree with everything you took out, and one click brings any of it back.",
+
+    "tour.editorAi.title": "Rewriting code by describing the change",
+    "tour.editorAi.body":
+      "Select some code, press {key}, and say what you want changed — in words. The rewrite lands in the editor's buffer like any edit you typed yourself: one undo away, and unsaved until you save it, so nothing reaches disk you haven't read. The keyboard icon at the bottom of the strip lists this shortcut and every other one the editor has.",
+
+    "tour.gitActions.title": "Fetch, pull and push",
+    "tour.gitActions.body":
+      "The three buttons that talk to the remote. Fetch asks what is new without changing anything you have, and the small number beside it counts down to the next automatic one if you turned that on. Pull brings down the commits your branch is behind by, and push sends up the ones it is ahead by — each shows its count beside the icon, so \"is there anything to move?\" is answered without hovering. A button with nothing to do is greyed out, and a branch that has never been pushed shows a single publish button instead of these two.",
+
+    "tour.aiToggle.title": "The AI panel",
+    "tour.aiToggle.body":
+      "This toggles the panel docked on the right. It is where reviews, analyses and chat happen, and it stays put while you switch views or repositories — so a review that is still running doesn't get lost when you go and look at something else. Press it again to put the panel away.",
+
+    "tour.aiPanel.title": "What is inside the panel",
+    "tour.aiPanel.body":
+      "Three things share it: the pull requests waiting on you, an activity list of everything the AI has run or is running for this workspace, and a free-form chat about the open repository. Drag its left edge to widen it — a review with code in it reads far better at 500px than at 340.",
+
+    "tour.prLink.title": "Reviewing a pull request without cloning it",
+    "tour.prLink.body":
+      "Paste the URL of a pull request — Azure DevOps, GitHub or GitLab — and CodeFlow fetches the diff over the API and reviews it. Nothing is cloned and no repository needs to be open: the link itself says which one it belongs to. This is the fast way to review a colleague's work on a service you have never checked out.",
+
+    "tour.terminal.title": "The terminal",
+    "tour.terminal.body":
+      "A real shell, docked under the view and opened from the button on the status bar. It starts in the folder of the selected repository, keeps its own set of tabs per repository, and survives switching views — a build left running keeps running while you read a diff. Drag its top edge to make it taller.",
+
+    "tour.notifications.title": "The bell",
+    "tour.notifications.body":
+      "Long jobs — a PR review, a generated document, an agent run — finish while you are looking at something else. The bell collects them: a dot appears when something new lands, and the list says what finished and takes you straight to it. It can also make a sound, which stays off until you turn it on in Settings.",
+
+    "tour.workspaceMenu.title": "The workspace tools",
+    "tour.workspaceMenu.body":
+      "Everything in this menu belongs to the workspace rather than to one repository — which is exactly why it is not a tab beside the other three: switching repository does not change what is in here. Five tools live in it today, and we will look at each one in turn.",
+
+    "tour.toolApi.title": "API client",
+    "tour.toolApi.body":
+      "A full HTTP client, built in. Collections, environments and variables, authentication, scripts and history — plus WebSocket, MQTT, gRPC and GraphQL alongside plain REST. Requests are saved into the workspace's collection, and a collection can be shared with your team so everyone runs the same requests against the same environments.",
+
+    "tour.collab.title": "Sharing a collection with your team",
+    "tour.collab.body":
+      "A collection does not have to stay on one machine. From here you point CodeFlow at a Supabase project you own, share a collection, and hand the token to whoever needs it — they paste it and get the same requests and environments, kept in step from then on. What is shared is the collection, not the workspace, and if two people edit the same request the change is held as a conflict for someone to settle rather than one side quietly winning.",
+
+    "tour.toolDb.title": "Databases",
+    "tour.toolDb.body":
+      "A database client under the same tab. Connect to PostgreSQL, MySQL, SQL Server, Oracle or InterSystems IRIS, browse the schema, run SQL, and edit rows in a grid — edits are staged and only sent when you say so, so a stray keystroke is never a write. Connections belong to the workspace, like everything else in this menu.",
+
+    "tour.toolAgents.title": "Agents",
+    "tour.toolAgents.body":
+      "A console for AI tasks that run on their own. Build a tree of projects and tasks, give each one an agent and a prompt, chain them so one starts where the last finished, and save the ones you repeat as templates. Runs happen in the background and report to the bell when they are done.",
+
+    "tour.toolStories.title": "Specs",
+    "tour.toolStories.body":
+      "Everything around the requirements themselves, in three directions — and these three tabs are the choice of which one you are working in. Write turns documentation into a backlog, Review reads a work item that already exists, and Wiki goes the other way and writes documentation from the code. They share the workspace and the Azure connection, so you move between them without leaving the screen.",
+
+    "tour.storiesWrite.title": "Write: documentation in, backlog out",
+    "tour.storiesWrite.body":
+      "Give it the documentation — an Azure DevOps wiki page, Markdown from a repository, or text you paste — and it writes the user stories with their acceptance criteria. Anything the documentation left unsaid comes back as open questions you answer, and the next pass takes your answers into account. When the set reads right, the rail on the right picks the organisation, project, work item type, area and iteration, and publishes them onto Azure Boards.",
+
+    "tour.storiesReview.title": "Review: what a story is missing",
+    "tour.storiesReview.body":
+      "For the work items that already exist. Paste the link — or the number — of a story or a bug, pick which repositories to read it against, and it reports what the item is missing: INVEST and testable Gherkin for a story, reproduction steps and a closing condition for a bug. It can also draft the missing scenarios and break the item into [DEV] and [QA] tasks. It only ever proposes: nothing on this tab writes back to the board.",
+
+    "tour.storiesWiki.title": "Wiki: documentation from the code",
+    "tour.storiesWiki.body":
+      "The opposite direction, and the one that fills the gap the other two assume somebody filled. It reads a repository and writes its technical documentation — environment variables, running it locally, integrations, database — or reads several at once and writes how they fit together as a system. Edit what comes out, then publish it to the wiki.",
+
+    "tour.toolRemote.title": "Remote",
+    "tour.toolRemote.body":
+      "The machines this workspace deploys to. Save SSH hosts, open a shell on one, forward ports and move files over SFTP without leaving the app. Still in beta, so expect this one to keep changing.",
+
+    "tour.settingsOpen.title": "Settings",
+    "tour.settingsOpen.body":
+      "The gear on the status bar opens Settings over whatever you were doing; closing it puts you back exactly where you were. The rail on the left splits into what applies everywhere and what applies only to the active workspace. Three of its sections are worth pointing out.",
+
+    "tour.settingsAi.title": "AI models",
+    "tour.settingsAi.body":
+      "This is where you choose which model does what. Pick a provider, sign in, and set a default — then, if you want, route the heavy jobs like a full PR review to a stronger model and leave the quick ones on a faster, cheaper one. The prompt templates and the review standard the AI is held to live here too.",
+
+    "tour.settingsIntegrations.title": "Integrations",
+    "tour.settingsIntegrations.body":
+      "Connect Azure DevOps, GitHub, GitLab, Jira and monday.com from here — one token each. This is what lets CodeFlow list your pull requests, open one from a link, post review comments back, and read the work items your user stories come from. Tokens are stored on this machine and never become part of a repository.",
+
+    "tour.settingsProjects.title": "Workspaces and projects",
+    "tour.settingsProjects.body":
+      "The other end of what you saw in the sidebar: rename a workspace, give it a colour, delete one, and manage the repositories inside it — including moving a repository from one workspace to another, which only changes which workspace tracks it and never touches the folder on disk.",
+
+    "tour.backup.title": "Backup",
+    "tour.backup.body":
+      "Everything you have just been shown — workspaces, repositories, collections, database connections, hosts, prompts and saved credentials — goes into one encrypted file that turns another computer into this one. You choose what travels and set the password that seals it; without that password nobody opens the file, us included. Leave it manual, or point it at a folder, iCloud, Google Drive or OneDrive and let it run on a schedule, keeping dated copies. Restoring tells you what the file holds before it changes anything.",
+
+    "tour.finish.title": "That is the tour",
+    "tour.finish.body":
+      "You have seen the map. This is the button that brings all of it back — press it whenever you want to walk through something again, or take it from Settings → General. Enjoy CodeFlow.",
   },
   es: {
     "titlebar.aiActions": "Acciones IA",
@@ -4751,6 +5055,38 @@ export const translations = {
     "statusbar.detachedHead": "HEAD separado",
 
     "notifications.title": "Notificaciones",
+
+    // El medidor de uso, junto a la campana. Mide, no predice — y la última cadena es la que evita
+    // que se lea como un indicador de plan.
+    "usage.title": "Uso de IA",
+    "usage.session": "Últimas 5 horas",
+    "usage.week": "Últimos 7 días",
+    "usage.quietWindow": "Nada en esta ventana.",
+    "usage.noCost": "sin precio",
+    "usage.breakdown": "{runs} ejecución(es) · entrada {input} · salida {output} · caché {cached}",
+    // La pantalla de estadísticas. La misma honestidad que el medidor, con sitio para desarrollarla.
+    "usage.statsTitle": "Uso",
+    "usage.statsHint":
+      "Lo que ha gastado de verdad cada motor, en la ventana que elijas. Medido a partir de lo que reporta cada CLI — un motor que no reporta nada no aparece, en vez de salir en cero.",
+    "usage.statsLoading": "Leyendo el historial…",
+    "usage.window5h": "5 horas",
+    "usage.window24h": "24 horas",
+    "usage.window7d": "7 días",
+    "usage.window30d": "30 días",
+    "usage.totalTokens": "Tokens",
+    "usage.runs": "Ejecuciones",
+    "usage.totalCost": "Coste",
+    "usage.costedOf": "{n} de {total} ejecuciones con precio",
+    "usage.cacheShare": "Desde caché",
+    "usage.cacheShareNote": "Tokens de prompt que el proveedor sirvió de su caché.",
+    "usage.overTime": "En el tiempo",
+    "usage.byProvider": "Por motor",
+    "usage.byModel": "Por modelo",
+    "usage.modelUnnamed": "modelo no reportado",
+    "usage.runsN": "{n} ejecución(es)",
+    "usage.peakN": "intervalo más cargado: {n}",
+    "usage.since": "Historial desde {date}. Lo anterior a 30 días se descarta.",
+    "usage.notAQuota": "Medido a partir de lo que reporta cada CLI, no de tu plan.",
     "notifications.sourceChat": "Asistente",
     "notifications.unseen": "{n} sin ver",
     "notifications.empty": "Todavía no hay nada",
@@ -4951,7 +5287,40 @@ export const translations = {
     "settings.saveToken": "Guardar token",
     "settings.savingToken": "Guardando…",
     "settings.adoOrgPlaceholder": "ej. mi-empresa (de dev.azure.com/mi-empresa)",
-    "settings.adoPatHowTo": "Cómo obtener un personal access token",
+    "settings.tokenHowTo": "Cómo obtener un personal access token",
+    "settings.apiTokenHowTo": "Cómo obtener un token de API",
+
+    "settings.githubPatStep1": "En GitHub, abre Settings → Developer settings → Personal access tokens.",
+    "settings.githubPatStep2":
+      "Tokens (classic) → Generate new token, o Fine-grained tokens si tu organización los exige.",
+    "settings.githubPatStep3":
+      "Scopes: repo cubre repositorios, pull requests y comentarios. Agrega read:org si los repositorios son de una organización.",
+    "settings.githubPatStep4": "Genera el token y cópialo — GitHub lo muestra una sola vez — y pégalo abajo.",
+    "settings.githubPatOpenPage": "Abrir la página de tokens en GitHub",
+
+    "settings.gitlabPatStep1": "En GitLab, abre tu avatar → Edit profile → Access tokens.",
+    "settings.gitlabPatStep2": "Add new token — ponle nombre y elige una fecha de expiración.",
+    "settings.gitlabPatStep3":
+      "Scopes: api cubre proyectos, merge requests y comentarios. Con read_api basta si solo quieres leer.",
+    "settings.gitlabPatStep4": "Crea el token y cópialo — GitLab lo muestra una sola vez — y pégalo abajo.",
+    "settings.gitlabPatOpenPage": "Abrir la página de tokens en GitLab",
+
+    "settings.jiraTokenStep1": "Entra en id.atlassian.com y abre Security → API tokens.",
+    "settings.jiraTokenStep2": "Create API token — ponle una etiqueta que reconozcas después.",
+    "settings.jiraTokenStep3":
+      "No hay scopes que elegir: el token lleva tus propios permisos en cada sitio que alcance la cuenta.",
+    "settings.jiraTokenStep4":
+      "Cópialo — Atlassian lo muestra una sola vez — y pégalo abajo junto al correo de esa misma cuenta.",
+    "settings.jiraTokenOpenPage": "Abrir la página de tokens de API en Atlassian",
+
+    "settings.mondayTokenStep1":
+      "En monday.com, abre tu avatar abajo a la izquierda y elige Developers (o Administración → API).",
+    "settings.mondayTokenStep2": "My access tokens → copia el token personal de API (v2).",
+    "settings.mondayTokenStep3":
+      "No hay scopes que elegir: el token lleva tus propios permisos sobre los tableros.",
+    "settings.mondayTokenStep4":
+      "Pégalo abajo. CodeFlow le pregunta a monday de quién es, y toma la cuenta de esa respuesta.",
+    "settings.mondayTokenOpenPage": "Abrir la documentación de la API de monday",
     "settings.adoPatStep1":
       "En Azure DevOps, abre el menú de usuario arriba a la derecha y elige Personal access tokens.",
     "settings.adoPatStep2": "New Token — elige la organización que quieres conectar y una fecha de expiración.",
@@ -5633,6 +6002,14 @@ export const translations = {
     "editor.copyPath": "Copiar ruta",
     "editor.copyRelativePath": "Copiar ruta relativa",
 
+    "editor.hide": "Ocultar del explorador",
+    "editor.hiddenSection": "Ocultos",
+    "editor.hiddenHint":
+      "Elementos que sacaste del explorador. No se ha borrado nada: los archivos siguen en disco, en git y en la búsqueda. Haz clic en uno para traerlo de vuelta.",
+    "editor.hiddenShow": "Mostrar de nuevo",
+    "editor.hiddenShowAll": "Mostrar todo",
+    "editor.allHiddenHere": "Todo lo de aquí está oculto ({n})",
+
     "terminal.noProject": "No hay proyecto abierto",
     "terminal.emptyHint": "No hay terminales abiertas — haz clic en + para iniciar una.",
     "terminal.new": "Nueva terminal",
@@ -6259,6 +6636,8 @@ export const translations = {
     "docs.generate": "Generar",
     "docs.regenerate": "Regenerar",
     "docs.generateHint": "Lee el código y escribe el documento. Reemplaza lo que haya aquí.",
+    "docs.modelTagHint":
+      "El motor y el modelo con los que se ejecutará Generar. Se cambia en Ajustes → Asistente de IA → Documentación.",
     "docs.generated": "Documento generado",
     "docs.regenerateConfirm": "¿Regenerar este documento? Lo que dice ahora se reemplaza y no se puede volver a él. Lo ya publicado en la wiki se queda como está hasta que vuelvas a publicar.",
     "docs.stop": "Detener",
@@ -6580,6 +6959,10 @@ export const translations = {
 
     "stories.newBatchTitle": "Nuevo conjunto de historias",
     "stories.newBatchSubtitle": "Elige la documentación de la que derivar el backlog",
+    "stories.modelTagHint":
+      "El motor y el modelo con los que se ejecutará esta generación, elijas la fuente que elijas. Se cambia en Ajustes → Asistente de IA → Historias.",
+    "stories.generatedWithHint":
+      "El motor y el modelo que escribieron estas historias, {when}. La próxima generación usa el que Ajustes → Asistente de IA enrute hoy a historias.",
     "stories.createAndGenerate": "Crear y generar",
     "stories.preparing": "Leyendo la fuente…",
     "stories.newBatchNote":
@@ -6738,7 +7121,7 @@ export const translations = {
     // ---------------- Espacio de agentes ----------------
     "agents.tasks": "Tareas",
     "agents.roster": "Agentes",
-    "agents.rosterHint": "La misma plantilla que Ajustes → SDD y el selector de agente del chat de IA.",
+    "agents.rosterHint": "Una plantilla por workspace. Las tareas, las cadenas y el realizador de historias corren como uno de estos.",
     "agents.manageAgents": "Gestionar agentes",
     "agents.help": "Cómo funciona esto",
     "agents.helpSubtitle": "Qué puedes hacer aquí, cómo se usa y qué no puede hacer.",
@@ -6749,9 +7132,12 @@ export const translations = {
     "agents.pickAgent": "Elige un agente",
     "agents.repository": "Repositorio",
     "agents.repositoryHint": "El agente trabaja sobre la copia de trabajo de este repositorio.",
+    "agents.taskReposMultiHint":
+      "Una tarea por repositorio — mismo agente, mismo objetivo, cada una en su copia de trabajo. Empiezan juntas y corren a la vez.",
     "agents.goal": "Objetivo",
     "agents.goalPlaceholder": "Describe la tarea — qué debe cambiar y cuándo estará terminada.",
     "agents.start": "Iniciar tarea",
+    "agents.startN": "Iniciar {n} tareas",
     "agents.searchPlaceholder": "Buscar tareas…",
     "agents.groupTree": "Tareas",
     "agents.groupStatus": "Estado",
@@ -6845,6 +7231,16 @@ export const translations = {
     "agents.chainComposerLocked": "La cadena está ejecutando este paso; su respuesta es la que se pasa al siguiente.",
     "agents.outputTruncated": "El traspaso era demasiado largo y se cortó por el medio.",
     "agents.stepRecovered": "ejecutándose (recuperado)",
+    "agents.stepRetrying": "reintentando — intento {n}/{max}",
+    "agents.stepCheckPlaceholder": "Comando de verificación — npm test, cargo build… (opcional)",
+    "agents.stepCheckHint":
+      "Se ejecuta en el repositorio de este paso cuando responde. El código de salida 0 es todo el veredicto — nadie lee la salida para decidir.",
+    "agents.stepOnFail": "Si falla la verificación",
+    "agents.stepOnFailRetry": "reintentar este paso",
+    "agents.stepOnFailGoto": "volver al paso {n} — {name}",
+    "agents.stepCheck": "verificación",
+    "agents.stepLoopsTo": "si falla → paso {n}",
+    "agents.stepRejected": "rechazado — devuelto",
     "agents.stepTaskGone": "tarea eliminada",
     "agents.chainStatusQueued": "Esperando para empezar",
     "agents.chainStatusRunning": "En marcha",
@@ -6853,6 +7249,52 @@ export const translations = {
     "agents.chainStatusFailed": "Falló",
     "agents.chainStatusDone": "Terminada",
     "agents.chainStatusAborted": "Abortada",
+
+    // Cadenas sobre más de un repositorio.
+    "agents.repositories": "Repositorios",
+    "agents.repositoriesMultiHint":
+      "Un paso se ejecuta en un repositorio a la vez. Elige cuál abajo, o pon el paso en todos los repositorios y se convierte en una ejecución por repositorio.",
+    "agents.repoPrimary": "principal",
+    "agents.stepRepository": "Repositorio de este paso",
+    "agents.stepRepoAll": "Todos los repositorios ({n})",
+    "agents.expandsToRuns": "→ {n}/{max} ejecuciones",
+    "agents.chainRepos": "{n} repositorios",
+    "agents.stepIn": "en {name}",
+
+    // El realizador de historias.
+    "agents.newStory": "Realizar una historia",
+    "agents.newStoryTitle": "Realizar una historia de usuario",
+    "agents.newStorySubtitle":
+      "Una HU, los repositorios que podría tocar y dos agentes: uno lee y planifica, tú decides, el otro escribe.",
+    "agents.storyRef": "Historia",
+    "agents.storyRefPlaceholder": "Un enlace, o un id — 4821, PROJ-123, o una URL pegada",
+    "agents.storyLoad": "Cargar",
+    "agents.storyLoadFirst": "Carga la historia antes de empezar.",
+    "agents.storyCandidates": "Repositorios candidatos",
+    "agents.storyCandidatesHint":
+      "Todos estos se leen y se evalúan. Cuáles se tocan de verdad lo decides tú, después de ver qué propuso cada uno.",
+    "agents.storyAnalyst": "Lee y planifica",
+    "agents.storyAnalystHint": "Se ejecuta una vez por repositorio y no escribe nada. Su respuesta es el plan que revisas.",
+    "agents.storyImplementer": "Escribe el código",
+    "agents.storyImplementerHint": "Solo se ejecuta en los repositorios que apruebes, con el plan que aprobaste.",
+    "agents.storyNotes": "Algo que añadir",
+    "agents.storyNotesPlaceholder": "Lo que la historia no dice — una convención, una rama, algo que no hay que tocar.",
+    "agents.storyStartAnalysis": "Empezar el análisis",
+    "agents.storyCreateOnly": "Crear sin empezar",
+    "agents.storyPhaseAnalyze": "Análisis",
+    "agents.storyPhaseImplement": "Implementación",
+    "agents.storyPlanTitle": "Lo que propuso cada repositorio",
+    "agents.storyPlanHint":
+      "Desmarca un repositorio para no tocarlo. Lo que escribas aquí es exactamente lo que se le envía a su agente.",
+    "agents.storyApprove": "Aprobar e implementar",
+    "agents.storyApproveNone": "Terminar sin cambiar nada",
+    "agents.storyApproveN": "Aprobar e implementar ({n})",
+    "agents.storyVerdictTouches": "hay que tocarlo",
+    "agents.storyVerdictClear": "no hay que tocarlo",
+    "agents.storyVerdictUnknown": "sin decidir",
+    "agents.storyNoAnalysis": "Sin analizar — su análisis se saltó o falló.",
+    "agents.storyOpenBoard": "Abrir en el tablero",
+    "agents.storyNoBoards": "Conecta Azure DevOps, Jira o monday en Ajustes para poder cargar una historia.",
 
     // ---------------- Árbol de tareas de agentes ----------------
     "agents.sectionProjects": "Proyectos",
@@ -6892,6 +7334,7 @@ export const translations = {
     "agents.pinnedEmpty": "Nada fijado",
     "agents.newTaskHere": "Nueva tarea aquí",
     "agents.newChainHere": "Nueva cadena aquí",
+    "agents.newStoryHere": "Realizar una historia aquí",
     "agents.projectItemsN": "{n} elementos",
     "agents.chainTask1": "1 tarea",
     "agents.chainProgress": "{done}/{total} hechos",
@@ -6919,11 +7362,15 @@ export const translations = {
     "chain.projectGone": "el repositorio ya no está",
     "chain.agentNotRoutable": "el agente de un paso no tiene proveedor y modelo",
     "chain.attemptsExhausted": "el paso falló demasiadas veces",
+    "chain.checkFailed": "falló la verificación de un paso — devolviendo el trabajo",
+    "chain.dispatchesExhausted": "el plan agotó su presupuesto de pasos — está dando vueltas",
     "chain.emptyOutput": "un paso no devolvió nada — revisa antes de continuar",
     "chain.stopped": "lo detuviste tú",
     "chain.timedOut": "el paso tardó demasiado y se detuvo",
     "chain.noSteps": "Una cadena necesita al menos un paso.",
     "chain.tooManySteps": "Una cadena admite como mucho 8 pasos.",
+    "chain.noRepos": "Elige al menos un repositorio.",
+    "chain.tooManyRepos": "Son más repositorios de los que una cadena puede recorrer.",
     "agents.agentNoModel": "Sin modelo",
 
     // ---------------- Espacio de bases de datos ----------------
@@ -7253,6 +7700,157 @@ export const translations = {
     "toast.mondaySaveFailed": "No se pudo conectar monday.com: {error}",
     "toast.mondayRemoved": "Conexión de monday.com eliminada",
     "toast.mondayRemoveFailed": "No se pudo eliminar la conexión de monday.com: {error}",
+
+    // ── Tour guiado ──────────────────────────────────────────────────────────────────────────
+    "tour.launch": "Tour guiado",
+    "tour.restart": "Hacer el tour guiado",
+    "tour.settingsTitle": "Tour guiado",
+    "tour.settingsHint":
+      "Un recorrido por las zonas principales de CodeFlow: la lista de repositorios, el panel de IA, la terminal, las herramientas del workspace y dónde se configura cada cosa. Corre sobre la app real y deja cada panel tal como lo tenías.",
+    "tour.skip": "Omitir",
+    "tour.back": "Volver",
+    "tour.next": "Continuar",
+    "tour.finish": "Finalizar",
+    "tour.stepOf": "{n} de {total}",
+
+    "tour.chapter.start": "Primeros pasos",
+    "tour.chapter.workspace": "Tu espacio de trabajo",
+    "tour.chapter.ai": "IA",
+    "tour.chapter.tools": "Herramientas",
+    "tour.chapter.settings": "Configuración",
+    "tour.chapter.done": "Listo",
+
+    "tour.welcome.title": "Te damos la bienvenida a CodeFlow",
+    "tour.welcome.body":
+      "Este es un recorrido rápido por la app, unos dos minutos. Todo lo que ves es la app real, no capturas: los paneles se van a abrir y cerrar sobre la marcha, y al final quedan exactamente como los tenías. Usa Continuar y Volver para moverte, u Omitir para salir cuando quieras.",
+
+    "tour.workspaces.title": "Workspaces: la caja que contiene todo",
+    "tour.workspaces.body":
+      "Un workspace agrupa todo lo que pertenece a un mismo contexto: un cliente, un producto, un equipo. Dentro viven los repositorios, las colecciones de API, las conexiones a bases de datos, los agentes y los servidores. Haz clic aquí para cambiar de workspace o crear uno nuevo; nada se comparte entre ellos, así que puedes mantener trabajos distintos bien separados.",
+
+    "tour.projects.title": "Tus repositorios",
+    "tour.projects.body":
+      "Aquí se listan todos los repositorios del workspace activo. Haz clic en uno para dejarlo como repositorio actual: las ramas, el historial, los cambios pendientes y los pull requests siguen al que elijas. Despliega una fila para llegar a sus ramas, stashes, URL remota y pull requests sin salir de la lista.",
+
+    "tour.addRepo.title": "Cómo agregar un repositorio",
+    "tour.addRepo.body":
+      "Tres caminos, de izquierda a derecha. Los lentes revisan un pull request a partir de un enlace pegado. El icono de rama clona un repositorio desde una URL. El más agrega repositorios que ya están en tu disco: elige una carpeta o varias a la vez y CodeFlow detecta cuáles son repositorios git y descarta el resto.",
+
+    "tour.sidebarToggle.title": "Cómo colapsar la lista de repositorios",
+    "tour.sidebarToggle.body":
+      "Este botón colapsa el panel de la izquierda y lo vuelve a mostrar. Sirve cuando necesitas el ancho — un diff largo, el editor a pantalla completa — y la lista de repositorios no te está diciendo nada útil en ese momento. El ancho queda guardado, así que al reabrirlo vuelve al tamaño que le habías dado.",
+
+    "tour.repoTabs.title": "Tres vistas del mismo repositorio",
+    "tour.repoTabs.body":
+      "Historial muestra el grafo de commits y qué cambió cada uno. Cambios es donde preparas archivos, escribes el mensaje y confirmas; el número al lado cuenta los archivos pendientes. Editor es el editor de código integrado. Las tres siguen al repositorio que tengas seleccionado en la lista de la izquierda.",
+
+    "tour.precommit.title": "Revisar antes de hacer commit",
+    "tour.precommit.body":
+      "Este escudo lanza una revisión con IA sobre lo que todavía no has confirmado. Lee tus cambios de trabajo como lo haría un revisor y reporta lo que encuentra — errores, código de depuración olvidado, cambios riesgosos — antes de que el commit exista, que es el momento más barato para arreglar cualquier cosa. El resultado se abre en el panel de IA; después confirmas, sigues editando o lo ignoras.",
+
+    "tour.editorOpen.title": "El editor",
+    "tour.editorOpen.body":
+      "Un editor de código de verdad dentro del cliente git, para que leer un diff y arreglar lo que salió no ocurran en dos apps distintas. Pestañas arriba, un panel que puedes dividir en dos para comparar archivos lado a lado, y un modo de vista por archivo: el código, la vista renderizada para Markdown, o el diff contra lo que está confirmado. Como las otras dos pestañas, sigue al repositorio que tengas seleccionado a la izquierda.",
+
+    "tour.editorRail.title": "La franja de la izquierda",
+    "tour.editorRail.body":
+      "Cinco paneles comparten la columna junto al código, y esta franja es como cambias entre ellos. Explorador es el árbol de archivos. Buscar recorre todos los archivos del repositorio de una vez. Anclas junta los comentarios tipo TODO y FIXME que lleva el propio código. Marcadores son tus notas sobre dónde estabas trabajando. Depurar ejecuta y avanza paso a paso. Los dos iconos de abajo son acciones, no paneles: saltar a un archivo por nombre, y la lista de atajos de teclado del editor.",
+
+    "tour.editorTree.title": "El árbol de archivos, y ocultar lo que no ocupas",
+    "tour.editorTree.body":
+      "Los archivos del repositorio, coloreados según su estado en git, con el clic derecho de siempre: nuevo archivo, renombrar, eliminar, copiar ruta. También oculta cosas: haz clic derecho en lo que prefieras no ver — node_modules, un lockfile — y elige \"Ocultar del explorador\". No se borra nada: el archivo sigue en disco, git lo sigue reportando y la búsqueda lo sigue encontrando, simplemente deja de dibujarse aquí. Aparece una sección \"Ocultos\" bajo el árbol con todo lo que sacaste, y un clic lo devuelve.",
+
+    "tour.editorAi.title": "Reescribir código describiendo el cambio",
+    "tour.editorAi.body":
+      "Selecciona código, pulsa {key} y di con palabras qué quieres cambiar. La reescritura entra al búfer del editor como cualquier edición que hubieras escrito tú: a un deshacer de distancia, y sin guardar hasta que tú guardes, así que nada llega al disco sin que lo hayas leído. El icono de teclado al final de la franja lista este atajo y todos los demás del editor.",
+
+    "tour.gitActions.title": "Fetch, pull y push",
+    "tour.gitActions.body":
+      "Los tres botones que hablan con el remoto. Fetch pregunta qué hay de nuevo sin tocar nada de lo tuyo, y el número pequeño a su lado cuenta hacia el siguiente automático si lo activaste. Pull baja los commits que tu rama tiene atrás, y push sube los que tiene adelante — cada uno muestra su cuenta junto al icono, así que \"¿hay algo que mover?\" se responde sin pasar el cursor. Un botón sin nada que hacer se ve apagado, y una rama que nunca se ha subido muestra un único botón de publicar en vez de esos dos.",
+
+    "tour.aiToggle.title": "El panel de IA",
+    "tour.aiToggle.body":
+      "Este botón muestra y oculta el panel acoplado a la derecha. Ahí ocurren las revisiones, los análisis y el chat, y se queda donde está aunque cambies de vista o de repositorio, así una revisión que sigue corriendo no se pierde cuando te vas a mirar otra cosa. Púlsalo de nuevo para guardarlo.",
+
+    "tour.aiPanel.title": "Qué hay dentro del panel",
+    "tour.aiPanel.body":
+      "Comparten el espacio tres cosas: los pull requests que esperan por ti, la lista de actividad con todo lo que la IA ha ejecutado o está ejecutando en este workspace, y un chat libre sobre el repositorio abierto. Arrastra su borde izquierdo para ensancharlo: una revisión con código se lee mucho mejor a 500px que a 340.",
+
+    "tour.prLink.title": "Revisar un PR sin clonar el repositorio",
+    "tour.prLink.body":
+      "Pega la URL de un pull request — Azure DevOps, GitHub o GitLab — y CodeFlow trae el diff por la API y lo revisa. No se clona nada y no hace falta tener ningún repositorio abierto: el propio enlace dice a cuál pertenece. Es la vía rápida para revisar el trabajo de un compañero en un servicio que nunca has descargado.",
+
+    "tour.terminal.title": "La terminal",
+    "tour.terminal.body":
+      "Una shell de verdad, acoplada bajo la vista y que se abre desde el botón de la barra de estado. Arranca en la carpeta del repositorio seleccionado, mantiene sus propias pestañas por repositorio y sobrevive a los cambios de vista: una compilación que dejaste corriendo sigue corriendo mientras lees un diff. Arrastra su borde superior para hacerla más alta.",
+
+    "tour.notifications.title": "La campana",
+    "tour.notifications.body":
+      "Los trabajos largos — una revisión de PR, un documento generado, una corrida de agentes — terminan mientras estás mirando otra cosa. La campana los recoge: aparece un punto cuando llega algo nuevo, y la lista te dice qué terminó y te lleva directo ahí. También puede sonar, aunque el sonido viene apagado hasta que lo actives en Configuración.",
+
+    "tour.workspaceMenu.title": "Las herramientas del workspace",
+    "tour.workspaceMenu.body":
+      "Todo lo que hay en este menú pertenece al workspace y no a un repositorio en particular, y por eso no es una pestaña junto a las otras tres: cambiar de repositorio no cambia lo que hay aquí dentro. Hoy viven cinco herramientas, y vamos a ver cada una.",
+
+    "tour.toolApi.title": "Cliente de API",
+    "tour.toolApi.body":
+      "Un cliente HTTP completo, integrado. Colecciones, entornos y variables, autenticación, scripts e historial, además de WebSocket, MQTT, gRPC y GraphQL junto al REST de siempre. Las peticiones se guardan en la colección del workspace, y una colección se puede compartir con tu equipo para que todos ejecuten las mismas peticiones contra los mismos entornos.",
+
+    "tour.collab.title": "Compartir una colección con tu equipo",
+    "tour.collab.body":
+      "Una colección no tiene por qué quedarse en una sola máquina. Desde aquí apuntas CodeFlow a un proyecto de Supabase tuyo, compartes una colección y le pasas el token a quien lo necesite: lo pega y obtiene las mismas peticiones y entornos, sincronizados de ahí en adelante. Lo que se comparte es la colección, no el workspace, y si dos personas editan la misma petición el cambio queda como conflicto para que alguien lo resuelva, en vez de que un lado gane en silencio.",
+
+    "tour.toolDb.title": "Bases de datos",
+    "tour.toolDb.body":
+      "Un cliente de base de datos bajo la misma pestaña. Conéctate a PostgreSQL, MySQL, SQL Server, Oracle o InterSystems IRIS, explora el esquema, ejecuta SQL y edita filas en una grilla: las ediciones quedan preparadas y solo se envían cuando tú lo dices, así que una tecla suelta nunca es una escritura. Las conexiones son del workspace, como todo lo demás en este menú.",
+
+    "tour.toolAgents.title": "Agentes",
+    "tour.toolAgents.body":
+      "Una consola para tareas de IA que corren solas. Arma un árbol de proyectos y tareas, dale a cada una su agente y su prompt, encadénalas para que una empiece donde terminó la anterior, y guarda como plantillas las que repites. Las ejecuciones van en segundo plano y avisan por la campana cuando terminan.",
+
+    "tour.toolStories.title": "Especificaciones",
+    "tour.toolStories.body":
+      "Todo lo que rodea a los requisitos, en tres direcciones — y estas tres pestañas son la elección de en cuál estás trabajando. Escribir convierte documentación en backlog, Revisar lee un work item que ya existe, y Wiki va al revés y escribe documentación a partir del código. Comparten el workspace y la conexión con Azure, así que te mueves entre ellas sin salir de la pantalla.",
+
+    "tour.storiesWrite.title": "Escribir: entra documentación, sale backlog",
+    "tour.storiesWrite.body":
+      "Dale la documentación — una página del wiki de Azure DevOps, Markdown de un repositorio, o texto que pegues — y escribe las historias de usuario con sus criterios de aceptación. Lo que la documentación no dijo vuelve como preguntas abiertas que tú respondes, y la siguiente pasada toma en cuenta tus respuestas. Cuando el conjunto se lee bien, el panel de la derecha elige organización, proyecto, tipo de work item, área e iteración, y las publica en Azure Boards.",
+
+    "tour.storiesReview.title": "Revisar: qué le falta a una historia",
+    "tour.storiesReview.body":
+      "Para los work items que ya existen. Pega el enlace — o el número — de una historia o un bug, elige contra qué repositorios leerlo, y te dice qué le falta al item: INVEST y Gherkin testeable si es historia, pasos de reproducción y condición de cierre si es bug. También puede redactar los escenarios que faltan y desglosar el item en tareas [DEV] y [QA]. Siempre propone: nada de esta pestaña escribe de vuelta en el tablero.",
+
+    "tour.storiesWiki.title": "Wiki: documentación desde el código",
+    "tour.storiesWiki.body":
+      "La dirección contraria, y la que llena el hueco que las otras dos dan por lleno. Lee un repositorio y escribe su documentación técnica — variables de entorno, cómo levantarlo en local, integraciones, base de datos — o lee varios a la vez y escribe cómo encajan entre sí como sistema. Edita lo que salga y publícalo al wiki.",
+
+    "tour.toolRemote.title": "Remoto",
+    "tour.toolRemote.body":
+      "Las máquinas a las que despliega este workspace. Guarda hosts SSH, abre una shell en uno, redirige puertos y mueve archivos por SFTP sin salir de la app. Todavía está en beta, así que espera que siga cambiando.",
+
+    "tour.settingsOpen.title": "Configuración",
+    "tour.settingsOpen.body":
+      "El engranaje de la barra de estado abre la configuración por encima de lo que estuvieras haciendo; al cerrarla vuelves exactamente a donde estabas. La columna de la izquierda separa lo que aplica en todas partes de lo que aplica solo al workspace activo. Vale la pena detenerse en tres de sus secciones.",
+
+    "tour.settingsAi.title": "Modelos de IA",
+    "tour.settingsAi.body":
+      "Aquí eliges qué modelo hace qué. Escoge el proveedor, inicia sesión y define uno por defecto; después, si quieres, manda los trabajos pesados como una revisión completa de PR a un modelo más potente y deja los rápidos en uno más veloz y económico. También viven aquí las plantillas de prompt y el estándar de revisión al que se sujeta la IA.",
+
+    "tour.settingsIntegrations.title": "Integraciones",
+    "tour.settingsIntegrations.body":
+      "Desde aquí conectas Azure DevOps, GitHub, GitLab, Jira y monday.com, con un token cada uno. Esto es lo que le permite a CodeFlow listar tus pull requests, abrir uno desde un enlace, publicar comentarios de revisión de vuelta y leer los work items de los que salen tus historias. Los tokens se guardan en esta máquina y nunca forman parte de un repositorio.",
+
+    "tour.settingsProjects.title": "Workspaces y proyectos",
+    "tour.settingsProjects.body":
+      "El otro extremo de lo que viste en la barra lateral: renombrar un workspace, darle color, eliminarlo y administrar los repositorios que contiene, incluido mover un repositorio de un workspace a otro — lo que solo cambia qué workspace lo sigue y nunca toca la carpeta en disco.",
+
+    "tour.backup.title": "Respaldos",
+    "tour.backup.body":
+      "Todo lo que acabas de ver — workspaces, repositorios, colecciones, conexiones a bases de datos, hosts, prompts y credenciales guardadas — cabe en un solo archivo cifrado que convierte otro computador en este. Tú eliges qué viaja y defines la contraseña que lo sella; sin esa contraseña nadie abre el archivo, nosotros incluidos. Déjalo manual, o apúntalo a una carpeta, iCloud, Google Drive o OneDrive y que corra programado, guardando copias fechadas. Al restaurar te dice qué trae el archivo antes de cambiar nada.",
+
+    "tour.finish.title": "Hasta aquí el recorrido",
+    "tour.finish.body":
+      "Ya tienes el mapa. Este es el botón que lo trae todo de vuelta: púlsalo cuando quieras repasar algo, o ábrelo desde Configuración → General. Que lo disfrutes.",
   },
 } as const;
 

@@ -67,8 +67,7 @@ import {
 import { ContextMenu } from "../api/CollectionTree";
 import { useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
-import { useAiProviderStore } from "../../state/aiProviderStore";
-import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
+import { TaskModelTag } from "../ai/ModelTag";
 import { useUiStore } from "../../state/uiStore";
 import { loadAdoConnections } from "../../lib/adoConnections";
 import { htmlToText } from "../../lib/workItemHtml";
@@ -474,28 +473,10 @@ function Provenance({ stages }: { stages: WorkItemReviewStage[] }) {
  */
 function ModelTag() {
   const t = useT();
-  const taskProviders = useAiProviderStore((s) => s.taskProviders);
-  const taskModels = useAiProviderStore((s) => s.taskModels);
-  const defaultProvider = useAiProviderStore((s) => s.providerId);
-
   // The task these runs route to in Rust (`AiTask::WorkItemReview`). It has to stay that one: this
   // tag is the only place the screen says which engine is about to rewrite a sprint's backlog, and
   // naming a task it does not run on would be worse than not showing it.
-  const providerId = taskProviders["work_item_review"]?.trim() || defaultProvider;
-  const provider = AI_PROVIDERS.find((p) => p.id === providerId);
-  const engine = provider ? (provider.label ?? (provider.labelKey ? t(provider.labelKey) : providerId)) : providerId;
-  const model = modelDisplayLabel(providerId, taskModels["work_item_review"] ?? "", t);
-
-  return (
-    <span
-      title={t("huReview.modelTagHint")}
-      className="inline-flex min-w-0 shrink items-center gap-1 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-px text-[10px] text-[var(--cf-text-muted)]"
-    >
-      <Cpu size={9} className="shrink-0" />
-      <span className="min-w-0 truncate font-mono">{model}</span>
-      <span className="shrink-0 opacity-60">{engine}</span>
-    </span>
-  );
+  return <TaskModelTag task="work_item_review" title={t("huReview.modelTagHint")} />;
 }
 
 /** The button that runs one tab's AI stage, sitting in the pane whose content it produces. */

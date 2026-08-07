@@ -10,10 +10,14 @@ import type {
   AgentTaskStatus,
   AutoLinkResult,
   ChainClaim,
+  StepCheck,
   ChainDetail,
   ChainStepBrief,
   ChainTemplate,
   NewChainStep,
+  NewStoryWorkItem,
+  UsageStats,
+  UsageSummary,
   BranchInfo,
   ChatConversationSummary,
   CommitInfo,
@@ -366,6 +370,17 @@ export const deleteAiApiKey = (provider: string) => invoke<void>("delete_ai_api_
  * error message. Non-http schemes are rejected backend-side. */
 export const openExternalUrl = (url: string) => invoke<void>("open_external_url", { url });
 
+/** What every engine has spent, over the two windows the status bar draws.
+ *
+ * Polled, not pushed: the rows are written from inside the run plumbing, which has no business
+ * knowing a window is open, and a meter a few seconds behind is a meter that is right. */
+export const aiUsageSummary = () => invoke<UsageSummary>("ai_usage_summary");
+
+/** The statistics screen's whole payload for one window, in hours. A window rather than a fixed
+ * pair: the status bar answers "what is happening", this answers "what has been happening". */
+export const aiUsageStats = (windowHours: number) =>
+  invoke<UsageStats>("ai_usage_stats", { windowHours });
+
 export interface ProviderStatus {
   available: boolean;
   /** Resolved path/endpoint when available; the missing binary name or connection error when not. */
@@ -477,13 +492,38 @@ export const listAgentChains = (workspaceId: string) =>
 export const getChainDetail = (chainId: string) =>
   invoke<ChainDetail | null>("get_chain_detail", { chainId });
 
+/** `projectIds` is the whole repository set, first one first — it is what a step that names no
+ * repository of its own falls back to, and what a step marked `ALL_REPOS` expands over. */
 export const createAgentChain = (
-  projectId: string,
+  projectIds: string[],
   title: string,
   goal: string,
   steps: NewChainStep[],
   agentProjectId: string,
-) => invoke<ChainDetail>("create_agent_chain", { projectId, title, goal, steps, agentProjectId });
+) => invoke<ChainDetail>("create_agent_chain", { projectIds, title, goal, steps, agentProjectId });
+
+/** A story run: the work item, the repositories that might have to change, and the two agents that
+ * will read them and then write them. The 2N-step plan is built in Rust — see `create_story_chain`
+ * there for why the instructions are not a parameter. */
+export const createStoryChain = (input: {
+  projectIds: string[];
+  title: string;
+  notes: string;
+  analystAgentId: string;
+  implementerAgentId: string;
+  agentProjectId: string;
+  workItem: NewStoryWorkItem;
+}) => invoke<ChainDetail>("create_story_chain", input);
+
+/** Freezes what one step will be sent, ahead of the gate it sits behind — how the story review
+ * approves a plan for six repositories in one press. Ignored once the step has left `pending`. */
+export const setChainStepInput = (stepId: string, input: string) =>
+  invoke<void>("set_chain_step_input", { stepId, input });
+
+/** Takes one step out of the plan, or puts it back. Only ever moves between `pending` and
+ * `skipped`. */
+export const setChainStepSkipped = (stepId: string, skipped: boolean) =>
+  invoke<void>("set_chain_step_skipped", { stepId, skipped });
 
 /** Asks the backend what happens next *and* records it. Everything that could refuse has already
  * refused by the time this resolves; `kind: "run"` means a step is now marked dispatched on disk
@@ -493,10 +533,16 @@ export const claimNextChainStep = (chainId: string, runId: string) =>
 
 export const completeChainStep = (
   stepId: string,
-  outcome: "done" | "error" | "cancelled" | "requeue",
+  outcome: "done" | "error" | "cancelled" | "requeue" | "check_failed",
   outputText: string,
   reason: string,
 ) => invoke<AgentChain | null>("complete_chain_step", { stepId, outcome, outputText, reason });
+
+/** Runs the step's declared check in its own repository. `ran: false` when it declares none, which
+ * is the caller's cue to complete the step exactly as it always did. Never throws for a check that
+ * merely failed — a non-zero exit is an answer, not an error. */
+export const runChainStepCheck = (stepId: string) =>
+  invoke<StepCheck>("run_chain_step_check", { stepId });
 
 export const approveChainGate = (chainId: string, input: string) =>
   invoke<AgentChain | null>("approve_chain_gate", { chainId, input });

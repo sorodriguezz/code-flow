@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the bundle's generated Info.plist. Tauri picks this file up automatically because it
+  sits next to `tauri.conf.json` — see `tauri-build`'s codegen, which watches `<config dir>/Info.plist`.
+
+  NSPrefersDisplaySafeAreaLayoutGuide = false
+  ------------------------------------------
+  Lets a fullscreen window use the *whole* display on a Mac with a camera housing, instead of being
+  laid out below it.
+
+  Anything built against the macOS 12+ SDK defaults this to true, which keeps windows inside the
+  "safe area": on a notched MacBook that means fullscreen stops at the bottom edge of the notch and
+  leaves a black band across the top — the app looks like it is refusing to fill the screen, which
+  is exactly how it was reported on an M4 Air. Windows never had the equivalent because it has no
+  such band.
+
+  Safe for this app specifically, and worth checking again if the title bar ever changes: the notch
+  sits in the *middle* of the top edge, and CodeFlow's title bar puts its controls at the two ends —
+  window buttons and navigation on the left, AI actions on the right — with nothing between them.
+  Only the bar's own gradient passes under the housing.
+-->
+<plist version="1.0">
+  <dict>
+    <key>NSPrefersDisplaySafeAreaLayoutGuide</key>
+    <false/>
+  </dict>
+</plist>

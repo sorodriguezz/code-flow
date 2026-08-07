@@ -36,7 +36,7 @@
 
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
+use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, AiUsage, QUOTA_MARKER};
 
 const DEFAULT_BINARY: &str = "grok";
 
@@ -52,6 +52,10 @@ const INLINE_LIMIT: usize = 12_000;
 pub struct GrokEngine;
 
 impl AiEngine for GrokEngine {
+    fn id(&self) -> &'static str {
+        "grok"
+    }
+
     fn label(&self) -> &'static str {
         "Grok"
     }
@@ -184,6 +188,22 @@ struct GrokReply {
     session_id: Option<String>,
     #[serde(default, rename = "modelUsage")]
     model_usage: std::collections::BTreeMap<String, serde_json::Value>,
+    /// The turn's own token counts. Defaulted field by field for the same reason Claude's are: a
+    /// CLI that adds one to this object must not take the whole reply down with it.
+    #[serde(default)]
+    usage: Option<GrokUsage>,
+    #[serde(default)]
+    total_cost_usd: Option<f64>,
+}
+
+#[derive(Default, serde::Deserialize)]
+struct GrokUsage {
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+    #[serde(default)]
+    cache_read_input_tokens: i64,
 }
 
 /// Grok prints one JSON object on stdout in headless mode; banners and errors go to stderr.
@@ -224,7 +244,7 @@ fn interpret_output(
         if refusal_reply(raw) {
             return Err(format!("{QUOTA_MARKER}{raw}"));
         }
-        return Ok(AiRun { text: raw.to_string(), session_id: None, model: None });
+        return Ok(AiRun { text: raw.to_string(), session_id: None, model: None, usage: None });
     };
 
     let text = reply.text.trim();
@@ -243,10 +263,19 @@ fn interpret_output(
         _ => None,
     };
 
+    let usage = reply.usage.as_ref().map(|u| AiUsage {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens,
+        cache_read_tokens: u.cache_read_input_tokens,
+        cache_write_tokens: 0,
+        cost_usd: reply.total_cost_usd,
+    });
+
     Ok(AiRun {
         text: text.to_string(),
         session_id: reply.session_id.filter(|s| !s.trim().is_empty()),
         model,
+        usage: usage.filter(|u| !u.is_empty()),
     })
 }
 

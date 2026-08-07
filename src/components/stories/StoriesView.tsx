@@ -117,7 +117,10 @@ export function StoriesView() {
             white column — read as a gap between two things rather than as the top of one. The
             hairline under it is what separates the tabs from what they switch. */}
         <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1.5">
-          <div className="flex items-center gap-0.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg)] p-0.5">
+          <div
+            data-tour="stories-modes"
+            className="flex items-center gap-0.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-bg)] p-0.5"
+          >
             {MODES.map(({ id, labelKey, icon: Icon }) => (
               <button
                 key={id}

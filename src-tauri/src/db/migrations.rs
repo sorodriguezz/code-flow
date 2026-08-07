@@ -222,6 +222,15 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             -- Why it is not moving, in the chain's own words: a translation key
             -- (`chain.interrupted`, `chain.repoBusy`, …) or a raw engine error.
             last_reason  TEXT NOT NULL DEFAULT '',
+            -- How many step runs this plan has dispatched, ever.
+            --
+            -- `step_count` stopped being the bound the day a step could send the plan backwards:
+            -- a three-step plan whose reviewer loops to the implementer runs more than three
+            -- times, by design. This is what actually bounds it (`MAX_CHAIN_DISPATCHES`), and it
+            -- is a counter rather than a computed value because the thing that must not be
+            -- exceeded is *work started*, which no amount of reading the steps back can recover
+            -- once a row has been overwritten by a second visit.
+            dispatches   INTEGER NOT NULL DEFAULT 0,
             created_at   TEXT NOT NULL,
             updated_at   TEXT NOT NULL
         );
@@ -275,6 +284,35 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             status        TEXT NOT NULL DEFAULT 'pending',
             attempts      INTEGER NOT NULL DEFAULT 0,
             last_error    TEXT NOT NULL DEFAULT '',
+
+            -- ---- the verdict, and where it sends the plan ----
+            --
+            -- Together these are what turn a list into a state machine. A chain used to advance
+            -- because a turn returned text: a reviewer that wrote "this is broken" finished the
+            -- plan green, because nothing in the schema could tell the difference between an
+            -- answer and a correct one.
+            --
+            -- A shell command run in this step's repository once the turn lands. Exit code 0 is
+            -- the verdict and nothing else is — no parsing, no asking the model whether it thinks
+            -- it succeeded. Empty means the step has no check, which is every step authored before
+            -- this column existed and every step that is genuinely unverifiable.
+            check_command TEXT NOT NULL DEFAULT '',
+            -- Where the plan goes next, as step indices. `-1` is "the default": for `on_pass` the
+            -- following step, for `on_fail` stopping.
+            --
+            -- A target **behind** this step is the loop the feature was missing — the reviewer
+            -- that sends the implementer back to try again — and it is expressed as an index
+            -- rather than as an edge table because the scheduler already selects the
+            -- lowest-`pending` step: jumping backwards is resetting rows to `pending`, jumping
+            -- forward is marking them `skipped`, and in both cases the existing selector then
+            -- picks exactly the right one. No second table, and no second way to be wrong.
+            on_pass       INTEGER NOT NULL DEFAULT -1,
+            on_fail       INTEGER NOT NULL DEFAULT -1,
+            -- What the step that sent the plan here had to say — its answer plus the output of the
+            -- check it failed. Written onto the *target*, because a loop back to step 2 walks its
+            -- context backwards from step 1 and would otherwise never see why it was sent back.
+            feedback      TEXT NOT NULL DEFAULT '',
+
             created_at    TEXT NOT NULL,
             updated_at    TEXT NOT NULL,
             UNIQUE (chain_id, step_index)
@@ -310,6 +348,12 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             agent_id    TEXT NOT NULL DEFAULT '',
             instruction TEXT NOT NULL DEFAULT '',
             gate        INTEGER NOT NULL DEFAULT 0,
+            -- The verdict and its targets travel with a template, unlike the repository: a check
+            -- command and "if this fails, go back to step 2" mean the same thing in any workspace,
+            -- and they are most of what makes a plan worth saving rather than retyping.
+            check_command TEXT NOT NULL DEFAULT '',
+            on_pass     INTEGER NOT NULL DEFAULT -1,
+            on_fail     INTEGER NOT NULL DEFAULT -1,
             UNIQUE (template_id, step_index)
         );
 
@@ -1062,6 +1106,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_board_provider_to_stories(conn)?;
     add_grouping_to_agent_tasks(conn)?;
     add_grouping_to_agent_chains(conn)?;
+    add_repos_to_agent_chains(conn)?;
+    add_ai_usage(conn)?;
     add_group_name_to_db_connections(conn)?;
     align_project_ado_org_with_connections(conn)?;
     Ok(())
@@ -1188,6 +1234,156 @@ fn add_grouping_to_agent_chains(conn: &Connection) -> rusqlite::Result<()> {
     }
     if !has_column(conn, "agent_chains", "pinned")? {
         conn.execute_batch("ALTER TABLE agent_chains ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    // Seeded at 0 rather than at `step_count`: an existing plan is not a plan that has already
+    // used up its budget, and every one of them is linear anyway — the counter only starts
+    // mattering the first time a step is authored with a backward `on_fail`.
+    if !has_column(conn, "agent_chains", "dispatches")? {
+        conn.execute_batch("ALTER TABLE agent_chains ADD COLUMN dispatches INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    Ok(())
+}
+
+/// What the engines have spent, one row per finished run that reported it.
+///
+/// Global on purpose — no `workspace_id`, no `project_id`. Consumption belongs to the *account* the
+/// CLI is logged into, and a meter split by whichever folder happened to be open would answer a
+/// question nobody asks of a status bar. It is also why there is no foreign key: nothing here
+/// should disappear because a repository was removed.
+///
+/// `has_cost` is separate from `cost_usd` because zero is a real value and "the CLI did not say" is
+/// not zero. Folding the two would report an engine that never prints a price as free.
+fn add_ai_usage(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ai_usage (
+            id                 TEXT PRIMARY KEY,
+            provider           TEXT NOT NULL,
+            -- The model the CLI said it ran, falling back to the one that was forced. May be empty
+            -- when neither was known, which is a real state: the CLI picked for itself and did not
+            -- report it.
+            model              TEXT NOT NULL DEFAULT '',
+            input_tokens       INTEGER NOT NULL DEFAULT 0,
+            output_tokens      INTEGER NOT NULL DEFAULT 0,
+            -- Prompt tokens served from the provider's cache, kept apart from `input_tokens`
+            -- because they are the cheap ones and a merged total reads as several times the work.
+            cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+            cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+            cost_usd           REAL NOT NULL DEFAULT 0,
+            has_cost           INTEGER NOT NULL DEFAULT 0,
+            created_at         TEXT NOT NULL
+         );
+         -- Every read of this table is 'since a timestamp, grouped by provider', and every write is
+         -- an append at the newest end.
+         CREATE INDEX IF NOT EXISTS idx_ai_usage_created ON ai_usage(created_at);
+         CREATE INDEX IF NOT EXISTS idx_ai_usage_provider ON ai_usage(provider, created_at);",
+    )
+}
+
+/// A chain stopped being about one repository.
+///
+/// Three things at once, because they are one change: the set of repositories a chain works across
+/// (`agent_chain_repos`), which repository each individual step runs in
+/// (`agent_chain_steps.project_id`), and — since the first user of both is the story realizer — the
+/// work item a chain can be built from.
+///
+/// `agent_chains.project_id` deliberately stays, and stays the **first** repository of the set.
+/// Everything that scopes a chain to a workspace does it by joining `projects` through that column
+/// (see [`queries::list_agent_chains`]), and a chain whose primary repository is deleted should
+/// still go with it — which is exactly what the existing `ON DELETE CASCADE` already says.
+///
+/// The backfill is what keeps every chain written before this identical to what it was: one row in
+/// `agent_chain_repos` naming its own repository, and every step pointed at that same repository.
+/// A step's `project_id` is never empty after this, which is what lets the scheduler read it
+/// without a fallback branch.
+fn add_repos_to_agent_chains(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "agent_chains")? {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS agent_chain_repos (
+            chain_id   TEXT NOT NULL REFERENCES agent_chains(id) ON DELETE CASCADE,
+            project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            -- The order the user picked them in. Position 0 is the chain's own `project_id`, and
+            -- the dialog offers it as the default for a step that names no repository.
+            position   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (chain_id, project_id)
+         );
+         CREATE INDEX IF NOT EXISTS idx_agent_chain_repos_chain
+            ON agent_chain_repos(chain_id, position);",
+    )?;
+
+    for (column, ddl) in [
+        ("kind", "ALTER TABLE agent_chains ADD COLUMN kind TEXT NOT NULL DEFAULT 'chain';"),
+        (
+            "work_item_provider",
+            "ALTER TABLE agent_chains ADD COLUMN work_item_provider TEXT NOT NULL DEFAULT '';",
+        ),
+        ("work_item_org", "ALTER TABLE agent_chains ADD COLUMN work_item_org TEXT NOT NULL DEFAULT '';"),
+        ("work_item_id", "ALTER TABLE agent_chains ADD COLUMN work_item_id INTEGER NOT NULL DEFAULT 0;"),
+        ("work_item_key", "ALTER TABLE agent_chains ADD COLUMN work_item_key TEXT NOT NULL DEFAULT '';"),
+        ("work_item_url", "ALTER TABLE agent_chains ADD COLUMN work_item_url TEXT NOT NULL DEFAULT '';"),
+        (
+            "work_item_title",
+            "ALTER TABLE agent_chains ADD COLUMN work_item_title TEXT NOT NULL DEFAULT '';",
+        ),
+    ] {
+        if !has_column(conn, "agent_chains", column)? {
+            conn.execute_batch(ddl)?;
+        }
+    }
+
+    // Every chain that existed before this works across exactly the one repository it names.
+    conn.execute(
+        "INSERT OR IGNORE INTO agent_chain_repos (chain_id, project_id, position)
+         SELECT id, project_id, 0 FROM agent_chains",
+        [],
+    )?;
+
+    if table_exists(conn, "agent_chain_steps")? {
+        if !has_column(conn, "agent_chain_steps", "project_id")? {
+            conn.execute_batch(
+                "ALTER TABLE agent_chain_steps ADD COLUMN project_id TEXT NOT NULL DEFAULT '';",
+            )?;
+        }
+        if !has_column(conn, "agent_chain_steps", "phase")? {
+            conn.execute_batch("ALTER TABLE agent_chain_steps ADD COLUMN phase TEXT NOT NULL DEFAULT '';")?;
+        }
+        for (column, ddl) in [
+            (
+                "check_command",
+                "ALTER TABLE workspace_chain_template_steps ADD COLUMN check_command TEXT NOT NULL DEFAULT '';",
+            ),
+            ("on_pass", "ALTER TABLE workspace_chain_template_steps ADD COLUMN on_pass INTEGER NOT NULL DEFAULT -1;"),
+            ("on_fail", "ALTER TABLE workspace_chain_template_steps ADD COLUMN on_fail INTEGER NOT NULL DEFAULT -1;"),
+        ] {
+            if table_exists(conn, "workspace_chain_template_steps")?
+                && !has_column(conn, "workspace_chain_template_steps", column)?
+            {
+                conn.execute_batch(ddl)?;
+            }
+        }
+        // The verdict columns. Every default is the behaviour that existed before them, so a plan
+        // authored last month keeps running exactly as it did: no check, pass goes to the next
+        // step, fail stops.
+        for (column, ddl) in [
+            ("check_command", "ALTER TABLE agent_chain_steps ADD COLUMN check_command TEXT NOT NULL DEFAULT '';"),
+            ("on_pass", "ALTER TABLE agent_chain_steps ADD COLUMN on_pass INTEGER NOT NULL DEFAULT -1;"),
+            ("on_fail", "ALTER TABLE agent_chain_steps ADD COLUMN on_fail INTEGER NOT NULL DEFAULT -1;"),
+            ("feedback", "ALTER TABLE agent_chain_steps ADD COLUMN feedback TEXT NOT NULL DEFAULT '';"),
+        ] {
+            if !has_column(conn, "agent_chain_steps", column)? {
+                conn.execute_batch(ddl)?;
+            }
+        }
+        // Idempotent and cheap: only the rows still saying nothing, which after the first run is
+        // none of them.
+        conn.execute(
+            "UPDATE agent_chain_steps
+                SET project_id = (SELECT c.project_id FROM agent_chains c WHERE c.id = chain_id)
+              WHERE project_id = ''",
+            [],
+        )?;
     }
     Ok(())
 }

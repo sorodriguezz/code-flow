@@ -1,5 +1,7 @@
-import { LogOut, Trash2 } from "lucide-react";
+import { GraduationCap, LogOut, Trash2 } from "lucide-react";
 import { ActivePill } from "../common/ActivePill";
+import { useTourStore } from "../../state/tourStore";
+import { useUiStore } from "../../state/uiStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import type { Language } from "../../lib/i18n/translations";
 import { quitApp, resetAppData } from "../../lib/tauri/commands";
@@ -21,6 +23,8 @@ export function GeneralSettings() {
   const setLanguage = useLanguageStore((s) => s.setLanguage);
   const platform = usePlatform();
   const dataPath = platform === "windows" ? "C:\\CodeFlow" : "~/CodeFlow";
+  const startTour = useTourStore((s) => s.start);
+  const closeSettings = useUiStore((s) => s.closeSettings);
 
   return (
     <section>
@@ -44,6 +48,24 @@ export function GeneralSettings() {
       <p className="mt-2 text-[11px] text-[var(--cf-text-muted)]">{t("settings.translationNote")}</p>
 
       <UpdateSection />
+
+      <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
+        <h3 className="mb-1 text-sm font-semibold">{t("tour.settingsTitle")}</h3>
+        <p className="mb-3 text-[13px] text-[var(--cf-text-muted)]">{t("tour.settingsHint")}</p>
+        <button
+          onClick={() => {
+            // Closed first: the tour opens and closes this dialog itself from step 19 on, and
+            // starting it from underneath an already-open settings would have the first step
+            // spotlighting a sidebar nobody can see.
+            closeSettings();
+            startTour();
+          }}
+          className="flex items-center gap-2 rounded-md border border-[var(--cf-border)] px-3 py-2 text-[13px] font-medium text-[var(--cf-text)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+        >
+          <GraduationCap size={14} className="text-[var(--cf-accent)]" />
+          {t("tour.restart")}
+        </button>
+      </div>
 
       <div className="mt-6 border-t border-[var(--cf-border)] pt-4">
         <h3 className="mb-1 text-sm font-semibold">{t("settings.appLifecycle")}</h3>

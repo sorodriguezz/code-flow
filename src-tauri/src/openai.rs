@@ -17,7 +17,7 @@
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::ai::{AiEngine, AiInvocation, AiRun, Transport};
+use crate::ai::{AiEngine, AiInvocation, AiRun, AiUsage, Transport};
 
 /// OpenAI's own endpoint. The Settings field is free text, so pointing it at a compatible provider
 /// is the whole configuration step.
@@ -30,6 +30,10 @@ pub struct OpenAiEngine {
 }
 
 impl AiEngine for OpenAiEngine {
+    fn id(&self) -> &'static str {
+        "openai"
+    }
+
     fn label(&self) -> &'static str {
         "OpenAI"
     }
@@ -79,6 +83,27 @@ struct ChatResponse {
     /// alias was used, so it's worth reporting over the configured value.
     #[serde(default)]
     model: Option<String>,
+    /// The standard OpenAI usage block. Optional because this engine also drives *OpenAI-compatible*
+    /// endpoints, and not every one of them fills it in.
+    #[serde(default)]
+    usage: Option<OpenAiUsage>,
+}
+
+#[derive(Default, Deserialize)]
+struct OpenAiUsage {
+    #[serde(default)]
+    prompt_tokens: i64,
+    #[serde(default)]
+    completion_tokens: i64,
+    /// Cached prompt tokens, when the endpoint reports the newer nested breakdown.
+    #[serde(default)]
+    prompt_tokens_details: Option<OpenAiPromptDetails>,
+}
+
+#[derive(Default, Deserialize)]
+struct OpenAiPromptDetails {
+    #[serde(default)]
+    cached_tokens: i64,
 }
 
 #[derive(Deserialize)]
@@ -162,7 +187,25 @@ pub async fn complete(base_url: &str, api_key: &str, inv: &AiInvocation<'_>) -> 
     }
     // No session: each request stands alone (see `resumes_sessions`), so the caller re-sends the
     // context every turn and the id is only bookkeeping for the activity log.
-    Ok(AiRun { text, session_id: None, model: parsed.model.or_else(|| Some(model.to_string())) })
+    // Cached tokens are reported *inside* the prompt total, unlike Claude's, so they are taken back
+    // out — otherwise one turn would be counted once as input and once again as cache.
+    let usage = parsed.usage.as_ref().map(|u| {
+        let cached = u.prompt_tokens_details.as_ref().map_or(0, |d| d.cached_tokens);
+        AiUsage {
+            input_tokens: (u.prompt_tokens - cached).max(0),
+            output_tokens: u.completion_tokens,
+            cache_read_tokens: cached,
+            cache_write_tokens: 0,
+            // The API prices nothing; only a bill does.
+            cost_usd: None,
+        }
+    });
+    Ok(AiRun {
+        text,
+        session_id: None,
+        model: parsed.model.or_else(|| Some(model.to_string())),
+        usage: usage.filter(|u| !u.is_empty()),
+    })
 }
 
 #[derive(Deserialize)]

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { TokenHowTo } from "./TokenHowTo";
 import { deleteJiraToken, setJiraToken } from "../../lib/tauri/commands";
 import {
   loadJiraConnections,
@@ -22,6 +23,10 @@ import { useT } from "../../state/languageStore";
  * `acme.atlassian.net` and `https://acme.atlassian.net/jira` are one connection, not three, and a
  * user who types a different form of the same site next month overwrites rather than duplicates.
  */
+/** Atlassian account-wide, not per site: one API token works across every Jira site the account
+ * can reach, which is why this is a constant rather than built from the field above. */
+const JIRA_TOKEN_PAGE = "https://id.atlassian.com/manage-profile/security/api-tokens";
+
 export function JiraSettings() {
   const t = useT();
   const [connections, setConnections] = useState<JiraConnection[]>([]);
@@ -157,6 +162,18 @@ export function JiraSettings() {
           </button>
         </div>
       </div>
+
+      <TokenHowTo
+        title={t("settings.apiTokenHowTo")}
+        steps={[
+          t("settings.jiraTokenStep1"),
+          t("settings.jiraTokenStep2"),
+          t("settings.jiraTokenStep3"),
+          t("settings.jiraTokenStep4"),
+        ]}
+        linkLabel={t("settings.jiraTokenOpenPage")}
+        url={JIRA_TOKEN_PAGE}
+      />
     </section>
   );
 }

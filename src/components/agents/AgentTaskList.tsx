@@ -17,6 +17,7 @@ import {
   Square,
   Trash2,
   Users,
+  Wand2,
   X,
 } from "lucide-react";
 import { AGENT_STATUS, STATUS_ORDER } from "./agentStatus";
@@ -67,6 +68,7 @@ export function AgentTaskList({
   width,
   onNewTask,
   onNewChain,
+  onNewStory,
   onNewAgent,
   onNewProject,
   onEditProject,
@@ -77,6 +79,7 @@ export function AgentTaskList({
   /** The folder to file the new row under — `""` for none. */
   onNewTask: (agentProjectId: string) => void;
   onNewChain: (agentProjectId: string) => void;
+  onNewStory: (agentProjectId: string) => void;
   onNewAgent: () => void;
   onNewProject: () => void;
   onEditProject: (project: AgentProject) => void;
@@ -212,6 +215,9 @@ export function AgentTaskList({
         <ToolbarButton onClick={() => onNewChain("")} title={t("agents.newChain")}>
           <Link2 size={13} />
         </ToolbarButton>
+        <ToolbarButton onClick={() => onNewStory("")} title={t("agents.newStory")}>
+          <Wand2 size={13} />
+        </ToolbarButton>
         <ToolbarButton onClick={onNewProject} title={t("agents.newProject")}>
           <Folder size={13} />
         </ToolbarButton>
@@ -275,6 +281,7 @@ export function AgentTaskList({
             query={query}
             onNewTask={onNewTask}
             onNewChain={onNewChain}
+            onNewStory={onNewStory}
             onNewProject={onNewProject}
             onEditProject={onEditProject}
             onContinueWith={setContinuing}
@@ -297,6 +304,7 @@ export function AgentTaskList({
             query={query}
             onNewTask={onNewTask}
             onNewChain={onNewChain}
+            onNewStory={onNewStory}
             onNewProject={onNewProject}
             onEditProject={onEditProject}
             onContinueWith={setContinuing}

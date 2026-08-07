@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { TokenHowTo } from "./TokenHowTo";
 import { deleteGithubToken, githubAuthenticatedUser, setGithubToken } from "../../lib/tauri/commands";
 import {
   GITHUB_COM,
@@ -11,6 +12,14 @@ import {
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { GithubConnection } from "../../types/domain";
+
+/** GitHub's own token page for whichever host is in the field. Enterprise Server mounts the same
+ * path under its own domain, so one shape covers both — and deep-linking it is the difference
+ * between four steps you follow and one link you click. */
+function tokenPageUrl(host: string): string {
+  const clean = normalizeGithubHost(host);
+  return `https://${clean}/settings/tokens`;
+}
 
 export function GitHubSettings() {
   const t = useT();
@@ -137,6 +146,18 @@ export function GitHubSettings() {
           </button>
         </div>
       </div>
+
+      <TokenHowTo
+        title={t("settings.tokenHowTo")}
+        steps={[
+          t("settings.githubPatStep1"),
+          t("settings.githubPatStep2"),
+          t("settings.githubPatStep3"),
+          t("settings.githubPatStep4"),
+        ]}
+        linkLabel={t("settings.githubPatOpenPage")}
+        url={tokenPageUrl(host)}
+      />
     </section>
   );
 }

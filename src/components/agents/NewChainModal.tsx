@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, BookmarkPlus, Check, Link2, Plus, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, BookmarkPlus, Check, Link2, Plus, TerminalSquare, Trash2, Undo2 } from "lucide-react";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { Note } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
@@ -12,11 +12,16 @@ import { isProviderReady, useProviderStatusStore } from "../../state/providerSta
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import type { NewChainStep } from "../../types/domain";
+import { ALL_REPOS, blankChainStep, type NewChainStep } from "../../types/domain";
 
 /** Mirrors `queries::MAX_CHAIN_STEPS`. The backend refuses past it too — a cap enforced only here
  * is a cap a stale window can walk through. */
-const MAX_STEPS = 8;
+const MAX_STEPS = 16;
+/** Mirrors `queries::MAX_CHAIN_REPOS`. */
+const MAX_REPOS = 16;
+/** Mirrors `queries::MAX_CHAIN_ROWS` — the cap on what the steps *expand into*, which is the one a
+ * multi-repository plan actually runs into. */
+const MAX_ROWS = 64;
 
 interface DraftStep extends NewChainStep {
   /** Local only: a stable key so reordering does not remount every row. */
@@ -26,24 +31,57 @@ interface DraftStep extends NewChainStep {
 let nextKey = 0;
 const draft = (agentId: string): DraftStep => ({
   key: `s${nextKey++}`,
-  agent_id: agentId,
-  instruction: "",
-  gate: false,
+  ...blankChainStep({ agent_id: agentId }),
 });
 
 /**
- * Authoring a chain: one repository, one objective, and an ordered list of agents with an
- * instruction each.
+ * Re-points every `on_fail` after the plan has been reordered or shortened.
  *
- * All of it is decided here because none of it can move afterwards without lying: the repository
- * is the working copy every step will edit, and each step's agent is snapshotted the moment this
+ * A target is a **position**, and a position stops meaning anything the moment the step at it moves:
+ * without this, deleting step 2 silently re-aims every loop that pointed at it onto whatever slid
+ * into its place, and the plan still saves. Resolved through the draft keys, which are the only
+ * stable identity a step has before it has been written anywhere.
+ *
+ * Anything that ends up pointing at or past its own step is cleared rather than clamped. A jump
+ * forward on failure is a plan skipping the work it has just proved it needs, and guessing which
+ * earlier step the user *meant* would be inventing a plan they did not author.
+ */
+function repoint(before: DraftStep[], after: DraftStep[]): DraftStep[] {
+  const positions = new Map(after.map((step, index) => [step.key, index]));
+  return after.map((step, index) => {
+    if (step.on_fail < 0) return step;
+    const moved = positions.get(before[step.on_fail]?.key ?? "");
+    return { ...step, on_fail: moved !== undefined && moved < index ? moved : -1 };
+  });
+}
+
+/** How many engine runs this plan turns into: a step marked "every repository" is one row per
+ * repository, and everything else is one row. Mirrors `queries::expand_steps`. */
+function expandedRows(steps: DraftStep[], repoCount: number): number {
+  return steps.reduce((total, step) => total + (step.project_id === ALL_REPOS ? repoCount : 1), 0);
+}
+
+/**
+ * Authoring a chain: the repositories it works across, one objective, and an ordered list of agents
+ * with an instruction each.
+ *
+ * All of it is decided here because none of it can move afterwards without lying: the repositories
+ * are the working copies the steps will edit, and each step's agent is snapshotted the moment this
  * dialog is submitted, so a roster edited next week does not rewrite a plan that is already
  * running. The folder is the exception — it only says where the chain is filed, and the list can
  * move it later.
  *
+ * **One step, one repository.** An engine session sees one working directory, so a plan across
+ * three repositories is three sets of turns rather than one turn that somehow spans them — the same
+ * constraint the work-item review already runs under. What the dialog offers on top of that is the
+ * shorthand: a step set to "every repository" is expanded at creation into one consecutive step per
+ * repository, so the common case (do this everywhere) is one row to author and N rows to watch.
+ * With a single repository picked, none of this is on screen and the form is what it always was.
+ *
  * With `templateId` the same form doubles as the template editor: a saved plan has exactly the
  * fields a chain is authored from, so editing one in a second dialog would mean two forms drifting
- * apart over one shape.
+ * apart over one shape. A template deliberately does **not** remember repositories — it is meant to
+ * be applied in whatever workspace you are in, and repository ids do not survive that trip.
  */
 export function NewChainModal({
   onClose,
@@ -71,9 +109,13 @@ export function NewChainModal({
 
   const runnable = useMemo(() => roster.filter(isRunnableAgent), [roster]);
 
-  const [projectId, setProjectId] = useState(
-    () => (activeProjectId && projects.some((p) => p.id === activeProjectId) ? activeProjectId : projects[0]?.id) ?? "",
-  );
+  /** The repository set, in the order it was picked — the first is the chain's own, which is what a
+   * step that names none falls back to. Starts as the repository the user is already in. */
+  const [projectIds, setProjectIds] = useState<string[]>(() => {
+    const first =
+      (activeProjectId && projects.some((p) => p.id === activeProjectId) ? activeProjectId : projects[0]?.id) ?? "";
+    return first ? [first] : [];
+  });
   const [agentProjectId, setAgentProjectId] = useState(() =>
     agentProjects.some((p) => p.id === initialAgentProjectId) ? initialAgentProjectId : "",
   );
@@ -111,15 +153,33 @@ export function NewChainModal({
       if (target < 0 || target >= current.length) return current;
       const next = [...current];
       [next[index], next[target]] = [next[target], next[index]];
-      return next;
+      return repoint(current, next);
     });
+
+  const removeStep = (key: string) =>
+    setSteps((current) => repoint(current, current.filter((step) => step.key !== key)));
 
   const gateAll = steps.length > 1 && steps.slice(1).every((step) => step.gate);
   const setGateAll = (on: boolean) =>
     setSteps((current) => current.map((step, i) => (i === 0 ? step : { ...step, gate: on })));
 
+  /** Ticking a repository appends it, so the *first* one stays whichever the user picked first —
+   * which is the one the chain is filed under and the one an unassigned step runs in. */
+  const toggleRepo = (id: string) =>
+    setProjectIds((current) => {
+      if (current.includes(id)) {
+        // A step pointed at a repository that is no longer in the set falls back to the first one,
+        // rather than being submitted with a routing the chain cannot honour.
+        setSteps((all) => all.map((step) => (step.project_id === id ? { ...step, project_id: "" } : step)));
+        return current.filter((kept) => kept !== id);
+      }
+      return current.length >= MAX_REPOS ? current : [...current, id];
+    });
+
+  const rows = expandedRows(steps, projectIds.length);
   const ready = steps.filter((step) => step.agent_id && step.instruction.trim());
-  const canStart = !busy && projectId !== "" && ready.length > 0 && ready.length === steps.length;
+  const canStart =
+    !busy && projectIds.length > 0 && rows <= MAX_ROWS && ready.length > 0 && ready.length === steps.length;
 
   /** Fills the form from a saved plan. A step whose agent has since been deleted comes back empty
    * for the user to re-point, rather than being dropped — a plan quietly one step shorter is worse
@@ -131,9 +191,16 @@ export function NewChainModal({
     setSteps(
       template.steps.map((step) => ({
         key: `s${nextKey++}`,
-        agent_id: runnable.some((a) => a.id === step.agent_id) ? step.agent_id : "",
-        instruction: step.instruction,
-        gate: step.gate,
+        ...blankChainStep({
+          agent_id: runnable.some((a) => a.id === step.agent_id) ? step.agent_id : "",
+          instruction: step.instruction,
+          gate: step.gate,
+          // The verdict and its targets *do* travel: unlike a repository id they mean the same
+          // thing in any workspace, and they are most of what makes a plan worth saving twice.
+          check_command: step.check_command,
+          on_pass: step.on_pass,
+          on_fail: step.on_fail,
+        }),
       })),
     );
   };
@@ -168,7 +235,11 @@ export function NewChainModal({
         id: savedTemplateId ?? undefined,
         name,
         description: goal.trim(),
-        steps: steps.map(({ agent_id, instruction, gate }) => ({ agent_id, instruction, gate })),
+        // Repository and phase are dropped on the way in: a template is applied in whatever
+        // workspace it is opened in, and an id from another one resolves to nothing there.
+        steps: steps.map(({ agent_id, instruction, gate, check_command, on_pass, on_fail }) =>
+          blankChainStep({ agent_id, instruction, gate, check_command, on_pass, on_fail }),
+        ),
       });
       // `null` means the store had no workspace to save into — announcing success there would be a
       // lie the user only discovers when the template is missing.
@@ -192,10 +263,19 @@ export function NewChainModal({
     setBusy(true);
     try {
       await useChainStore.getState().create({
-        projectId,
+        projectIds,
         title: title.trim() || goal.trim().split("\n")[0].slice(0, 64) || t("agents.newChain"),
         goal,
-        steps: steps.map(({ agent_id, instruction, gate }) => ({ agent_id, instruction, gate })),
+        steps: steps.map(({ agent_id, instruction, gate, project_id, phase, check_command, on_pass, on_fail }) => ({
+          agent_id,
+          instruction,
+          gate,
+          project_id,
+          phase,
+          check_command,
+          on_pass,
+          on_fail,
+        })),
         agentProjectId,
         start,
       });
@@ -280,25 +360,48 @@ export function NewChainModal({
           </Field>
         )}
 
-        <div className="grid grid-cols-2 gap-3">
-          <Field label={t("agents.repository")} hint={t("agents.repositoryHint")}>
-            <Select
-              size="field"
-              value={projectId}
-              ariaLabel={t("agents.repository")}
-              onChange={setProjectId}
-              options={projects.map((p) => ({ value: p.id, label: p.name }))}
-            />
-          </Field>
-          <Field label={t("agents.chainName")}>
-            <input
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder={t("agents.chainNamePlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
-            />
-          </Field>
-        </div>
+        <Field label={t("agents.chainName")}>
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder={t("agents.chainNamePlaceholder")}
+            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
+          />
+        </Field>
+
+        {/* Checkboxes rather than a multi-select, the same call the QA panel makes: the list is the
+            workspace's repositories, short enough to read at a glance, and which ones are ticked is
+            the whole question. The order of ticking is kept — the first one is the chain's own. */}
+        <Field
+          label={t("agents.repositories")}
+          hint={projectIds.length > 1 ? t("agents.repositoriesMultiHint") : t("agents.repositoryHint")}
+        >
+          <div className="max-h-40 space-y-1 overflow-y-auto rounded-md border border-[var(--cf-border)] px-2 py-1.5">
+            {projects.map((repo) => {
+              const at = projectIds.indexOf(repo.id);
+              return (
+                <label
+                  key={repo.id}
+                  className="flex cursor-pointer items-center gap-1.5 text-[12px] text-[var(--cf-text)]"
+                >
+                  <Checkbox
+                    checked={at !== -1}
+                    disabled={at === -1 && projectIds.length >= MAX_REPOS}
+                    onChange={() => toggleRepo(repo.id)}
+                  />
+                  <span className="min-w-0 truncate">{repo.name}</span>
+                  {/* Only the first one is called out, and only once there is more than one: it is
+                      the repository an unassigned step runs in, which is otherwise invisible. */}
+                  {at === 0 && projectIds.length > 1 && (
+                    <span className="shrink-0 rounded bg-black/[0.05] px-1.5 py-[1px] text-[10px] text-[var(--cf-text-muted)] dark:bg-white/[0.07]">
+                      {t("agents.repoPrimary")}
+                    </span>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        </Field>
 
         {/* Filing, never routing — and one field away from the repository, which is the one place a
             user could reasonably read the two as the same thing. Hence the hint, and hence "no
@@ -334,6 +437,17 @@ export function NewChainModal({
             <span className="text-[11px] tabular-nums text-[var(--cf-text-muted)]">
               {t("agents.stepsCount", { n: steps.length, max: MAX_STEPS })}
             </span>
+            {/* What the plan actually turns into, shown only when the two numbers differ — a step
+                set to "every repository" is one row to author and N turns to sit through. */}
+            {rows !== steps.length && (
+              <span
+                className={`text-[11px] tabular-nums ${
+                  rows > MAX_ROWS ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-muted)]"
+                }`}
+              >
+                {t("agents.expandsToRuns", { n: rows, max: MAX_ROWS })}
+              </span>
+            )}
             <label className="ml-auto flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
               <Checkbox checked={gateAll} onChange={setGateAll} />
               {t("agents.gateAll")}
@@ -386,7 +500,7 @@ export function NewChainModal({
                   </button>
                   <button
                     type="button"
-                    onClick={() => setSteps((current) => current.filter((s) => s.key !== step.key))}
+                    onClick={() => removeStep(step.key)}
                     disabled={steps.length === 1}
                     title={t("common.delete")}
                     className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-danger)] disabled:opacity-30 dark:hover:bg-white/[0.08]"
@@ -401,6 +515,67 @@ export function NewChainModal({
                   placeholder={t("agents.stepInstructionPlaceholder")}
                   className="w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 text-[12px] leading-relaxed outline-none focus:border-[var(--cf-accent)]"
                 />
+                {/* Only once there is a choice to make. With one repository every step runs there
+                    and a picker with a single option is a question with one answer — which is why
+                    a single-repository chain is authored in exactly the form it always was. */}
+                {projectIds.length > 1 && (
+                  <div className="mt-1.5">
+                    <Select
+                      size="sm"
+                      value={step.project_id || projectIds[0]}
+                      ariaLabel={t("agents.stepRepository")}
+                      onChange={(value) => patch(step.key, { project_id: value })}
+                      options={[
+                        { value: ALL_REPOS, label: t("agents.stepRepoAll", { n: projectIds.length }) },
+                        ...projectIds.map((id) => ({
+                          value: id,
+                          label: projects.find((p) => p.id === id)?.name ?? id,
+                        })),
+                      ]}
+                    />
+                  </div>
+                )}
+                {/* The verdict, and the only thing in this dialog that is not about what an agent
+                    is told. A chain used to advance because a turn returned text; this is the one
+                    fact in the plan no agent authors. Hidden behind its own line so a plan that
+                    does not want one is authored exactly as it always was. */}
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  <TerminalSquare size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+                  <input
+                    value={step.check_command}
+                    onChange={(e) => patch(step.key, { check_command: e.target.value })}
+                    placeholder={t("agents.stepCheckPlaceholder")}
+                    title={t("agents.stepCheckHint")}
+                    className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 font-mono text-[11px] outline-none focus:border-[var(--cf-accent)]"
+                  />
+                </div>
+                {/* Only with a check: without one there is no failure to route, and a "where does
+                    this go when it fails" on a step that cannot fail is a question with no meaning.
+                    Only backwards, too — the loop is the thing worth having, and a forward jump on
+                    failure is a plan skipping the work it just proved it needs. */}
+                {step.check_command.trim() !== "" && index > 0 && (
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    <Undo2 size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+                    <Select
+                      size="sm"
+                      value={String(step.on_fail)}
+                      ariaLabel={t("agents.stepOnFail")}
+                      onChange={(value) => patch(step.key, { on_fail: Number(value) })}
+                      options={[
+                        { value: "-1", label: t("agents.stepOnFailRetry") },
+                        ...steps.slice(0, index).map((earlier, at) => ({
+                          value: String(at),
+                          label: t("agents.stepOnFailGoto", {
+                            n: at + 1,
+                            name:
+                              runnable.find((a) => a.id === earlier.agent_id)?.name ||
+                              t("settings.sddNewAgent"),
+                          }),
+                        })),
+                      ]}
+                    />
+                  </div>
+                )}
                 {/* Not offered on the first step: there is nothing before it to review. */}
                 {index > 0 && (
                   <label className="mt-1.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">

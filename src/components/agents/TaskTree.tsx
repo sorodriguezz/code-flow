@@ -16,6 +16,7 @@ import {
   RotateCcw,
   Square,
   Trash2,
+  Wand2,
 } from "lucide-react";
 import { AGENT_STATUS } from "./agentStatus";
 import { chainRollup } from "./chainStatus";
@@ -37,6 +38,7 @@ import type {
   ChainStepBrief,
   ChainTemplate,
 } from "../../types/domain";
+import { blankChainStep } from "../../types/domain";
 
 /**
  * A row of the tree, before it is drawn.
@@ -80,6 +82,7 @@ export function TaskTree({
   query,
   onNewTask,
   onNewChain,
+  onNewStory,
   onNewProject,
   onEditProject,
   onContinueWith,
@@ -94,6 +97,7 @@ export function TaskTree({
   query: string;
   onNewTask: (agentProjectId: string) => void;
   onNewChain: (agentProjectId: string) => void;
+  onNewStory: (agentProjectId: string) => void;
   onNewProject: () => void;
   onEditProject: (project: AgentProject) => void;
   onContinueWith: (taskId: string) => void;
@@ -248,7 +252,11 @@ export function TaskTree({
                 id: template.id,
                 name: name.trim(),
                 description: template.description,
-                steps: template.steps.map(({ agent_id, instruction, gate }) => ({ agent_id, instruction, gate })),
+                // A template carries no repositories — it is applied wherever it is opened, and an
+                // id from another workspace resolves to nothing there.
+                steps: template.steps.map(({ agent_id, instruction, gate, check_command, on_pass, on_fail }) =>
+                  blankChainStep({ agent_id, instruction, gate, check_command, on_pass, on_fail }),
+                ),
               })
               .catch((e: unknown) => pushErrorToast(String(e)));
           }
@@ -319,6 +327,7 @@ export function TaskTree({
               onEditProject,
               onNewTask,
               onNewChain,
+              onNewStory,
               startRename: (kind, id) => setRenaming({ kind, id }),
               startMove: (kind, id) => setMove({ x: menu.x, y: menu.y, kind, id }),
             })}
@@ -449,6 +458,7 @@ export function TaskTree({
             onEditProject,
             onNewTask,
             onNewChain,
+            onNewStory,
             startRename: (kind, id) => setRenaming({ kind, id }),
             startMove: (kind, id) => setMove({ x: menu.x, y: menu.y, kind, id }),
           })}
@@ -764,6 +774,7 @@ function menuItemsFor(
     onEditProject: (project: AgentProject) => void;
     onNewTask: (agentProjectId: string) => void;
     onNewChain: (agentProjectId: string) => void;
+    onNewStory: (agentProjectId: string) => void;
     startRename: (kind: Renaming["kind"], id: string) => void;
     startMove: (kind: "task" | "chain", id: string) => void;
   },
@@ -887,6 +898,7 @@ function menuItemsFor(
       [
         { label: t("agents.newTaskHere"), icon: Plus, onClick: () => ctx.onNewTask(project.id) },
         { label: t("agents.newChainHere"), icon: Link2, onClick: () => ctx.onNewChain(project.id) },
+        { label: t("agents.newStoryHere"), icon: Wand2, onClick: () => ctx.onNewStory(project.id) },
       ],
       [
         { label: t("agents.renameProject"), icon: Pencil, onClick: () => ctx.startRename("project", project.id) },

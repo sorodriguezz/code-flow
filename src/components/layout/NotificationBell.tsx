@@ -236,6 +236,7 @@ export function NotificationBell() {
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={label}
+        data-tour="notification-bell"
         title={label}
         onClick={() => (open ? close() : setOpen(true))}
         className={`relative flex h-6 w-6 shrink-0 items-center justify-center rounded-md hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${

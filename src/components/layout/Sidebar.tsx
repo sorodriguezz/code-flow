@@ -120,7 +120,7 @@ function WorkspaceSwitcher() {
   useDismissOnOutside(open, dismiss, [rootRef]);
 
   return (
-    <div ref={rootRef} className="relative mb-4 px-1">
+    <div ref={rootRef} data-tour="workspace-switcher" className="relative mb-4 px-1">
       <button
         onClick={() => (open ? dismiss() : setOpen(true))}
         className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
@@ -1438,17 +1438,18 @@ export function Sidebar() {
           <WorkspaceSwitcher />
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-          <div className="mb-1 flex items-center justify-between px-1">
+        <div data-tour="projects-panel" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+          <div data-tour="projects-header" className="mb-1 flex items-center justify-between px-1">
             <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("sidebar.projects")}
             </span>
-            <div className="flex items-center gap-0.5">
+            <div data-tour="projects-actions" className="flex items-center gap-0.5">
               {/* Deliberately here, above the project list, rather than inside one project's
                   Pull Requests section: the whole point is that the link decides which repo
                   it belongs to. */}
               <button
                 onClick={openPrLinkModal}
+                data-tour="pr-link"
                 className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
                 title={t("prLink.menuItem")}
               >
@@ -1456,6 +1457,7 @@ export function Sidebar() {
               </button>
               <button
                 onClick={() => setShowCloneModal(true)}
+                data-tour="clone-repo"
                 className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
                 title={t("sidebar.cloneRepo")}
               >
@@ -1463,6 +1465,7 @@ export function Sidebar() {
               </button>
               <button
                 onClick={handleAddProject}
+                data-tour="add-project"
                 className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
                 title={t("sidebar.addProject")}
               >

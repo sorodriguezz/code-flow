@@ -11,10 +11,83 @@ use tauri::State;
 use crate::db::{
     models::{
         AgentChain, AgentProject, AgentTask, ChainClaim, ChainDetail, ChainStepBrief, ChainTemplate,
-        NewChainStep,
+        NewChainStep, NewStoryWorkItem, StepCheck,
     },
     queries, Db,
 };
+
+/// How long a step's check may run before it is treated as a failure.
+///
+/// Generous, because the checks worth writing are the slow ones — a test suite, a build — and a
+/// bound that cut those short would push people towards checks that prove nothing. Bounded at all
+/// because a command that hangs is a chain that hangs: there is no user watching an autonomous run
+/// to notice that `npm test` is sitting on a prompt it will never be answered.
+const CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Runs one step's declared check in its own repository and reports what happened.
+///
+/// **Exit code 0 and nothing else.** No parsing of the output, no asking a model whether it thinks
+/// it succeeded — the point of this whole mechanism is to introduce one fact into a chain that no
+/// agent authored, and a verdict inferred from prose would not be one.
+///
+/// Through the platform shell on purpose: the checks people actually write are `npm test`,
+/// `cargo test`, `make lint` — shell words, with the pipes and `&&` that go with them. That does
+/// mean the command runs with the user's full privileges, which is the same bargain the rest of
+/// this view already makes: the agents it runs edit the working copy directly.
+#[tauri::command]
+pub async fn run_chain_step_check(db: State<'_, Db>, step_id: String) -> Result<StepCheck, String> {
+    // Read and release. The connection is behind a `Mutex` and the process below is awaited, so a
+    // guard held across it would freeze every other command for as long as a test suite takes.
+    let target = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::chain_step_check(&conn, &step_id).map_err(|e| e.to_string())?
+    };
+    let Some((command, cwd)) = target else {
+        return Ok(StepCheck { ran: false, passed: false, output: String::new() });
+    };
+
+    let mut cmd = if cfg!(windows) {
+        let mut c = crate::proc::command("cmd");
+        c.arg("/C").arg(&command);
+        c
+    } else {
+        let mut c = crate::proc::command("sh");
+        c.arg("-c").arg(&command);
+        c
+    };
+    cmd.current_dir(&cwd);
+    // Never inherited: a check that reads stdin would block forever behind a terminal that does
+    // not exist.
+    cmd.stdin(std::process::Stdio::null());
+
+    let output = match tokio::time::timeout(CHECK_TIMEOUT, cmd.output()).await {
+        Err(_) => {
+            return Ok(StepCheck {
+                ran: true,
+                passed: false,
+                output: format!("The check timed out after {} minutes.", CHECK_TIMEOUT.as_secs() / 60),
+            })
+        }
+        // The command could not be started at all — a missing binary, an unreadable directory.
+        // Reported as a *failed* check rather than as an error, because a step whose verdict cannot
+        // be taken has not been verified, and silently passing it is the one outcome that would
+        // make the whole mechanism worse than not having it.
+        Ok(Err(e)) => {
+            return Ok(StepCheck { ran: true, passed: false, output: format!("{command}: {e}") })
+        }
+        Ok(Ok(output)) => output,
+    };
+
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        if !text.trim().is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&stderr);
+    }
+    Ok(StepCheck { ran: true, passed: output.status.success(), output: text })
+}
 
 #[tauri::command]
 pub fn list_agent_tasks(db: State<Db>, workspace_id: String) -> Result<Vec<AgentTask>, String> {
@@ -112,26 +185,115 @@ pub fn get_chain_detail(db: State<Db>, chain_id: String) -> Result<Option<ChainD
     queries::get_chain_detail(&conn, &chain_id).map_err(|e| e.to_string())
 }
 
+/// The repository set of a chain, deduplicated and in the order the user picked them.
+///
+/// A repository listed twice is one repository — the dialog cannot produce that, but a stale window
+/// and a hand-made call both can, and `agent_chain_repos` would refuse the second insert while the
+/// step expansion would happily have run everything twice.
+fn repo_set(project_ids: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(project_ids.len());
+    for id in project_ids {
+        let id = id.trim();
+        if !id.is_empty() && !out.iter().any(|kept| kept == id) {
+            out.push(id.to_string());
+        }
+    }
+    out
+}
+
 /// Refuses a plan longer than the cap here as well as in the dialog: the cap is what makes a
 /// runaway impossible, and a limit enforced only in the UI is a limit a stale window can exceed.
+///
+/// Two caps now, because a step can say "every repository": [`queries::MAX_CHAIN_STEPS`] bounds what
+/// was written and [`queries::MAX_CHAIN_ROWS`] bounds what it expands into.
 #[tauri::command]
 pub fn create_agent_chain(
     db: State<Db>,
-    project_id: String,
+    project_ids: Vec<String>,
     title: String,
     goal: String,
     steps: Vec<NewChainStep>,
     agent_project_id: String,
 ) -> Result<ChainDetail, String> {
+    let project_ids = repo_set(&project_ids);
+    if project_ids.is_empty() {
+        return Err("chain.noRepos".to_string());
+    }
+    if project_ids.len() > queries::MAX_CHAIN_REPOS {
+        return Err("chain.tooManyRepos".to_string());
+    }
     if steps.is_empty() {
         return Err("chain.noSteps".to_string());
     }
     if steps.len() > queries::MAX_CHAIN_STEPS {
         return Err("chain.tooManySteps".to_string());
     }
+    if queries::expanded_step_count(&steps, &project_ids) > queries::MAX_CHAIN_ROWS {
+        return Err("chain.tooManySteps".to_string());
+    }
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::create_agent_chain(&conn, &project_id, &title, &goal, &steps, &agent_project_id)
+    queries::create_agent_chain(&conn, &project_ids, &title, &goal, &steps, &agent_project_id)
         .map_err(|e| e.to_string())
+}
+
+/// A story run: one work item, N candidate repositories, and the two agents that will read it and
+/// then write it.
+///
+/// The plan is fixed at 2N steps and is built in `queries` rather than sent from the dialog — the
+/// instructions the two phases run under are the feature, not a form field, and a client that could
+/// send its own would be a client that could quietly drop "do not edit any file" out of the analysis
+/// pass.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn create_story_chain(
+    db: State<Db>,
+    project_ids: Vec<String>,
+    title: String,
+    notes: String,
+    analyst_agent_id: String,
+    implementer_agent_id: String,
+    agent_project_id: String,
+    work_item: NewStoryWorkItem,
+) -> Result<ChainDetail, String> {
+    let project_ids = repo_set(&project_ids);
+    if project_ids.is_empty() {
+        return Err("chain.noRepos".to_string());
+    }
+    // Half of `MAX_CHAIN_REPOS`' worth would still fit the row cap, but the repository cap is about
+    // how long a run a person will actually watch, and a story run is two passes per repository.
+    if project_ids.len() > queries::MAX_CHAIN_REPOS || project_ids.len() * 2 > queries::MAX_CHAIN_ROWS {
+        return Err("chain.tooManyRepos".to_string());
+    }
+    if analyst_agent_id.trim().is_empty() || implementer_agent_id.trim().is_empty() {
+        return Err("chain.agentNotRoutable".to_string());
+    }
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::create_story_chain(
+        &conn,
+        &project_ids,
+        &title,
+        &notes,
+        &analyst_agent_id,
+        &implementer_agent_id,
+        &agent_project_id,
+        &work_item,
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Freezes what one step will be sent, ahead of the gate it sits behind. See
+/// [`queries::set_chain_step_input`].
+#[tauri::command]
+pub fn set_chain_step_input(db: State<Db>, step_id: String, input: String) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_chain_step_input(&conn, &step_id, &input).map_err(|e| e.to_string())
+}
+
+/// Takes one step out of the plan, or puts it back. See [`queries::set_chain_step_skipped`].
+#[tauri::command]
+pub fn set_chain_step_skipped(db: State<Db>, step_id: String, skipped: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_chain_step_skipped(&conn, &step_id, skipped).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -86,14 +86,18 @@ pub const TABLES: &[&str] = &[
     "remote_snippets",
     "remote_log",
     // History, activity and agent work. Last because every one of them hangs off a project or a
-    // workspace, and `agent_chain_steps` hangs off `agent_chains` in turn.
+    // workspace, and `agent_chain_steps` and `agent_chain_repos` hang off `agent_chains` in turn.
     "activity_log",
     "job_history",
+    // What the engines spent. No foreign key of its own, so its position here is only about
+    // reading order: it belongs with the history of the work that spent it.
+    "ai_usage",
     "workspace_activity",
     "conversation_titles",
     "review_runs",
     "agent_tasks",
     "agent_chains",
+    "agent_chain_repos",
     "agent_chain_steps",
 ];
 
@@ -160,11 +164,23 @@ pub const GROUPS: &[Group] = &[
     },
     Group { key: "requestHistory", tables: &["api_history", "db_query_history"] },
     Group {
+        // `ai_usage` rides here rather than in a switch of its own: it is the token account of
+        // exactly these turns, and somebody who does not keep the conversations has no use for a
+        // meter of what they cost.
         key: "conversations",
-        tables: &["activity_log", "conversation_titles", "workspace_activity", "job_history"],
+        tables: &[
+            "activity_log",
+            "conversation_titles",
+            "workspace_activity",
+            "job_history",
+            "ai_usage",
+        ],
     },
     Group { key: "reviews", tables: &["review_runs"] },
-    Group { key: "agentWork", tables: &["agent_tasks", "agent_chains", "agent_chain_steps"] },
+    Group {
+        key: "agentWork",
+        tables: &["agent_tasks", "agent_chains", "agent_chain_repos", "agent_chain_steps"],
+    },
     Group { key: "cookies", tables: &["api_cookies"] },
 ];
 

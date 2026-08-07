@@ -6,10 +6,18 @@
 //! `--print` mode. The provider stays labelled "Gemini" (that's the login/brand the user picks);
 //! this module is what actually differs.
 //!
-//! Verified against agy 1.1.7 on Windows:
+//! Verified against agy 1.1.7 on Windows, and re-verified on 1.1.10 (macOS):
 //!   - `agy models` prints available model ids, one per line → [`list_models_args`] makes the
 //!     Settings picker show the real set instead of a hardcoded guess.
 //!   - `agy -p "<prompt>"` runs one prompt non-interactively and prints the reply to stdout.
+//!   - **`--output-format text|json|stream-json` exists as of 1.1.10** and did not in 1.1.7. Under
+//!     `stream-json` the CLI emits one JSON event per line and closes with
+//!     `{"event":"result","result":{…}}`, which carries the reply, the conversation id and the
+//!     turn's `usage` block. That is the same shape `claude.rs` reads, and this engine now asks for
+//!     it: without it a Gemini turn reported no tokens at all and the usage meter simply had
+//!     nothing to draw for this provider. **It also means agy 1.1.10 or newer is required** — an
+//!     older binary rejects the flag. The plain-text fallback below covers a CLI that ignores it,
+//!     not one that refuses it.
 //!   - `-p` does **not** read stdin, and there's no `--system-prompt` / `--file` flag. So the whole
 //!     prompt (system + ask + data) can't ride on stdin. Two delivery paths, chosen by size:
 //!       * **small** — passed inline as the `-p` argument. `agy.exe` is a native binary, so
@@ -19,24 +27,23 @@
 //!         read it. Reading it headlessly needs `--dangerously-skip-permissions` (no prompt to
 //!         answer). agy has no granular tool-allowlist flag, so permissions are all-or-nothing.
 //!
-//! **Sessions: agy cannot resume by id from `--print`, so this engine deliberately doesn't try.**
-//! The sibling engines were moved off "resume the CLI's last run" onto real per-conversation ids
-//! (`opencode --session <id>`, `codex exec resume <id>`); agy is the one that can't follow, and it
-//! is a gap in the CLI, not here. `agy --conversation <id>` *does* resume a specific conversation,
-//! but nothing gives a headless caller that id: it is printed on neither stdout nor stderr in
-//! `--print` mode, and there is no `--json`/`--output-format` to ask for it. That is tracked
-//! upstream as google-antigravity/antigravity-cli#7, still open — which also rules out the
-//! workarounds: `~/.gemini/antigravity-cli/cache/last_conversations.json` maps a workspace path to
-//! its most recent conversation, but the schema is undocumented and the mapping is per *workspace*,
-//! so two chats on one project overwrite each other exactly like `--continue` does.
+//! **Sessions: the blocker is gone, the swap is not made yet.** This engine used to say a headless
+//! caller could not learn agy's conversation id — true on 1.1.7, where nothing printed it and there
+//! was no `--output-format` to ask for it (google-antigravity/antigravity-cli#7). On 1.1.10 the
+//! `result` event carries `conversation_id`, and `--conversation <id>` has always accepted one. So
+//! the two halves now exist and [`SESSION_SENTINEL`] could be replaced by the real id.
 //!
-//! So `--continue` stays, with its known limitation: two conversations open on the same project can
-//! resume each other's context, silently. Guessing a flag or a cache format would trade a *known*
-//! collision for an unverifiable one. When #7 lands, capture the id and swap in `--conversation`.
+//! It deliberately has **not** been, because that is a change to how chat resumes rather than a
+//! bug fix on the way past: `--continue` keeps working exactly as it has, with its known
+//! limitation — two conversations open on the same project can resume each other's context,
+//! silently. Making the swap is a decision about chat behaviour and wants to be made on purpose,
+//! with the id threaded through `AiRun::session_id` and `build_command` moved off `--continue` in
+//! the same change.
 
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
+use serde::Deserialize;
+use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, AiUsage, QUOTA_MARKER};
 
 const DEFAULT_BINARY: &str = "agy";
 
@@ -59,6 +66,10 @@ const INLINE_LIMIT: usize = 12_000;
 pub struct GeminiEngine;
 
 impl AiEngine for GeminiEngine {
+    fn id(&self) -> &'static str {
+        "gemini"
+    }
+
     fn label(&self) -> &'static str {
         "Gemini"
     }
@@ -110,6 +121,10 @@ impl AiEngine for GeminiEngine {
             }
         }
 
+        // One JSON event per line as the run happens, rather than a single blob at the end: the
+        // app streams stdout into the run log, and plain `json` would leave it empty until the
+        // process exits. The closing `result` event is what `interpret_output` reads.
+        cmd.arg("--output-format").arg("stream-json");
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
         }
@@ -155,8 +170,55 @@ fn write_brief_file_if_large(content: &str) -> Option<(std::path::PathBuf, std::
     Some((dir, file))
 }
 
-/// agy `-p` prints the assistant reply to stdout (status/banner, if any, goes to stderr), so the
-/// reply is just stdout. Mirrors the other engines' error/quota contract.
+/// The closing `{"event":"result", …}` line of a `stream-json` run.
+#[derive(Deserialize)]
+struct AgyResult {
+    #[serde(default)]
+    response: String,
+    #[serde(default)]
+    usage: Option<AgyUsage>,
+}
+
+/// Defaulted field by field, like every other engine's: agy has already added fields to this
+/// object between two point releases, and a strict shape would turn "a newer CLI reported one more
+/// counter" into "the whole turn failed to parse".
+#[derive(Default, Deserialize)]
+struct AgyUsage {
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+    /// Reasoning tokens. Counted as output, because that is what they are — generated, and billed
+    /// as such — and a meter that dropped them would under-report a thinking model by most of it.
+    #[serde(default)]
+    thinking_tokens: i64,
+    #[serde(default)]
+    cache_read_tokens: i64,
+}
+
+/// Walks the events backwards for the run's verdict. Backwards because the `result` event is the
+/// last line by construction, and because anything a banner printed ahead of the stream is then
+/// never even parsed.
+fn result_event(stdout: &str) -> Option<AgyResult> {
+    for line in stdout.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        if value.get("event").and_then(serde_json::Value::as_str) != Some("result") {
+            continue;
+        }
+        if let Some(result) = value.get("result") {
+            return serde_json::from_value(result.clone()).ok();
+        }
+    }
+    None
+}
+
+/// Under `stream-json` the reply is the `response` of the closing event; a CLI that ignored the
+/// flag prints the reply as plain text instead, and that stays the fallback. Mirrors the other
+/// engines' error/quota contract either way.
 fn interpret_output(
     success: bool,
     status_label: &str,
@@ -177,7 +239,13 @@ fn interpret_output(
         return Err(format!("agy exited with an error ({status_label}): {detail}"));
     }
 
-    let text = stdout.trim();
+    let parsed = result_event(stdout);
+    // The whole of stdout when there was no result event — a CLI old enough to ignore
+    // `--output-format` prints the reply and nothing else, which is exactly what this used to read.
+    let text = match &parsed {
+        Some(result) => result.response.trim().to_string(),
+        None => stdout.trim().to_string(),
+    };
     if text.is_empty() {
         let err = stderr.trim();
         return Err(if err.is_empty() {
@@ -186,21 +254,68 @@ fn interpret_output(
             err.to_string()
         });
     }
-    if refusal_reply(text) {
+    if refusal_reply(&text) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
-    Ok(AiRun { text: text.to_string(), session_id: Some(SESSION_SENTINEL.to_string()), model: None })
+    let usage = parsed.and_then(|result| result.usage).map(|u| AiUsage {
+        input_tokens: u.input_tokens,
+        output_tokens: u.output_tokens + u.thinking_tokens,
+        cache_read_tokens: u.cache_read_tokens,
+        cache_write_tokens: 0,
+        // agy prices nothing. `None` and not `0.0`: the meter shows "no price" for this engine
+        // rather than claiming its turns were free.
+        cost_usd: None,
+    });
+    Ok(AiRun {
+        text,
+        session_id: Some(SESSION_SENTINEL.to_string()),
+        model: None,
+        usage: usage.filter(|u| !u.is_empty()),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The fallback path: a CLI old enough to ignore `--output-format` prints prose and nothing
+    /// else, and that still has to work.
     #[test]
     fn a_successful_run_returns_stdout_as_the_reply() {
         let run = interpret_output(true, "exit status: 0", "  feat: add thing  ", "").unwrap();
         assert_eq!(run.text, "feat: add thing");
         assert_eq!(run.session_id.as_deref(), Some(SESSION_SENTINEL));
+        assert!(run.usage.is_none(), "no envelope means nothing to report");
+    }
+
+    /// Captured verbatim from `agy -p … --output-format stream-json` on 1.1.10, trimmed to the
+    /// closing event.
+    const STREAM: &str = concat!(
+        r#"{"event":"step_update","step_update":{"step_index":0,"state":"DONE"}}"#,
+        "\n",
+        r#"{"event":"result","result":{"conversation_id":"c8bb","status":"SUCCESS","response":"ok\n","#,
+        r#""num_turns":1,"usage":{"input_tokens":17902,"output_tokens":16,"thinking_tokens":4,"#,
+        r#""cache_read_tokens":9,"total_tokens":17918}}}"#,
+    );
+
+    #[test]
+    fn the_closing_event_carries_the_reply_and_the_tokens() {
+        let run = interpret_output(true, "exit status: 0", STREAM, "").unwrap();
+        assert_eq!(run.text, "ok");
+        let usage = run.usage.expect("1.1.10 reports usage");
+        assert_eq!(usage.input_tokens, 17902);
+        // Thinking tokens are generated tokens, so they land on the output side.
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.cache_read_tokens, 9);
+        assert!(usage.cost_usd.is_none(), "agy prices nothing");
+    }
+
+    /// A stray line that happens to be JSON must not be mistaken for the verdict.
+    #[test]
+    fn only_the_result_event_counts() {
+        let noise = concat!(r#"{"event":"step_update","step_update":{"state":"DONE"}}"#, "\n", "plain tail");
+        let run = interpret_output(true, "exit status: 0", noise, "").unwrap();
+        assert!(run.text.contains("plain tail"), "fell back to the whole of stdout");
     }
 
     #[test]

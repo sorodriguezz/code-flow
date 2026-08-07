@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Check, ExternalLink, KeyRound, Loader2, Trash2 } from "lucide-react";
-import { adoCheckOrg, adoVerifyPat, deleteAdoPat, openExternalUrl, setAdoPat } from "../../lib/tauri/commands";
+import { AlertTriangle, Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { TokenHowTo } from "./TokenHowTo";
+import { adoCheckOrg, adoVerifyPat, deleteAdoPat, setAdoPat } from "../../lib/tauri/commands";
 import { loadAdoConnections, normalizeAdoOrg, saveAdoConnections } from "../../lib/adoConnections";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
@@ -175,27 +176,6 @@ export function AzureDevOpsSettings() {
         </div>
       )}
 
-      {/* Where the token comes from, in the place you're being asked for one. Azure calls this a
-          Personal Access Token and files it under the account menu rather than the organization
-          settings, which is not where anyone looks first — and picking the scopes is its own
-          decision, made once, on a page with dozens of checkboxes. */}
-      <div className="mb-3 rounded-lg border border-[var(--cf-border)] bg-black/[0.02] p-3 dark:bg-white/[0.03]">
-        <p className="mb-1.5 text-[12px] font-medium">{t("settings.adoPatHowTo")}</p>
-        <ol className="ml-3.5 list-decimal space-y-1 text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
-          <li>{t("settings.adoPatStep1")}</li>
-          <li>{t("settings.adoPatStep2")}</li>
-          <li>{t("settings.adoPatStep3")}</li>
-          <li>{t("settings.adoPatStep4")}</li>
-        </ol>
-        <button
-          onClick={() => void openExternalUrl(tokenPageUrl(org))}
-          className="mt-2 flex items-center gap-1 text-[11.5px] font-medium text-[var(--cf-accent)] hover:underline"
-        >
-          <ExternalLink size={11} />
-          {t("settings.adoPatOpenPage")}
-        </button>
-      </div>
-
       <div className="space-y-2">
         <div>
           <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">
@@ -245,6 +225,18 @@ export function AzureDevOpsSettings() {
           </button>
         </div>
       </div>
+
+      <TokenHowTo
+        title={t("settings.tokenHowTo")}
+        steps={[
+          t("settings.adoPatStep1"),
+          t("settings.adoPatStep2"),
+          t("settings.adoPatStep3"),
+          t("settings.adoPatStep4"),
+        ]}
+        linkLabel={t("settings.adoPatOpenPage")}
+        url={tokenPageUrl(org)}
+      />
     </section>
   );
 }

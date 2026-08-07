@@ -1924,14 +1924,29 @@ struct GeneratedBatch {
 /// rather than a fix, and that backlog is exactly the work that must not be repeated.
 const GENERATED_SHAPE: &str = r#"{"stories":[{"title":"","narrative":"","description":"","acceptance_criteria":[""],"priority":0,"story_points":0,"estimate_hours":0,"tags":[""],"notes":""}],"open_questions":[""]}"#;
 
+/// An answer with no JSON object anywhere in it — prose where a document was asked for.
+///
+/// Separated from the malformed-JSON message because it is a different failure with a different
+/// fix: a broken document means the model did the work and stumbled on the syntax (that is what the
+/// repair pass is for), while prose means it never attempted the task. That is nearly always a
+/// model too small or too old to follow a long instruction, and the reply on its own — "Hola,
+/// ¿en qué puedo ayudarte?" — reads as a bug in the app rather than as what it is.
+fn no_json_error(text: &str) -> String {
+    format!(
+        "El modelo no devolvió JSON. Respondió:\n\n{}\n\nContestar con prosa a un prompt que pide \
+         únicamente JSON suele significar que el modelo se queda corto para esta tarea. Prueba con \
+         un modelo de instrucciones más capaz (8B o más si es local) o con otro proveedor.",
+        text.trim()
+    )
+}
+
 /// Turns the model's answer into rows.
 ///
 /// Split out from the command so it is testable without an engine: this is where a plausible-looking
 /// reply that is actually empty (`{"stories": []}`) has to be caught, because everything downstream
 /// would otherwise report a successful generation of nothing.
 fn parse_generated(text: &str) -> Result<(Vec<NewStoryDraft>, Vec<String>), String> {
-    let json = ai::json_answer(text)
-        .ok_or_else(|| format!("El modelo no devolvió JSON. Respondió:\n\n{}", text.trim()))?;
+    let json = ai::json_answer(text).ok_or_else(|| no_json_error(text))?;
     let parsed: GeneratedBatch = serde_json::from_str(&json)
         .map_err(|e| format!("El modelo devolvió un JSON que no se pudo leer ({e}). Respondió:\n\n{json}"))?;
 
@@ -2389,8 +2404,7 @@ const VERIFY_SHAPE: &str = r#"{"stories":[{"story":1,"summary":"","criteria":[{"
 /// or criterion number outside what was actually sent is dropped rather than writing a verdict onto
 /// the wrong row.
 fn parse_verification(text: &str, criteria_counts: &[usize]) -> Result<Vec<ParsedVerification>, String> {
-    let json = ai::json_answer(text)
-        .ok_or_else(|| format!("El modelo no devolvió JSON. Respondió:\n\n{}", text.trim()))?;
+    let json = ai::json_answer(text).ok_or_else(|| no_json_error(text))?;
     let parsed: ReportedVerification = serde_json::from_str(&json)
         .map_err(|e| format!("El modelo devolvió un JSON que no se pudo leer ({e}). Respondió:\n\n{json}"))?;
 

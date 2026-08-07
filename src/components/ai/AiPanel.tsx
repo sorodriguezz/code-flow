@@ -1719,6 +1719,7 @@ export function AiPanel() {
       />
       <aside
         style={{ width }}
+        data-tour="ai-panel"
         // No `border-l`: the handle to its left is already the seam, and the border was a second
         // line beside it — see the note in `TerminalDock`.
         className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"

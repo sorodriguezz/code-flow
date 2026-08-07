@@ -388,7 +388,7 @@ export function ResultGrid({
                       about a result, where insert/delete state is marked — and, when the panel
                       wants a selection, the handle you click to build one. */}
                   <div
-                    className={`sticky left-0 z-[5] flex shrink-0 items-center justify-end gap-1 border-r border-[var(--cf-border)] px-1.5 text-[10px] tabular-nums ${
+                    className={`sticky left-0 z-[5] flex shrink-0 items-stretch justify-end gap-1 border-r border-[var(--cf-border)] text-[10px] tabular-nums ${
                       selected
                         ? "bg-[color-mix(in_oklab,var(--cf-accent)_22%,var(--cf-surface))] font-semibold text-[var(--cf-text)]"
                         : "bg-[var(--cf-surface)] text-[var(--cf-text-muted)]"
@@ -399,13 +399,13 @@ export function ResultGrid({
                       <button
                         onClick={() => onRemoveInserted(row - rows.length)}
                         title={t("db.discardRow")}
-                        className="text-[var(--cf-danger)] hover:underline"
+                        className="pl-1.5 text-[var(--cf-danger)] hover:underline"
                       >
                         ✕
                       </button>
                     ) : null}
                     {inserted || !onSelectRow ? (
-                      <span>{inserted ? "+" : row + 1}</span>
+                      <span className="flex items-center pr-1.5">{inserted ? "+" : row + 1}</span>
                     ) : (
                       <button
                         type="button"
@@ -422,7 +422,11 @@ export function ResultGrid({
                           if (!e.shiftKey) sweep.start(e, row, e.metaKey || e.ctrlKey);
                         }}
                         title={t("db.selectRowHint")}
-                        className="w-full cursor-pointer select-none text-right"
+                        // The button *is* the gutter cell — full width, full height, and it owns the
+                        // padding, the same rule the column headers follow. It used to be a
+                        // content-sized element in a padded box, so the number was clickable and the
+                        // rest of the box was not: two thirds of a target that looks like one target.
+                        className="flex h-full flex-1 cursor-pointer select-none items-center justify-end px-1.5"
                       >
                         {row + 1}
                       </button>

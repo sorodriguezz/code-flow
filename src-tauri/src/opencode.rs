@@ -31,14 +31,18 @@
 //! an id opencode no longer has, which is deliberate: a loud error beats the wrong context.
 //!
 //! Verified against opencode 1.18.7 (`opencode run --help` for the flags, a live run for the event
-//! shape) and pinned against the CLI's own `run.ts`, which emits every event as
+//! shape), and re-verified on **1.15.7**, where the permission flag had a different name — see
+//! [`OpenCodeEngine::build_command`]. Flags move between releases here more than on the other
+//! engines, and a wrong one is not ignored: `opencode run` is strict, so it answers with its own
+//! help text on stdout and exit 1, which the app then reports verbatim as the engine's error.
+//! Pinned against the CLI's own `run.ts`, which emits every event as
 //! `{type, timestamp, sessionID, ...data}` — one JSON object per line on stdout. The events this
 //! module reads are `text` (a completed assistant text part, in `part.text`) and `error`.
 
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
+use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, AiUsage, QUOTA_MARKER};
 
 /// opencode addresses models as `provider/model`; leaving the commit model empty lets opencode use
 /// whatever default the user configured instead of forcing a provider they might not have set up.
@@ -49,6 +53,10 @@ const DEFAULT_BINARY: &str = "opencode";
 pub struct OpenCodeEngine;
 
 impl AiEngine for OpenCodeEngine {
+    fn id(&self) -> &'static str {
+        "opencode"
+    }
+
     fn label(&self) -> &'static str {
         "opencode"
     }
@@ -63,7 +71,8 @@ impl AiEngine for OpenCodeEngine {
 
     fn fix_tools(&self) -> Vec<String> {
         // opencode's built-in tool names. NOTE: `opencode run` has no tool-allowlist flag (see
-        // build_command), so these aren't passed today — write access comes from `--auto`. Kept
+        // build_command), so these aren't passed today — write access is all-or-nothing via
+        // `--dangerously-skip-permissions`. Kept
         // for parity/documentation. TODO(verify).
         ["read", "edit", "write", "bash", "grep", "glob"].iter().map(|s| s.to_string()).collect()
     }
@@ -107,8 +116,13 @@ impl AiEngine for OpenCodeEngine {
         }
         // Auto-approve edits (Claude's `--permission-mode acceptEdits`). Headless runs can't answer
         // an interactive permission prompt, so the write flows (chat, "fix with AI") set this.
+        //
+        // **`--dangerously-skip-permissions`, not `--auto`.** opencode renamed it; on 1.15.7 the old
+        // spelling is not merely ignored — yargs is strict here, so the CLI printed its own help to
+        // stdout and exited 1, and *every* write flow surfaced that help text as the engine's error.
+        // Verified against 1.15.7: with this flag the run reaches the model.
         if inv.auto_approve_edits {
-            cmd.arg("--auto");
+            cmd.arg("--dangerously-skip-permissions");
         }
         if let Some(dir) = inv.cwd {
             cmd.arg("--dir").arg(dir);
@@ -134,6 +148,102 @@ impl AiEngine for OpenCodeEngine {
         // exactly the shape [`crate::ai::list_models`] expects.
         Some(vec!["models".to_string()])
     }
+
+    /// opencode is the one engine here that accounts for a run **only after the fact**.
+    ///
+    /// Its `--format json` stream carries `step_start`, `text` and `error` and nothing else — no
+    /// tokens, no cost — while `opencode export <session>` returns every message of the session
+    /// with a `tokens` object on each assistant reply. `opencode stats` is no help: it is a
+    /// human-formatted table of *lifetime* totals with no per-run figure in it.
+    ///
+    /// So the numbers cost a second process (~1.2s on 1.15.7), which is why this is a probe rather
+    /// than part of `interpret`: it runs detached, once the reply is already back.
+    fn usage_probe_args(&self, session_id: &str) -> Option<Vec<String>> {
+        match session_id.trim().is_empty() {
+            true => None,
+            false => Some(vec!["export".to_string(), session_id.to_string()]),
+        }
+    }
+
+    fn parse_usage_probe(&self, stdout: &str) -> Option<AiUsage> {
+        parse_export(stdout)
+    }
+}
+
+/// The **last** assistant message of an exported session, as usage.
+///
+/// Last and not summed, because a resumed conversation exports every turn it has ever had and the
+/// probe is asked about the one that just finished. Summing would re-count the whole history on
+/// every turn, which on a ten-turn chat reports roughly fifty times what was spent.
+fn parse_export(stdout: &str) -> Option<AiUsage> {
+    // `opencode export` prints "Exporting session: <id>" before the JSON, so the payload starts at
+    // the first brace rather than at the first byte.
+    let start = stdout.find('{')?;
+    let parsed: Export = serde_json::from_str(&stdout[start..]).ok()?;
+    let (tokens, cost) = parsed
+        .messages
+        .into_iter()
+        .filter_map(|message| match message.info.role.as_str() {
+            "assistant" => message.info.tokens.map(|tokens| (tokens, message.info.cost)),
+            _ => None,
+        })
+        .next_back()?;
+    let usage = AiUsage {
+        input_tokens: tokens.input,
+        // Reasoning tokens are generated tokens; a meter that dropped them would under-report a
+        // thinking model by most of what it did.
+        output_tokens: tokens.output + tokens.reasoning,
+        cache_read_tokens: tokens.cache.read,
+        cache_write_tokens: tokens.cache.write,
+        // opencode always writes a number here, so unlike the CLIs that stay silent this is a real
+        // zero: a free model really did cost nothing.
+        cost_usd: Some(cost),
+    };
+    match usage.is_empty() {
+        true => None,
+        false => Some(usage),
+    }
+}
+
+#[derive(Deserialize)]
+struct Export {
+    #[serde(default)]
+    messages: Vec<ExportMessage>,
+}
+
+#[derive(Deserialize)]
+struct ExportMessage {
+    info: ExportInfo,
+}
+
+#[derive(Deserialize)]
+struct ExportInfo {
+    #[serde(default)]
+    role: String,
+    #[serde(default)]
+    cost: f64,
+    #[serde(default)]
+    tokens: Option<ExportTokens>,
+}
+
+#[derive(Default, Deserialize)]
+struct ExportTokens {
+    #[serde(default)]
+    input: i64,
+    #[serde(default)]
+    output: i64,
+    #[serde(default)]
+    reasoning: i64,
+    #[serde(default)]
+    cache: ExportCache,
+}
+
+#[derive(Default, Deserialize)]
+struct ExportCache {
+    #[serde(default)]
+    read: i64,
+    #[serde(default)]
+    write: i64,
 }
 
 /// Writes the combined prompt (system + ask + input) to a uniquely-named temp file so it can be
@@ -270,7 +380,12 @@ fn interpret_output(
         if refusal_reply(text) {
             return Err(format!("{QUOTA_MARKER}{text}"));
         }
-        return Ok(AiRun { text: text.to_string(), session_id: parsed.session_id, model: None });
+        return Ok(AiRun {
+            text: text.to_string(),
+            session_id: parsed.session_id,
+            model: None,
+            usage: None,
+        });
     }
 
     if !success {
@@ -303,7 +418,7 @@ fn interpret_output(
     }
     // No events means no session id to report. `None` costs this conversation its continuity (the
     // next turn starts fresh and re-sends the project context) but never resumes the wrong one.
-    Ok(AiRun { text: text.to_string(), session_id: None, model: None })
+    Ok(AiRun { text: text.to_string(), session_id: None, model: None, usage: None })
 }
 
 /// Rewrites opencode's bare "Session not found" into something actionable. It means the id we asked
@@ -321,6 +436,46 @@ fn stale_session_hint(detail: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Trimmed from a real `opencode export` on 1.15.7 — banner line included, because stripping it
+    /// is the first thing [`parse_export`] has to get right.
+    const EXPORT: &str = concat!(
+        "Exporting session: ses_0263\n",
+        r#"{"info":{"id":"ses_0263"},"messages":["#,
+        r#"{"info":{"role":"user","id":"m1"}},"#,
+        r#"{"info":{"role":"assistant","cost":0.5,"tokens":{"total":9,"input":10,"output":2,"#,
+        r#""reasoning":49,"cache":{"write":3,"read":29056}}}},"#,
+        r#"{"info":{"role":"assistant","cost":0,"tokens":{"total":29223,"input":116,"output":2,"#,
+        r#""reasoning":49,"cache":{"write":0,"read":29056}}}}]}"#,
+    );
+
+    #[test]
+    fn the_probe_reads_the_last_assistant_turn_and_not_the_whole_session() {
+        let usage = parse_export(EXPORT).expect("an export carries tokens");
+        assert_eq!(usage.input_tokens, 116, "the newest turn, not the first");
+        // Reasoning counts as output: 2 generated + 49 thought.
+        assert_eq!(usage.output_tokens, 51);
+        assert_eq!(usage.cache_read_tokens, 29056);
+        assert_eq!(usage.cache_write_tokens, 0);
+        // A free model really did cost nothing — which is not the same as not saying.
+        assert_eq!(usage.cost_usd, Some(0.0));
+    }
+
+    #[test]
+    fn a_session_with_no_assistant_turn_reports_nothing() {
+        let empty = r#"{"info":{},"messages":[{"info":{"role":"user"}}]}"#;
+        assert!(parse_export(empty).is_none());
+    }
+
+    /// The probe is only worth spawning when there is a session to ask about.
+    #[test]
+    fn no_session_means_no_probe() {
+        assert!(OpenCodeEngine.usage_probe_args("  ").is_none());
+        assert_eq!(
+            OpenCodeEngine.usage_probe_args("ses_1"),
+            Some(vec!["export".to_string(), "ses_1".to_string()])
+        );
+    }
 
     /// A real `--format json` run, trimmed to the events this module reads. Shape taken from the
     /// CLI's own emitter (`{type, timestamp, sessionID, ...data}`) and a live opencode 1.18.7 run.
