@@ -88,6 +88,21 @@ export interface RepoStatusInfo {
   head_oid: string | null;
 }
 
+/**
+ * What a ref drawn against a commit is: a local branch, a remote-tracking branch, or a tag.
+ *
+ * Sent by the backend rather than guessed here, because it cannot be guessed: `v2.0.1` looks like a
+ * release and usually is one, but nothing stops a branch being called that, and `origin/main` looks
+ * remote only by a convention that a local branch is free to imitate. See `git/graph.rs`.
+ */
+export type RefKind = "branch" | "remote" | "tag";
+
+export interface CommitRef {
+  /** The shorthand: "main", "origin/main", "v1.0". */
+  name: string;
+  kind: RefKind;
+}
+
 export interface CommitInfo {
   id: string;
   short_id: string;
@@ -96,7 +111,8 @@ export interface CommitInfo {
   author_email: string;
   timestamp: number;
   parent_ids: string[];
-  refs: string[];
+  /** Ordered by the backend: local branches, then tags, then remotes. */
+  refs: CommitRef[];
 }
 
 export interface BranchInfo {
@@ -748,6 +764,15 @@ export type PrLinkResolution =
     }
   | { status: "Unrecognized" };
 
+/** One thing the first-launch check looked at, and what it found. `id` is a stable key — never
+ *  shown raw — while `detail` is the machine's own words (a version string, or the error) and is
+ *  deliberately untranslated: it is a quotation, not a sentence of ours. See `requirements.rs`. */
+export interface Requirement {
+  id: string;
+  ok: boolean;
+  detail: string;
+}
+
 /** A shell the terminal can be opened with. `builtin` profiles are detected on this machine at
  * every launch and aren't editable; the rest are the user's own, persisted in app settings. */
 export interface ShellProfile {
@@ -764,6 +789,55 @@ export interface TerminalOpened {
   id: string;
   profile_id: string;
   profile_name: string;
+}
+
+/**
+ * One shell on the agent console's terminal bench.
+ *
+ * The row survives; the shell does not. A pty belongs to the process that opened it, so quitting
+ * the app ends every one of them — what is stored is enough to put the same shell back in the same
+ * directory with everything it had already said still on screen.
+ *
+ * `session_id` is the live half and is `null` far more often than it looks: after a restart every
+ * terminal on the bench has one until it is resumed. The bench draws a row either way; what
+ * changes is whether opening it attaches to a running shell or starts a new one under the replay.
+ *
+ * Deliberately never in a backup — see `NEVER_BACKED_UP` in `backup/snapshot.rs`.
+ */
+/** One tab of the bench. `layout` is the JSON pane tree — opaque everywhere but
+ *  `lib/bench/layout.ts`, which is also where a stale or corrupt one is repaired. */
+export interface BenchTab {
+  id: string;
+  workspace_id: string;
+  /** Empty until renamed; the bench then names the tab after the shells in it. */
+  title: string;
+  layout: string;
+  sort_order: number;
+  created_at: string;
+}
+
+/** The whole bench in one reply. The two halves are only meaningful together — see the Rust
+ *  `Bench` for why they are not fetched separately. */
+export interface Bench {
+  tabs: BenchTab[];
+  terminals: BenchTerminal[];
+}
+
+export interface BenchTerminal {
+  id: string;
+  workspace_id: string;
+  /** Which `BenchTab` this shell is a pane of. */
+  tab_id: string;
+  title: string;
+  cwd: string;
+  /** Empty means the configured default profile, resolved when the shell opens — not a fixed
+   *  shell, so changing the default in Settings reaches these too. */
+  profile_id: string;
+  /** Everything the shell printed, capped at ~256 KB by the backend. */
+  transcript: string;
+  sort_order: number;
+  created_at: string;
+  session_id: string | null;
 }
 
 // ---------- user stories (wiki in, Azure Boards out) ----------

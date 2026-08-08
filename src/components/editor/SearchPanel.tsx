@@ -10,7 +10,6 @@ import {
   ReplaceAll,
   Search,
   WholeWord,
-  X,
 } from "lucide-react";
 import { replaceInRepo, searchRepo, type SearchHit, type SearchOptions } from "../../lib/tauri/commands";
 import { FileGlyph } from "../common/FileGlyph";
@@ -238,14 +237,11 @@ export function SearchPanel({
             )}
           </div>
 
+          {/* No close button. The panel is a sidebar section reached from the activity bar, and the
+              icon that opens it is the icon that closes it — an X inside as well made "closed" two
+              controls in two places disagreeing about one piece of state. Escape still closes it,
+              which is what the input's own keydown is for. */}
           <div className="mt-0.5 flex shrink-0 flex-col items-center gap-0.5">
-            <button
-              onClick={onClose}
-              title={t("editor.closeSearch")}
-              className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-            >
-              <X size={12} />
-            </button>
             <Toggle
               active={showFilters || Boolean(include || exclude)}
               onClick={() => setShowFilters((v) => !v)}

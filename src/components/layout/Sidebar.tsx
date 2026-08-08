@@ -1417,7 +1417,14 @@ export function Sidebar() {
         // second line hard against the sidebar's edge — so the pair read as one thick divider whose
         // live half sat off to the right, against the panel it isn't part of. Dropping it leaves one
         // line, centred in the handle's own six pixels, with equal space to each panel.
-        className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
+        //
+        // `cf-fold-zone` only while folded: the whole rail is the fold button's hover target, which
+        // is the only way a control that small gets found by someone not already looking for it.
+        // Unfolded it is absent, so brushing a 300px panel on the way somewhere else lights nothing
+        // — there the handle is a live control with its own hover and needs no help. See `index.css`.
+        className={`flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)] ${
+          collapsed ? "cf-fold-zone" : ""
+        }`}
       >
         {/* Laid out at the width the panel is *heading for* rather than the width it currently is.
             The outer eases; this doesn't — so the contents are clipped by the fold instead of
@@ -1534,7 +1541,10 @@ export function Sidebar() {
           live handle there would let someone drag it to a width the names are still hidden at. The
           stored width is untouched, so unfolding returns to it. */}
       {collapsed ? (
-        <div className="w-px shrink-0 bg-[var(--cf-border)]" />
+        // Part of the fold button's hover zone, along with the rail itself — `cf-seam-collapsed`
+        // is what gives this hairline four pixels of reach so the approach from the *content* side
+        // answers too, which the rail on the other side cannot cover. See `index.css`.
+        <div className="cf-fold-zone cf-seam-collapsed w-px shrink-0 bg-[var(--cf-border)]" />
       ) : (
         <ResizeHandle
           axis="x"
@@ -1547,10 +1557,14 @@ export function Sidebar() {
         />
       )}
 
-      {/* The fold control, riding the seam exactly as the settings nav's does — inside the panel it
+      {/* The fold control, riding the seam the way the settings nav's does — inside the panel it
           would be clipped by that panel's own `overflow-y-auto` and would scroll away with the
           list. `z-20` because the handle it rides is `z-[15]`: any lower and the seam's accent glow
           paints across the button, and the handle's grab area takes the clicks aimed at it.
+
+          The *height* is where the two part company, deliberately: this one is centred and the
+          settings one sits at the top. See the note there for why — in short, that seam is short,
+          fixed and never dragged, and this one is none of those things.
 
           Centred on the seam rather than at its top. Up there it came out level with the tab bar's
           own row of controls, close enough to read as one more of them — a button about the *panel*
@@ -1578,7 +1592,11 @@ export function Sidebar() {
           animate={{ left: railWidth - 10 }}
           transition={fold}
           style={{ translateY: "-50%" }}
-          className="absolute top-1/2 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
+          // The seam-hover class only while folded — unfolded, the live handle is its own
+          // affordance and the button keeps the plain hover it always had.
+          className={`absolute top-1/2 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)] ${
+            collapsed ? "cf-fold-toggle" : ""
+          }`}
         >
           {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
         </motion.button>

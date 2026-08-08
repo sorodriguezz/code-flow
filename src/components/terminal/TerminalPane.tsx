@@ -65,10 +65,23 @@ function clipboardKeys(term: Terminal, sessionId: string) {
 export function TerminalPane({
   sessionId,
   visible,
+  replay,
   onCommand,
 }: {
   sessionId: string;
   visible: boolean;
+  /**
+   * Output to write into the terminal before it is wired to the pty — the agent console's bench
+   * replaying what this terminal printed in an earlier run of the app.
+   *
+   * Written raw, escape sequences and all, because that is what it is: a verbatim copy of the
+   * bytes the shell sent, so colour, cursor moves and progress bars redraw exactly as they did.
+   *
+   * Read once, at mount. It is history, and history does not update — a prop that changed later
+   * would replay a second copy over a live session. Which is also why it is *not* in the effect's
+   * dependency list: the terminal is rebuilt when `sessionId` changes and at no other time.
+   */
+  replay?: string;
   /**
    * Called with each whole line the user typed and submitted, for the panes that keep a history.
    *
@@ -81,6 +94,9 @@ export function TerminalPane({
   const containerRef = useRef<HTMLDivElement>(null);
   const onCommandRef = useRef(onCommand);
   onCommandRef.current = onCommand;
+  // Captured at first render and never updated, so a parent re-rendering with a longer transcript
+  // (the store reloaded, say) cannot make this pane replay it again over a live shell.
+  const replayRef = useRef(replay);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
 
@@ -101,6 +117,12 @@ export function TerminalPane({
     termRef.current = term;
     fitRef.current = fitAddon;
     clipboardKeys(term, sessionId);
+
+    // Before `onData` is wired and before the output listener is attached, so the replay can never
+    // interleave with what the live shell is saying — the whole of the past, then the present.
+    // Verbatim: the separator marking where an earlier process ended is already inside the
+    // transcript, put there by whoever resumed it, so this stays a dumb write.
+    if (replayRef.current) term.write(replayRef.current);
 
     const lines = new TypedLineBuffer();
     const dataDisposable = term.onData((data) => {

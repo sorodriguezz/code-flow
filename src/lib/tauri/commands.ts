@@ -57,8 +57,12 @@ import type {
   StoryDraft,
   StoryPublishOutcome,
   StorySourceKind,
+  Bench,
+  BenchTab,
+  BenchTerminal,
   TerminalOpened,
   ThreadCloseOutcome,
+  Requirement,
   ReviewRunDetail,
   ReviewRunSummary,
   Workspace,
@@ -86,6 +90,10 @@ import type { FindingLocation } from "../parseAnalysis";
 export const quitApp = () => invoke<void>("quit_app");
 
 export const resetAppData = () => invoke<void>("reset_app_data");
+
+/** What the app cannot do without: `git` on `PATH`, and a writable data directory. Called once per
+ *  installation — see `requirementsStore` for the flag that keeps it that way. */
+export const checkRequirements = () => invoke<Requirement[]>("check_requirements");
 
 // ---------- workspaces / projects ----------
 
@@ -334,6 +342,52 @@ export const resizeTerminal = (id: string, cols: number, rows: number) =>
   invoke<void>("resize_terminal", { id, cols, rows });
 
 export const closeTerminal = (id: string) => invoke<void>("close_terminal", { id });
+
+// ---------- terminal: the agent console's bench ----------
+
+/**
+ * The workspace's bench, live state included.
+ *
+ * Re-read every time the bench opens rather than trusted from the store, because the two facts it
+ * carries go stale in opposite directions: the rows change only when the user edits them, and
+ * `session_id` changes whenever a shell starts or exits — including while the bench was closed,
+ * which is the state the whole feature is built around.
+ */
+export const listWorkspaceTerminals = (workspaceId: string) =>
+  invoke<Bench>("list_workspace_terminals", { workspaceId });
+
+/** Adds a shell to `tabId` and starts it. Omit `profileId` for the configured default. */
+export const addWorkspaceTerminal = (workspaceId: string, tabId: string, cwd: string, profileId?: string) =>
+  invoke<BenchTerminal>("add_workspace_terminal", { workspaceId, tabId, cwd, profileId });
+
+/** A new, empty tab. Its layout is written once something is put in it. */
+export const addBenchTab = (workspaceId: string) => invoke<BenchTab>("add_bench_tab", { workspaceId });
+
+/** Records a tab's pane arrangement — the serialized tree from `lib/bench/layout`. */
+export const setBenchLayout = (tabId: string, layout: string) =>
+  invoke<void>("set_bench_layout", { tabId, layout });
+
+export const renameBenchTab = (tabId: string, title: string) =>
+  invoke<void>("rename_bench_tab", { tabId, title });
+
+/** Closes a tab: every shell in it killed, every transcript in it forgotten. */
+export const removeBenchTab = (tabId: string) => invoke<void>("remove_bench_tab", { tabId });
+
+/** Starts a shell for a row that has none, and returns its session id. Idempotent: a row that is
+ *  already attached hands back the session it has rather than opening a second one. */
+export const resumeWorkspaceTerminal = (id: string) =>
+  invoke<string>("resume_workspace_terminal", { id });
+
+export const renameWorkspaceTerminal = (id: string, title: string) =>
+  invoke<void>("rename_workspace_terminal", { id, title });
+
+/** Kills one terminal's shell and forgets its row and output. */
+export const removeWorkspaceTerminal = (id: string) =>
+  invoke<void>("remove_workspace_terminal", { id });
+
+/** Empties the bench — every shell killed, every transcript forgotten. Irreversible. */
+export const clearWorkspaceTerminals = (workspaceId: string) =>
+  invoke<void>("clear_workspace_terminals", { workspaceId });
 
 // ---------- git: remote (streamed) ----------
 

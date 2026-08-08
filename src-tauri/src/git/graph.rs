@@ -5,6 +5,31 @@ use serde::{Deserialize, Serialize};
 
 use super::repo::open;
 
+/// What a ref pointing at a commit actually *is*.
+///
+/// git2 knows this while the reference is still in hand, and the shorthand alone throws it away:
+/// `v2.0.1` is a release, `main` is a branch and `origin/main` is neither of the two, but as three
+/// bare strings they are three bare strings, and the graph drew them as three identical chips. A
+/// tag and a branch can even carry the same name, so this cannot be recovered by looking at the
+/// text afterwards — it has to be carried across.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RefKind {
+    /// A local branch: something you can check out and commit to as it stands.
+    Branch,
+    /// A remote-tracking branch — where that branch was on the server the last time we looked.
+    Remote,
+    /// A tag, lightweight or annotated. What a release is, in practice.
+    Tag,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitRef {
+    /// The shorthand: "main", "origin/main", "v1.0".
+    pub name: String,
+    pub kind: RefKind,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommitInfo {
     pub id: String,
@@ -15,17 +40,45 @@ pub struct CommitInfo {
     /// Seconds since epoch, UTC.
     pub timestamp: i64,
     pub parent_ids: Vec<String>,
-    /// Branch/tag names pointing at this commit (e.g. "main", "origin/main", "v1.0").
-    pub refs: Vec<String>,
+    /// The branches, remote-tracking branches and tags pointing at this commit, each with its kind.
+    pub refs: Vec<CommitRef>,
 }
 
-fn build_ref_map(repo: &Repository) -> HashMap<String, Vec<String>> {
-    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+/// Local branches first, then tags, then remotes; alphabetical within each.
+///
+/// The graph's refs column is narrow and shows the first couple of chips, so this ordering is
+/// which ones survive. Local branches say where *you* are, tags say what was released, and
+/// remote-tracking refs mostly restate one of the two — `origin/HEAD` in particular is a symbolic
+/// ref that always duplicates whichever remote branch is the default. Ordering rather than
+/// filtering: nothing is dropped, the noise just queues behind the signal.
+///
+/// It is also the only stable order available. `references()` yields loose and packed refs in
+/// whatever order they happen to sit on disk, so without this the same repository could list the
+/// same commit's chips differently after a `git gc`.
+fn ref_rank(kind: RefKind) -> u8 {
+    match kind {
+        RefKind::Branch => 0,
+        RefKind::Tag => 1,
+        RefKind::Remote => 2,
+    }
+}
+
+fn build_ref_map(repo: &Repository) -> HashMap<String, Vec<CommitRef>> {
+    let mut map: HashMap<String, Vec<CommitRef>> = HashMap::new();
     if let Ok(refs) = repo.references() {
         for r in refs.flatten() {
-            if !(r.is_remote() || r.is_branch() || r.is_tag()) {
+            // Three disjoint namespaces (`refs/remotes/`, `refs/tags/`, `refs/heads/`), so the
+            // order of the arms is only about readability. Anything else — `refs/notes/`, our own
+            // `refs/codeflow/checkpoints/` — is not a ref the graph has a chip for.
+            let kind = if r.is_remote() {
+                RefKind::Remote
+            } else if r.is_tag() {
+                RefKind::Tag
+            } else if r.is_branch() {
+                RefKind::Branch
+            } else {
                 continue;
-            }
+            };
             let Some(name) = r.shorthand() else { continue };
             // Annotated tags point at a tag object, not a commit; peel to the commit.
             let commit_id = r
@@ -34,13 +87,18 @@ fn build_ref_map(repo: &Repository) -> HashMap<String, Vec<String>> {
                 .ok()
                 .or_else(|| r.target());
             let Some(commit_id) = commit_id else { continue };
-            map.entry(commit_id.to_string()).or_default().push(name.to_string());
+            map.entry(commit_id.to_string())
+                .or_default()
+                .push(CommitRef { name: name.to_string(), kind });
         }
+    }
+    for refs in map.values_mut() {
+        refs.sort_by(|a, b| ref_rank(a.kind).cmp(&ref_rank(b.kind)).then_with(|| a.name.cmp(&b.name)));
     }
     map
 }
 
-fn build_commit_info(repo: &Repository, oid: Oid, ref_map: &HashMap<String, Vec<String>>) -> Result<CommitInfo, String> {
+fn build_commit_info(repo: &Repository, oid: Oid, ref_map: &HashMap<String, Vec<CommitRef>>) -> Result<CommitInfo, String> {
     let commit = repo.find_commit(oid).map_err(|e| e.message().to_string())?;
     let author = commit.author();
     let id_str = oid.to_string();

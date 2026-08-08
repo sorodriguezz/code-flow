@@ -23,7 +23,9 @@ pub fn open(
 ) -> Result<String, String> {
     spec.require_host()?;
     spec.require_shell()?;
-    terminal::open_pty(app, registry, "ssh", &args(spec), None).map_err(|e| explain(spec, e))
+    // Not recorded: a transcript here would be a copy of somebody else's machine talking, kept in
+    // this one's database. See `terminal::TerminalSession::transcript`.
+    terminal::open_pty(app, registry, "ssh", &args(spec), None, None).map_err(|e| explain(spec, e))
 }
 
 /// The command line. Its own function so it can be asserted on without a host to connect to.

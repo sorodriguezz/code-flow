@@ -15,6 +15,7 @@ import {
   RotateCcw,
   Search,
   Square,
+  TerminalSquare,
   Trash2,
   Users,
   Wand2,
@@ -32,6 +33,7 @@ import { ActivePill } from "../common/ActivePill";
 import { EmptyState } from "../common/EmptyState";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { useAgentsStore, type TaskGrouping } from "../../state/agentsStore";
+import { benchTabLabel, terminalsOfTab, useBenchStore } from "../../state/benchStore";
 import { useChainStore } from "../../state/chainStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -98,6 +100,18 @@ export function AgentTaskList({
   const setGroupBy = useAgentsStore((s) => s.setGroupBy);
   const setQuery = useAgentsStore((s) => s.setQuery);
   const toggleRoster = useAgentsStore((s) => s.toggleRoster);
+  const benchOpen = useBenchStore((s) => s.open);
+  const benchTabs = useBenchStore((s) => s.tabs);
+  const benchTerminals = useBenchStore((s) => s.terminals);
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  // Toggling *reloads* on the way open rather than just flipping a flag, and that is the point of
+  // the bench: shells that were running behind a closed panel — or that died when the app last
+  // quit — have to be found again, not assumed. See `benchStore`.
+  const toggleBench = () => {
+    const bench = useBenchStore.getState();
+    if (bench.open) bench.hide();
+    else if (workspaceId) void bench.show(workspaceId).catch((e: unknown) => pushErrorToast(String(e)));
+  };
   const chains = useChainStore((s) => s.chains);
   const activeView = useUiStore((s) => s.activeView);
   const setActiveView = useUiStore((s) => s.setActiveView);
@@ -108,6 +122,10 @@ export function AgentTaskList({
    * own, because it renames three kinds of row and this one only ever renames a task. */
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [continuing, setContinuing] = useState<string | null>(null);
+  /** The right-clicked bench tab and where its menu goes. The same two actions its tab in the panel
+   *  offers — these rows *are* those tabs, and a row that answers differently from the thing it
+   *  stands for is a row you stop trusting. */
+  const [benchMenu, setBenchMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
 
   // The menu portals to `document.body`, and this view is hidden rather than unmounted — left
   // open, it would float over whatever the user switched to.
@@ -228,6 +246,14 @@ export function AgentTaskList({
         <ToolbarButton onClick={onNewProject} title={t("agents.newProject")}>
           <Folder size={13} />
         </ToolbarButton>
+        {/* The terminal bench, between the folders and the roster — which is where it belongs in
+            the reading of this toolbar rather than merely where it fits. Everything to the left
+            creates work for an agent to do; the roster to the right is who does it. This is the
+            one that hands the machine back to the user: whatever CLI they want, driven by hand,
+            in the same workspace. Active while the panel is up, like the roster's own button. */}
+        <ToolbarButton onClick={toggleBench} active={benchOpen} title={t("bench.title")}>
+          <TerminalSquare size={13} />
+        </ToolbarButton>
         <ToolbarButton onClick={toggleRoster} active={rosterOpen} title={t("agents.manageAgents")}>
           <Users size={13} />
         </ToolbarButton>
@@ -276,6 +302,74 @@ export function AgentTaskList({
           </button>
         )}
       </div>
+
+      {/* The bench, from the outside — above the body and outside every branch of it.
+          It started inside `TaskTree` and that was wrong twice over. `nothingYet` counts tasks and
+          chains, so a workspace whose only work was two running shells replaced the whole tree with
+          "no tasks yet" and the bench vanished from the one place that was supposed to prove it was
+          still there. And the tree is only one of three groupings, so switching to "Estado" lost it
+          again. Neither is a fact about terminals: they belong to the workspace, not to a way of
+          grouping its tasks.
+
+          **Tabs, not terminals.** This listed every shell individually and that was a second list
+          of the same things the panel's own tab strip already lists, disagreeing with it as soon as
+          a tab held more than one — three rows here for what is two tabs there. One row per tab
+          with a count says the same thing in the same shape as the panel, and the count is the part
+          that was actually missing: how many shells are behind a tab is exactly what a strip of
+          tabs cannot show you.
+
+          Drawn only when there is something on it, on the same rule the pinned section follows: a
+          permanent empty heading advertises a feature rather than listing anything. */}
+      {benchTabs.length > 0 && (
+        // Capped and scrolled rather than left to grow: this sits above the task list in the fixed
+        // part of the panel, so eight tabs would push the work itself off the bottom.
+        <div className="max-h-[8.5rem] shrink-0 overflow-y-auto border-b border-[var(--cf-border)] px-1.5 pb-1.5 pt-1">
+          <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+            {t("bench.section")}
+          </p>
+          {benchTabs.map((tab) => {
+            const mine = terminalsOfTab(benchTerminals, tab.id);
+            const live = mine.some((terminal) => terminal.session_id !== null);
+            return (
+              <button
+                key={tab.id}
+                onClick={() => {
+                  if (!workspaceId) return;
+                  // Focused on one of this tab's own shells, which is how `show` is told which tab
+                  // to land on — it resolves the tab from the terminal. A tab always has at least
+                  // one: closing the last pane closes the tab with it.
+                  void useBenchStore
+                    .getState()
+                    .show(workspaceId, mine[0]?.id)
+                    .catch((e: unknown) => pushErrorToast(String(e)));
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setBenchMenu({ x: e.clientX, y: e.clientY, tabId: tab.id });
+                }}
+                title={benchTabLabel(tab, benchTerminals, t("bench.title"))}
+                className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12px] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+              >
+                {/* Green when anything in the tab is still running — the one thing about a
+                    backgrounded tab that is not in its name. */}
+                <span
+                  aria-hidden
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    live ? "bg-[var(--cf-success)]" : "bg-[var(--cf-text-muted)]/40"
+                  }`}
+                />
+                <TerminalSquare size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+                <span className="min-w-0 flex-1 truncate">
+                  {benchTabLabel(tab, benchTerminals, t("bench.title"))}
+                </span>
+                <span className="shrink-0 rounded-full bg-black/[0.06] px-1.5 text-[10px] font-semibold text-[var(--cf-text-muted)] dark:bg-white/[0.1]">
+                  {mine.length}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       <div className="flex min-h-0 flex-1 flex-col overflow-y-auto pb-2">
         {loading ? null : groupBy === "templates" ? (
@@ -355,6 +449,44 @@ export function AgentTaskList({
           ))
         )}
       </div>
+
+      {/* The same two actions the tab in the panel offers, on the row that stands for it. Rename
+          opens the panel on that tab first and *then* starts the editor: the input lives in the tab
+          strip, and editing a label on a screen the tab is not on is editing something nobody can
+          see. */}
+      {benchMenu && (
+        <ContextMenu
+          x={benchMenu.x}
+          y={benchMenu.y}
+          items={[
+            {
+              label: t("bench.renameTab"),
+              icon: Pencil,
+              onClick: () => {
+                if (!workspaceId) return;
+                const first = terminalsOfTab(benchTerminals, benchMenu.tabId)[0]?.id;
+                void useBenchStore
+                  .getState()
+                  .show(workspaceId, first)
+                  .then(() => useBenchStore.getState().startRenameTab(benchMenu.tabId))
+                  .catch((e: unknown) => pushErrorToast(String(e)));
+              },
+            },
+            {
+              label: t("bench.closeTab"),
+              icon: Trash2,
+              danger: true,
+              separated: true,
+              onClick: () =>
+                void useBenchStore
+                  .getState()
+                  .closeTab(benchMenu.tabId)
+                  .catch((e: unknown) => pushErrorToast(String(e))),
+            },
+          ]}
+          onClose={() => setBenchMenu(null)}
+        />
+      )}
 
       {menu && menuTask && (
         <ContextMenu x={menu.x} y={menu.y} items={taskMenuItems(menuTask)} onClose={() => setMenu(null)} />

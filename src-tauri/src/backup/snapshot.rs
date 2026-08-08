@@ -101,6 +101,30 @@ pub const TABLES: &[&str] = &[
     "agent_chain_steps",
 ];
 
+/// Tables that are deliberately *not* in a backup, and the only sanctioned way to be absent from
+/// [`TABLES`].
+///
+/// [`covers_every_table`] exists precisely to make silent omission impossible, so opting out has to
+/// be something a person wrote down. A table named here is claiming its rows are worthless on
+/// another machine — not merely large, not merely regenerable, but wrong to carry.
+///
+/// The bench's two tables are that: they hold the scrollback of shells opened on *this* computer, in
+/// directories that exist on *this* computer, under a shell profile detected on *this* computer.
+/// Restored onto another machine it is a wall of output from somewhere else, pinned to paths that
+/// are not there. It is also the one table whose contents nobody curated — a `cargo build` scrolls
+/// a hundred kilobytes through it — and putting that inside an encrypted file the user keeps
+/// forever is a cost with no matching benefit.
+///
+/// It stays in the local database, which is the whole of what was asked for: survive a restart,
+/// travel nowhere.
+///
+/// Read only by [`covers_every_table`], and that is the point rather than an oversight: nothing at
+/// runtime consults this, because excluding a table is *not* an action the exporter takes — it is
+/// [`TABLES`] not naming it. This list is the written-down reason, and the test is what makes
+/// writing it down compulsory.
+#[allow(dead_code)]
+pub const NEVER_BACKED_UP: &[&str] = &["workspace_terminals", "workspace_bench_tabs"];
+
 // ---------------------------------------------------------------------------
 // What the user chose to include
 // ---------------------------------------------------------------------------
@@ -799,8 +823,23 @@ mod tests {
             .collect::<rusqlite::Result<Vec<String>>>()
             .unwrap();
 
-        let missing: Vec<&String> = present.iter().filter(|name| !TABLES.contains(&name.as_str())).collect();
-        assert!(missing.is_empty(), "these tables would vanish on a restore: {missing:?}");
+        let missing: Vec<&String> = present
+            .iter()
+            .filter(|name| !TABLES.contains(&name.as_str()) && !NEVER_BACKED_UP.contains(&name.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these tables would vanish on a restore: {missing:?} — add them to TABLES, or to \
+             NEVER_BACKED_UP with a reason",
+        );
+
+        // The exemption is not a loophole to leave lying around: a table named there and *also*
+        // named in `TABLES` would read as excluded while travelling anyway, and one named there
+        // after being dropped from the schema is a note about nothing.
+        for name in NEVER_BACKED_UP {
+            assert!(!TABLES.contains(name), "{name} is both excluded and included");
+            assert!(present.iter().any(|p| p == name), "{name} is excluded but not in the schema");
+        }
 
         let stale: Vec<&&str> = TABLES.iter().filter(|name| !present.iter().any(|p| p == *name)).collect();
         assert!(stale.is_empty(), "these are named but no longer in the schema: {stale:?}");

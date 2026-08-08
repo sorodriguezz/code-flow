@@ -11,6 +11,8 @@ import { NewChainModal } from "./NewChainModal";
 import { NewTaskModal } from "./NewTaskModal";
 import { StoryRealizerModal } from "./StoryRealizerModal";
 import { TemplateDetail } from "./TemplateDetail";
+import { TerminalBench } from "./TerminalBench";
+import { useBenchStore } from "../../state/benchStore";
 import { useChainStore } from "../../state/chainStore";
 import { CARD } from "../api/panelChrome";
 import { EmptyState } from "../common/EmptyState";
@@ -52,6 +54,7 @@ export function AgentsView() {
   const activeView = useUiStore((s) => s.activeView);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const rosterOpen = useAgentsStore((s) => s.rosterOpen);
+  const benchOpen = useBenchStore((s) => s.open);
   const selectedId = useAgentsStore((s) => s.selectedId);
   const listWidth = useLayoutStore((s) => s.sizes.agentsListWidth);
   const rosterWidth = useLayoutStore((s) => s.sizes.agentsRosterWidth);
@@ -80,6 +83,15 @@ export function AgentsView() {
     // whether or not this view has ever been mounted — this call only covers the very first mount,
     // where the subscription has had no change to react to yet.
     void useChainStore.getState().setWorkspace(workspaceId);
+    // The bench is read here rather than when its panel opens, and that is what makes the tree's
+    // section honest: after a restart the terminals exist in the database with no shell behind
+    // them, and a list that only loaded when somebody opened the panel would show nothing until
+    // they did — leaving "closed but still there" as something the user has to already know. The
+    // panel's own `show` reloads on top of this; a second read of a handful of rows is not a cost
+    // worth arranging around.
+    if (workspaceId) {
+      void useBenchStore.getState().refresh(workspaceId);
+    }
   }, [workspaceId]);
 
   // Scoped to the view: it stays mounted once opened, so an unscoped ⌘N would open the new-task
@@ -155,7 +167,15 @@ export function AgentsView() {
               the action bar belongs to. All three are keyed, for the same reason — every bit of
               local state in those panes belongs to one row. */}
           <div className={`flex min-w-0 flex-1 flex-col overflow-hidden ${CARD}`}>
-            {selectedTemplateId ? (
+            {/* The bench takes the middle column whole rather than docking under it. It is a place
+                you work, not a strip you glance at — several shells, each wanting the height of a
+                real terminal — and the column it displaces holds a task you were reading, which is
+                still selected and comes straight back when the bench is closed. Nothing about the
+                task is lost by looking away from it, which is exactly what makes taking the whole
+                column affordable. */}
+            {benchOpen ? (
+              <TerminalBench />
+            ) : selectedTemplateId ? (
               <TemplateDetail key={selectedTemplateId} templateId={selectedTemplateId} onUse={openTemplate} />
             ) : selectedChainId ? (
               <ChainDetail key={selectedChainId} chainId={selectedChainId} />

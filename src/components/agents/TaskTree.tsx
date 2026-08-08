@@ -445,6 +445,7 @@ export function TaskTree({
         )}
       </Section>
 
+
       {menu && (
         <ContextMenu
           x={menu.x}

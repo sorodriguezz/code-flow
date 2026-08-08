@@ -180,8 +180,13 @@ export function SettingsView() {
         </div>
 
         <div className="relative flex min-h-0 flex-1">
-          {/* No `border-r`: the handle after this nav is the seam, and a border here doubled it. */}
-          <nav style={{ width: railWidth }} className="shrink-0 overflow-y-auto p-3">
+          {/* No `border-r`: the handle after this nav is the seam, and a border here doubled it.
+              `cf-fold-zone` only while folded — the whole icon rail is the fold button's hover
+              target, same as the projects sidebar's. See `index.css`. */}
+          <nav
+            style={{ width: railWidth }}
+            className={`shrink-0 overflow-y-auto p-3 ${collapsed ? "cf-fold-zone" : ""}`}
+          >
             {collapsed ? (
               // The group headings are the one thing with no icon to fall back on. A rule in their
               // place keeps the two groups visibly separate without inventing a glyph for "Global".
@@ -224,7 +229,8 @@ export function SettingsView() {
               and leaving a live handle there would let someone drag it to a width the labels are
               still hidden at. The stored width is untouched, so expanding returns to it. */}
           {collapsed ? (
-            <div className="w-px shrink-0 bg-[var(--cf-border)]" />
+            // Same rail-that-points-at-its-button as the projects sidebar's — see `index.css`.
+            <div className="cf-fold-zone cf-seam-collapsed w-px shrink-0 bg-[var(--cf-border)]" />
           ) : (
             <ResizeHandle
               axis="x"
@@ -242,16 +248,30 @@ export function SettingsView() {
               glow it lights up under the pointer — painted straight across the middle of the
               button, and the handle's grab area took the clicks aimed at it.
 
-              Centred, following the projects sidebar's — see the longer note there. These two are
-              the same control on two different seams, and the one thing worse than either position
-              is having one of each. */}
+              At the top, level with the section heading — and here the projects sidebar's reasoning
+              does *not* carry over, which is worth writing down because this button used to be
+              centred precisely in order to match it.
+
+              That argument was about the seam being where the hand already is: down the side of a
+              long panel you grab the divider in the middle, so the fold control belongs there too.
+              It holds for the sidebar, whose seam runs the full height of the window against a list
+              that scrolls and is dragged. It does not hold here. This nav is a dozen fixed rows in a
+              640px dialog — nothing scrolls, nothing is resized to reach anything — so the middle of
+              its seam is not where anything happens, it is merely the middle. Level with the first
+              heading it sits at the top of both columns at once, on the line the eye starts at.
+
+              `top-6` and no `translate`: the pane beside it has `py-6`, and its heading is a 20px
+              `text-sm` line — so 24px puts this 20px button exactly on that line rather than near
+              it. */}
           <Tooltip side="right" label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}>
             <button
               onClick={() => toggleFlag("settingsNavCollapsed")}
               aria-label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}
               aria-expanded={!collapsed}
               style={{ left: railWidth - 10 }}
-              className="absolute top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
+              className={`absolute top-6 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)] ${
+                collapsed ? "cf-fold-toggle" : ""
+              }`}
             >
               {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
             </button>

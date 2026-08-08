@@ -9,6 +9,7 @@ import {
   FolderOpen,
   KeyRound,
   ListChecks,
+  Lock,
   RefreshCw,
   Upload,
   type LucideIcon,
@@ -335,11 +336,15 @@ function IncludeRow({
   detail,
   checked,
   onChange,
+  alwaysLabel,
 }: {
   label: string;
   detail: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
+  checked?: boolean;
+  onChange?: (checked: boolean) => void;
+  /** Set for the one row that has no switch — the core. Its slot gets a padlock instead of a
+   *  checkbox, so the row still reads as one of the list rather than as a paragraph above it. */
+  alwaysLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -359,7 +364,11 @@ function IncludeRow({
           <span className="truncate">{label}</span>
         </button>
         <span className="shrink-0">
-          <Checkbox checked={checked} onChange={onChange} />
+          {alwaysLabel !== undefined ? (
+            <Lock size={11} className="text-[var(--cf-text-muted)]" aria-label={alwaysLabel} />
+          ) : (
+            <Checkbox checked={checked ?? false} onChange={onChange ?? (() => {})} />
+          )}
         </span>
       </div>
       {open && (
@@ -399,6 +408,21 @@ function IncludeGroup({
   return (
     <>
       <div className="divide-y divide-[var(--cf-border)] border-y border-[var(--cf-border)]">
+        {/* The core, first and locked.
+            It has no switch, which used to mean it had no row either — and so the pane answered
+            "what is in my backup" with nine optional groups and complete silence about the part
+            that is always in it. Someone looking for their keyboard shortcuts or their file-icon
+            rules read nine labels, found neither, and concluded they were not backed up. They are:
+            both are `app_settings` rows, and that table is core.
+
+            A row rather than the paragraph this pane deliberately doesn't have (see above) — the
+            answer belongs in the list people are already reading, folded away like every other
+            row's, and the padlock says why this one can't be turned off. */}
+        <IncludeRow
+          label={t("backup.include.core")}
+          detail={t("backup.include.coreHint")}
+          alwaysLabel={t("backup.include.coreAlways")}
+        />
         {INCLUDE_KEYS.map((key) => (
           <IncludeRow
             key={key}

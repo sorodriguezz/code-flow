@@ -109,8 +109,15 @@ function ink(color: string): string {
  * repository happens to be selected, so it doesn't move or reload when you click a different repo.
  *
  * The workspace tile caps it for the same reason the tab bar keeps a repository marker at its own
- * end: five unlabelled glyphs need something saying whose they are. It is a marker, not a control —
- * changing workspace is the title bar's job.
+ * end: five unlabelled glyphs need something saying whose they are. It still isn't the way to
+ * *change* workspace — that stays the projects panel's job — but it is no longer inert: clicking it
+ * goes back to the repository graph.
+ *
+ * Which is the way out of these five apps, and it was missing. Every app here is workspace-scoped,
+ * so opening one leaves the repository views with nothing on screen pointing back at them: the tab
+ * bar above is about the selected repository and reads as somewhere you already are. The tile is
+ * the one thing on the rail that isn't one of the five, it is directly above them, and "back to
+ * where I started" is the plainest thing a cap like that can mean.
  */
 export function AppRail() {
   const activeView = useUiStore((s) => s.activeView);
@@ -144,15 +151,17 @@ export function AppRail() {
       {/* The tour anchors this cluster rather than the whole rail: the rail is as tall as the
           window, and a spotlight that size says "look everywhere". */}
       <div data-tour="workspace-tools" className="flex flex-col items-center gap-1">
-        <Tooltip side="left" label={scopeHint}>
-          <span
+        <Tooltip side="left" label={scopeHint} description={t("tabbar.scopeWorkspaceReset")}>
+          <button
+            type="button"
             data-tour="workspace-menu"
-            aria-label={workspace?.name ?? t("tabbar.scopeWorkspace")}
-            className="flex h-6 w-6 shrink-0 cursor-default select-none items-center justify-center rounded-md border"
+            onClick={() => setActiveView("graph")}
+            aria-label={`${workspace?.name ?? t("tabbar.scopeWorkspace")} — ${t("tabbar.scopeWorkspaceReset")}`}
+            className="flex h-6 w-6 shrink-0 select-none items-center justify-center rounded-md border transition-[filter,transform] hover:brightness-105 active:scale-95"
             style={{ backgroundColor: wash(wsColor, 16), borderColor: wash(wsColor, 40) }}
           >
             <Layers size={12} style={{ color: ink(wsColor) }} />
-          </span>
+          </button>
         </Tooltip>
 
         <span className="my-1 h-px w-5 bg-[var(--cf-border)]" />

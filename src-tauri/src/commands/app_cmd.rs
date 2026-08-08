@@ -51,3 +51,13 @@ pub fn ai_usage_stats(db: State<Db>, window_hours: i64) -> Result<crate::ai_usag
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     crate::db::queries::ai_usage_stats(&conn, window_hours).map_err(|e| e.to_string())
 }
+
+/// What the app cannot do without, checked on the first launch after installing.
+///
+/// Called at most once per installation — the frontend remembers the answer in `app_settings`,
+/// beside the tour's own flag and for the same reason (see `requirementsStore`). Cheap regardless:
+/// one short-lived subprocess and one file write.
+#[tauri::command]
+pub fn check_requirements() -> Vec<crate::requirements::Requirement> {
+    crate::requirements::check()
+}

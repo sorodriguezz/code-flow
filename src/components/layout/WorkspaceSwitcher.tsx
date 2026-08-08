@@ -117,8 +117,14 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
     <div ref={rootRef} data-tour="workspace-switcher" className={collapsed ? "" : "w-full"}>
       {collapsed ? (
         // Folded there is no room for the name, so the name becomes the tooltip — the same trade
-        // every chip in the rail underneath makes.
-        <Tooltip side="right" label={name}>
+        // every chip in the rail underneath makes, down to the colour dot in front of it: a rail of
+        // identically-shaped squares is told apart by colour, so the label that stands in for one
+        // carries the same colour it does.
+        <Tooltip
+          side="right"
+          label={name}
+          leading={<span className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />}
+        >
           <button onClick={toggle} aria-label={name} aria-expanded={open} className="flex">
             {tile}
           </button>

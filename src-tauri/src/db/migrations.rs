@@ -145,6 +145,76 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_projects_workspace
             ON agent_projects(workspace_id, sort_order);
 
+        -- The agent console's terminal bench: shells the user opened by hand to drive whatever CLI
+        -- they like, kept beside the agents rather than inside a repository.
+        --
+        -- Workspace-scoped and *not* project-scoped, unlike the terminal dock in the repository
+        -- views. That dock belongs to a working copy — its cwd is the repo and it closes with it.
+        -- These belong to the workspace the way the agent roster does: the CLI you are logging into
+        -- or the long build you are watching is not a fact about which repository is selected, and
+        -- clicking a different one must not take it away.
+        --
+        -- `transcript` is the reason this table exists at all. A pty cannot outlive the process that
+        -- opened it, so "don't lose my work" cannot mean keeping the shell alive across a restart —
+        -- it means keeping what the shell *said*. The bytes are appended as they are printed (see
+        -- `terminal::Transcript`, which caps them), so reopening the bench replays the scrollback
+        -- with a fresh shell under it. `cwd` and `profile_id` are what make that shell the same
+        -- shell in the same place rather than a new one somewhere else.
+        --
+        -- Deliberately absent from `backup::snapshot::TABLES`; see `NEVER_BACKED_UP` there.
+        CREATE TABLE IF NOT EXISTS workspace_terminals (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- Which bench tab this shell is a pane of. See `workspace_bench_tabs`.
+            tab_id       TEXT NOT NULL DEFAULT '',
+            title        TEXT NOT NULL,
+            cwd          TEXT NOT NULL DEFAULT '',
+            -- Empty means "whatever the configured default profile resolves to", which is not the
+            -- same as a fixed shell: a user who changes their default gets it here too.
+            profile_id   TEXT NOT NULL DEFAULT '',
+            transcript   TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workspace_terminals_workspace
+            ON workspace_terminals(workspace_id, sort_order);
+
+        -- One tab of the bench, and the arrangement of shells inside it.
+        --
+        -- Tabs and panes both, the way every terminal emulator that has one does it, and for the
+        -- reason those all arrived at: a tiling view alone does not scale. Six shells tiled are six
+        -- unreadable slivers and the only way out is closing one. Tabs give the set somewhere to
+        -- live that costs no screen, and panes give the two or three you are actually watching
+        -- right now — the build and the server it is restarting — the room to be watched together.
+        --
+        -- `layout` is a JSON binary tree over the ids of this tab's terminals:
+        --
+        --     {"kind":"leaf","id":"<workspace_terminals.id>"}
+        --     {"kind":"split","dir":"row"|"col","ratio":0.5,"a":{…},"b":{…}}
+        --
+        -- A tree rather than the list-of-groups the repository dock uses, because a list cannot say
+        -- what the user is asking for: one shell down the left with two stacked beside it is two
+        -- levels of nesting, and one level of grouping can only ever draw a single row or column.
+        --
+        -- Stored as text and parsed on the frontend, which is the only place it means anything —
+        -- the backend never walks it, it only keeps it. A layout that fails to parse, or that names
+        -- a terminal that has since been deleted, is repaired on load rather than refused: see
+        -- `lib/bench/layout.ts`.
+        --
+        -- Also absent from `backup::snapshot::TABLES`, for the same reason its terminals are.
+        CREATE TABLE IF NOT EXISTS workspace_bench_tabs (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            title        TEXT NOT NULL DEFAULT '',
+            layout       TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_workspace_bench_tabs_workspace
+            ON workspace_bench_tabs(workspace_id, sort_order);
+
         -- One agent task: a goal handed to a roster agent (`workspace_agents`) and worked on
         -- against one repository of this workspace.
         --
@@ -1109,7 +1179,51 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_repos_to_agent_chains(conn)?;
     add_ai_usage(conn)?;
     add_group_name_to_db_connections(conn)?;
+    add_tab_to_workspace_terminals(conn)?;
     align_project_ado_org_with_connections(conn)?;
+    Ok(())
+}
+
+/// Files the bench's existing shells into a tab.
+///
+/// The bench shipped flat — a list of terminals, one on screen at a time — and gained tabs and
+/// panes in the release after. Every row written before that names no tab, and a shell filed under
+/// no tab is a shell that has vanished: the bench draws tabs, and it would draw none.
+///
+/// So the backfill is not optional and is not a tidy-up. Rows with an empty `tab_id` are gathered
+/// into one tab per workspace, in the order they were created — which is the arrangement they
+/// already had, since a flat bench *is* a single tab of stacked panes with only one showing.
+fn add_tab_to_workspace_terminals(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "workspace_terminals")? {
+        return Ok(());
+    }
+    if !has_column(conn, "workspace_terminals", "tab_id")? {
+        conn.execute_batch("ALTER TABLE workspace_terminals ADD COLUMN tab_id TEXT NOT NULL DEFAULT '';")?;
+    }
+
+    let orphaned: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT workspace_id FROM workspace_terminals WHERE tab_id = ''",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()?
+    };
+
+    for workspace_id in orphaned {
+        let tab_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO workspace_bench_tabs (id, workspace_id, title, layout, sort_order, created_at)
+             VALUES (?1, ?2, '', '', 0, ?3)",
+            rusqlite::params![tab_id, workspace_id, crate::db::queries::now()],
+        )?;
+        // No `layout` written: an empty one means "lay these out however you like", and the
+        // frontend builds a default arrangement from whichever terminals name the tab. Inventing a
+        // tree here would mean this file knowing the shape of something it otherwise only stores.
+        conn.execute(
+            "UPDATE workspace_terminals SET tab_id = ?2 WHERE workspace_id = ?1 AND tab_id = ''",
+            rusqlite::params![workspace_id, tab_id],
+        )?;
+    }
     Ok(())
 }
 

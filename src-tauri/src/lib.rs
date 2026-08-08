@@ -33,11 +33,13 @@ mod proc;
 mod remote;
 mod remotes;
 mod repo_identity;
+mod requirements;
 mod review;
 mod review_memory;
 mod search;
 mod secret_scan;
 mod secrets;
+mod shell_env;
 mod shell_profiles;
 mod supabase;
 mod terminal;
@@ -89,6 +91,12 @@ fn hide_to_background(window: &tauri::Window) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // First of all, and it has to be first: this writes a process-wide environment variable, which
+    // is only sound while this is still the only thread. Everything after it — the AI CLIs, the
+    // pty, `git`, `ssh` — resolves programs against the `PATH` it leaves behind, so a widening that
+    // landed later would be a widening half the app had already read past. See `shell_env`.
+    shell_env::import_login_path();
+
     // Must happen before `db::init()` opens the SQLite connection below — see
     // `paths::reset_marker_path`'s doc comment for why the delete can't happen live.
     if paths::reset_marker_path().exists() {
@@ -140,6 +148,10 @@ pub fn run() {
             // The scheduled backup. Ticks on the clock rather than on every edit, and an unchanged
             // configuration costs it a hash — see `backup::auto`.
             backup::auto::spawn(app.handle().clone());
+            // The agent console's terminal bench writes down what its shells printed, on a timer.
+            // Here for the same reason as everything above it — `setup` is where the `AppHandle`
+            // is — and cheap when the bench is empty, which is most installs most of the time.
+            commands::terminal_cmd::spawn_transcript_flush(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -169,6 +181,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_cmd::quit_app,
+            commands::app_cmd::check_requirements,
             commands::app_cmd::reset_app_data,
             commands::backup_cmd::backup_state,
             commands::backup_cmd::backup_save_settings,
@@ -469,6 +482,16 @@ pub fn run() {
             commands::terminal_cmd::write_terminal,
             commands::terminal_cmd::resize_terminal,
             commands::terminal_cmd::close_terminal,
+            commands::terminal_cmd::list_workspace_terminals,
+            commands::terminal_cmd::add_workspace_terminal,
+            commands::terminal_cmd::resume_workspace_terminal,
+            commands::terminal_cmd::rename_workspace_terminal,
+            commands::terminal_cmd::remove_workspace_terminal,
+            commands::terminal_cmd::clear_workspace_terminals,
+            commands::terminal_cmd::add_bench_tab,
+            commands::terminal_cmd::set_bench_layout,
+            commands::terminal_cmd::rename_bench_tab,
+            commands::terminal_cmd::remove_bench_tab,
             // The Remote workspace. Note the absence of write/resize/close: a remote session is a
             // terminal session, driven by the five above.
             commands::remote_cmd::remote_load_tree,
@@ -646,6 +669,11 @@ pub fn run() {
             //
             // Blocking is correct here: the point is to finish before the process does.
             if let tauri::RunEvent::Exit = _event {
+                // The last four seconds of every bench terminal's output, which the flusher's timer
+                // has not come round for. The shells themselves die with the process — that is what
+                // a pty is — so this is the whole of what "don't lose my work" can mean here, and
+                // it is the moment it has to happen.
+                commands::terminal_cmd::flush_transcripts(_app_handle);
                 let registry = _app_handle.state::<DbRegistry>();
                 tauri::async_runtime::block_on(registry.close_all());
             }

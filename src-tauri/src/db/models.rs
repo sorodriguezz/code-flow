@@ -129,6 +129,44 @@ pub struct AgentProject {
     pub updated_at: String,
 }
 
+/// One shell on the agent console's terminal bench.
+///
+/// The row is what survives; the shell is not. A pty belongs to the process that opened it, so
+/// closing the app ends every one of them — what is kept is enough to put the same shell back in
+/// the same directory (`cwd`, `profile_id`) with everything it had already said still on screen
+/// (`transcript`).
+/// One tab of the agent console's terminal bench, and the arrangement of shells inside it.
+///
+/// `layout` is a JSON binary tree over this tab's terminal ids — opaque here on purpose. The
+/// backend keeps it and never walks it; the only place it means anything is `lib/bench/layout.ts`,
+/// which is also where a tree that fails to parse or names a deleted terminal is repaired.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchTab {
+    pub id: String,
+    pub workspace_id: String,
+    /// Empty until the user renames it, in which case the bench names it after its shells.
+    pub title: String,
+    pub layout: String,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceTerminal {
+    pub id: String,
+    pub workspace_id: String,
+    /// Which [`BenchTab`] this shell is a pane of.
+    pub tab_id: String,
+    pub title: String,
+    pub cwd: String,
+    /// Empty means the configured default profile, resolved at open time — not a fixed shell.
+    pub profile_id: String,
+    /// Everything the shell printed, capped. See `terminal::Transcript`.
+    pub transcript: String,
+    pub sort_order: i64,
+    pub created_at: String,
+}
+
 /// One agent task: a goal handed to a roster agent and worked on against one repository. The
 /// turns themselves are `activity_log` rows sharing `conversation_id`; this row is the task's
 /// identity and its overall state.

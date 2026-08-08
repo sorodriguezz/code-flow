@@ -22,6 +22,7 @@ import { ShortcutsModal } from "./components/layout/ShortcutsModal";
 import { BranchSwitcherModal } from "./components/layout/BranchSwitcherModal";
 import { OpenPrLinkModal } from "./components/layout/OpenPrLinkModal";
 import { UpdateNotesModal } from "./components/layout/UpdateNotesModal";
+import { RequirementsModal } from "./components/layout/RequirementsModal";
 import { UpdateAlert } from "./components/layout/UpdateAlert";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
@@ -46,6 +47,7 @@ import { useTerminalStore } from "./state/terminalStore";
 import { useShortcutsStore } from "./state/shortcutsStore";
 import { useIconRulesStore } from "./state/iconRulesStore";
 import { useTourStore } from "./state/tourStore";
+import { useRequirementsStore } from "./state/requirementsStore";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
@@ -125,6 +127,7 @@ export default function App() {
   const initShortcuts = useShortcutsStore((s) => s.init);
   const initIconRules = useIconRulesStore((s) => s.init);
   const initTour = useTourStore((s) => s.init);
+  const initRequirements = useRequirementsStore((s) => s.init);
   const project = useWorkspaceStore((s) => s.activeProject());
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
@@ -148,6 +151,14 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
+      // Ahead of the batch, and on its own, because its answer decides one thing inside it.
+      //
+      // On every launch but the first of an installation this is a single settings read that
+      // returns immediately — the flag is set and nothing is probed. Only on that first launch does
+      // it cost a `git --version` and a file write, and only then can it come back saying the tour
+      // must not open itself over the dialog it is about to show. Ordering stated rather than left
+      // to a 1100 ms timer to win by being slower. See `requirementsStore`.
+      const clearToTour = await initRequirements();
       await Promise.all([
         initTheme(),
         initLayout(),
@@ -163,7 +174,7 @@ export default function App() {
         // Reads whether the guided tour has already been run, and — if it hasn't — arms the
         // first-launch opening. Deliberately inside this batch: the tour rearranges panels, and
         // it must not start before the layout and language it rearranges have loaded.
-        initTour(),
+        initTour({ autoOpen: clearToTour }),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
         startWindowBoundsTracking(),
@@ -181,6 +192,7 @@ export default function App() {
     initShortcuts,
     initIconRules,
     initTour,
+    initRequirements,
   ]);
 
   // Re-apply the chosen accent whenever the resolved theme or the accent selection changes,
@@ -330,6 +342,9 @@ export default function App() {
       {/* Owns its own open flag rather than one in uiStore: nothing but the update badge and the
           Settings panel ever opens it, and both go through the update store already. */}
       <UpdateNotesModal />
+      {/* Only ever drawn on the first launch of an installation, and only if that launch found
+          something broken. Silent on a clean machine and on every launch after. */}
+      <RequirementsModal />
       <ToastContainer />
       <ConfirmModal />
       {/* Last, and above everything: the guided tour dims the whole window and drives the panels

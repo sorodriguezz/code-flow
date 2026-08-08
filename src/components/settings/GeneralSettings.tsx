@@ -2,7 +2,6 @@ import { GraduationCap, LogOut, Trash2 } from "lucide-react";
 import { ActivePill } from "../common/ActivePill";
 import { APP_TOURS, type TourId } from "../../lib/tour/steps";
 import { tourLength, useTourStore } from "../../state/tourStore";
-import { useUiStore } from "../../state/uiStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import type { Language } from "../../lib/i18n/translations";
 import { quitApp, resetAppData } from "../../lib/tauri/commands";
@@ -25,18 +24,23 @@ export function GeneralSettings() {
   const platform = usePlatform();
   const dataPath = platform === "windows" ? "C:\\CodeFlow" : "~/CodeFlow";
   const startTour = useTourStore((s) => s.start);
-  const closeSettings = useUiStore((s) => s.closeSettings);
 
   /**
-   * Settings is closed first, then the tour is started.
+   * Starting the tour is the whole of it. It closes this dialog itself.
    *
    * Every tour begins by staging a screen behind this dialog — the sidebar for the main one, an app
-   * for the other five — and starting from underneath an open settings would put the first
-   * spotlight on something nobody can see. The tour reopens it at the end anyway: this dialog is
-   * part of the state it snapshots, so finishing returns you to the screen you launched from.
+   * for the other five — and the stage is applied whole, so `settingsOpen` comes out false on the
+   * first step whether or not anybody closed it first. Which makes the `closeSettings()` that used
+   * to run here not merely redundant but the bug: `start` snapshots the app *before* it stages
+   * anything, so closing the dialog one line earlier meant the snapshot recorded settings as
+   * already shut. Finishing then restored it faithfully — to closed — and the tour that promises to
+   * leave every panel as it found it dropped you on the graph instead of back on this screen.
+   *
+   * Left to `applyStage` rather than reordered into `closeSettings(); startTour()`, because the
+   * stage is the thing that decides what the first step needs on screen: a tour whose opening step
+   * one day *wants* a settings section would have had that undone by a close sitting out here.
    */
   const launch = (tour?: TourId) => {
-    closeSettings();
     startTour(tour ? { tour } : undefined);
   };
 

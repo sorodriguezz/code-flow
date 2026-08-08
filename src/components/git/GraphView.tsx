@@ -6,9 +6,10 @@ import { confirmAction } from "../../state/confirmStore";
 import { DiffView } from "./DiffView";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
-import { History, RotateCcw, X } from "lucide-react";
+import { Cloud, GitBranch, History, RotateCcw, Tag, X, type LucideIcon } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { SkeletonRows } from "../common/Skeleton";
+import type { CommitRef, RefKind } from "../../types/domain";
 
 const ROW_HEIGHT = 30;
 const LANE_WIDTH = 16;
@@ -27,6 +28,78 @@ function formatDate(ts: number): string {
 function formatFullDateTime(ts: number): string {
   const d = new Date(ts * 1000);
   return d.toLocaleString(undefined, { dateStyle: "full", timeStyle: "short" });
+}
+
+/** How many chips a row shows before the rest become a counter. The column is ~200px and a chip
+ *  with a glyph and a branch name in it is most of a hundred. */
+const MAX_REF_CHIPS = 2;
+
+/**
+ * The glyph for each kind of ref — and the *only* thing that carries the kind.
+ *
+ * Colour used to do this job too: local branches accent, tags amber, remotes muted. That was an
+ * improvement on the one soft-accent pill they all used to be, and it was still spending the
+ * strongest channel on the question you can already answer from the shape. A tag looks like a tag.
+ *
+ * What colour is now spent on is the question the shape *cannot* answer: **which line in the graph
+ * is this?** See [`RefChip`].
+ */
+const REF_GLYPH: Record<RefKind, LucideIcon> = { branch: GitBranch, remote: Cloud, tag: Tag };
+
+/**
+ * One ref, as a chip, in the colour of the lane its commit sits on.
+ *
+ * **That is the whole point.** The refs column is inches away from the graph and was telling you
+ * nothing about it: `feat/thing` came out indigo whether its commit was the tip of the indigo line,
+ * the green one or the orange one, so matching a name to a line meant tracing the row across by eye
+ * and counting lanes. Painted in `laneColor(lane)` the chip *is* the line — the same hue as the dot
+ * beside it and the stroke running out of it — and the match is made before you have finished
+ * reading the name.
+ *
+ * The palette is safe to read as text: the eight lane colours sit in the same 55–70% lightness band
+ * as the workspace colours, which is the band chosen precisely because one hex has to work on both
+ * themes (see `lib/workspaceColors`).
+ *
+ * **Three channels, three questions, no overlap.**
+ * - *Hue* — which line. From the graph, never from the kind.
+ * - *Glyph* — what it is. A branch, a remote-tracking branch, a tag.
+ * - *Fill* — how present it is. A remote is an outline with no fill, because it is a record of where
+ *   a branch stood on the server rather than a thing in this working copy, and a column where
+ *   `origin/*` shouts as loudly as `main` is the column this replaces. The branch you are actually
+ *   *on* fills harder and goes semibold — the answer to "where am I", which can only ever be true
+ *   on one row.
+ *
+ * Tags take the pill shape as well as the tag glyph. Cheap, and shape is the one channel that
+ * survives both colour-blindness and 10px type, which is where two 9px icons start to converge.
+ *
+ * `title` rather than the app's own `Tooltip`: the name is *truncated*, not missing, so this is the
+ * fallback case that `Tooltip`'s own note reserves for the platform's — and it is per-row in a list
+ * that can run to a thousand commits, where a portalled component per chip is a cost with nothing
+ * to show for it.
+ */
+function RefChip({ commitRef, lane, isCurrent }: { commitRef: CommitRef; lane: string; isCurrent: boolean }) {
+  const Icon = REF_GLYPH[commitRef.kind];
+  const outline = commitRef.kind === "remote";
+  return (
+    <span
+      title={commitRef.name}
+      className={`flex min-w-0 shrink items-center gap-1 border px-1.5 py-0.5 text-[10px] ${
+        commitRef.kind === "tag" ? "rounded-full" : "rounded"
+      } ${isCurrent ? "font-semibold" : "font-medium"}`}
+      style={{
+        // The lane's own hue for the text, and washes of it for the box. Not a solid fill with
+        // white on top, which is what the checked-out branch used to get: at these lightnesses
+        // white is comfortable on the indigo and unreadable on the amber, and a treatment that
+        // depends on which lane you happen to be on is not a treatment.
+        color: lane,
+        background: outline ? "transparent" : `color-mix(in oklab, ${lane} ${isCurrent ? 26 : 14}%, transparent)`,
+        borderColor: `color-mix(in oklab, ${lane} ${outline || isCurrent ? 55 : 28}%, transparent)`,
+      }}
+    >
+      <Icon size={9} className="shrink-0" />
+      <span className="truncate">{commitRef.name}</span>
+    </span>
+  );
 }
 
 /** Everything left of the diff panel: sticky column headers + the commit rows/graph SVG.
@@ -54,6 +127,9 @@ const CommitTable = memo(function CommitTable() {
   // does, and deriving it from the branch list dropped the marker off the graph entirely just
   // when knowing where you are matters most.
   const headCommitId = status?.head_oid ?? null;
+  // Null on a detached HEAD, which is the right answer rather than a missing one: no branch is
+  // checked out, so no chip should be claiming to be the one you are on.
+  const currentBranch = status?.is_detached ? null : (status?.current_branch ?? null);
 
   const svgWidth = layout.laneCount * LANE_WIDTH + 12;
   const svgHeight = layout.rows.length * ROW_HEIGHT;
@@ -244,19 +320,29 @@ const CommitTable = memo(function CommitTable() {
                   <span style={{ width: messageWidth }} className="shrink-0 truncate text-[var(--cf-text)]">
                     {r.commit.summary}
                   </span>
-                  <span style={{ width: colRefs }} className="flex shrink-0 gap-1 overflow-hidden">
-                    {r.commit.refs.slice(0, 2).map((ref) => (
-                      <span
-                        key={ref}
-                        className="truncate rounded px-1.5 py-0.5 text-[10px] font-medium"
-                        style={{
-                          background: "var(--cf-accent-soft)",
-                          color: "var(--cf-accent)",
-                        }}
-                      >
-                        {ref}
-                      </span>
+                  <span style={{ width: colRefs }} className="flex shrink-0 items-center gap-1 overflow-hidden">
+                    {r.commit.refs.slice(0, MAX_REF_CHIPS).map((ref) => (
+                      <RefChip
+                        key={`${ref.kind}:${ref.name}`}
+                        commitRef={ref}
+                        // The same call the dot beside it makes, so chip and dot cannot disagree.
+                        lane={laneColor(r.lane)}
+                        isCurrent={ref.kind === "branch" && ref.name === currentBranch}
+                      />
                     ))}
+                    {/* The overflow used to be silent: a commit with a branch, its remote and two
+                        tags on it showed two chips and no sign that it had four. A counter is
+                        smaller than a third chip and says the one thing the missing chips were
+                        there to say — that there is more here — with the names themselves a hover
+                        away. */}
+                    {r.commit.refs.length > MAX_REF_CHIPS && (
+                      <span
+                        title={r.commit.refs.slice(MAX_REF_CHIPS).map((ref) => ref.name).join("\n")}
+                        className="shrink-0 rounded px-1 py-0.5 text-[10px] font-medium text-[var(--cf-text-muted)]"
+                      >
+                        +{r.commit.refs.length - MAX_REF_CHIPS}
+                      </span>
+                    )}
                   </span>
                 </button>
                 {isHead && r.commit.parent_ids.length > 0 && (

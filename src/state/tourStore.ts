@@ -54,7 +54,19 @@ interface TourState {
   seen: boolean | null;
   /** Where the app was before the tour started rearranging it. */
   snapshot: AppSnapshot | null;
-  init: () => Promise<void>;
+  /**
+   * Reads the flag, and — unless told otherwise — arms the post-install opening.
+   *
+   * `autoOpen: false` reads the flag and arms nothing. For the one case that outranks the tour: the
+   * first-launch requirements check found something broken and is saying so. A tour that drives the
+   * app around behind that dialog is two things claiming the screen, and the second of them is a
+   * tour of an app that cannot fetch. The user can still start it by hand from the title bar or
+   * Settings, which is the only way it is ever reached after this launch anyway.
+   *
+   * Passed in rather than read from the requirements store, so this file keeps knowing nothing
+   * about it — the ordering belongs to `App`, the only place that can see both.
+   */
+  init: (options?: { autoOpen?: boolean }) => Promise<void>;
   /** `firstRun` is set only by the post-install opening in `init`; every button that opens a
    * tour by hand leaves it false, and therefore ends without the confetti. `tour` defaults to the
    * main one, so the two callers that only ever want that one don't have to name it. */
@@ -92,9 +104,13 @@ export const useTourStore = create<TourState>((set, get) => ({
   seen: null,
   snapshot: null,
 
-  init: async () => {
+  init: async (options) => {
     const seen = (await getSetting(SEEN_KEY).catch(() => null)) === "1";
     set({ seen });
+    // The flag is still read and still published — the title bar's launcher shows a hint on an
+    // installation that has never run it, and that is true whether or not anything else went wrong
+    // this launch. Only the *automatic* opening is held back.
+    if (options?.autoOpen === false) return;
     // The one automatic opening there is. Everything the app can do is behind a panel toggle or a
     // menu, and an app whose features are all one click away is also an app where none of them is
     // discoverable — being shown the map once beats finding it by accident. Whichever way it ends,

@@ -291,6 +291,61 @@ body {
   }
 }
 
+/* The seam of a *folded* panel, and the fold button riding it.
+   Used by the projects sidebar and by Settings' section nav — the same control on two seams.
+
+   Folded, the seam is a hairline and nothing else. The `ResizeHandle` that normally draws it is
+   gone (there is nothing left to drag at one chip wide), and with it went the grip, the glow and
+   the resize cursor — every mark that says a seam is a place where something happens. What is
+   left is a 20px circle on a plain line, in the muted text colour, and it is genuinely hard to
+   find if you don't already know it is there.
+
+   So the panel answers for it: put the pointer anywhere on the folded rail — the chips, the icons,
+   the seam beside them — and the button it carries lights up. That is the whole intent: not a hover
+   state for the button, which it already had, but a way for the *panel* to point at the button.
+
+   The whole rail rather than only the seam, and that was a correction. A hairline plus four pixels
+   either side is a target you have to already be aiming at, which is no help at all to someone who
+   does not know there is anything there — and "does not know there is anything there" is the entire
+   audience for this. The rail is fifty pixels wide and is where the pointer already goes on its way
+   to a project or a settings section, so the answer arrives before the question is asked.
+
+   Unfolded, none of this applies, and deliberately: there the handle is a live control with its
+   own hover behaviour, and a second thing lighting up 300px away every time you brushed the
+   divider on the way somewhere else would be noise reporting on a control you can already see.
+   The classes are simply not applied in that state. */
+.cf-seam-collapsed {
+  position: relative;
+}
+
+/* A hairline is not a hover target on its own. Four pixels either side, matching the grab area the
+   unfolded handle claims, so the seam answers at the same distance in both states — and so the
+   approach from the *content* side works too, which the rail alone cannot cover. Costs no layout;
+   the button sitting on top is a real element above this one and still takes its own clicks. */
+.cf-seam-collapsed::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: -4px;
+  right: -4px;
+}
+
+/* Every part of the same gesture: the rail entered, the seam approached, the button reached.
+
+   The last one is not redundant. Without it, walking the final pixels off the rail and onto the
+   button would *drop* the highlight the rail just promised — the control going quiet exactly as you
+   arrive at it, which reads as having missed.
+
+   Two sibling selectors per trigger because the button may or may not be wrapped: `Tooltip` renders
+   a `display: contents` span around its child, which changes nothing about layout and everything
+   about which combinator reaches it. */
+.cf-fold-toggle:hover,
+.cf-fold-zone:hover ~ .cf-fold-toggle,
+.cf-fold-zone:hover ~ * .cf-fold-toggle {
+  color: var(--cf-accent);
+  border-color: var(--cf-accent);
+}
+
 /* A card arriving in a list — same move as cf-fade-in but slow enough to register as one, and
    with `backwards` fill so a staggered `animation-delay` holds the card invisible until its turn
    instead of flashing it at full opacity first. The stagger is set per card via

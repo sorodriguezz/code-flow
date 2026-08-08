@@ -10,6 +10,7 @@ import { renderMarkdown } from "../../lib/markdown";
 import { FindingCard, QualityGateBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
 import { AiErrorBanner } from "./AiErrorBanner";
 import { AiRunLog } from "./AiRunLog";
+import { useTaskModelLabel } from "./ModelTag";
 
 /** Pre-commit change analysis, shown inline in the AI panel (alongside chat and PR review)
  * instead of a separate modal — so it shares the same "Activity" job tracking and the same
@@ -19,6 +20,11 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
   const hide = useAnalyzeUiStore((s) => s.hide);
   const selectedJobId = useAnalyzeUiStore((s) => s.selectedJobId);
   const jobs = useJobsStore((s) => s.byProject[projectId] ?? EMPTY_JOBS);
+  /** Which engine the next run reaches, on the button that starts it. The panel this button lives
+   *  in is also where the failure lands, and `failed to launch 'opencode'` names a binary that
+   *  appears nowhere else on screen — so the name has to be readable *before* the click, not
+   *  reverse-engineered from the error after it. */
+  const analyzeModel = useTaskModelLabel("analyze");
   // A specific past run is pinned by id when opened from the Activity list; otherwise show the
   // project's most recent analysis. Selecting by id is what stops every analyze entry from
   // aliasing onto the newest run.
@@ -104,7 +110,7 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
           <button
             onClick={runAnalysis}
             disabled={loading}
-            title={t("analyze.reanalyze")}
+            title={[t("analyze.reanalyze"), analyzeModel].join("\n")}
             className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] disabled:opacity-40"
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />

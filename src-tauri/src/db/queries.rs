@@ -3,11 +3,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::models::{
-    ActivityLogEntry, AgentChain, AgentChainStep, AgentProject, AgentTask, ChainClaim, ChainDetail,
+    ActivityLogEntry, AgentChain, AgentChainStep, AgentProject, AgentTask, BenchTab, ChainClaim, ChainDetail,
     ChainRepo, ChainStepBrief, ChainTemplate, ChainTemplateStep, ChatConversationSummary, DocPage,
     JobHistoryEntry, NewChainStep, NewProject, NewStoryWorkItem, Project, ReviewContext, ReviewRunDetail,
     ReviewRunSummary, StoryBatch, StoryBatchDetail, StoryDraft, Workspace, WorkspaceActivityEntry,
-    WorkspaceAgent, WorkspaceSkill, WorkItemReviewRow,
+    WorkspaceAgent, WorkspaceSkill, WorkspaceTerminal, WorkItemReviewRow,
 };
 
 /// The timestamp every record is stamped with, truncated to **microseconds**.
@@ -4930,4 +4930,215 @@ pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<
         peak_tokens,
         since: since.unwrap_or_default(),
     })
+}
+
+// ---------- the agent console's terminal bench ----------
+
+const WORKSPACE_TERMINAL_COLUMNS: &str =
+    "id, workspace_id, tab_id, title, cwd, profile_id, transcript, sort_order, created_at";
+
+fn map_workspace_terminal(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceTerminal> {
+    Ok(WorkspaceTerminal {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        tab_id: row.get(2)?,
+        title: row.get(3)?,
+        cwd: row.get(4)?,
+        profile_id: row.get(5)?,
+        transcript: row.get(6)?,
+        sort_order: row.get(7)?,
+        created_at: row.get(8)?,
+    })
+}
+
+/// Every terminal of a workspace, in the order they sit on the bench.
+///
+/// Transcripts and all — this is what the bench replays into xterm on the way in, and a terminal
+/// without its output is the thing the table exists to prevent. They are capped at a quarter of a
+/// megabyte each (see `terminal::TRANSCRIPT_LIMIT`), so a bench of a dozen is still a small read.
+pub fn list_workspace_terminals(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceTerminal>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {WORKSPACE_TERMINAL_COLUMNS} FROM workspace_terminals WHERE workspace_id = ?1
+         ORDER BY sort_order ASC, created_at ASC"
+    ))?;
+    let rows = stmt.query_map(params![workspace_id], map_workspace_terminal)?;
+    rows.collect()
+}
+
+/// Adds one to the end of the bench. The row exists before its shell does, deliberately: the id it
+/// gets here is what the pty records against, so a terminal that fails to open is still a row the
+/// user can see failed rather than a click that did nothing.
+pub fn add_workspace_terminal(
+    conn: &Connection,
+    workspace_id: &str,
+    tab_id: &str,
+    title: &str,
+    cwd: &str,
+    profile_id: &str,
+) -> rusqlite::Result<WorkspaceTerminal> {
+    let sort_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspace_terminals WHERE workspace_id = ?1",
+        params![workspace_id],
+        |row| row.get(0),
+    )?;
+    let terminal = WorkspaceTerminal {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: workspace_id.to_string(),
+        tab_id: tab_id.to_string(),
+        title: title.to_string(),
+        cwd: cwd.to_string(),
+        profile_id: profile_id.to_string(),
+        transcript: String::new(),
+        sort_order,
+        created_at: now(),
+    };
+    conn.execute(
+        "INSERT INTO workspace_terminals (id, workspace_id, tab_id, title, cwd, profile_id, transcript, sort_order, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, '', ?7, ?8)",
+        params![
+            terminal.id,
+            terminal.workspace_id,
+            terminal.tab_id,
+            terminal.title,
+            terminal.cwd,
+            terminal.profile_id,
+            terminal.sort_order,
+            terminal.created_at,
+        ],
+    )?;
+    Ok(terminal)
+}
+
+/// A blank title is ignored rather than stored, so cancelling out of the inline editor with an
+/// empty field leaves the tab named — the same rule the repository dock's rename follows.
+pub fn rename_workspace_terminal(conn: &Connection, id: &str, title: &str) -> rusqlite::Result<()> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    conn.execute("UPDATE workspace_terminals SET title = ?2 WHERE id = ?1", params![id, trimmed])?;
+    Ok(())
+}
+
+/// Writes one session's recorded output. Called on a timer and on the way out — see
+/// `terminal::drain_transcripts` for why the whole buffer is written rather than an append.
+pub fn save_workspace_terminal_transcript(conn: &Connection, id: &str, transcript: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE workspace_terminals SET transcript = ?2 WHERE id = ?1",
+        params![id, transcript],
+    )?;
+    Ok(())
+}
+
+/// Forgets one terminal, output and all. Killing its shell is the caller's job — this row is the
+/// record, not the process.
+pub fn delete_workspace_terminal(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM workspace_terminals WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Empties the whole bench for a workspace, and reports the ids it removed so the caller can kill
+/// their shells. Returned rather than looked up separately because the two have to agree: a row
+/// deleted whose shell was missed is a process nobody can reach again.
+pub fn clear_workspace_terminals(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<String>> {
+    let ids: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT id FROM workspace_terminals WHERE workspace_id = ?1")?;
+        let rows = stmt.query_map(params![workspace_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()?
+    };
+    conn.execute("DELETE FROM workspace_terminals WHERE workspace_id = ?1", params![workspace_id])?;
+    Ok(ids)
+}
+
+// ---------- the bench's tabs ----------
+
+const BENCH_TAB_COLUMNS: &str = "id, workspace_id, title, layout, sort_order, created_at";
+
+fn map_bench_tab(row: &rusqlite::Row) -> rusqlite::Result<BenchTab> {
+    Ok(BenchTab {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        title: row.get(2)?,
+        layout: row.get(3)?,
+        sort_order: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
+pub fn list_bench_tabs(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<BenchTab>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {BENCH_TAB_COLUMNS} FROM workspace_bench_tabs WHERE workspace_id = ?1
+         ORDER BY sort_order ASC, created_at ASC"
+    ))?;
+    let rows = stmt.query_map(params![workspace_id], map_bench_tab)?;
+    rows.collect()
+}
+
+/// A new, empty tab at the end of the strip. Its layout is written later, once it has a pane in it
+/// — an empty string means "arrange these however you like", which is the state a tab with no
+/// terminals is genuinely in.
+pub fn add_bench_tab(conn: &Connection, workspace_id: &str) -> rusqlite::Result<BenchTab> {
+    let sort_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspace_bench_tabs WHERE workspace_id = ?1",
+        params![workspace_id],
+        |row| row.get(0),
+    )?;
+    let tab = BenchTab {
+        id: Uuid::new_v4().to_string(),
+        workspace_id: workspace_id.to_string(),
+        title: String::new(),
+        layout: String::new(),
+        sort_order,
+        created_at: now(),
+    };
+    conn.execute(
+        "INSERT INTO workspace_bench_tabs (id, workspace_id, title, layout, sort_order, created_at)
+         VALUES (?1, ?2, '', '', ?3, ?4)",
+        params![tab.id, tab.workspace_id, tab.sort_order, tab.created_at],
+    )?;
+    Ok(tab)
+}
+
+/// Records the arrangement of a tab's panes.
+///
+/// Written on every split, close and finished drag, which is why it takes the tree whole rather
+/// than a diff: the frontend owns the shape, and a backend that tried to apply changes to it would
+/// need to understand it — which is exactly what keeping this opaque avoids.
+pub fn set_bench_layout(conn: &Connection, tab_id: &str, layout: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE workspace_bench_tabs SET layout = ?2 WHERE id = ?1",
+        params![tab_id, layout],
+    )?;
+    Ok(())
+}
+
+/// A blank title is ignored rather than stored — the bench falls back to naming a tab after its
+/// shells, and an empty name would leave it nameless instead of returning it to that default.
+pub fn rename_bench_tab(conn: &Connection, tab_id: &str, title: &str) -> rusqlite::Result<()> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    conn.execute("UPDATE workspace_bench_tabs SET title = ?2 WHERE id = ?1", params![tab_id, trimmed])?;
+    Ok(())
+}
+
+/// Forgets a tab and every terminal filed under it, and reports those ids so the caller can kill
+/// their shells. Returned rather than looked up separately because the two have to agree: a row
+/// deleted whose shell was missed is a process nobody can reach again.
+pub fn delete_bench_tab(conn: &Connection, tab_id: &str) -> rusqlite::Result<Vec<String>> {
+    let ids: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT id FROM workspace_terminals WHERE tab_id = ?1")?;
+        let rows = stmt.query_map(params![tab_id], |row| row.get::<_, String>(0))?;
+        rows.collect::<rusqlite::Result<Vec<String>>>()?
+    };
+    conn.execute("DELETE FROM workspace_terminals WHERE tab_id = ?1", params![tab_id])?;
+    conn.execute("DELETE FROM workspace_bench_tabs WHERE id = ?1", params![tab_id])?;
+    Ok(ids)
+}
+
+/// Empties the whole bench: every tab, every terminal, every transcript.
+pub fn clear_bench_tabs(conn: &Connection, workspace_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM workspace_bench_tabs WHERE workspace_id = ?1", params![workspace_id])?;
+    Ok(())
 }

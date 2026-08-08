@@ -117,6 +117,31 @@ fn detect() -> Vec<ShellProfile> {
     found
 }
 
+/// The flag that makes a shell a *login* shell, for the shells that spell it `-l`.
+///
+/// Without it the terminal's `PATH` is launchd's, not the user's. A GUI app on macOS inherits a
+/// four-entry `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) and nothing else, and the file that fixes
+/// that on almost every developer machine — `~/.zprofile`, where Homebrew's `shellenv`, nvm, pnpm
+/// and asdf all put themselves — is read by login shells *only*. `~/.zshrc` still ran, which is
+/// why the prompt looked right; that made the failure read as "CodeFlow can't find npm" rather
+/// than "this shell never sourced your profile". `node`, `npm`, `pnpm` and every globally-installed
+/// CLI came back as `command not found` in a terminal where the same command works one window over.
+///
+/// This is what Terminal.app, iTerm and VS Code all do, so `-l` is also the thing that makes this
+/// pane behave like the terminal the user already has rather than like a subtly different one.
+///
+/// By name rather than for everything, because `-l` is only near-universal: it holds for the four
+/// shells detected below and for the usual `$SHELL` values, but a login shell is not required to
+/// spell the flag that way, and passing it to one that reads it as something else turns "an odd
+/// `PATH`" into "the terminal won't open at all". An unrecognised `$SHELL` keeps today's behaviour.
+#[cfg(not(target_os = "windows"))]
+fn login_args(shell_name: &str) -> &'static [&'static str] {
+    match shell_name {
+        "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh" => &["-l"],
+        _ => &[],
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 fn detect() -> Vec<ShellProfile> {
     let mut found: Vec<ShellProfile> = Vec::new();
@@ -126,7 +151,10 @@ fn detect() -> Vec<ShellProfile> {
         // login shell is added first and therefore wins the slot.
         if !found.iter().any(|p| p.id == id) {
             let name = id.clone();
-            found.push(profile(&id, &name, command, &[]));
+            // The id *is* the executable's basename, for both the `$SHELL` entry and the four
+            // below, which is exactly what decides how to ask for a login shell.
+            let args = login_args(&id);
+            found.push(profile(&id, &name, command, args));
         }
     };
 
@@ -247,6 +275,26 @@ mod tests {
         for p in &found {
             assert!(!p.command.trim().is_empty(), "profile {} has no command", p.id);
             assert!(p.builtin, "detected profile {} isn't marked built-in", p.id);
+        }
+    }
+
+    /// Every detected shell has to be asked for a *login* shell, or its user's `PATH` never gets
+    /// built: a GUI app's environment is launchd's, and `~/.zprofile` is where the entries that
+    /// make `npm`, `pnpm` and every other globally-installed CLI resolvable actually live.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn detected_shells_are_login_shells() {
+        for p in detect() {
+            // Only the shells `login_args` knows; an exotic `$SHELL` is deliberately left alone.
+            if !matches!(p.id.as_str(), "zsh" | "bash" | "fish" | "sh" | "dash" | "ksh") {
+                continue;
+            }
+            assert!(
+                p.args.iter().any(|a| a == "-l"),
+                "profile {} is not a login shell: {:?}",
+                p.id,
+                p.args,
+            );
         }
     }
 

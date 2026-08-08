@@ -306,6 +306,11 @@ export function ChangesPanel({
    * `"commit"` is the key Rust's `AiTask::Commit` reports, which is what `generate_commit_message`
    * loads its config from; naming any other task here would put a confident lie in the tooltip. */
   const commitModel = useTaskModelLabel("commit");
+  /** Same, for the 🛡 button. `"analyze"` is `AiTask::Analyze`'s key — the task the change analysis
+   *  actually routes through. Worth the second line for the same reason the commit button's is, and
+   *  one more: when the run fails it fails as `failed to launch 'opencode'`, a sentence naming a
+   *  binary the user never chose by that name and cannot connect to anything on this screen. */
+  const analyzeModel = useTaskModelLabel("analyze");
 
   // Feedback for the row action buttons is otherwise invisible until refreshStatus() comes
   // back (stage/unstage/discard all trigger a full status+diff refresh) — set the pending
@@ -551,7 +556,7 @@ export function ChangesPanel({
                       openAiPanel();
                     }}
                     data-tour="changes-analyze"
-                    title={t("analyze.button")}
+                    title={[t("analyze.button"), analyzeModel].join("\n")}
                     className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]"
                   >
                     <ShieldCheck size={13} />

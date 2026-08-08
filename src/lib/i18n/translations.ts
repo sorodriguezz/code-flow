@@ -170,6 +170,7 @@ export const translations = {
     "tabbar.scopeWorkspace": "Workspace",
     "tabbar.scopeWorkspaceHint": "Workspace: {name} — these tabs follow the workspace, not the repository",
     "tabbar.scopeWorkspaceNone": "These tabs follow the workspace, not the repository — none is selected",
+    "tabbar.scopeWorkspaceReset": "Click to go back to the repository graph",
     "tabbar.workspaceTools": "Workspace tools",
     "tabbar.apiDescription": "Collections, environments and requests",
 
@@ -682,6 +683,10 @@ export const translations = {
     "backup.tabGuides": "Destination guides",
     "backup.tabGuidesHint":
       "Both cloud destinations are bring-your-own: a Google Cloud project for Drive, an app registration for OneDrive. A synced folder needs neither, and is the shortest route.",
+    "backup.include.core": "Workspaces and settings",
+    "backup.include.coreAlways": "Always included",
+    "backup.include.coreHint":
+      "Always included, and the only part with no switch — everything below hangs off it, and a backup without it restores into nothing. Workspaces and the repositories in them, prompts, agents and MCP servers, and every app setting: theme and accent, AI routing, terminal profiles, your keyboard shortcuts and your file-icon rules.",
     "backup.include.credentials": "Credentials",
     "backup.include.credentialsHint":
       "Every token, key and password this app keeps in the operating system's credential store: Azure DevOps PATs, GitHub and GitLab tokens, AI provider keys, database passwords and cloud grants. Without these the other machine gets every repository and connection in place and cannot authenticate with any of them — you would type each one in again by hand. Turn it off only if the file will sit somewhere you would not put a password.",
@@ -1907,6 +1912,46 @@ export const translations = {
     "fileStatus.ignored": "Ignored",
     "fileStatus.unmodified": "Unmodified",
 
+    "requirements.title": "Something on this machine needs attention",
+    "requirements.subtitle":
+      "Checked once, the first time CodeFlow runs after being installed. You won't see this again — everything below is also reachable later.",
+    "requirements.dismiss": "Got it",
+    "requirements.git": "Git isn't available",
+    "requirements.gitHint":
+      "CodeFlow reads history on its own, but every clone, fetch, pull and push runs your system Git — that's how it reuses your SSH keys, your credential manager and your .gitconfig. Without it those will fail. Install Git from git-scm.com and reopen CodeFlow.",
+    "requirements.dataDir": "CodeFlow can't write its data folder",
+    "requirements.dataDirHint":
+      "This is where the database, your workspaces and your settings live. If it can't be written, nothing can be saved and the app may not start at all. Check the folder's permissions, or ask whoever administers this machine for write access to it.",
+
+    "bench.title": "Terminals",
+    "bench.section": "Terminals",
+    "bench.newTab": "New tab",
+    "bench.newTabWith": "New tab with a specific shell",
+    "bench.closeTab": "Close this tab and its terminals",
+    "bench.splitRight": "Split right",
+    "bench.splitDown": "Split down",
+    "bench.splitWith": "Split with a specific shell",
+    "bench.pickShell": "Pick a shell",
+    "bench.noShells": "No shells found",
+    "bench.removeTerminal": "Delete this terminal",
+    "bench.renameTerminal": "Rename this terminal",
+    "bench.renameTab": "Rename this tab",
+    "bench.close": "Close — the terminals keep running",
+    "bench.clearAction": "Delete every terminal",
+    "bench.clearConfirm":
+      "Kill {n} terminal(s) and delete everything they printed? The processes are stopped and the history cannot be recovered. To just put the panel away and leave them running, close it instead.",
+    "bench.running": "Running",
+    "bench.stopped": "Stopped",
+    "bench.loading": "Loading…",
+    "bench.empty": "No terminals yet",
+    "bench.emptyHint":
+      "Open a tab, split it into as many panes as you like, and run whatever CLI you want in each. Drag the dividers to arrange them. Closing this panel leaves everything running.",
+    "bench.pickTerminal": "Pick a terminal",
+    "bench.stoppedTitle": "This terminal has no shell running",
+    "bench.stoppedHint":
+      "Its process ended when the app last closed. Everything it printed is still here — start a shell to carry on where you left off.",
+    "bench.resume": "Start a shell",
+
     "analyze.button": "Analyze changes with AI",
     "analyze.title": "Change analysis",
     "analyze.reanalyze": "Re-analyze",
@@ -2158,7 +2203,6 @@ export const translations = {
     "editor.confirmReplaceAll": "Replace {n} match(es) across {files} file(s)? You can undo it from the restore points.",
     "editor.confirmReplaceFile": "Replace every match in {file}?",
     "editor.replaced": "{n} replacement(s) in {files} file(s)",
-    "editor.closeSearch": "Close search",
     "editor.searching": "Searching…",
     "editor.noMatches": "No matches",
     "editor.matchCount": "{hits} results in {files} files",
@@ -4353,6 +4397,7 @@ export const translations = {
     "tabbar.scopeWorkspace": "Espacio de trabajo",
     "tabbar.scopeWorkspaceHint": "Espacio de trabajo: {name} — estas pestañas siguen al espacio de trabajo, no al repositorio",
     "tabbar.scopeWorkspaceNone": "Estas pestañas siguen al espacio de trabajo, no al repositorio — no hay ninguno seleccionado",
+    "tabbar.scopeWorkspaceReset": "Haz clic para volver al grafo del repositorio",
     "tabbar.workspaceTools": "Herramientas del espacio de trabajo",
     "tabbar.apiDescription": "Colecciones, entornos y peticiones",
 
@@ -4865,6 +4910,10 @@ export const translations = {
     "backup.tabGuides": "Guías de destino",
     "backup.tabGuidesHint":
       "Los dos destinos en la nube son con credenciales propias: un proyecto de Google Cloud para Drive, un registro de aplicación para OneDrive. Una carpeta sincronizada no necesita ninguno, y es el camino más corto.",
+    "backup.include.core": "Espacios de trabajo y configuración",
+    "backup.include.coreAlways": "Siempre incluido",
+    "backup.include.coreHint":
+      "Siempre se incluye, y es la única parte sin interruptor: todo lo de abajo depende de ella, y un respaldo sin esto se restaura sobre nada. Los espacios de trabajo y sus repositorios, los prompts, los agentes y servidores MCP, y todas las opciones de la app: el tema y el color de acento, el enrutado de IA, los perfiles de terminal, tus atajos de teclado y tus reglas de iconos.",
     "backup.include.credentials": "Credenciales",
     "backup.include.credentialsHint":
       "Cada token, clave y contraseña que la app guarda en el almacén de credenciales del sistema: PAT de Azure DevOps, tokens de GitHub y GitLab, claves de proveedores de IA, contraseñas de bases de datos y accesos a la nube. Sin esto el otro equipo recibe todos los repositorios y conexiones en su lugar y no puede autenticarse con ninguno — tendrías que escribir cada uno a mano. Apágalo solo si el archivo va a quedar en un lugar donde no dejarías una contraseña.",
@@ -6090,6 +6139,46 @@ export const translations = {
     "fileStatus.ignored": "Ignorado",
     "fileStatus.unmodified": "Sin cambios",
 
+    "requirements.title": "Hay algo en este equipo que necesita atención",
+    "requirements.subtitle":
+      "Se comprueba una sola vez, la primera vez que abres CodeFlow después de instalarlo. No volverás a ver esto — todo lo de abajo también se puede resolver más tarde.",
+    "requirements.dismiss": "Entendido",
+    "requirements.git": "Git no está disponible",
+    "requirements.gitHint":
+      "CodeFlow lee el historial por su cuenta, pero cada clone, fetch, pull y push usa el Git del sistema — así es como reutiliza tus llaves SSH, tu gestor de credenciales y tu .gitconfig. Sin él, esas operaciones fallarán. Instala Git desde git-scm.com y vuelve a abrir CodeFlow.",
+    "requirements.dataDir": "CodeFlow no puede escribir su carpeta de datos",
+    "requirements.dataDirHint":
+      "Ahí viven la base de datos, tus espacios de trabajo y tu configuración. Si no se puede escribir, no se guarda nada y puede que la app ni siquiera arranque. Revisa los permisos de la carpeta, o pide acceso de escritura a quien administre este equipo.",
+
+    "bench.title": "Terminales",
+    "bench.section": "Terminales",
+    "bench.newTab": "Nueva pestaña",
+    "bench.newTabWith": "Nueva pestaña con un shell concreto",
+    "bench.closeTab": "Cerrar esta pestaña y sus terminales",
+    "bench.splitRight": "Dividir a la derecha",
+    "bench.splitDown": "Dividir abajo",
+    "bench.splitWith": "Dividir con un shell concreto",
+    "bench.pickShell": "Elegir shell",
+    "bench.noShells": "No se encontraron shells",
+    "bench.removeTerminal": "Eliminar esta terminal",
+    "bench.renameTerminal": "Renombrar esta terminal",
+    "bench.renameTab": "Renombrar esta pestaña",
+    "bench.close": "Cerrar — las terminales siguen corriendo",
+    "bench.clearAction": "Eliminar todas las terminales",
+    "bench.clearConfirm":
+      "¿Matar {n} terminal(es) y borrar todo lo que imprimieron? Se detienen los procesos y el historial no se puede recuperar. Si solo quieres guardar el panel y dejarlas corriendo, ciérralo en vez de esto.",
+    "bench.running": "Corriendo",
+    "bench.stopped": "Detenida",
+    "bench.loading": "Cargando…",
+    "bench.empty": "Todavía no hay terminales",
+    "bench.emptyHint":
+      "Abre una pestaña, divídela en los paneles que quieras y ejecuta en cada uno el CLI que necesites. Arrastra los divisores para acomodarlos. Cerrar este panel lo deja todo corriendo.",
+    "bench.pickTerminal": "Elige una terminal",
+    "bench.stoppedTitle": "Esta terminal no tiene shell corriendo",
+    "bench.stoppedHint":
+      "Su proceso terminó cuando cerraste la app. Todo lo que imprimió sigue aquí — inicia un shell para seguir donde lo dejaste.",
+    "bench.resume": "Iniciar shell",
+
     "analyze.button": "Analizar cambios con IA",
     "analyze.title": "Análisis de cambios",
     "analyze.reanalyze": "Re-analizar",
@@ -6341,7 +6430,6 @@ export const translations = {
     "editor.confirmReplaceAll": "¿Reemplazar {n} coincidencia(s) en {files} archivo(s)? Puedes deshacerlo desde los puntos de restauración.",
     "editor.confirmReplaceFile": "¿Reemplazar todas las coincidencias en {file}?",
     "editor.replaced": "{n} reemplazo(s) en {files} archivo(s)",
-    "editor.closeSearch": "Cerrar búsqueda",
     "editor.searching": "Buscando…",
     "editor.noMatches": "Sin coincidencias",
     "editor.matchCount": "{hits} resultados en {files} archivos",

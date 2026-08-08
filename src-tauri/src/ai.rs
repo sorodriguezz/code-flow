@@ -684,6 +684,19 @@ fn install_dirs() -> Vec<std::path::PathBuf> {
         dirs.push(home.join("Library/pnpm"));
         dirs.push(home.join(".npm-global/bin"));
     }
+    // Node version managers, whose global bin is wherever the *selected* version put it — so the
+    // entry has to be the manager's own stable alias for "the default version" rather than any
+    // concrete one, which would pin this to whichever release was current the day it was written.
+    //
+    // fnm earns a line here despite `shell_env` importing the shell's `PATH`, because what fnm puts
+    // on that `PATH` is a per-shell-session symlink under `fnm_multishells/<pid>_<timestamp>`. It
+    // resolves fine and it is what the import brings back, but it names a directory created for a
+    // shell that has since exited; this is the same binaries under a name that is nobody's session.
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".local/share/fnm/aliases/default/bin")); // fnm
+        dirs.push(home.join(".volta/bin")); // Volta
+        dirs.push(home.join(".asdf/shims")); // asdf
+    }
     dirs.push(PathBuf::from("/opt/homebrew/bin"));
     dirs.push(PathBuf::from("/usr/local/bin"));
     dirs
@@ -697,9 +710,25 @@ fn install_dirs() -> Vec<std::path::PathBuf> {
         dirs.push(home.join(".claude").join("local"));
         dirs.push(home.join(".opencode").join("bin")); // opencode install script
     }
-    // npm global bin on Windows is `%APPDATA%\npm` (dirs::data_dir() == Roaming AppData).
+    // Windows carries more of the weight than its Unix counterpart, and it is worth saying why.
+    //
+    // There, `shell_env` widens `PATH` to whatever the login shell reports, so this list is a
+    // backstop for the few installers that put a binary somewhere no profile mentions. Here there
+    // is no such import and no need for one in the ordinary case: `PATH` is user and machine state
+    // in the registry, not something a startup file assembles, so a GUI process gets the same one a
+    // console does.
+    //
+    // What it does *not* get is an edit made after it started — install a CLI while CodeFlow is
+    // running and the process keeps the pre-install `PATH` until it is restarted. That case has no
+    // equivalent on Unix and no shell to ask, which leaves this list as the whole of the answer.
+    // Hence the node-manager entries below: they are the paths a `npm i -g`, `pnpm add -g` or
+    // `bun add -g` actually lands in, so a CLI installed a minute ago is found without a restart.
     if let Some(appdata) = dirs::data_dir() {
+        // npm's global bin (`dirs::data_dir()` is Roaming AppData).
         dirs.push(appdata.join("npm"));
+        // fnm. Its Windows layout has no `bin` under the alias — Node on Windows puts `node.exe`
+        // and the `.cmd` shims in the prefix root, where Unix uses `prefix/bin`.
+        dirs.push(appdata.join("fnm").join("aliases").join("default"));
     }
     if let Some(local) = dirs::data_local_dir() {
         // Antigravity CLI (`agy`) installs to `%LOCALAPPDATA%\agy\bin`.
@@ -707,6 +736,12 @@ fn install_dirs() -> Vec<std::path::PathBuf> {
         // The Codex desktop app ships the CLI here and does *not* put it on `PATH`, so without
         // this entry a perfectly working install still probes as "not found".
         dirs.push(local.join("Programs").join("OpenAI").join("Codex").join("bin"));
+        // pnpm's global bin (`PNPM_HOME`) and Volta's shim directory.
+        dirs.push(local.join("pnpm"));
+        dirs.push(local.join("Volta").join("bin"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        dirs.push(home.join(".bun").join("bin"));
     }
     dirs
 }
