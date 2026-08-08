@@ -10,7 +10,6 @@ import {
 import { useUiStore, type ApiWorkspace, type MainView } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
-import { appTourFor } from "../../lib/tour/steps";
 import { Tooltip } from "../common/Tooltip";
 import { TourLauncher } from "../tour/TourLauncher";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -130,10 +129,6 @@ export function AppRail() {
     ? t("tabbar.scopeWorkspaceHint", { name: workspace.name })
     : t("tabbar.scopeWorkspaceNone");
 
-  // The graduation cap only exists while one of these five is open, so the rule above it has to
-  // come and go with it rather than being left behind as a line under nothing.
-  const hasAppTour = appTourFor(activeView, apiWorkspace) !== null;
-
   const open = (app: WorkspaceApp) => {
     // A view with sub-workspaces needs both set at once, or the tab would open on whichever side
     // was last on screen rather than the one just picked.
@@ -226,13 +221,16 @@ export function AppRail() {
 
       {/* Pinned to the foot of the rail rather than trailing the apps: the five above are a list
           you pick from and this is not one of them, so a fixed corner tells them apart better than
-          a rule does. It also stops the cap moving up and down as apps are added. */}
-      {hasAppTour && (
-        <div className="mt-auto flex w-full flex-col items-center gap-1 pt-2">
-          <span className="h-px w-5 bg-[var(--cf-border)]" />
-          <TourLauncher />
-        </div>
-      )}
+          a rule does. It also stops the cap moving up and down as apps are added.
+
+          Unconditional now. It used to come and go with whether the screen had an app tour, which
+          left the three repository views with an empty corner and their tour up in the title bar —
+          the split this button exists to have ended. A control that is always in the same place is
+          the whole argument for putting it here. */}
+      <div className="mt-auto flex w-full flex-col items-center gap-1 pt-2">
+        <span className="h-px w-5 bg-[var(--cf-border)]" />
+        <TourLauncher />
+      </div>
     </aside>
   );
 }

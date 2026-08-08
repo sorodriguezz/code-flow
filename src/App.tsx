@@ -234,8 +234,9 @@ export default function App() {
     };
   }, []);
 
-  // Records every view/project change onto the back/forward history — TitleBar's
-  // chevrons just replay entries from this stack.
+  // Records every view/project change onto the back/forward history. `nav.back` and `nav.forward`
+  // just replay entries from this stack — they were a pair of chevrons in the title bar until those
+  // came out, and the stack is what the shortcuts have always been driving.
   useEffect(() => {
     useNavigationStore.getState().push({ view: activeView, projectId: project?.id ?? null });
   }, [activeView, project?.id]);

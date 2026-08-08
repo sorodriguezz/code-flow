@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { motion } from "framer-motion";
 import {
   Archive,
   Check,
@@ -62,6 +63,7 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
 import { Tooltip } from "../common/Tooltip";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ImportReposModal } from "./ImportReposModal";
 import { CreateBranchModal } from "./CreateBranchModal";
@@ -1240,6 +1242,19 @@ export function Sidebar() {
   // onto the panel's own seam. See `SIDEBAR_COLLAPSED`.
   const railWidth = collapsed ? SIDEBAR_COLLAPSED : sidebarWidth;
 
+  /**
+   * The easing has to be off while the seam is being dragged — the AI panel's note in full.
+   *
+   * `animate` treats every width it is handed as a target to ease toward, and a drag hands it a new
+   * one on every pointer move, so the edge would spend 180ms easing toward a width the pointer had
+   * already left. Zero duration while dragging lands the width in the same frame as the pointer;
+   * the easing is back for the fold and unfold, which is the only place it was meant to apply.
+   */
+  const [resizing, setResizing] = useState(false);
+  /** One object, shared by the panel and by the button riding its seam. They animate the same fold
+   *  and have to arrive together — two transitions that merely *look* alike would drift. */
+  const fold = resizing ? { duration: 0 } : { duration: 0.18, ease: "easeOut" as const };
+
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
 
   /** Registers one repository. The path is always a verified repository root by the time it gets
@@ -1391,68 +1406,110 @@ export function Sidebar() {
     // `relative` so the fold button below can be positioned against the seam rather than against
     // the window.
     <div className="relative flex shrink-0">
-      <aside
-        style={{ width: railWidth }}
+      <motion.aside
+        // `initial={false}`: the fold is animated, the app's first paint is not. Without it the
+        // sidebar unrolls from nothing every time the window opens, which turns a state the user
+        // never changed into an event.
+        initial={false}
+        animate={{ width: railWidth }}
+        transition={fold}
         // No `border-r`. The `ResizeHandle` after this draws the seam already, and the border put a
         // second line hard against the sidebar's edge — so the pair read as one thick divider whose
         // live half sat off to the right, against the panel it isn't part of. Dropping it leaves one
         // line, centred in the handle's own six pixels, with equal space to each panel.
         className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
       >
-        {collapsed ? (
-          // Back to `pt-3`, level with the expanded panel: the 36px of clearance up here existed
-          // only to keep the first chip out from under the fold button, and the fold button has
-          // moved to the middle of the seam.
-          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3 pt-3">
-            <CollapsedProjects projects={projects} onAdd={handleAddProject} />
+        {/* Laid out at the width the panel is *heading for* rather than the width it currently is.
+            The outer eases; this doesn't — so the contents are clipped by the fold instead of
+            reflowing inside it. Reflowing is what made a plain width animation look broken: on the
+            way open, every project row spent the first frames laid out at 50px, wrapping its name
+            and its hover actions onto three lines before snapping back. The AI panel gets this for
+            free by unmounting; a panel that folds to a rail instead of vanishing has to say it. */}
+        <div style={{ width: railWidth }} className="flex min-h-0 flex-1 flex-col">
+          {/* Above the first repository, and outside the scroller below it. Outside because the
+              switcher names what that list *is* — a heading that scrolled away with the rows it
+              heads would leave the panel unlabelled exactly when it is longest. Its menu escapes
+              the panel by being portalled; see `WorkspaceSwitcher`. */}
+          <div className={`flex shrink-0 pt-3 ${collapsed ? "justify-center px-2" : "px-3"}`}>
+            <WorkspaceSwitcher collapsed={collapsed} />
           </div>
-        ) : (
-          <div data-tour="projects-panel" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-3">
-            <div data-tour="projects-header" className="mb-1 flex items-center justify-between px-1">
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-                {t("sidebar.projects")}
-              </span>
-              <div data-tour="projects-actions" className="flex items-center gap-0.5">
-                {/* Deliberately here, above the project list, rather than inside one project's
-                    Pull Requests section: the whole point is that the link decides which repo
-                    it belongs to. */}
-                <button
-                  onClick={openPrLinkModal}
-                  data-tour="pr-link"
-                  className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                  title={t("prLink.menuItem")}
-                >
-                  <Glasses size={13} />
-                </button>
-                <button
-                  onClick={() => setShowCloneModal(true)}
-                  data-tour="clone-repo"
-                  className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                  title={t("sidebar.cloneRepo")}
-                >
-                  <GitBranchPlus size={13} />
-                </button>
-                <button
-                  onClick={handleAddProject}
-                  data-tour="add-project"
-                  className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                  title={t("sidebar.addProject")}
-                >
-                  <Plus size={14} />
-                </button>
+          {/* Folded: a short centred rule with real room under it, not a full-width one with 8px.
+              Both halves of that matter. Edge to edge across a 50px rail, the line reads as a
+              divider *within* one list rather than as the break between the workspace and the
+              repositories in it — which is the same call the app rail makes under its own workspace
+              tile, and the same width. And the room is `mb-3` because the active project chip wears
+              a `ring-2` with `ring-offset-2`: its drawn edge stands 4px outside its box, so 8px of
+              margin came out as 4px of daylight and the first folder looked tucked under the tile.
+              Nothing else in the rail has a ring, which is why only the first one looked wrong. */}
+          <div
+            className={
+              collapsed
+                ? "mx-auto my-2 h-px w-5 shrink-0 bg-[var(--cf-border)]"
+                : "mx-3 my-2 h-px shrink-0 bg-[var(--cf-border)]"
+            }
+          />
+
+          {collapsed ? (
+            // Padding on all four sides, and it is not spacing — it is clearance for a box-shadow.
+            // The active chip is marked with `ring-2 ring-offset-2`, which Tailwind implements as
+            // two stacked box-shadows standing 4px outside the chip's own box. Box-shadows don't
+            // contribute scrollable overflow, so a scroll container doesn't grow for them: it just
+            // cuts them off at its padding box. Flush against the edges, the first chip's ring came
+            // out sliced flat on top and reduced to two vertical slivers at the sides — which reads
+            // exactly like the chip sliding under whatever is above it. `px-0.5` rather than `px-1`
+            // so the ring still closes once enough projects bring the scrollbar in and take 10px of
+            // the 50px with it.
+            <div className="min-h-0 flex-1 overflow-y-auto px-0.5 pb-3 pt-1">
+              <CollapsedProjects projects={projects} onAdd={handleAddProject} />
+            </div>
+          ) : (
+            <div data-tour="projects-panel" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+              <div data-tour="projects-header" className="mb-1 flex items-center justify-between px-1">
+                <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                  {t("sidebar.projects")}
+                </span>
+                <div data-tour="projects-actions" className="flex items-center gap-0.5">
+                  {/* Deliberately here, above the project list, rather than inside one project's
+                      Pull Requests section: the whole point is that the link decides which repo
+                      it belongs to. */}
+                  <button
+                    onClick={openPrLinkModal}
+                    data-tour="pr-link"
+                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                    title={t("prLink.menuItem")}
+                  >
+                    <Glasses size={13} />
+                  </button>
+                  <button
+                    onClick={() => setShowCloneModal(true)}
+                    data-tour="clone-repo"
+                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                    title={t("sidebar.cloneRepo")}
+                  >
+                    <GitBranchPlus size={13} />
+                  </button>
+                  <button
+                    onClick={handleAddProject}
+                    data-tour="add-project"
+                    className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                    title={t("sidebar.addProject")}
+                  >
+                    <Plus size={14} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-0.5">
+                {projects.map((project, at) => (
+                  <ProjectRow key={project.id} project={project} at={at} />
+                ))}
+                {projects.length === 0 && (
+                  <p className="px-1.5 py-1 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noProjects")}</p>
+                )}
               </div>
             </div>
-
-            <div className="space-y-0.5">
-              {projects.map((project, at) => (
-                <ProjectRow key={project.id} project={project} at={at} />
-              ))}
-              {projects.length === 0 && (
-                <p className="px-1.5 py-1 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noProjects")}</p>
-              )}
-            </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {folderScan && (
           <ImportReposModal
@@ -1472,7 +1529,7 @@ export function Sidebar() {
         {showCloneModal && activeWorkspaceId && (
           <CloneRepoModal workspaceId={activeWorkspaceId} onClose={() => setShowCloneModal(false)} />
         )}
-      </aside>
+      </motion.aside>
       {/* Folded, there is nothing to drag: the panel is exactly one chip wide by definition, and a
           live handle there would let someone drag it to a width the names are still hidden at. The
           stored width is untouched, so unfolding returns to it. */}
@@ -1486,6 +1543,7 @@ export function Sidebar() {
           max={SIDEBAR_MAX}
           onChange={(w) => setSize("sidebarWidth", w)}
           onCommit={(w) => commitSize("sidebarWidth", w)}
+          onDragChange={setResizing}
         />
       )}
 
@@ -1508,15 +1566,22 @@ export function Sidebar() {
           collapsed ? t("sidebar.expandProjects") : t("sidebar.collapseProjects"),
         )}
       >
-        <button
+        {/* Animated on the same `fold`, because the seam it rides is moving: left as a plain style
+            it teleported to the folded position and then waited there for the panel to catch up.
+            The vertical centring moves into framer's own `translateY` rather than staying a
+            Tailwind transform — this element's transform is framer's to write now. */}
+        <motion.button
           onClick={() => toggleFlag("sidebarCollapsed")}
           aria-label={collapsed ? t("sidebar.expandProjects") : t("sidebar.collapseProjects")}
           aria-expanded={!collapsed}
-          style={{ left: railWidth - 10 }}
-          className="absolute top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
+          initial={false}
+          animate={{ left: railWidth - 10 }}
+          transition={fold}
+          style={{ translateY: "-50%" }}
+          className="absolute top-1/2 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
         >
           {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
-        </button>
+        </motion.button>
       </Tooltip>
     </div>
   );

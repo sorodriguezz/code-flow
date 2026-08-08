@@ -1,29 +1,11 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import {
-  ChevronLeft,
-  ChevronRight,
-  Copy,
-  Glasses,
-  GraduationCap,
-  MessageCircle,
-  Minus,
-  Search,
-  Sparkles,
-  Square,
-  X,
-  Zap,
-} from "lucide-react";
+import { Copy, Glasses, MessageCircle, Minus, Sparkles, Square, X, Zap } from "lucide-react";
 import { usePlatform } from "../../lib/platform";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { useNavigationStore } from "../../state/navigationStore";
 import { usePrStore } from "../../state/prStore";
-import { useTourStore } from "../../state/tourStore";
-import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { useT } from "../../state/languageStore";
-import { goHistory } from "../../lib/shortcuts";
-import { useShortcutHint } from "../../lib/useShortcutHint";
 import { toggleMaximize } from "../../lib/windowControls";
 
 const win = getCurrentWindow();
@@ -196,19 +178,10 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
 
 export function TitleBar() {
   const platform = usePlatform();
-  const openCommandPalette = useUiStore((s) => s.openCommandPalette);
-  const canGoBack = useNavigationStore((s) => s.canGoBack);
-  const canGoForward = useNavigationStore((s) => s.canGoForward);
   const isMac = platform === "macos";
   const fullscreen = useIsFullscreen();
   const t = useT();
-  const hint = useShortcutHint();
   const [showAiMenu, setShowAiMenu] = useState(false);
-  const startTour = useTourStore((s) => s.start);
-  const tourActive = useTourStore((s) => s.active);
-  /** Unlit once the tour has been finished or skipped. Until then the button wears the accent, so
-   * the one control that explains all the others is the one control that stands out. */
-  const tourSeen = useTourStore((s) => s.seen);
 
   return (
     <header
@@ -226,65 +199,24 @@ export function TitleBar() {
       className="relative z-30 flex h-11 shrink-0 items-center justify-between px-3"
       style={{ background: "var(--cf-titlebar-gradient)" }}
     >
+      {/* Nothing but the room the traffic lights need.
+
+          Search and the two history arrows are gone, and the workspace switcher before them moved
+          to the head of the projects panel. What is left is a bar that holds the two controls that
+          are genuinely about the whole window, at the end where the window's own buttons aren't.
+          Search and history keep their keyboard shortcuts — `app.commandPalette`, `nav.back`,
+          `nav.forward` — and the palette is also reachable from every place that opens it; three
+          buttons in the corner were three permanent pixels for what a chord already does. */}
       <div className="flex items-center gap-3">
         {isMac ? <MacControlsSpacer fullscreen={fullscreen} /> : <div className="w-2" />}
-        {/* Where the sidebar toggle used to be. The panel it toggled now carries its own fold
-            control on its seam — the same one the settings nav wears — which leaves this, the one
-            control that says what the whole window is about, at the top-left where a window says
-            what it is about. */}
-        <WorkspaceSwitcher />
-        <button
-          onClick={() => openCommandPalette("all")}
-          title={hint("app.commandPalette", t("titlebar.search"))}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-black/60 hover:bg-black/10 dark:text-white/70"
-        >
-          <Search size={16} />
-        </button>
-        <div className="flex items-center gap-0.5">
-          <button
-            onClick={() => goHistory("back")}
-            disabled={!canGoBack}
-            title={hint("nav.back", t("titlebar.goBack"))}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-black/40 hover:bg-black/10 disabled:opacity-30 disabled:hover:bg-transparent dark:text-white/50"
-          >
-            <ChevronLeft size={16} />
-          </button>
-          <button
-            onClick={() => goHistory("forward")}
-            disabled={!canGoForward}
-            title={hint("nav.forward", t("titlebar.goForward"))}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-black/40 hover:bg-black/10 disabled:opacity-30 disabled:hover:bg-transparent dark:text-white/50"
-          >
-            <ChevronRight size={16} />
-          </button>
-        </div>
       </div>
 
       <div className="flex items-center gap-2">
-        {/* The way in to the guided tour, and the only control here that advertises itself: until
-            the tour has been run once it sits in the accent with a dot on it, because an app this
-            wide is one where the feature that explains the rest has to be the findable one. */}
-        {/* Not disabled while the tour is running, deliberately: the last step spotlights this
-            button, and a greyed-out control under a highlight reads as "this is unavailable" —
-            the opposite of what that step is saying. The overlay swallows the click anyway. */}
-        <button
-          // Wrapped rather than passed straight through: `start` takes an options object, and
-          // handing it the click event would make React's synthetic event the tour's options.
-          onClick={() => startTour()}
-          data-tour="tour-launcher"
-          title={t("tour.launch")}
-          aria-label={t("tour.launch")}
-          className={`relative flex h-7 w-7 items-center justify-center rounded-md hover:bg-black/10 ${
-            tourSeen === false || tourActive
-              ? "text-[var(--cf-accent)]"
-              : "text-black/60 dark:text-white/70"
-          }`}
-        >
-          <GraduationCap size={16} />
-          {tourSeen === false && (
-            <span className="absolute right-1 top-1 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />
-          )}
-        </button>
+        {/* The graduation cap that used to sit here is at the foot of the app rail now, merged with
+            the launcher the five workspace apps already had. Two buttons with the same glyph, one
+            in this corner and one in the rail, meaning "the tour" and "a different tour" — the
+            difference was carried entirely by which of them you happened to click. See
+            `TourLauncher`. */}
         {/* Opted out of the header's drag region: the open menu hangs a full-screen backdrop and a
             popover off this wrapper, and both are plain divs — under `deep` they would turn a press
             anywhere on screen into a window drag instead of closing the menu. */}

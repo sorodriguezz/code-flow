@@ -1,7 +1,6 @@
 export const translations = {
   en: {
     "titlebar.aiActions": "AI Actions",
-    "titlebar.search": "Search",
     "titlebar.searchPlaceholder": "Search projects, branches, views, settings…",
     "titlebar.noResults": "No matches",
     "titlebar.goTo": "Go to",
@@ -4184,7 +4183,6 @@ export const translations = {
   },
   es: {
     "titlebar.aiActions": "Acciones IA",
-    "titlebar.search": "Buscar",
     "titlebar.searchPlaceholder": "Busca proyectos, ramas, vistas, configuración…",
     "titlebar.noResults": "Sin resultados",
     "titlebar.goTo": "Ir a",

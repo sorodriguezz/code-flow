@@ -243,7 +243,10 @@ function closingStep(
     chapterKey,
     titleKey,
     bodyKey,
-    anchors: ['[data-tour="app-tour-launcher"]', '[data-tour="workspace-menu"]'],
+    // The same launcher the main tour finishes on — there is one now, at the foot of the app rail,
+    // and it is always rendered. The `workspace-menu` fallback that used to sit behind this went
+    // with the condition that could hide the button.
+    anchors: ['[data-tour="tour-launcher"]'],
     padding: 6,
     stage,
   };
