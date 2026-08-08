@@ -1,4 +1,5 @@
 import { useUiStore, type ApiWorkspace, type MainView } from "../state/uiStore";
+import { useLayoutStore } from "../state/layoutStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { useNavigationStore } from "../state/navigationStore";
@@ -236,7 +237,10 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     group: "panels",
     labelKey: "shortcuts.cmdSidebar",
     defaultChord: "Mod+B",
-    run: () => useUiStore.getState().toggleSidebar(),
+    // Through the store's action rather than a raw `setState`: this is the user asking for the
+    // panel to be a given size, which is exactly the decision `toggleFlag` writes to disk. The
+    // tour moves the same flag and deliberately does *not* go through here — see `applyStage`.
+    run: () => useLayoutStore.getState().toggleFlag("sidebarCollapsed"),
   },
   {
     id: "panel.ai",

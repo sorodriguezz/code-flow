@@ -4,8 +4,6 @@ import { useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ActivePill } from "../common/ActivePill";
-import { TourLauncher } from "../tour/TourLauncher";
-import { WorkspaceMenu } from "./WorkspaceMenu";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -13,8 +11,8 @@ import type { TranslationKey } from "../../lib/i18n/translations";
  * Everything in this strip follows the **selected repository** — click a different repo and all
  * three reload. That is the whole reason the API client isn't here: its collections belong to the
  * workspace and deliberately don't change with the repo, and a tab sitting alongside these would
- * imply it did. It lives in `WorkspaceMenu` at the other end of the bar instead, so the two
- * scopes never look like one list.
+ * imply it did. Those live in `AppRail`, a column of the window rather than a strip inside this
+ * one, so the two scopes never look like one list.
  */
 interface Tab {
   id: MainView;
@@ -125,17 +123,6 @@ export function TabBar() {
             badge={tab.id === "changes" ? uncommitted : undefined}
           />
         ))}
-      </div>
-
-      {/* Left of the menu rather than right of it: the menu is the widest control on the bar and
-          the one that grows with the workspace's name, so anything past it moves every time the
-          workspace changes. Here the cap keeps one position.
-
-          The pair is anchored as one, because one step of the main tour is about both at once —
-          these are the workspace's apps, and this is how each of them explains itself. */}
-      <div data-tour="workspace-tools" className="ml-auto flex shrink-0 items-center gap-1">
-        <TourLauncher />
-        <WorkspaceMenu />
       </div>
     </div>
   );

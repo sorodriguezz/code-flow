@@ -8,8 +8,8 @@ import { useTourStore } from "../../state/tourStore";
  * The way into the tour of whichever workspace app is on screen.
  *
  * One button that changes what it starts, rather than a graduation cap bolted into five different
- * panel headers — see the note on `appTourFor`. It sits beside the workspace menu because that menu
- * is what names the app you are in, so the button is unambiguously "explain *this*".
+ * panel headers — see the note on `appTourFor`. It sits at the foot of the app rail, under the very
+ * buttons that open those five, so it is unambiguously "explain *this*".
  *
  * Absent on the three repository views. Those are what the main tour is about, and a button that
  * looked identical but started the same tour the title bar starts would read as a second, different

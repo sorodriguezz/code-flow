@@ -1,6 +1,7 @@
 import { useAgentsStore } from "../../state/agentsStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
 import { useDbModalStore, type DbModal } from "../../state/dbModalStore";
+import { useLayoutStore } from "../../state/layoutStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import {
   useUiStore,
@@ -76,10 +77,25 @@ export interface AppSnapshot {
   dbModal: DbModal | null;
 }
 
+/**
+ * Folds or unfolds the sidebar *without* remembering it.
+ *
+ * `toggleFlag` is the store's own way in and writes the flag to disk, which is right for the user
+ * pressing ⌘B and wrong for a tour that folds the panel for one step and puts it back at the end —
+ * that would leave the tour having quietly rewritten a preference nobody changed. Straight onto the
+ * store, like every other write in this file, for exactly that reason.
+ */
+function setSidebarCollapsed(collapsed: boolean): void {
+  useLayoutStore.setState((s) => ({ flags: { ...s.flags, sidebarCollapsed: collapsed } }));
+}
+
 export function captureAppState(): AppSnapshot {
   const ui = useUiStore.getState();
   return {
-    sidebarCollapsed: ui.sidebarCollapsed,
+    // In `layoutStore` rather than `uiStore` since the sidebar started collapsing to a rail instead
+    // of vanishing — it is a remembered size now, which is the whole reason the writes below go
+    // through `setState` and not through `toggleFlag`.
+    sidebarCollapsed: useLayoutStore.getState().flags.sidebarCollapsed,
     activeView: ui.activeView,
     apiWorkspace: ui.apiWorkspace,
     storiesMode: ui.storiesMode,
@@ -94,8 +110,8 @@ export function captureAppState(): AppSnapshot {
 }
 
 export function restoreAppState(snapshot: AppSnapshot): void {
+  setSidebarCollapsed(snapshot.sidebarCollapsed);
   useUiStore.setState({
-    sidebarCollapsed: snapshot.sidebarCollapsed,
     activeView: snapshot.activeView,
     apiWorkspace: snapshot.apiWorkspace,
     storiesMode: snapshot.storiesMode,
@@ -120,8 +136,8 @@ export function restoreAppState(snapshot: AppSnapshot): void {
 export function applyStage(stage: TourStage | undefined): void {
   const current = useUiStore.getState();
   const settings = stage?.settings ?? null;
+  setSidebarCollapsed(!(stage?.sidebar ?? true));
   useUiStore.setState({
-    sidebarCollapsed: !(stage?.sidebar ?? true),
     activeView: stage?.view ?? "graph",
     apiWorkspace: stage?.apiWorkspace ?? current.apiWorkspace,
     storiesMode: stage?.storiesMode ?? current.storiesMode,

@@ -30,6 +30,7 @@ import { ShortcutsSettings } from "./ShortcutsSettings";
 import { ApiSettingsBody } from "../api/ApiSettingsPanel";
 import { ActivePill } from "../common/ActivePill";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { Tooltip } from "../common/Tooltip";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
@@ -239,16 +240,22 @@ export function SettingsView() {
               be clipped by the nav's own `overflow-y-auto` and would scroll away with the list.
               `z-20` because the handle it rides is `z-[15]`: at `z-10` the seam — and the accent
               glow it lights up under the pointer — painted straight across the middle of the
-              button, and the handle's grab area took the clicks aimed at it. */}
-          <button
-            onClick={() => toggleFlag("settingsNavCollapsed")}
-            title={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}
-            aria-expanded={!collapsed}
-            style={{ left: railWidth - 10 }}
-            className="absolute top-2.5 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
-          >
-            {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
-          </button>
+              button, and the handle's grab area took the clicks aimed at it.
+
+              Centred, following the projects sidebar's — see the longer note there. These two are
+              the same control on two different seams, and the one thing worse than either position
+              is having one of each. */}
+          <Tooltip side="right" label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}>
+            <button
+              onClick={() => toggleFlag("settingsNavCollapsed")}
+              aria-label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}
+              aria-expanded={!collapsed}
+              style={{ left: railWidth - 10 }}
+              className="absolute top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
+            >
+              {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
+            </button>
+          </Tooltip>
           {/* `overflow-y-scroll`, not `auto`: the app styles its scrollbars, which makes them a
               real 10px of layout rather than an overlay. Letting one come and go as a section
               grows past the pane moved the centred column sideways on every switch — most visibly

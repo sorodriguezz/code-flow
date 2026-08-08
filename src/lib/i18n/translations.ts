@@ -10,10 +10,11 @@ export const translations = {
     "titlebar.openChat": "Open AI chat",
     "titlebar.reviewCurrentPr": "Review \"{title}\"",
     "titlebar.noPrSelected": "No pull request selected",
-    "titlebar.toggleSidebar": "Toggle sidebar",
 
     "sidebar.workspaces": "Workspaces",
     "sidebar.projects": "Projects",
+    "sidebar.collapseProjects": "Collapse to project icons",
+    "sidebar.expandProjects": "Show project names",
     "import.title": "Import repositories",
     "import.found": "{count} repositories in this folder",
     "import.selectAll": "Select all",
@@ -171,7 +172,6 @@ export const translations = {
     "tabbar.scopeWorkspaceHint": "Workspace: {name} — these tabs follow the workspace, not the repository",
     "tabbar.scopeWorkspaceNone": "These tabs follow the workspace, not the repository — none is selected",
     "tabbar.workspaceTools": "Workspace tools",
-    "tabbar.workspaceToolsEmpty": "No workspace tools available",
     "tabbar.apiDescription": "Collections, environments and requests",
 
     "api.title": "API Client",
@@ -4193,10 +4193,11 @@ export const translations = {
     "titlebar.openChat": "Abrir chat de IA",
     "titlebar.reviewCurrentPr": "Revisar \"{title}\"",
     "titlebar.noPrSelected": "Ningún pull request seleccionado",
-    "titlebar.toggleSidebar": "Mostrar u ocultar la barra lateral",
 
     "sidebar.workspaces": "Workspaces",
     "sidebar.projects": "Proyectos",
+    "sidebar.collapseProjects": "Contraer a iconos de proyecto",
+    "sidebar.expandProjects": "Mostrar nombres de proyecto",
     "import.title": "Importar repositorios",
     "import.found": "{count} repositorios en esta carpeta",
     "import.selectAll": "Seleccionar todos",
@@ -4355,7 +4356,6 @@ export const translations = {
     "tabbar.scopeWorkspaceHint": "Espacio de trabajo: {name} — estas pestañas siguen al espacio de trabajo, no al repositorio",
     "tabbar.scopeWorkspaceNone": "Estas pestañas siguen al espacio de trabajo, no al repositorio — no hay ninguno seleccionado",
     "tabbar.workspaceTools": "Herramientas del espacio de trabajo",
-    "tabbar.workspaceToolsEmpty": "No hay herramientas disponibles",
     "tabbar.apiDescription": "Colecciones, entornos y peticiones",
 
     "api.title": "Cliente API",

@@ -142,15 +142,19 @@ export function StoriesView() {
           {/* At the end of the strip rather than inside either tab: the manual covers both
               directions, and the limits that matter most — the review never writes to Azure, the
               session is not saved — belong to the workspace, not to whichever half is on screen. */}
+          {/* Icon only: the glyph is the universal one for "explain this", so the caption was a
+              word-and-a-half of chrome saying what the question mark already said — and it sat at
+              the wide end of a strip that has to make room for three tab labels. The name survives
+              on the tooltip and as the accessible name, which is where an icon-only control has to
+              carry it. */}
           <button
             type="button"
             onClick={() => setHelpOpen(true)}
             title={t("stories.helpHint")}
             aria-label={t("stories.help")}
-            className="ml-auto flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
+            className="ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.06]"
           >
-            <CircleHelp size={13} />
-            {t("stories.help")}
+            <CircleHelp size={15} />
           </button>
         </div>
 

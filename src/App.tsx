@@ -5,6 +5,7 @@ import { useT } from "./state/languageStore";
 import { TitleBar } from "./components/layout/TitleBar";
 import { Sidebar } from "./components/layout/Sidebar";
 import { TabBar } from "./components/layout/TabBar";
+import { AppRail } from "./components/layout/AppRail";
 import { StatusBar } from "./components/layout/StatusBar";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
@@ -305,6 +306,11 @@ export default function App() {
             {terminalPanelOpen && <TerminalDock key="terminal-dock" />}
           </AnimatePresence>
         </div>
+        {/* Between the view and the chat, and a sibling of both: the workspace's apps are a column
+            of the window, so opening or closing the AI panel slides past the rail rather than
+            moving it, and the terminal dock — which lives *inside* the column above — rises
+            without pushing it around either. */}
+        <AppRail />
         <AnimatePresence initial={false}>{aiPanelOpen && <AiPanel key="ai-panel" />}</AnimatePresence>
       </div>
       {/* The update notice hangs off the top edge of the status bar, so it's anchored to the bar

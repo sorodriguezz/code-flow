@@ -256,6 +256,41 @@ body {
   animation: cf-fade-in 0.15s ease-out;
 }
 
+/* A tooltip arriving. Shorter and smaller-travelled than everything else that animates in here:
+   this one is answering a question the pointer is asking *now*, so the motion is there to say
+   which control it came out of, not to be watched. The direction is set per placement via
+   `--cf-tip-x`/`--cf-tip-y`, since the box can flip to the other side of a trigger that sits
+   against a window edge. */
+@keyframes cf-tip-in {
+  from {
+    opacity: 0;
+    transform: translate(var(--cf-tip-x, 0), var(--cf-tip-y, 0)) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(0, 0) scale(1);
+  }
+}
+
+.cf-tip {
+  animation: cf-tip-in 0.12s cubic-bezier(0.22, 1, 0.36, 1);
+  transform-origin: center;
+  /* The shared popover shadow, plus a hairline. `--cf-shadow` is tuned for a menu opening *on* a
+     surface; a tooltip lands on whatever happened to be under the pointer, and in the light theme
+     that is usually another white panel — border and background both white, and the box loses its
+     edge. Mixed out of `--cf-text` so the ring darkens on light and lightens on dark from one
+     declaration, the same trick the workspace glyphs use to stay legible in both. */
+  box-shadow:
+    var(--cf-shadow),
+    0 0 0 1px color-mix(in oklab, var(--cf-text) 9%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cf-tip {
+    animation: none;
+  }
+}
+
 /* A card arriving in a list — same move as cf-fade-in but slow enough to register as one, and
    with `backwards` fill so a staggered `animation-delay` holds the card invisible until its turn
    instead of flashing it at full opacity first. The stagger is set per card via

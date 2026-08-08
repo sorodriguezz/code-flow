@@ -9,7 +9,6 @@ import {
   MessageCircle,
   Minus,
   Search,
-  Sidebar as SidebarIcon,
   Sparkles,
   Square,
   X,
@@ -21,6 +20,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useNavigationStore } from "../../state/navigationStore";
 import { usePrStore } from "../../state/prStore";
 import { useTourStore } from "../../state/tourStore";
+import { WorkspaceSwitcher } from "./WorkspaceSwitcher";
 import { useT } from "../../state/languageStore";
 import { goHistory } from "../../lib/shortcuts";
 import { useShortcutHint } from "../../lib/useShortcutHint";
@@ -28,13 +28,44 @@ import { toggleMaximize } from "../../lib/windowControls";
 
 const win = getCurrentWindow();
 
+/**
+ * Whether the window is in macOS fullscreen — which is not the same thing as maximized, and is the
+ * one state where the traffic lights are not on screen at all.
+ *
+ * Read from the window rather than tracked locally, for the reason `WindowsControls` gives below:
+ * the green button, `⌃⌘F` and the menu bar all enter fullscreen without passing through this app.
+ * `onResized` is the signal because entering and leaving fullscreen always resizes the window.
+ */
+function useIsFullscreen(): boolean {
+  const [fullscreen, setFullscreen] = useState(false);
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    const sync = () => void win.isFullscreen().then(setFullscreen).catch(() => {});
+    sync();
+    void win.onResized(sync).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+  return fullscreen;
+}
+
 /// On macOS the traffic lights are the real system buttons (see `tauri.macos.conf.json`:
 /// `titleBarStyle: Overlay` keeps native decorations — and with them the rounded window
 /// corners and the green button's real fullscreen behavior — while letting the webview draw
 /// under the title bar). They're drawn by AppKit *over* the webview, so all this bar has to do
 /// is leave a gap wide enough not to collide with them: they run from x=20 to roughly x=74.
-function MacControlsSpacer() {
-  return <div aria-hidden className="w-[62px]" />;
+///
+/// In fullscreen AppKit takes them away entirely — they only come back while the pointer is at the
+/// top edge, over an overlay of its own — so the gap is reserved for nothing, and 62px of nothing
+/// is what pushed the workspace name into the middle of an otherwise empty bar.
+function MacControlsSpacer({ fullscreen }: { fullscreen: boolean }) {
+  return <div aria-hidden className={fullscreen ? "w-1" : "w-[62px]"} />;
 }
 
 function WindowsControls() {
@@ -165,11 +196,11 @@ function AiActionsMenu({ onClose }: { onClose: () => void }) {
 
 export function TitleBar() {
   const platform = usePlatform();
-  const toggleSidebar = useUiStore((s) => s.toggleSidebar);
   const openCommandPalette = useUiStore((s) => s.openCommandPalette);
   const canGoBack = useNavigationStore((s) => s.canGoBack);
   const canGoForward = useNavigationStore((s) => s.canGoForward);
   const isMac = platform === "macos";
+  const fullscreen = useIsFullscreen();
   const t = useT();
   const hint = useShortcutHint();
   const [showAiMenu, setShowAiMenu] = useState(false);
@@ -186,19 +217,22 @@ export function TitleBar() {
       // dead. `deep` drags from anywhere in the subtree, and Tauri's handler still steps aside for
       // buttons, links, inputs and anything with an interactive role, so no control loses a click.
       data-tauri-drag-region="deep"
-      className="relative flex h-11 shrink-0 items-center justify-between px-3"
+      // `z-30` makes the whole bar one layer above the panels below it, which is what the menus it
+      // owns need: the workspace switcher hangs its list down over the sidebar, and the sidebar's
+      // fold button rides its seam at `z-20` — same root stacking context, same z, and the sidebar
+      // comes later in the DOM, so the button was painting through the open menu. Lifting the bar
+      // rather than each popover keeps the rule in one place, and stays under the modals (`z-50`)
+      // and the tour's veil, which have to cover the title bar in turn.
+      className="relative z-30 flex h-11 shrink-0 items-center justify-between px-3"
       style={{ background: "var(--cf-titlebar-gradient)" }}
     >
       <div className="flex items-center gap-3">
-        {isMac ? <MacControlsSpacer /> : <div className="w-2" />}
-        <button
-          onClick={toggleSidebar}
-          data-tour="sidebar-toggle"
-          title={hint("panel.sidebar", t("titlebar.toggleSidebar"))}
-          className="flex h-7 w-7 items-center justify-center rounded-md text-black/60 hover:bg-black/10 dark:text-white/70"
-        >
-          <SidebarIcon size={16} />
-        </button>
+        {isMac ? <MacControlsSpacer fullscreen={fullscreen} /> : <div className="w-2" />}
+        {/* Where the sidebar toggle used to be. The panel it toggled now carries its own fold
+            control on its seam — the same one the settings nav wears — which leaves this, the one
+            control that says what the whole window is about, at the top-left where a window says
+            what it is about. */}
+        <WorkspaceSwitcher />
         <button
           onClick={() => openCommandPalette("all")}
           title={hint("app.commandPalette", t("titlebar.search"))}

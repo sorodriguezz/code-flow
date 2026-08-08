@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Archive,
-  Briefcase,
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   CircleDot,
   Cloud,
   Code2,
@@ -60,6 +61,7 @@ import type {
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
 import { SkeletonRows } from "../common/Skeleton";
+import { Tooltip } from "../common/Tooltip";
 import { CloneRepoModal } from "./CloneRepoModal";
 import { ImportReposModal } from "./ImportReposModal";
 import { CreateBranchModal } from "./CreateBranchModal";
@@ -71,7 +73,7 @@ import { CreatePrModal } from "./CreatePrModal";
 import { StashDiffModal } from "./StashDiffModal";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
+import { useShortcutHint } from "../../lib/useShortcutHint";
 import { riseDelay } from "../../lib/rise";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
@@ -84,6 +86,9 @@ const ROW_ACTION_CLASS =
 
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 440;
+/** Folded, the panel is exactly wide enough for a centred project chip inside its own padding —
+ * the same trade the settings nav makes at 50px. */
+const SIDEBAR_COLLAPSED = 50;
 
 /** `defaultOpen` is the open one and only the open one: it's the group with work still in it, and
  * the reason the others fold is that merged and closed grow without bound (see `openGroups`). */
@@ -94,109 +99,60 @@ const PR_SECTIONS: { key: string; labelKey: TranslationKey; defaultOpen?: boolea
   { key: "closed", labelKey: "sidebar.closed" },
 ];
 
-function WorkspaceSwitcher() {
-  const workspaces = useWorkspaceStore((s) => s.workspaces);
-  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const setActiveWorkspace = useWorkspaceStore((s) => s.setActiveWorkspace);
-  const addWorkspace = useWorkspaceStore((s) => s.addWorkspace);
-  const [open, setOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
+/**
+ * The project list, folded down to one chip per repository.
+ *
+ * What survives the fold is navigation and the one action that has no other way in from here:
+ * everything else on a row — reveal, open in VS Code, move to another workspace — is a hover
+ * action on a name, and there is no name to hover. Adding a repository stays because a folded
+ * panel with no projects in it would otherwise be a dead end.
+ */
+function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: () => void }) {
+  const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
+  const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const t = useT();
 
-  const active = workspaces.find((w) => w.id === activeWorkspaceId);
-
-  /**
-   * Clicking anywhere else puts it away — it was staying open over whatever you clicked next.
-   *
-   * The half-typed name of a new workspace goes with it. Reopening to find a name you had already
-   * abandoned, in a field you had already left, is worse than starting it again.
-   */
-  const rootRef = useRef<HTMLDivElement>(null);
-  const dismiss = useCallback(() => {
-    setOpen(false);
-    setCreating(false);
-    setNewName("");
-  }, []);
-  useDismissOnOutside(open, dismiss, [rootRef]);
-
   return (
-    <div ref={rootRef} data-tour="workspace-switcher" className="relative mb-4 px-1">
-      <button
-        onClick={() => (open ? dismiss() : setOpen(true))}
-        className="flex w-full items-center gap-2 rounded-md px-1.5 py-1 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-      >
-        <span
-          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white"
-          style={{ background: active?.color ?? DEFAULT_WORKSPACE_COLOR }}
+    <div className="flex flex-col items-center gap-1.5">
+      {/* The chip's own colour, repeated in the tooltip. Folded down to 24px squares the projects
+          are told apart by colour alone, so the label that names one should be carrying the same
+          colour the eye followed to ask. */}
+      {projects.map((project, at) => (
+        <Tooltip
+          key={project.id}
+          side="right"
+          label={project.name}
+          leading={
+            <span
+              className="h-2 w-2 shrink-0 rounded-full"
+              style={{ background: project.color }}
+            />
+          }
         >
-          <Briefcase size={13} />
-        </span>
-        <span className="flex-1 truncate text-left text-sm font-semibold">{active?.name ?? "CodeFlow"}</span>
-        <ChevronDown size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
-      </button>
-
-      {open && (
-        <div className="absolute left-1 right-1 top-full z-20 mt-1 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1 shadow-[var(--cf-shadow)]">
-          {workspaces.map((ws) => (
-            <button
-              key={ws.id}
-              onClick={() => {
-                setActiveWorkspace(ws.id);
-                setOpen(false);
-              }}
-              className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] ${
-                ws.id === activeWorkspaceId
-                  ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-              }`}
-            >
-              <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: ws.color }} />
-              <span className="truncate">{ws.name}</span>
-            </button>
-          ))}
-
-          {creating ? (
-            <div className="flex items-center gap-1 px-1 py-1">
-              <input
-                autoFocus
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                onKeyDown={async (e) => {
-                  if (e.key === "Enter" && newName.trim()) {
-                    await addWorkspace(newName.trim(), "briefcase", "#6366f1");
-                    setNewName("");
-                    setCreating(false);
-                  } else if (e.key === "Escape") {
-                    setCreating(false);
-                  }
-                }}
-                placeholder={t("sidebar.workspaceName")}
-                className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-1.5 py-0.5 text-[12px] outline-none focus:border-[var(--cf-accent)]"
-              />
-              <button
-                onClick={async () => {
-                  if (!newName.trim()) return;
-                  await addWorkspace(newName.trim(), "briefcase", "#6366f1");
-                  setNewName("");
-                  setCreating(false);
-                }}
-                className="text-[var(--cf-accent)]"
-              >
-                <Check size={14} />
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setCreating(true)}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-            >
-              <Plus size={14} />
-              {t("sidebar.newWorkspace")}
-            </button>
-          )}
-        </div>
-      )}
+          <button
+            onClick={() => setActiveProject(project.id)}
+            aria-label={project.name}
+            aria-current={project.id === activeProjectId ? "true" : undefined}
+            style={{ ...riseDelay(at), background: project.color }}
+            className={`cf-rise flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white transition-shadow ${
+              project.id === activeProjectId
+                ? "ring-2 ring-[var(--cf-accent)] ring-offset-2 ring-offset-[var(--cf-surface)]"
+                : "opacity-70 hover:opacity-100"
+            }`}
+          >
+            <Folder size={12} />
+          </button>
+        </Tooltip>
+      ))}
+      <Tooltip side="right" label={t("sidebar.addProject")}>
+        <button
+          onClick={onAdd}
+          aria-label={t("sidebar.addProject")}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-dashed border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+        >
+          <Plus size={13} />
+        </button>
+      </Tooltip>
     </div>
   );
 }
@@ -1250,7 +1206,8 @@ function basename(path: string): string {
 }
 
 export function Sidebar() {
-  const collapsed = useUiStore((s) => s.sidebarCollapsed);
+  const collapsed = useLayoutStore((s) => s.flags.sidebarCollapsed);
+  const toggleFlag = useLayoutStore((s) => s.toggleFlag);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
   const loadWorkspaces = useWorkspaceStore((s) => s.loadWorkspaces);
@@ -1260,6 +1217,8 @@ export function Sidebar() {
   const commitSize = useLayoutStore((s) => s.commitSize);
   const openPrLinkModal = useUiStore((s) => s.openPrLinkModal);
   const t = useT();
+  // ⌘B still folds the panel; the button that used to carry that hint left the title bar with it.
+  const hint = useShortcutHint();
   const [showCloneModal, setShowCloneModal] = useState(false);
   /** The repositories a pick turned up, waiting for the user to choose which to import. */
   const [folderScan, setFolderScan] = useState<{
@@ -1276,7 +1235,10 @@ export function Sidebar() {
     void loadWorkspaces();
   }, [loadWorkspaces]);
 
-  if (collapsed) return null;
+  // Folded, the panel narrows to a rail of project chips rather than disappearing — which is what
+  // it used to do, and what stopped being possible the moment the control that unfolds it moved
+  // onto the panel's own seam. See `SIDEBAR_COLLAPSED`.
+  const railWidth = collapsed ? SIDEBAR_COLLAPSED : sidebarWidth;
 
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
 
@@ -1426,64 +1388,71 @@ export function Sidebar() {
   };
 
   return (
-    <div className="flex shrink-0">
+    // `relative` so the fold button below can be positioned against the seam rather than against
+    // the window.
+    <div className="relative flex shrink-0">
       <aside
-        style={{ width: sidebarWidth }}
+        style={{ width: railWidth }}
         // No `border-r`. The `ResizeHandle` after this draws the seam already, and the border put a
         // second line hard against the sidebar's edge — so the pair read as one thick divider whose
         // live half sat off to the right, against the panel it isn't part of. Dropping it leaves one
         // line, centred in the handle's own six pixels, with equal space to each panel.
         className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
       >
-        <div className="shrink-0 px-3 pt-3">
-          <WorkspaceSwitcher />
-        </div>
+        {collapsed ? (
+          // Back to `pt-3`, level with the expanded panel: the 36px of clearance up here existed
+          // only to keep the first chip out from under the fold button, and the fold button has
+          // moved to the middle of the seam.
+          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3 pt-3">
+            <CollapsedProjects projects={projects} onAdd={handleAddProject} />
+          </div>
+        ) : (
+          <div data-tour="projects-panel" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-3">
+            <div data-tour="projects-header" className="mb-1 flex items-center justify-between px-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                {t("sidebar.projects")}
+              </span>
+              <div data-tour="projects-actions" className="flex items-center gap-0.5">
+                {/* Deliberately here, above the project list, rather than inside one project's
+                    Pull Requests section: the whole point is that the link decides which repo
+                    it belongs to. */}
+                <button
+                  onClick={openPrLinkModal}
+                  data-tour="pr-link"
+                  className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                  title={t("prLink.menuItem")}
+                >
+                  <Glasses size={13} />
+                </button>
+                <button
+                  onClick={() => setShowCloneModal(true)}
+                  data-tour="clone-repo"
+                  className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                  title={t("sidebar.cloneRepo")}
+                >
+                  <GitBranchPlus size={13} />
+                </button>
+                <button
+                  onClick={handleAddProject}
+                  data-tour="add-project"
+                  className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                  title={t("sidebar.addProject")}
+                >
+                  <Plus size={14} />
+                </button>
+              </div>
+            </div>
 
-        <div data-tour="projects-panel" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
-          <div data-tour="projects-header" className="mb-1 flex items-center justify-between px-1">
-            <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-              {t("sidebar.projects")}
-            </span>
-            <div data-tour="projects-actions" className="flex items-center gap-0.5">
-              {/* Deliberately here, above the project list, rather than inside one project's
-                  Pull Requests section: the whole point is that the link decides which repo
-                  it belongs to. */}
-              <button
-                onClick={openPrLinkModal}
-                data-tour="pr-link"
-                className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                title={t("prLink.menuItem")}
-              >
-                <Glasses size={13} />
-              </button>
-              <button
-                onClick={() => setShowCloneModal(true)}
-                data-tour="clone-repo"
-                className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                title={t("sidebar.cloneRepo")}
-              >
-                <GitBranchPlus size={13} />
-              </button>
-              <button
-                onClick={handleAddProject}
-                data-tour="add-project"
-                className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
-                title={t("sidebar.addProject")}
-              >
-                <Plus size={14} />
-              </button>
+            <div className="space-y-0.5">
+              {projects.map((project, at) => (
+                <ProjectRow key={project.id} project={project} at={at} />
+              ))}
+              {projects.length === 0 && (
+                <p className="px-1.5 py-1 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noProjects")}</p>
+              )}
             </div>
           </div>
-
-          <div className="space-y-0.5">
-            {projects.map((project, at) => (
-              <ProjectRow key={project.id} project={project} at={at} />
-            ))}
-            {projects.length === 0 && (
-              <p className="px-1.5 py-1 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noProjects")}</p>
-            )}
-          </div>
-        </div>
+        )}
 
         {folderScan && (
           <ImportReposModal
@@ -1504,14 +1473,51 @@ export function Sidebar() {
           <CloneRepoModal workspaceId={activeWorkspaceId} onClose={() => setShowCloneModal(false)} />
         )}
       </aside>
-      <ResizeHandle
-        axis="x"
-        value={sidebarWidth}
-        min={SIDEBAR_MIN}
-        max={SIDEBAR_MAX}
-        onChange={(w) => setSize("sidebarWidth", w)}
-        onCommit={(w) => commitSize("sidebarWidth", w)}
-      />
+      {/* Folded, there is nothing to drag: the panel is exactly one chip wide by definition, and a
+          live handle there would let someone drag it to a width the names are still hidden at. The
+          stored width is untouched, so unfolding returns to it. */}
+      {collapsed ? (
+        <div className="w-px shrink-0 bg-[var(--cf-border)]" />
+      ) : (
+        <ResizeHandle
+          axis="x"
+          value={sidebarWidth}
+          min={SIDEBAR_MIN}
+          max={SIDEBAR_MAX}
+          onChange={(w) => setSize("sidebarWidth", w)}
+          onCommit={(w) => commitSize("sidebarWidth", w)}
+        />
+      )}
+
+      {/* The fold control, riding the seam exactly as the settings nav's does — inside the panel it
+          would be clipped by that panel's own `overflow-y-auto` and would scroll away with the
+          list. `z-20` because the handle it rides is `z-[15]`: any lower and the seam's accent glow
+          paints across the button, and the handle's grab area takes the clicks aimed at it.
+
+          Centred on the seam rather than at its top. Up there it came out level with the tab bar's
+          own row of controls, close enough to read as one more of them — a button about the *panel*
+          sitting in the strip that belongs to the tabs, which is the wrong thing for it to look
+          like. Halfway down it is the only thing on that line, and it is already where the hand
+          goes to grab the divider. The cost is those same 20px: centred, they are the middle of the
+          drag strip rather than a corner of it — worth it against a full-height handle, and the
+          same trade the button was already making at the top. */}
+      <Tooltip
+        side="right"
+        label={hint(
+          "panel.sidebar",
+          collapsed ? t("sidebar.expandProjects") : t("sidebar.collapseProjects"),
+        )}
+      >
+        <button
+          onClick={() => toggleFlag("sidebarCollapsed")}
+          aria-label={collapsed ? t("sidebar.expandProjects") : t("sidebar.collapseProjects")}
+          aria-expanded={!collapsed}
+          style={{ left: railWidth - 10 }}
+          className="absolute top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)]"
+        >
+          {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
+        </button>
+      </Tooltip>
     </div>
   );
 }

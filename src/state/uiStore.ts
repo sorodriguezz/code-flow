@@ -8,7 +8,7 @@ import type { ShortcutGroup } from "../lib/shortcuts";
 /** `api`, `agents`, `stories` and `remote` are the odd ones out: the built-in API client, the agent
  * console, the user-stories workspace and the SSH host manager are scoped to the *workspace* rather
  * than to a repo, so they render whether or not a project is open (see `App.tsx`). All four are
- * reached from the workspace menu rather than from the tab bar. */
+ * reached from the app rail down the right edge rather than from the tab bar. */
 export type MainView = "graph" | "changes" | "editor" | "api" | "agents" | "stories" | "remote";
 
 /** The three directions the stories section works in. Its own sub-tab, one level under the view. */
@@ -43,7 +43,6 @@ export type ApiWorkspace = "requests" | "database";
 export type PaletteScope = "all" | "workspaces" | "projects";
 
 interface UiState {
-  sidebarCollapsed: boolean;
   activeView: MainView;
   /**
    * Which stories sub-tab is showing.
@@ -96,7 +95,6 @@ interface UiState {
   apiSettingsTab: ApiSettingsTab | undefined;
   /** Which of the API tab's two workspaces is on screen. */
   apiWorkspace: ApiWorkspace;
-  toggleSidebar: () => void;
   setActiveView: (view: MainView) => void;
   setStoriesMode: (mode: StoriesMode) => void;
   /** Opens the stories section on a given sub-tab, in one move. */
@@ -136,7 +134,6 @@ interface UiState {
 }
 
 export const useUiStore = create<UiState>((set) => ({
-  sidebarCollapsed: false,
   activeView: "graph",
   storiesMode: "batches",
   settingsOpen: false,
@@ -153,7 +150,6 @@ export const useUiStore = create<UiState>((set) => ({
   shortcutsModalGroups: null,
   branchSwitcherOpen: false,
   prLinkModalOpen: false,
-  toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setActiveView: (view) => set({ activeView: view, settingsOpen: false }),
   setStoriesMode: (mode) => set({ storiesMode: mode }),
   // Settings closed too: it covers the whole app, and landing behind it looks like nothing
