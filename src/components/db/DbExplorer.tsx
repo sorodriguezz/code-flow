@@ -6,9 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  EyeOff,
   Filter,
-  FilterX,
   Database,
   Eraser,
   FileCode2,
@@ -41,6 +39,7 @@ import { ActivePill } from "../common/ActivePill";
 import { CARD, ConnectionDot, ToolbarButton, engineColor, engineIcon, nodeIcon } from "./dbChrome";
 import { DbHistoryList } from "./DbHistoryList";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
+import { effectiveObjectFilter, schemaIsNarrowed } from "../../lib/db/objectFilter";
 import {
   describeConnection,
   groupConnections,
@@ -67,8 +66,36 @@ import {
   type DbNode,
   type DbNodeKind,
   type DbNodeRef,
-  type DbSchemaObjectFilter,
 } from "../../types/database";
+
+/**
+ * What a schema's filter menu offers, in order.
+ *
+ * Tables first because that is the answer nine times in ten, and "everything" last because it is the
+ * blunt one — a pattern written there covers the folders that have none of their own. The four
+ * folders are exactly the ones the backend narrows in `filter_children`; column, index and key
+ * folders hold parts of an object rather than objects, and filtering those by name is a list nobody
+ * asks for.
+ */
+const FILTERABLE_FOLDERS: {
+  folder: DbNodeKind | null;
+  label: TranslationKey;
+  separated?: boolean;
+}[] = [
+  { folder: "table_folder", label: "db.catTables" },
+  { folder: "view_folder", label: "db.catViews" },
+  { folder: "routine_folder", label: "db.catRoutines" },
+  { folder: "sequence_folder", label: "db.catSequences" },
+  { folder: null, label: "db.filterEverythingHere", separated: true },
+];
+
+/** The folder kinds a filter can sit on, for the "is this list narrowed?" lookup. */
+const FOLDER_FILTER_KINDS = new Set<DbNodeKind>([
+  "table_folder",
+  "view_folder",
+  "routine_folder",
+  "sequence_folder",
+]);
 
 const WIDTH_MIN = 220;
 const WIDTH_MAX = 520;
@@ -104,6 +131,7 @@ function TreeRow({
   onKeyDown,
   onContextMenu,
   leading,
+  badge,
   color,
   title,
   drag,
@@ -129,6 +157,9 @@ function TreeRow({
   onKeyDown?: (e: React.KeyboardEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
   leading?: React.ReactNode;
+  /** A mark after the name — today only "what is under here is filtered". After the name and not
+   * before it so the names of sibling rows still line up. */
+  badge?: React.ReactNode;
   color?: string;
   /** Pointer plumbing for the rows that can be dragged — only the connections. Spread onto the row
    * rather than handled here, so a row that isn't draggable carries no handlers at all. */
@@ -229,6 +260,7 @@ function TreeRow({
         {icon}
       </span>
       <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--cf-text)]">{name}</span>
+      {badge}
       {detail && (
         <span className="max-w-[45%] shrink-0 truncate text-[11px] text-[var(--cf-text-muted)]">
           {detail}
@@ -275,10 +307,6 @@ function useDbDrop() {
   };
 }
 
-/** One shared empty list, so a connection with no per-schema filters yields the same reference
- * every time it is derived. A fresh `[]` would make every comparison below report a change. */
-const EMPTY_FILTERS: DbSchemaObjectFilter[] = [];
-
 function NodeSubtree({
   connectionId,
   node,
@@ -298,25 +326,51 @@ function NodeSubtree({
   const children = useDbStore((s) => s.children[key]);
   const error = useDbStore((s) => s.nodeErrors[key]);
   const openModal = useDbModalStore((s) => s.openDbModal);
-  /** Which schemas of this connection carry a filter of their own — only so the menu can offer to
-   * clear the one it is standing on. Subscribed rather than read from `getState`, so clearing a
-   * filter takes the row out of the menu the next time it opens.
-   *
-   * The subscription is to the *row*, and the parse happens outside it. `parseSpec` runs
-   * `JSON.parse` and spreads the defaults over it, so it hands back a new object — and a new
-   * `schema_object_filters` array — on every single call. A selector that returned it was a
-   * snapshot that never compared equal to itself, which is `useSyncExternalStore`'s definition of
-   * an infinite loop: render, "the store changed", render. It took the whole tree down with
-   * "Maximum update depth exceeded" as soon as one node mounted. `find` returns the row object
-   * itself, which is stable until the connection is actually rewritten. */
-  const row = useDbStore((s) => s.connections.find((c) => c.id === connectionId) ?? null);
-  const schemaFilters = useMemo(
-    () => (row ? parseSpec(row) : null)?.schema_object_filters ?? EMPTY_FILTERS,
-    [row],
-  );
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   /** The second menu: which statement to draft, once "Generate SQL" has been picked. */
   const [generateMenu, setGenerateMenu] = useState<{ x: number; y: number } | null>(null);
+  /** The other second menu: which of a schema's folders to narrow. */
+  const [filterMenu, setFilterMenu] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * The connection's own row, for reading the filters off it.
+   *
+   * Subscribed to the *row*, with the parse outside the selector. `parseSpec` runs `JSON.parse` and
+   * spreads defaults over it, so it hands back a new object every call — a selector that returned
+   * one was a snapshot that never compared equal to itself, which is `useSyncExternalStore`'s
+   * definition of an infinite loop. It took the whole tree down with "Maximum update depth exceeded"
+   * as soon as one node mounted. `find` returns the row object itself, stable until the connection
+   * is actually rewritten.
+   */
+  const connectionRow = useDbStore((s) => s.connections.find((c) => c.id === connectionId) ?? null);
+  /**
+   * What is narrowing whatever this node lists, or `null` when nothing is.
+   *
+   * A tree that quietly shows nine of ninety tables is the worst thing this feature can do, and the
+   * one question it leaves the user with — "is this everything?" — has no answer anywhere on screen.
+   * This is that answer, on the row whose children are short.
+   */
+  const narrowing = useMemo(() => {
+    const config = connectionRow ? parseSpec(connectionRow) : null;
+    if (!config) return null;
+    if (node.kind === "database") {
+      // The pattern only. `schemas_filtered` says the tick-list *counts* as a filter, not that it
+      // hides anything — with every schema ticked it hides nothing, and there is no way to tell from
+      // here: the tree only knows the schemas that already survived it. Marking the row on that flag
+      // put a badge on a list nothing was missing from, which is worse than no badge at all.
+      const pattern = config.schema_filter.trim();
+      return config.schema_filter_enabled && pattern ? pattern : null;
+    }
+    if (node.kind === "schema") {
+      if (!schemaIsNarrowed(config, node.name)) return null;
+      // The pattern where one covers the whole schema. Where only some of its folders are narrowed
+      // there is no single pattern to name, and saying which is the folder rows' own job.
+      return effectiveObjectFilter(config, node.name, null) || t("db.narrowedInside");
+    }
+    if (FOLDER_FILTER_KINDS.has(node.kind) && node.schema) {
+      return effectiveObjectFilter(config, node.schema, node.kind) || null;
+    }
+    return null;
+  }, [connectionRow, node.kind, node.name, node.schema, t]);
   const Icon = nodeIcon(node.kind);
 
   const store = useDbStore.getState();
@@ -451,38 +505,39 @@ function NodeSubtree({
       }
     }
   }
-  // Filtering from the tree, on the schema you are looking at — which is where you realise you
-  // never want to see it again. The dialog's Schemas tab is the same list, for editing it as a set.
-  if (node.kind === "schema") {
-    // Narrowing what is *inside* the schema, above the two that hide the schema itself: the tables
-    // are what you are looking at when you right-click, and a hundred of them is the far commoner
-    // complaint than a schema too many.
+  /**
+   * Filtering from the tree.
+   *
+   * One rule, all the way down: **you right-click the container and narrow what it holds.** A
+   * database holds schemas, so that is where "which schemas are listed" belongs. A schema holds
+   * tables and views and routines, so that is where those are narrowed — not on the folder rows
+   * themselves, which you would have to expand the schema to reach in order to say something about
+   * what is inside it.
+   *
+   * Which of a schema's folders is a *second* menu rather than four entries in this one, the same
+   * shape "Generate SQL" uses two items above: the common answer is tables, and the other three are
+   * one click further rather than three lines of noise on every schema's menu.
+   *
+   * The scope is the gesture, so the dialog itself never asks about it.
+   */
+  if (node.kind === "database") {
     menuItems.push({
-      label: t("db.filterTables"),
+      label: t("db.filterMenu"),
       icon: Filter,
       separated: true,
-      onClick: () => openModal({ kind: "objectFilter", connectionId, schema: node.name }),
-    });
-    if (schemaFilters.some((entry) => entry.schema.toLowerCase() === node.name.toLowerCase())) {
-      menuItems.push({
-        label: t("db.clearTableFilter"),
-        icon: FilterX,
-        onClick: () => void store.setObjectFilter(connectionId, node.name, ""),
-      });
-    }
-    menuItems.push({
-      label: t("db.onlyThisSchema"),
-      icon: Filter,
-      separated: true,
-      onClick: () => void store.setVisibleSchemas(connectionId, () => [node.name]),
-    });
-    menuItems.push({
-      label: t("db.hideThisSchema"),
-      icon: EyeOff,
+      // On Mongo this level lists collections rather than schemas — the same filter, and the dialog
+      // titles it in the engine's own word.
       onClick: () =>
-        void store.setVisibleSchemas(connectionId, (known) =>
-          known.filter((name) => name !== node.name),
-        ),
+        openModal({ kind: "objectFilter", connectionId, target: { kind: "schemas" } }),
+    });
+  } else if (node.kind === "schema") {
+    menuItems.push({
+      label: t("db.filterMenu"),
+      icon: Filter,
+      separated: true,
+      // Anchored where the first menu was, so the second opens over it rather than wherever the
+      // pointer drifted to while reading.
+      onClick: () => setFilterMenu(menu),
     });
   }
   menuItems.push({
@@ -506,6 +561,18 @@ function NodeSubtree({
         icon={<Icon size={12} />}
         name={node.name}
         detail={node.detail}
+        badge={
+          narrowing ? (
+            <span
+              // The pattern itself in the tooltip, because "filtered" alone leaves the next
+              // question unanswered — you want to know *by what*, and then to go change it.
+              title={t("db.narrowedBy", { pattern: narrowing })}
+              className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-accent)]"
+            >
+              <Filter size={10} />
+            </span>
+          ) : undefined
+        }
         expandable={node.has_children}
         expanded={expanded}
         loading={loading}
@@ -549,6 +616,25 @@ function NodeSubtree({
       )}
       {menu && (
         <ContextMenu x={menu.x} y={menu.y} items={menuItems} onClose={() => setMenu(null)} />
+      )}
+      {filterMenu && (
+        <ContextMenu
+          x={filterMenu.x}
+          y={filterMenu.y}
+          heading={t("db.filterMenu")}
+          items={FILTERABLE_FOLDERS.map((entry) => ({
+            label: t(entry.label),
+            icon: Filter,
+            separated: entry.separated,
+            onClick: () =>
+              openModal({
+                kind: "objectFilter",
+                connectionId,
+                target: { kind: "objects", schema: node.name, folder: entry.folder },
+              }),
+          }))}
+          onClose={() => setFilterMenu(null)}
+        />
       )}
       {generateMenu && (
         <ContextMenu

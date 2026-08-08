@@ -134,11 +134,30 @@ impl DbAuthMethod {
 // Connection configuration
 // ---------------------------------------------------------------------------
 
-/// One schema's own object filter. See [`DbConnectionConfig::schema_object_filters`].
+/// One scope's own object filter. See [`DbConnectionConfig::schema_object_filters`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbSchemaObjectFilter {
     pub schema: String,
+    /// Which folder inside the schema it narrows — [`DbNodeKind::TableFolder`],
+    /// [`DbNodeKind::ViewFolder`], and so on — or `None` for all of them.
+    ///
+    /// Present because "hide the `tmp_` tables" and "hide the reporting views" are different
+    /// sentences about the same schema, and a filter keyed only by schema forces one pattern to
+    /// answer both. `None` on every entry written before this field existed, which is exactly what
+    /// those entries meant.
+    #[serde(default)]
+    pub folder: Option<DbNodeKind>,
     pub pattern: String,
+    /// Whether the pattern is in force. Off keeps the terms while showing everything again, which is
+    /// what "is this filter the reason I can't find that table?" needs and clearing the box can't
+    /// answer without losing the work.
+    #[serde(default = "yes")]
+    pub enabled: bool,
+}
+
+/// The default for the `enabled` flags: a filter written before they existed was, by definition, on.
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,12 +230,28 @@ pub struct DbConnectionConfig {
     /// silently reverting to all 348.
     #[serde(default)]
     pub schemas_filtered: bool,
+    /// Which schema *names* the tree lists, in the [`object_filter_matches`] grammar. Empty means
+    /// all of them.
+    ///
+    /// Alongside [`Self::visible_schemas`] rather than instead of it, because the two answer
+    /// different questions and a database large enough to need filtering usually needs both: the
+    /// tick-list names the handful you work in, and this one says `!pg_*, !information_schema` —
+    /// a rule about noise that stays true as the server grows schemas nobody has ticked yet.
+    /// A schema has to survive both.
+    #[serde(default)]
+    pub schema_filter: String,
+    /// Whether [`Self::schema_filter`] is in force.
+    #[serde(default = "yes")]
+    pub schema_filter_enabled: bool,
     /// Which table, view, routine and sequence names the tree lists. Empty means all of them.
     ///
     /// See [`object_filter_matches`] for the grammar. Matched case-insensitively, since no engine
     /// here agrees with another about case.
     #[serde(default)]
     pub object_filter: String,
+    /// Whether [`Self::object_filter`] is in force.
+    #[serde(default = "yes")]
+    pub object_filter_enabled: bool,
     /// The same thing, for one schema, overriding [`Self::object_filter`] inside it.
     ///
     /// A list and not a map because it is written from the tree — right-click a schema, filter what
@@ -603,10 +638,17 @@ pub fn filter_children(
     node: &DbNodeRef,
     mut nodes: Vec<DbNode>,
 ) -> Vec<DbNode> {
-    if node.kind == DbNodeKind::Database && config.schemas_filtered {
-        nodes.retain(|child| {
-            config.visible_schemas.iter().any(|name| name.eq_ignore_ascii_case(&child.name))
-        });
+    if node.kind == DbNodeKind::Database {
+        if config.schemas_filtered {
+            nodes.retain(|child| {
+                config.visible_schemas.iter().any(|name| name.eq_ignore_ascii_case(&child.name))
+            });
+        }
+        // ANDed with the tick-list above, not layered over it: the list names what you work in and
+        // the pattern names what is noise, and a schema that fails either is not one you asked for.
+        if config.schema_filter_enabled && !config.schema_filter.trim().is_empty() {
+            nodes.retain(|child| object_filter_matches(&config.schema_filter, &child.name));
+        }
     }
     let named = matches!(
         node.kind,
@@ -616,7 +658,7 @@ pub fn filter_children(
             | DbNodeKind::SequenceFolder
     );
     if named {
-        let filter = config.object_filter_for(node.schema());
+        let filter = config.object_filter_for(node.schema(), node.kind);
         if !filter.trim().is_empty() {
             nodes.retain(|child| object_filter_matches(filter, &child.name));
         }
@@ -625,17 +667,32 @@ pub fn filter_children(
 }
 
 impl DbConnectionConfig {
-    /// The object filter in force inside one schema: its own if it has one, the connection's
-    /// otherwise. `None` — a level with no schema, which is only Mongo — takes the connection's.
-    pub fn object_filter_for(&self, schema: Option<&str>) -> &str {
-        schema
-            .and_then(|name| {
-                self.schema_object_filters
-                    .iter()
-                    .find(|entry| entry.schema.eq_ignore_ascii_case(name))
-            })
-            .map(|entry| entry.pattern.as_str())
-            .unwrap_or(&self.object_filter)
+    /// The object filter in force inside one folder.
+    ///
+    /// Most specific wins, and the first match ends it: an entry for *this folder of this schema*,
+    /// then one for the whole schema, then the connection's. `None` for the schema — a level with no
+    /// schema, which is only Mongo — goes straight to the connection's.
+    ///
+    /// A *disabled* entry answers `""` rather than falling through to the next level up. Turning off
+    /// the filter on the thing you are looking at has to mean that thing stops being filtered;
+    /// inheriting a broader pattern at that moment would leave the tree narrowed by a rule the user
+    /// just switched off, which is the one reading of "off" nobody intends.
+    pub fn object_filter_for(&self, schema: Option<&str>, folder: DbNodeKind) -> &str {
+        if let Some(name) = schema {
+            for want in [Some(folder), None] {
+                let found = self.schema_object_filters.iter().find(|entry| {
+                    entry.schema.eq_ignore_ascii_case(name) && entry.folder == want
+                });
+                if let Some(entry) = found {
+                    return if entry.enabled { &entry.pattern } else { "" };
+                }
+            }
+        }
+        if self.object_filter_enabled {
+            &self.object_filter
+        } else {
+            ""
+        }
     }
 }
 
@@ -2067,7 +2124,10 @@ mod tests {
             show_all_databases: false,
             visible_schemas: Vec::new(),
             schemas_filtered: false,
+            schema_filter: String::new(),
+            schema_filter_enabled: true,
             object_filter: String::new(),
+            object_filter_enabled: true,
             schema_object_filters: Vec::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,
@@ -2214,7 +2274,9 @@ mod tests {
         config.object_filter = "invoice".into();
         config.schema_object_filters = vec![DbSchemaObjectFilter {
             schema: "Audit".into(),
+            folder: None,
             pattern: "app_*".into(),
+            enabled: true,
         }];
 
         let tables = || vec![table_node("invoice_line"), table_node("app_users"), table_node("orders")];
@@ -2231,6 +2293,123 @@ mod tests {
         // to the connection's filter instead of showing everything.
         config.schema_object_filters = Vec::new();
         assert_eq!(filter_children(&config, &folder("audit"), tables()).len(), 1);
+    }
+
+    /// Switching a filter off has to show everything again — and, on a schema override, without
+    /// quietly handing that schema the connection-wide pattern instead.
+    #[test]
+    fn a_disabled_filter_filters_nothing() {
+        let folder = |schema: &str| DbNodeRef {
+            kind: DbNodeKind::TableFolder,
+            database: Some("app".into()),
+            schema: Some(schema.into()),
+            name: None,
+        };
+        let tables = || vec![table_node("invoice_line"), table_node("app_users"), table_node("orders")];
+
+        let mut config = config_for_tests();
+        config.object_filter = "invoice".into();
+        assert_eq!(filter_children(&config, &folder("public"), tables()).len(), 1);
+
+        config.object_filter_enabled = false;
+        assert_eq!(filter_children(&config, &folder("public"), tables()).len(), 3);
+
+        // The terms are still there to switch back on — off is not clear.
+        assert_eq!(config.object_filter, "invoice");
+        config.object_filter_enabled = true;
+
+        config.schema_object_filters = vec![DbSchemaObjectFilter {
+            schema: "audit".into(),
+            folder: None,
+            pattern: "app_*".into(),
+            enabled: false,
+        }];
+        let kept = filter_children(&config, &folder("audit"), tables());
+        assert_eq!(kept.len(), 3, "a disabled override shows the schema whole: {kept:?}");
+    }
+
+    /// The tables of a schema and its views are two different questions, and a filter written on one
+    /// must not answer the other.
+    #[test]
+    fn a_folder_can_have_a_filter_of_its_own() {
+        let folder = |kind: DbNodeKind| DbNodeRef {
+            kind,
+            database: Some("app".into()),
+            schema: Some("public".into()),
+            name: None,
+        };
+        let objects = || vec![table_node("app_users"), table_node("tmp_scratch"), table_node("orders")];
+
+        let mut config = config_for_tests();
+        config.schema_object_filters = vec![DbSchemaObjectFilter {
+            schema: "public".into(),
+            folder: Some(DbNodeKind::TableFolder),
+            pattern: "app_*".into(),
+            enabled: true,
+        }];
+
+        // The folder that was filtered.
+        let kept = filter_children(&config, &folder(DbNodeKind::TableFolder), objects());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].name, "app_users");
+        // Its neighbours are untouched — no pattern of theirs was written.
+        assert_eq!(filter_children(&config, &folder(DbNodeKind::ViewFolder), objects()).len(), 3);
+        assert_eq!(filter_children(&config, &folder(DbNodeKind::RoutineFolder), objects()).len(), 3);
+
+        // A schema-wide entry covers the folders that have none of their own, and the folder's own
+        // entry still wins where there is one.
+        config.schema_object_filters.push(DbSchemaObjectFilter {
+            schema: "public".into(),
+            folder: None,
+            pattern: "orders".into(),
+            enabled: true,
+        });
+        let kept = filter_children(&config, &folder(DbNodeKind::ViewFolder), objects());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].name, "orders");
+        let kept = filter_children(&config, &folder(DbNodeKind::TableFolder), objects());
+        assert_eq!(kept[0].name, "app_users", "the folder's own entry still wins: {kept:?}");
+
+        // Off on the folder means that folder is unfiltered — it does not inherit the schema's.
+        config.schema_object_filters[0].enabled = false;
+        assert_eq!(filter_children(&config, &folder(DbNodeKind::TableFolder), objects()).len(), 3);
+    }
+
+    /// The schema pattern narrows the schema list, and stacks with the tick-list rather than
+    /// replacing it.
+    #[test]
+    fn schemas_pass_both_the_list_and_the_pattern() {
+        let database = DbNodeRef {
+            kind: DbNodeKind::Database,
+            database: Some("app".into()),
+            schema: None,
+            name: None,
+        };
+        let schemas = || {
+            vec![
+                db_node("public"),
+                db_node("audit"),
+                db_node("pg_catalog"),
+                db_node("information_schema"),
+            ]
+        };
+
+        let mut config = config_for_tests();
+        config.schema_filter = "!pg_*, !information_schema".into();
+        let kept = filter_children(&config, &database, schemas());
+        assert_eq!(kept.len(), 2, "{kept:?}");
+        assert_eq!(kept[0].name, "public");
+
+        // Both in force: the tick-list allows two, the pattern rejects one of them.
+        config.schemas_filtered = true;
+        config.visible_schemas = vec!["public".into(), "pg_catalog".into()];
+        let kept = filter_children(&config, &database, schemas());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].name, "public");
+
+        // Off leaves the tick-list alone rather than taking the whole filter with it.
+        config.schema_filter_enabled = false;
+        assert_eq!(filter_children(&config, &database, schemas()).len(), 2);
     }
 
     /// Two databases differing only in case are two databases — the exact one wins rather than both
@@ -2264,7 +2443,10 @@ mod tests {
             show_all_databases: false,
             visible_schemas: Vec::new(),
             schemas_filtered: false,
+            schema_filter: String::new(),
+            schema_filter_enabled: true,
             object_filter: String::new(),
+            object_filter_enabled: true,
             schema_object_filters: Vec::new(),
             keep_alive_secs: 0,
             auto_disconnect_secs: 0,

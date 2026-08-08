@@ -386,7 +386,7 @@ function buildOptions(
 }
 
 /** Exact host, or a `*.example.com` wildcard covering any single-or-deeper subdomain. */
-function matchClientCert(certs: ClientCert[], url: string): ClientCert | null {
+export function matchClientCert(certs: ClientCert[], url: string): ClientCert | null {
   const host = hostOf(url);
   if (!host) return null;
   return (

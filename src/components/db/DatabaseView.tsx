@@ -126,7 +126,7 @@ export function DatabaseView() {
       {modal?.kind === "objectFilter" && (
         <ObjectFilterModal
           connectionId={modal.connectionId}
-          schema={modal.schema}
+          target={modal.target}
           onClose={closeModal}
         />
       )}

@@ -247,7 +247,13 @@ export function ResultGrid({
             style={{ height: HEADER_HEIGHT }}
           >
             {/* The corner over the row numbers: all or none, the way the gutter's own header
-                behaves in every grid that lets you select rows. */}
+                behaves in every grid that lets you select rows.
+
+                From a *partial* selection it clears instead of completing. Someone who has picked
+                three rows and reaches for this box is undoing that pick — the one who wanted every
+                row would have hit the box while it was still empty. It also makes the control
+                reversible: none → all → none returns you where you started, where
+                some → all → none has quietly thrown the three rows away. */}
             <div
               className="sticky left-0 z-10 flex shrink-0 items-center justify-center border-r border-[var(--cf-border)] bg-[var(--cf-surface)]"
               style={{ width: GUTTER_WIDTH }}
@@ -256,7 +262,9 @@ export function ResultGrid({
                 <Checkbox
                   checked={allSelected}
                   indeterminate={!allSelected && (selectedRows?.size ?? 0) > 0}
-                  onChange={onSelectAllRows}
+                  onChange={(on) =>
+                    onSelectAllRows(!allSelected && (selectedRows?.size ?? 0) > 0 ? false : on)
+                  }
                 />
               )}
             </div>

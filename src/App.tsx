@@ -206,6 +206,12 @@ export default function App() {
   // previously left branches/commits empty until the user re-clicked it.
   useEffect(() => {
     void setRepoPath(project?.local_path ?? null);
+    // Which icon profile the explorer draws this repository with. Scoped here and not to the
+    // workspace because the collision profiles exist for is per checkout: the Angular app and the
+    // Nest API can sit in one workspace and still disagree about what `*.service.ts` is. Only the
+    // *selection* is per repo — the profiles themselves are global — so this swaps a preference
+    // rather than dropping any state.
+    void useIconRulesStore.getState().setRepo(project?.local_path ?? null);
   }, [project?.local_path, setRepoPath]);
 
   // The API client's collections, environments, history and cookies belong to the workspace, so

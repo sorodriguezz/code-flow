@@ -65,6 +65,13 @@ const SIZE = {
    * a row, or a stack of rows, with text fields.
    */
   field: "px-2 py-1.5 text-[12px]",
+  /**
+   * The 11px metrics of the app's densest strips — a select sharing a row with a text `<input>`
+   * rather than sitting in a form. Same padding and text size as those inputs, which is the whole
+   * point: a native `<select>` adds its own height on macOS whatever you pad it with, so the two
+   * controls arrived visibly different and only one of them could be fixed with CSS.
+   */
+  compact: "px-1.5 py-1 text-[11px]",
 } as const;
 
 /**

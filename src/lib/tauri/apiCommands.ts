@@ -219,6 +219,15 @@ export const apiPickFile = (extensions: string[]) =>
 export const apiSaveFile = (defaultName: string, contents: string) =>
   invoke<string | null>("api_save_file", { defaultName, contents });
 
+/**
+ * The same dialog for bytes rather than text — a rasterised diagram, an image out of a response.
+ *
+ * `base64` is the payload alone, with no `data:` prefix: the bridge carries a string, so binary can
+ * only cross it encoded, and `apiSaveFile` would write the encoding instead of the file.
+ */
+export const apiSaveBinaryFile = (defaultName: string, base64: string) =>
+  invoke<string | null>("api_save_binary_file", { defaultName, base64 });
+
 /** Reads a text file the user picked (collection import, CSV/JSON runner data). */
 export const apiReadTextFile = (path: string) => invoke<string>("api_read_text_file", { path });
 

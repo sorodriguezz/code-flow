@@ -623,6 +623,7 @@ pub fn run() {
             commands::api_cmd::api_grpc_call,
             commands::api_cmd::api_pick_file,
             commands::api_cmd::api_save_file,
+            commands::api_cmd::api_save_binary_file,
             commands::api_cmd::api_read_text_file,
             commands::api_cmd::gdrive_status,
             commands::api_cmd::gdrive_set_client_secret,

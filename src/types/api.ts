@@ -1075,6 +1075,14 @@ export type ImportedItem =
     }
   | { kind: "request"; name: string; spec: ApiRequestSpec };
 
+export interface ImportOptions {
+  /**
+   * Map an OpenAPI document's documented responses to saved examples. On by default; off is for
+   * the user who wants the requests and not the several hundred example rows that come with them.
+   */
+  includeExamples?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Code snippets
 // ---------------------------------------------------------------------------

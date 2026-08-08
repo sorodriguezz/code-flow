@@ -302,7 +302,10 @@ interface TreeRowProps {
   at?: number;
   /** Containers, and requests that have saved examples to unfold; `undefined` on a plain request. */
   expanded?: boolean;
-  /** Requests only: set when the row has examples, so it gets a twisty instead of the spacer. */
+  /**
+   * Folds the row without activating it. Containers always have one; a request only when it has
+   * examples, which is also what decides whether it gets a twisty instead of the spacer.
+   */
   onToggle?: () => void;
   /** Collections only: current pin state, and the toggle for it. */
   pinned?: boolean;
@@ -404,12 +407,28 @@ function TreeRow({
 
       {isContainer ? (
         <>
-          <span style={{ width: TWISTY_W }} className="flex shrink-0 justify-center">
-            {expanded ? (
-              <ChevronDown size={12} className="text-[var(--cf-text-muted)]" />
-            ) : (
-              <ChevronRight size={12} className="text-[var(--cf-text-muted)]" />
-            )}
+          {/* The twisty folds and nothing else. Activating the *row* also opens the container's
+              settings tab, which is not what someone reaching for the chevron is asking for.
+
+              The *press* stops here as well as the click, and it has to: the row captures the
+              pointer on `pointerdown` to drag, and a captured pointer retargets the following
+              `click` to whatever holds the capture — so the chevron's own click would be delivered
+              to the row and the settings tab would open anyway. The cost is that the chevron isn't
+              a drag handle, which is the right way round. */}
+          <span
+            aria-hidden
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              if (!onToggle) return;
+              e.stopPropagation();
+              onToggle();
+            }}
+            style={{ width: TWISTY_W }}
+            className={`flex shrink-0 justify-center text-[var(--cf-text-muted)] ${
+              onToggle ? "hover:text-[var(--cf-text)]" : ""
+            }`}
+          >
+            {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </span>
           <GlyphSlot>
             {node.kind === "collection" ? (
@@ -1357,6 +1376,7 @@ export function CollectionTree() {
           depth={depth}
           at={at}
           expanded={isExpanded}
+          onToggle={() => toggle(folder.id)}
           renaming={renaming?.id === folder.id}
           dragging={drag?.id === folder.id}
           dropInto={over?.mode === "into" && over.parentId === folder.id}
@@ -1395,6 +1415,7 @@ export function CollectionTree() {
                   depth={0}
                   at={at}
                   expanded={isExpanded}
+                  onToggle={() => toggle(collection.id)}
                   pinned={collection.pinned}
                   onTogglePin={() => void useApiStore.getState().toggleCollectionPinned(collection.id)}
                   share={sharedIds.has(collection.id) ? shareHealth(collection.id) : null}

@@ -3,9 +3,11 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  CopyPlus,
   Eye,
   EyeOff,
   MoreHorizontal,
+  Pencil,
   Plus,
   RotateCcw,
   Folder,
@@ -14,6 +16,7 @@ import {
   X,
 } from "lucide-react";
 import { IconGlyph } from "../common/FileGlyph";
+import { Select } from "../common/Select";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import {
   iconCatalogReady,
@@ -30,6 +33,7 @@ import {
   sameRuleTarget,
   type IconRule,
 } from "../../lib/icons/rules";
+import { shippedProfile } from "../../lib/icons/profiles";
 import { useIconRulesStore } from "../../state/iconRulesStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -249,6 +253,176 @@ function RuleRow({
 }
 
 /**
+ * The profile bar: which set of rules this repository draws with, and everything that acts on it.
+ *
+ * A row of its own above everything, because it is the frame the rest of the panel is inside — the
+ * list underneath is not "the rules", it is *this profile's* rules, and a panel that did not say so
+ * would make editing Angular's list while sitting in the Nest checkout look like a bug in the
+ * editor rather than a profile left selected.
+ *
+ * **"New rule" and "restore" live here and not in the title bar.** Up there they read as belonging
+ * to the panel — to file icons as a whole — when both have only ever acted on one profile's list.
+ * Attached to the selector, the thing they change is named an inch to their left.
+ */
+function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
+  const t = useT();
+  const profiles = useIconRulesStore((s) => s.profiles);
+  const activeId = useIconRulesStore((s) => s.activeId);
+  const repoPath = useIconRulesStore((s) => s.repoPath);
+  const selectProfile = useIconRulesStore((s) => s.selectProfile);
+  const addProfile = useIconRulesStore((s) => s.addProfile);
+  const duplicateProfile = useIconRulesStore((s) => s.duplicateProfile);
+  const renameProfile = useIconRulesStore((s) => s.renameProfile);
+  const removeProfile = useIconRulesStore((s) => s.removeProfile);
+  const resetProfile = useIconRulesStore((s) => s.resetProfile);
+  const resetAll = useIconRulesStore((s) => s.resetAll);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /** The name being typed, or `null` when the row is showing the select. */
+  const [naming, setNaming] = useState<{ mode: "add" | "duplicate" | "rename"; value: string } | null>(
+    null,
+  );
+
+  const active = profiles.find((profile) => profile.id === activeId);
+  /** Whether there is a shipped version of this profile to go back to. A profile the user wrote has
+   * no factory state, and a restore button that did nothing would be worse than one that says so. */
+  const restorable = shippedProfile(activeId) !== null;
+
+  /**
+   * Restoring is asked about first: it is not undoable — this list is the only copy — and the
+   * sentence has to name the profile, because the whole point of the change is that this button no
+   * longer touches the others.
+   */
+  const confirmResetProfile = async () => {
+    const message = t("icons.resetProfileConfirm", {
+      name: active?.name ?? "",
+      n: active?.rules.length ?? 0,
+    });
+    if (await confirmAction(message, true, t("icons.resetConfirmAction"))) void resetProfile();
+  };
+
+  /** The blunt one, kept in the menu rather than on the row. Its blast radius is every profile the
+   * user owns, which is not something a button one pixel from "restore this profile" should do. */
+  const confirmResetAll = async () => {
+    const message = t("icons.resetConfirm", { n: profiles.length });
+    if (await confirmAction(message, true, t("icons.resetConfirmAction"))) void resetAll();
+  };
+
+  const commit = () => {
+    if (!naming) return;
+    const name = naming.value.trim();
+    setNaming(null);
+    if (!name) return;
+    if (naming.mode === "add") void addProfile(name);
+    else if (naming.mode === "duplicate") void duplicateProfile(activeId, name);
+    else void renameProfile(activeId, name);
+  };
+
+  const items: MenuItem[] = [
+    {
+      label: t("icons.profileAdd"),
+      icon: Plus,
+      onClick: () => setNaming({ mode: "add", value: "" }),
+    },
+    {
+      label: t("icons.profileDuplicate"),
+      icon: CopyPlus,
+      onClick: () => setNaming({ mode: "duplicate", value: `${active?.name ?? ""} 2` }),
+    },
+    {
+      label: t("icons.profileRename"),
+      icon: Pencil,
+      onClick: () => setNaming({ mode: "rename", value: active?.name ?? "" }),
+    },
+  ];
+  // The last profile has no delete: with none left there is no rule list to fall back to.
+  if (profiles.length > 1) {
+    items.push({
+      label: t("icons.profileRemove"),
+      icon: Trash2,
+      danger: true,
+      separated: true,
+      onClick: async () => {
+        if (await confirmAction(t("icons.profileRemoveConfirm", { name: active?.name ?? "" }))) {
+          void removeProfile(activeId);
+        }
+      },
+    });
+  }
+  items.push({
+    label: t("icons.resetAll"),
+    icon: RotateCcw,
+    danger: true,
+    separated: true,
+    onClick: () => void confirmResetAll(),
+  });
+
+  return (
+    <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
+      {naming ? (
+        <input
+          autoFocus
+          value={naming.value}
+          onChange={(e) => setNaming({ ...naming, value: e.target.value })}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") commit();
+            if (e.key === "Escape") setNaming(null);
+          }}
+          placeholder={t("icons.profileNamePlaceholder")}
+          className="min-w-0 flex-1 rounded-md border border-[var(--cf-accent)] bg-[var(--cf-bg)] px-1.5 py-1 text-[12px] outline-none"
+        />
+      ) : (
+        <div className="min-w-0 flex-1">
+          <Select
+            size="compact"
+            ariaLabel={t("icons.profile")}
+            value={activeId}
+            onChange={(id) => void selectProfile(id)}
+            options={profiles.map((profile) => ({ value: profile.id, label: profile.name }))}
+          />
+        </div>
+      )}
+      <button
+        onClick={onAddRule}
+        title={t("icons.addRule")}
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+      >
+        <Plus size={13} />
+      </button>
+      <button
+        onClick={() => void confirmResetProfile()}
+        disabled={!restorable}
+        title={
+          restorable
+            ? t("icons.resetProfile", { name: active?.name ?? "" })
+            : t("icons.resetProfileUnavailable")
+        }
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-white/[0.08]"
+      >
+        <RotateCcw size={12} />
+      </button>
+      <button
+        onClick={(e) => setMenu({ x: e.clientX, y: e.clientY })}
+        title={t("icons.more")}
+        className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+      >
+        <MoreHorizontal size={13} />
+      </button>
+      {menu && <ContextMenu x={menu.x} y={menu.y} items={items} onClose={() => setMenu(null)} />}
+
+      {/* Said once, here, rather than on every row: the selection belongs to the repository, the
+          rules belong to everybody. Without it, editing a profile shared by three repos looks
+          local — and with no repo open there is nowhere for a selection to be written at all. */}
+      {!repoPath && (
+        <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">
+          {t("icons.profileNoRepo")}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
  * The explorer's iconography, configured from the rail beside the tree it changes.
  *
  * In the rail and not in Settings, because this is edited *while looking at the tree* — you notice
@@ -260,9 +434,11 @@ export function IconRulesPanel() {
   const t = useT();
   const rules = useIconRulesStore((s) => s.rules);
   const save = useIconRulesStore((s) => s.save);
-  const reset = useIconRulesStore((s) => s.reset);
   const defaultFolderIcon = useIconRulesStore((s) => s.defaultFolderIcon);
   const setDefaultFolderIcon = useIconRulesStore((s) => s.setDefaultFolderIcon);
+  const profileName = useIconRulesStore(
+    (s) => s.profiles.find((profile) => profile.id === s.activeId)?.name ?? "",
+  );
   const [query, setQuery] = useState("");
   const [pickingFolder, setPickingFolder] = useState(false);
 
@@ -312,24 +488,6 @@ export function IconRulesPanel() {
     void save(next);
   };
 
-  /**
-   * Resetting is asked about first, and the question says what is actually at stake.
-   *
-   * Two things make it worth a dialog rather than a click. It is **not undoable** — the rules are
-   * the only copy — and it is **global**: this list is one setting for the whole app, not something
-   * a workspace owns, so restoring it changes how every repository in every workspace draws its
-   * tree. Neither fact is visible from a panel that sits inside one project's editor, which is
-   * exactly why it has to be said out loud. The count comes from the list so the sentence is about
-   * *their* rules and not about the idea of rules.
-   */
-  const confirmReset = async () => {
-    const custom = rules.length;
-    const message = defaultFolderIcon
-      ? t("icons.resetConfirmWithFolder", { n: custom })
-      : t("icons.resetConfirm", { n: custom });
-    if (await confirmAction(message, true, t("icons.resetConfirmAction"))) void reset();
-  };
-
   /** Refuses a second blank rule. The `+` is next to a list where the top row may already be an
    * empty one waiting to be typed into, and stacking three of them is the fastest way to make this
    * panel look broken. */
@@ -353,25 +511,15 @@ export function IconRulesPanel() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {/* The title alone. Both buttons that used to sit here act on one profile's list, and up here
+          they read as acting on file icons as a whole — see `ProfileBar`, which is where they are. */}
       <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1.5">
         <span className="flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">
           {t("icons.title")}
         </span>
-        <button
-          onClick={add}
-          title={t("icons.addRule")}
-          className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-        >
-          <Plus size={12} />
-        </button>
-        <button
-          onClick={() => void confirmReset()}
-          title={t("icons.resetAll")}
-          className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-        >
-          <RotateCcw size={11} />
-        </button>
       </div>
+
+      <ProfileBar onAddRule={add} />
 
       {/* What every folder no rule claims looks like. A row of its own above the list and not a
           rule in it, because it is the opposite of a rule: it has no pattern, it cannot be
@@ -445,7 +593,9 @@ export function IconRulesPanel() {
 
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-2">
         {rules.length === 0 ? (
-          <p className="px-1 py-6 text-center text-[11px] text-[var(--cf-text-muted)]">{t("icons.empty")}</p>
+          <p className="px-1 py-6 text-center text-[11px] text-[var(--cf-text-muted)]">
+            {t("icons.emptyProfile", { name: profileName })}
+          </p>
         ) : visible.length === 0 ? (
           <p className="px-1 py-6 text-center text-[11px] text-[var(--cf-text-muted)]">
             {t("icons.noMatches", { query: query.trim() })}

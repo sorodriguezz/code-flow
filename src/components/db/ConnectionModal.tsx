@@ -37,7 +37,6 @@ import {
   engineInfo,
   type DbAuthMethod,
   type DbConnectionConfig,
-  type DbSchemaObjectFilter,
   type DbConnectionRow,
   type DbKind,
   type DbSchemaGroup,
@@ -112,11 +111,15 @@ function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
     a.connect_timeout_ms === b.connect_timeout_ms &&
     a.show_all_databases === b.show_all_databases &&
     a.object_filter === b.object_filter &&
+    a.object_filter_enabled === b.object_filter_enabled &&
+    a.schema_filter === b.schema_filter &&
+    a.schema_filter_enabled === b.schema_filter_enabled &&
     a.schema_object_filters.length === b.schema_object_filters.length &&
     a.schema_object_filters.every(
       (entry, i) =>
         b.schema_object_filters[i]?.schema === entry.schema &&
-        b.schema_object_filters[i]?.pattern === entry.pattern,
+        b.schema_object_filters[i]?.pattern === entry.pattern &&
+        b.schema_object_filters[i]?.enabled === entry.enabled,
     ) &&
     a.keep_alive_secs === b.keep_alive_secs &&
     a.auto_disconnect_secs === b.auto_disconnect_secs &&
@@ -911,8 +914,6 @@ export function ConnectionModal({
                   connectionId={selected}
                   visible={config.visible_schemas}
                   filtered={config.schemas_filtered}
-                  objectFilter={config.object_filter}
-                  schemaFilters={config.schema_object_filters}
                   onChange={patch}
                 />
               ) : (
@@ -1101,17 +1102,13 @@ function SchemasTab({
   connectionId,
   visible,
   filtered: isFiltered,
-  objectFilter,
-  schemaFilters,
   onChange,
 }: {
   connectionId: string | null;
   visible: string[];
   /** Whether the list is being used as a filter at all. See `schemas_filtered`. */
   filtered: boolean;
-  objectFilter: string;
   /** Schemas that carry a filter of their own, set from the tree or edited here. */
-  schemaFilters: DbSchemaObjectFilter[];
   onChange: (partial: Partial<DbConnectionConfig>) => void;
 }) {
   const t = useT();
@@ -1361,65 +1358,10 @@ function SchemasTab({
         </div>
       </div>
 
-      <Row label={t("db.objectFilter")} hint={t("db.objectFilterHint")}>
-        <input
-          value={objectFilter}
-          onChange={(e) => onChange({ object_filter: e.target.value })}
-          placeholder={t("db.objectFilterPlaceholder")}
-          spellCheck={false}
-          className={INPUT}
-        />
-        <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-          {t("db.objectFilterGrammar")}
-        </p>
-      </Row>
-
-      {/* The overrides written from the tree, editable here too. Without this the dialog would be
-          the one place that claims to hold a connection's visibility while quietly not showing a
-          filter somebody set with a right-click — and a schema listing three of its ninety tables
-          for no visible reason is the worst bug this feature could have. */}
-      {schemaFilters.length > 0 && (
-        <Row label={t("db.objectFilterPerSchema")}>
-          <div className="rounded-md border border-[var(--cf-border)]">
-            {schemaFilters.map((entry) => (
-              <div
-                key={entry.schema}
-                className="flex items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5 last:border-b-0"
-              >
-                <span className="min-w-0 shrink-0 truncate text-[12px] font-medium text-[var(--cf-text)]">
-                  {entry.schema}
-                </span>
-                <input
-                  value={entry.pattern}
-                  onChange={(e) =>
-                    onChange({
-                      schema_object_filters: schemaFilters.map((candidate) =>
-                        candidate.schema === entry.schema
-                          ? { ...candidate, pattern: e.target.value }
-                          : candidate,
-                      ),
-                    })
-                  }
-                  spellCheck={false}
-                  className={`${INPUT} font-mono`}
-                />
-                <GhostButton
-                  onClick={() =>
-                    onChange({
-                      schema_object_filters: schemaFilters.filter(
-                        (candidate) => candidate.schema !== entry.schema,
-                      ),
-                    })
-                  }
-                  title={t("db.objectFilterRemove")}
-                >
-                  <Trash2 size={12} />
-                </GhostButton>
-              </div>
-            ))}
-          </div>
-        </Row>
-      )}
+      {/* No pattern fields here. The tree's filter dialog is where a filter is written now — you
+          right-click the level you want narrowed and edit that one, which is a scope this tab
+          cannot express and a second, worse editor for the same three settings. Existing patterns
+          keep applying and are listed, and removable, from that dialog. */}
     </div>
   );
 }

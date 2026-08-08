@@ -45,6 +45,7 @@ import {
   defaultConnectionConfig,
   engineInfo,
   type DbConnectionConfig,
+  type DbFilterTarget,
   type DbForeignKey,
   type DbConnectionRow,
   type DbConsole,
@@ -370,12 +371,14 @@ interface DbState {
   openData: (connectionId: string, node: DbNodeRef, name: string, filter?: string) => void;
   /** Opens the table a foreign-key column points at. `null` opens it whole. */
   followForeignKey: (tab: DbDataTab, key: DbForeignKey, value: string | null) => void;
-  /** Rewrites which schemas a connection's tree lists. See the implementation for what the
-   * updater is handed when nothing has been filtered yet. */
-  setVisibleSchemas: (connectionId: string, update: (current: string[]) => string[]) => Promise<void>;
-  /** Rewrites the name filter over tables, views and routines — for one schema, or (with `null`)
-   * for the whole connection. An empty pattern removes the filter rather than matching nothing. */
-  setObjectFilter: (connectionId: string, schema: string | null, pattern: string) => Promise<void>;
+  /** Writes the filter on one target — the schema list, or what one level lists. An empty pattern
+   * removes it rather than matching nothing. */
+  setFilter: (
+    connectionId: string,
+    target: DbFilterTarget,
+    pattern: string,
+    enabled: boolean,
+  ) => Promise<void>;
   updateData: (tabId: string, patch: Partial<DbDataTab>) => void;
   loadData: (tabId: string) => Promise<void>;
   setCell: (tabId: string, row: number, column: string, value: string | null) => void;
@@ -1373,60 +1376,61 @@ export const useDbStore = create<DbState>((set, get) => ({
   },
 
   /**
-   * Rewrites which schemas a connection's tree lists.
+   * Rewrites the filter on one target.
    *
-   * The updater is handed the *effective* list, not the stored one: with no filter on, "hide this
-   * one" has to start from the full set or it would turn into "show only the others, of which
-   * there are none". What the explorer has loaded is that full set — which is why this is only
-   * offered from a tree that is already open.
+   * One action rather than one per field, because the dialog only ever edits one filter: the one on
+   * whatever was right-clicked. What varies is *which* of the config's fields that lands in, and
+   * that is this function's whole job.
    *
-   * Setting either turns the filter on, exactly as ticking a box in the dialog does, so the two
-   * ways in agree about what an empty list means.
+   * Blank clears rather than filters, in every target: a pattern that matches nothing has a way to
+   * be written on purpose (`!*`), and an empty box is what someone types to undo — a tree emptied by
+   * deleting the text would be the worst possible reading of that gesture. A cleared entry is
+   * dropped from the list instead of kept as an empty string, so the level falls back to whatever is
+   * above it and the dialog stops listing a filter that does nothing.
+   *
+   * `enabled` is kept even for a blank pattern's sake: it is written alongside, so switching a
+   * filter off and clearing it are two different edits that do not undo each other.
    */
-  setVisibleSchemas: async (connectionId, update) => {
-    const state = get();
-    const row = state.connections.find((c) => c.id === connectionId);
-    const config = row ? parseSpec(row) : null;
-    if (!row || !config) return;
-    const current = config.schemas_filtered
-      ? config.visible_schemas
-      : loadedSchemas(state.children, connectionId);
-    await state.saveConnection(
-      row,
-      { ...config, visible_schemas: update(current), schemas_filtered: true },
-      null,
-    );
-  },
-
-  /**
-   * Rewrites the object filter, connection-wide or for one schema.
-   *
-   * Blank clears rather than filters, in both scopes: a pattern that matches nothing has a way to
-   * be written on purpose (`!*`), and an empty box is what someone types to undo — a tree emptied
-   * by deleting the text would be the worst possible reading of that gesture.
-   *
-   * A cleared schema entry is dropped from the list instead of kept as an empty string, so the
-   * schema falls back to the connection's filter and the dialog stops listing an override that
-   * does nothing.
-   */
-  setObjectFilter: async (connectionId, schema, pattern) => {
+  setFilter: async (connectionId, target, pattern, enabled) => {
     const state = get();
     const row = state.connections.find((c) => c.id === connectionId);
     const config = row ? parseSpec(row) : null;
     if (!row || !config) return;
     const trimmed = pattern.trim();
-    if (schema === null) {
-      await state.saveConnection(row, { ...config, object_filter: trimmed }, null);
+
+    if (target.kind === "schemas") {
+      await state.saveConnection(
+        row,
+        { ...config, schema_filter: trimmed, schema_filter_enabled: enabled },
+        null,
+      );
       return;
     }
+    if (target.schema === null) {
+      await state.saveConnection(
+        row,
+        { ...config, object_filter: trimmed, object_filter_enabled: enabled },
+        null,
+      );
+      return;
+    }
+
+    const schema = target.schema;
+    const folder = target.folder ?? null;
     const rest = config.schema_object_filters.filter(
-      (entry) => entry.schema.toLowerCase() !== schema.toLowerCase(),
+      (entry) =>
+        !(
+          entry.schema.toLowerCase() === schema.toLowerCase() &&
+          (entry.folder ?? null) === folder
+        ),
     );
     await state.saveConnection(
       row,
       {
         ...config,
-        schema_object_filters: trimmed ? [...rest, { schema, pattern: trimmed }] : rest,
+        schema_object_filters: trimmed
+          ? [...rest, { schema, folder, pattern: trimmed, enabled }]
+          : rest,
       },
       null,
     );
@@ -1959,18 +1963,6 @@ function contextOf(tab: DbConsoleTab) {
     schema: tab.schema || null,
     max_rows: tab.maxRows,
   };
-}
-
-/** Every schema the explorer has loaded under one connection, in the order it found them. */
-function loadedSchemas(children: Record<string, DbNode[]>, connectionId: string): string[] {
-  const names = new Set<string>();
-  for (const [key, nodes] of Object.entries(children)) {
-    if (!key.startsWith(`${connectionId}|`)) continue;
-    for (const node of nodes) {
-      if (node.kind === "schema") names.add(node.name);
-    }
-  }
-  return [...names];
 }
 
 /**

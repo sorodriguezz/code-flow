@@ -30,9 +30,37 @@ const ROW_HEIGHT = 18;
 const OVERFLOW_HEIGHT = 16;
 const NODE_MIN_WIDTH = 168;
 const NODE_MAX_WIDTH = 320;
-const COLUMN_GAP = 96;
-const ROW_GAP = 32;
-const PADDING = 40;
+
+/**
+ * How much air the layout leaves between boxes.
+ *
+ * `roomy` is the reading layout: generous gaps, every layer a single column, the shape of the model
+ * legible at a glance. `compact` is for the schema that doesn't fit — it is not just smaller gaps
+ * (see `layoutDiagram`), and the two are a user-facing toggle rather than a constant because which
+ * one is right depends on whether you are studying six tables or trying to see two hundred at once.
+ */
+export type DiagramDensity = "roomy" | "compact";
+
+interface Spacing {
+  /** Between one layer of the foreign-key flow and the next. */
+  columnGap: number;
+  /** Between two boxes stacked in the same layer. */
+  rowGap: number;
+  /** Between a box and the edge of the canvas. */
+  padding: number;
+  /** Between boxes that are side by side without an edge between them: a wrapped layer's own
+   * sub-columns, and the grid of unrelated tables. Tighter, because there is no line to clear. */
+  looseGap: number;
+}
+
+const SPACING: Record<DiagramDensity, Spacing> = {
+  roomy: { columnGap: 96, rowGap: 32, padding: 40, looseGap: 32 },
+  compact: { columnGap: 40, rowGap: 12, padding: 16, looseGap: 16 },
+};
+
+/** The aspect ratio compact aims the whole canvas at — roughly the shape of the panel it has to fit
+ * into, so "fit to window" lands near 1:1 instead of scaling a strip down to nothing. */
+const TARGET_RATIO = 16 / 9;
 
 /** Beyond this a box stops being a table and becomes a wall. The rest is one "+N more" line. */
 const MAX_ROWS = 24;
@@ -183,43 +211,56 @@ export function diagramStats(diagram: DbSchemaDiagram): DiagramStats {
  * each column to pull connected tables level with each other, then convert those orders into
  * coordinates. `pinned` overrides the result for tables the user has dragged — their position is
  * theirs, and a relayout must not snatch it back.
+ *
+ * `density` is a genuine change of strategy, not a scale factor. What makes a real schema look
+ * spread out is never the gaps; it is that the layered form has two failure modes, and compact
+ * fixes both:
+ *
+ * - **Tables with no relationships** have no edge to place them by, so they all land in layer 0.
+ *   Fifty of them make the first column a mile long, and every other layer is then centred against
+ *   that — which is where the acres of empty canvas come from. Compact takes them out of the flow
+ *   and packs them into a grid underneath, where they cost height proportional to their number
+ *   instead of setting the height of everything.
+ * - **A layer that fans out** — thirty tables all pointing at one lookup — is a strip taller than
+ *   any window. Compact wraps it into side-by-side sub-columns at the same depth.
+ *
+ * The result is aimed at a `TARGET_RATIO` rectangle, so fitting it to the panel uses the whole panel.
  */
 export function layoutDiagram(
   diagram: DbSchemaDiagram,
   mode: DiagramColumnMode,
   pinned: Record<string, { x: number; y: number }> = {},
+  density: DiagramDensity = "roomy",
 ): DiagramLayout {
+  const gap = SPACING[density];
   const nodes = buildNodes(diagram, mode);
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const links = buildLinks(diagram, byId);
 
-  const depths = assignDepths(nodes, links);
-  const layers = orderLayers(nodes, links, depths);
-
-  // Column x: each layer is as wide as its widest box, so no two columns overlap however uneven
-  // the boxes are.
-  let x = PADDING;
-  for (const layer of layers) {
-    const width = Math.max(...layer.map((node) => node.width), NODE_MIN_WIDTH);
-    let y = PADDING;
-    for (const node of layer) {
-      node.x = x;
-      node.y = y;
-      y += node.height + ROW_GAP;
-    }
-    x += width + COLUMN_GAP;
+  const wired = new Set<string>();
+  for (const link of links) {
+    wired.add(link.from);
+    wired.add(link.to);
   }
+  const loose = density === "compact" ? nodes.filter((node) => !wired.has(node.id)) : [];
+  const flowing = loose.length === 0 ? nodes : nodes.filter((node) => wired.has(node.id));
 
-  // Layers are centred against the tallest one, so a schema with one long chain and one short
-  // branch doesn't hang everything off the top edge.
-  const tallest = Math.max(
-    ...layers.map((layer) => layer.reduce((total, node) => total + node.height + ROW_GAP, 0)),
-    0,
+  const depths = assignDepths(flowing, links);
+  const layers = orderLayers(flowing, links, depths);
+  const flow = placeLayers(
+    layers,
+    gap,
+    density === "compact" ? compactHeight(flowing, gap) : Infinity,
   );
-  for (const layer of layers) {
-    const height = layer.reduce((total, node) => total + node.height + ROW_GAP, 0);
-    const offset = (tallest - height) / 2;
-    for (const node of layer) node.y += offset;
+
+  if (loose.length > 0) {
+    packLoose(
+      loose,
+      gap,
+      gap.padding,
+      flowing.length === 0 ? gap.padding : flow.bottom + gap.columnGap,
+      flow.right - gap.padding,
+    );
   }
 
   for (const node of nodes) {
@@ -235,9 +276,126 @@ export function layoutDiagram(
   return {
     nodes,
     links,
-    width: nodes.length === 0 ? 0 : Math.max(...nodes.map((n) => n.x + n.width)) + PADDING,
-    height: nodes.length === 0 ? 0 : Math.max(...nodes.map((n) => n.y + n.height)) + PADDING,
+    width: nodes.length === 0 ? 0 : Math.max(...nodes.map((n) => n.x + n.width)) + gap.padding,
+    height: nodes.length === 0 ? 0 : Math.max(...nodes.map((n) => n.y + n.height)) + gap.padding,
   };
+}
+
+/**
+ * Turns the ordered layers into coordinates, and reports the block's far edges.
+ *
+ * A layer taller than `maxHeight` is split into sub-columns that sit at the same depth — the boxes
+ * keep their order, they just carry on in the next stack rather than off the bottom of the world.
+ * With `maxHeight` at `Infinity` (which is what `roomy` passes) nothing splits and this is the
+ * one-column-per-layer placement it has always been.
+ */
+function placeLayers(
+  layers: DiagramNode[][],
+  gap: Spacing,
+  maxHeight: number,
+): { right: number; bottom: number } {
+  // `width` is the layer's widest box, not the stack's, so a wrapped layer's sub-columns stay on a
+  // common grid instead of stepping in and out.
+  const columns: { stack: DiagramNode[]; width: number; endsLayer: boolean }[] = [];
+  for (const layer of layers) {
+    if (layer.length === 0) continue;
+    const width = Math.max(...layer.map((node) => node.width), NODE_MIN_WIDTH);
+    const stacks = wrapStacks(layer, maxHeight, gap.rowGap);
+    stacks.forEach((stack, index) =>
+      columns.push({ stack, width, endsLayer: index === stacks.length - 1 }),
+    );
+  }
+  if (columns.length === 0) return { right: gap.padding, bottom: gap.padding };
+
+  const stackHeight = (stack: DiagramNode[]) =>
+    stack.reduce((total, node) => total + node.height + gap.rowGap, 0) - gap.rowGap;
+  const tallest = Math.max(...columns.map((column) => stackHeight(column.stack)));
+
+  let x = gap.padding;
+  for (const column of columns) {
+    // Centred against the tallest column, so a schema with one long chain and one short branch
+    // doesn't hang everything off the top edge.
+    let y = gap.padding + (tallest - stackHeight(column.stack)) / 2;
+    for (const node of column.stack) {
+      node.x = x;
+      node.y = y;
+      y += node.height + gap.rowGap;
+    }
+    x += column.width + (column.endsLayer ? gap.columnGap : gap.looseGap);
+  }
+
+  return { right: x - gap.columnGap, bottom: gap.padding + tallest };
+}
+
+/** Splits one layer into as few equal stacks as keep it under `maxHeight`. Layers of three or fewer
+ * are left alone: wrapping two boxes reads as an unrelated pair, not as a folded column. */
+function wrapStacks(layer: DiagramNode[], maxHeight: number, rowGap: number): DiagramNode[][] {
+  const height = layer.reduce((total, node) => total + node.height + rowGap, 0) - rowGap;
+  if (height <= maxHeight || layer.length < 4) return [layer];
+
+  const stacks: DiagramNode[][] = [];
+  const per = Math.ceil(layer.length / Math.ceil(height / maxHeight));
+  for (let start = 0; start < layer.length; start += per) {
+    stacks.push(layer.slice(start, start + per));
+  }
+  return stacks;
+}
+
+/** How tall compact is willing to let the flow get: the height of a `TARGET_RATIO` rectangle with
+ * room for every box in it. Never less than the tallest single box, which cannot be split. */
+function compactHeight(nodes: DiagramNode[], gap: Spacing): number {
+  if (nodes.length === 0) return Infinity;
+  const area = nodes.reduce(
+    (total, node) => total + (node.width + gap.columnGap) * (node.height + gap.rowGap),
+    0,
+  );
+  return Math.max(
+    Math.max(...nodes.map((node) => node.height)),
+    Math.sqrt(area / TARGET_RATIO),
+  );
+}
+
+/**
+ * The tables that touch nothing, packed into a block of their own.
+ *
+ * Shelf packing rather than a fixed grid, because the boxes are not the same size and a grid sized
+ * to the widest one would waste a column's worth of space on every short name. Ordered by name: with
+ * no edges to follow, alphabetical is the only order a reader can predict.
+ */
+function packLoose(
+  loose: DiagramNode[],
+  gap: Spacing,
+  left: number,
+  top: number,
+  minWidth: number,
+): void {
+  const sorted = [...loose].sort((a, b) => a.name.localeCompare(b.name));
+  const area = sorted.reduce(
+    (total, node) => total + (node.width + gap.looseGap) * (node.height + gap.looseGap),
+    0,
+  );
+  // As wide as the flow above it where that is wide enough to be worth matching, so the two blocks
+  // read as one rectangle rather than as a diagram with a tail.
+  const width = Math.max(
+    minWidth,
+    Math.max(...sorted.map((node) => node.width)),
+    Math.sqrt(area * TARGET_RATIO),
+  );
+
+  let x = left;
+  let y = top;
+  let shelf = 0;
+  for (const node of sorted) {
+    if (x > left && x + node.width > left + width) {
+      x = left;
+      y += shelf + gap.looseGap;
+      shelf = 0;
+    }
+    node.x = x;
+    node.y = y;
+    x += node.width + gap.looseGap;
+    shelf = Math.max(shelf, node.height);
+  }
 }
 
 function buildNodes(diagram: DbSchemaDiagram, mode: DiagramColumnMode): DiagramNode[] {

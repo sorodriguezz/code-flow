@@ -28,10 +28,47 @@ export type DbSslMode = "disable" | "require" | "verify_full";
  */
 export type DbAuthMethod = "password" | "entra_cli" | "entra_service_principal";
 
-/** One schema's own object filter. See `DbConnectionConfig.schema_object_filters`. */
+/** One scope's own object filter. See `DbConnectionConfig.schema_object_filters`. */
 export interface DbSchemaObjectFilter {
   schema: string;
+  /** Which folder inside the schema it narrows (`table_folder`, `view_folder`, …), or `null` for
+   * all of them. "Hide the `tmp_` tables" and "hide the reporting views" are different sentences
+   * about the same schema; keyed only by schema, one pattern would have to answer both. */
+  folder: DbNodeKind | null;
   pattern: string;
+  /** Whether the pattern is in force. Off keeps the terms while showing everything again — which is
+   * what "is a filter the reason I can't find that table?" needs, and clearing the box can only
+   * answer by throwing the terms away. Absent in a spec written before the flag existed, where the
+   * default is on: a filter saved back then was, by definition, applying. */
+  enabled: boolean;
+}
+
+/**
+ * The one thing a filter dialog is about.
+ *
+ * The dialog is opened by right-clicking something, and it edits the filter on *that thing* — the
+ * schema list of a connection, everything in a schema, or one folder of one schema. There is no
+ * scope picker and no tabs, because the scope was chosen by what was clicked, and a dialog that
+ * then asked again would be making the user re-answer with a radio what they had already answered
+ * with the pointer.
+ */
+export type DbFilterTarget =
+  /** Which schemas the tree lists. `schema_filter` on the connection. */
+  | { kind: "schemas" }
+  /**
+   * What a level lists. `schema: null` is the connection-wide `object_filter`; a schema with
+   * `folder: null` is everything in it; a schema with a folder is just that folder.
+   */
+  | { kind: "objects"; schema: string | null; folder: DbNodeKind | null };
+
+/** Whether two targets name the same filter. */
+export function sameFilterTarget(a: DbFilterTarget, b: DbFilterTarget): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind !== "objects" || b.kind !== "objects") return true;
+  return (
+    (a.schema ?? "").toLowerCase() === (b.schema ?? "").toLowerCase() &&
+    (a.folder ?? null) === (b.folder ?? null)
+  );
 }
 
 export interface DbConnectionConfig {
@@ -78,6 +115,16 @@ export interface DbConnectionConfig {
    */
   schemas_filtered: boolean;
   /**
+   * Which schema *names* the tree lists, in the same grammar as `object_filter`. Empty means all.
+   *
+   * Alongside `visible_schemas` rather than instead of it: the tick-list names the handful you work
+   * in, this one says `!pg_*, !information_schema` — a rule about noise that stays true as the
+   * server grows schemas nobody has ticked yet. A schema has to survive both.
+   */
+  schema_filter: string;
+  /** Whether `schema_filter` is in force. */
+  schema_filter_enabled: boolean;
+  /**
    * Which table, view, routine and sequence names the tree lists. Empty means all of them.
    *
    * Comma-separated terms, any of which is enough. A term with `*` or `?` is a pattern matched
@@ -88,8 +135,12 @@ export interface DbConnectionConfig {
    * is the one description of the grammar on this side.
    */
   object_filter: string;
+  /** Whether `object_filter` is in force. */
+  object_filter_enabled: boolean;
   /** Schemas with a filter of their own, overriding `object_filter` inside them. Written from the
-   * tree: right-click a schema, filter what is under it. */
+   * tree: right-click a schema, filter what is under it. A *disabled* override means that schema is
+   * not filtered — it does not fall back to the connection's pattern, because switching a filter off
+   * on the schema you are looking at has to mean that schema stops being filtered. */
   schema_object_filters: DbSchemaObjectFilter[];
 
   /** Seconds of idleness before a trivial statement is sent to hold the connection open. 0 is off. */
@@ -520,7 +571,12 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     show_all_databases: false,
     visible_schemas: [],
     schemas_filtered: false,
+    schema_filter: "",
+    // On, with nothing to apply. The flag is what an older spec falls back to when `parseSpec`
+    // spreads these under it, and a filter saved before the flag existed was one that applied.
+    schema_filter_enabled: true,
     object_filter: "",
+    object_filter_enabled: true,
     schema_object_filters: [],
     keep_alive_secs: 0,
     auto_disconnect_secs: 0,

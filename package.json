@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "1.14.4",
+  "version": "1.14.5",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -32,6 +32,7 @@
     "marked": "^18.0.7",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "yaml": "^2.9.0",
     "zustand": "^5.0.14"
   },
   "devDependencies": {

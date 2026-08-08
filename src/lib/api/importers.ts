@@ -1,3 +1,4 @@
+import { parse as parseYaml } from "yaml";
 import {
   defaultAuth,
   defaultRequestSpec,
@@ -8,6 +9,7 @@ import {
   type ImportedCollection,
   type ImportedItem,
   type ImportFormat,
+  type ImportOptions,
   type ImportResult,
   type JwtAlgorithm,
   type KeyValue,
@@ -243,17 +245,39 @@ export function detectFormat(text: string): ImportFormat | null {
 // Entry point
 // ---------------------------------------------------------------------------
 
-export function importAny(text: string): ImportResult {
+export function importAny(text: string, options: ImportOptions = {}): ImportResult {
   const warnings: string[] = [];
   const format = detectFormat(text);
-  const result = runImport(text, format, warnings);
+  const result = runImport(text, format, warnings, options);
   // The same unmapped construct usually repeats once per request; one line per distinct problem
   // is a report, one per occurrence is a wall.
   result.warnings = [...new Set(result.warnings)];
   return result;
 }
 
-function runImport(text: string, format: ImportFormat | null, warnings: string[]): ImportResult {
+/**
+ * JSON first, YAML second.
+ *
+ * YAML is a superset of JSON, so `parseYaml` alone would read both — but it is an order of
+ * magnitude slower, and the documents that arrive here are routinely several megabytes and get
+ * re-parsed on a keystroke debounce. The fast path stays the common one.
+ */
+function parseDocument(text: string): unknown {
+  const json = parseJsonSafe(text);
+  if (json !== undefined) return json;
+  try {
+    return parseYaml(text, { maxAliasCount: 1000 });
+  } catch {
+    return undefined;
+  }
+}
+
+function runImport(
+  text: string,
+  format: ImportFormat | null,
+  warnings: string[],
+  options: ImportOptions,
+): ImportResult {
   const empty = (f: ImportFormat): ImportResult => ({
     format: f,
     collections: [],
@@ -269,13 +293,9 @@ function runImport(text: string, format: ImportFormat | null, warnings: string[]
     return empty("codeflow");
   }
 
-  const doc = parseJsonSafe(text);
+  const doc = parseDocument(text);
   if (!isObj(doc)) {
-    warnings.push(
-      format === "openapi"
-        ? "This looks like a YAML OpenAPI document. Convert it to JSON and import again."
-        : "The file isn't valid JSON.",
-    );
+    warnings.push("The document isn't valid JSON or YAML.");
     return empty(format);
   }
 
@@ -284,7 +304,7 @@ function runImport(text: string, format: ImportFormat | null, warnings: string[]
       case "postman":
         return importPostman(doc, warnings);
       case "openapi":
-        return importOpenApi(doc, warnings);
+        return importOpenApi(doc, warnings, options);
       case "har":
         return importHar(doc, warnings);
       case "insomnia":
@@ -1501,6 +1521,8 @@ interface OasContext {
   doc: Json;
   swagger: boolean;
   warnings: string[];
+  /** Whether documented responses are mapped to saved examples. */
+  examples: boolean;
 }
 
 /** Local `$ref` only. A remote document can't be fetched from here, so it becomes a warning and
@@ -1794,8 +1816,140 @@ function oasBody(ctx: OasContext, operation: Json, bodyParams: Json[], spec: Api
         : JSON.stringify(example, null, 2);
 }
 
-function importOpenApi(doc: Json, warnings: string[]): ImportResult {
-  const ctx: OasContext = { doc, swagger: typeof doc.swagger === "string", warnings };
+/** Only the codes an API actually documents; anything else keeps an empty status text. */
+const REASON_PHRASES: Record<string, string> = {
+  "200": "OK",
+  "201": "Created",
+  "202": "Accepted",
+  "203": "Non-Authoritative Information",
+  "204": "No Content",
+  "206": "Partial Content",
+  "301": "Moved Permanently",
+  "302": "Found",
+  "303": "See Other",
+  "304": "Not Modified",
+  "307": "Temporary Redirect",
+  "308": "Permanent Redirect",
+  "400": "Bad Request",
+  "401": "Unauthorized",
+  "402": "Payment Required",
+  "403": "Forbidden",
+  "404": "Not Found",
+  "405": "Method Not Allowed",
+  "406": "Not Acceptable",
+  "408": "Request Timeout",
+  "409": "Conflict",
+  "410": "Gone",
+  "412": "Precondition Failed",
+  "413": "Payload Too Large",
+  "415": "Unsupported Media Type",
+  "422": "Unprocessable Entity",
+  "429": "Too Many Requests",
+  "500": "Internal Server Error",
+  "501": "Not Implemented",
+  "502": "Bad Gateway",
+  "503": "Service Unavailable",
+  "504": "Gateway Timeout",
+};
+
+function renderExampleBody(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  return typeof value === "string" ? value : JSON.stringify(value, null, 2);
+}
+
+/**
+ * The body of one documented response.
+ *
+ * One media type per status code — the JSON one when there is one, otherwise whichever came
+ * first. Taking every media type of every code would bury a five-response CRUD endpoint under
+ * fifteen rows for no extra information, since they describe the same payload twice over.
+ */
+function oasResponseBody(
+  ctx: OasContext,
+  response: Json,
+  operation: Json,
+): { body: string; contentType: string } {
+  if (ctx.swagger) {
+    // Swagger 2 keeps literal examples in `examples`, keyed by MIME, and the shape in `schema`.
+    const examples = isObj(response.examples) ? response.examples : null;
+    const literalKey = examples
+      ? (Object.keys(examples).find((m) => m.includes("json")) ?? Object.keys(examples)[0])
+      : undefined;
+    if (examples && literalKey !== undefined) {
+      return { body: renderExampleBody(examples[literalKey]), contentType: literalKey };
+    }
+    if (response.schema === undefined) return { body: "", contentType: "" };
+    const produces = arr(operation.produces).map((p) => str(p));
+    const contentType = produces.find((p) => p.includes("json")) ?? produces[0] ?? "application/json";
+    return {
+      body: renderExampleBody(synthesize(ctx, response.schema, new Set(), 0)),
+      contentType,
+    };
+  }
+
+  const content = isObj(response.content) ? response.content : null;
+  if (!content) return { body: "", contentType: "" };
+  const preferred = Object.keys(content).find((ct) => ct.includes("json")) ?? Object.keys(content)[0];
+  if (preferred === undefined) return { body: "", contentType: "" };
+  const media = isObj(content[preferred]) ? (content[preferred] as Json) : {};
+  return { body: renderExampleBody(oasMediaExample(ctx, media)), contentType: preferred };
+}
+
+/**
+ * Documented responses, as the saved examples that hang under a request in the tree.
+ *
+ * This is the half of the spec a request alone throws away: what the endpoint answers. The body
+ * comes out of the same `oasMediaExample`/`synthesize` pair the request body uses, so a documented
+ * example wins over a schema skeleton here exactly as it does there.
+ *
+ * `default` is skipped. It means "every code not listed", which has no status to file it under,
+ * and a row labelled `default` sitting next to `200` reads as a second real response.
+ */
+function oasExamples(ctx: OasContext, operation: Json): SavedExample[] {
+  const responses = deref(ctx, operation.responses);
+  if (!isObj(responses)) return [];
+
+  const out: SavedExample[] = [];
+  for (const [code, raw] of Object.entries(responses)) {
+    const status = Number.parseInt(code, 10);
+    if (!Number.isFinite(status) || status < 100 || status > 599) continue;
+    const response = deref(ctx, raw);
+    if (!isObj(response)) continue;
+
+    const { body, contentType } = oasResponseBody(ctx, response, operation);
+    const headers: KeyValue[] = [];
+    if (contentType) headers.push(kv("Content-Type", contentType));
+    if (isObj(response.headers)) {
+      for (const [name, headerRaw] of Object.entries(response.headers)) {
+        const header = deref(ctx, headerRaw);
+        if (!isObj(header)) continue;
+        headers.push(
+          kv(name, oasParamExample(ctx, header), { description: str(header.description) }),
+        );
+      }
+    }
+
+    const reason = REASON_PHRASES[code] ?? "";
+    const description = str(response.description);
+    out.push({
+      id: crypto.randomUUID(),
+      name: description ? `${code} · ${description}` : `${code} ${reason}`.trim(),
+      status,
+      statusText: reason,
+      headers,
+      body,
+    });
+  }
+  return out;
+}
+
+function importOpenApi(doc: Json, warnings: string[], options: ImportOptions): ImportResult {
+  const ctx: OasContext = {
+    doc,
+    swagger: typeof doc.swagger === "string",
+    warnings,
+    examples: options.includeExamples !== false,
+  };
   const info = isObj(doc.info) ? doc.info : {};
   const collection = emptyCollection(str(info.title) || "Imported API");
   collection.description = str(info.description);
@@ -1866,6 +2020,8 @@ function importOpenApi(doc: Json, warnings: string[]): ImportResult {
       if (operation.security !== undefined) {
         spec.auth = oasSecurityAuth(ctx, operation.security) ?? defaultAuth("none");
       }
+
+      if (ctx.examples) spec.examples = oasExamples(ctx, operation);
 
       const name = str(operation.summary) || str(operation.operationId) || `${spec.method} ${path}`;
       const tag = str(arr(operation.tags)[0]) || path.split("/").filter(Boolean)[0] || "default";

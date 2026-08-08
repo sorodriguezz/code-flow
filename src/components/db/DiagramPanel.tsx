@@ -3,12 +3,17 @@ import {
   AlertTriangle,
   Copy,
   Download,
+  FileCode2,
+  // Aliased: the raster export needs the DOM's own `Image`, and an unaliased icon of that name
+  // would shadow it in this module.
+  Image as ImageIcon,
   KeyRound,
   Loader2,
   Maximize2,
   Network,
   RefreshCw,
   Search,
+  Shrink,
   Table2,
   Unlink,
   View,
@@ -17,12 +22,14 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { ToolbarButton, formatCount } from "./dbChrome";
-import { apiSaveFile } from "../../lib/tauri/apiCommands";
+import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { apiSaveBinaryFile, apiSaveFile } from "../../lib/tauri/apiCommands";
 import {
   diagramStats,
   layoutDiagram,
   toMermaid,
   type DiagramColumnMode,
+  type DiagramDensity,
   type DiagramLayout,
   type DiagramNode,
 } from "../../lib/db/erLayout";
@@ -57,11 +64,14 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
   const t = useT();
   const store = useDbStore.getState();
   const [mode, setMode] = useState<DiagramColumnMode>("keys");
+  const [density, setDensity] = useState<DiagramDensity>("roomy");
   const [pinned, setPinned] = useState<Record<string, { x: number; y: number }>>({});
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [highlight, setHighlight] = useState<Highlight>("none");
+  /** Where the export menu was opened from, or `null` when it is closed. */
+  const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   /** What a drag is currently moving: the canvas, or one table. */
@@ -80,9 +90,9 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
   const layout = useMemo<DiagramLayout>(
     () =>
       tab.diagram
-        ? layoutDiagram(tab.diagram, mode, pinned)
+        ? layoutDiagram(tab.diagram, mode, pinned, density)
         : { nodes: [], links: [], width: 0, height: 0 },
-    [tab.diagram, mode, pinned],
+    [tab.diagram, mode, pinned, density],
   );
   const stats = useMemo(() => (tab.diagram ? diagramStats(tab.diagram) : null), [tab.diagram]);
 
@@ -103,10 +113,12 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
   };
 
   // Fits once per fresh diagram, not on every layout change: re-fitting after a drag or a column
-  // toggle would yank the canvas out from under the hand that just moved it.
+  // toggle would yank the canvas out from under the hand that just moved it. Density is the one
+  // exception — the whole point of packing the tables closer is to see more of them at once, and a
+  // compaction you then have to zoom out to notice has done half its job.
   useLayoutEffect(() => {
     if (tab.diagram) fit();
-  }, [tab.diagram]);
+  }, [tab.diagram, density]);
 
   const zoomBy = (factor: number, origin?: { x: number; y: number }) => {
     setView((current) => {
@@ -207,12 +219,39 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
     useToastStore.getState().pushToast(t("db.copied"), "success");
   };
 
+  const announce = (path: string | null) => {
+    if (path) useToastStore.getState().pushToast(t("db.exported", { path }), "success");
+  };
+
   const saveSvg = async () => {
     const svg = svgRef.current;
     if (!svg) return;
-    const saved = await apiSaveFile(`${tab.name}.svg`, standaloneSvg(svg, layout)).catch(() => null);
-    if (saved) useToastStore.getState().pushToast(t("db.exported", { path: saved }), "success");
+    announce(await apiSaveFile(`${tab.name}.svg`, standaloneSvg(svg, layout)).catch(() => null));
   };
+
+  const savePng = async () => {
+    const svg = svgRef.current;
+    if (!svg || layout.width === 0) return;
+    const png = await rasterize(standaloneSvg(svg, layout), layout).catch(() => null);
+    if (png === null) {
+      useToastStore.getState().pushToast(t("db.diagram.rasterFailed"), "error");
+      return;
+    }
+    announce(await apiSaveBinaryFile(`${tab.name}.png`, png).catch(() => null));
+  };
+
+  const saveMermaid = async () => {
+    if (!tab.diagram) return;
+    announce(await apiSaveFile(`${tab.name}.mmd`, toMermaid(tab.diagram)).catch(() => null));
+  };
+
+  /** The three shapes the same picture is worth having: one that scales, one that pastes anywhere,
+   * and one that is still readable as text in a pull request. */
+  const exportItems: MenuItem[] = [
+    { label: t("db.diagram.saveSvg"), icon: Download, onClick: () => void saveSvg() },
+    { label: t("db.diagram.savePng"), icon: ImageIcon, onClick: () => void savePng() },
+    { label: t("db.diagram.saveMermaid"), icon: FileCode2, onClick: () => void saveMermaid() },
+  ];
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -299,6 +338,16 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
           >
             <KeyRound size={12} />
           </ToolbarButton>
+          {/* The gaps are not the point — see `layoutDiagram`. Compact takes the tables nothing
+              points at out of the flow and wraps the layers that have grown into strips, which is
+              what turns a canvas of mostly whitespace back into a diagram. */}
+          <ToolbarButton
+            onClick={() => setDensity((current) => (current === "compact" ? "roomy" : "compact"))}
+            active={density === "compact"}
+            title={density === "compact" ? t("db.diagram.spreadOut") : t("db.diagram.packTogether")}
+          >
+            <Shrink size={12} />
+          </ToolbarButton>
           <ToolbarButton onClick={() => zoomBy(1.2)} title={t("db.diagram.zoomIn")}>
             <ZoomIn size={12} />
           </ToolbarButton>
@@ -317,7 +366,14 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
           <ToolbarButton onClick={copyMermaid} disabled={!tab.diagram} title={t("db.diagram.copyMermaid")}>
             <Copy size={12} />
           </ToolbarButton>
-          <ToolbarButton onClick={() => void saveSvg()} disabled={!tab.diagram} title={t("db.diagram.saveSvg")}>
+          <ToolbarButton
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect();
+              setExportAt({ x: rect.right - 180, y: rect.bottom + 2 });
+            }}
+            disabled={!tab.diagram}
+            title={t("db.diagram.export")}
+          >
             <Download size={12} />
           </ToolbarButton>
           <ToolbarButton
@@ -438,6 +494,15 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
           </g>
         </svg>
       </div>
+
+      {exportAt && (
+        <ContextMenu
+          x={exportAt.x}
+          y={exportAt.y}
+          items={exportItems}
+          onClose={() => setExportAt(null)}
+        />
+      )}
     </div>
   );
 }
@@ -680,6 +745,11 @@ function standaloneSvg(source: SVGSVGElement, layout: DiagramLayout): string {
   // Undo the pan/zoom: the file is the whole diagram at 1:1.
   clone.querySelector("#cf-er-canvas")?.setAttribute("transform", "translate(0 0)");
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  // On screen the text inherits its face from the page. Detached from the page it would fall back to
+  // whatever the viewer calls default — usually a serif, always wider than the boxes were measured
+  // for, so names that fit here would overrun there. Named explicitly, and the raster export goes
+  // through the same string, so the PNG matches the SVG.
+  clone.setAttribute("font-family", getComputedStyle(source).fontFamily || "system-ui, sans-serif");
   clone.setAttribute("width", String(Math.ceil(layout.width)));
   clone.setAttribute("height", String(Math.ceil(layout.height)));
   clone.setAttribute("viewBox", `0 0 ${Math.ceil(layout.width)} ${Math.ceil(layout.height)}`);
@@ -694,4 +764,59 @@ function standaloneSvg(source: SVGSVGElement, layout: DiagramLayout): string {
   clone.insertBefore(background, clone.firstChild);
 
   return `<?xml version="1.0" encoding="UTF-8"?>\n${clone.outerHTML}`;
+}
+
+/** Above this many pixels a canvas stops being allocated and starts returning a blank one, which
+ * would save a transparent rectangle where the schema should be. */
+const MAX_RASTER_PIXELS = 24e6;
+const MAX_RASTER_EDGE = 8192;
+
+/**
+ * The same picture as pixels, Base64-encoded and ready for `apiSaveBinaryFile`.
+ *
+ * Drawn at 2× so it stays sharp in a document or a ticket, but scaled back down for a schema large
+ * enough to hit a canvas limit — a smaller PNG is worth having and a blank one is not. Routed
+ * through the *standalone* SVG rather than the live one on purpose: every `var(--cf-…)` has already
+ * been resolved there, and an image element gets no stylesheet to resolve them against, so
+ * rasterising what is on screen would produce a picture drawn entirely in the fallback grey.
+ */
+function rasterize(svgText: string, layout: DiagramLayout): Promise<string> {
+  const scale = Math.min(
+    2,
+    MAX_RASTER_EDGE / Math.max(layout.width, layout.height),
+    Math.sqrt(MAX_RASTER_PIXELS / (layout.width * layout.height)),
+  );
+
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.ceil(layout.width * scale));
+      canvas.height = Math.max(1, Math.ceil(layout.height * scale));
+      const context = canvas.getContext("2d");
+      if (!context) {
+        reject(new Error("no 2d context"));
+        return;
+      }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      // `toDataURL` hands back `data:image/png;base64,…`; the command wants the payload alone.
+      const encoded = canvas.toDataURL("image/png").split(",")[1];
+      if (encoded) resolve(encoded);
+      else reject(new Error("empty raster"));
+    };
+    image.onerror = () => reject(new Error("the diagram could not be rasterised"));
+    image.src = svgDataUri(svgText);
+  });
+}
+
+/** Base64 rather than percent-encoding, because a schema is full of characters — the `↗` on an
+ * external stub, an accented column name — that a URI-encoded `data:` payload gets wrong often
+ * enough to matter. Chunked, since spreading a megabyte of bytes into one call overflows the stack. */
+function svgDataUri(svgText: string): string {
+  const bytes = new TextEncoder().encode(svgText);
+  let binary = "";
+  for (let start = 0; start < bytes.length; start += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+  }
+  return `data:image/svg+xml;base64,${btoa(binary)}`;
 }

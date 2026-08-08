@@ -420,6 +420,31 @@ pub async fn api_save_file(app: AppHandle, default_name: String, contents: Strin
     Ok(Some(path))
 }
 
+/// The binary twin of `api_save_file`, for the exports that aren't text — a rasterised diagram, an
+/// image pulled out of a response.
+///
+/// The bytes arrive as Base64 because the bridge carries a Rust `String` and nothing else; writing
+/// that string straight out would leave a file named `.png` that no viewer can open. Decoded before
+/// the dialog opens, so a malformed payload fails without first making the user pick a destination.
+#[tauri::command]
+pub async fn api_save_binary_file(app: AppHandle, default_name: String, base64: String) -> Result<Option<String>, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(base64.as_bytes())
+        .map_err(|e| format!("not valid Base64: {e}"))?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_file_name(default_name.as_str())
+        .save_file(move |file| {
+            let _ = tx.send(file.map(|p| p.to_string()));
+        });
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    std::fs::write(&path, bytes).map_err(|e| format!("{path}: {e}"))?;
+    Ok(Some(path))
+}
+
 #[tauri::command]
 pub fn api_read_text_file(path: String) -> Result<String, String> {
     let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;

@@ -9,6 +9,7 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
+import { Select } from "../common/Select";
 import { useDebugStore } from "../../state/debugStore";
 import { DEBUG_ADAPTERS, adapterById, adapterForFile } from "../../lib/debugAdapters";
 import type { DebugVariable } from "../../lib/tauri/commands";
@@ -123,22 +124,26 @@ export function DebugPanel({
             disabled={running}
             className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1.5 py-1 font-mono text-[11px] outline-none disabled:opacity-60"
           />
-          {/* Which debugger runs it. Node is built in; the rest drive an installed adapter. */}
-          <select
-            value={adapterId}
-            onChange={(e) => {
-              setAdapterId(e.target.value);
-              setAdapterCommand(adapterById(e.target.value).command ?? "");
-            }}
-            disabled={running}
-            className="shrink-0 rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] px-1 py-1 text-[11px] outline-none disabled:opacity-60"
-          >
-            {DEBUG_ADAPTERS.map((adapter) => (
-              <option key={adapter.id} value={adapter.id}>
-                {adapter.label}
-              </option>
-            ))}
-          </select>
+          {/* Which debugger runs it. Node is built in; the rest drive an installed adapter.
+              The shared `Select` rather than a native one, at the same 11px metrics as the field
+              beside it — a native `<select>` sets its own height on macOS and sat a couple of
+              pixels taller than the input no matter what it was padded with. */}
+          <div className="w-[104px] shrink-0">
+            <Select
+              size="compact"
+              ariaLabel={t("debug.adapter")}
+              value={adapterId}
+              onChange={(next) => {
+                setAdapterId(next);
+                setAdapterCommand(adapterById(next).command ?? "");
+              }}
+              options={DEBUG_ADAPTERS.map((adapter) => ({
+                value: adapter.id,
+                label: adapter.label,
+              }))}
+              disabled={running}
+            />
+          </div>
           {running ? (
             <button
               onClick={() => void store.stop()}
