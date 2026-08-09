@@ -27,6 +27,11 @@ import {
  * `includeSecrets` is false at every call site by default: an exported collection routinely ends
  * up committed to a repo, so a variable flagged `secret` leaves with an empty value unless the
  * user explicitly opts in. Every exporter below applies that rule, the native one included.
+ *
+ * The readers in "Reading back what the DB stored" and the tree walkers below are exported for
+ * `docs.ts`, which is an exporter too — it just writes for a human rather than for another tool.
+ * They are the only supported way to turn a stored `spec` blob back into typed values; parsing
+ * that JSON anywhere else would fork the tolerance rules these apply to older or partial blobs.
  */
 
 // ---------------------------------------------------------------------------
@@ -104,7 +109,7 @@ function pretty(value: unknown): string {
  * settings are deliberately absent: nothing in Postman or OpenAPI holds them, and the native
  * exporter never parses the spec at all, so this narrow view is the whole need.
  */
-interface ExportView {
+export interface ExportView {
   protocol: ApiProtocol;
   method: string;
   url: string;
@@ -224,6 +229,11 @@ function readAuth(v: unknown): AuthConfig | null {
   return auth;
 }
 
+/** `readAuth` for the collection/folder columns, which hold the config as its own JSON string. */
+export function readAuthJson(json: string): AuthConfig | null {
+  return readAuth(parseJsonSafe(json));
+}
+
 function readExamples(v: unknown): SavedExample[] {
   if (!Array.isArray(v)) return [];
   return v.filter(isObj).map((e) => ({
@@ -236,7 +246,7 @@ function readExamples(v: unknown): SavedExample[] {
   }));
 }
 
-function readSpec(row: ApiRequestRow): ExportView {
+export function readSpec(row: ApiRequestRow): ExportView {
   const parsed = parseJsonSafe(row.spec);
   const spec = isObj(parsed) ? parsed : {};
   return {
@@ -255,7 +265,7 @@ function readSpec(row: ApiRequestRow): ExportView {
   };
 }
 
-function readVariables(json: string): ApiVariable[] | null {
+export function readVariables(json: string): ApiVariable[] | null {
   const parsed = parseJsonSafe(json);
   if (!Array.isArray(parsed)) return null;
   return parsed.filter(isObj).map((v) => ({
@@ -273,7 +283,7 @@ function readVariables(json: string): ApiVariable[] | null {
  * The single choke point for the secret guard. Both values are cleared, not just `initialValue`:
  * `currentValue` is the one a token-refresh script writes to, so it is the likelier leak.
  */
-function redact(vars: ApiVariable[], includeSecrets: boolean): ApiVariable[] {
+export function redact(vars: ApiVariable[], includeSecrets: boolean): ApiVariable[] {
   if (includeSecrets) return vars;
   return vars.map((v) => (v.secret ? { ...v, initialValue: "", currentValue: "" } : v));
 }
@@ -282,12 +292,12 @@ function redact(vars: ApiVariable[], includeSecrets: boolean): ApiVariable[] {
 // Tree walking
 // ---------------------------------------------------------------------------
 
-type TreeNode =
+export type TreeNode =
   | { kind: "folder"; order: number; folder: ApiFolder }
   | { kind: "request"; order: number; request: ApiRequestRow };
 
 /** Folders and requests share one ordering space under a parent, so they interleave by `sort_order`. */
-function childrenOf(
+export function childrenOf(
   collectionId: string,
   parentId: string | null,
   folders: ApiFolder[],
@@ -311,13 +321,13 @@ function childrenOf(
 // URL splitting, shared by the Postman and OpenAPI writers
 // ---------------------------------------------------------------------------
 
-interface SplitUrl {
+export interface SplitUrl {
   base: string;
   fragment: string;
   inlineParams: { key: string; value: string }[];
 }
 
-function splitUrl(raw: string): SplitUrl {
+export function splitUrl(raw: string): SplitUrl {
   const hashAt = raw.indexOf("#");
   const fragment = hashAt >= 0 ? raw.slice(hashAt) : "";
   const withoutHash = hashAt >= 0 ? raw.slice(0, hashAt) : raw;
@@ -755,6 +765,35 @@ export function exportEnvironment(env: ApiEnvironment, opts: ExportOptions): str
 
 const SERVER_VARIABLE_KEYS = ["baseurl", "base_url", "host", "url", "server", "endpoint"];
 
+/** What every request is hanging off, when there is one. */
+export interface ServerGuess {
+  /** The literal text to strip off a request URL to leave the path — `{{baseUrl}}` or an origin. */
+  prefix: string;
+  /** The same thing resolved for display: a variable's value rather than its name. */
+  url: string;
+}
+
+/**
+ * Guesses the collection's server two ways, in order: a collection variable named like a base URL
+ * that the requests actually start with, else a single origin shared by every request. Anything
+ * less consistent than that isn't a server, so the prefix comes back empty and callers keep the
+ * full URL. Shared with `docs.ts`, which shows the same guess as the document's base URL.
+ */
+export function guessServer(vars: ApiVariable[], urls: string[]): ServerGuess {
+  const serverVar = vars.find((v) => SERVER_VARIABLE_KEYS.includes(v.key.toLowerCase()));
+  if (serverVar && urls.some((u) => u.startsWith(`{{${serverVar.key}}}`))) {
+    const prefix = `{{${serverVar.key}}}`;
+    return { prefix, url: serverVar.initialValue || serverVar.currentValue || prefix };
+  }
+  const origins = urls
+    .map((u) => /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]+)/.exec(u)?.[1] ?? "")
+    .filter(Boolean);
+  if (origins.length && origins.every((o) => o === origins[0])) {
+    return { prefix: origins[0], url: origins[0] };
+  }
+  return { prefix: "", url: "" };
+}
+
 /** Schema inferred from a concrete example, so a generated spec still documents its own shape. */
 function schemaOfValue(value: unknown, depth = 0): Json {
   if (value === null || depth > 6) return { type: "null" };
@@ -943,7 +982,7 @@ function oasResponses(examples: SavedExample[]): Json {
 }
 
 /** Path chain of folder names, used as the operation's tag. */
-function folderTag(folderId: string | null, folders: ApiFolder[]): string {
+export function folderTag(folderId: string | null, folders: ApiFolder[]): string {
   const names: string[] = [];
   let current = folderId;
   const guard = new Set<string>();
@@ -976,21 +1015,13 @@ export function exportOpenApi(
     .filter(({ view }) => view.protocol === "http" || view.protocol === "graphql");
 
   const vars = readVariables(collection.variables) ?? [];
-  const serverVar = vars.find((v) => SERVER_VARIABLE_KEYS.includes(v.key.toLowerCase()));
-  let serverPrefix = "";
-  let serverUrl = "/";
-  if (serverVar && views.some(({ view }) => view.url.startsWith(`{{${serverVar.key}}}`))) {
-    serverPrefix = `{{${serverVar.key}}}`;
-    serverUrl = serverVar.initialValue || serverVar.currentValue || serverPrefix;
-  } else {
-    const origins = views
-      .map(({ view }) => /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/]+)/.exec(view.url)?.[1] ?? "")
-      .filter(Boolean);
-    if (origins.length && origins.every((o) => o === origins[0])) {
-      serverPrefix = origins[0];
-      serverUrl = origins[0];
-    }
-  }
+  const server = guessServer(
+    vars,
+    views.map(({ view }) => view.url),
+  );
+  const serverPrefix = server.prefix;
+  // OpenAPI requires a `url` on a server object; `/` is the spec's own "same host as the docs".
+  const serverUrl = server.url || "/";
 
   const paths: Json = {};
   const securitySchemes: Json = {};

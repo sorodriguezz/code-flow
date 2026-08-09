@@ -28,6 +28,11 @@ const WELL_KNOWN_PATHS = [
   "/v2/api-docs",
   "/openapi.json",
   "/swagger.json",
+  // Where Swagger 2.0 tooling puts it — the version in the path is the *API description's*, not the
+  // app's, so it is a fixed layout rather than a guess about someone's routing. The petstore, which
+  // is the URL everyone reaches for first when trying this feature out, is exactly this.
+  "/v2/swagger.json",
+  "/v1/swagger.json",
   "/swagger/v1/swagger.json",
   "/api-docs",
   "/api-json",
@@ -43,6 +48,20 @@ const PROBE_TIMEOUT_MS = 10_000;
 
 /** `url:`/`configUrl:` in Swagger UI's inline config, its initializer script, or a config JSON. */
 const URL_FIELD = /["']?(?:configUrl|url)["']?\s*:\s*["']([^"']+)["']/g;
+
+/**
+ * Any quoted string that looks like a document URL, anywhere in a script or config we fetched.
+ *
+ * `URL_FIELD` assumes the URL sits in the field that consumes it, and a real initializer routinely
+ * does not: Swagger UI's own ships as `const defaultDefinitionUrl = "…/v2/swagger.json"` and then
+ * `url: definitionURL`, so the field holds an identifier and the only literal in the file is the
+ * assignment above it. Matching on the shape of the value instead of on its key finds it.
+ *
+ * Only applied to text we already know is not a document (see `fetchSpec`), and every hit is a
+ * *candidate* that still has to answer 2xx with something `detectFormat` recognises — so a stray
+ * `package.json` costs one bounded probe rather than a wrong import.
+ */
+const DOC_URL = /["'`]((?:https?:\/\/|\.{0,2}\/)[^"'`\s]+\.(?:json|ya?ml))["'`]/gi;
 
 /**
  * `<script src="./swagger-initializer.js">` — Swagger UI 4+ moved the config out of the page.
@@ -142,18 +161,40 @@ async function probe(url: string, settings: ApiSettings): Promise<string | null>
 
 /** Every document URL a Swagger UI page, initializer script or config JSON points at. */
 function referencedUrls(text: string, base: string): string[] {
+  let host: string;
+  try {
+    host = new URL(base).hostname;
+  } catch {
+    return [];
+  }
+
   const out: string[] = [];
+  const seen = new Set<string>();
   const push = (raw: string) => {
-    // Swagger UI's own placeholder, and the petstore default a copied config leaves behind.
-    if (!raw || raw.includes("{{") || raw.includes("petstore.swagger.io")) return;
+    if (!raw || raw.includes("{{")) return;
+    let resolved: URL;
     try {
-      out.push(new URL(raw, base).toString());
+      resolved = new URL(raw, base);
     } catch {
-      /* a relative URL we can't resolve is not a candidate */
+      return; /* a relative URL we can't resolve is not a candidate */
     }
+    // Swagger UI ships pointing at the petstore, so a self-hosted copy whose config was never
+    // changed would otherwise import somebody else's API. Only a lead *off* the host being imported
+    // is dropped: asking for the petstore — which is the first URL anyone tries this with — has to
+    // be able to return the petstore.
+    if (resolved.hostname !== host && /(^|\.)petstore\d*\.swagger\.io$/i.test(resolved.hostname)) {
+      return;
+    }
+    const href = resolved.toString();
+    if (seen.has(href)) return;
+    seen.add(href);
+    out.push(href);
   };
+  // Ordered by how specific the evidence is: a `url:` field is the document, a script tag is one
+  // more hop, and a bare literal is a guess about a string that merely looks like one.
   for (const match of text.matchAll(URL_FIELD)) push(match[1]);
   for (const match of text.matchAll(SCRIPT_SRC)) push(match[1]);
+  for (const match of text.matchAll(DOC_URL)) push(match[1]);
   return out;
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Briefcase,
   Check,
@@ -7,6 +7,7 @@ import {
   GripVertical,
   Pencil,
   Plus,
+  Search,
   Trash2,
   X,
 } from "lucide-react";
@@ -19,13 +20,19 @@ import { useT } from "../../state/languageStore";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { SettingsHeader } from "../api/settingsChrome";
 import { riseDelay } from "../../lib/rise";
+import type { Project, Workspace } from "../../types/domain";
 
-/** The repository being dragged, and where it would land if the pointer were released now. */
+/**
+ * The row being dragged, and where it would land if the pointer were released now.
+ *
+ * One shape for both lists on this panel. `workspaceId` scopes a repository drag to the list it
+ * started in, so a pointer wandering into another workspace's rows lands on nothing rather than on
+ * that workspace's gaps; a workspace drag has no parent list to be scoped to and leaves it `null`.
+ */
 interface RowDrag {
-  workspaceId: string;
+  workspaceId: string | null;
   id: string;
-  /** Index in the workspace's list the row would take. `null` while the pointer is over nothing
-   *  this drag can land on — another workspace's list, or off the panel entirely. */
+  /** Index in the list the row would take. `null` while the pointer is over nothing droppable. */
   overIndex: number | null;
 }
 
@@ -34,11 +41,11 @@ interface RowDrag {
  *
  * Measured off the DOM rather than tracked per row, because the answer is "above or below the
  * midpoint of whichever row you are over" and that needs the geometry either way. Rows are tagged
- * with `data-project-row` so this can find them without threading refs through every one.
+ * with a data attribute so this can find them without threading refs through every one.
  */
-function dropIndexAt(list: HTMLElement | null, y: number): number | null {
+function dropIndexAt(list: HTMLElement | null, selector: string, y: number): number | null {
   if (!list) return null;
-  const rows = [...list.querySelectorAll<HTMLElement>("[data-project-row]")];
+  const rows = [...list.querySelectorAll<HTMLElement>(selector)];
   if (rows.length === 0) return null;
   const box = list.getBoundingClientRect();
   // A pointer well outside the list is not hovering a gap in it.
@@ -58,16 +65,32 @@ function dropIndexAt(list: HTMLElement | null, y: number): number | null {
  * marked by being faded, and a line touching it would point at the gap it is currently filling.
  */
 function insertionLine(
-  drag: RowDrag | null,
-  workspaceId: string,
+  dragId: string | null,
+  overIndex: number | null,
   id: string,
   at: number,
   count: number,
 ): string {
-  if (drag?.workspaceId !== workspaceId || drag.overIndex === null || drag.id === id) return "";
-  if (drag.overIndex === at) return "shadow-[0_-2px_0_0_var(--cf-accent)]";
-  if (drag.overIndex >= count && at === count - 1) return "shadow-[0_2px_0_0_var(--cf-accent)]";
+  if (!dragId || overIndex === null || dragId === id) return "";
+  if (overIndex === at) return "shadow-[0_-2px_0_0_var(--cf-accent)]";
+  if (overIndex >= count && at === count - 1) return "shadow-[0_2px_0_0_var(--cf-accent)]";
   return "";
+}
+
+/**
+ * One workspace as this panel shows it.
+ *
+ * `shown` and `all` are the same list until the filter narrows it, and then the difference matters:
+ * `shown` is what gets rendered, but "can this workspace be removed?" has to keep asking `all`.
+ * Answering it from a filtered list would offer to delete a workspace with four repositories in it
+ * purely because none of them matched what the user typed.
+ */
+interface WorkspaceRow {
+  ws: Workspace;
+  shown: Project[];
+  all: Project[];
+  /** The workspace only matched through its repositories, so it opens to show which. */
+  forcedOpen: boolean;
 }
 
 export function ProjectsSettings() {
@@ -81,16 +104,43 @@ export function ProjectsSettings() {
   const setWorkspaceColor = useWorkspaceStore((s) => s.setWorkspaceColor);
   const setProjectColor = useWorkspaceStore((s) => s.setProjectColor);
   const renameWorkspace = useWorkspaceStore((s) => s.renameWorkspace);
+  const reorderProject = useWorkspaceStore((s) => s.reorderProject);
+  const reorderWorkspace = useWorkspaceStore((s) => s.reorderWorkspace);
   const [newName, setNewName] = useState("");
+  const [filter, setFilter] = useState("");
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
   // Which workspace is being renamed, and the half-typed name — one at a time, so opening a
   // second row's field closes the first rather than leaving two drafts on screen.
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
-  const reorderProject = useWorkspaceStore((s) => s.reorderProject);
   const [drag, setDrag] = useState<RowDrag | null>(null);
-  /** One entry per workspace, so a drag can measure the list it started in. */
+  /** One entry per workspace, so a repository drag can measure the list it started in. */
   const listRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const workspaceListRef = useRef<HTMLDivElement>(null);
+
+  const query = filter.trim().toLowerCase();
+  const filtering = query.length > 0;
+
+  /**
+   * A workspace earns its place either on its own name — in which case it keeps all its
+   * repositories, since the workspace itself is the hit — or on a repository inside it, in which
+   * case only the matching ones are listed and the row opens to show them. Paths are searched
+   * alongside names because "which workspace was that clone in?" is the question this filter is
+   * really for, and the answer is often only in the path.
+   */
+  const rows = useMemo<WorkspaceRow[]>(
+    () =>
+      workspaces.flatMap<WorkspaceRow>((ws) => {
+        const all = projectsByWorkspace[ws.id] ?? [];
+        if (!query) return [{ ws, shown: all, all, forcedOpen: false }];
+        if (ws.name.toLowerCase().includes(query)) return [{ ws, shown: all, all, forcedOpen: false }];
+        const hits = all.filter(
+          (p) => p.name.toLowerCase().includes(query) || p.local_path.toLowerCase().includes(query),
+        );
+        return hits.length ? [{ ws, shown: hits, all, forcedOpen: true }] : [];
+      }),
+    [workspaces, projectsByWorkspace, query],
+  );
 
   /**
    * The whole reorder gesture, on `window` so it keeps tracking when the pointer leaves the row.
@@ -99,8 +149,16 @@ export function ProjectsSettings() {
    * are the same: Tauri's native drag handler on the webview swallows those events before the page
    * sees them (see `lib/pointerDrag.ts`). A press that never travels `DRAG_THRESHOLD` is not a
    * drag, so a click on the handle does nothing rather than reordering by a pixel of jitter.
+   *
+   * Shared by both lists: the two differ only in which element they measure and what they commit.
    */
-  const beginDrag = (e: React.PointerEvent, workspaceId: string, id: string) => {
+  const trackReorder = (
+    e: React.PointerEvent,
+    row: Omit<RowDrag, "overIndex">,
+    listAt: () => HTMLElement | null,
+    selector: string,
+    commit: (toIndex: number) => void,
+  ) => {
     if (e.button !== 0) return;
     e.preventDefault();
     const from = { x: e.clientX, y: e.clientY };
@@ -112,7 +170,7 @@ export function ProjectsSettings() {
         started = true;
         setDragCursor(true);
       }
-      setDrag({ workspaceId, id, overIndex: dropIndexAt(listRefs.current[workspaceId], ev.clientY) });
+      setDrag({ ...row, overIndex: dropIndexAt(listAt(), selector, ev.clientY) });
     };
 
     const onUp = (ev: PointerEvent) => {
@@ -122,15 +180,33 @@ export function ProjectsSettings() {
       if (!started) return;
       setDragCursor(false);
       setDrag(null);
-      const to = dropIndexAt(listRefs.current[workspaceId], ev.clientY);
+      const to = dropIndexAt(listAt(), selector, ev.clientY);
       // Dropped on nothing — the row stays where it was, like every list that does this.
-      if (to !== null) void reorderProject(workspaceId, id, to);
+      if (to !== null) commit(to);
     };
 
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
   };
+
+  const beginProjectDrag = (e: React.PointerEvent, workspaceId: string, id: string) =>
+    trackReorder(
+      e,
+      { workspaceId, id },
+      () => listRefs.current[workspaceId],
+      "[data-project-row]",
+      (to) => void reorderProject(workspaceId, id, to),
+    );
+
+  const beginWorkspaceDrag = (e: React.PointerEvent, id: string) =>
+    trackReorder(
+      e,
+      { workspaceId: null, id },
+      () => workspaceListRef.current,
+      "[data-workspace-row]",
+      (to) => void reorderWorkspace(id, to),
+    );
 
   const startRename = (id: string, name: string) => {
     setRenamingId(id);
@@ -173,14 +249,100 @@ export function ProjectsSettings() {
     setTimeout(() => setCopiedPath((prev) => (prev === path ? null : prev)), 1500);
   };
 
+  const addNewWorkspace = async () => {
+    const name = newName.trim();
+    if (!name) return;
+    await addWorkspace(name, "briefcase", DEFAULT_WORKSPACE_COLOR);
+    setNewName("");
+  };
+
+  /** Only ever set by a workspace drag — repository drags carry the id of the list they belong to. */
+  const workspaceDrag = drag?.workspaceId === null ? drag : null;
+
+  /**
+   * Reordering is off while the filter is on.
+   *
+   * Both lists resolve a drop by counting the rows that are *rendered*, and the store then applies
+   * that index to the full list. With rows hidden the two disagree, so a drop that looks like
+   * "second" would land somewhere else entirely. Rather than translate between the two indexes —
+   * which still leaves the user arranging a list they can only partly see — the handle says why it
+   * is inert and the filter is one click from being cleared.
+   */
+  const dragHandle = (label: string, onPointerDown: (e: React.PointerEvent) => void) =>
+    filtering ? (
+      <span
+        title={t("settings.reorderWhileFiltering")}
+        aria-hidden
+        className="-ml-1 shrink-0 cursor-not-allowed text-[var(--cf-text-muted)] opacity-30"
+      >
+        <GripVertical size={13} />
+      </span>
+    ) : (
+      <span
+        onPointerDown={onPointerDown}
+        title={label}
+        aria-label={label}
+        className="-ml-1 shrink-0 cursor-grab touch-none text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] active:cursor-grabbing"
+      >
+        <GripVertical size={13} />
+      </span>
+    );
+
   return (
     <section>
       <SettingsHeader title={t("settings.projectsTitle")} hint={t("settings.projectsHint")} />
-      <div className="space-y-4">
-        {workspaces.map((ws) => {
-          const projects = projectsByWorkspace[ws.id] ?? [];
+
+      {/* Above the list, not below it: the list grows without bound and a control parked under it
+          walks off the bottom of the panel, while the two things this row does — find a workspace,
+          add one — are both what you arrive here to do. New workspaces still land at the end of the
+          list (see `create_workspace`), so the form's position says nothing about where they go. */}
+      <div className="mb-4 flex gap-1.5">
+        <div className="relative flex min-w-0 flex-1 items-center">
+          <Search
+            size={13}
+            className="pointer-events-none absolute left-2.5 text-[var(--cf-text-muted)]"
+          />
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder={t("settings.filterPlaceholder")}
+            aria-label={t("settings.filterPlaceholder")}
+            className="w-full rounded-md border border-[var(--cf-border)] bg-transparent py-1.5 pl-7 pr-7 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+          />
+          {filtering && (
+            <button
+              onClick={() => setFilter("")}
+              title={t("common.clear")}
+              aria-label={t("common.clear")}
+              className="absolute right-2 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            >
+              <X size={12} />
+            </button>
+          )}
+        </div>
+        <input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && newName.trim()) void addNewWorkspace();
+          }}
+          placeholder={t("settings.newWorkspaceNamePlaceholder")}
+          className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
+        />
+        <button
+          disabled={!newName.trim()}
+          onClick={() => void addNewWorkspace()}
+          className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
+        >
+          <Plus size={13} />
+          {t("settings.addWorkspace")}
+        </button>
+      </div>
+
+      <div ref={workspaceListRef} className="space-y-4">
+        {rows.map(({ ws, shown, all, forcedOpen }, wsAt) => {
           const isOnlyWorkspace = workspaces.length <= 1;
-          const hasProjects = projects.length > 0;
+          const hasProjects = all.length > 0;
           const disableRemoveWorkspace = isOnlyWorkspace || hasProjects;
           const removeWorkspaceTitle = isOnlyWorkspace
             ? t("settings.onlyWorkspace")
@@ -188,11 +350,28 @@ export function ProjectsSettings() {
               ? t("settings.removeWorkspaceHasProjects")
               : t("settings.removeWorkspace");
 
-          const expanded = expandedIds.has(ws.id);
+          const expanded = forcedOpen || expandedIds.has(ws.id);
 
           return (
-            <div key={ws.id} className="rounded-lg border border-[var(--cf-border)] p-2.5">
+            <div
+              key={ws.id}
+              data-workspace-row
+              className={`rounded-lg border p-2.5 transition-colors ${
+                workspaceDrag?.id === ws.id
+                  ? "border-[var(--cf-accent)] opacity-40"
+                  : "border-[var(--cf-border)]"
+              } ${insertionLine(
+                workspaceDrag?.id ?? null,
+                workspaceDrag?.overIndex ?? null,
+                ws.id,
+                wsAt,
+                rows.length,
+              )}`}
+            >
               <div className={`flex items-center gap-2 text-[13px] font-medium ${expanded ? "mb-2" : ""}`}>
+                {/* Outside the rename branch so the row's contents don't shift sideways the moment
+                    the field opens. */}
+                {dragHandle(t("settings.reorderWorkspace"), (e) => beginWorkspaceDrag(e, ws.id))}
                 {renamingId === ws.id ? (
                   // In place of the row's own label, so the name is edited where it is read. No
                   // commit on blur: the tick and Escape/× are the two answers, and a blur-commit
@@ -246,7 +425,7 @@ export function ProjectsSettings() {
                       <span className="flex-1 truncate">{ws.name}</span>
                       {!expanded && (
                         <span className="shrink-0 rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[10px] font-normal text-[var(--cf-text-muted)] dark:bg-white/[0.08]">
-                          {projects.length}
+                          {shown.length}
                         </span>
                       )}
                     </button>
@@ -283,29 +462,28 @@ export function ProjectsSettings() {
                   }}
                   className="space-y-1.5"
                 >
-                  {projects.map((p, at) => (
+                  {shown.map((p, at) => (
                     <div
                       key={p.id}
                       data-project-row
                       style={riseDelay(at)}
                       className={`cf-rise rounded-md border px-2.5 py-1.5 transition-colors ${
-                        drag?.id === p.id
+                        drag?.workspaceId === ws.id && drag.id === p.id
                           ? "border-[var(--cf-accent)] opacity-40"
                           : "border-[var(--cf-border)]"
-                      } ${insertionLine(drag, ws.id, p.id, at, projects.length)}`}
+                      } ${insertionLine(
+                        drag?.workspaceId === ws.id ? drag.id : null,
+                        drag?.workspaceId === ws.id ? drag.overIndex : null,
+                        p.id,
+                        at,
+                        shown.length,
+                      )}`}
                     >
                       <div className="flex items-center gap-2 text-[12px]">
                         {/* A handle rather than the whole row: the row carries a colour picker, a
                             bin and a copy-the-path button, and a press anywhere on it that might
                             turn into a drag makes all three feel unreliable. */}
-                        <span
-                          onPointerDown={(e) => beginDrag(e, ws.id, p.id)}
-                          title={t("settings.reorderProject")}
-                          aria-label={t("settings.reorderProject")}
-                          className="-ml-1 shrink-0 cursor-grab touch-none text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] active:cursor-grabbing"
-                        >
-                          <GripVertical size={13} />
-                        </span>
+                        {dragHandle(t("settings.reorderProject"), (e) => beginProjectDrag(e, ws.id, p.id))}
                         <ColorSwatchPicker value={p.color} onChange={(color) => setProjectColor(p.id, ws.id, color)} />
                         <span className="flex-1 truncate font-medium">{p.name}</span>
                         <button
@@ -330,7 +508,7 @@ export function ProjectsSettings() {
                       </button>
                     </div>
                   ))}
-                  {projects.length === 0 && (
+                  {shown.length === 0 && (
                     <p className="text-[12px] text-[var(--cf-text-muted)]">{t("settings.noProjectsInWorkspace")}</p>
                   )}
                 </div>
@@ -338,26 +516,10 @@ export function ProjectsSettings() {
             </div>
           );
         })}
-      </div>
 
-      <div className="mt-4 flex gap-1.5 border-t border-[var(--cf-border)] pt-3">
-        <input
-          value={newName}
-          onChange={(e) => setNewName(e.target.value)}
-          placeholder={t("settings.newWorkspaceNamePlaceholder")}
-          className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]"
-        />
-        <button
-          disabled={!newName.trim()}
-          onClick={async () => {
-            await addWorkspace(newName.trim(), "briefcase", DEFAULT_WORKSPACE_COLOR);
-            setNewName("");
-          }}
-          className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] disabled:opacity-40 dark:hover:bg-white/[0.04]"
-        >
-          <Plus size={13} />
-          {t("settings.addWorkspace")}
-        </button>
+        {rows.length === 0 && (
+          <p className="text-[12px] text-[var(--cf-text-muted)]">{t("settings.filterNoMatches")}</p>
+        )}
       </div>
     </section>
   );

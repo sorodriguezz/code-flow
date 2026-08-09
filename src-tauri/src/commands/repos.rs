@@ -152,6 +152,13 @@ pub fn list_workspaces(db: State<Db>) -> Result<Vec<Workspace>, String> {
     queries::list_workspaces(&conn).map_err(|e| e.to_string())
 }
 
+/// Writes the order the workspaces are shown in. `ids` is the whole list.
+#[tauri::command]
+pub fn reorder_workspaces(db: State<Db>, ids: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::reorder_workspaces(&conn, &ids).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn delete_workspace(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;

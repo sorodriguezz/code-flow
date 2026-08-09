@@ -9,6 +9,7 @@ import { CodeSnippetPanel } from "./CodeSnippetPanel";
 import { EnvironmentModal } from "./EnvironmentModal";
 import { ImportModal } from "./ImportModal";
 import { ExportModal } from "./ExportModal";
+import { DocsModal } from "./DocsModal";
 import { RunnerModal } from "./RunnerModal";
 import { CookieModal } from "./CookieModal";
 import { CollabModal } from "./CollabModal";
@@ -209,6 +210,7 @@ export function ApiView() {
       {modal?.kind === "export" && (
         <ExportModal collectionId={modal.collectionId} onClose={closeModal} />
       )}
+      {modal?.kind === "docs" && <DocsModal collectionId={modal.collectionId} onClose={closeModal} />}
       {modal?.kind === "runner" && (
         <RunnerModal collectionId={modal.collectionId} folderId={modal.folderId} onClose={closeModal} />
       )}

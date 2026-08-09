@@ -31,6 +31,8 @@ interface WorkspaceState {
    *  the user dropped it before the write goes out, because a list that snaps back for a moment
    *  reads as a failed drag. */
   reorderProject: (workspaceId: string, id: string, toIndex: number) => Promise<void>;
+  /** The same gesture one level up, for the workspaces themselves. Optimistic for the same reason. */
+  reorderWorkspace: (id: string, toIndex: number) => Promise<void>;
   setActiveWorkspace: (id: string) => void;
   setActiveProject: (id: string) => void;
   /** Brings a project into focus from anywhere, crossing workspaces if it lives in another one —
@@ -204,6 +206,25 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
       pushErrorToast(String(e));
       // Back to what the database still holds — the optimistic list is now a lie.
       set((s) => ({ projectsByWorkspace: { ...s.projectsByWorkspace, [workspaceId]: current } }));
+    });
+  },
+
+  reorderWorkspace: async (id, toIndex) => {
+    const current = get().workspaces;
+    const from = current.findIndex((w) => w.id === id);
+    if (from === -1) return;
+    // Same off-by-one as `reorderProject`: `toIndex` is a gap in the list with the dragged row
+    // still in it, so a drop below the row's own position shifts down by one when it is removed.
+    const target = from < toIndex ? toIndex - 1 : toIndex;
+    const next = [...current];
+    const [moved] = next.splice(from, 1);
+    next.splice(Math.max(0, Math.min(target, next.length)), 0, moved);
+    if (next.every((w, at) => w.id === current[at].id)) return;
+
+    set({ workspaces: next });
+    await api.reorderWorkspaces(next.map((w) => w.id)).catch((e: unknown) => {
+      pushErrorToast(String(e));
+      set({ workspaces: current });
     });
   },
 

@@ -32,6 +32,35 @@ export function badgeLabel(protocol: ApiProtocol, method: string): string {
   return (method.trim() || "GET").toUpperCase();
 }
 
+/**
+ * The two verbs long enough to set the width of a column everything else then pays for.
+ *
+ * `DELETE` is six characters and `OPTIONS` is seven; the next longest is `PATCH` at five. Written in
+ * full they make the tree's verb column 40px wide, and since container rows reserve that same column
+ * to keep their names on the tree's one left edge, every folder icon in the app ends up floating in
+ * the middle of a gap sized for a word that appears on two rows out of thirty.
+ *
+ * Abbreviated the column is 30px, which is a quarter of the row's chrome back. The convention is
+ * Insomnia's and it is unambiguous — no other HTTP verb starts with `DEL` or `OPT`.
+ */
+const SHORT_METHODS: Record<string, string> = {
+  DELETE: "DEL",
+  OPTIONS: "OPTS",
+  CONNECT: "CONN",
+};
+
+/**
+ * The badge label where the column is narrow — the tree, the sidebar's search results, the history.
+ *
+ * Not `badgeLabel` itself, because the URL bar shows the verb the request is actually going to send
+ * and a reader has to be able to trust it literally. A tree row is a pointer to a request; the URL
+ * bar is the request.
+ */
+export function badgeShort(protocol: ApiProtocol, method: string): string {
+  const label = badgeLabel(protocol, method);
+  return protocol === "http" ? (SHORT_METHODS[label] ?? label) : label;
+}
+
 export function badgeColor(protocol: ApiProtocol, method: string): string {
   if (protocol === "graphql") return "var(--cf-accent)";
   if (protocol !== "http") return "var(--cf-text-muted)";

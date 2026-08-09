@@ -212,6 +212,7 @@ pub fn run() {
             commands::repos::default_clone_dir,
             commands::repos::create_workspace,
             commands::repos::list_workspaces,
+            commands::repos::reorder_workspaces,
             commands::repos::delete_workspace,
             commands::repos::update_workspace_color,
             commands::repos::rename_workspace,

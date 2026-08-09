@@ -27,6 +27,7 @@ import { ScopePicker } from "./ScopePicker";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
 import { nodeKey, useDbStore, type DbConsoleTab } from "../../state/dbStore";
 import { useDbModalStore } from "../../state/dbModalStore";
+import { useDbObjectDragStore } from "../../state/dbObjectDragStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useToastStore } from "../../state/toastStore";
@@ -135,6 +136,94 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
     }
     void store.runConsole(tab.id);
   };
+
+  /**
+   * A table dragged out of the explorer, and whether it is over this editor.
+   *
+   * Refused unless it came from *this* connection: `text` was quoted for the engine it was dragged
+   * from (`[x]` on SQL Server, `"x"` elsewhere), so the same name pasted into another engine's
+   * console is a syntax error waiting to be run. Refusing shows as the drop hint simply never
+   * appearing, which is the same answer the rest of the app gives for a drop that can't land.
+   */
+  const objectDrag = useDbObjectDragStore((s) => s.drag);
+  const endObjectDrag = useDbObjectDragStore((s) => s.end);
+  const [dropOver, setDropOver] = useState(false);
+  const acceptsDrop = objectDrag !== null && objectDrag.connectionId === tab.connectionId;
+  /** The editor's pane, so a release anywhere on screen can be tested against its box. */
+  const editorBoxRef = useRef<HTMLDivElement>(null);
+
+  // The drag can end anywhere — over the results, outside the window — and the highlight has to go
+  // with it. `dbObjectDragStore` clears the drag from a `window` listener, so this is the one signal
+  // that arrives for every ending, including the ones this panel never sees.
+  useEffect(() => {
+    if (!objectDrag) setDropOver(false);
+  }, [objectDrag]);
+
+  /**
+   * Inserts the dragged name where it was dropped, not where the caret happens to be.
+   *
+   * `getTargetAtClientPoint` is what makes that possible: you aim at a spot in a half-written
+   * `SELECT ... FROM` and the name lands there. Falling back to the caret covers the drop that
+   * lands past the last line, where there is no position under the pointer to resolve.
+   */
+  const insertObject = (text: string, clientX: number, clientY: number) => {
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (!editor || !model) return;
+    const position = editor.getTargetAtClientPoint(clientX, clientY)?.position ?? editor.getPosition();
+    if (!position) return;
+
+    // A name dropped straight after a word would weld itself to it — `FROM"public"."x"` parses, and
+    // is unreadable. One space when the character before is one a name cannot legally touch.
+    const before = model.getValueInRange({
+      startLineNumber: position.lineNumber,
+      startColumn: 1,
+      endLineNumber: position.lineNumber,
+      endColumn: position.column,
+    });
+    const padded = /[\w"'`\])]$/.test(before) ? ` ${text}` : text;
+
+    const at = {
+      startLineNumber: position.lineNumber,
+      startColumn: position.column,
+      endLineNumber: position.lineNumber,
+      endColumn: position.column,
+    };
+    editor.executeEdits("cf-drop-object", [{ range: at, text: padded, forceMoveMarkers: true }]);
+    // The caret lands after what was inserted, so you can keep typing the clause it belongs to.
+    editor.setPosition({ lineNumber: position.lineNumber, column: position.column + padded.length });
+    editor.focus();
+  };
+
+  /**
+   * The drop itself, from `window` rather than from a handler on the editor's wrapper.
+   *
+   * Monaco owns the DOM under this pane and there is no contract that says a `pointerup` inside it
+   * reaches a React handler above — a listener on the wrapper works right up until it doesn't. A
+   * hit test against the pane's own box asks the question directly instead.
+   *
+   * **Capture phase, and that is load-bearing.** `dbObjectDragStore` arms its own `pointerup` on
+   * `window` the moment the press begins, to guarantee a drag can never get stuck; registered in
+   * the bubble phase this would run *after* it, and the drag would already be `null`. Capture-phase
+   * listeners on `window` run before every bubble-phase one, so this reads the drag while it lives.
+   */
+  useEffect(() => {
+    if (!acceptsDrop || !objectDrag) return;
+    const drop = (e: PointerEvent) => {
+      const box = editorBoxRef.current?.getBoundingClientRect();
+      if (!box) return;
+      const inside =
+        e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom;
+      if (!inside) return;
+      insertObject(objectDrag.text, e.clientX, e.clientY);
+      endObjectDrag();
+    };
+    window.addEventListener("pointerup", drop, true);
+    return () => window.removeEventListener("pointerup", drop, true);
+    // `insertObject` is rebuilt every render but closes over nothing that changes — only `editorRef`
+    // — so the drag itself is the whole dependency, and the listener exists only while one is live.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [acceptsDrop, objectDrag, endObjectDrag]);
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
@@ -255,7 +344,22 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
       </div>
 
       {/* Editor */}
-      <div className="min-h-0 flex-1">
+      <div
+        ref={editorBoxRef}
+        className="relative min-h-0 flex-1"
+        // Highlight only — the drop is handled from `window` above, because these handlers sit on
+        // top of Monaco's own DOM and are not guaranteed to see a release inside it. `pointerenter`
+        // covers the drag arriving from the tree; `pointermove` is the belt to its braces, for one
+        // that begins with the pointer already inside. Guarded, so it is a comparison per move
+        // rather than a render.
+        onPointerEnter={() => {
+          if (acceptsDrop) setDropOver(true);
+        }}
+        onPointerMove={() => {
+          if (acceptsDrop && !dropOver) setDropOver(true);
+        }}
+        onPointerLeave={() => setDropOver(false)}
+      >
         <Editor
           height="100%"
           // One model per tab, so two consoles keep their own undo history and cursor. The scheme
@@ -269,6 +373,16 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
           onMount={handleMount}
           options={EDITOR_OPTIONS}
         />
+        {/* `pointer-events-none` so the drop still reaches the wrapper's handler and Monaco can
+            still resolve the position under the pointer — an overlay that swallowed the release
+            would be a drop target you cannot drop on. */}
+        {dropOver && objectDrag && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex justify-center rounded-sm border-2 border-dashed border-[var(--cf-accent)] bg-[color-mix(in_oklab,var(--cf-accent)_7%,transparent)]">
+            <span className="mt-3 h-fit rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2 py-1 text-[11px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]">
+              {t("db.dropObjectHint", { name: objectDrag.label })}
+            </span>
+          </div>
+        )}
       </div>
 
       <ResizeHandle

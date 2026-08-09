@@ -89,6 +89,26 @@ function qualify(node: DbNode, kind: DbKind): string {
   return node.schema ? `${quote(node.schema, kind)}.${quote(node.name, kind)}` : quote(node.name, kind);
 }
 
+/**
+ * How a console names this object — what dragging it out of the explorer inserts.
+ *
+ * The same `qualify` every draft above is built on, exported so the drop and the generated
+ * statements cannot disagree: a name dragged in reads identically to one that arrived with a
+ * `SELECT`, quotes and all.
+ *
+ * Quoted even when the name would survive bare, which is the deliberate half of that. Unquoted is
+ * prettier right up until the collection holds a `"Users"` on Postgres or an `order` anywhere, and
+ * the failure then is a syntax error in a query the user did not type — the one kind of paste that
+ * teaches nothing. The schema is included whenever the node has one rather than when the console's
+ * current scope makes it necessary: that scope is a dropdown two clicks from changing, and a query
+ * that silently starts resolving against a different schema is worse than a redundant prefix.
+ */
+export function objectReference(node: DbNode, kind: DbKind): string {
+  // Mongo names a collection through `db`, exactly as every Mongo draft above does; the bare name
+  // is not valid anywhere in that shell.
+  return engineInfo(kind).sql ? qualify(node, kind) : `db.${node.name}`;
+}
+
 /** A placeholder that is obviously one, so an unfinished draft can't be mistaken for a finished one. */
 const VALUE = "?";
 

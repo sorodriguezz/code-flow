@@ -33,12 +33,21 @@ pub(crate) fn now() -> String {
 // ---------- workspaces ----------
 
 pub fn create_workspace(conn: &Connection, name: &str, icon: &str, color: &str) -> rusqlite::Result<Workspace> {
+    // Appended, not prepended. `list_workspaces` sorts on `sort_order` and the user arranges that
+    // order by hand (see `reorder_workspaces`), so a new row taking 0 would push itself in front of
+    // an arrangement somebody made on purpose. `MAX + 1` puts it after everything; the `-1` default
+    // means the first workspace on a fresh install still starts at 0.
+    let sort_order: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspaces",
+        [],
+        |row| row.get(0),
+    )?;
     let ws = Workspace {
         id: Uuid::new_v4().to_string(),
         name: name.to_string(),
         icon: icon.to_string(),
         color: color.to_string(),
-        sort_order: 0,
+        sort_order,
         created_at: now(),
     };
     conn.execute(
@@ -422,6 +431,23 @@ pub fn list_workspaces(conn: &Connection) -> rusqlite::Result<Vec<Workspace>> {
         })
     })?;
     rows.collect()
+}
+
+/// Writes the order the user arranged the workspaces in.
+///
+/// The same positional contract as [`reorder_projects`]: the caller sends the whole list in its new
+/// order and each row takes its index, so anything missing from the list keeps the `sort_order` it
+/// had. Unscoped, because workspaces are the top of the tree — there is no parent whose siblings a
+/// stale list could renumber by mistake.
+pub fn reorder_workspaces(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (index, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE workspaces SET sort_order = ?2 WHERE id = ?1",
+            params![id, index as i64],
+        )?;
+    }
+    tx.commit()
 }
 
 pub fn delete_workspace(conn: &Connection, id: &str) -> rusqlite::Result<()> {

@@ -51,6 +51,7 @@ import {
 } from "../../state/dbStore";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useDbDragStore } from "../../state/dbDragStore";
+import { useDbObjectDragStore } from "../../state/dbObjectDragStore";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -58,7 +59,12 @@ import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { dbChildren } from "../../lib/tauri/dbCommands";
 import { riseDelay } from "../../lib/rise";
-import { createTemplate, sqlTemplate, type SqlTemplate } from "../../lib/db/sqlTemplates";
+import {
+  createTemplate,
+  objectReference,
+  sqlTemplate,
+  type SqlTemplate,
+} from "../../lib/db/sqlTemplates";
 import {
   engineInfo,
   type DbConnectionRow,
@@ -161,15 +167,19 @@ function TreeRow({
    * before it so the names of sibling rows still line up. */
   badge?: React.ReactNode;
   color?: string;
-  /** Pointer plumbing for the rows that can be dragged — only the connections. Spread onto the row
-   * rather than handled here, so a row that isn't draggable carries no handlers at all. */
+  /** Pointer plumbing for the rows that can be dragged. Spread onto the row rather than handled
+   * here, so a row that isn't draggable carries no handlers at all.
+   *
+   * Two kinds of row use it and they need different halves: a connection is dragged *and* dropped
+   * onto, so it wires all four; a table is only ever dragged *out* — into a console — and wires the
+   * first two. Hence every handler being optional. */
   drag?: {
-    onPointerDown: (e: React.PointerEvent) => void;
-    onPointerMove: (e: React.PointerEvent) => void;
-    onPointerEnter: () => void;
-    onPointerUp: () => void;
+    onPointerDown?: (e: React.PointerEvent) => void;
+    onPointerMove?: (e: React.PointerEvent) => void;
+    onPointerEnter?: () => void;
+    onPointerUp?: () => void;
   };
-  /** Drawn as the line a drop would land on. */
+  /** Drawn as the line a drop would land on. Omitted entirely by rows nothing lands on. */
   dropTarget?: boolean;
 }) {
   return (
@@ -216,8 +226,13 @@ function TreeRow({
       className={`cf-rise group flex w-full cursor-default items-center gap-1 rounded-md py-[3px] pr-1.5 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         // Only the rows that can be dropped onto carry the border, transparent or not: giving it to
         // every row would add a pixel to each of the hundreds a schema can hold, for a line that
-        // only ever draws on a connection.
-        drag ? (dropTarget ? "border-t border-[var(--cf-accent)]" : "border-t border-transparent") : ""
+        // only ever draws on a connection. Keyed off `dropTarget` rather than off `drag`, because a
+        // table row is draggable without being droppable — it would otherwise have paid the pixel.
+        dropTarget !== undefined
+          ? dropTarget
+            ? "border-t border-[var(--cf-accent)]"
+            : "border-t border-transparent"
+          : ""
       } ${
         active
           ? "bg-[var(--cf-accent-soft)]"
@@ -326,6 +341,8 @@ function NodeSubtree({
   const children = useDbStore((s) => s.children[key]);
   const error = useDbStore((s) => s.nodeErrors[key]);
   const openModal = useDbModalStore((s) => s.openDbModal);
+  const dragPress = useDbObjectDragStore((s) => s.press);
+  const dragBegin = useDbObjectDragStore((s) => s.begin);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   /** The second menu: which statement to draft, once "Generate SQL" has been picked. */
   const [generateMenu, setGenerateMenu] = useState<{ x: number; y: number } | null>(null);
@@ -558,6 +575,56 @@ function NodeSubtree({
       <TreeRow
         depth={depth}
         at={at}
+        /**
+         * Dragging a relation out of the tree, to drop its name into a console.
+         *
+         * Only relations: a schema or a folder is not something a query names, and a column would
+         * want a different reference than `schema.table` — worth having, but not by pretending it
+         * is the same drag.
+         *
+         * The text is rendered here, at the press, rather than at the drop. The engine is known
+         * here and the quoting rules live one import away in `sqlTemplates`; a console working it
+         * out on release would be a second place in the app that knows how SQL Server spells a
+         * quote. See `dbObjectDragStore`.
+         */
+        drag={
+          isRelation
+            ? {
+                onPointerDown: (e) => {
+                  // Left button only. A right-click opens the menu, and picking the row up under
+                  // it would leave the tree dragging something the user never grabbed.
+                  if (e.button !== 0) return;
+                  const kind = useDbStore.getState().connections.find(
+                    (c) => c.id === connectionId,
+                  )?.kind;
+                  if (!kind) return;
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  dragPress(
+                    {
+                      connectionId,
+                      text: objectReference(node, kind),
+                      label: node.name,
+                    },
+                    e.clientX,
+                    e.clientY,
+                  );
+                },
+                onPointerMove: (e) => {
+                  // No button held is a hover, whatever the store still remembers.
+                  if (e.buttons === 0) return;
+                  const origin = useDbObjectDragStore.getState().origin;
+                  if (!origin || useDbObjectDragStore.getState().drag) return;
+                  // The threshold is what keeps a click from being a one-pixel drag — without it
+                  // every click on a table would arm a drop.
+                  if (Math.hypot(e.clientX - origin.x, e.clientY - origin.y) < DRAG_THRESHOLD) return;
+                  dragBegin();
+                  // Capture is released so the console underneath receives its own pointer events;
+                  // held, every move would keep reporting this row and no drop could be aimed.
+                  e.currentTarget.releasePointerCapture(e.pointerId);
+                },
+              }
+            : undefined
+        }
         icon={<Icon size={12} />}
         name={node.name}
         detail={node.detail}
@@ -1107,7 +1174,7 @@ function GroupNameInput({
           onCancel();
         }
       }}
-      className="min-w-0 flex-1 rounded border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1 py-px text-[12px] outline-none"
+      className="min-w-0 flex-1 select-text rounded border border-[var(--cf-accent)] bg-[var(--cf-field)] px-1 py-px text-[12px] outline-none"
     />
   );
 }
@@ -1480,7 +1547,15 @@ export function DbExplorer() {
       <div
         data-tour="db-explorer"
         style={{ width }}
-        className={`flex h-full min-h-0 shrink-0 flex-col overflow-hidden ${CARD}`}
+        // `select-none` across the whole panel. Nothing in here is text you read *out of*: a row is
+        // a thing you point at, its name is one "Copy the name" away in the context menu, and a
+        // history entry is opened by clicking it rather than by being retyped. What the selection
+        // did instead was get in the way — the double click that opens a table left the name it
+        // opened highlighted behind it, and now that rows can be dragged into a console, the press
+        // that starts a drag would sweep a selection across every row it crossed. The two text
+        // fields opt back in with `select-text`, since a search box you cannot select inside is
+        // unusable — and under a `user-select: none` ancestor WebKit takes it from them too.
+        className={`flex h-full min-h-0 shrink-0 select-none flex-col overflow-hidden ${CARD}`}
       >
         <div
           data-tour="db-explorer-actions"
@@ -1543,7 +1618,7 @@ export function DbExplorer() {
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t("db.searchPlaceholder")}
-              className="w-full rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-1 pl-6 pr-6 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+              className="w-full select-text rounded-md border border-[var(--cf-border)] bg-[var(--cf-bg)] py-1 pl-6 pr-6 text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
             />
             {query && (
               <button

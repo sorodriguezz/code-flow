@@ -12,6 +12,23 @@ import { PROTOCOL_NAMES } from "../../lib/api/protocol";
 import { API_PROTOCOLS, type ApiProtocol } from "../../types/api";
 
 /**
+ * Every tab is this wide, rather than as wide as the name it holds.
+ *
+ * Request names come from whoever wrote the collection, and an imported spec routinely mixes "Create
+ * user" with "Creates list of users with given input array" — sized to content, the strip becomes a
+ * row of tabs with no two edges alike, and the close button you are aiming for sits somewhere new on
+ * every one. A fixed column also means a tab does not resize under the cursor when a rename or a
+ * protocol switch changes its label.
+ *
+ * Fixed rather than shared-and-shrinking (the browser behaviour): the strip already scrolls, with a
+ * wheel handler and a `scrollIntoView` on activation to go with it. Letting tabs shrink instead
+ * would trade those for tabs that get unreadable exactly when there are the most of them.
+ *
+ * Matches the editor strip's `max-w-[220px]`, so the two rows of tabs in the same window agree.
+ */
+const TAB_W = 220;
+
+/**
  * The request tabs across the top of the builder.
  *
  * Deliberately *not* draggable: `apiStore` has no action that reorders `openTabs`, and a gesture
@@ -122,7 +139,8 @@ export function RequestTabs() {
                 e.preventDefault();
                 void requestClose(tab);
               }}
-              className={`group relative flex h-9 max-w-[280px] shrink-0 cursor-pointer select-none items-center gap-2 border-r border-[var(--cf-border)] pl-3 pr-2 text-[12px] transition-colors ${
+              style={{ width: TAB_W }}
+              className={`group relative flex h-9 shrink-0 cursor-pointer select-none items-center gap-2 border-r border-[var(--cf-border)] pl-3 pr-2 text-[12px] transition-colors ${
                 active
                   ? "bg-[var(--cf-surface)] text-[var(--cf-text)]"
                   : `text-[var(--cf-text-muted)] ${hoverKey === hoveredKey ? "cf-row-hover" : ""}`

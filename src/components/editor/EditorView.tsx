@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { AnimatePresence, motion } from "framer-motion";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   Bookmark,
@@ -66,6 +67,10 @@ const TREE_MAX = 480;
  * path and three action buttons, and the commit box under them has to fit a message. */
 const CHANGES_MIN = 240;
 const CHANGES_MAX = 560;
+/** The shut dock: wide enough for one 28px button with a little air. A constant because the close
+ * animation interpolates to it, and a `w-9` class the motion value had to agree with by hand is a
+ * pair that drifts. */
+const RAIL_W = 36;
 const GROUP_MAX = 2000;
 /** Matches the `w-px` on `ResizeHandle`, which the even-split maths has to account for. */
 const HANDLE_WIDTH = 1;
@@ -141,6 +146,10 @@ export function EditorView() {
   /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
    * step into while committing, not a layout preference — the editor's resting state is code. */
   const [changesOpen, setChangesOpen] = useState(false);
+  /** True while the dock's edge is being dragged. The open/close ease has to be off then: the
+   * handle writes a new width on every pointer move, and easing toward each one makes the edge swim
+   * after the cursor instead of tracking it. The same trade `AiPanel` makes for the same reason. */
+  const [resizingChanges, setResizingChanges] = useState(false);
   /** The snapshot being composed, or `null` when the dialog is closed. */
   const [codeSnap, setCodeSnap] = useState<CodeSnapTarget | null>(null);
   /** Which group should jump where. Scoped to a group because "go to this search hit" means the
@@ -1002,57 +1011,88 @@ export function EditorView() {
             Shut, a narrow rail holds the button instead. One or the other, never both: a rail kept
             up alongside the open panel was a full-height column of empty surface that pushed the
             panel a button's width off the edge it is docked to. */}
-        {changesOpen ? (
-          <>
-            <ResizeHandle
-              axis="x"
-              value={changesWidth}
-              min={CHANGES_MIN}
-              max={CHANGES_MAX}
-              // Anchored to the right, so dragging left — toward the code — has to grow it.
-              invert
-              onChange={(w) => setSize("editorChangesWidth", w)}
-              onCommit={(w) => commitSize("editorChangesWidth", w)}
-            />
-            <div
-              style={{ width: changesWidth }}
-              className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
+        {/* Both halves animate their width, and both are inside the one `AnimatePresence`, because
+            they trade places rather than appear and disappear. Only the panel sliding shut would
+            leave the rail popping in at full width the instant the close began — the editor beside
+            it would jump a button's width narrower and then ease back. Growing the rail from zero
+            over the same 180ms keeps the pair's total width monotonic, so the code just widens.
+
+            Each animates the *wrapper*, which clips; the content inside keeps its own full width.
+            Animating a width the content had to fit into would reflow it every frame — the header
+            buttons walking left as the panel closed — instead of sliding it out of view. */}
+        <AnimatePresence initial={false}>
+          {changesOpen ? (
+            <motion.div
+              key="changes-dock"
+              initial={{ width: 0 }}
+              animate={{ width: changesWidth }}
+              exit={{ width: 0 }}
+              transition={resizingChanges ? { duration: 0 } : { duration: 0.18, ease: "easeOut" }}
+              className="flex shrink-0 overflow-hidden bg-[var(--cf-surface)]"
             >
-              <ChangesPanel
-                onOpenFile={openChangedFile}
-                onOpenDiff={(path) => void openDiffTab(path)}
-                headerAction={
-                  <button
-                    onClick={() => setChangesOpen(false)}
-                    title={t("editor.toggleChanges")}
-                    aria-label={t("editor.toggleChanges")}
-                    aria-expanded
-                    className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-                  >
-                    <PanelRightClose size={13} />
-                  </button>
-                }
+              <ResizeHandle
+                axis="x"
+                value={changesWidth}
+                min={CHANGES_MIN}
+                max={CHANGES_MAX}
+                // Anchored to the right, so dragging left — toward the code — has to grow it.
+                invert
+                onChange={(w) => setSize("editorChangesWidth", w)}
+                onCommit={(w) => commitSize("editorChangesWidth", w)}
+                onDragChange={setResizingChanges}
               />
-            </div>
-          </>
-        ) : (
-          <div className="flex w-9 shrink-0 flex-col items-center gap-1 bg-[var(--cf-surface)] py-1.5">
-            <button
-              onClick={() => setChangesOpen(true)}
-              title={t("editor.toggleChanges")}
-              aria-label={t("editor.toggleChanges")}
-              aria-expanded={false}
-              className="relative flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+              <div
+                style={{ width: changesWidth }}
+                className="flex shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
+              >
+                <ChangesPanel
+                  onOpenFile={openChangedFile}
+                  onOpenDiff={(path) => void openDiffTab(path)}
+                  headerAction={
+                    <button
+                      onClick={() => setChangesOpen(false)}
+                      title={t("editor.toggleChanges")}
+                      aria-label={t("editor.toggleChanges")}
+                      aria-expanded
+                      className="flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+                    >
+                      <PanelRightClose size={13} />
+                    </button>
+                  }
+                />
+              </div>
+            </motion.div>
+          ) : (
+            <motion.div
+              key="changes-rail"
+              initial={{ width: 0 }}
+              animate={{ width: RAIL_W }}
+              exit={{ width: 0 }}
+              transition={{ duration: 0.18, ease: "easeOut" }}
+              className="shrink-0 overflow-hidden bg-[var(--cf-surface)]"
             >
-              <GitBranch size={15} className="relative" />
-              {/* Only while shut — which is the only state this rail has. Open, the panel itself is
-                  the count, and a badge over it would be the same number twice. */}
-              {uncommittedCount > 0 && (
-                <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />
-              )}
-            </button>
-          </div>
-        )}
+              <div
+                style={{ width: RAIL_W }}
+                className="flex flex-col items-center gap-1 py-1.5"
+              >
+                <button
+                  onClick={() => setChangesOpen(true)}
+                  title={t("editor.toggleChanges")}
+                  aria-label={t("editor.toggleChanges")}
+                  aria-expanded={false}
+                  className="relative flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                >
+                  <GitBranch size={15} className="relative" />
+                  {/* Only while shut — which is the only state this rail has. Open, the panel itself
+                      is the count, and a badge over it would be the same number twice. */}
+                  {uncommittedCount > 0 && (
+                    <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent)]" />
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
       {/* The drop affordance: an outline around what will take the files, and a banner naming the
           folder they will land in — named rather than merely lit, because the same gesture lands

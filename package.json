@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "1.14.5",
+  "version": "1.14.6",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -30,6 +30,7 @@
     "framer-motion": "^12.42.2",
     "lucide-react": "^1.25.0",
     "marked": "^18.0.7",
+    "pdfmake": "^0.3.11",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "yaml": "^2.9.0",
@@ -38,6 +39,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2",
+    "@types/pdfmake": "^0.3.3",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",

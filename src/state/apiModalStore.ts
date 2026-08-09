@@ -31,6 +31,8 @@ export type ApiModal =
   | { kind: "import" }
   | { kind: "cookies" }
   | { kind: "export"; collectionId: string }
+  /** The same collection written for a reader instead of for another tool — Markdown, HTML or PDF. */
+  | { kind: "docs"; collectionId: string }
   | { kind: "runner"; collectionId: string; folderId: string | null }
   /** Accept an invitation to a shared collection. Sharing one lives in the settings pane. */
   | { kind: "collab" }

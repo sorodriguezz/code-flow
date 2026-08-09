@@ -166,6 +166,9 @@ export const createWorkspace = (name: string, icon: string, color: string) =>
 
 export const listWorkspaces = () => invoke<Workspace[]>("list_workspaces");
 
+/** Writes the order the workspaces are shown in. `ids` is the whole list, in order. */
+export const reorderWorkspaces = (ids: string[]) => invoke<void>("reorder_workspaces", { ids });
+
 export const deleteWorkspace = (id: string) => invoke<void>("delete_workspace", { id });
 
 export const updateWorkspaceColor = (id: string, color: string) =>

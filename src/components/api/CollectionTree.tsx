@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Copy,
   FilePlus,
+  FileText,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -27,7 +28,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
-import { badgeColor, badgeLabel, statusColor } from "./methodStyle";
+import { badgeColor, badgeShort, statusColor } from "./methodStyle";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { canDrop, useApiDragStore, type ApiDrag, type ApiDropZone } from "../../state/apiDragStore";
 import { useApiStore } from "../../state/apiStore";
@@ -51,9 +52,16 @@ const ROW_PAD = 6;
 
 /** The twisty column, and the glyph column beside it — the method badge on a request, the folder
  * icon on a container. Sharing one width is what puts every name on the same left edge, so a
- * request reads as the sibling of the folder above it rather than as something inside it. */
+ * request reads as the sibling of the folder above it rather than as something inside it.
+ *
+ * Wide enough for `PATCH` — five characters, and the longest label this column draws now that
+ * `DELETE` and `OPTIONS` are abbreviated for it (see `badgeShort`). It was 40px when they were
+ * spelled out, and that width is paid by every row: the container rows reserve the same column to
+ * keep their names on the tree's one left edge, so a word appearing twice in thirty rows was setting
+ * how far every folder icon floats from its own name. A method is free text, so something longer
+ * still truncates — by then it is a name, not a verb. */
 const TWISTY_W = 12;
-const GLYPH_W = 38;
+const GLYPH_W = 30;
 
 /** How much of a folder row's height, top and bottom, aims *between* rows rather than into it.
  * Small enough that the middle — "into this folder" — is what you hit without trying. */
@@ -89,14 +97,21 @@ interface Draft {
  * The little uppercase tag in front of every request row — a verb for HTTP, the protocol name for
  * everything else. Colour and wording come from `methodStyle` so the tree, the tab strip and the
  * URL bar can never disagree about what a POST looks like.
+ *
+ * **Left-aligned in a fixed column, not right-aligned against the name.** Both put the names on one
+ * edge, which is what `GLYPH_W` is for — but right-aligning leaves the *verbs* ragged, since a list
+ * of them is `GET`, `POST`, `DELETE`, `OPTIONS` and every one starts at a different x. The column is
+ * read down far more often than any single row is read across: you scan it looking for the DELETE,
+ * and a ragged left edge is the one thing that makes that scan slow. So the verbs line up and the
+ * short ones carry a gap to their name.
  */
 export function MethodBadge({ protocol, method }: { protocol: ApiProtocol; method: string }) {
   return (
     <span
       style={{ color: badgeColor(protocol, method), width: GLYPH_W }}
-      className="shrink-0 truncate text-right font-mono text-[9px] font-bold uppercase leading-none tracking-tight"
+      className="shrink-0 truncate font-mono text-[9px] font-bold uppercase leading-none tracking-tight"
     >
-      {badgeLabel(protocol, method)}
+      {badgeShort(protocol, method)}
     </span>
   );
 }
@@ -123,11 +138,23 @@ function IndentGuides({ depth }: { depth: number }) {
   );
 }
 
-/** The glyph column: whatever goes in it is pushed against the name, so icons of different sizes
- * still leave every name on the same left edge. */
+/**
+ * The glyph column on a container row: a folder or collection icon, centred.
+ *
+ * **Centred because both edges are wrong.** The column is as wide as the longest verb (see
+ * `GLYPH_W`) and the icon is a third of that, so the slack has to go somewhere. Against the name,
+ * and the icon sits 33px from the chevron that belongs with it; against the chevron, and it sits
+ * 33px from its own name. Split, it is 19px either way and reads as an icon column rather than as
+ * something that came loose.
+ *
+ * The slack exists at all because container names and request names share one left edge — that is
+ * what the shared width buys, and it is what makes a request read as the sibling of the folder above
+ * it rather than as something inside it. Giving that up is the only way to close the gap completely,
+ * and it costs 40px of disagreement between the two kinds of row.
+ */
 function GlyphSlot({ children }: { children: ReactNode }) {
   return (
-    <span style={{ width: GLYPH_W }} className="flex shrink-0 items-center justify-end">
+    <span style={{ width: GLYPH_W }} className="flex shrink-0 items-center justify-center">
       {children}
     </span>
   );
@@ -650,7 +677,7 @@ function ExampleRow({
       </span>
       <span
         style={{ color: statusColor(example.status), width: GLYPH_W }}
-        className="shrink-0 truncate text-right font-mono text-[9px] font-bold leading-none tracking-tight"
+        className="shrink-0 truncate font-mono text-[9px] font-bold leading-none tracking-tight"
       >
         {example.status}
       </span>
@@ -1035,6 +1062,11 @@ export function CollectionTree() {
         label: t("api.export.title"),
         icon: Share2,
         onClick: () => openModal({ kind: "export", collectionId: node.id }),
+      });
+      items.push({
+        label: t("api.docs.generate"),
+        icon: FileText,
+        onClick: () => openModal({ kind: "docs", collectionId: node.id }),
       });
       if (sharedIds.has(node.id)) {
         // The invitation carries the project's URL and key, so it is the host's to hand out and

@@ -12,7 +12,7 @@
  */
 
 import { useState } from "react";
-import { Boxes, Folder, Play, Save, Share2 } from "lucide-react";
+import { Boxes, FileText, Folder, Play, Save, Share2 } from "lucide-react";
 import { AuthEditor, ROOT_AUTH_TYPES, authAncestors } from "./AuthPanel";
 import { ScriptEditor } from "./ScriptsPanel";
 import { VariableTable } from "./VariableTable";
@@ -118,14 +118,26 @@ function Header({ tab }: { tab: ApiEntityTab }) {
         </button>
 
         {tab.kind === "collection" && (
-          <button
-            onClick={() => openModal({ kind: "export", collectionId: tab.entityId })}
-            title={t("api.export.title")}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
-          >
-            <Share2 size={12} />
-            {t("api.export.title")}
-          </button>
+          <>
+            <button
+              onClick={() => openModal({ kind: "export", collectionId: tab.entityId })}
+              title={t("api.export.title")}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+            >
+              <Share2 size={12} />
+              {t("api.export.title")}
+            </button>
+            {/* Next to Export because the two are asked in the same breath, and this is the screen
+                where the descriptions the document is made of are actually written. */}
+            <button
+              onClick={() => openModal({ kind: "docs", collectionId: tab.entityId })}
+              title={t("api.docs.generate")}
+              className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+            >
+              <FileText size={12} />
+              {t("api.docs.generate")}
+            </button>
+          </>
         )}
 
         {/* Disabled while clean rather than hidden: the button is where the ⌘S it mirrors is
