@@ -24,11 +24,13 @@
 //! never mentions. The two compose — this widens `PATH` to what the user has, and that list adds
 //! what nobody put on it.
 
+#[cfg(not(target_os = "windows"))]
 use std::time::Duration;
 
 /// How long the shell gets. A profile that runs `nvm use` or an asdf hook can genuinely take a
 /// second or two, so this is generous — but it is a hard ceiling on how long a broken or
 /// input-blocked startup file can delay the app's own launch.
+#[cfg(not(target_os = "windows"))]
 const TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Markers around the value, so what comes back can be found inside whatever else the shell said.
@@ -38,7 +40,9 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 /// Reading "the output" as the `PATH` would inherit all of that as a directory name. Reading
 /// *between the markers* is immune to it, and to the shell that decides to print something after
 /// the value as well.
+#[cfg(not(target_os = "windows"))]
 const OPEN: &str = "__CF_PATH_OPEN__";
+#[cfg(not(target_os = "windows"))]
 const CLOSE: &str = "__CF_PATH_CLOSE__";
 
 /// Adopts the login shell's `PATH`, if it can be had.
@@ -136,6 +140,7 @@ fn script(shell_name: &str) -> String {
 }
 
 /// The value between the markers, or `None` if the shell never printed them.
+#[cfg(not(target_os = "windows"))]
 fn extract(output: &str) -> Option<String> {
     let start = output.find(OPEN)? + OPEN.len();
     let end = output[start..].find(CLOSE)? + start;
@@ -150,6 +155,7 @@ fn extract(output: &str) -> Option<String> {
 /// which is what makes "it works in my terminal" and "it works in CodeFlow" agree about *which*
 /// `node` — but a launcher that injected something of its own into our environment keeps it, at
 /// lower precedence, instead of having it silently dropped.
+#[cfg(not(target_os = "windows"))]
 fn merge(imported: &str, current: Option<&str>) -> String {
     let mut seen = std::collections::HashSet::new();
     let mut entries: Vec<&str> = Vec::new();
@@ -162,7 +168,7 @@ fn merge(imported: &str, current: Option<&str>) -> String {
     entries.join(":")
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 mod tests {
     use super::*;
 

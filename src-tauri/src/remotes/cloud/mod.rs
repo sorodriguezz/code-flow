@@ -61,6 +61,26 @@ pub fn http() -> &'static reqwest::Client {
     })
 }
 
+/// Does this account answer, with this credential?
+///
+/// **Why a cloud row needs this at all.** Every other kind proves itself by connecting: a shell
+/// opens or it doesn't, a screen appears or the viewer says why. A storage account has no session
+/// to open — the first thing that ever touches the network is a listing inside a panel, so a wrong
+/// key looked exactly like an empty account, and pressing Connect looked like nothing happening.
+///
+/// The cheapest request that proves all three things at once (the account exists, the credential
+/// signs, the network reaches it) is the account root: containers on Azure, buckets on S3. It is one
+/// signed GET and it is the same call the panel is about to make anyway.
+///
+/// Returns how many things are at that root, which is what tells an empty account from a working
+/// one — the count is the only part of the answer worth showing when nothing appears in the panel.
+pub async fn check(host_id: &str, spec: &super::RemoteHostSpec) -> Result<usize, String> {
+    // `/blob` rather than `/` for Azure: the account root is a synthesised listing of the two file
+    // services (see [`account`]), which would answer "2" without a single request leaving here.
+    let root = if spec.kind.is_azure() { "/blob" } else { "/" };
+    Ok(super::files::list(host_id, spec, root).await?.entries.len())
+}
+
 /// Where a browser path points inside an account.
 ///
 /// The browser hands down `/`-rooted paths — `/`, `/photos`, `/photos/2024/cat.jpg` — because that

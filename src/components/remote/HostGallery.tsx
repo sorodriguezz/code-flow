@@ -336,8 +336,11 @@ function HostCard({ host, at, onMenu }: { host: RemoteHostRow; at: number; onMen
   const cardMenu = useCardMenu(onMenu);
   const selectHost = useRemoteStore((s) => s.selectHost);
   const selected = useRemoteStore((s) => s.selectedHostId === host.id);
-  const hasSession = useRemoteStore((s) =>
-    s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited),
+  // A shell that is running, or — for an account, which has no process — a credential that answered.
+  const hasSession = useRemoteStore(
+    (s) =>
+      s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited) ||
+      (s.cloudStatus[host.id]?.ok ?? false),
   );
   const hasForward = useRemoteStore((s) => s.forwards.some((f) => f.host_id === host.id));
   const t = useT();
@@ -421,8 +424,11 @@ function HostListRow({ host, at, onMenu }: { host: RemoteHostRow; at: number; on
   const cardMenu = useCardMenu(onMenu);
   const selectHost = useRemoteStore((s) => s.selectHost);
   const selected = useRemoteStore((s) => s.selectedHostId === host.id);
-  const hasSession = useRemoteStore((s) =>
-    s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited),
+  // A shell that is running, or — for an account, which has no process — a credential that answered.
+  const hasSession = useRemoteStore(
+    (s) =>
+      s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited) ||
+      (s.cloudStatus[host.id]?.ok ?? false),
   );
   const hasForward = useRemoteStore((s) => s.forwards.some((f) => f.host_id === host.id));
   const t = useT();

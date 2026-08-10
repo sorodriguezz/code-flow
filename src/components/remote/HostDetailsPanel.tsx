@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
   Eye,
+  Loader2,
   EyeOff,
   FolderPlus,
   Monitor,
@@ -101,6 +102,8 @@ export function HostDetailsPanel() {
   const t = useT();
 
   const openPrimary = useOpenPrimary();
+  const checkCloud = useRemoteStore((s) => s.checkCloud);
+  const cloudStatus = useRemoteStore((s) => (hostId ? s.cloudStatus[hostId] : undefined));
 
   const [tab, setTab] = useState<Tab>("connection");
   const [spec, setSpec] = useState<RemoteHostSpec | null>(null);
@@ -341,17 +344,43 @@ export function HostDetailsPanel() {
               // screen, not what the debounce had got round to saving. A cloud account is read from
               // the row by the backend, so an unsaved key would connect as the old one.
               flush();
-              openPrimary(host, spec);
+              if (!isCloudKind(spec.kind)) return openPrimary(host, spec);
+              // A cloud account has no session to open, so pressing this used to open a panel and
+              // look like nothing happened. It asks the account first, says which it was, and only
+              // opens on success — a panel that would show the same failure in smaller type is not
+              // a useful place to be sent.
+              void checkCloud(host.id).then((ok) => ok && openPrimary(host, spec));
             }}
-            disabled={!hasAddress(spec)}
-            className="w-full rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:brightness-110 disabled:opacity-40"
+            disabled={!hasAddress(spec) || cloudStatus?.checking}
+            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:brightness-110 disabled:opacity-40"
           >
+            {cloudStatus?.checking && <Loader2 size={13} className="animate-spin" />}
             {/* Named for what is missing rather than for a field this kind hasn't got: a storage
                 account reading "no address" was a button pointing at a box that does not exist. */}
-            {hasAddress(spec)
-              ? t("remote.connect")
-              : t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")}
+            {!hasAddress(spec)
+              ? t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")
+              : cloudStatus?.checking
+                ? t("remote.connecting")
+                : t("remote.connect")}
           </button>
+
+          {/* What the account said, kept under the button until the next attempt. The green line is
+              not decoration: an account with no containers opens an empty panel, and "connected, 0
+              containers" is the difference between that and a key that was rejected. */}
+          {isCloudKind(spec.kind) && cloudStatus && !cloudStatus.checking && (
+            <p
+              className={`pt-1.5 text-[11px] leading-relaxed ${
+                cloudStatus.ok ? "text-[var(--cf-success)]" : "text-[var(--cf-danger)]"
+              }`}
+            >
+              {cloudStatus.ok
+                ? t(spec.kind === "s3" ? "remote.cloudOkS3" : "remote.cloudOk", {
+                    n: String(cloudStatus.count),
+                  })
+                : cloudStatus.error}
+            </p>
+          )}
+
           {passwordLoaded && spec.auth === "password" && (
             <p className="pt-1.5 text-center text-[10px] text-[var(--cf-text-muted)]">
               {t("remote.authPasswordHint")}

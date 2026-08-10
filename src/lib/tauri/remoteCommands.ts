@@ -204,6 +204,16 @@ export const remoteParseSshCommand = (line: string) =>
 export const remoteParseAzureConnection = (text: string) =>
   invoke<ParsedAzureConnection | null>("remote_parse_azure_connection", { text });
 
+/**
+ * Checks that a cloud account answers with the credential it has, and returns how many containers
+ * or buckets are at its root.
+ *
+ * The Connect button's verb for a kind that has no session to open: a storage account is reached by
+ * signed HTTPS, so without this, pressing Connect opened a panel and a *wrong key* looked exactly
+ * like an empty account. See `remotes::cloud::check`.
+ */
+export const remoteCheckCloud = (id: string) => invoke<number>("remote_check_cloud", { id });
+
 /** Round-trip time to the host's SSH port, or `null` when there is no direct route — a jump-hosted
  *  machine has none from here, and reporting the bastion's number instead would be a lie. */
 export const remotePing = (id: string) => invoke<number | null>("remote_ping", { id });

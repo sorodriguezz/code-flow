@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import {
+  remoteCheckCloud,
   remoteCloseForward,
   remoteCloseFiles,
   remoteCloseHostForwards,
@@ -173,6 +174,19 @@ export interface RemoteLogTab {
   name: string;
 }
 
+/** What one reachability check found. `checking` is its own state rather than an absent entry: the
+ *  button has to say "connecting" while it waits, and an absent entry means "never asked". */
+export interface CloudStatus {
+  checking: boolean;
+  ok: boolean;
+  /** How many containers or buckets were at the root. Meaningful only when `ok`. */
+  count: number;
+  /** The service's own sentence when it failed. Empty when it worked. */
+  error: string;
+  /** Epoch milliseconds of the answer — "worked at 14:02", not "works". */
+  at: number;
+}
+
 /** One command, and which machine it was typed at. */
 export interface RemoteHistoryEntry {
   id: string;
@@ -239,6 +253,19 @@ interface RemoteState {
    * a port scan.
    */
   latency: number | null;
+  /**
+   * What the last reachability check said about each cloud account, by host id.
+   *
+   * **Cloud rows have no session, so nothing else could ever say "connected".** A shell is live
+   * while its process is; a forward is live while its port listens. A storage account is signed
+   * HTTPS with nothing held open between requests — so the only honest statement is "this
+   * credential worked at this moment", which is what this records. It lights the dot on the row and
+   * it is what the editor reports under its Connect button.
+   *
+   * Session state, not persisted: a key that worked yesterday says nothing about a key that may
+   * have been rotated since, and a green dot restored from disk would be a claim nobody checked.
+   */
+  cloudStatus: Record<string, CloudStatus>;
   /** Host whose row is in inline-rename mode, or `null`. */
   renamingHostId: string | null;
   /**
@@ -320,6 +347,13 @@ interface RemoteState {
    * one account would be two things to keep in step.
    */
   openAzure: (hostId: string, service?: AzureService) => void;
+  /**
+   * Asks a cloud account whether it answers, and records what it said.
+   *
+   * Returns whether it worked, so the editor's Connect button can hold off opening a panel that
+   * would only show the same failure in smaller type.
+   */
+  checkCloud: (hostId: string) => Promise<boolean>;
   openScreen: (hostId: string) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   setActiveTab: (tabId: string) => void;
@@ -436,6 +470,7 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   latency: null,
   tabs: [],
   activeTabId: null,
+  cloudStatus: {},
   renamingHostId: null,
   selectedHostId: null,
   detailsHostId: null,
@@ -467,6 +502,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       activeTabId: null,
       query: "",
       tagFilter: [],
+      // Another workspace's accounts are other accounts; carrying their green dots across would be
+      // claiming something was checked that never was.
+      cloudStatus: {},
       renamingHostId: null,
       selectedHostId: null,
       detailsHostId: null,
@@ -867,6 +905,36 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, selectedHostId: hostId }));
   },
 
+  checkCloud: async (hostId) => {
+    set((s) => ({
+      cloudStatus: {
+        ...s.cloudStatus,
+        [hostId]: { checking: true, ok: false, count: 0, error: "", at: Date.now() },
+      },
+    }));
+    try {
+      const count = await remoteCheckCloud(hostId);
+      set((s) => ({
+        cloudStatus: {
+          ...s.cloudStatus,
+          [hostId]: { checking: false, ok: true, count, error: "", at: Date.now() },
+        },
+      }));
+      return true;
+    } catch (error) {
+      // Kept on the row rather than thrown as a toast: a rejected key is a fact about *this
+      // account* that the user is about to go and fix, and a toast is gone by the time they look
+      // back at the field. The log has it too — see `remote_check_cloud`.
+      set((s) => ({
+        cloudStatus: {
+          ...s.cloudStatus,
+          [hostId]: { checking: false, ok: false, count: 0, error: String(error), at: Date.now() },
+        },
+      }));
+      return false;
+    }
+  },
+
   openAzure: (hostId, service) => {
     const host = hostOf(get().hosts, hostId);
     if (!host) return;
@@ -892,6 +960,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       service: wanted,
     };
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, selectedHostId: hostId }));
+    // Only on the first open, and only when nobody has asked yet: the editor's Connect button runs
+    // its own check before calling this, and the panel is about to make the same listing request.
+    if (!get().cloudStatus[hostId]) void get().checkCloud(hostId);
   },
 
   openScreen: async (hostId) => {

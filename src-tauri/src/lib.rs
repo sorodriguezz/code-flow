@@ -556,6 +556,7 @@ pub fn run() {
             commands::remote_cmd::remote_close_files,
             commands::remote_cmd::remote_parse_ssh_command,
             commands::remote_cmd::remote_parse_azure_connection,
+            commands::remote_cmd::remote_check_cloud,
             commands::remote_cmd::remote_list_keys,
             commands::remote_cmd::remote_ssh_config_path,
             commands::remote_cmd::remote_scan_ssh_config,

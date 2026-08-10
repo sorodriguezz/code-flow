@@ -213,6 +213,15 @@ export const HOST_COLORS = [
  * look idle. Filled = a session is open; ringed = no session but something of this host's is
  * running; hollow = nothing.
  */
+/**
+ * The row's state light: filled while something is live, ringed while something is up, hollow
+ * otherwise.
+ *
+ * `session` is what "live" means, and for a cloud account that is not a process but a credential
+ * that answered — see `cloudStatus` in the remote store. Same light for both because it answers one
+ * question ("is this thing working right now") and a second kind of dot beside it would only make
+ * the reader ask which one to believe.
+ */
 export function HostDot({
   session,
   active,

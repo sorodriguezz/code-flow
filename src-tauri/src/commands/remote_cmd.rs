@@ -480,6 +480,18 @@ pub fn remote_parse_ssh_command(line: String) -> Option<remotes::parse::ParsedCo
     remotes::parse::parse_ssh_command(&line)
 }
 
+/// Checks that a cloud account answers, and says how much is at its root.
+///
+/// The Connect button's honest verb for a kind that has no session to open — see
+/// [`remotes::cloud::check`]. Logged like every other thing opened against a host, because "the key
+/// was rejected at 14:02" is exactly the kind of fact the log exists to outlive the toast.
+#[tauri::command]
+pub async fn remote_check_cloud(db: State<'_, Db>, id: String) -> Result<usize, String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::check(&id, &spec).await;
+    logged(&db, &row, "cloud-check", spec.kind.label(), result)
+}
+
 /// What an Azure Storage connection string was understood to mean.
 ///
 /// The secret rides in its own field and never in `spec`, which is the whole point of the split:
