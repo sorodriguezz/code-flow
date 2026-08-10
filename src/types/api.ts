@@ -1081,6 +1081,15 @@ export interface ImportOptions {
    * the user who wants the requests and not the several hundred example rows that come with them.
    */
   includeExamples?: boolean;
+  /**
+   * Where the document was fetched from, when it was fetched rather than pasted or opened.
+   *
+   * An API description routinely does not say what host it describes — NestJS emits no `servers`
+   * unless the app calls `addServer`, and OpenAPI positively encourages `servers: [{ url: "/v1" }]`,
+   * which is *defined* as relative to wherever the document is served. Swagger UI gets away with
+   * both because it knows the URL it loaded the document from; this is that URL.
+   */
+  sourceUrl?: string;
 }
 
 // ---------------------------------------------------------------------------

@@ -1523,6 +1523,10 @@ interface OasContext {
   warnings: string[];
   /** Whether documented responses are mapped to saved examples. */
   examples: boolean;
+  /** `ImportOptions.sourceUrl` — what a declared server is relative *to*, and the host when none. */
+  sourceUrl: string;
+  /** Variable names the imported auth blocks reference, collected as the operations are walked. */
+  credentials: Set<string>;
 }
 
 /** Local `$ref` only. A remote document can't be fetched from here, so it becomes a warning and
@@ -1670,6 +1674,53 @@ function oasServerUrl(ctx: OasContext): string {
   return url.replace(/\/$/, "");
 }
 
+/**
+ * What the document declares, made absolute — the value `{{baseUrl}}` is imported with.
+ *
+ * Two shapes reach here without a host: nothing at all, and a root-relative `servers` entry. Both
+ * are legal and both are unusable on their own; a request row reading `/v1/orders` cannot be sent.
+ * Swagger UI resolves them against the URL it loaded the document from, so when we fetched the
+ * document we resolve them the same way and the import arrives ready to send.
+ *
+ * A pasted or opened file has no such URL, so it keeps today's behaviour: relative in, relative out.
+ */
+function oasBaseUrl(ctx: OasContext): string {
+  const declared = oasServerUrl(ctx);
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(declared)) return declared;
+  if (!ctx.sourceUrl) return declared;
+  try {
+    // `declared || "/"` — with nothing declared the origin *is* the base, because a path that was
+    // written without a server is written from the root.
+    return new URL(declared || "/", ctx.sourceUrl).toString().replace(/\/$/, "");
+  } catch {
+    return declared;
+  }
+}
+
+/** `bearerAuth` + `Token` → `{{bearerAuthToken}}`, the reference and the variable it declares. */
+function credentialVar(ctx: OasContext, schemeName: string, role: string): string {
+  const words = schemeName.replace(/[^A-Za-z0-9]+/g, " ").trim().split(/\s+/).filter(Boolean);
+  // `JWT` reads as `jwt`, not `jWT`; an acronym is one word, not a run of initials.
+  const flatten = (word: string) => (word === word.toUpperCase() ? word.toLowerCase() : word);
+  const head = words.length ? flatten(words[0]) : "auth";
+  const rest = words
+    .slice(1)
+    .map(flatten)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1));
+  const name = `${head.charAt(0).toLowerCase()}${head.slice(1)}${rest.join("")}${role}`;
+  ctx.credentials.add(name);
+  return `{{${name}}}`;
+}
+
+/**
+ * The auth block for one security requirement, with its credential pointed at a variable.
+ *
+ * `@ApiBearerAuth()` on a controller writes `security` onto every operation, and each one imports
+ * as its own auth block — fifteen endpoints, fifteen empty token fields, fillable only one at a
+ * time. Aiming them all at a single variable is what makes the import sendable after one paste.
+ * The variable itself is declared empty and only in the environment, so nothing is invented here
+ * and no credential is ever written into a collection that gets exported or shared.
+ */
 function oasSecurityAuth(ctx: OasContext, requirements: unknown): AuthConfig | null {
   const first = objs(requirements)[0];
   if (!first) return null;
@@ -1683,13 +1734,27 @@ function oasSecurityAuth(ctx: OasContext, requirements: unknown): AuthConfig | n
   const scheme = deref(ctx, isObj(store) ? store[schemeName] : undefined);
   if (!isObj(scheme)) return null;
 
+  const userPass = (type: "basic" | "digest") => {
+    const auth = defaultAuth(type);
+    auth[type] = {
+      username: credentialVar(ctx, schemeName, "Username"),
+      password: credentialVar(ctx, schemeName, "Password"),
+    };
+    return auth;
+  };
+  const bearer = () => {
+    const auth = defaultAuth("bearer");
+    auth.bearer = { token: credentialVar(ctx, schemeName, "Token") };
+    return auth;
+  };
+
   const type = str(scheme.type).toLowerCase();
-  if (type === "basic") return defaultAuth("basic");
+  if (type === "basic") return userPass("basic");
   if (type === "http") {
     const httpScheme = str(scheme.scheme).toLowerCase();
-    if (httpScheme === "basic") return defaultAuth("basic");
-    if (httpScheme === "digest") return defaultAuth("digest");
-    if (httpScheme === "bearer") return defaultAuth("bearer");
+    if (httpScheme === "basic") return userPass("basic");
+    if (httpScheme === "digest") return userPass("digest");
+    if (httpScheme === "bearer") return bearer();
     ctx.warnings.push(`HTTP auth scheme "${httpScheme}" isn't supported.`);
     return null;
   }
@@ -1699,7 +1764,11 @@ function oasSecurityAuth(ctx: OasContext, requirements: unknown): AuthConfig | n
       ctx.warnings.push(`API key in a cookie isn't supported (${schemeName}); imported as a header.`);
     }
     const auth = defaultAuth("apikey");
-    auth.apikey = { key: str(scheme.name), value: "", addTo: where === "query" ? "query" : "header" };
+    auth.apikey = {
+      key: str(scheme.name),
+      value: credentialVar(ctx, schemeName, "Key"),
+      addTo: where === "query" ? "query" : "header",
+    };
     return auth;
   }
   if (type === "oauth2") {
@@ -1949,12 +2018,14 @@ function importOpenApi(doc: Json, warnings: string[], options: ImportOptions): I
     swagger: typeof doc.swagger === "string",
     warnings,
     examples: options.includeExamples !== false,
+    sourceUrl: options.sourceUrl ?? "",
+    credentials: new Set(),
   };
   const info = isObj(doc.info) ? doc.info : {};
   const collection = emptyCollection(str(info.title) || "Imported API");
   collection.description = str(info.description);
 
-  const serverUrl = oasServerUrl(ctx);
+  const serverUrl = oasBaseUrl(ctx);
   if (serverUrl) collection.variables.push(variable("baseUrl", serverUrl));
 
   const globalAuth = oasSecurityAuth(ctx, doc.security);
@@ -2046,7 +2117,51 @@ function importOpenApi(doc: Json, warnings: string[], options: ImportOptions): I
     });
   }
 
-  return { format: "openapi", collections: [collection], environments: [], warnings };
+  return {
+    format: "openapi",
+    collections: [collection],
+    environments: oasEnvironments(serverUrl, ctx.credentials),
+    warnings,
+  };
+}
+
+/**
+ * The environment the import is sendable from: where the host lives, and where the token goes.
+ *
+ * `baseUrl` is deliberately in both scopes. Collection scope is the default the requests were
+ * imported with, environment scope is what wins over it (`VARIABLE_SCOPE_ORDER`), so moving a whole
+ * import to another stage is picking a different environment rather than rewriting a variable you
+ * then have to remember to put back — and deleting the environment leaves the import still working.
+ *
+ * Credentials are only here, never on the collection, for two reasons. An empty variable is still a
+ * definition, so the same key in both scopes would mean the environment's blank shadows whatever
+ * was typed on the collection — a 401 with a token clearly visible one panel over. And a secret
+ * belongs in the scope that is per-stage and stays out of the collection you export or share.
+ *
+ * Named for the host, because that is precisely what differs when one description is imported for
+ * two stages — two environments carrying the API's own name would tell you nothing.
+ */
+function oasEnvironments(
+  baseUrl: string,
+  credentials: Set<string>,
+): { name: string; variables: ApiVariable[] }[] {
+  if (!baseUrl) return [];
+  let host: string;
+  try {
+    host = new URL(baseUrl).hostname;
+  } catch {
+    return []; /* a base we could not make absolute is not a stage anyone can switch to */
+  }
+  if (!host) return [];
+  return [
+    {
+      name: host,
+      variables: [
+        variable("baseUrl", baseUrl),
+        ...[...credentials].map((key) => variable(key, "", { secret: true })),
+      ],
+    },
+  ];
 }
 
 // ---------------------------------------------------------------------------

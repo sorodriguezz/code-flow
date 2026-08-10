@@ -332,6 +332,8 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
 
   const [text, setText] = useState("");
   const [sourcePath, setSourcePath] = useState<string | null>(null);
+  /** Where a fetched document came from — the host an OpenAPI description usually omits. */
+  const [sourceUrl, setSourceUrl] = useState<string | null>(null);
   const [dropActive, setDropActive] = useState(false);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState<ImportResult | null>(null);
@@ -360,9 +362,12 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
       setResult(null);
       return;
     }
-    const timer = setTimeout(() => setResult(importAny(text, { includeExamples })), PARSE_DEBOUNCE_MS);
+    const timer = setTimeout(
+      () => setResult(importAny(text, { includeExamples, sourceUrl: sourceUrl ?? undefined })),
+      PARSE_DEBOUNCE_MS,
+    );
     return () => clearTimeout(timer);
-  }, [text, includeExamples]);
+  }, [text, includeExamples, sourceUrl]);
 
   // A fresh document starts fully selected; a re-parse of the same one (toggling examples) keeps
   // whatever the user had unticked, because the keys are positional and the positions didn't move.
@@ -384,6 +389,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
       try {
         setText(await apiReadTextFile(path));
         setSourcePath(path);
+        setSourceUrl(null);
         setFetchNote(null);
         // A new document brings its own title; a name typed for the previous one is stale.
         setNameDirty(false);
@@ -443,6 +449,9 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
       const spec = await fetchSpec(url, settings);
       setText(spec.text);
       setSourcePath(null);
+      // Where the document actually was, not the page that pointed at it — that is what a relative
+      // `servers` entry is relative to, and both share the origin we need when there is no server.
+      setSourceUrl(spec.url);
       setNameDirty(false);
       setFetchNote({
         ok: true,
@@ -692,6 +701,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
                 onClick={() => {
                   setText("");
                   setSourcePath(null);
+                  setSourceUrl(null);
                   setFetchNote(null);
                   setName("");
                   setNameDirty(false);
@@ -714,6 +724,7 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
           onChange={(e) => {
             setText(e.target.value);
             setSourcePath(null);
+            setSourceUrl(null);
             setFetchNote(null);
           }}
           placeholder={t("api.import.curlPlaceholder")}
