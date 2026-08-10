@@ -105,9 +105,9 @@ function decode(text: string): string {
  * People copy the address bar, not the path, and Azure writes that address two different ways:
  *
  * - `…/_wiki/wikis/My.wiki?pagePath=%2FGuías` — the query form, which carries the path outright.
- * - `…/_wiki/wikis/My.wiki/71978/Transporte` — the friendly form, and the one that used to come out
- *   wrong. That `71978` is the page's **id**, not a folder: the path is `/Transporte`, and sending
- *   `/71978/Transporte` gets a 404 naming a page nobody was looking for.
+ * - `…/_wiki/wikis/My.wiki/12345/Guías` — the friendly form, and the one that used to come out
+ *   wrong. That `12345` is the page's **id**, not a folder: the path is `/Guías`, and sending
+ *   `/12345/Guías` gets a 404 naming a page nobody was looking for.
  *
  * Anything that is not a wiki URL is passed through as typed — a path is what this field is for,
  * and silently reshaping one would be worse than refusing it.

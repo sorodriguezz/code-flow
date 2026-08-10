@@ -174,13 +174,13 @@ function DbTabStrip() {
   const store = useDbStore.getState();
 
   // Which connection a tab belongs to is only ambiguous when more than one is open — and then it
-  // is the most important thing on the tab, because `MotivoTransporte` on staging and the same
-  // table on production are the same six words. So the name rides along only when it disambiguates
-  // something; with a single connection it would be the same label repeated on every tab.
+  // is the most important thing on the tab, because `order_items` on staging and the same table on
+  // production are the same string. So the name rides along only when it disambiguates something;
+  // with a single connection it would be the same label repeated on every tab.
   const manyConnections = new Set(tabs.map((tab) => tab.connectionId)).size > 1;
 
   // Every tab the same width, the way a browser's are, rather than each one sized to its own name.
-  // Table names run from `users` to `convenio_consumos_historico_2024`, and letting them set the
+  // Table names run from `users` to `order_line_item_archive_2024`, and letting them set the
   // width means the strip's geometry changes every time you open one — the tab you were aiming for
   // has moved by the time you click. A fixed width costs a little space on the short names and buys
   // a strip whose positions hold still; the full name is in the tooltip either way. Two connections
