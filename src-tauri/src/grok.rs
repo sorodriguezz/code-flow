@@ -92,7 +92,7 @@ impl AiEngine for GrokEngine {
             brief.push_str(inv.stdin_content);
         }
 
-        match write_brief_file_if_large(&brief) {
+        match write_brief_file_if_unsafe_inline(&brief) {
             Some(file) => {
                 cmd.arg("--prompt-file").arg(file);
             }
@@ -135,11 +135,19 @@ impl AiEngine for GrokEngine {
     }
 }
 
-/// Returns `Some(path)` when `content` is too big to pass inline and was written to a temp file;
-/// `None` when it fits on the command line. A failed write also returns `None`, degrading to an
-/// inline attempt rather than failing the call outright.
-fn write_brief_file_if_large(content: &str) -> Option<std::path::PathBuf> {
-    if content.len() <= INLINE_LIMIT {
+/// Returns `Some(path)` when `content` is unsafe or too big to pass inline and was written to a
+/// temp file; `None` when it fits on the command line as-is. A failed write also returns `None`,
+/// degrading to an inline attempt rather than failing the call outright.
+///
+/// Two reasons content can't ride on `-p`, not just one: past [`INLINE_LIMIT`] it risks the
+/// ~32k Windows command-line ceiling (a review diff alone can reach 120k) — but a *short* brief
+/// with an embedded newline (any system prompt, or `stdin_content` folded in below it) is just as
+/// unsafe if this binary is ever resolved through an npm `.cmd` shim on Windows, which routes
+/// through `cmd.exe` and rejects multi-line arguments outright (see `claude.rs`, which hit exactly
+/// this). Routing those through `--prompt-file` too costs one temp-file write and closes the gap
+/// regardless of which case applies to a given install.
+fn write_brief_file_if_unsafe_inline(content: &str) -> Option<std::path::PathBuf> {
+    if content.len() <= INLINE_LIMIT && !content.contains('\n') {
         return None;
     }
     let file = std::env::temp_dir().join(format!("codeflow-grok-{}.txt", uuid::Uuid::new_v4()));
@@ -354,7 +362,14 @@ mod tests {
     }
 
     #[test]
-    fn small_prompts_stay_inline() {
-        assert!(write_brief_file_if_large("hola").is_none());
+    fn small_single_line_prompts_stay_inline() {
+        assert!(write_brief_file_if_unsafe_inline("hola").is_none());
+    }
+
+    /// A brief under `INLINE_LIMIT` still has to move to a file once it has a newline — a system
+    /// prompt or folded-in `stdin_content` makes this the common case, not an edge case.
+    #[test]
+    fn a_short_multiline_brief_still_moves_to_a_file() {
+        assert!(write_brief_file_if_unsafe_inline("system prompt\n\nthe ask").is_some());
     }
 }

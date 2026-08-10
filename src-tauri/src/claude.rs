@@ -3,6 +3,18 @@
 //! Everything provider-neutral (run plumbing, templates, high-level ops) lives in [`crate::ai`];
 //! this module is only what's specific to the `claude` CLI: its flags and how it reports results
 //! under `--output-format json`.
+//!
+//! **Windows `.cmd` shim can't take newline args.** When `claude` is installed via npm the binary
+//! is `claude.cmd`, which `std::process` runs through `cmd.exe` — and cmd.exe rejects any argument
+//! containing a newline ("batch file arguments are invalid"), same failure mode already worked
+//! around in `opencode.rs`/`codex.rs`. Two arguments here can carry one: the ask (`-p`), when it's
+//! short but multi-line (long asks already move to stdin — see `ai::chat_with_repo`'s
+//! `INLINE_ASK_LIMIT` — but that swap is keyed on length, not on newlines), and the system prompt
+//! (`--append-system-prompt`), several of whose fixed templates in `ai.rs` are themselves
+//! multi-paragraph. [`ClaudeEngine::build_command`] routes both off the command line when that's
+//! the case: the ask goes to stdin behind a fixed pointer (mirrors [`PROMPT_POINTER`]), and the
+//! system prompt goes to a temp file via `--append-system-prompt-file` — verified against the
+//! installed CLI (`claude --append-system-prompt-file <path>` reads it; confirmed against 2.1.226).
 
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -13,6 +25,26 @@ use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, AiUs
 /// Commit-message generation always runs on Haiku regardless of the user's configured review
 /// model — it's a small, mechanical task that doesn't need a bigger model.
 const COMMIT_MESSAGE_MODEL: &str = "claude-haiku-4-5-20251001";
+
+/// Single-line, ASCII, shim-safe stand-in for an ask this engine can't put on the command line as
+/// given — mirrors `codex.rs`'s `POINTER`. The real ask rides on stdin instead, ahead of the usual
+/// skills note and data.
+const PROMPT_POINTER: &str =
+    "Your instructions for this turn are in the input provided via stdin. Read all of it and carry it out.";
+
+/// Whether `prompt` is unsafe to hand to `-p` as-is on Windows (see the module docs).
+fn needs_stdin_prompt(prompt: &str) -> bool {
+    prompt.contains('\n')
+}
+
+/// Writes the system prompt to a temp file for `--append-system-prompt-file`, so a multi-paragraph
+/// prompt never has to survive the `.cmd` shim as a single argument. `None` on a failed write, so
+/// the caller can fall back to passing it inline rather than losing the system prompt outright.
+fn write_system_prompt_file(sp: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::temp_dir().join(format!("codeflow-claude-system-{}.txt", uuid::Uuid::new_v4()));
+    std::fs::write(&path, sp).ok()?;
+    Some(path)
+}
 
 pub struct ClaudeEngine;
 
@@ -43,11 +75,29 @@ impl AiEngine for ClaudeEngine {
         ["Read", "Edit", "Write", "Grep", "Glob"].iter().map(|s| s.to_string()).collect()
     }
 
+    fn stdin_payload(&self, inv: &AiInvocation) -> String {
+        let mut payload = String::new();
+        if needs_stdin_prompt(inv.prompt) {
+            payload.push_str(inv.prompt);
+            payload.push_str("\n\n");
+        }
+        payload.push_str(&inv.skills_note);
+        payload.push_str(inv.stdin_content);
+        payload
+    }
+
     fn build_command(&self, binary: &str, inv: &AiInvocation) -> Command {
         let mut cmd = crate::proc::command(binary);
-        cmd.arg("-p").arg(inv.prompt);
+        if needs_stdin_prompt(inv.prompt) {
+            cmd.arg("-p").arg(PROMPT_POINTER);
+        } else {
+            cmd.arg("-p").arg(inv.prompt);
+        }
         if let Some(sp) = inv.system_prompt {
-            cmd.arg("--append-system-prompt").arg(sp);
+            match write_system_prompt_file(sp) {
+                Some(path) => cmd.arg("--append-system-prompt-file").arg(path),
+                None => cmd.arg("--append-system-prompt").arg(sp),
+            };
         }
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
@@ -231,6 +281,32 @@ fn interpret_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_single_line_ask_stays_on_the_command_line() {
+        assert!(!needs_stdin_prompt("fix the null check"));
+    }
+
+    /// Short but multi-line is exactly the shape a task description has — the case the
+    /// length-only `INLINE_ASK_LIMIT` swap in `ai::chat_with_repo` doesn't catch.
+    #[test]
+    fn a_multiline_ask_is_routed_to_stdin() {
+        assert!(needs_stdin_prompt("line one\nline two"));
+    }
+
+    #[test]
+    fn a_multiline_ask_is_prepended_to_the_stdin_payload() {
+        let mut inv = AiInvocation::new("line one\nline two", "the data");
+        inv.skills_note = "skills: none\n".to_string();
+        let payload = ClaudeEngine.stdin_payload(&inv);
+        assert_eq!(payload, "line one\nline two\n\nskills: none\nthe data");
+    }
+
+    #[test]
+    fn a_single_line_ask_is_left_out_of_the_stdin_payload() {
+        let inv = AiInvocation::new("fix the null check", "the data");
+        assert_eq!(ClaudeEngine.stdin_payload(&inv), "the data");
+    }
 
     /// Real payload from a failing `claude -p … --output-format json` run on macOS: exit
     /// status 1, **empty stderr**, and the actual reason only present on stdout. The old

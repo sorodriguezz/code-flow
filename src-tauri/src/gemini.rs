@@ -7,8 +7,10 @@
 //! this module is what actually differs.
 //!
 //! Verified against agy 1.1.7 on Windows, and re-verified on 1.1.10 (macOS):
-//!   - `agy models` prints available model ids, one per line → [`list_models_args`] makes the
-//!     Settings picker show the real set instead of a hardcoded guess.
+//!   - `agy models` prints available models, one per line → [`list_models_args`] makes the
+//!     Settings picker show the real set instead of a hardcoded guess. Newer builds print
+//!     `<id>\t<display label>` rather than a bare id, which is why [`parse_model_list`] takes only
+//!     the first token of each line instead of the default one-id-per-line parse.
 //!   - `agy -p "<prompt>"` runs one prompt non-interactively and prints the reply to stdout.
 //!   - **`--output-format text|json|stream-json` exists as of 1.1.10** and did not in 1.1.7. Under
 //!     `stream-json` the CLI emits one JSON event per line and closes with
@@ -19,13 +21,19 @@
 //!     older binary rejects the flag. The plain-text fallback below covers a CLI that ignores it,
 //!     not one that refuses it.
 //!   - `-p` does **not** read stdin, and there's no `--system-prompt` / `--file` flag. So the whole
-//!     prompt (system + ask + data) can't ride on stdin. Two delivery paths, chosen by size:
-//!       * **small** — passed inline as the `-p` argument. `agy.exe` is a native binary, so
-//!         multi-line args are fine (unlike the `.cmd` shims opencode/gemini get from npm).
-//!       * **large** — a review diff can be 120k, past the ~32k Windows argv limit; it's written to
-//!         a temp file, the temp dir added with `--add-dir`, and a short `-p` message tells agy to
-//!         read it. Reading it headlessly needs `--dangerously-skip-permissions` (no prompt to
-//!         answer). agy has no granular tool-allowlist flag, so permissions are all-or-nothing.
+//!     prompt (system + ask + data) can't ride on stdin. Two delivery paths, chosen by
+//!     [`write_brief_file_if_unsafe_inline`]:
+//!       * **small and single-line** — passed inline as the `-p` argument. The installs verified
+//!         above resolve `agy` to a native binary, so a multi-line argument wouldn't hit the `.cmd`
+//!         shim newline rejection `claude.rs`/`grok.rs` guard against — but nothing stops a future
+//!         or platform-specific packaging from landing as `agy.cmd` instead (npm is exactly how
+//!         `opencode` ships), so a brief with an embedded newline still routes to a file rather than
+//!         betting on that.
+//!       * **large, or multi-line** — a review diff can be 120k, past the ~32k Windows argv limit;
+//!         either way it's written to a temp file, the temp dir added with `--add-dir`, and a short
+//!         `-p` message tells agy to read it. Reading it headlessly needs
+//!         `--dangerously-skip-permissions` (no prompt to answer). agy has no granular
+//!         tool-allowlist flag, so permissions are all-or-nothing.
 //!
 //! **Sessions: the blocker is gone, the swap is not made yet.** This engine used to say a headless
 //! caller could not learn agy's conversation id — true on 1.1.7, where nothing printed it and there
@@ -105,9 +113,10 @@ impl AiEngine for GeminiEngine {
             brief.push_str(inv.stdin_content);
         }
 
-        // Deliver the prompt inline when it fits, else via a temp file agy is told to read.
+        // Deliver the prompt inline when it's small and single-line, else via a temp file agy is
+        // told to read.
         let mut needs_read_permission = false;
-        match write_brief_file_if_large(&brief) {
+        match write_brief_file_if_unsafe_inline(&brief) {
             Some((dir, file)) => {
                 cmd.arg("-p").arg(format!(
                     "Read the file at {} and carry out the instructions it contains, replying with only the requested output.",
@@ -150,16 +159,30 @@ impl AiEngine for GeminiEngine {
     }
 
     fn list_models_args(&self) -> Option<Vec<String>> {
-        // `agy models` prints one model id per line — exactly what `crate::ai::list_models` wants.
         Some(vec!["models".to_string()])
+    }
+
+    fn parse_models(&self, stdout: &str) -> Vec<String> {
+        parse_model_list(stdout)
     }
 }
 
-/// Returns `Some((tempdir, file))` when `content` is too big to pass inline and was written to a
-/// temp file; `None` when it fits inline (the caller then passes it as the `-p` argument). A failed
-/// write also returns `None`, degrading to an inline attempt rather than failing the whole call.
-fn write_brief_file_if_large(content: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-    if content.len() <= INLINE_LIMIT {
+/// Pulls the id out of each line of `agy models`. Newer builds print `<id>\t<display label>`
+/// (e.g. `gemini-3.6-flash-high\tGemini 3.6 Flash (High)`) rather than a bare id — the default
+/// [`AiEngine::parse_models`] takes the whole trimmed line, so the label rode along into
+/// `--model` and the CLI rejected it outright ("model … is not recognized as a known model").
+/// An id never contains whitespace, so the first token of the line is always it, tab-separated
+/// or not.
+fn parse_model_list(stdout: &str) -> Vec<String> {
+    stdout.lines().filter_map(|line| line.split_whitespace().next()).map(str::to_string).collect()
+}
+
+/// Returns `Some((tempdir, file))` when `content` is too big, or has an embedded newline, to pass
+/// inline, and was written to a temp file; `None` when it fits inline as-is (the caller then passes
+/// it as the `-p` argument). A failed write also returns `None`, degrading to an inline attempt
+/// rather than failing the whole call. See the module docs for why a newline alone routes here too.
+fn write_brief_file_if_unsafe_inline(content: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    if content.len() <= INLINE_LIMIT && !content.contains('\n') {
         return None;
     }
     // A per-call subdirectory so `--add-dir` scopes agy to exactly this file and nothing else.
@@ -337,7 +360,31 @@ mod tests {
     }
 
     #[test]
-    fn small_prompts_stay_inline() {
-        assert!(write_brief_file_if_large("hola").is_none());
+    fn small_single_line_prompts_stay_inline() {
+        assert!(write_brief_file_if_unsafe_inline("hola").is_none());
+    }
+
+    /// A brief under `INLINE_LIMIT` still moves to a file once it has a newline — the module docs
+    /// explain why this engine doesn't bet on `agy` always resolving to a native binary.
+    #[test]
+    fn a_short_multiline_brief_still_moves_to_a_file() {
+        assert!(write_brief_file_if_unsafe_inline("system prompt\n\nthe ask").is_some());
+    }
+
+    /// Captured verbatim from a failing run: `agy models` handed back `id\tlabel` pairs, and the
+    /// whole line was stored as the model id, so `--model` broke with "not recognized as a known
+    /// model or custom model in settings".
+    #[test]
+    fn strips_the_display_label_off_a_tab_separated_listing() {
+        let out = "gemini-3.6-flash-high\tGemini 3.6 Flash (High)\ngemini-3.6-flash\tGemini 3.6 Flash";
+        assert_eq!(parse_model_list(out), vec!["gemini-3.6-flash-high", "gemini-3.6-flash"]);
+    }
+
+    #[test]
+    fn a_bare_id_per_line_still_works() {
+        assert_eq!(parse_model_list("gemini-3.6-flash-high\ngemini-3.6-flash"), vec![
+            "gemini-3.6-flash-high",
+            "gemini-3.6-flash"
+        ]);
     }
 }
