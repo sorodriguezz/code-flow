@@ -20,6 +20,11 @@ import type { ApiSettings, HttpSendRequest, NetworkOptions } from "../../types/a
  * else. Refusing that and asking for "the real URL" is asking the user to do a lookup we can do:
  * the page names its document, either inline or in the `swagger-initializer.js` beside it, and
  * failing that the generators put it at a handful of well-known paths.
+ *
+ * **Sometimes the document has no URL at all.** `swagger-ui-express` — what NestJS and most Express
+ * apps mount — serialises the whole description *into* `swagger-ui-init.js` as a `swaggerDoc`
+ * literal and never serves it as a document of its own. There is nothing to follow and nothing to
+ * sweep for: the only copy on the wire is embedded in a script, so we read it out of one.
  */
 
 /** Server-Driven candidates come first; these are the fallback sweep. */
@@ -64,13 +69,18 @@ const URL_FIELD = /["']?(?:configUrl|url)["']?\s*:\s*["']([^"']+)["']/g;
 const DOC_URL = /["'`]((?:https?:\/\/|\.{0,2}\/)[^"'`\s]+\.(?:json|ya?ml))["'`]/gi;
 
 /**
- * `<script src="./swagger-initializer.js">` — Swagger UI 4+ moved the config out of the page.
+ * `<script src="./swagger-initializer.js">` — Swagger UI 4+ moved the config out of the page — and
+ * `swagger-ui-init.js`, which is the same idea under swagger-ui-express's spelling.
  *
  * Deliberately narrower than "any script with swagger in the name": the page also loads
  * `swagger-ui-bundle.js` and `swagger-ui-standalone-preset.js`, and probing those means
- * downloading a megabyte of minified library to learn it isn't an API description.
+ * downloading a megabyte of minified library to learn it isn't an API description. `-init` is the
+ * substring both initializers share and neither bundle has.
  */
-const SCRIPT_SRC = /<script[^>]+src\s*=\s*["']([^"']*(?:initializer|swagger-config)[^"']*\.js)["']/gi;
+const SCRIPT_SRC = /<script[^>]+src\s*=\s*["']([^"']*(?:-init|swagger-config)[^"']*\.js)["']/gi;
+
+/** `swaggerDoc: {…}` under swagger-ui-express, `spec: {…}` in a hand-written `SwaggerUIBundle`. */
+const EMBEDDED_DOC = /["']?(?:swaggerDoc|spec)["']?\s*:\s*\{/g;
 
 export type SpecFetchFailure =
   | { code: "badUrl" }
@@ -161,20 +171,29 @@ async function probe(url: string, settings: ApiSettings): Promise<string | null>
 
 /** Every document URL a Swagger UI page, initializer script or config JSON points at. */
 function referencedUrls(text: string, base: string): string[] {
-  let host: string;
+  let parsed: URL;
   try {
-    host = new URL(base).hostname;
+    parsed = new URL(base);
   } catch {
     return [];
   }
+  const host = parsed.hostname;
+
+  // `<script src="./swagger-ui-init.js">` on a page served at `/api/docs` resolves to
+  // `/api/swagger-ui-init.js` by the URL rules, but to `/api/docs/swagger-ui-init.js` in the
+  // browser that rendered it — the server redirected to the trailing slash on the way in, and a
+  // redirect we didn't make is invisible in the body we got. So a relative lead is tried both ways
+  // rather than guessed at.
+  const asDirectory = new URL(parsed.href);
+  if (!asDirectory.pathname.endsWith("/")) asDirectory.pathname += "/";
+  const bases = asDirectory.href === parsed.href ? [base] : [base, asDirectory.href];
 
   const out: string[] = [];
   const seen = new Set<string>();
-  const push = (raw: string) => {
-    if (!raw || raw.includes("{{")) return;
+  const add = (raw: string, from: string) => {
     let resolved: URL;
     try {
-      resolved = new URL(raw, base);
+      resolved = new URL(raw, from);
     } catch {
       return; /* a relative URL we can't resolve is not a candidate */
     }
@@ -190,12 +209,61 @@ function referencedUrls(text: string, base: string): string[] {
     seen.add(href);
     out.push(href);
   };
+  const push = (raw: string) => {
+    if (!raw || raw.includes("{{")) return;
+    // Absolute and root-relative leads land in the same place against either base; only a genuinely
+    // relative one is ambiguous enough to be worth the second probe.
+    if (/^[a-z][a-z0-9+.-]*:/i.test(raw) || raw.startsWith("/")) add(raw, base);
+    else for (const from of bases) add(raw, from);
+  };
   // Ordered by how specific the evidence is: a `url:` field is the document, a script tag is one
   // more hop, and a bare literal is a guess about a string that merely looks like one.
   for (const match of text.matchAll(URL_FIELD)) push(match[1]);
   for (const match of text.matchAll(SCRIPT_SRC)) push(match[1]);
   for (const match of text.matchAll(DOC_URL)) push(match[1]);
   return out;
+}
+
+/**
+ * The `{…}` that starts at `text[start]`, or null if it never closes.
+ *
+ * Brace counting has to understand strings, because an API description is full of path templates:
+ * a summary reading `Fetch the order for {orderId}` would otherwise close the object early and hand
+ * back a fragment that doesn't parse.
+ */
+function balancedObject(text: string, start: number): string | null {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') inString = true;
+    else if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * The API description serialised *into* a script, for when it is served nowhere else.
+ *
+ * Every hit still has to parse and still has to look like OpenAPI to `detectFormat`, so the
+ * `customOptions: {…}` sitting next to it in the same literal — and any unrelated `spec:` in a
+ * page we misjudged — is rejected on its contents rather than on where it happened to sit.
+ */
+function embeddedSpec(text: string): string | null {
+  for (const match of text.matchAll(EMBEDDED_DOC)) {
+    const object = balancedObject(text, match.index + match[0].length - 1);
+    if (object && detectFormat(object) === "openapi") return object;
+  }
+  return null;
 }
 
 function wellKnownUrls(base: string): string[] {
@@ -221,6 +289,11 @@ function wellKnownUrls(base: string): string[] {
   if (page) {
     add(`${origin}${page}-json`);
     add(`${origin}${page}.json`);
+    // Same family, and the one that survives a reverse proxy: an Ingress routing the page by path
+    // prefix forwards `<page>/…` and 404s `<page>-json`, because prefix matching is per segment and
+    // `docs-json` is a different segment from `docs`. It is also the only candidate that exists at
+    // all when the app was set up without `jsonDocumentUrl`.
+    add(`${origin}${page}/swagger-ui-init.js`);
   }
 
   // `https://host/api/swagger-ui/index.html` → try `https://host/api/swagger-ui/…` before the
@@ -253,6 +326,10 @@ export async function fetchSpec(rawUrl: string, settings: ApiSettings): Promise<
 
   const body = first.body_text ?? "";
   if (detectFormat(body)) return { text: body, url, resolvedFrom: null };
+  // A page carrying its own description — a single-file export, or the initializer itself pasted in
+  // by someone who already did the lookup by hand.
+  const inline = embeddedSpec(body);
+  if (inline) return { text: inline, url, resolvedFrom: null };
 
   // Not a document. Walk what the page points at, one level of indirection deep — index.html
   // names swagger-initializer.js, which names swagger-config.json, which names the spec — then
@@ -270,6 +347,8 @@ export async function fetchSpec(rawUrl: string, settings: ApiSettings): Promise<
     const hit = await probe(candidate, settings);
     if (!hit) continue;
     if (detectFormat(hit)) return { text: hit, url: candidate, resolvedFrom: url };
+    const embedded = embeddedSpec(hit);
+    if (embedded) return { text: embedded, url: candidate, resolvedFrom: url };
     // A config or another shell: put what it references at the front, ahead of the blind sweep.
     queue.unshift(...referencedUrls(hit, candidate).filter((next) => !visited.has(next)));
   }
