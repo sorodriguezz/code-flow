@@ -1,11 +1,10 @@
 import { useEffect, useState } from "react";
 import {
+  Cloud,
   FolderOpen,
-  Inbox,
   Monitor,
   MonitorSmartphone,
   ScrollText,
-  Table2,
   Terminal,
   Waypoints,
   X,
@@ -18,8 +17,7 @@ import { ImportSshConfigModal } from "./ImportSshConfigModal";
 import { ForwardsPanel } from "./ForwardsPanel";
 import { AllForwardsPanel } from "./AllForwardsPanel";
 import { SftpPanel } from "./SftpPanel";
-import { QueuePanel } from "./QueuePanel";
-import { TablePanel } from "./TablePanel";
+import { AzureAccountPanel } from "./AzureAccountPanel";
 import { LogPanel } from "./LogPanel";
 import { ScreenPanel } from "./ScreenPanel";
 import { HostGallery } from "./HostGallery";
@@ -149,17 +147,15 @@ export function RemoteView() {
                   )}
                   {activeTab?.kind === "sftp" && (
                     <div className="absolute inset-0">
-                      <SftpPanel tab={activeTab} />
+                      <SftpPanel hostId={activeTab.hostId} />
                     </div>
                   )}
-                  {activeTab?.kind === "queue" && (
+                  {/* A whole storage account — the four services in one tab. See
+                      `AzureAccountPanel` for why it wraps the three panels above rather than
+                      replacing them. */}
+                  {activeTab?.kind === "azure" && (
                     <div className="absolute inset-0">
-                      <QueuePanel tab={activeTab} />
-                    </div>
-                  )}
-                  {activeTab?.kind === "table" && (
-                    <div className="absolute inset-0">
-                      <TablePanel tab={activeTab} />
+                      <AzureAccountPanel tab={activeTab} />
                     </div>
                   )}
                   {activeTab?.kind === "log" && (
@@ -197,8 +193,9 @@ export function RemoteView() {
 function tabIcon(tab: RemoteTab) {
   if (tab.kind === "forwards" || tab.kind === "all-forwards") return Waypoints;
   if (tab.kind === "sftp") return FolderOpen;
-  if (tab.kind === "queue") return Inbox;
-  if (tab.kind === "table") return Table2;
+  // The account's tab keeps one icon whichever page is showing: it is one connection, and a tab
+  // whose icon changed as you clicked the rail would read as four tabs in one slot.
+  if (tab.kind === "azure") return Cloud;
   if (tab.kind === "log") return ScrollText;
   if (tab.kind === "screen") return tab.launch?.protocol === "rdp" ? MonitorSmartphone : Monitor;
   return Terminal;

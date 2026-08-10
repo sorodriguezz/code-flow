@@ -410,6 +410,18 @@ export const getSetting = (key: string) => invoke<string | null>("get_setting", 
 
 export const setSetting = (key: string, value: string) => invoke<void>("set_setting", { key, value });
 
+/** The app-wide patterns whose branches come locked with no padlock clicked on them. Not a
+ * `getSetting` call: the backend answers with the shipped defaults when nothing has been saved
+ * yet, and re-seeds the cache the git-layer guards read. */
+export const getLockedBranchRules = () => invoke<string[]>("get_locked_branch_rules");
+
+/** Returns the list as actually stored — trimmed, blanks dropped, duplicates collapsed — so the
+ * screen shows what the guards will use rather than what was typed. */
+export const setLockedBranchRules = (rules: string[]) =>
+  invoke<string[]>("set_locked_branch_rules", { rules });
+
+export const defaultLockedBranchRules = () => invoke<string[]>("default_locked_branch_rules");
+
 /** Models the given provider's CLI reports as available (e.g. `opencode models`). Empty for
  * providers whose CLI has no listing command — the caller falls back to a curated list. */
 export const listAiModels = (provider: string) => invoke<string[]>("list_ai_models", { provider });

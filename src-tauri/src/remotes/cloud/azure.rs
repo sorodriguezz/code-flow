@@ -75,6 +75,12 @@ pub enum Credential {
 /// the two pasted secrets this host is configured for — the account key or the SAS. They are never
 /// both in play, so a second slot would only be a second thing to keep in step.
 pub async fn credential(host_id: &str, spec: &RemoteHostSpec) -> Result<Credential, String> {
+    // The one gate every Azure request passes through, wherever it came from — files, queues or
+    // tables. Without it a row of the wrong kind reaches the signer and fails with a signature
+    // error, which says nothing about the actual mistake.
+    if !spec.kind.is_azure() {
+        return Err(spec.kind.refuses("reach Azure Storage"));
+    }
     let saved = crate::secrets::get_secret(&super::super::password_key(host_id))
         .unwrap_or_default()
         .unwrap_or_default();
@@ -114,12 +120,41 @@ pub async fn credential(host_id: &str, spec: &RemoteHostSpec) -> Result<Credenti
     }
 }
 
+/// The default emulator ports, in [`Service`] order. Azurite listens on one port per service — the
+/// convention every Azure SDK hard-codes, and the reason a single custom endpoint can still serve
+/// all four here.
+const EMULATOR_PORTS: [(Service, u16); 4] = [
+    (Service::Blob, 10000),
+    (Service::Queue, 10001),
+    (Service::Table, 10002),
+    // Azurite has no file service; 10003 is what the older emulator used and costs nothing to map.
+    (Service::File, 10003),
+];
+
 /// The base URL for one service on this account.
 pub fn endpoint(spec: &RemoteHostSpec, service: Service) -> Result<Url, String> {
     let custom = spec.azure.endpoint.trim();
     if !custom.is_empty() {
         let base = if custom.contains("://") { custom.to_string() } else { format!("https://{custom}") };
-        return Url::parse(&base).map_err(|e| format!("\"{custom}\" is not a valid endpoint: {e}"));
+        let mut url =
+            Url::parse(&base).map_err(|e| format!("\"{custom}\" is not a valid endpoint: {e}"))?;
+        // An emulator endpoint names *one* service by its port, and the spec holds one endpoint for
+        // all four. Moving the port is what makes a single pasted `UseDevelopmentStorage=true` — or
+        // an Azurite blob URL — reach the queues and the tables too. A real custom endpoint (a
+        // private endpoint, a custom domain) has no port in this range and is left exactly as typed.
+        if let Some(port) = url.port() {
+            if EMULATOR_PORTS.iter().any(|(_, known)| *known == port) {
+                let wanted = EMULATOR_PORTS
+                    .iter()
+                    .find(|(named, _)| *named == service)
+                    .map(|(_, port)| *port);
+                if let Some(wanted) = wanted {
+                    url.set_port(Some(wanted))
+                        .map_err(|_| format!("\"{custom}\" can't carry a port"))?;
+                }
+            }
+        }
+        return Ok(url);
     }
 
     let account = spec.azure.account.trim();
@@ -140,7 +175,191 @@ pub fn endpoint(spec: &RemoteHostSpec, service: Service) -> Result<Url, String> 
 /// account in the *first path segment* (`http://127.0.0.1:10000/devstoreaccount1`), and a signature
 /// naming the wrong account is rejected with no hint as to why.
 pub fn account(spec: &RemoteHostSpec) -> String {
-    spec.azure.account.trim().to_string()
+    let named = spec.azure.account.trim();
+    if !named.is_empty() {
+        return named.to_string();
+    }
+    // The emulator case the doc comment describes: nothing in the account field, and the account
+    // sitting in the endpoint's first path segment. Signing as "" is rejected with no hint as to
+    // why, so it is read back out here rather than left to the user to type twice.
+    Url::parse(spec.azure.endpoint.trim())
+        .ok()
+        .and_then(|url| url.path_segments().and_then(|mut parts| parts.next().map(str::to_string)))
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// Connection strings
+// ---------------------------------------------------------------------------
+
+/// The emulator's fixed account, published by Microsoft and identical in every SDK — it is what
+/// `UseDevelopmentStorage=true` expands to, not a credential anybody owns.
+const EMULATOR_ACCOUNT: &str = "devstoreaccount1";
+const EMULATOR_KEY: &str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+const EMULATOR_ENDPOINT: &str = "http://127.0.0.1:10000/devstoreaccount1";
+
+/// What a pasted connection string was understood to mean.
+///
+/// The secret is deliberately *not* part of it as far as storage is concerned: the caller puts
+/// `secret` in the keychain and the rest in the spec, which is the same split every other host kind
+/// makes. Keeping them in one struct only says they were read from one line.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConnectionString {
+    pub account: String,
+    /// The account key, base64 as the portal gives it. Empty when the string carried a SAS instead.
+    pub key: String,
+    /// A shared access signature's query string, without its `?`. Empty when the string carried a
+    /// key instead.
+    pub sas: String,
+    /// The DNS suffix. Empty means `core.windows.net`.
+    pub suffix: String,
+    /// A whole endpoint, when the string named one that isn't the account's own — an emulator, a
+    /// private endpoint. Empty means "build it from the account".
+    pub endpoint: String,
+}
+
+/// Reads the one line the portal actually hands out.
+///
+/// **Three shapes arrive, and all three are this function's job**, because the person pasting has
+/// no reason to know which one they were given:
+///
+/// - `DefaultEndpointsProtocol=https;AccountName=…;AccountKey=…;EndpointSuffix=…` — the "Access
+///   keys" blade's connection string.
+/// - The same with `SharedAccessSignature=…` and per-service `…Endpoint=` entries instead of an
+///   account and a key — what "Shared access signature" produces.
+/// - A SAS *URL*: `https://contoso.blob.core.windows.net/photos?sv=…&sig=…`, which is what the
+///   context menu on a container copies.
+///
+/// `UseDevelopmentStorage=true` expands to Azurite's fixed account, since a string that short says
+/// nothing else and refusing it would be refusing the one form that needs no thought at all.
+///
+/// Returns `None` for anything that names neither an account nor an endpoint — the normal state of
+/// a field being typed into, not an error.
+pub fn parse_connection_string(text: &str) -> Option<ConnectionString> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    // A URL rather than a `;`-separated list. Taken first because a SAS URL contains no `=`-keyed
+    // segments at all and would otherwise parse as nothing.
+    if text.starts_with("http://") || text.starts_with("https://") {
+        return parse_sas_url(text);
+    }
+
+    let mut parsed = ConnectionString::default();
+    let mut endpoints: Vec<(Service, String)> = Vec::new();
+    let mut found = false;
+
+    for part in text.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        // The *first* `=` only: an account key is base64 and ends in `=` padding, and splitting on
+        // every one of them is the classic way to hand Azure three quarters of a key.
+        let Some((name, value)) = part.split_once('=') else { continue };
+        let value = value.trim();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "usedevelopmentstorage" if value.eq_ignore_ascii_case("true") => {
+                parsed.account = EMULATOR_ACCOUNT.to_string();
+                parsed.key = EMULATOR_KEY.to_string();
+                parsed.endpoint = EMULATOR_ENDPOINT.to_string();
+                found = true;
+            }
+            "accountname" => {
+                parsed.account = value.to_string();
+                found = true;
+            }
+            "accountkey" => {
+                parsed.key = value.to_string();
+                found = true;
+            }
+            "sharedaccesssignature" => {
+                parsed.sas = value.trim_start_matches('?').to_string();
+                found = true;
+            }
+            "endpointsuffix" => parsed.suffix = value.to_string(),
+            "blobendpoint" => endpoints.push((Service::Blob, value.to_string())),
+            "fileendpoint" => endpoints.push((Service::File, value.to_string())),
+            "queueendpoint" => endpoints.push((Service::Queue, value.to_string())),
+            "tableendpoint" => endpoints.push((Service::Table, value.to_string())),
+            // `DefaultEndpointsProtocol`, and anything a future SDK adds. The scheme is already in
+            // every endpoint we build (https) or in the explicit one, so there is nothing to keep.
+            _ => {}
+        }
+    }
+
+    // Only one endpoint fits in a spec, so the blob one wins and the rest are re-derived — see
+    // `endpoint`, which moves an emulator port per service. A canonical endpoint is dropped
+    // entirely: `https://contoso.blob.core.windows.net` is exactly what the account name already
+    // builds, and storing it would pin every service to the blob subdomain.
+    if let Some((_, url)) = endpoints
+        .iter()
+        .find(|(service, _)| *service == Service::Blob)
+        .or_else(|| endpoints.first())
+    {
+        match split_account_host(url) {
+            Some((account, suffix)) => {
+                if parsed.account.is_empty() {
+                    parsed.account = account;
+                    found = true;
+                }
+                if parsed.suffix.is_empty() {
+                    parsed.suffix = suffix;
+                }
+            }
+            None => {
+                if parsed.endpoint.is_empty() {
+                    parsed.endpoint = url.clone();
+                }
+                found = true;
+            }
+        }
+    }
+
+    if !found || (parsed.account.is_empty() && parsed.endpoint.is_empty()) {
+        return None;
+    }
+    Some(parsed)
+}
+
+/// A SAS URL, as the portal's "Copy" button produces it.
+fn parse_sas_url(text: &str) -> Option<ConnectionString> {
+    let url = Url::parse(text).ok()?;
+    let query = url.query().unwrap_or_default();
+    // No signature, no credential — a bare service URL says where, never who, and a host built from
+    // it would fail at the first request with a 403 instead of here.
+    if !query.contains("sig=") {
+        return None;
+    }
+    let host = url.host_str().unwrap_or_default();
+    let (account, suffix) = split_host(host)?;
+    Some(ConnectionString { account, sas: query.to_string(), suffix, ..Default::default() })
+}
+
+/// `https://contoso.blob.core.windows.net` → `("contoso", "core.windows.net")`. `None` for anything
+/// that isn't an account's own endpoint — an emulator, an IP, a private endpoint with its own name.
+fn split_account_host(url: &str) -> Option<(String, String)> {
+    let parsed = Url::parse(url).ok()?;
+    // A path means the account is in the path, which is the emulator's shape and not this one.
+    if parsed.path().trim_matches('/') != "" {
+        return None;
+    }
+    split_host(parsed.host_str().unwrap_or_default())
+}
+
+/// The account and suffix in `contoso.blob.core.windows.net`, if the middle label is a service.
+fn split_host(host: &str) -> Option<(String, String)> {
+    let (account, rest) = host.split_once('.')?;
+    let (service, suffix) = rest.split_once('.')?;
+    if !matches!(service, "blob" | "file" | "queue" | "table" | "dfs") {
+        return None;
+    }
+    if account.is_empty() || suffix.is_empty() {
+        return None;
+    }
+    Some((account.to_string(), suffix.to_string()))
 }
 
 /// A signed, sendable request.
@@ -545,6 +764,109 @@ mod tests {
             shared_key(&key, "contoso", "PUT", &url, &headers, Some(0)),
             shared_key(&key, "contoso", "PUT", &url, &headers, Some(7)),
         );
+    }
+
+    /// The line off the "Access keys" blade, which is what people actually paste.
+    #[test]
+    fn the_portals_connection_string_becomes_an_account_and_a_key() {
+        let parsed = parse_connection_string(
+            "DefaultEndpointsProtocol=https;AccountName=contoso;\
+             AccountKey=YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo=;EndpointSuffix=core.windows.net",
+        )
+        .expect("a full connection string names an account");
+        assert_eq!(parsed.account, "contoso");
+        // The whole key, padding included: splitting on every `=` is how three quarters of one
+        // reaches Azure and comes back a 403.
+        assert_eq!(parsed.key, "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo=");
+        assert_eq!(parsed.suffix, "core.windows.net");
+        assert!(parsed.endpoint.is_empty(), "an account's own endpoint is not worth storing");
+        assert!(parsed.sas.is_empty());
+    }
+
+    /// A SAS string names endpoints instead of an account, and the account is inside them.
+    #[test]
+    fn a_sas_connection_string_reads_the_account_out_of_its_endpoint() {
+        let parsed = parse_connection_string(
+            "BlobEndpoint=https://contoso.blob.core.windows.net;\
+             QueueEndpoint=https://contoso.queue.core.windows.net;\
+             SharedAccessSignature=sv=2021-08-06&ss=b&sig=abc",
+        )
+        .unwrap();
+        assert_eq!(parsed.account, "contoso");
+        assert_eq!(parsed.suffix, "core.windows.net");
+        assert_eq!(parsed.sas, "sv=2021-08-06&ss=b&sig=abc");
+        assert!(parsed.endpoint.is_empty());
+    }
+
+    #[test]
+    fn a_sas_url_is_a_connection_string_too() {
+        let parsed =
+            parse_connection_string("https://contoso.blob.core.windows.net/photos?sv=2021-08-06&sig=abc")
+                .unwrap();
+        assert_eq!(parsed.account, "contoso");
+        assert_eq!(parsed.sas, "sv=2021-08-06&sig=abc");
+        // A URL with no signature is an address, not a credential.
+        assert!(parse_connection_string("https://contoso.blob.core.windows.net/photos").is_none());
+    }
+
+    #[test]
+    fn the_emulator_shorthand_expands_to_azurite() {
+        let parsed = parse_connection_string("UseDevelopmentStorage=true").unwrap();
+        assert_eq!(parsed.account, EMULATOR_ACCOUNT);
+        assert_eq!(parsed.endpoint, EMULATOR_ENDPOINT);
+        assert!(!parsed.key.is_empty());
+    }
+
+    /// An explicit emulator string keeps its endpoint, because that one is *not* the account's own.
+    #[test]
+    fn an_emulator_endpoint_is_kept_and_a_canonical_one_is_not() {
+        let parsed = parse_connection_string(
+            "DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=a2V5;\
+             BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;",
+        )
+        .unwrap();
+        assert_eq!(parsed.endpoint, "http://127.0.0.1:10000/devstoreaccount1");
+        assert_eq!(parsed.account, "devstoreaccount1");
+    }
+
+    #[test]
+    fn a_line_that_names_nothing_is_not_a_connection_string() {
+        assert!(parse_connection_string("").is_none());
+        assert!(parse_connection_string("ssh deploy@10.0.0.7 -p 2222").is_none());
+        assert!(parse_connection_string("DefaultEndpointsProtocol=https").is_none());
+    }
+
+    /// One endpoint in the spec, four services on the far side. The emulator is the case where the
+    /// port has to move, and the case where getting it wrong means the queues silently 404.
+    #[test]
+    fn an_emulator_endpoint_moves_its_port_per_service() {
+        let mut s = spec();
+        s.azure.endpoint = "http://127.0.0.1:10000/devstoreaccount1".into();
+        assert_eq!(endpoint(&s, Service::Blob).unwrap().port(), Some(10000));
+        assert_eq!(endpoint(&s, Service::Queue).unwrap().port(), Some(10001));
+        assert_eq!(endpoint(&s, Service::Table).unwrap().port(), Some(10002));
+        // The account stays in the path, which is where the emulator wants it.
+        assert_eq!(endpoint(&s, Service::Queue).unwrap().path(), "/devstoreaccount1");
+    }
+
+    /// A private endpoint is not an emulator: nothing about it should be rewritten.
+    #[test]
+    fn a_custom_endpoint_with_no_emulator_port_is_left_alone() {
+        let mut s = spec();
+        s.azure.endpoint = "https://storage.internal:8443/".into();
+        for service in [Service::Blob, Service::Queue, Service::Table, Service::File] {
+            assert_eq!(endpoint(&s, service).unwrap().as_str(), "https://storage.internal:8443/");
+        }
+    }
+
+    /// Signing as the empty account is a 403 with no explanation, so an emulator endpoint's first
+    /// path segment stands in for the account field nobody filled.
+    #[test]
+    fn an_emulator_account_is_read_out_of_its_endpoint() {
+        let mut s = spec();
+        s.azure.account = String::new();
+        s.azure.endpoint = "http://127.0.0.1:10000/devstoreaccount1".into();
+        assert_eq!(account(&s), "devstoreaccount1");
     }
 
     /// A key pasted with its `?`, or as a whole URL, is still a key. The user should not have to

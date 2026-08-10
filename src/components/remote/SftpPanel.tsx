@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
-import { useRemoteStore, type RemoteSftpTab } from "../../state/remoteStore";
+import { useRemoteStore } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -52,11 +52,27 @@ import { riseDelay } from "../../lib/rise";
  * not by which pane you started in — which means the same click means the same thing regardless of
  * where the selection happens to be.
  */
-export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
+export interface SftpPanelProps {
+  hostId: string;
+  /**
+   * Where the remote pane opens, and what its Home button goes back to. Empty means the far side
+   * decides — the login directory over SFTP, the bucket list on S3.
+   *
+   * It exists for the Azure account panel, whose Blob and Files pages are the same browser pointed
+   * at `/blob` and `/files`: the service is the first segment of the path (see
+   * `remotes::cloud::account`), so "which service" and "which directory" are one question and one
+   * component answers both.
+   */
+  root?: string;
+  /** What the remote pane calls itself. Defaults to the host's name. */
+  title?: string;
+}
+
+export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
   const width = useLayoutStore((s) => s.sizes.remoteSftpLocalWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
-  const host = useRemoteStore((s) => s.hosts.find((entry) => entry.id === tab.hostId) ?? null);
+  const host = useRemoteStore((s) => s.hosts.find((entry) => entry.id === hostId) ?? null);
   const t = useT();
 
   const [local, setLocal] = useState<RemoteListing | null>(null);
@@ -69,8 +85,13 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
   const [progress, setProgress] = useState<RemoteTransferEvent | null>(null);
   const [remoteError, setRemoteError] = useState<string | null>(null);
   /** Identifies this pane's transfer, so a late event from a previous one is ignored rather than
-   *  jerking the bar backwards. */
+   *  jerking the bar backwards.
+   *
+   *  Prefixed with a per-instance id, because two of these panels can be alive at once: the Azure
+   *  account panel keeps Blob and Files mounted side by side, and a counter that restarted at zero
+   *  in each would have both bars move for one transfer. */
   const transferId = useRef(0);
+  const paneId = useId();
   /**
    * The entry being dragged and which side it came from.
    *
@@ -101,7 +122,7 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void onRemoteTransfer((event) => {
-      if (event.id === String(transferId.current)) setProgress(event);
+      if (event.id === `${paneId}-${transferId.current}`) setProgress(event);
     }).then((fn) => {
       unlisten = fn;
     });
@@ -122,7 +143,7 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
   const loadRemote = useCallback(
     async (path: string) => {
       try {
-        const listing = await remoteListFiles(tab.hostId, path);
+        const listing = await remoteListFiles(hostId, path);
         setRemote(listing);
         setRemotePath(listing.path);
         setRemotePick(null);
@@ -134,13 +155,13 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
         setRemoteError(String(error));
       }
     },
-    [tab.hostId],
+    [hostId],
   );
 
   useEffect(() => {
     void loadLocal("");
-    void loadRemote("");
-  }, [loadLocal, loadRemote]);
+    void loadRemote(root);
+  }, [loadLocal, loadRemote, root]);
 
   /**
    * Moves `pick` in `direction`. Directories included — the backend walks them.
@@ -150,15 +171,15 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
    */
   const transfer = async (direction: "up" | "down", pick: RemoteFile | null) => {
     if (!pick || busy) return;
-    const id = String(++transferId.current);
+    const id = `${paneId}-${++transferId.current}`;
     setBusy(true);
     setProgress(null);
     try {
       if (direction === "up") {
-        await remoteUploadFile(id, tab.hostId, pick.path, joinRemote(remotePath, pick.name));
+        await remoteUploadFile(id, hostId, pick.path, joinRemote(remotePath, pick.name));
         await loadRemote(remotePath);
       } else {
-        await remoteDownloadFile(id, tab.hostId, pick.path, joinLocal(localPath, pick.name));
+        await remoteDownloadFile(id, hostId, pick.path, joinLocal(localPath, pick.name));
         await loadLocal(localPath);
       }
     } catch (error) {
@@ -232,7 +253,7 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
             </p>
             <button
               type="button"
-              onClick={() => void loadRemote("")}
+              onClick={() => void loadRemote(root)}
               className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-3 py-1.5 text-[12px] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
             >
               <RefreshCw size={13} />
@@ -242,7 +263,7 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
         ) : (
           <FilePane
             icon={Server}
-            title={host.name}
+            title={title ?? host.name}
             listing={remote}
             selected={remotePick}
             onSelect={setRemotePick}
@@ -260,7 +281,7 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
             }}
             onMakeDir={async (name) => {
               try {
-                await remoteMakeDir(tab.hostId, joinRemote(remotePath, name));
+                await remoteMakeDir(hostId, joinRemote(remotePath, name));
                 await loadRemote(remotePath);
               } catch (error) {
                 pushErrorToast(String(error));
@@ -271,7 +292,7 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
                 // Renaming *is* moving in SFTP, so the destination is built from the directory the
                 // pane is in rather than from the entry's own path — which is what makes a name
                 // with a `/` in it fail loudly instead of silently relocating the file.
-                await remoteRenameFile(tab.hostId, entry.path, joinRemote(remotePath, name));
+                await remoteRenameFile(hostId, entry.path, joinRemote(remotePath, name));
                 await loadRemote(remotePath);
               } catch (error) {
                 pushErrorToast(String(error));
@@ -281,7 +302,7 @@ export function SftpPanel({ tab }: { tab: RemoteSftpTab }) {
               if (!(await confirmAction(t("remote.sftpConfirmDelete", { name: entry.name }))))
                 return;
               try {
-                await remoteRemoveFile(tab.hostId, entry.path, entry.is_dir);
+                await remoteRemoveFile(hostId, entry.path, entry.is_dir);
                 await loadRemote(remotePath);
               } catch (error) {
                 pushErrorToast(String(error));

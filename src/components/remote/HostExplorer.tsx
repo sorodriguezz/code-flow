@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEven
 import {
   ChevronDown,
   ChevronRight,
+  Cloud,
   Download,
   Bookmark,
   FolderOpen,
@@ -26,7 +27,7 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRemoteDragStore } from "../../state/remoteDragStore";
 import { CARD, HostDot, KindGlyph, OsGlyph, ToolbarButton } from "./remoteChrome";
-import { useHostMenu, useNewConnectionMenu } from "./hostMenu";
+import { useHostMenu, useNewConnectionMenu, useOpenPrimary } from "./hostMenu";
 import { groupHosts, hostMatches, UNGROUPED, useRemoteStore } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -36,6 +37,8 @@ import {
   capabilities,
   describeHost,
   hasAddress,
+  isAzureKind,
+  isCloudKind,
   parseHostSpec,
   type RemoteHostRow,
 } from "../../types/remote";
@@ -429,6 +432,8 @@ function HostRow({
   const openForwards = useRemoteStore((s) => s.openForwards);
   const openScreen = useRemoteStore((s) => s.openScreen);
   const openSftp = useRemoteStore((s) => s.openSftp);
+  const openAzure = useRemoteStore((s) => s.openAzure);
+  const openPrimary = useOpenPrimary();
   const renameHost = useRemoteStore((s) => s.renameHost);
   const setRenamingHost = useRemoteStore((s) => s.setRenamingHost);
   const openDetails = useRemoteStore((s) => s.openDetails);
@@ -467,15 +472,10 @@ function HostRow({
    */
   const act = (run: () => void) => (incomplete ? openDetails(host.id) : run());
 
-  /**
-   * What double-click and Enter do: the shell where there is one, the file browser otherwise.
-   *
-   * Not "open a shell and let it fail" — on a file-only host there is no shell to open, and the
-   * row's *point* is the files. Same gesture, same meaning ("show me this machine"), different
-   * thing on the other side.
-   */
-  const openPrimary = () =>
-    act(() => (can.shell ? void openSession(host.id) : openSftp(host.id)));
+  // What double-click and Enter do. Shared with the gallery's cards and the editor's Connect
+  // button — see `useOpenPrimary`, which is where the "what is the biggest thing this host is"
+  // order lives now that three places ask it.
+  const activate = () => openPrimary(host, spec);
 
   const detail = describeHost(spec);
 
@@ -506,11 +506,11 @@ function HostRow({
       onPointerEnter={() => hoverDrag(host.id, host.group_name)}
       onPointerUp={() => commitDrop(host.group_name, host.id)}
       onClick={() => selectHost(host.id)}
-      onDoubleClick={openPrimary}
+      onDoubleClick={activate}
       onKeyDown={(e) => {
         if (e.key === "Enter") {
           e.preventDefault();
-          openPrimary();
+          activate();
         } else if (e.key === "F2") {
           e.preventDefault();
           setRenamingHost(host.id);
@@ -573,7 +573,7 @@ function HostRow({
               editor. Hidden on hover so it doesn't fight the buttons for the same pixels. */}
           {incomplete && (
             <span className="shrink-0 text-[10px] text-[var(--cf-text-muted)] group-hover:hidden">
-              {t("remote.needsAddress")}
+              {t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")}
             </span>
           )}
 
@@ -594,12 +594,20 @@ function HostRow({
                 onClick={() => act(() => void openSession(host.id))}
               />
             )}
-            {can.files && (
+            {isAzureKind(spec.kind) ? (
               <RowAction
-                icon={FolderOpen}
-                label={t("remote.files")}
-                onClick={() => act(() => openSftp(host.id))}
+                icon={Cloud}
+                label={t("remote.azOpenAccount")}
+                onClick={() => act(() => openAzure(host.id))}
               />
+            ) : (
+              can.files && (
+                <RowAction
+                  icon={FolderOpen}
+                  label={t("remote.files")}
+                  onClick={() => act(() => openSftp(host.id))}
+                />
+              )
             )}
             {can.forwards && (
               <RowAction

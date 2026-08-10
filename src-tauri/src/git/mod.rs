@@ -3,6 +3,7 @@ pub mod checkpoint;
 pub mod diff;
 pub mod graph;
 pub mod identity;
+pub mod lock_rules;
 pub mod merge;
 pub mod remotes;
 pub mod repo;

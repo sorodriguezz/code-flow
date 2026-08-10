@@ -108,7 +108,21 @@ pub enum RemoteKind {
     /// An S3 bucket store — Amazon's, or anything that speaks the same API (MinIO, Cloudflare R2,
     /// Wasabi, Ceph) via [`S3Spec::endpoint`]. Files, with the caveats in [`cloud`].
     S3,
-    /// Azure Blob storage. Files, same caveats.
+    /// **A whole Azure Storage account** — blob containers, file shares, queues and tables behind
+    /// one credential.
+    ///
+    /// This is what an Azure account actually is: one name, one key, four endpoints that differ
+    /// only by subdomain. The four kinds below predate it and made you keep four rows for one
+    /// account, four copies of the same key in the keychain, and four things to fix when it
+    /// rotated. They still load — a row written as one keeps working — but nothing creates them
+    /// any more.
+    ///
+    /// Files reach it through [`cloud::account`], which puts the service in the first path segment
+    /// (`/blob/photos/cat.jpg`) so one browser can cross both filesystems. Queues and tables never
+    /// went through the file browser at all, so they need nothing: their commands read the account
+    /// out of [`AzureSpec`] and don't care which kind the row is.
+    Azure,
+    /// Azure Blob storage. Files, same caveats. Legacy — see [`Azure`](Self::Azure).
     AzureBlob,
     /// Azure File shares — SMB's protocol over HTTPS. The one Azure service in this list that has
     /// real directories rather than synthesised ones.
@@ -172,8 +186,29 @@ impl RemoteKind {
             Self::Rdp => DEFAULT_RDP_PORT,
             // A cloud endpoint is a URL, and its port is whatever the scheme says. Naming 443 here
             // would put a port field in front of the user that changes nothing.
-            Self::S3 | Self::AzureBlob | Self::AzureFiles | Self::AzureQueue | Self::AzureTable => 443,
+            Self::S3
+            | Self::Azure
+            | Self::AzureBlob
+            | Self::AzureFiles
+            | Self::AzureQueue
+            | Self::AzureTable => 443,
         }
+    }
+
+    /// The Azure kinds: one account, one credential, four endpoints.
+    ///
+    /// Checked once, in [`cloud::azure::credential`], which every request to any of the four
+    /// services goes through. That is what keeps an SSH row from reaching the queue panel and
+    /// getting a signing error instead of a sentence saying what it is.
+    pub fn is_azure(self) -> bool {
+        matches!(
+            self,
+            Self::Azure
+                | Self::AzureBlob
+                | Self::AzureFiles
+                | Self::AzureQueue
+                | Self::AzureTable
+        )
     }
 
     /// What this kind is called in a message to the user.
@@ -186,6 +221,7 @@ impl RemoteKind {
             Self::Vnc => "VNC",
             Self::Rdp => "RDP",
             Self::S3 => "S3",
+            Self::Azure => "Azure Storage",
             Self::AzureBlob => "Azure Blob",
             Self::AzureFiles => "Azure Files",
             Self::AzureQueue => "Azure Queue",

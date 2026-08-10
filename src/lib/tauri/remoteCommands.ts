@@ -4,6 +4,7 @@ import type {
   ForwardSpec,
   ImportResult,
   ImportedHost,
+  ParsedAzureConnection,
   ParsedCommand,
   RemoteGroupRow,
   RemoteHostRow,
@@ -189,6 +190,19 @@ export const remoteCloseScreen = (id: string) => invoke<void>("remote_close_scre
  *  are; see `remotes::parse`. */
 export const remoteParseSshCommand = (line: string) =>
   invoke<ParsedCommand | null>("remote_parse_ssh_command", { line });
+
+/**
+ * Reads one pasted Azure Storage connection string.
+ *
+ * The three shapes the portal hands out — `AccountName=…;AccountKey=…`, a SAS string with
+ * per-service endpoints, and a SAS URL — all come back as the same account. `null` when the text
+ * names no account, which is the normal state of a field being typed into.
+ *
+ * The secret arrives beside the spec rather than inside it: the spec is stored as JSON in the
+ * workspace database, so the key goes to the keychain with `remoteSetPassword` instead.
+ */
+export const remoteParseAzureConnection = (text: string) =>
+  invoke<ParsedAzureConnection | null>("remote_parse_azure_connection", { text });
 
 /** Round-trip time to the host's SSH port, or `null` when there is no direct route — a jump-hosted
  *  machine has none from here, and reporting the bastion's number instead would be a lie. */

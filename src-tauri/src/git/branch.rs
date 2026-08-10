@@ -1,6 +1,7 @@
 use git2::{BranchType, ConfigLevel, ErrorCode, ObjectType, Repository};
 use serde::{Deserialize, Serialize};
 
+use super::lock_rules;
 use super::repo::open;
 
 /// Marks the one checkout failure the UI can offer a way out of: uncommitted work that the
@@ -35,13 +36,38 @@ fn lock_key(branch: &str) -> String {
     format!("branch.{branch}.codeflowLocked")
 }
 
-fn read_lock(config: &git2::Config, branch: &str) -> bool {
-    config.get_bool(&lock_key(branch)).unwrap_or(false)
+/// The branch's own entry, if it has one. Three states, not two:
+///
+/// * absent — the branch has never been decided on, so [`lock_rules`] answers for it;
+/// * `true`  — locked here, whatever the rules say;
+/// * `false` — deliberately *unlocked* here, whatever the rules say.
+///
+/// The third state is what keeps the global list from being a cage: a rule covering `release/*`
+/// still leaves you able to open the one release branch you're actually cutting today, without
+/// editing a setting that applies to every repository you own.
+fn read_override(config: &git2::Config, branch: &str) -> Option<bool> {
+    config.get_bool(&lock_key(branch)).ok()
 }
 
-/// Writes the lock entry without checking that the branch exists — `delete_branch` needs to clear
-/// a lock for a branch that has just stopped existing.
-fn write_lock(repo: &Repository, branch: &str, locked: bool) -> Result<(), String> {
+/// Whether the branch is locked right now, and whether it's the rule list saying so rather than
+/// an entry in this repository. The second half is only for the UI — a padlock that can say
+/// "this one comes from your settings" is the difference between a lock you understand and a lock
+/// that appeared on its own.
+fn resolve_lock(config: &git2::Config, branch: &str) -> (bool, bool) {
+    match read_override(config, branch) {
+        Some(explicit) => (explicit, false),
+        None => {
+            let by_rule = lock_rules::matches(branch);
+            (by_rule, by_rule)
+        }
+    }
+}
+
+/// Writes the branch's own entry without checking that the branch exists — `delete_branch` needs
+/// to clear one for a branch that has just stopped existing.
+///
+/// `Some(v)` pins the branch at `v`; `None` drops the entry so the rules answer for it again.
+fn write_override(repo: &Repository, branch: &str, value: Option<bool>) -> Result<(), String> {
     // Write to the repository's own config explicitly — the multi-level config a repo hands back
     // would otherwise be free to land this in ~/.gitconfig, where it would leak across repos.
     let mut config = repo
@@ -49,12 +75,16 @@ fn write_lock(repo: &Repository, branch: &str, locked: bool) -> Result<(), Strin
         .and_then(|c| c.open_level(ConfigLevel::Local))
         .map_err(|e| e.message().to_string())?;
 
-    if locked {
-        config.set_bool(&lock_key(branch), true).map_err(|e| e.message().to_string())?;
-    } else if let Err(e) = config.remove(&lock_key(branch)) {
-        // Unlocking something that was never locked is the requested end state, not a failure.
-        if e.code() != ErrorCode::NotFound {
-            return Err(e.message().to_string());
+    match value {
+        Some(v) => config.set_bool(&lock_key(branch), v).map_err(|e| e.message().to_string())?,
+        None => {
+            if let Err(e) = config.remove(&lock_key(branch)) {
+                // Clearing something that was never written is the requested end state, not a
+                // failure.
+                if e.code() != ErrorCode::NotFound {
+                    return Err(e.message().to_string());
+                }
+            }
         }
     }
     Ok(())
@@ -69,9 +99,14 @@ pub struct BranchInfo {
     pub ahead: usize,
     pub behind: usize,
     pub target: Option<String>,
-    /// Locked by the user to keep merges and pushes off it. Always false for remote-tracking
+    /// Locked to keep merges and pushes off it, by whichever of the two routes got there first:
+    /// this branch's own padlock, or the app-wide rule list. Always false for remote-tracking
     /// branches — the lock is a local guard rail, not a server-side protected branch.
     pub is_locked: bool,
+    /// True only when `is_locked` comes from the rule list rather than from a padlock clicked on
+    /// this branch. Lets the UI say where a lock came from, and offer "stop locking every branch
+    /// like this one" next to "unlock just this one".
+    pub locked_by_rule: bool,
 }
 
 pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
@@ -103,8 +138,15 @@ pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
             }
         }
 
+        let (is_locked, locked_by_rule) = if is_remote {
+            (false, false)
+        } else {
+            resolve_lock(&config, &name)
+        };
+
         result.push(BranchInfo {
-            is_locked: !is_remote && read_lock(&config, &name),
+            is_locked,
+            locked_by_rule,
             name,
             is_head: branch.is_head(),
             is_remote,
@@ -118,15 +160,20 @@ pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
     Ok(result)
 }
 
-/// Locks or unlocks a local branch. Unlocking drops the config entry rather than writing `false`,
-/// so an unlocked branch leaves nothing behind in `.git/config`.
+/// Locks or unlocks one local branch, overriding whatever the rule list says about it.
+///
+/// Asking for the state the rules already produce drops the entry instead of writing it, so the
+/// branch goes back to following the list: unlocking a `release/*` branch that nothing else covers
+/// leaves nothing behind in `.git/config`, and re-locking a rule-locked `main` doesn't pin it
+/// against a rule the user might later remove.
 pub fn set_branch_locked(path: &str, name: &str, locked: bool) -> Result<(), String> {
     let repo = open(path)?;
     // Refuse a name that isn't a local branch: the key would sit in the config forever with
     // nothing to apply to, and `list_branches` would never surface it again.
     repo.find_branch(name, BranchType::Local)
         .map_err(|e| e.message().to_string())?;
-    write_lock(&repo, name, locked)
+    let value = if locked == lock_rules::matches(name) { None } else { Some(locked) };
+    write_override(&repo, name, value)
 }
 
 /// The checked-out branch's name if it's locked. `None` on a detached HEAD or an unborn branch —
@@ -138,7 +185,7 @@ pub fn locked_head_branch(repo: &Repository) -> Option<String> {
     }
     let name = head.shorthand()?;
     let config = repo.config().ok()?;
-    read_lock(&config, name).then(|| name.to_string())
+    resolve_lock(&config, name).0.then(|| name.to_string())
 }
 
 /// Gate for anything that would move or publish the current branch. Lives here, in the git layer,
@@ -181,10 +228,11 @@ pub fn delete_branch(path: &str, name: &str, is_remote: bool) -> Result<(), Stri
         .find_branch(name, kind)
         .map_err(|e| e.message().to_string())?;
     branch.delete().map_err(|e| e.message().to_string())?;
-    // Take any lock down with the branch, so re-creating the name later doesn't come back locked
-    // by a config entry nothing on screen accounts for.
+    // Take the branch's own entry down with it, so re-creating the name later doesn't come back
+    // pinned by a config entry nothing on screen accounts for. A rule still applies to the
+    // re-created branch, which is the point of a rule — that isn't leftover state.
     if !is_remote {
-        write_lock(&repo, name, false)?;
+        write_override(&repo, name, None)?;
     }
     Ok(())
 }
@@ -336,6 +384,10 @@ mod tests {
 
     #[test]
     fn a_lock_blocks_merging_into_the_locked_branch_but_not_out_of_it() {
+        // `base` is whatever `git init` called it — `main` or `master`, both of which the shipped
+        // rules cover. Pin an empty list so this test is about the padlock alone; the rules get
+        // their own tests below.
+        let _pinned = lock_rules::pin_for_test(&[]);
         let (dir, base) = fixture();
         let path = dir.to_str().unwrap();
 
@@ -366,6 +418,7 @@ mod tests {
     /// formatting goes wrong, so the round-trip is pinned on one.
     #[test]
     fn a_lock_survives_a_branch_name_with_dots_and_slashes() {
+        let _pinned = lock_rules::pin_for_test(&[]);
         let (dir, _base) = fixture();
         let path = dir.to_str().unwrap();
         let name = "release/1.2.x";
@@ -378,6 +431,73 @@ mod tests {
         delete_branch(path, name, false).unwrap();
         create_branch(path, name, None).unwrap();
         assert!(list_branches(path).unwrap().iter().any(|b| b.name == name && !b.is_locked));
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The app-wide list locks branches nobody has ever clicked a padlock on, in a repository that
+    /// has never been opened before — which is the entire point of it existing.
+    #[test]
+    fn a_rule_locks_a_branch_with_no_entry_of_its_own() {
+        let _pinned = lock_rules::pin_for_test(&["develop", "release/*"]);
+        let (dir, base) = fixture();
+        let path = dir.to_str().unwrap();
+
+        create_branch(path, "develop", None).unwrap();
+        create_branch(path, "release/1.2", None).unwrap();
+
+        let listed = list_branches(path).unwrap();
+        let of = |n: &str| listed.iter().find(|b| b.name == n).unwrap().clone();
+        // Locked, and reported as the rules' doing so the UI can say so.
+        assert!(of("develop").is_locked && of("develop").locked_by_rule);
+        assert!(of("release/1.2").is_locked && of("release/1.2").locked_by_rule);
+        // Nothing else is touched, `base` included — it isn't in the pinned list.
+        assert!(!of("feature").is_locked && !of("feature").locked_by_rule);
+        assert!(!of(&base).is_locked);
+
+        // And the guard honours it: merging into a rule-locked branch is refused exactly like
+        // merging into a hand-locked one.
+        checkout_local_branch(path, "develop").unwrap();
+        let err = super::super::merge::merge_branch(path, "feature").unwrap_err();
+        assert!(err.starts_with(BRANCH_LOCKED_PREFIX), "unexpected error: {err}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The per-branch padlock still wins, in both directions — that's what keeps a list that
+    /// applies to every repository from being something you have to edit to get work done.
+    #[test]
+    fn a_branchs_own_padlock_overrides_the_rules_both_ways() {
+        let _pinned = lock_rules::pin_for_test(&["develop"]);
+        let (dir, _base) = fixture();
+        let path = dir.to_str().unwrap();
+        create_branch(path, "develop", None).unwrap();
+
+        let locked_state = |name: &str| {
+            let listed = list_branches(path).unwrap();
+            let b = listed.iter().find(|b| b.name == name).unwrap();
+            (b.is_locked, b.locked_by_rule)
+        };
+
+        // Unlocking a rule-locked branch pins it open, and the merge that was refused goes through.
+        set_branch_locked(path, "develop", false).unwrap();
+        assert_eq!(locked_state("develop"), (false, false));
+        checkout_local_branch(path, "develop").unwrap();
+        super::super::merge::merge_branch(path, "feature").unwrap();
+
+        // Locking a branch no rule covers pins it shut, and isn't attributed to the rules.
+        set_branch_locked(path, "feature", true).unwrap();
+        assert_eq!(locked_state("feature"), (true, false));
+
+        // Asking for the state the rules already give drops the entry rather than pinning it, so
+        // the branch follows the list again afterwards.
+        set_branch_locked(path, "develop", true).unwrap();
+        assert_eq!(locked_state("develop"), (true, true));
+        set_branch_locked(path, "feature", false).unwrap();
+        assert_eq!(locked_state("feature"), (false, false));
+        let config = git2::Repository::open(path).unwrap().config().unwrap();
+        assert!(config.get_bool("branch.develop.codeflowLocked").is_err());
+        assert!(config.get_bool("branch.feature.codeflowLocked").is_err());
 
         fs::remove_dir_all(&dir).ok();
     }

@@ -1164,9 +1164,18 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
                       {/* One padlock, drawn as the state it is in — shut when locked, open when
                           not — and clicking it flips that state. A separate always-on badge next
                           to it meant a shut padlock and an open one sat side by side, which read
-                          as a contradiction rather than as "locked, click to unlock". */}
+                          as a contradiction rather than as "locked, click to unlock".
+                          A lock that came from the app-wide rule list says so in its tooltip:
+                          the click still unlocks this one branch, and a padlock that appeared on
+                          its own is worth explaining where it came from. */}
                       <button
-                        title={b.is_locked ? t("branch.lockedToggle") : t("branch.lock")}
+                        title={
+                          b.locked_by_rule
+                            ? t("branch.lockedByRuleToggle")
+                            : b.is_locked
+                              ? t("branch.lockedToggle")
+                              : t("branch.lock")
+                        }
                         onClick={() => setBranchLocked(b.name, !b.is_locked)}
                         className={`ml-1 shrink-0 hover:text-[var(--cf-warning)] ${
                           b.is_locked

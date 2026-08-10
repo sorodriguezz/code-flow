@@ -14,7 +14,8 @@ import {
   Terminal,
   type LucideIcon,
 } from "lucide-react";
-import { KIND_LABEL, type RemoteKind, type RemoteOs } from "../../types/remote";
+import { KIND_LABEL, type AzureService, type RemoteKind, type RemoteOs } from "../../types/remote";
+import type { TranslationKey } from "../../lib/i18n/translations";
 
 /**
  * The Remote workspace's shared visual vocabulary, the counterpart of `dbChrome`.
@@ -51,6 +52,7 @@ export function kindIcon(kind: RemoteKind): LucideIcon {
     // instead, because a queue drawn as a cloud beside a blob drawn as a cloud is two rows the eye
     // cannot separate.
     case "s3":
+    case "azure":
     case "azure_blob":
     case "azure_files":
       return Cloud;
@@ -85,6 +87,7 @@ export function kindColor(kind: RemoteKind): string {
     // Azure one in a list that now has both.
     case "s3":
       return "#c4801f";
+    case "azure":
     case "azure_blob":
     case "azure_files":
     case "azure_queue":
@@ -94,6 +97,28 @@ export function kindColor(kind: RemoteKind): string {
       return "#8b8b96";
   }
 }
+
+/**
+ * What each of a storage account's four services is called and drawn as.
+ *
+ * Here rather than in either of the two places that need it — the host's context menu and the
+ * account panel's rail — because they are two drawings of one list, and the tour, the menu and the
+ * rail disagreeing about whether it is "Files" or "File shares" is exactly the drift this file
+ * exists to prevent.
+ */
+export const AZURE_SERVICE_LABEL: Record<AzureService, TranslationKey> = {
+  blob: "remote.azBlobContainers",
+  files: "remote.azFileShares",
+  queues: "remote.queues",
+  tables: "remote.tables",
+};
+
+export const AZURE_SERVICE_ICON: Record<AzureService, LucideIcon> = {
+  blob: HardDrive,
+  files: FolderTree,
+  queues: Inbox,
+  tables: Database,
+};
 
 export function KindGlyph({ kind, size = 14 }: { kind: RemoteKind; size?: number }) {
   const Icon = kindIcon(kind);

@@ -72,7 +72,10 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
                   {/* A locked branch reads as locked wherever branches are listed, not only in
                       the sidebar row that owns the toggle. */}
                   {b.is_locked && (
-                    <span className="shrink-0 text-[var(--cf-warning)]" title={t("branch.lockedBadge")}>
+                    <span
+                      className="shrink-0 text-[var(--cf-warning)]"
+                      title={b.locked_by_rule ? t("branch.lockedByRuleBadge") : t("branch.lockedBadge")}
+                    >
                       <Lock size={11} />
                     </span>
                   )}

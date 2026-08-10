@@ -105,11 +105,14 @@ enum Transport {
     Ftp,
     /// Signed HTTPS against a bucket — [`RemoteKind::S3`].
     S3,
-    /// Signed HTTPS against a blob container — [`RemoteKind::AzureBlob`].
-    Blob,
-    /// Signed HTTPS against a file share — [`RemoteKind::AzureFiles`]. The only cloud transport
-    /// with real directories.
-    Share,
+    /// Signed HTTPS against an Azure Storage account — every Azure kind.
+    ///
+    /// One arm for all of them, not one per service: [`super::cloud::account`] picks blob storage
+    /// or a file share from the first segment of the path, so the kind no longer decides which
+    /// filesystem a request lands on. The legacy single-service kinds come through here too — the
+    /// credential is the *account's* either way, and routing them separately would leave a row
+    /// saved as `azure_blob` unable to open the account panel it now opens into.
+    Azure,
 }
 
 fn transport(spec: &RemoteHostSpec) -> Result<Transport, String> {
@@ -117,13 +120,14 @@ fn transport(spec: &RemoteHostSpec) -> Result<Transport, String> {
         RemoteKind::Ssh | RemoteKind::Sftp => Ok(Transport::Sftp),
         RemoteKind::Ftp | RemoteKind::Ftps => Ok(Transport::Ftp),
         RemoteKind::S3 => Ok(Transport::S3),
-        RemoteKind::AzureBlob => Ok(Transport::Blob),
-        RemoteKind::AzureFiles => Ok(Transport::Share),
+        RemoteKind::Azure
+        | RemoteKind::AzureBlob
+        | RemoteKind::AzureFiles
+        | RemoteKind::AzureQueue
+        | RemoteKind::AzureTable => Ok(Transport::Azure),
         // Spelled out rather than left to a `_`, so a kind added later is a compile error here
         // instead of a host quietly inheriting somebody else's file transport.
-        RemoteKind::Vnc | RemoteKind::Rdp | RemoteKind::AzureQueue | RemoteKind::AzureTable => {
-            Err(spec.kind.refuses("browse files"))
-        }
+        RemoteKind::Vnc | RemoteKind::Rdp => Err(spec.kind.refuses("browse files")),
     }
 }
 
@@ -138,8 +142,7 @@ pub async fn list(
         Transport::Sftp => super::sftp::list(host_id, spec, path).await,
         Transport::Ftp => super::ftp::list(host_id, spec, path).await,
         Transport::S3 => super::cloud::s3::list(host_id, spec, path).await,
-        Transport::Blob => super::cloud::blob::list(host_id, spec, path).await,
-        Transport::Share => super::cloud::share::list(host_id, spec, path).await,
+        Transport::Azure => super::cloud::account::list(host_id, spec, path).await,
     }
 }
 
@@ -156,8 +159,7 @@ pub async fn download(
         Transport::Sftp => super::sftp::download(app, id, host_id, spec, remote_path, local_path).await,
         Transport::Ftp => super::ftp::download(app, id, host_id, spec, remote_path, local_path).await,
         Transport::S3 => super::cloud::s3::download(app, id, host_id, spec, remote_path, local_path).await,
-        Transport::Blob => super::cloud::blob::download(app, id, host_id, spec, remote_path, local_path).await,
-        Transport::Share => super::cloud::share::download(app, id, host_id, spec, remote_path, local_path).await,
+        Transport::Azure => super::cloud::account::download(app, id, host_id, spec, remote_path, local_path).await,
     }
 }
 
@@ -174,8 +176,7 @@ pub async fn upload(
         Transport::Sftp => super::sftp::upload(app, id, host_id, spec, local_path, remote_path).await,
         Transport::Ftp => super::ftp::upload(app, id, host_id, spec, local_path, remote_path).await,
         Transport::S3 => super::cloud::s3::upload(app, id, host_id, spec, local_path, remote_path).await,
-        Transport::Blob => super::cloud::blob::upload(app, id, host_id, spec, local_path, remote_path).await,
-        Transport::Share => super::cloud::share::upload(app, id, host_id, spec, local_path, remote_path).await,
+        Transport::Azure => super::cloud::account::upload(app, id, host_id, spec, local_path, remote_path).await,
     }
 }
 
@@ -184,8 +185,7 @@ pub async fn make_dir(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Resul
         Transport::Sftp => super::sftp::make_dir(host_id, spec, path).await,
         Transport::Ftp => super::ftp::make_dir(host_id, spec, path).await,
         Transport::S3 => super::cloud::s3::make_dir(host_id, spec, path).await,
-        Transport::Blob => super::cloud::blob::make_dir(host_id, spec, path).await,
-        Transport::Share => super::cloud::share::make_dir(host_id, spec, path).await,
+        Transport::Azure => super::cloud::account::make_dir(host_id, spec, path).await,
     }
 }
 
@@ -204,8 +204,7 @@ pub async fn remove(
         Transport::Sftp => super::sftp::remove(host_id, spec, path, is_dir).await,
         Transport::Ftp => super::ftp::remove(host_id, spec, path, is_dir).await,
         Transport::S3 => super::cloud::s3::remove(host_id, spec, path, is_dir).await,
-        Transport::Blob => super::cloud::blob::remove(host_id, spec, path, is_dir).await,
-        Transport::Share => super::cloud::share::remove(host_id, spec, path, is_dir).await,
+        Transport::Azure => super::cloud::account::remove(host_id, spec, path, is_dir).await,
     }
 }
 
@@ -219,8 +218,7 @@ pub async fn rename(
         Transport::Sftp => super::sftp::rename(host_id, spec, from, to).await,
         Transport::Ftp => super::ftp::rename(host_id, spec, from, to).await,
         Transport::S3 => super::cloud::s3::rename(host_id, spec, from, to).await,
-        Transport::Blob => super::cloud::blob::rename(host_id, spec, from, to).await,
-        Transport::Share => super::cloud::share::rename(host_id, spec, from, to).await,
+        Transport::Azure => super::cloud::account::rename(host_id, spec, from, to).await,
     }
 }
 

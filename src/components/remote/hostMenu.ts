@@ -1,12 +1,10 @@
 import {
   Copy,
   FolderOpen,
-  Inbox,
   Monitor,
   MonitorSmartphone,
   Pencil,
   Settings2,
-  Table2,
   Terminal,
   Trash2,
   Unplug,
@@ -14,15 +12,17 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import type { MenuItem } from "../api/CollectionTree";
-import { kindIcon } from "./remoteChrome";
+import { AZURE_SERVICE_ICON, AZURE_SERVICE_LABEL, kindIcon } from "./remoteChrome";
 import { disconnectHost, useRemoteStore, type RemoteDetailsTab } from "../../state/remoteStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import {
+  AZURE_SERVICES,
   capabilities,
   defaultHostSpec,
   hasAddress,
+  isAzureKind,
   parseHostSpec,
   type RemoteHostRow,
   type RemoteHostSpec,
@@ -54,8 +54,7 @@ export function useHostMenu() {
   const openForwards = useRemoteStore((s) => s.openForwards);
   const openScreen = useRemoteStore((s) => s.openScreen);
   const openSftp = useRemoteStore((s) => s.openSftp);
-  const openQueues = useRemoteStore((s) => s.openQueues);
-  const openTables = useRemoteStore((s) => s.openTables);
+  const openAzure = useRemoteStore((s) => s.openAzure);
   const openDetails = useRemoteStore((s) => s.openDetails);
   const duplicateHost = useRemoteStore((s) => s.duplicateHost);
   const deleteHost = useRemoteStore((s) => s.deleteHost);
@@ -79,6 +78,12 @@ export function useHostMenu() {
     // it is the editor, open, on the field that is missing.
     const act = (run: () => void) => () => (incomplete ? openDetails(host.id) : run());
 
+    // An Azure row is an account, so its entries are its four services rather than "Files" — each
+    // one opens the account panel on that page, in the tab that is already open if there is one.
+    // The legacy single-service kinds get the same four: the row still says which service it was
+    // made for (that is where it opens), and there is no reason to hide the other three.
+    const azure = isAzureKind(spec.kind);
+
     return [
       ...(can.shell
         ? [
@@ -89,7 +94,14 @@ export function useHostMenu() {
             },
           ]
         : []),
-      ...(can.files
+      ...(azure
+        ? AZURE_SERVICES.map((service) => ({
+            label: t(AZURE_SERVICE_LABEL[service]),
+            icon: AZURE_SERVICE_ICON[service],
+            onClick: act(() => openAzure(host.id, service)),
+          }))
+        : []),
+      ...(can.files && !azure
         ? [{ label: t("remote.files"), icon: FolderOpen, onClick: act(() => openSftp(host.id)) }]
         : []),
       ...(can.forwards
@@ -109,14 +121,6 @@ export function useHostMenu() {
               onClick: act(() => void openScreen(host.id)),
             },
           ]
-        : []),
-      // Neither is a file, so neither is in the capability table's `files` column — each is its own
-      // one-action kind, and that action is the only thing the row can do.
-      ...(spec.kind === "azure_queue"
-        ? [{ label: t("remote.queues"), icon: Inbox, onClick: act(() => openQueues(host.id)) }]
-        : []),
-      ...(spec.kind === "azure_table"
-        ? [{ label: t("remote.tables"), icon: Table2, onClick: act(() => openTables(host.id)) }]
         : []),
       {
         label: t("remote.editHost"),
@@ -150,6 +154,34 @@ export function useHostMenu() {
         },
       },
     ];
+  };
+}
+
+/**
+ * What activating a host opens — double-click, Enter, or the editor's Connect button.
+ *
+ * Defined once and called from all three, because they are three gestures meaning one thing ("show
+ * me this"), and they used to disagree: the tree opened a file browser for a VNC host, which has no
+ * files at all. In capability order, which is also "the biggest thing this host is": an account if
+ * it is one, then a shell, then a screen, then files. Every kind matches exactly one.
+ *
+ * A host with no address opens its editor instead. That is not an error path — a newly created host
+ * is exactly this case, and an error toast saying "fill in the address" is worse than the field.
+ */
+export function useOpenPrimary() {
+  const openSession = useRemoteStore((s) => s.openSession);
+  const openSftp = useRemoteStore((s) => s.openSftp);
+  const openScreen = useRemoteStore((s) => s.openScreen);
+  const openAzure = useRemoteStore((s) => s.openAzure);
+  const openDetails = useRemoteStore((s) => s.openDetails);
+
+  return (host: RemoteHostRow, spec: RemoteHostSpec = parseHostSpec(host)) => {
+    if (!hasAddress(spec)) return openDetails(host.id);
+    if (isAzureKind(spec.kind)) return openAzure(host.id);
+    const can = capabilities(spec);
+    if (can.shell) void openSession(host.id);
+    else if (can.screen) void openScreen(host.id);
+    else openSftp(host.id);
   };
 }
 
@@ -249,37 +281,17 @@ export const NEW_CONNECTIONS: NewConnection[] = [
     tab: "connection",
     spec: () => ({ ...defaultHostSpec(), kind: "s3" }),
   },
+  // One entry for the whole of Azure Storage, where there used to be four. An account is one name
+  // and one key with four services behind it — offering "Azure Blob" and "Azure Queue" as separate
+  // things to create was offering four rows for one account, four copies of the key, and four
+  // things to fix when it rotated.
   {
-    id: "azure_blob",
-    labelKey: "remote.newAzureBlob",
-    icon: kindIcon("azure_blob"),
-    suffix: "Blob",
+    id: "azure",
+    labelKey: "remote.newAzure",
+    icon: kindIcon("azure"),
+    suffix: "Azure",
     tab: "connection",
-    spec: () => ({ ...defaultHostSpec(), kind: "azure_blob" }),
-  },
-  {
-    id: "azure_files",
-    labelKey: "remote.newAzureFiles",
-    icon: kindIcon("azure_files"),
-    suffix: "Files",
-    tab: "connection",
-    spec: () => ({ ...defaultHostSpec(), kind: "azure_files" }),
-  },
-  {
-    id: "azure_queue",
-    labelKey: "remote.newAzureQueue",
-    icon: kindIcon("azure_queue"),
-    suffix: "Queue",
-    tab: "connection",
-    spec: () => ({ ...defaultHostSpec(), kind: "azure_queue" }),
-  },
-  {
-    id: "azure_table",
-    labelKey: "remote.newAzureTable",
-    icon: kindIcon("azure_table"),
-    suffix: "Table",
-    tab: "connection",
-    spec: () => ({ ...defaultHostSpec(), kind: "azure_table" }),
+    spec: () => ({ ...defaultHostSpec(), kind: "azure" }),
   },
 ];
 

@@ -31,7 +31,9 @@ import { looksSecret } from "../lib/remote/typedLines";
 import {
   defaultHostSpec,
   parseHostSpec,
+  serviceOfKind,
   type ActiveForward,
+  type AzureService,
   type ForwardSpec,
   type RemoteGroupRow,
   type RemoteHostRow,
@@ -146,24 +148,21 @@ export interface RemoteSftpTab {
   name: string;
 }
 
-/** A queue account's queues, and whichever one is open.
+/**
+ * A whole Azure Storage account: blob containers, file shares, queues and tables in one tab.
  *
- * One tab per *host*, not per queue: the panel lists the account's queues down one side and shows
- * the selected one beside it, the way the file browser shows one directory of one host. Opening
- * three queues is three selections in one tab, not three tabs. */
-export interface RemoteQueueTab {
+ * **One tab per account, not per service**, which is the point of the kind — an account is one name
+ * and one key, and having to open four tabs to see what is in it was the reason four separate host
+ * rows felt wrong. `service` is which of the four pages is showing; it moves with the rail and with
+ * whatever menu entry opened the tab, and it is on the tab rather than in the panel so that
+ * right-clicking a host and picking "Queues" lands on Queues in a tab that was already open.
+ */
+export interface RemoteAzureTab {
   id: string;
-  kind: "queue";
+  kind: "azure";
   hostId: string;
   name: string;
-}
-
-/** A table account's tables, same arrangement and for the same reason. */
-export interface RemoteTableTab {
-  id: string;
-  kind: "table";
-  hostId: string;
-  name: string;
+  service: AzureService;
 }
 
 /** The connection log. Belongs to no host, like the global forwards tab. */
@@ -188,8 +187,7 @@ export type RemoteTab =
   | RemoteScreenTab
   | RemoteAllForwardsTab
   | RemoteSftpTab
-  | RemoteQueueTab
-  | RemoteTableTab
+  | RemoteAzureTab
   | RemoteLogTab;
 
 interface RemoteState {
@@ -314,10 +312,14 @@ interface RemoteState {
   openAllForwards: () => void;
   openLog: () => void;
   openSftp: (hostId: string) => void;
-  /** Opens the queue panel for an Azure Queue host. */
-  openQueues: (hostId: string) => void;
-  /** Opens the entity grid for an Azure Table host. */
-  openTables: (hostId: string) => void;
+  /**
+   * Opens an Azure Storage account, on one of its four services.
+   *
+   * One tab per account. Called again with a different service, it moves the tab that is already
+   * open rather than adding a second — the services are pages of one account, and two tabs showing
+   * one account would be two things to keep in step.
+   */
+  openAzure: (hostId: string, service?: AzureService) => void;
   openScreen: (hostId: string) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   setActiveTab: (tabId: string) => void;
@@ -390,7 +392,18 @@ export function hostMatches(host: RemoteHostRow, query: string, tagFilter: strin
   if (tagFilter.length > 0 && !tagFilter.every((tag) => spec.tags.includes(tag))) return false;
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
-  return [host.name, host.group_name, spec.host, spec.user, spec.notes, ...spec.tags]
+  // The account name too, because a cloud row has no `host` — searching an estate for
+  // "sadesaintersystemsiris" would otherwise match nothing at all.
+  return [
+    host.name,
+    host.group_name,
+    spec.host,
+    spec.user,
+    spec.azure.account,
+    spec.s3.profile,
+    spec.notes,
+    ...spec.tags,
+  ]
     .join(" ")
     .toLowerCase()
     .includes(needle);
@@ -854,27 +867,30 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, selectedHostId: hostId }));
   },
 
-  openQueues: (hostId) => {
+  openAzure: (hostId, service) => {
     const host = hostOf(get().hosts, hostId);
     if (!host) return;
-    const existing = get().tabs.find((tab) => tab.kind === "queue" && tab.hostId === hostId);
+    // A legacy single-service row opens where it used to — an `azure_queue` host lands on Queues —
+    // and an account row with nothing asked for opens on Blob, which is what an account usually is.
+    const wanted = service ?? serviceOfKind(parseHostSpec(host).kind);
+    const existing = get().tabs.find((tab) => tab.kind === "azure" && tab.hostId === hostId);
     if (existing) {
-      set({ activeTabId: existing.id, selectedHostId: hostId });
+      set((s) => ({
+        activeTabId: existing.id,
+        selectedHostId: hostId,
+        tabs: s.tabs.map((tab) =>
+          tab.id === existing.id && tab.kind === "azure" ? { ...tab, service: wanted } : tab,
+        ),
+      }));
       return;
     }
-    const tab: RemoteQueueTab = { id: nextTabId(), kind: "queue", hostId, name: host.name };
-    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, selectedHostId: hostId }));
-  },
-
-  openTables: (hostId) => {
-    const host = hostOf(get().hosts, hostId);
-    if (!host) return;
-    const existing = get().tabs.find((tab) => tab.kind === "table" && tab.hostId === hostId);
-    if (existing) {
-      set({ activeTabId: existing.id, selectedHostId: hostId });
-      return;
-    }
-    const tab: RemoteTableTab = { id: nextTabId(), kind: "table", hostId, name: host.name };
+    const tab: RemoteAzureTab = {
+      id: nextTabId(),
+      kind: "azure",
+      hostId,
+      name: host.name,
+      service: wanted,
+    };
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, selectedHostId: hostId }));
   },
 
@@ -934,7 +950,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     // The tunnel, not the viewer: that window is the user's, and closing it out from under them
     // would be a surprise rather than a cleanup.
     if (tab.kind === "screen") await remoteCloseScreen(tab.hostId).catch(() => {});
-    if (tab.kind === "sftp") await remoteCloseFiles(tab.hostId).catch(() => {});
+    if (tab.kind === "sftp" || tab.kind === "azure")
+      await remoteCloseFiles(tab.hostId).catch(() => {});
     set((s) => {
       const tabs = s.tabs.filter((entry) => entry.id !== tabId);
       const activeTabId =

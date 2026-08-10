@@ -27,6 +27,7 @@
 //! canonical form with a different set of things it refuses to sign. Each cloud gets its own module
 //! for that, and the services within a cloud share it.
 
+pub mod account;
 pub mod aws;
 pub mod azure;
 pub mod blob;

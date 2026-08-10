@@ -141,6 +141,16 @@ pub fn run() {
             // one down would mean an extra argument on every operation in `ai.rs`.
             ai_usage::attach(app.handle().clone());
             appmenu::setup(&app.handle())?;
+            // The branches that come locked without anyone having clicked a padlock. Seeded here,
+            // before the first window can ask for anything, because the guards that read this list
+            // live in the git layer — which is handed a repository path and no database at all.
+            // A read that fails leaves the shipped defaults in place, which is the safe direction:
+            // the failure mode is a padlock too many, not a lock silently missing.
+            if let Ok(conn) = app.state::<db::Db>().0.lock() {
+                if let Ok(stored) = db::queries::get_setting(&conn, git::lock_rules::SETTING_KEY) {
+                    git::lock_rules::set_rules(git::lock_rules::resolve_stored(stored.as_deref()));
+                }
+            }
             // The IRIS driver reaches its bundled Java runtime through this. Recorded here because
             // `setup` is the only place with an `AppHandle`, and the datasource layer deliberately
             // has no Tauri types in it.
@@ -270,6 +280,9 @@ pub fn run() {
             commands::git_ops::git_push,
             commands::settings::get_setting,
             commands::settings::set_setting,
+            commands::settings::get_locked_branch_rules,
+            commands::settings::set_locked_branch_rules,
+            commands::settings::default_locked_branch_rules,
             commands::settings::get_workspace_prompt,
             commands::settings::set_workspace_prompt,
             commands::settings::default_workspace_prompt,
@@ -542,6 +555,7 @@ pub fn run() {
             commands::remote_cmd::remote_rename_file,
             commands::remote_cmd::remote_close_files,
             commands::remote_cmd::remote_parse_ssh_command,
+            commands::remote_cmd::remote_parse_azure_connection,
             commands::remote_cmd::remote_list_keys,
             commands::remote_cmd::remote_ssh_config_path,
             commands::remote_cmd::remote_scan_ssh_config,

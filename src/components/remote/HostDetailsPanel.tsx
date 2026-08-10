@@ -18,14 +18,20 @@ import { ForwardDiagram } from "./ForwardDiagram";
 import { Select } from "../common/Select";
 import { Checkbox } from "../common/Checkbox";
 import { CARD, HOST_COLORS, KindGlyph, OsGlyph, Pill, kindIcon } from "./remoteChrome";
+import { useOpenPrimary } from "./hostMenu";
 import { useRemoteStore, type RemoteDetailsTab } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
-import { remoteGetPassword, remoteListKeys, remoteSetPassword } from "../../lib/tauri/remoteCommands";
+import {
+  remoteGetPassword,
+  remoteListKeys,
+  remoteParseAzureConnection,
+  remoteSetPassword,
+} from "../../lib/tauri/remoteCommands";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import {
   KIND_LABEL,
-  REMOTE_KINDS,
+  azureEndpoint,
   capabilities,
   defaultPortFor,
   isAzureKind,
@@ -33,6 +39,7 @@ import {
   describeForward,
   effectivePort,
   hasAddress,
+  kindOptions,
   parseHostSpec,
   type ForwardKind,
   type ForwardSpec,
@@ -41,6 +48,7 @@ import {
   type RemoteHostSpec,
   type RemoteKind,
   type AzureAuth,
+  type ParsedAzureConnection,
   type RemoteOs,
   type S3Auth,
   type SshKey,
@@ -87,13 +95,12 @@ export function HostDetailsPanel() {
   const host = useRemoteStore((s) => s.hosts.find((entry) => entry.id === hostId) ?? null);
   const saveHost = useRemoteStore((s) => s.saveHost);
   const closeDetails = useRemoteStore((s) => s.closeDetails);
-  const openSession = useRemoteStore((s) => s.openSession);
-  const openSftp = useRemoteStore((s) => s.openSftp);
-  const openScreen = useRemoteStore((s) => s.openScreen);
   const width = useLayoutStore((s) => s.sizes.remoteDetailsWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const t = useT();
+
+  const openPrimary = useOpenPrimary();
 
   const [tab, setTab] = useState<Tab>("connection");
   const [spec, setSpec] = useState<RemoteHostSpec | null>(null);
@@ -330,15 +337,20 @@ export function HostDetailsPanel() {
           <button
             type="button"
             onClick={() => {
+              // Flushed first, and that ordering is the point: what opens has to be what is on
+              // screen, not what the debounce had got round to saving. A cloud account is read from
+              // the row by the backend, so an unsaved key would connect as the old one.
               flush();
-              if (can.shell) void openSession(host.id);
-              else if (can.screen) void openScreen(host.id);
-              else openSftp(host.id);
+              openPrimary(host, spec);
             }}
             disabled={!hasAddress(spec)}
             className="w-full rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:brightness-110 disabled:opacity-40"
           >
-            {!hasAddress(spec) ? t("remote.needsAddress") : t("remote.connect")}
+            {/* Named for what is missing rather than for a field this kind hasn't got: a storage
+                account reading "no address" was a button pointing at a box that does not exist. */}
+            {hasAddress(spec)
+              ? t("remote.connect")
+              : t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")}
           </button>
           {passwordLoaded && spec.auth === "password" && (
             <p className="pt-1.5 text-center text-[10px] text-[var(--cf-text-muted)]">
@@ -388,9 +400,23 @@ function ConnectionTab({
   // which returns another new array. React calls that out as "getSnapshot should be cached" and
   // then kills it with "Maximum update depth exceeded".
   const hosts = useRemoteStore((s) => s.hosts);
+  // Both halves, and the second one is not optional: a group is a *folder row* plus whichever hosts
+  // name it, and those are two different facts. Built from the hosts alone, a group created here
+  // and then left — pick another group, and it has no members — vanished from this list while its
+  // folder was still sitting in the tree, so the only way back into it was dragging the host onto
+  // the folder. `groupHosts` in the tree has always merged the two; this had not.
+  const folders = useRemoteStore((s) => s.groups);
   const groups = useMemo(
-    () => [...new Set(hosts.map((host) => host.group_name.trim()).filter(Boolean))].sort(),
-    [hosts],
+    () =>
+      [
+        ...new Set(
+          [
+            ...folders.map((folder) => folder.name.trim()),
+            ...hosts.map((host) => host.group_name.trim()),
+          ].filter(Boolean),
+        ),
+      ].sort(),
+    [folders, hosts],
   );
   const t = useT();
 
@@ -419,6 +445,7 @@ function ConnectionTab({
     vnc: t("remote.kindVncHint"),
     rdp: t("remote.kindRdpHint"),
     s3: t("remote.kindS3Hint"),
+    azure: t("remote.kindAzureHint"),
     azure_blob: t("remote.kindAzureBlobHint"),
     azure_files: t("remote.kindAzureFilesHint"),
     azure_queue: t("remote.kindAzureQueueHint"),
@@ -445,7 +472,7 @@ function ConnectionTab({
           value={spec.kind}
           onChange={(value) => onPatch({ kind: value as RemoteKind })}
           size="field"
-          options={REMOTE_KINDS.map((kind) => ({
+          options={kindOptions(spec.kind).map((kind) => ({
             value: kind,
             label: KIND_LABEL[kind],
             icon: kindIcon(kind),
@@ -825,10 +852,17 @@ function S3Settings({
 /**
  * The Azure-only settings.
  *
- * One account name and one of three credentials. The three are genuinely different things rather
- * than three spellings of "password" — a key signs every request, a SAS *is* the signature and
- * carries its own scope and expiry, and Entra is a token borrowed from `az login` — so the field
- * under the picker changes with the choice instead of staying a generic secret box.
+ * **The connection string comes first, because that is what people have.** Nobody is handed an
+ * account name, a key, a suffix and an endpoint as four separate values — they are handed one line
+ * off the portal's "Access keys" blade, or a SAS URL from a right-click on a container. Retyping
+ * that into four fields is work the app can do, and doing it by hand is where a truncated key comes
+ * from. The fields below stay, because a string is not the only way in (Entra ID has no string at
+ * all) and because after pasting one you still want to *see* what it set.
+ *
+ * The rest is one account name and one of three credentials. The three are genuinely different
+ * things rather than three spellings of "password" — a key signs every request, a SAS *is* the
+ * signature and carries its own scope and expiry, and Entra is a token borrowed from `az login` —
+ * so the field under the picker changes with the choice instead of staying a generic secret box.
  */
 function AzureSettings({
   spec,
@@ -857,6 +891,15 @@ function AzureSettings({
 
   return (
     <>
+      <ConnectionStringField
+        onApply={(parsed) => {
+          onPatch({ azure: { ...spec.azure, ...parsed.spec.azure } });
+          // Straight to the keychain, by the same debounced path the field below writes on. The
+          // key never touches the spec — that is what gets stored as JSON in the workspace.
+          if (parsed.secret) onPassword(parsed.secret);
+        }}
+      />
+
       <Row label={t("remote.azAccount")} hint={t("remote.azAccountHint")} wide>
         <Field
           value={spec.azure.account}
@@ -911,7 +954,106 @@ function AzureSettings({
           placeholder="http://127.0.0.1:10000/devstoreaccount1"
         />
       </Row>
+
+      <EndpointPreview spec={spec} />
     </>
+  );
+}
+
+/**
+ * Paste one connection string, get an account.
+ *
+ * **It applies the moment it parses, and then empties itself.** A parse only succeeds on something
+ * that names an account, so a half-typed line changes nothing; and a field that kept the text would
+ * be an account key sitting in a visible input for the rest of the session. What is left behind is
+ * a line saying what it set — which is the confirmation the user needs, without the secret in it.
+ *
+ * The parse is in Rust (`remotes::cloud::azure::parse_connection_string`) for the same reason the
+ * `ssh` one is: three shapes arrive, the differences between them are not obvious, and that is
+ * where the tests are.
+ */
+function ConnectionStringField({ onApply }: { onApply: (parsed: ParsedAzureConnection) => void }) {
+  const t = useT();
+  const [text, setText] = useState("");
+  const [applied, setApplied] = useState<ParsedAzureConnection | null>(null);
+  const [rejected, setRejected] = useState(false);
+
+  const apply = async (value: string) => {
+    setText(value);
+    setApplied(null);
+    if (!value.trim()) return setRejected(false);
+    try {
+      const parsed = await remoteParseAzureConnection(value);
+      if (!parsed) return setRejected(true);
+      setRejected(false);
+      setApplied(parsed);
+      onApply(parsed);
+      // Cleared on success only: a line that didn't parse is one the user is still editing.
+      setText("");
+    } catch (error) {
+      pushErrorToast(String(error));
+    }
+  };
+
+  return (
+    <div className="py-1">
+      <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.azConnectionString")}</span>
+      <span className="block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+        {t("remote.azConnectionStringHint")}
+      </span>
+      <textarea
+        value={text}
+        rows={2}
+        onChange={(e) => void apply(e.target.value)}
+        placeholder="DefaultEndpointsProtocol=https;AccountName=…;AccountKey=…"
+        spellCheck={false}
+        className="mt-1.5 w-full resize-y rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1.5 font-mono text-[11px] outline-none focus:border-[var(--cf-accent)]"
+      />
+      {applied && (
+        <p className="flex items-center gap-1.5 pt-1 text-[11px] text-[var(--cf-success)]">
+          <Check size={11} className="shrink-0" />
+          {t("remote.azConnectionApplied", {
+            account: applied.spec.azure.account || applied.name,
+            auth: applied.auth === "sas" ? t("remote.azAuthSas") : t("remote.azAuthKey"),
+          })}
+        </p>
+      )}
+      {rejected && text.trim().length > 0 && (
+        <p className="pt-1 text-[11px] text-[var(--cf-text-muted)]">{t("remote.azConnectionUnread")}</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The four URLs this account will actually be asked for.
+ *
+ * Cheap, and the fastest way to catch the two mistakes this form makes possible: a suffix typed for
+ * the wrong cloud, and an account name with a typo in it. Both otherwise surface as a DNS failure
+ * that names a host the user never typed. It is a preview and never an input — every request is
+ * still built in Rust.
+ */
+function EndpointPreview({ spec }: { spec: RemoteHostSpec }) {
+  const t = useT();
+  const services: ("blob" | "file" | "queue" | "table")[] = ["blob", "file", "queue", "table"];
+  const rows = services
+    .map((service) => [service, azureEndpoint(spec, service)] as const)
+    .filter(([, url]) => url);
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="py-1">
+      <span className="block text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+        {t("remote.azEndpointsTitle")}
+      </span>
+      <div className="mt-1 space-y-0.5">
+        {rows.map(([service, url]) => (
+          <p key={service} className="min-w-0 truncate font-mono text-[10px] text-[var(--cf-text-muted)]" title={url}>
+            {url}
+          </p>
+        ))}
+      </div>
+    </div>
   );
 }
 

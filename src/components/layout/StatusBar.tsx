@@ -204,7 +204,10 @@ export function StatusBar() {
           {status?.current_branch ?? (status?.is_detached ? t("statusbar.detachedHead") : "—")}
         </span>
         {current?.is_locked && (
-          <span className="text-[var(--cf-warning)]" title={t("branch.lockedBadge")}>
+          <span
+            className="text-[var(--cf-warning)]"
+            title={current.locked_by_rule ? t("branch.lockedByRuleBadge") : t("branch.lockedBadge")}
+          >
             <Lock size={11} />
           </span>
         )}

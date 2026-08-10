@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  Cloud,
   Folder,
   FolderOpen,
   LayoutGrid,
@@ -13,7 +14,7 @@ import {
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { HostDot, KindGlyph, OsGlyph, Pill } from "./remoteChrome";
-import { useHostMenu, useNewConnectionMenu } from "./hostMenu";
+import { useHostMenu, useNewConnectionMenu, useOpenPrimary } from "./hostMenu";
 import { allTags, hostMatches, useRemoteStore } from "../../state/remoteStore";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
@@ -21,9 +22,10 @@ import {
   capabilities,
   describeHost,
   hasAddress,
+  isAzureKind,
+  isCloudKind,
   parseHostSpec,
   type RemoteHostRow,
-  type RemoteHostSpec,
 } from "../../types/remote";
 
 /**
@@ -257,39 +259,13 @@ export function TagFilterRow() {
   );
 }
 
-/**
- * What activating a host opens: the shell where there is one, the file browser otherwise.
- *
- * A hook so the card and the list row share it — they are two drawings of the same object, and a
- * double-click meaning different things in the two would be a bug nobody would think to look for.
- */
-function useOpenPrimary() {
-  const openSession = useRemoteStore((s) => s.openSession);
-  const openSftp = useRemoteStore((s) => s.openSftp);
-  const openScreen = useRemoteStore((s) => s.openScreen);
-  const openQueues = useRemoteStore((s) => s.openQueues);
-  const openTables = useRemoteStore((s) => s.openTables);
-  const openDetails = useRemoteStore((s) => s.openDetails);
-
-  return (host: RemoteHostRow, spec: RemoteHostSpec) => {
-    if (!hasAddress(spec)) return openDetails(host.id);
-    const can = capabilities(spec);
-    // In capability order, which is also "the biggest thing this host is": a shell if it has one, a
-    // screen if that is what it is, files otherwise. Every kind matches exactly one of the three.
-    if (can.shell) void openSession(host.id);
-    else if (can.screen) void openScreen(host.id);
-    else if (spec.kind === "azure_queue") openQueues(host.id);
-    else if (spec.kind === "azure_table") openTables(host.id);
-    else openSftp(host.id);
-  };
-}
-
 /** The three things you came to a machine for, wherever the host is drawn. */
 function HostActions({ host }: { host: RemoteHostRow }) {
   const openSession = useRemoteStore((s) => s.openSession);
   const openForwards = useRemoteStore((s) => s.openForwards);
   const openScreen = useRemoteStore((s) => s.openScreen);
   const openSftp = useRemoteStore((s) => s.openSftp);
+  const openAzure = useRemoteStore((s) => s.openAzure);
   const openDetails = useRemoteStore((s) => s.openDetails);
   const t = useT();
 
@@ -305,8 +281,19 @@ function HostActions({ host }: { host: RemoteHostRow }) {
       {can.shell && (
         <Action icon={Terminal} label={t("remote.openShell")} onClick={() => act(() => void openSession(host.id))} />
       )}
-      {can.files && (
-        <Action icon={FolderOpen} label={t("remote.files")} onClick={() => act(() => openSftp(host.id))} />
+      {/* An account's one button opens the account, not a file browser: its blob half is one of
+          four pages, and the other three are not files. Which page it lands on is the rail's job
+          from there. */}
+      {isAzureKind(spec.kind) ? (
+        <Action
+          icon={Cloud}
+          label={t("remote.azOpenAccount")}
+          onClick={() => act(() => openAzure(host.id))}
+        />
+      ) : (
+        can.files && (
+          <Action icon={FolderOpen} label={t("remote.files")} onClick={() => act(() => openSftp(host.id))} />
+        )
       )}
       {can.forwards && (
         <Action icon={Waypoints} label={t("remote.portForwards")} onClick={() => act(() => openForwards(host.id))} />
@@ -397,7 +384,7 @@ function HostCard({ host, at, onMenu }: { host: RemoteHostRow; at: number; onMen
       </div>
 
       <span className="min-w-0 truncate font-mono text-[11px] text-[var(--cf-text-muted)]">
-        {detail || t("remote.needsAddress")}
+        {detail || t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")}
       </span>
 
       <div className="flex min-w-0 items-center gap-1">

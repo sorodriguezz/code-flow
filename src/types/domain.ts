@@ -123,8 +123,12 @@ export interface BranchInfo {
   ahead: number;
   behind: number;
   target: string | null;
-  /** Locked by the user: no merges onto it and no pushes of it. Always false when remote. */
+  /** Locked against merges onto it and pushes of it, by this branch's own padlock or by the
+   * app-wide rule list. Always false when remote. */
   is_locked: boolean;
+  /** True only when the lock comes from the rule list rather than from a padlock clicked on this
+   * branch — which is what lets the padlock say where its lock came from. */
+  locked_by_rule: boolean;
 }
 
 export interface StashInfo {

@@ -1,6 +1,7 @@
 use tauri::State;
 
 use crate::db::{models::*, queries, Db};
+use crate::git::lock_rules;
 
 #[tauri::command]
 pub fn get_setting(db: State<Db>, key: String) -> Result<Option<String>, String> {
@@ -12,6 +13,52 @@ pub fn get_setting(db: State<Db>, key: String) -> Result<Option<String>, String>
 pub fn set_setting(db: State<Db>, key: String, value: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::set_setting(&conn, &key, &value).map_err(|e| e.to_string())
+}
+
+// ---------- branches that come locked without anyone clicking a padlock ----------
+//
+// These three go through here rather than through `git_ops` because the list is an app-wide
+// preference living in `app_settings`, not a property of any repository. The git layer only ever
+// *reads* it, from the process-wide mirror `lock_rules` keeps — see that module for why it can't
+// simply take a database connection.
+//
+// The value is stored as JSON rather than the comma-joined form used elsewhere for lists: a comma
+// is a legal character in a git branch name, so a pattern containing one would silently split in
+// two on the way back out.
+
+/// The list as stored, falling back to the shipped defaults when nothing has ever been saved.
+/// Reading also re-seeds the process-wide mirror, so the screen that shows the list is the same
+/// thing that repairs the cache if it ever got out of step.
+#[tauri::command]
+pub fn get_locked_branch_rules(db: State<Db>) -> Result<Vec<String>, String> {
+    let stored = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::get_setting(&conn, lock_rules::SETTING_KEY).map_err(|e| e.to_string())?
+    };
+    Ok(lock_rules::set_rules(lock_rules::resolve_stored(stored.as_deref())))
+}
+
+/// Saves the list and returns it as it was actually stored — trimmed, blanks dropped, duplicates
+/// collapsed — so the screen shows what the guards will use rather than what was typed.
+///
+/// The database is written first: a failure there has to leave the running process agreeing with
+/// what will be on disk after a restart, not with an edit that never landed.
+#[tauri::command]
+pub fn set_locked_branch_rules(db: State<Db>, rules: Vec<String>) -> Result<Vec<String>, String> {
+    let cleaned = lock_rules::normalize(rules);
+    let json = serde_json::to_string(&cleaned).map_err(|e| e.to_string())?;
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::set_setting(&conn, lock_rules::SETTING_KEY, &json).map_err(|e| e.to_string())?;
+    }
+    Ok(lock_rules::set_rules(cleaned))
+}
+
+/// What a fresh install locks, for the "restore defaults" action — so the defaults are named once,
+/// in Rust, instead of being retyped in the settings screen where they could drift.
+#[tauri::command]
+pub fn default_locked_branch_rules() -> Vec<String> {
+    lock_rules::DEFAULT_RULES.iter().map(|s| s.to_string()).collect()
 }
 
 /// A workspace's editable prompt override for `kind` (`review_standard` | `pr_description`).

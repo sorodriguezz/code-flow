@@ -5,7 +5,6 @@ import { CARD } from "./remoteChrome";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import type { RemoteQueueTab } from "../../state/remoteStore";
 import {
   remoteQueueClear,
   remoteQueueDeleteMessage,
@@ -34,7 +33,7 @@ import type { QueueMessage, QueueSummary } from "../../types/remote";
 const VISIBILITY_SECONDS = 30;
 const HOW_MANY = 32;
 
-export function QueuePanel({ tab }: { tab: RemoteQueueTab }) {
+export function QueuePanel({ hostId }: { hostId: string }) {
   const t = useT();
   const [queues, setQueues] = useState<QueueSummary[]>([]);
   const [selected, setSelected] = useState<string>("");
@@ -51,7 +50,7 @@ export function QueuePanel({ tab }: { tab: RemoteQueueTab }) {
   const loadQueues = useCallback(async () => {
     setLoading(true);
     try {
-      const found = await remoteQueues(tab.hostId);
+      const found = await remoteQueues(hostId);
       setQueues(found);
       // Land on the first queue rather than an empty pane: an account with one queue should not
       // need a click to show it.
@@ -61,14 +60,14 @@ export function QueuePanel({ tab }: { tab: RemoteQueueTab }) {
     } finally {
       setLoading(false);
     }
-  }, [tab.hostId]);
+  }, [hostId]);
 
   const peek = useCallback(
     async (name: string) => {
       if (!name) return setMessages([]);
       setBusy(true);
       try {
-        setMessages(await remoteQueuePeek(tab.hostId, name, HOW_MANY));
+        setMessages(await remoteQueuePeek(hostId, name, HOW_MANY));
         setReceived(false);
       } catch (e) {
         fail(e);
@@ -76,7 +75,7 @@ export function QueuePanel({ tab }: { tab: RemoteQueueTab }) {
         setBusy(false);
       }
     },
-    [tab.hostId],
+    [hostId],
   );
 
   useEffect(() => {
@@ -91,7 +90,7 @@ export function QueuePanel({ tab }: { tab: RemoteQueueTab }) {
     if (!selected) return;
     setBusy(true);
     try {
-      setMessages(await remoteQueueReceive(tab.hostId, selected, HOW_MANY, VISIBILITY_SECONDS));
+      setMessages(await remoteQueueReceive(hostId, selected, HOW_MANY, VISIBILITY_SECONDS));
       setReceived(true);
       void loadQueues();
     } catch (e) {
@@ -104,7 +103,7 @@ export function QueuePanel({ tab }: { tab: RemoteQueueTab }) {
   const send = async () => {
     if (!selected || !draft.trim()) return;
     try {
-      await remoteQueuePut(tab.hostId, selected, draft);
+      await remoteQueuePut(hostId, selected, draft);
       setDraft("");
       await peek(selected);
       void loadQueues();
@@ -115,7 +114,7 @@ export function QueuePanel({ tab }: { tab: RemoteQueueTab }) {
 
   const remove = async (message: QueueMessage) => {
     try {
-      await remoteQueueDeleteMessage(tab.hostId, selected, message.id, message.pop_receipt);
+      await remoteQueueDeleteMessage(hostId, selected, message.id, message.pop_receipt);
       setMessages((current) => current.filter((one) => one.id !== message.id));
       void loadQueues();
     } catch (e) {
@@ -128,7 +127,7 @@ export function QueuePanel({ tab }: { tab: RemoteQueueTab }) {
     const ok = await confirmAction(t("remote.queueClearConfirm", { name: selected }), true, t("remote.queueClear"));
     if (!ok) return;
     try {
-      await remoteQueueClear(tab.hostId, selected);
+      await remoteQueueClear(hostId, selected);
       setMessages([]);
       void loadQueues();
     } catch (e) {
@@ -140,7 +139,7 @@ export function QueuePanel({ tab }: { tab: RemoteQueueTab }) {
     const ok = await confirmAction(t("remote.queueDeleteConfirm", { name }), true, t("common.delete"));
     if (!ok) return;
     try {
-      await remoteQueueRemove(tab.hostId, name);
+      await remoteQueueRemove(hostId, name);
       if (selected === name) setSelected("");
       void loadQueues();
     } catch (e) {

@@ -5,7 +5,6 @@ import { CARD } from "./remoteChrome";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import type { RemoteTableTab } from "../../state/remoteStore";
 import {
   remoteTableDeleteEntity,
   remoteTableQuery,
@@ -27,7 +26,7 @@ import type { TablePage, TableSummary } from "../../types/remote";
  * service will run all three without comment, so the panel is where the difference is stated —
  * quietly, under the box, rather than as a warning nobody reads twice.
  */
-export function TablePanel({ tab }: { tab: RemoteTableTab }) {
+export function TablePanel({ hostId }: { hostId: string }) {
   const t = useT();
   const [tables, setTables] = useState<TableSummary[]>([]);
   const [selected, setSelected] = useState<string>("");
@@ -41,7 +40,7 @@ export function TablePanel({ tab }: { tab: RemoteTableTab }) {
   const loadTables = useCallback(async () => {
     setLoading(true);
     try {
-      const found = await remoteTables(tab.hostId);
+      const found = await remoteTables(hostId);
       setTables(found);
       setSelected((current) => (current && found.some((one) => one.name === current) ? current : found[0]?.name ?? ""));
     } catch (e) {
@@ -49,7 +48,7 @@ export function TablePanel({ tab }: { tab: RemoteTableTab }) {
     } finally {
       setLoading(false);
     }
-  }, [tab.hostId]);
+  }, [hostId]);
 
   /** Runs the query from the first page. `more` continues from where the last one stopped. */
   const run = useCallback(
@@ -58,7 +57,7 @@ export function TablePanel({ tab }: { tab: RemoteTableTab }) {
       setBusy(true);
       try {
         const next = await remoteTableQuery(
-          tab.hostId,
+          hostId,
           name,
           expression,
           "",
@@ -82,7 +81,7 @@ export function TablePanel({ tab }: { tab: RemoteTableTab }) {
         setBusy(false);
       }
     },
-    [tab.hostId],
+    [hostId],
   );
 
   useEffect(() => {
@@ -100,7 +99,7 @@ export function TablePanel({ tab }: { tab: RemoteTableTab }) {
     const ok = await confirmAction(t("remote.tableDeleteEntityConfirm", { key: `${partition}/${rowKey}` }));
     if (!ok) return;
     try {
-      await remoteTableDeleteEntity(tab.hostId, selected, partition, rowKey);
+      await remoteTableDeleteEntity(hostId, selected, partition, rowKey);
       setPage((current) =>
         current
           ? { ...current, rows: current.rows.filter((one) => one.PartitionKey !== row.PartitionKey || one.RowKey !== row.RowKey) }
@@ -115,7 +114,7 @@ export function TablePanel({ tab }: { tab: RemoteTableTab }) {
     const ok = await confirmAction(t("remote.tableDeleteConfirm", { name }), true, t("common.delete"));
     if (!ok) return;
     try {
-      await remoteTableRemove(tab.hostId, name);
+      await remoteTableRemove(hostId, name);
       if (selected === name) setSelected("");
       void loadTables();
     } catch (e) {

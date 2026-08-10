@@ -480,6 +480,49 @@ pub fn remote_parse_ssh_command(line: String) -> Option<remotes::parse::ParsedCo
     remotes::parse::parse_ssh_command(&line)
 }
 
+/// What an Azure Storage connection string was understood to mean.
+///
+/// The secret rides in its own field and never in `spec`, which is the whole point of the split:
+/// `spec` is what gets written to the workspace database as JSON, and an account key belongs in the
+/// keychain. The caller stores it with `remote_set_password` once the row it belongs to exists.
+#[derive(serde::Serialize)]
+pub struct ParsedAzureConnection {
+    pub spec: RemoteHostSpec,
+    /// What to call the row — the account name.
+    pub name: String,
+    /// The account key or SAS token, for the keychain. Empty for a string that carried neither.
+    pub secret: String,
+    /// Which credential the string turned out to carry, so the preview can say so before anything
+    /// is saved.
+    pub auth: remotes::AzureAuth,
+}
+
+/// Reads one pasted connection string — the `AccountName=…;AccountKey=…` line, a SAS string, or a
+/// SAS URL. `None` when it names no account, which is the normal state of a field being typed into.
+///
+/// In Rust for the same reason the `ssh` parser is: it is a parser, that is where the tests are, and
+/// the three shapes people paste are not obvious enough to re-derive in the UI. See
+/// [`remotes::cloud::azure::parse_connection_string`].
+#[tauri::command]
+pub fn remote_parse_azure_connection(text: String) -> Option<ParsedAzureConnection> {
+    let parsed = remotes::cloud::azure::parse_connection_string(&text)?;
+    let auth = if parsed.sas.is_empty() {
+        remotes::AzureAuth::AccountKey
+    } else {
+        remotes::AzureAuth::Sas
+    };
+    let secret = if parsed.sas.is_empty() { parsed.key.clone() } else { parsed.sas.clone() };
+
+    let mut spec = RemoteHostSpec { kind: remotes::RemoteKind::Azure, ..Default::default() };
+    spec.azure.auth = auth;
+    spec.azure.account = parsed.account.clone();
+    spec.azure.endpoint_suffix = parsed.suffix;
+    spec.azure.endpoint = parsed.endpoint;
+
+    let name = if parsed.account.is_empty() { "Azure Storage".to_string() } else { parsed.account };
+    Some(ParsedAzureConnection { spec, name, secret, auth })
+}
+
 /// The identities this machine already has — keys in `~/.ssh` plus whatever the agent holds.
 /// Read-only by design; see [`remotes::keys`].
 #[tauri::command]

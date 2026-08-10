@@ -38,11 +38,18 @@ export type RemoteKind =
   | "vnc"
   | "rdp"
   | "s3"
+  | "azure"
   | "azure_blob"
   | "azure_files"
   | "azure_queue"
   | "azure_table";
 
+/**
+ * Every kind that exists on the wire, legacy included. Mirrors the Rust enum.
+ *
+ * Not what the Type select offers — see `SELECTABLE_KINDS`. The four single-service Azure kinds are
+ * still read and still work, but nothing creates them any more.
+ */
 export const REMOTE_KINDS: RemoteKind[] = [
   "ssh",
   "sftp",
@@ -51,22 +58,81 @@ export const REMOTE_KINDS: RemoteKind[] = [
   "vnc",
   "rdp",
   "s3",
+  "azure",
   "azure_blob",
   "azure_files",
   "azure_queue",
   "azure_table",
 ];
 
-/** The cloud kinds — an account reached over HTTPS rather than a host reached over a socket. What
- *  it gates is the shape of the editor: an account and a credential where SSH has a host and a
- *  port. Mirrors `RemoteKind::is_cloud`. */
-export const isCloudKind = (kind: RemoteKind): boolean =>
-  kind === "s3" || kind === "azure_blob" || kind === "azure_files" || kind === "azure_queue" || kind === "azure_table";
+/**
+ * What the Type select offers, which is deliberately shorter than the list above.
+ *
+ * An Azure account is one row now — `azure` — because that is what an account is: one name, one
+ * key, four services. Offering the four service kinds beside it would be offering four ways to make
+ * the row that used to be the problem. A host already saved as one still shows its own type; see
+ * `kindOptions`.
+ */
+export const SELECTABLE_KINDS: RemoteKind[] = [
+  "ssh",
+  "sftp",
+  "ftp",
+  "ftps",
+  "vnc",
+  "rdp",
+  "s3",
+  "azure",
+];
 
-/** The Azure services, which share an account, a credential and a signing scheme and differ only in
+/** The Type select's options for a host that already exists: the offered set, plus this row's own
+ *  kind when it is a legacy one — a select that cannot show what it is set to is worse than a long
+ *  list. */
+export function kindOptions(kind: RemoteKind): RemoteKind[] {
+  return SELECTABLE_KINDS.includes(kind) ? SELECTABLE_KINDS : [...SELECTABLE_KINDS, kind];
+}
+
+/** The Azure kinds, which share an account, a credential and a signing scheme and differ only in
  *  which endpoint they ask for. Mirrors `RemoteKind::is_azure`. */
 export const isAzureKind = (kind: RemoteKind): boolean =>
-  kind === "azure_blob" || kind === "azure_files" || kind === "azure_queue" || kind === "azure_table";
+  kind === "azure" ||
+  kind === "azure_blob" ||
+  kind === "azure_files" ||
+  kind === "azure_queue" ||
+  kind === "azure_table";
+
+/** The cloud kinds — an account reached over HTTPS rather than a host reached over a socket. What
+ *  it gates is the shape of the editor: an account and a credential where SSH has a host and a
+ *  port. */
+export const isCloudKind = (kind: RemoteKind): boolean => kind === "s3" || isAzureKind(kind);
+
+/**
+ * The four services under one storage account, as the account panel's rail lists them.
+ *
+ * `blob` and `files` double as the first segment of a browser path — `/blob/photos/cat.jpg` — which
+ * is how one file browser reaches both filesystems. See `remotes::cloud::account`.
+ */
+export type AzureService = "blob" | "files" | "queues" | "tables";
+
+export const AZURE_SERVICES: AzureService[] = ["blob", "files", "queues", "tables"];
+
+/** Where the file browser starts for a service that has files. The other two have panels of their
+ *  own and no path at all. */
+export function azureServiceRoot(service: AzureService): string {
+  return service === "files" ? "/files" : "/blob";
+}
+
+/**
+ * Which service a legacy single-service row is, so opening one lands where it used to.
+ *
+ * A row saved as `azure_queue` opens the account panel on Queues rather than on Blob: the row still
+ * says what it was for, and the panel simply has more in it than it did.
+ */
+export function serviceOfKind(kind: RemoteKind): AzureService {
+  if (kind === "azure_files") return "files";
+  if (kind === "azure_queue") return "queues";
+  if (kind === "azure_table") return "tables";
+  return "blob";
+}
 
 export const DEFAULT_SSH_PORT = 22;
 export const DEFAULT_FTP_PORT = 21;
@@ -99,12 +165,17 @@ export const KIND_CAPABILITIES: Record<
   // What it *is* is covered in `remotes::cloud`: folders are synthesised, rename copies, and the
   // account root lists buckets.
   s3: { shell: false, files: true, forwards: false, screen: false },
+  // A whole account. `files: true` is the blob and share halves, which the browser reaches through
+  // one path (`/blob/…`, `/files/…`); its queues and tables are not files and are not in this
+  // table — they are two of the four pages of `AzureAccountPanel`.
+  azure: { shell: false, files: true, forwards: false, screen: false },
+  // The legacy single-service rows. They reach files through the same account transport the row
+  // above does — the credential is the account's whichever service the kind was named for — so a
+  // host saved as `azure_queue` opens the same panel and simply lands on Queues.
   azure_blob: { shell: false, files: true, forwards: false, screen: false },
   azure_files: { shell: false, files: true, forwards: false, screen: false },
-  // Messages and entities, not files. Each needs a view of its own, which is why neither claims the
-  // file browser rather than claiming it and showing an empty tree.
-  azure_queue: { shell: false, files: false, forwards: false, screen: false },
-  azure_table: { shell: false, files: false, forwards: false, screen: false },
+  azure_queue: { shell: false, files: true, forwards: false, screen: false },
+  azure_table: { shell: false, files: true, forwards: false, screen: false },
 };
 
 /** Which protocol a kind *is*, when it is a screen. The kind is the protocol — there is no second
@@ -124,6 +195,7 @@ export const KIND_LABEL: Record<RemoteKind, string> = {
   vnc: "VNC",
   rdp: "RDP",
   s3: "S3",
+  azure: "Azure Storage",
   azure_blob: "Azure Blob",
   azure_files: "Azure Files",
   azure_queue: "Azure Queue",
@@ -435,6 +507,23 @@ export interface ParsedCommand {
   ignored: string[];
 }
 
+/**
+ * What a pasted Azure connection string was understood to mean. Mirrors
+ * `commands::remote_cmd::ParsedAzureConnection`.
+ *
+ * `secret` is separate from `spec` and stays that way: the spec is written to the workspace
+ * database as JSON, and an account key belongs in the keychain. Whoever creates the row puts one in
+ * each place.
+ */
+export interface ParsedAzureConnection {
+  spec: RemoteHostSpec;
+  /** What to call the row — the account name. */
+  name: string;
+  /** The account key or SAS token. Never stored in the spec. */
+  secret: string;
+  auth: AzureAuth;
+}
+
 /** One `Host` block from `~/.ssh/config`, before it becomes a row. */
 export interface ImportedHost {
   name: string;
@@ -528,6 +617,7 @@ export function defaultPortFor(spec: RemoteHostSpec): number {
     case "rdp":
       return DEFAULT_RDP_PORT;
     case "s3":
+    case "azure":
     case "azure_blob":
     case "azure_files":
     case "azure_queue":
@@ -552,8 +642,21 @@ export function effectivePort(spec: RemoteHostSpec): number {
  * error toast is the wrong answer to a question the UI can see coming: the message would be
  * "open it and fill in the hostname", which is a thing the app can simply *do*. So the callers
  * check this first and open the editor instead, and the Rust check stays as the backstop.
+ *
+ * **A cloud account has no hostname, and asking for one is what kept Connect greyed out.** This
+ * used to read `spec.host` for every kind, so an Azure account with its name, its key and its
+ * endpoints all filled in still reported "no address" — the one field it can never have. What
+ * stands in its place is what each cloud actually needs before a request can be signed: an account
+ * (or an endpoint) for Azure, and for S3 an access key when that is the scheme, since a profile
+ * resolves to something without anything being typed here at all.
  */
 export function hasAddress(spec: RemoteHostSpec): boolean {
+  if (isAzureKind(spec.kind)) {
+    return spec.azure.account.trim().length > 0 || spec.azure.endpoint.trim().length > 0;
+  }
+  if (spec.kind === "s3") {
+    return spec.s3.auth === "profile" || spec.s3.access_key_id.trim().length > 0;
+  }
   return spec.host.trim().length > 0;
 }
 
@@ -565,6 +668,25 @@ export function hasAddress(spec: RemoteHostSpec): boolean {
  * one. `jump` is SSH-only and simply never set on the others.
  */
 export function describeHost(spec: RemoteHostSpec): string {
+  // A cloud row's one line is the account, not an address it hasn't got. Written as the endpoint it
+  // will actually talk to, because that is the string the user can check against the portal —
+  // `contoso.blob.core.windows.net` is recognisable in a way `contoso` alone is not.
+  if (isAzureKind(spec.kind)) {
+    const endpoint = spec.azure.endpoint.trim();
+    if (endpoint) return endpoint;
+    const account = spec.azure.account.trim();
+    if (!account) return "";
+    const suffix = spec.azure.endpoint_suffix.trim() || "core.windows.net";
+    return `${account}.${suffix}`;
+  }
+  if (spec.kind === "s3") {
+    const endpoint = spec.s3.endpoint.trim();
+    const where = endpoint || `s3 · ${spec.s3.region.trim() || "us-east-1"}`;
+    const who =
+      spec.s3.auth === "profile" ? spec.s3.profile.trim() || "default" : spec.s3.access_key_id.trim();
+    return who ? `${where} · ${who}` : where;
+  }
+
   const host = spec.host.trim();
   if (!host) return "";
   const user = spec.user.trim();
@@ -572,6 +694,26 @@ export function describeHost(spec: RemoteHostSpec): string {
   const port = spec.port && spec.port !== defaultPortFor(spec) ? `:${spec.port}` : "";
   const jump = spec.jump.trim() ? ` via ${spec.jump.trim()}` : "";
   return `${target}${port}${jump}`;
+}
+
+/**
+ * The URL one Azure service on this account will actually be asked for.
+ *
+ * The same arithmetic `remotes::cloud::azure::endpoint` does, repeated here for one reason: the
+ * editor can then *show* the four endpoints as they are typed, which is how a wrong suffix or a
+ * misspelt account is caught before a request fails with a DNS error. It is a preview, never an
+ * input — every request is still built in Rust.
+ */
+export function azureEndpoint(
+  spec: RemoteHostSpec,
+  service: "blob" | "file" | "queue" | "table",
+): string {
+  const custom = spec.azure.endpoint.trim();
+  if (custom) return custom;
+  const account = spec.azure.account.trim();
+  if (!account) return "";
+  const suffix = spec.azure.endpoint_suffix.trim() || "core.windows.net";
+  return `https://${account}.${service}.${suffix}`;
 }
 
 /** How a forward reads in a list: `5432 → db.internal:5432`, or the SOCKS form for a dynamic one. */
