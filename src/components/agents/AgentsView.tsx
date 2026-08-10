@@ -76,6 +76,22 @@ export function AgentsView() {
   const [helping, setHelping] = useState(false);
   const selectedChainId = useChainStore((s) => s.selectedId);
   const selectedTemplateId = useChainStore((s) => s.selectedTemplateId);
+  /**
+   * Whether the bench has been on screen at least once this session.
+   *
+   * Once it has, it stays mounted and closing it is a class — never a teardown. A pane is a live
+   * xterm attached to a running shell, and unmounting one throws the scrollback in the DOM away for
+   * good: the panel came back replaying a transcript into a fresh terminal rather than showing the
+   * one that was left, which is not what putting something away for a moment is supposed to mean.
+   * The same rule the repository dock and the app's own views already follow.
+   *
+   * Latched rather than always mounted, so a workspace whose bench is never opened never builds an
+   * xterm for any of it.
+   */
+  const [benchMounted, setBenchMounted] = useState(false);
+  useEffect(() => {
+    if (benchOpen) setBenchMounted(true);
+  }, [benchOpen]);
 
   useEffect(() => {
     void useAgentsStore.getState().setWorkspace(workspaceId);
@@ -173,17 +189,21 @@ export function AgentsView() {
                 still selected and comes straight back when the bench is closed. Nothing about the
                 task is lost by looking away from it, which is exactly what makes taking the whole
                 column affordable. */}
-            {benchOpen ? (
-              <TerminalBench />
-            ) : selectedTemplateId ? (
-              <TemplateDetail key={selectedTemplateId} templateId={selectedTemplateId} onUse={openTemplate} />
-            ) : selectedChainId ? (
-              <ChainDetail key={selectedChainId} chainId={selectedChainId} />
-            ) : selectedId ? (
-              <AgentTaskDetail key={selectedId} taskId={selectedId} />
-            ) : (
-              <EmptyState icon={Bot} title={t("agents.selectTask")} subtitle={t("agents.selectTaskHint")} />
+            {benchMounted && (
+              <div className={benchOpen ? "flex h-full min-h-0 flex-col" : "hidden"}>
+                <TerminalBench />
+              </div>
             )}
+            {!benchOpen &&
+              (selectedTemplateId ? (
+                <TemplateDetail key={selectedTemplateId} templateId={selectedTemplateId} onUse={openTemplate} />
+              ) : selectedChainId ? (
+                <ChainDetail key={selectedChainId} chainId={selectedChainId} />
+              ) : selectedId ? (
+                <AgentTaskDetail key={selectedId} taskId={selectedId} />
+              ) : (
+                <EmptyState icon={Bot} title={t("agents.selectTask")} subtitle={t("agents.selectTaskHint")} />
+              ))}
           </div>
 
           {rosterOpen && (

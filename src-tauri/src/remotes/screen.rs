@@ -59,21 +59,16 @@ pub fn tunnel_id(host_id: &str) -> String {
 /// Opens the host's screen, raising the SSH forward first if it is configured to need one.
 pub async fn open(host_id: &str, host: &RemoteHostSpec) -> Result<ScreenLaunch, String> {
     host.require_screen()?;
+    // Infallible after `require_screen`, which is the point of deriving it from the kind: there is
+    // no second field left that could say "none" on a host the UI drew a screen button for.
+    let protocol = host.kind.screen_protocol().ok_or_else(|| host.kind.refuses("open a screen"))?;
     let screen = &host.screen;
-    if screen.protocol == ScreenProtocol::None {
-        return Err("This host has no screen configured. Open it and pick VNC or RDP.".into());
-    }
 
-    // Empty means the host's own address — the common case, and the reason the screen block is
-    // mostly blank for most hosts.
-    let target_host = match screen.host.trim() {
-        "" => host.host.trim(),
-        named => named,
-    };
+    let target_host = host.host.trim();
     if target_host.is_empty() {
         return Err("This host has no address to open a screen on.".into());
     }
-    let target_port = if screen.port == 0 { screen.protocol.default_port() } else { screen.port };
+    let target_port = host.effective_port();
 
     let (host_arg, port_arg) = if screen.tunnel {
         let spec = ForwardSpec {
@@ -82,18 +77,16 @@ pub async fn open(host_id: &str, host: &RemoteHostSpec) -> Result<ScreenLaunch, 
             // The viewer is told which port it got, so there is no reason to ask for a fixed one —
             // and a fixed one collides the moment two hosts' screens are open at once.
             listen_port: 0,
-            // Resolved on the far side. When the screen host is the SSH host, that is `localhost`
-            // *there*, which is exactly the loopback-bound server this exists for.
-            target_host: if screen.host.trim().is_empty() {
-                "localhost".to_string()
-            } else {
-                target_host.to_string()
-            },
+            // `localhost` as resolved *on the far side*, which is the loopback-bound server this
+            // whole path exists for. The far side is the machine the tunnel lands on, so a screen
+            // reached through a `jump` still means the screen host's own loopback.
+            target_host: "localhost".to_string(),
             target_port,
             auto: false,
             label: "screen".into(),
         };
-        let active = super::forward::open(host_id, host, &spec).await?;
+        // Through `ssh` to this machine at *its* port, not the screen's — see `tunnel_via`.
+        let active = super::forward::open(host_id, &host.tunnel_via(), &spec).await?;
         ("127.0.0.1".to_string(), active.listen_port)
     } else {
         (target_host.to_string(), target_port)
@@ -102,7 +95,7 @@ pub async fn open(host_id: &str, host: &RemoteHostSpec) -> Result<ScreenLaunch, 
     // Embedded: no viewer at all. The bridge is published against the same address the viewer
     // would have been given — which, with `tunnel` on, is the local end of the SSH forward raised
     // just above. Nothing about the tunnel changes; only who draws the pixels.
-    if screen.embedded && screen.protocol == ScreenProtocol::Vnc {
+    if screen.embedded && protocol == ScreenProtocol::Vnc {
         let address = tokio::net::lookup_host((host_arg.as_str(), port_arg))
             .await
             .map_err(|e| format!("Couldn't resolve {host_arg}: {e}"))?
@@ -111,7 +104,7 @@ pub async fn open(host_id: &str, host: &RemoteHostSpec) -> Result<ScreenLaunch, 
         let (ws_url, ws_token) = super::wsbridge::publish(address).await?;
         remember_token(host_id, &ws_token);
         return Ok(ScreenLaunch {
-            protocol: screen.protocol,
+            protocol,
             host: host_arg,
             port: port_arg,
             target_host: target_host.to_string(),
@@ -123,8 +116,10 @@ pub async fn open(host_id: &str, host: &RemoteHostSpec) -> Result<ScreenLaunch, 
         });
     }
 
-    let user = screen.user.trim();
-    let command = viewer_command(screen.protocol, &screen.viewer, &host_arg, port_arg, user)?;
+    // The host's own user, because on a screen row that is who logs into the screen — there is no
+    // separate SSH account here to confuse it with.
+    let user = host.user.trim();
+    let command = viewer_command(protocol, &screen.viewer, &host_arg, port_arg, user)?;
     spawn(&command).map_err(|e| {
         // The tunnel was raised for a viewer that never started; leaving it would park an `ssh`
         // process under a screen nobody is looking at.
@@ -135,7 +130,7 @@ pub async fn open(host_id: &str, host: &RemoteHostSpec) -> Result<ScreenLaunch, 
     })?;
 
     Ok(ScreenLaunch {
-        protocol: screen.protocol,
+        protocol,
         host: host_arg,
         port: port_arg,
         target_host: target_host.to_string(),
@@ -228,7 +223,6 @@ fn default_viewer(
             "open".into(),
             format!("rdp://full%20address=s:{host}:{port}"),
         ]),
-        ScreenProtocol::None => Err("No screen protocol.".into()),
     }
 }
 
@@ -247,7 +241,6 @@ fn default_viewer(
              `vncviewer {host}:{port}` — and CodeFlow will run that."
                 .into(),
         ),
-        ScreenProtocol::None => Err("No screen protocol.".into()),
     }
 }
 
@@ -397,10 +390,12 @@ mod tests {
         assert_eq!(command, vec!["xfreerdp", "/v:win-db", "/u:sam"]);
     }
 
+    /// The protocol's standard port is now the *kind's* default port, which is what a screen row
+    /// resolves its blank `port` against — one number, in one place, for the row and the viewer.
     #[test]
     fn protocol_defaults_are_the_standard_ports() {
-        assert_eq!(ScreenProtocol::Vnc.default_port(), 5900);
-        assert_eq!(ScreenProtocol::Rdp.default_port(), 3389);
+        assert_eq!(super::super::RemoteKind::Vnc.default_port(false), 5900);
+        assert_eq!(super::super::RemoteKind::Rdp.default_port(false), 3389);
     }
 
     #[test]

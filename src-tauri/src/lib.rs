@@ -41,6 +41,8 @@ mod secret_scan;
 mod secrets;
 mod shell_env;
 mod shell_profiles;
+/// AWS request signing, shared by the API client and the Remote workspace's S3 transport.
+mod sigv4;
 mod supabase;
 mod terminal;
 mod tray;
@@ -514,6 +516,20 @@ pub fn run() {
             commands::remote_cmd::remote_list_forwards,
             commands::remote_cmd::remote_open_screen,
             commands::remote_cmd::remote_close_screen,
+            commands::remote_cmd::remote_queues,
+            commands::remote_cmd::remote_queue_peek,
+            commands::remote_cmd::remote_queue_receive,
+            commands::remote_cmd::remote_queue_put,
+            commands::remote_cmd::remote_queue_delete_message,
+            commands::remote_cmd::remote_queue_clear,
+            commands::remote_cmd::remote_queue_create,
+            commands::remote_cmd::remote_queue_remove,
+            commands::remote_cmd::remote_tables,
+            commands::remote_cmd::remote_table_query,
+            commands::remote_cmd::remote_table_upsert,
+            commands::remote_cmd::remote_table_delete_entity,
+            commands::remote_cmd::remote_table_create,
+            commands::remote_cmd::remote_table_remove,
             commands::remote_cmd::remote_ping,
             commands::remote_cmd::remote_list_logs,
             commands::remote_cmd::remote_clear_logs,
@@ -580,6 +596,7 @@ pub fn run() {
             commands::db_cmd::db_schema_diagram,
             commands::db_cmd::db_object_ddl,
             commands::db_cmd::db_cancel,
+            commands::db_cmd::db_ai_assist,
             commands::api_cmd::api_load_tree,
             commands::api_cmd::api_create_collection,
             commands::api_cmd::api_update_collection,

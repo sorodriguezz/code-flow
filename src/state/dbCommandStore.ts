@@ -15,7 +15,7 @@ import { useUiStore } from "./uiStore";
  * is what `view.database` is for.
  */
 
-export type DbCommand = "refresh" | "filter" | "apply";
+export type DbCommand = "refresh" | "filter" | "apply" | "askAi";
 
 interface DbCommandState {
   /** The nonce is what lets the same command fire twice in a row; see `editorCommandStore`. */

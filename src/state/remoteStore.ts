@@ -146,6 +146,26 @@ export interface RemoteSftpTab {
   name: string;
 }
 
+/** A queue account's queues, and whichever one is open.
+ *
+ * One tab per *host*, not per queue: the panel lists the account's queues down one side and shows
+ * the selected one beside it, the way the file browser shows one directory of one host. Opening
+ * three queues is three selections in one tab, not three tabs. */
+export interface RemoteQueueTab {
+  id: string;
+  kind: "queue";
+  hostId: string;
+  name: string;
+}
+
+/** A table account's tables, same arrangement and for the same reason. */
+export interface RemoteTableTab {
+  id: string;
+  kind: "table";
+  hostId: string;
+  name: string;
+}
+
 /** The connection log. Belongs to no host, like the global forwards tab. */
 export interface RemoteLogTab {
   id: string;
@@ -168,6 +188,8 @@ export type RemoteTab =
   | RemoteScreenTab
   | RemoteAllForwardsTab
   | RemoteSftpTab
+  | RemoteQueueTab
+  | RemoteTableTab
   | RemoteLogTab;
 
 interface RemoteState {
@@ -292,6 +314,10 @@ interface RemoteState {
   openAllForwards: () => void;
   openLog: () => void;
   openSftp: (hostId: string) => void;
+  /** Opens the queue panel for an Azure Queue host. */
+  openQueues: (hostId: string) => void;
+  /** Opens the entity grid for an Azure Table host. */
+  openTables: (hostId: string) => void;
   openScreen: (hostId: string) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
   setActiveTab: (tabId: string) => void;
@@ -825,6 +851,30 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       return;
     }
     const tab: RemoteSftpTab = { id: nextTabId(), kind: "sftp", hostId, name: host.name };
+    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, selectedHostId: hostId }));
+  },
+
+  openQueues: (hostId) => {
+    const host = hostOf(get().hosts, hostId);
+    if (!host) return;
+    const existing = get().tabs.find((tab) => tab.kind === "queue" && tab.hostId === hostId);
+    if (existing) {
+      set({ activeTabId: existing.id, selectedHostId: hostId });
+      return;
+    }
+    const tab: RemoteQueueTab = { id: nextTabId(), kind: "queue", hostId, name: host.name };
+    set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, selectedHostId: hostId }));
+  },
+
+  openTables: (hostId) => {
+    const host = hostOf(get().hosts, hostId);
+    if (!host) return;
+    const existing = get().tabs.find((tab) => tab.kind === "table" && tab.hostId === hostId);
+    if (existing) {
+      set({ activeTabId: existing.id, selectedHostId: hostId });
+      return;
+    }
+    const tab: RemoteTableTab = { id: nextTabId(), kind: "table", hostId, name: host.name };
     set((s) => ({ tabs: [...s.tabs, tab], activeTabId: tab.id, selectedHostId: hostId }));
   },
 

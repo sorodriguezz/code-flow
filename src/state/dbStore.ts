@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 import {
   dbAddHistory,
+  dbAiAssist,
   dbApplyEdits,
   dbCancel,
   dbChildren,
@@ -35,6 +36,9 @@ import {
   dbUpdateConsole,
 } from "../lib/tauri/dbCommands";
 import { getSetting, setSetting } from "../lib/tauri/commands";
+// The AI run registry is a different one from the database's: `dbCancel` stops a statement on the
+// server, this stops a CLI subprocess. The assistant runs on the second and never the first.
+import { isCancellation, newRunId as newAiRunId, useAiRunStore } from "./aiRunStore";
 import { unguardedDelete } from "../lib/db/sqlGuards";
 import { translate } from "./languageStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
@@ -44,6 +48,7 @@ import {
   DEFAULT_PAGE_SIZE,
   defaultConnectionConfig,
   engineInfo,
+  type DbAiAnswer,
   type DbConnectionConfig,
   type DbFilterTarget,
   type DbForeignKey,
@@ -124,6 +129,30 @@ export interface DbConsoleTab {
   activeResult: number;
   /** An `EXPLAIN` plan, shown instead of a grid until the next run. */
   plan: string | null;
+  /** The AI assistant's ask bar and its last answer. `null` until it is first opened, so a console
+   * that never uses it costs nothing — and it is never persisted, like every other result here. */
+  ai: DbConsoleAi | null;
+}
+
+/**
+ * The console's AI assistant, per tab.
+ *
+ * Per tab and not global because the question is about *this* console's scope and *this* console's
+ * query: two consoles open on two schemas asking one shared assistant would answer the second
+ * question against the first one's tables.
+ */
+export interface DbConsoleAi {
+  /** What is typed in the ask box, kept across tab switches so a half-written question survives
+   * going to look at the schema tree for the name you were missing. */
+  question: string;
+  running: boolean;
+  /** The **AI** run registry's id — this is `cancelAiRun`'s handle, not `dbCancel`'s. No statement
+   * runs on the database here, so there is nothing on that side to stop. */
+  runId: string | null;
+  answer: DbAiAnswer | null;
+  /** Kept on the panel rather than shown as a toast: an answer that failed is something you retry
+   * with a reworded question, which means reading the reason while you rewrite it. */
+  error: string | null;
 }
 
 /** One relation's rows, editable. */
@@ -272,6 +301,16 @@ interface DbState {
   /** Connection ids with a live session. */
   connected: string[];
   /**
+   * Connection ids whose connect or disconnect is in flight right now.
+   *
+   * Separate from [`connected`] because it is a *third* state, not a shade of the other two. Opening
+   * a session is a round trip that can take seconds — a cold Atlas cluster, an SSH tunnel being
+   * raised, a DNS lookup — and with only "connected or not" the dot sat unchanged the whole time
+   * and then flipped. Nothing said the click had registered, so the honest reading was that it
+   * hadn't.
+   */
+  connecting: string[];
+  /**
    * The connection the explorer is pointing at, or `null`.
    *
    * Deliberately *not* persisted and deliberately not tied to anything the tree fetches: this is
@@ -367,6 +406,14 @@ interface DbState {
   runConsole: (tabId: string, sql?: string) => Promise<void>;
   explainConsole: (tabId: string, sql?: string) => Promise<void>;
   cancelRun: (tabId: string) => Promise<void>;
+
+  /** Opens the console's AI ask bar, or closes it. Opening never clears the last answer — the
+   * usual second question is a follow-up on what it just said. */
+  toggleConsoleAi: (tabId: string) => void;
+  setConsoleAiQuestion: (tabId: string, question: string) => void;
+  /** Asks the assistant, with this console's scope, text and last outcome as the context. */
+  askConsoleAi: (tabId: string) => Promise<void>;
+  cancelConsoleAi: (tabId: string) => Promise<void>;
 
   openData: (connectionId: string, node: DbNodeRef, name: string, filter?: string) => void;
   /** Opens the table a foreign-key column points at. `null` opens it whole. */
@@ -597,6 +644,7 @@ export const useDbStore = create<DbState>((set, get) => ({
   consoles: [],
   history: [],
   connected: [],
+  connecting: [],
   selectedConnectionId: null,
   serverInfo: {},
   children: {},
@@ -923,24 +971,38 @@ export const useDbStore = create<DbState>((set, get) => ({
   },
 
   connect: async (id) => {
-    const info = await guarded(() => dbConnect(id));
-    if (!info) return false;
-    connectedEpoch += 1;
-    set((s) => ({
-      connected: s.connected.includes(id) ? s.connected : [...s.connected, id],
-      serverInfo: { ...s.serverInfo, [id]: info },
-    }));
-    return true;
+    // Marked before the await and cleared in `finally`, so a connection that fails stops looking
+    // busy rather than spinning until the next click.
+    set((s) => ({ connecting: s.connecting.includes(id) ? s.connecting : [...s.connecting, id] }));
+    try {
+      const info = await guarded(() => dbConnect(id));
+      if (!info) return false;
+      connectedEpoch += 1;
+      set((s) => ({
+        connected: s.connected.includes(id) ? s.connected : [...s.connected, id],
+        serverInfo: { ...s.serverInfo, [id]: info },
+      }));
+      return true;
+    } finally {
+      set((s) => ({ connecting: s.connecting.filter((c) => c !== id) }));
+    }
   },
 
   disconnect: async (id) => {
-    await guarded(() => dbDisconnect(id));
-    connectedEpoch += 1;
-    set((s) => ({
-      connected: s.connected.filter((c) => c !== id),
-      children: dropConnection(s.children, id),
-      expanded: s.expanded.filter((key) => !key.startsWith(`${id}|`)),
-    }));
+    // Shown for the same reason as connecting: closing a pooled session, tearing down an SSH
+    // tunnel and waiting on a server that is mid-query are all slower than the click.
+    set((s) => ({ connecting: s.connecting.includes(id) ? s.connecting : [...s.connecting, id] }));
+    try {
+      await guarded(() => dbDisconnect(id));
+      connectedEpoch += 1;
+      set((s) => ({
+        connected: s.connected.filter((c) => c !== id),
+        children: dropConnection(s.children, id),
+        expanded: s.expanded.filter((key) => !key.startsWith(`${id}|`)),
+      }));
+    } finally {
+      set((s) => ({ connecting: s.connecting.filter((c) => c !== id) }));
+    }
   },
 
   /** Throws rather than toasting: the connection dialog shows the result inline, next to the
@@ -1037,6 +1099,7 @@ export const useDbStore = create<DbState>((set, get) => ({
           result: null,
           activeResult: 0,
           plan: null,
+          ai: null,
         });
         return;
       }
@@ -1063,6 +1126,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       result: null,
       activeResult: 0,
       plan: null,
+      ai: null,
     });
   },
 
@@ -1295,6 +1359,85 @@ export const useDbStore = create<DbState>((set, get) => ({
     ].filter((id): id is string => typeof id === "string" && id.length > 0);
     if (runIds.length === 0) return;
     await Promise.all(runIds.map((runId) => guarded(() => dbCancel(runId))));
+  },
+
+  // ---------------------------------------------------------------- assistant
+
+  toggleConsoleAi: (tabId) => {
+    const open = findTab<DbConsoleTab>(get, tabId, "console")?.ai;
+    // Closing the bar stops the run behind it. Without this the panel goes away and the CLI keeps
+    // burning tokens with nowhere left to report — the state it would write back was just thrown
+    // away. Closing *is* the cancel, which is why the button says so while one is in flight.
+    if (open?.runId) void useAiRunStore.getState().cancel(open.runId);
+    patchTab<DbConsoleTab>(set, tabId, "console", (tab) => ({
+      ...tab,
+      ai: tab.ai
+        ? null
+        : { question: "", running: false, runId: null, answer: null, error: null },
+    }));
+  },
+
+  setConsoleAiQuestion: (tabId, question) => {
+    patchTab<DbConsoleTab>(set, tabId, "console", (tab) =>
+      tab.ai ? { ...tab, ai: { ...tab.ai, question } } : tab,
+    );
+  },
+
+  askConsoleAi: async (tabId) => {
+    const tab = findTab<DbConsoleTab>(get, tabId, "console");
+    const question = tab?.ai?.question.trim();
+    if (!tab || !question || tab.ai?.running) return;
+
+    const runId = newAiRunId("db-assist");
+    useAiRunStore.getState().start(runId);
+    patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
+      current.ai
+        ? { ...current, ai: { ...current.ai, running: true, runId, error: null } }
+        : current,
+    );
+    try {
+      const answer = await dbAiAssist(
+        tab.connectionId,
+        tab.database || null,
+        tab.schema || null,
+        question,
+        tab.body,
+        // Only the *shape* of the last run. "No me trae datos" is two different situations — zero
+        // rows, or a statement that never ran — and this is what tells them apart. The rows
+        // themselves are deliberately left behind: they are the user's data, the assistant has no
+        // use for them, and a five-thousand-row grid would otherwise cross IPC again on every
+        // question asked about it.
+        (tab.result?.results ?? []).map((result) => ({
+          error: result.error,
+          rows: result.documents.length || result.rows.length,
+          rows_affected: result.rows_affected,
+          duration_ms: result.duration_ms,
+        })),
+        runId,
+      );
+      patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
+        current.ai ? { ...current, ai: { ...current.ai, answer, error: null } } : current,
+      );
+    } catch (e) {
+      // A stop is not a failure. The panel goes back to how it was, with whatever it was showing
+      // before — an error line saying "cancelled" is noise on an action the user just took.
+      if (!isCancellation(e)) {
+        patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
+          current.ai ? { ...current, ai: { ...current.ai, error: String(e) } } : current,
+        );
+      }
+    } finally {
+      useAiRunStore.getState().finish(runId);
+      patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
+        current.ai ? { ...current, ai: { ...current.ai, running: false, runId: null } } : current,
+      );
+    }
+  },
+
+  cancelConsoleAi: async (tabId) => {
+    const tab = findTab<DbConsoleTab>(get, tabId, "console");
+    if (!tab?.ai?.runId) return;
+    await useAiRunStore.getState().cancel(tab.ai.runId);
   },
 
   // -------------------------------------------------------------------- data
@@ -2009,6 +2152,25 @@ export function describeConnection(row: DbConnectionRow): string {
   return config.database ? `${engine.label} · ${where}/${config.database}` : `${engine.label} · ${where}`;
 }
 
+/**
+ * Whether a connection URI carries a password of its own.
+ *
+ * What it decides is whether the separate password box is worth showing: a URI with `user:pass@` in
+ * it has already answered that question, and every engine here prefers the URI's own credential. A
+ * URI with a user and no password has not, and then the box is the only path to the OS keychain —
+ * which is the whole reason it exists, since the URI itself is stored in the app's database as
+ * typed.
+ *
+ * The same shape `redactUrl` matches, deliberately: one reading of "where the credentials are in a
+ * URI", so a URL that redacts as having a password is a URL that counts as having one.
+ */
+export function urlHasPassword(url: string): boolean {
+  const match = url.match(/\/\/([^/@]*)@/);
+  if (!match) return false;
+  const at = match[1].indexOf(":");
+  return at >= 0 && match[1].slice(at + 1).length > 0;
+}
+
 /** Strips the credentials out of a connection URI for display. */
 export function redactUrl(url: string): string {
   return url.replace(/\/\/([^/@]*)@/, (_match, credentials: string) => {
@@ -2163,6 +2325,7 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
       result: null,
       activeResult: 0,
       plan: null,
+      ai: null,
     };
   }
   const node = persisted.node ?? { kind: "table", database: null, schema: null, name: null };

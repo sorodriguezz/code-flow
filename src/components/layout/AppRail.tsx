@@ -29,8 +29,11 @@ interface WorkspaceApp {
   /** What the app holds, so the tooltip can say it — the rail itself has room for an icon and
    * nothing else. */
   descriptionKey: TranslationKey;
-  /** Marks an app that is still settling, so the rail says so before it is opened rather than after
-   * something behaves unexpectedly inside it. */
+  /** Marks an app that is still settling, so the rail says so before it is opened rather than
+   * after something behaves unexpectedly inside it.
+   *
+   * Intentionally unused right now — nothing is in beta. Kept so the next app that ships early
+   * is one field, not a rediscovered design. Don't delete as dead code. */
   beta?: boolean;
 }
 
@@ -77,7 +80,6 @@ const APPS: WorkspaceApp[] = [
     icon: MonitorSmartphone,
     labelKey: "tabbar.remote",
     descriptionKey: "tabbar.remoteDescription",
-    beta: true,
   },
 ];
 

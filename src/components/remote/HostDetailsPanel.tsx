@@ -26,10 +26,12 @@ import { useT } from "../../state/languageStore";
 import {
   KIND_LABEL,
   REMOTE_KINDS,
-  SCREEN_DEFAULT_PORT,
   capabilities,
   defaultPortFor,
+  isAzureKind,
+  isCloudKind,
   describeForward,
+  effectivePort,
   hasAddress,
   parseHostSpec,
   type ForwardKind,
@@ -38,8 +40,9 @@ import {
   type RemoteHostRow,
   type RemoteHostSpec,
   type RemoteKind,
+  type AzureAuth,
   type RemoteOs,
-  type ScreenProtocol,
+  type S3Auth,
   type SshKey,
 } from "../../types/remote";
 
@@ -86,6 +89,7 @@ export function HostDetailsPanel() {
   const closeDetails = useRemoteStore((s) => s.closeDetails);
   const openSession = useRemoteStore((s) => s.openSession);
   const openSftp = useRemoteStore((s) => s.openSftp);
+  const openScreen = useRemoteStore((s) => s.openScreen);
   const width = useLayoutStore((s) => s.sizes.remoteDetailsWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
@@ -317,24 +321,24 @@ export function HostDetailsPanel() {
         {/* Pinned, and the reason the panel beats the modal: the fill-in / connect / fix loop never
             leaves this column. */}
         <div className="shrink-0 border-t border-[var(--cf-border)] p-2">
-          {/* The one action a host has, whatever it is. On a file-only host "Connect" would open a
-              shell that cannot exist, so the button opens the file browser instead — the same
-              button in the same place, doing the thing this kind actually offers. */}
+          {/* The one action a host has, whatever it is: a shell if it has one, a screen if that is
+              what it is, files otherwise — every kind matches exactly one, in that order, same as
+              double-clicking the row. It reads "Connect" in all three cases, because that is what
+              the click *does*: this is the panel's primary action, and a bare noun in that slot
+              reads as the name of a place rather than something that happens when pressed. What
+              opens is decided by the kind, and the kind is named a few rows up. */}
           <button
             type="button"
             onClick={() => {
               flush();
               if (can.shell) void openSession(host.id);
+              else if (can.screen) void openScreen(host.id);
               else openSftp(host.id);
             }}
             disabled={!hasAddress(spec)}
             className="w-full rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:brightness-110 disabled:opacity-40"
           >
-            {!hasAddress(spec)
-              ? t("remote.needsAddress")
-              : can.shell
-                ? t("remote.connect")
-                : t("remote.files")}
+            {!hasAddress(spec) ? t("remote.needsAddress") : t("remote.connect")}
           </button>
           {passwordLoaded && spec.auth === "password" && (
             <p className="pt-1.5 text-center text-[10px] text-[var(--cf-text-muted)]">
@@ -396,16 +400,29 @@ function ConnectionTab({
     { value: "password", label: t("remote.authPassword"), hint: t("remote.authPasswordHint") },
   ];
 
-  // SSH and SFTP share a transport and therefore share every flag below; FTP and FTPS share none
-  // of them. One boolean rather than four checks against `spec.kind`.
+  // Four families of fields, and every kind is in exactly one. SSH and SFTP share a transport and
+  // therefore share every flag below; FTP and FTPS share none of them; a screen has neither an
+  // authentication scheme this app can carry nor a filesystem to configure — what it has is an
+  // address, and a way to reach it. A cloud account has no address at all: it has an account name
+  // and a credential, and everything from Host downwards is replaced rather than hidden.
   const isSsh = spec.kind === "ssh" || spec.kind === "sftp";
+  const isFtp = spec.kind === "ftp" || spec.kind === "ftps";
+  const isScreen = capabilities(spec).screen;
+  const isCloud = isCloudKind(spec.kind);
 
-  /** One line under the type selector saying what picking it means — the four read as one set. */
+  /** One line under the type selector saying what picking it means — the set reads as one. */
   const KIND_HINT: Record<RemoteKind, string> = {
     ssh: t("remote.kindSshHint"),
     sftp: t("remote.kindSftpHint"),
     ftp: t("remote.kindFtpHint"),
     ftps: t("remote.kindFtpsHint"),
+    vnc: t("remote.kindVncHint"),
+    rdp: t("remote.kindRdpHint"),
+    s3: t("remote.kindS3Hint"),
+    azure_blob: t("remote.kindAzureBlobHint"),
+    azure_files: t("remote.kindAzureFilesHint"),
+    azure_queue: t("remote.kindAzureQueueHint"),
+    azure_table: t("remote.kindAzureTableHint"),
   };
 
   const OS: { value: RemoteOs; label: string }[] = [
@@ -438,12 +455,46 @@ function ConnectionTab({
 
       <GroupPicker group={group} groups={groups} onGroup={onGroup} />
 
-      <Row label={t("remote.fieldHost")} hint={t("remote.fieldHostHint")} wide>
+      {/* A cloud account replaces the whole address-and-credential block below, rather than hiding
+          field by field: there is no host, no port and no `ssh`, and what takes their place —
+          a profile, a bucket region, an account name — has nothing in common with them. */}
+      {isCloud && spec.kind === "s3" && (
+        <S3Settings
+          spec={spec}
+          password={password}
+          showPassword={showPassword}
+          onPatch={onPatch}
+          onPassword={onPassword}
+          onToggleShowPassword={onToggleShowPassword}
+        />
+      )}
+      {isCloud && isAzureKind(spec.kind) && (
+        <AzureSettings
+          spec={spec}
+          password={password}
+          showPassword={showPassword}
+          onPatch={onPatch}
+          onPassword={onPassword}
+          onToggleShowPassword={onToggleShowPassword}
+        />
+      )}
+
+      {!isCloud && (
+        <>
+      {/* On a screen row this address is the *screen's* — there is no second one hidden on the
+          Screen page for it to disagree with. Which is also why the hint changes: a `~/.ssh/config`
+          alias means nothing to a VNC viewer. */}
+      <Row
+        label={t("remote.fieldHost")}
+        hint={isScreen ? t("remote.fieldHostScreenHint") : t("remote.fieldHostHint")}
+        wide
+      >
         <Field value={spec.host} onChange={(host) => onPatch({ host })} mono placeholder="web-01.example.com" />
       </Row>
       <Row label={t("remote.fieldPort")}>
-        {/* The placeholder tracks the kind — 22, 21 or 990 — because an empty port means "the usual
-            one for this protocol", and a hard-coded 22 under an FTP host would name the wrong one. */}
+        {/* The placeholder tracks the kind — 22, 21, 990, 5900 or 3389 — because an empty port means
+            "the usual one for this protocol", and a hard-coded 22 under an FTP host would name the
+            wrong one. */}
         <Field
           type="number"
           value={spec.port === 0 ? "" : String(spec.port)}
@@ -451,7 +502,10 @@ function ConnectionTab({
           placeholder={String(defaultPortFor(spec))}
         />
       </Row>
-      <Row label={t("remote.fieldUser")} hint={t("remote.fieldUserHint")}>
+      <Row
+        label={t("remote.fieldUser")}
+        hint={isScreen ? t("remote.fieldUserScreenHint") : t("remote.fieldUserHint")}
+      >
         <Field value={spec.user} onChange={(user) => onPatch({ user })} mono placeholder="—" />
       </Row>
 
@@ -470,7 +524,11 @@ function ConnectionTab({
 
       {isSsh && spec.auth === "key" && <KeyPicker spec={spec} onPatch={onPatch} />}
 
-      {((isSsh && spec.auth === "password") || (!isSsh && !spec.ftp.anonymous)) && (
+      {/* A screen has no password field, and that is not an omission: nothing here would use it.
+          The viewer asks for the VNC password or the Windows credentials itself, in its own window,
+          and a field that quietly stored one in the keychain for nobody to read would be worse than
+          no field at all. */}
+      {((isSsh && spec.auth === "password") || (isFtp && !spec.ftp.anonymous)) && (
         <Row label={t("remote.fieldPassword")} hint={t("remote.fieldPasswordHint")} wide>
           <div className="flex w-full items-center gap-1">
             <Field
@@ -491,14 +549,23 @@ function ConnectionTab({
         </Row>
       )}
 
-      {/* `ProxyJump` and agent forwarding are `ssh` flags with no FTP equivalent — there is no
-          config file on the other side to read them. */}
+      {/* `ProxyJump` has no FTP equivalent — there is no config file on the other side to read it —
+          but a *screen* keeps it, and it is the one SSH flag that survives the split: the tunnel a
+          screen raises is an `ssh`, and reaching a machine through a bastion is exactly what this
+          field says. Agent forwarding stays behind, since nothing on the far side of a screen
+          tunnel would use the socket. */}
+      {(isSsh || isScreen) && (
+        <Row
+          label={t("remote.fieldJump")}
+          hint={isScreen ? t("remote.fieldJumpScreenHint") : t("remote.fieldJumpHint")}
+          wide
+        >
+          <Field value={spec.jump} onChange={(jump) => onPatch({ jump })} mono placeholder="bastion.example.com" />
+        </Row>
+      )}
+
       {isSsh && (
         <>
-          <Row label={t("remote.fieldJump")} hint={t("remote.fieldJumpHint")} wide>
-            <Field value={spec.jump} onChange={(jump) => onPatch({ jump })} mono placeholder="bastion.example.com" />
-          </Row>
-
           <label className="flex items-start gap-2 py-1">
             <Checkbox
               checked={spec.agent_forward}
@@ -515,7 +582,9 @@ function ConnectionTab({
         </>
       )}
 
-      {!isSsh && <FtpSettings spec={spec} onPatch={onPatch} />}
+      {isFtp && <FtpSettings spec={spec} onPatch={onPatch} />}
+        </>
+      )}
 
       <Row label={t("remote.fieldTags")} hint={t("remote.fieldTagsHint")} wide>
         {/* Edited as text rather than as chips: a comma-separated line is faster to retype than a
@@ -615,6 +684,234 @@ function GroupPicker({
         />
       )}
     </Row>
+  );
+}
+
+/** The secret field the two cloud editors share — a password input with a reveal, over whichever
+ *  credential this host keeps in the keychain. */
+function SecretField({
+  label,
+  hint,
+  password,
+  showPassword,
+  onPassword,
+  onToggleShowPassword,
+}: {
+  label: string;
+  hint: string;
+  password: string;
+  showPassword: boolean;
+  onPassword: (value: string) => void;
+  onToggleShowPassword: () => void;
+}) {
+  const t = useT();
+  return (
+    <Row label={label} hint={hint} wide>
+      <div className="flex w-full items-center gap-1">
+        <Field type={showPassword ? "text" : "password"} value={password} onChange={onPassword} mono />
+        <button
+          type="button"
+          onClick={onToggleShowPassword}
+          aria-label={showPassword ? t("remote.hide") : t("remote.show")}
+          className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+        >
+          {showPassword ? <EyeOff size={13} /> : <Eye size={13} />}
+        </button>
+      </div>
+    </Row>
+  );
+}
+
+/**
+ * The S3-only settings.
+ *
+ * **The profile is the default, and that is the point.** A named `~/.aws` profile is resolved by the
+ * AWS CLI at the moment of use, so SSO, MFA, assumed roles and rotation all keep working and this
+ * app stores no credential at all. The access-key path is there for a MinIO box or a machine
+ * account — a real case, and the one where a secret does end up in the keychain.
+ */
+function S3Settings({
+  spec,
+  password,
+  showPassword,
+  onPatch,
+  onPassword,
+  onToggleShowPassword,
+}: {
+  spec: RemoteHostSpec;
+  password: string;
+  showPassword: boolean;
+  onPatch: (changes: Partial<RemoteHostSpec>) => void;
+  onPassword: (value: string) => void;
+  onToggleShowPassword: () => void;
+}) {
+  const t = useT();
+  const patchS3 = (changes: Partial<RemoteHostSpec["s3"]>) =>
+    onPatch({ s3: { ...spec.s3, ...changes } });
+
+  const AUTH: { value: S3Auth; label: string; hint: string }[] = [
+    { value: "profile", label: t("remote.s3AuthProfile"), hint: t("remote.s3AuthProfileHint") },
+    { value: "access_key", label: t("remote.s3AuthKey"), hint: t("remote.s3AuthKeyHint") },
+  ];
+  // A custom endpoint has no wildcard DNS in front of it, so path style is not a choice there. Shown
+  // as forced rather than silently overridden, which would be a toggle that lies about its state.
+  const custom = spec.s3.endpoint.trim() !== "";
+
+  return (
+    <>
+      <Row label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.s3.auth)?.hint}>
+        <Select
+          value={spec.s3.auth}
+          onChange={(value) => patchS3({ auth: value as S3Auth })}
+          options={AUTH.map(({ value, label }) => ({ value, label }))}
+        />
+      </Row>
+
+      {spec.s3.auth === "profile" ? (
+        <Row label={t("remote.s3Profile")} hint={t("remote.s3ProfileHint")}>
+          <Field value={spec.s3.profile} onChange={(profile) => patchS3({ profile })} mono placeholder="default" />
+        </Row>
+      ) : (
+        <>
+          <Row label={t("remote.s3AccessKeyId")} wide>
+            <Field
+              value={spec.s3.access_key_id}
+              onChange={(access_key_id) => patchS3({ access_key_id })}
+              mono
+              placeholder="AKIA…"
+            />
+          </Row>
+          <SecretField
+            label={t("remote.s3SecretKey")}
+            hint={t("remote.s3SecretKeyHint")}
+            password={password}
+            showPassword={showPassword}
+            onPassword={onPassword}
+            onToggleShowPassword={onToggleShowPassword}
+          />
+        </>
+      )}
+
+      <Row label={t("remote.s3Region")} hint={t("remote.s3RegionHint")}>
+        <Field value={spec.s3.region} onChange={(region) => patchS3({ region })} mono placeholder="us-east-1" />
+      </Row>
+      <Row label={t("remote.s3Endpoint")} hint={t("remote.s3EndpointHint")} wide>
+        <Field
+          value={spec.s3.endpoint}
+          onChange={(endpoint) => patchS3({ endpoint })}
+          mono
+          placeholder="https://minio.internal:9000"
+        />
+      </Row>
+
+      <label className="flex items-start gap-2 py-1">
+        <Checkbox
+          checked={spec.s3.path_style || custom}
+          onChange={(path_style) => patchS3({ path_style })}
+          disabled={custom}
+          className="mt-px"
+        />
+        <span className="min-w-0">
+          <span className="block text-[12px] text-[var(--cf-text)]">{t("remote.s3PathStyle")}</span>
+          <span className="block text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+            {custom ? t("remote.s3PathStyleForced") : t("remote.s3PathStyleHint")}
+          </span>
+        </span>
+      </label>
+    </>
+  );
+}
+
+/**
+ * The Azure-only settings.
+ *
+ * One account name and one of three credentials. The three are genuinely different things rather
+ * than three spellings of "password" — a key signs every request, a SAS *is* the signature and
+ * carries its own scope and expiry, and Entra is a token borrowed from `az login` — so the field
+ * under the picker changes with the choice instead of staying a generic secret box.
+ */
+function AzureSettings({
+  spec,
+  password,
+  showPassword,
+  onPatch,
+  onPassword,
+  onToggleShowPassword,
+}: {
+  spec: RemoteHostSpec;
+  password: string;
+  showPassword: boolean;
+  onPatch: (changes: Partial<RemoteHostSpec>) => void;
+  onPassword: (value: string) => void;
+  onToggleShowPassword: () => void;
+}) {
+  const t = useT();
+  const patchAzure = (changes: Partial<RemoteHostSpec["azure"]>) =>
+    onPatch({ azure: { ...spec.azure, ...changes } });
+
+  const AUTH: { value: AzureAuth; label: string; hint: string }[] = [
+    { value: "account_key", label: t("remote.azAuthKey"), hint: t("remote.azAuthKeyHint") },
+    { value: "sas", label: t("remote.azAuthSas"), hint: t("remote.azAuthSasHint") },
+    { value: "entra", label: t("remote.azAuthEntra"), hint: t("remote.azAuthEntraHint") },
+  ];
+
+  return (
+    <>
+      <Row label={t("remote.azAccount")} hint={t("remote.azAccountHint")} wide>
+        <Field
+          value={spec.azure.account}
+          onChange={(account) => patchAzure({ account })}
+          mono
+          placeholder="contoso"
+        />
+      </Row>
+
+      <Row label={t("remote.fieldAuth")} hint={AUTH.find((a) => a.value === spec.azure.auth)?.hint}>
+        <Select
+          value={spec.azure.auth}
+          onChange={(value) => patchAzure({ auth: value as AzureAuth })}
+          options={AUTH.map(({ value, label }) => ({ value, label }))}
+        />
+      </Row>
+
+      {spec.azure.auth === "account_key" && (
+        <SecretField
+          label={t("remote.azKey")}
+          hint={t("remote.azKeyHint")}
+          password={password}
+          showPassword={showPassword}
+          onPassword={onPassword}
+          onToggleShowPassword={onToggleShowPassword}
+        />
+      )}
+      {spec.azure.auth === "sas" && (
+        <SecretField
+          label={t("remote.azSas")}
+          hint={t("remote.azSasHint")}
+          password={password}
+          showPassword={showPassword}
+          onPassword={onPassword}
+          onToggleShowPassword={onToggleShowPassword}
+        />
+      )}
+
+      <Row label={t("remote.azSuffix")} hint={t("remote.azSuffixHint")}>
+        <Field
+          value={spec.azure.endpoint_suffix}
+          onChange={(endpoint_suffix) => patchAzure({ endpoint_suffix })}
+          mono
+          placeholder="core.windows.net"
+        />
+      </Row>
+      <Row label={t("remote.azEndpoint")} hint={t("remote.azEndpointHint")} wide>
+        <Field
+          value={spec.azure.endpoint}
+          onChange={(endpoint) => patchAzure({ endpoint })}
+          mono
+          placeholder="http://127.0.0.1:10000/devstoreaccount1"
+        />
+      </Row>
+    </>
   );
 }
 
@@ -998,17 +1295,11 @@ function ScreenTab({
   const patchScreen = (changes: Partial<RemoteHostSpec["screen"]>) =>
     onPatch({ screen: { ...screen, ...changes } });
 
-  const PROTOCOLS: { value: ScreenProtocol; label: string }[] = [
-    { value: "none", label: t("remote.screenNone") },
-    { value: "vnc", label: "VNC" },
-    { value: "rdp", label: "RDP" },
-  ];
-
-  const effectiveTarget = useMemo(() => {
-    const host = screen.host.trim() || spec.host.trim() || "—";
-    const port = screen.port || SCREEN_DEFAULT_PORT[screen.protocol];
-    return `${host}:${port}`;
-  }, [screen.host, screen.port, screen.protocol, spec.host]);
+  // The three things left once the kind has said the protocol and Connection has said the address:
+  // whether to reach it through `ssh`, whether to draw it here, and what to open it with. There is
+  // no protocol select and no second address, because a screen row *is* the screen.
+  const target = useMemo(() => `${spec.host.trim() || "—"}:${effectivePort(spec)}`, [spec]);
+  const via = spec.jump.trim();
 
   return (
     <div className="space-y-1">
@@ -1016,79 +1307,44 @@ function ScreenTab({
         {t("remote.screenHelp")}
       </p>
 
-      <Row label={t("remote.fieldProtocol")}>
-        <Select
-          value={screen.protocol}
-          onChange={(value) => patchScreen({ protocol: value as ScreenProtocol })}
-          options={PROTOCOLS.map(({ value, label }) => ({ value, label }))}
+      <div className="my-2 rounded-md border border-[var(--cf-border)] p-2.5">
+        <label className="flex items-center gap-2">
+          <Checkbox checked={screen.tunnel} onChange={(tunnel) => patchScreen({ tunnel })} />
+          <span className="text-[12px] text-[var(--cf-text)]">{t("remote.screenTunnel")}</span>
+        </label>
+        <p className="mt-1.5 pl-6 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+          {t("remote.screenTunnelHint")}
+        </p>
+        {screen.tunnel && (
+          // The command as it will actually run, jump host and all — the one line that answers
+          // "so what am I connecting to" without opening a terminal to find out.
+          <p className="mt-1.5 flex items-center gap-1.5 pl-6 font-mono text-[11px] text-[var(--cf-text-muted)]">
+            <Pill tone="accent">{via ? `ssh -J ${via} -L` : "ssh -L"}</Pill>
+            127.0.0.1:auto → {target}
+          </p>
+        )}
+      </div>
+
+      {spec.kind === "vnc" && (
+        <div className="my-2 rounded-md border border-[var(--cf-border)] p-2.5">
+          <label className="flex items-center gap-2">
+            <Checkbox checked={screen.embedded} onChange={(embedded) => patchScreen({ embedded })} />
+            <span className="text-[12px] text-[var(--cf-text)]">{t("remote.screenEmbedded")}</span>
+          </label>
+          <p className="mt-1.5 pl-6 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+            {t("remote.screenEmbeddedHint")}
+          </p>
+        </div>
+      )}
+
+      <Row label={t("remote.fieldViewer")} hint={t("remote.fieldViewerHint")} wide>
+        <Field
+          value={screen.viewer}
+          onChange={(viewer) => patchScreen({ viewer })}
+          mono
+          placeholder={t("remote.viewerPlaceholder")}
         />
       </Row>
-
-      {screen.protocol !== "none" && (
-        <>
-          <Row label={t("remote.fieldScreenHost")} hint={t("remote.fieldScreenHostHint")} wide>
-            <Field
-              value={screen.host}
-              onChange={(host) => patchScreen({ host })}
-              mono
-              placeholder={spec.host || "—"}
-            />
-          </Row>
-          <Row label={t("remote.fieldScreenPort")}>
-            <Field
-              type="number"
-              value={screen.port === 0 ? "" : String(screen.port)}
-              onChange={(value) => patchScreen({ port: Number(value) || 0 })}
-              placeholder={String(SCREEN_DEFAULT_PORT[screen.protocol])}
-            />
-          </Row>
-          <Row label={t("remote.fieldScreenUser")}>
-            <Field value={screen.user} onChange={(user) => patchScreen({ user })} mono placeholder="—" />
-          </Row>
-
-          <div className="my-2 rounded-md border border-[var(--cf-border)] p-2.5">
-            <label className="flex items-center gap-2">
-              <Checkbox checked={screen.tunnel} onChange={(tunnel) => patchScreen({ tunnel })} />
-              <span className="text-[12px] text-[var(--cf-text)]">{t("remote.screenTunnel")}</span>
-            </label>
-            <p className="mt-1.5 pl-6 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-              {t("remote.screenTunnelHint")}
-            </p>
-            {screen.tunnel && (
-              <p className="mt-1.5 flex items-center gap-1.5 pl-6 font-mono text-[11px] text-[var(--cf-text-muted)]">
-                <Pill tone="accent">ssh -L</Pill>
-                127.0.0.1:auto → {effectiveTarget}
-              </p>
-            )}
-          </div>
-
-          {screen.protocol === "vnc" && (
-            <div className="my-2 rounded-md border border-[var(--cf-border)] p-2.5">
-              <label className="flex items-center gap-2">
-                <Checkbox
-                  checked={screen.embedded}
-                  onChange={(embedded) => patchScreen({ embedded })}
-                />
-                <span className="text-[12px] text-[var(--cf-text)]">
-                  {t("remote.screenEmbedded")}
-                </span>
-              </label>
-              <p className="mt-1.5 pl-6 text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
-                {t("remote.screenEmbeddedHint")}
-              </p>
-            </div>
-          )}
-
-          <Row label={t("remote.fieldViewer")} hint={t("remote.fieldViewerHint")} wide>
-            <Field
-              value={screen.viewer}
-              onChange={(viewer) => patchScreen({ viewer })}
-              mono
-              placeholder={t("remote.viewerPlaceholder")}
-            />
-          </Row>
-        </>
-      )}
     </div>
   );
 }
@@ -1107,35 +1363,45 @@ function AdvancedTab({
   const snippets = useRemoteStore((s) => s.snippets);
   const t = useT();
 
+  // All three are things to do *with a shell* — what to run instead of one, what to run inside one,
+  // where to start it. A host with no shell has nowhere to put any of them, so it doesn't get them.
+  // The `-o` options below are a different matter: they reach every `ssh` this app spawns for the
+  // host, and a screen host spawns one for its tunnel.
+  const canShell = capabilities(spec).shell;
+
   return (
     <div className="space-y-1">
-      <Row label={t("remote.fieldCommand")} hint={t("remote.fieldCommandHint")} wide>
-        <Field
-          value={spec.command}
-          onChange={(command) => onPatch({ command })}
-          mono
-          placeholder="docker compose logs -f"
-        />
-      </Row>
-      <Row label={t("remote.fieldStartupSnippet")} hint={t("remote.fieldStartupSnippetHint")} wide>
-        <Select
-          value={spec.startup_snippet_id}
-          onChange={(startup_snippet_id) => onPatch({ startup_snippet_id })}
-          options={[
-            { value: "", label: t("remote.screenNone") },
-            ...snippets.map((snippet) => ({ value: snippet.id, label: snippet.name })),
-          ]}
-        />
-      </Row>
+      {canShell && (
+        <>
+          <Row label={t("remote.fieldCommand")} hint={t("remote.fieldCommandHint")} wide>
+            <Field
+              value={spec.command}
+              onChange={(command) => onPatch({ command })}
+              mono
+              placeholder="docker compose logs -f"
+            />
+          </Row>
+          <Row label={t("remote.fieldStartupSnippet")} hint={t("remote.fieldStartupSnippetHint")} wide>
+            <Select
+              value={spec.startup_snippet_id}
+              onChange={(startup_snippet_id) => onPatch({ startup_snippet_id })}
+              options={[
+                { value: "", label: t("remote.screenNone") },
+                ...snippets.map((snippet) => ({ value: snippet.id, label: snippet.name })),
+              ]}
+            />
+          </Row>
 
-      <Row label={t("remote.fieldDirectory")} hint={t("remote.fieldDirectoryHint")} wide>
-        <Field
-          value={spec.directory}
-          onChange={(directory) => onPatch({ directory })}
-          mono
-          placeholder="/srv/app"
-        />
-      </Row>
+          <Row label={t("remote.fieldDirectory")} hint={t("remote.fieldDirectoryHint")} wide>
+            <Field
+              value={spec.directory}
+              onChange={(directory) => onPatch({ directory })}
+              mono
+              placeholder="/srv/app"
+            />
+          </Row>
+        </>
+      )}
 
       <div className="pt-3">
         <p className="text-[12px] text-[var(--cf-text)]">{t("remote.fieldOptions")}</p>

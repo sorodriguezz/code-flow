@@ -143,10 +143,31 @@ export function EngineGlyph({ kind, size = 14 }: { kind: DbKind; size?: number }
   return <Icon size={size} className="shrink-0" style={{ color: engineColor(kind) }} />;
 }
 
-/** The dot next to a connection: its engine's colour, hollow when nothing is connected. */
-export function ConnectionDot({ kind, connected }: { kind: DbKind; connected: boolean }) {
+/**
+ * The dot next to a connection: its engine's colour, hollow when nothing is connected.
+ *
+ * **Three states, not two.** Filled means there is a session, hollow means there isn't — and
+ * `busy` is the one in between, while a connect or a disconnect is in flight. Without it the dot
+ * held its old value for however long the round trip took (a cold cluster, an SSH tunnel coming up,
+ * a DNS lookup) and then flipped, so the only reading available to the user was that the click had
+ * not registered.
+ *
+ * Drawn as a halo pulsing out of the dot rather than as a spinner: at eight pixels a spinner is a
+ * grey smudge, and the halo keeps the dot itself — the thing that carries the engine's colour and
+ * the actual state — legible underneath it. It sits in an overlay, so nothing in the row moves when
+ * it appears.
+ */
+export function ConnectionDot({
+  kind,
+  connected,
+  busy = false,
+}: {
+  kind: DbKind;
+  connected: boolean;
+  busy?: boolean;
+}) {
   const color = engineColor(kind);
-  return (
+  const dot = (
     <span
       aria-hidden
       className="h-2 w-2 shrink-0 rounded-full border transition-colors"
@@ -155,6 +176,17 @@ export function ConnectionDot({ kind, connected }: { kind: DbKind; connected: bo
         backgroundColor: connected ? color : "transparent",
       }}
     />
+  );
+  if (!busy) return dot;
+  return (
+    <span className="relative flex h-2 w-2 shrink-0 items-center justify-center">
+      <span
+        aria-hidden
+        className="absolute inset-0 animate-ping rounded-full opacity-75 motion-reduce:animate-none motion-reduce:animate-pulse"
+        style={{ backgroundColor: color }}
+      />
+      {dot}
+    </span>
   );
 }
 
@@ -192,17 +224,23 @@ export function ToolbarButton({
   title,
   disabled,
   active,
+  dataTour,
   children,
 }: {
   onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   title: string;
   disabled?: boolean;
   active?: boolean;
+  /** Marks this button as a guided-tour anchor. Opt-in per call site rather than derived from the
+   *  title, because the tour points at a handful of controls and every other one of these should
+   *  stay out of its selector list. */
+  dataTour?: string;
   children: React.ReactNode;
 }) {
   return (
     <button
       type="button"
+      data-tour={dataTour}
       onClick={onClick}
       title={title}
       aria-label={title}

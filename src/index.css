@@ -25,6 +25,15 @@
   --cf-success: #16a34a;
   --cf-danger: #dc2626;
   --cf-warning: #d97706;
+  /* BSON value colours for the document list. Their own tokens rather than borrowed semantics:
+     `--cf-danger` happens to be the right red for an ObjectId today, and the day someone retunes
+     what "danger" means, every id in every document would move with it. Chosen to sit at similar
+     weight so no one type shouts over the others in a document read top to bottom. */
+  --cf-bson-string: #0f7a4d;
+  --cf-bson-number: #1d4ed8;
+  --cf-bson-id: #b45309;
+  --cf-bson-date: #7c3aed;
+  --cf-bson-literal: #9333ea;
   /* Mixed halfway into the surface rather than used at full strength: the bar spans the whole
      window and never changes, so at full saturation three hues of it were the loudest thing on
      screen permanently — chrome outshouting the content it frames. Halved, the identity survives
@@ -60,6 +69,12 @@
   --cf-success: #4ade80;
   --cf-danger: #f87171;
   --cf-warning: #fbbf24;
+  /* Same five, lifted for a dark background — see the light theme's note. */
+  --cf-bson-string: #6ee7a8;
+  --cf-bson-number: #93b4fd;
+  --cf-bson-id: #fbbf5c;
+  --cf-bson-date: #c4a2fb;
+  --cf-bson-literal: #d8a2fb;
   /* Same halving as the light theme — see the note there. */
   --cf-titlebar-gradient: linear-gradient(
     120deg,
@@ -89,6 +104,12 @@
     --cf-success: #4ade80;
     --cf-danger: #f87171;
     --cf-warning: #fbbf24;
+    /* Same as the explicit dark theme above. */
+    --cf-bson-string: #6ee7a8;
+    --cf-bson-number: #93b4fd;
+    --cf-bson-id: #fbbf5c;
+    --cf-bson-date: #c4a2fb;
+    --cf-bson-literal: #d8a2fb;
     /* Same halving as the light theme — see the note there. */
     --cf-titlebar-gradient: linear-gradient(
       120deg,

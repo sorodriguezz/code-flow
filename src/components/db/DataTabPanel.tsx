@@ -5,12 +5,15 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleX,
+  Braces,
   Columns3,
   Copy,
   Download,
   Loader2,
   Plus,
+  List,
   Rows3,
+  Table as TableIcon,
   RefreshCw,
   Save,
   Square,
@@ -18,6 +21,9 @@ import {
   X,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { recordModel } from "../../lib/db/engineModel";
+import { DocumentList } from "./DocumentList";
+import { DocumentsView } from "./DocumentsView";
 import { RecordGrid } from "./RecordGrid";
 import { ResultGrid } from "./ResultGrid";
 import { nodeLabel } from "./SqlConsolePanel";
@@ -91,12 +97,25 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
    * the selection, and a persisted tab that reopened sideways would be surprising.
    */
   const [layout, setLayout] = useState<"grid" | "record">("grid");
+  /**
+   * Which of the three Mongo views is up: the document list, the raw text, or the grid.
+   *
+   * Only meaningful on an engine that returns documents, and it opens on `documents` there — a
+   * collection is read as documents, and the grid's flattening invents a schema the collection does
+   * not have (see `DocumentList`). On a relational engine this stays `grid` and the switcher is not
+   * drawn at all, because "documents" is not a way of looking at a row.
+   */
+  const [docView, setDocView] = useState<"documents" | "json" | "grid">("documents");
   /** Where a ⇧-click measures its run from. */
   const anchor = useRef<number | null>(null);
   /** What a ⌘-drag must not throw away: the selection as it stood when the drag began. */
   const kept = useRef<Set<number>>(new Set());
 
   const engine = connection ? engineInfo(connection.kind) : null;
+  /** Whether what came back are documents. Asked of the *result* and not of the engine: it is the
+   *  presence of the text that makes the document views possible, and a page that returned none has
+   *  nothing for them to draw. */
+  const hasDocuments = (tab.result?.documents.length ?? 0) > 0;
   const staged = pendingCount(tab);
   const identified = hasPrimaryKey(tab);
 
@@ -118,6 +137,8 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
    *  leaves its rows on screen, and they are better read as an ordinary relational result — the
    *  same fallback `recordModel` makes for a kind it doesn't know — than not read at all. */
   const engineKind: DbKind = connection?.kind ?? "postgres";
+  /** Rows or documents, in this engine's own noun — see `EngineRecordModel.counts`. */
+  const counts = recordModel(engineKind).counts;
 
   const primaryKeys = useMemo(
     () =>
@@ -450,16 +471,49 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
 
           <ToolbarSeparator />
 
+          {/* Three ways to read documents, in Compass's own order: the list, the raw text, the
+              grid. A switcher rather than the two-state toggle beside it, because these are three
+              alternatives and a toggle can only ever say "the other one". */}
+          {hasDocuments && (
+            <>
+              <ToolbarButton
+                onClick={() => setDocView("documents")}
+                active={docView === "documents"}
+                title={t("db.documentList")}
+              >
+                <List size={12} />
+              </ToolbarButton>
+              <ToolbarButton
+                onClick={() => setDocView("json")}
+                active={docView === "json"}
+                title={t("db.showJson")}
+              >
+                <Braces size={12} />
+              </ToolbarButton>
+              <ToolbarButton
+                onClick={() => setDocView("grid")}
+                active={docView === "grid"}
+                title={t("db.showGrid")}
+              >
+                <TableIcon size={12} />
+              </ToolbarButton>
+              <ToolbarSeparator />
+            </>
+          )}
+
           {/* How to look at the page, not what to do with a selection — which is why the "read
-              these as records" action lives on the selection bar instead of beside this. */}
-          <ToolbarButton
-            onClick={() => setLayout((current) => (current === "grid" ? "record" : "grid"))}
-            active={layout === "record"}
-            disabled={!tab.result}
-            title={layout === "grid" ? t("db.recordLayout") : t("db.gridLayout")}
-          >
-            {layout === "grid" ? <Columns3 size={12} /> : <Rows3 size={12} />}
-          </ToolbarButton>
+              these as records" action lives on the selection bar instead of beside this. Hidden
+              while documents are up: transposing a grid is a question about a grid. */}
+          {(!hasDocuments || docView === "grid") && (
+            <ToolbarButton
+              onClick={() => setLayout((current) => (current === "grid" ? "record" : "grid"))}
+              active={layout === "record"}
+              disabled={!tab.result}
+              title={layout === "grid" ? t("db.recordLayout") : t("db.gridLayout")}
+            >
+              {layout === "grid" ? <Columns3 size={12} /> : <Rows3 size={12} />}
+            </ToolbarButton>
+          )}
           <ToolbarButton
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
@@ -519,6 +573,16 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               <span className="min-w-0 whitespace-pre-wrap break-words">{tab.error}</span>
             </p>
           </div>
+        ) : hasDocuments && docView !== "grid" ? (
+          // Read-only, both of them, and that is the honest trade: editing is a cell operation and
+          // a cell is a grid's idea. The switcher is right there when a value needs changing.
+          <div className="flex h-full min-h-0 flex-col">
+            {docView === "documents" ? (
+              <DocumentList documents={tab.result?.documents ?? []} offset={tab.offset} />
+            ) : (
+              <DocumentsView id={tab.id} documents={tab.result?.documents ?? []} />
+            )}
+          </div>
         ) : tab.result ? (
           // The same props either way: the two are one dataset seen along different axes, and
           // anything that behaved differently between them would be a bug rather than a feature.
@@ -577,7 +641,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           <div className="pointer-events-none absolute inset-x-0 bottom-2 z-20 flex justify-center px-2">
             <div className="pointer-events-auto flex max-w-full flex-wrap items-center gap-1.5 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-1 shadow-[var(--cf-shadow)]">
               <span className="text-[11px] font-medium text-[var(--cf-text)]">
-                {t("db.rowsSelectedN", { n: String(selectedRows.length) })}
+                {t(counts.selected, { n: String(selectedRows.length) })}
               </span>
               <ToolbarButton
                 onClick={() => openRecords(selectedRows)}
@@ -702,8 +766,8 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           {tab.result && <span>{formatDuration(tab.result.duration_ms)}</span>}
           <span>
             {tab.total === null
-              ? t("db.rowsN", { n: formatCount(tab.result?.rows.length ?? 0) })
-              : t("db.rowsOfTotal", {
+              ? t(counts.n, { n: formatCount(tab.result?.rows.length ?? 0) })
+              : t(counts.ofTotal, {
                   n: formatCount(tab.result?.rows.length ?? 0),
                   total: formatCount(tab.total),
                 })}

@@ -151,7 +151,10 @@ tiberius = { version = "0.12", default-features = false, features = [
     "sql-browser-tokio",
 ] }
 # tiberius is runtime-agnostic and wants a futures-io stream; this adapts tokio's TcpStream.
-tokio-util = { version = "0.7", features = ["compat"] }
+# `io` alongside `compat`: the cloud transports download through `StreamReader`, which turns
+# reqwest's chunk stream into the `AsyncRead` that `files::pump` — and therefore the one progress
+# bar every transport shares — is written against.
+tokio-util = { version = "0.7", features = ["compat", "io"] }
 # `default-features = false` to keep the optional KMS/compression backends out, but three features
 # are not optional in practice: `bson-2` is the document type the whole API is written in (with no
 # bson feature the crate compiles and exposes almost nothing), `dns-resolver` is what resolves a
@@ -182,6 +185,12 @@ suppaftp = { version = "10", default-features = false, features = [
 # Pinned to the version suppaftp itself resolves: two `tokio-rustls` majors in the tree would make
 # the `From` impl take a `TlsConnector` that is not the one this code builds.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# The resolver the MongoDB driver already bundles, named directly so `datasource::srv` can build one
+# from the nameservers this machine actually has. Pinned to the version the driver resolves: two
+# copies in the tree would be two DNS stacks, and the point of this is to use the same one the
+# driver would have used if it could read the system config. See `datasource/srv.rs` for why it
+# often can't.
+hickory-resolver = "0.26"
 
 # `keyring` ships with no OS credential-store backend enabled by default — without one
 # of these, Entry::set_password()/get_password() silently round-trip through a

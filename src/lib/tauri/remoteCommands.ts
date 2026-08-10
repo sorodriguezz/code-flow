@@ -14,6 +14,10 @@ import type {
   RemoteWorkspaceTree,
   SshKey,
   ScreenLaunch,
+  QueueMessage,
+  QueueSummary,
+  TablePage,
+  TableSummary,
 } from "../../types/remote";
 
 /**
@@ -112,6 +116,70 @@ export const remoteListForwards = () => invoke<ActiveForward[]>("remote_list_for
 // ---------- screen ----------
 
 export const remoteOpenScreen = (id: string) => invoke<ScreenLaunch>("remote_open_screen", { id });
+
+// ---------------------------------------------------------------------------
+// Azure Queue and Table storage
+// ---------------------------------------------------------------------------
+//
+// Neither is a file, so neither goes through `remoteListFiles` — these are the two services whose
+// content the dual-pane browser has no shape for. See `remotes::cloud::queue` and `::table`.
+
+export const remoteQueues = (id: string) => invoke<QueueSummary[]>("remote_queues", { id });
+
+/** Reads the front of a queue **without consuming anything**. The default, and the safe one. */
+export const remoteQueuePeek = (id: string, queue: string, count: number) =>
+  invoke<QueueMessage[]>("remote_queue_peek", { id, queue, count });
+
+/** The destructive read: hides the messages for `visibility` seconds and hands back the pop
+ *  receipts that `remoteQueueDeleteMessage` needs. */
+export const remoteQueueReceive = (id: string, queue: string, count: number, visibility: number) =>
+  invoke<QueueMessage[]>("remote_queue_receive", { id, queue, count, visibility });
+
+export const remoteQueuePut = (id: string, queue: string, text: string) =>
+  invoke<void>("remote_queue_put", { id, queue, text });
+
+export const remoteQueueDeleteMessage = (
+  id: string,
+  queue: string,
+  messageId: string,
+  popReceipt: string,
+) => invoke<void>("remote_queue_delete_message", { id, queue, messageId, popReceipt });
+
+export const remoteQueueClear = (id: string, queue: string) =>
+  invoke<void>("remote_queue_clear", { id, queue });
+
+export const remoteQueueCreate = (id: string, queue: string) =>
+  invoke<void>("remote_queue_create", { id, queue });
+
+export const remoteQueueRemove = (id: string, queue: string) =>
+  invoke<void>("remote_queue_remove", { id, queue });
+
+export const remoteTables = (id: string) => invoke<TableSummary[]>("remote_tables", { id });
+
+export const remoteTableQuery = (
+  id: string,
+  table: string,
+  filter: string,
+  select: string,
+  fromPartition: string,
+  fromRow: string,
+) => invoke<TablePage>("remote_table_query", { id, table, filter, select, fromPartition, fromRow });
+
+export const remoteTableUpsert = (id: string, table: string, entity: Record<string, unknown>) =>
+  invoke<void>("remote_table_upsert", { id, table, entity });
+
+export const remoteTableDeleteEntity = (
+  id: string,
+  table: string,
+  partition: string,
+  rowKey: string,
+) => invoke<void>("remote_table_delete_entity", { id, table, partition, rowKey });
+
+export const remoteTableCreate = (id: string, table: string) =>
+  invoke<void>("remote_table_create", { id, table });
+
+export const remoteTableRemove = (id: string, table: string) =>
+  invoke<void>("remote_table_remove", { id, table });
 
 /** Closes the screen's tunnel. Not the viewer — that is the user's own window. */
 export const remoteCloseScreen = (id: string) => invoke<void>("remote_close_screen", { id });

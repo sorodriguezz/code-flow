@@ -164,6 +164,9 @@ export const useBenchStore = create<BenchState>((set, get) => ({
     // `open` before the load, not after: the panel has an empty state of its own and a spinner in
     // it reads as "opening", where a click that does nothing for half a second reads as one that
     // missed.
+    //
+    // `loading` is what the panel holds its *first* set of panes back on, which is not cosmetic —
+    // see `TerminalBench`. Every later read leaves them where they are.
     set({ open: true, loading: true });
     await get().refresh(workspaceId, focus);
     set({ loading: false });

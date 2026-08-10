@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import {
   FolderOpen,
+  Inbox,
   Monitor,
   MonitorSmartphone,
   ScrollText,
+  Table2,
   Terminal,
   Waypoints,
   X,
@@ -16,6 +18,8 @@ import { ImportSshConfigModal } from "./ImportSshConfigModal";
 import { ForwardsPanel } from "./ForwardsPanel";
 import { AllForwardsPanel } from "./AllForwardsPanel";
 import { SftpPanel } from "./SftpPanel";
+import { QueuePanel } from "./QueuePanel";
+import { TablePanel } from "./TablePanel";
 import { LogPanel } from "./LogPanel";
 import { ScreenPanel } from "./ScreenPanel";
 import { HostGallery } from "./HostGallery";
@@ -148,6 +152,16 @@ export function RemoteView() {
                       <SftpPanel tab={activeTab} />
                     </div>
                   )}
+                  {activeTab?.kind === "queue" && (
+                    <div className="absolute inset-0">
+                      <QueuePanel tab={activeTab} />
+                    </div>
+                  )}
+                  {activeTab?.kind === "table" && (
+                    <div className="absolute inset-0">
+                      <TablePanel tab={activeTab} />
+                    </div>
+                  )}
                   {activeTab?.kind === "log" && (
                     <div className="absolute inset-0">
                       <LogPanel />
@@ -183,6 +197,8 @@ export function RemoteView() {
 function tabIcon(tab: RemoteTab) {
   if (tab.kind === "forwards" || tab.kind === "all-forwards") return Waypoints;
   if (tab.kind === "sftp") return FolderOpen;
+  if (tab.kind === "queue") return Inbox;
+  if (tab.kind === "table") return Table2;
   if (tab.kind === "log") return ScrollText;
   if (tab.kind === "screen") return tab.launch?.protocol === "rdp" ? MonitorSmartphone : Monitor;
   return Terminal;

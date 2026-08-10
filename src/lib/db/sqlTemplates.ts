@@ -141,7 +141,16 @@ export function sqlTemplate(
         // Mongo has no TRUNCATE. Emptying a collection while keeping it is a filterless
         // `deleteMany` — the one place this module writes one, because here it is the request.
         return `// Empties ${node.name}, keeping the collection itself.\ndb.${node.name}.deleteMany({})`;
-      default:
+      // No Mongo equivalent, and these are hidden from the menu on this engine (`sqlOnly` in
+      // `DbExplorer`'s `GENERATED`). Answered with the reason rather than by falling through to the
+      // `find` below, which is what used to happen: a row labelled GRANT that silently drafted a
+      // read is worse than one that says the operation does not exist here.
+      case "create":
+        return `// A collection is created by writing to it — there is no schema to declare.\ndb.createCollection(${JSON.stringify(node.name)})`;
+      case "grant":
+      case "revoke":
+        return `// MongoDB grants roles to a user on a database, not privileges on a collection.\n// Run this against the admin database:\n// db.grantRolesToUser("<user>", [{ role: "readWrite", db: ${JSON.stringify(node.database ?? "<db>")} }])`;
+      case "select":
         return `db.${node.name}.find({}).limit(50)`;
     }
   }

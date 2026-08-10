@@ -730,6 +730,7 @@ dependencies = [
  "git2",
  "globset",
  "hex",
+ "hickory-resolver",
  "hmac 0.12.1",
  "keyring",
  "md-5 0.10.6",

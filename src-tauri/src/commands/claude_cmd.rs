@@ -89,6 +89,11 @@ pub(crate) enum AiTask {
     /// own route rather than the verification's: this is the longest single run in the app, and
     /// which engine writes documentation is a decision a team makes on its own terms.
     Wiki,
+    /// The database console's assistant. Text-only like [`AiTask::Inline`] — the schema is read by
+    /// CodeFlow's own driver and put on stdin, so the engine never touches the database — which is
+    /// what lets this one be routed to a fast or local model. It is also the task most likely to be
+    /// run twenty times in an afternoon, so being able to point it somewhere cheap is the point.
+    DbQuery,
 }
 
 impl AiTask {
@@ -109,6 +114,7 @@ impl AiTask {
             AiTask::StoryVerify => "story_verify",
             AiTask::WorkItemReview => "work_item_review",
             AiTask::Wiki => "wiki",
+            AiTask::DbQuery => "db_query",
         }
     }
 }

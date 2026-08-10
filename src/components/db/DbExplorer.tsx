@@ -359,6 +359,9 @@ function NodeSubtree({
    * is actually rewritten.
    */
   const connectionRow = useDbStore((s) => s.connections.find((c) => c.id === connectionId) ?? null);
+  /** Whether this connection's console speaks SQL — which decides what the generator menu is even
+   *  called, and which of its rows describe an operation this engine has. */
+  const generatesSql = engineInfo(connectionRow?.kind ?? "postgres").sql;
   /**
    * What is narrowing whatever this node lists, or `null` when nothing is.
    *
@@ -444,7 +447,8 @@ function NodeSubtree({
     menuItems.push({ label: t("db.openData"), icon: Table2, onClick: openData });
     menuItems.push({ label: t("db.showDdl"), icon: FileCode2, onClick: showDdl });
     menuItems.push({
-      label: t("db.selectRows"),
+      // The draft this opens is a `find()` on Mongo, so the row does not promise a SELECT.
+      label: generatesSql ? t("db.selectRows") : t("db.findDocuments"),
       icon: Play,
       onClick: () =>
         store.newConsole(
@@ -494,7 +498,9 @@ function NodeSubtree({
     const engineKind = useDbStore.getState().connections.find((c) => c.id === connectionId)?.kind;
     if (engineKind) {
       menuItems.push({
-        label: t("db.createTable"),
+        // The draft is `db.createCollection(…)` on Mongo, so the row says so — "New table here…"
+        // over a Mongo database named something the engine has no word for.
+        label: engineInfo(engineKind).sql ? t("db.createTable") : t("db.createCollection"),
         icon: Table2,
         separated: true,
         onClick: () =>
@@ -707,11 +713,15 @@ function NodeSubtree({
         <ContextMenu
           x={generateMenu.x}
           y={generateMenu.y}
-          heading={t("db.generateSql")}
+          // "Generate SQL" over a Mongo collection was naming a language that connection does not
+          // speak. What the menu produces is a draft in whatever the console runs.
+          heading={generatesSql ? t("db.generateSql") : t("db.generateMql")}
           items={GENERATED.filter(
-            (entry) => !entry.appliesTo || entry.appliesTo.includes(node.kind),
+            (entry) =>
+              (!entry.appliesTo || entry.appliesTo.includes(node.kind)) &&
+              (generatesSql || !entry.sqlOnly),
           ).map((entry) => ({
-            label: t(entry.label),
+            label: t(generatesSql ? entry.label : entry.mongoLabel ?? entry.label),
             icon: entry.icon,
             separated: entry.separated,
             onClick: () => void generate(entry.template),
@@ -731,27 +741,50 @@ function NodeSubtree({
  * Inside the DDL group the order is not alphabetical: `CREATE` first, then the two that destroy the
  * whole object. Being last in their group puts the most irreversible rows furthest from `SELECT` at
  * the top, which is where the pointer arrives.
+ *
+ * **The rows are named after what they produce, not after SQL.** A collection's menu offering
+ * `SELECT COUNT(*)` and `CREATE TABLE` was describing statements Mongo cannot run: two of them
+ * (`GRANT`/`REVOKE`) had no Mongo draft at all and fell through to a `find()`, which is a menu row
+ * that quietly does something else. So `mongoLabel` renames the ones that exist in both, and
+ * `sqlOnly` removes the ones that do not.
  */
 const GENERATED: {
   template: SqlTemplate;
   label: TranslationKey;
+  /** What this row is called on an engine with no SQL. Absent means the name is the same. */
+  mongoLabel?: TranslationKey;
   icon: LucideIcon;
   separated?: boolean;
   /** Node kinds the draft makes sense for. Absent means every relation this menu opens on. */
   appliesTo?: DbNodeKind[];
+  /**
+   * Hidden on engines with no SQL, because the operation itself does not exist there — not because
+   * it is spelled differently. Mongo has no per-collection DDL (a collection appears when you write
+   * to it) and no per-collection privileges (roles are granted on the `admin` database, to a user,
+   * which is a different screen's job and not a draft about *this* object).
+   */
+  sqlOnly?: boolean;
 }[] = [
-  { template: "select", label: "db.sql.select", icon: Search },
-  { template: "count", label: "db.sql.count", icon: Hash },
-  { template: "insert", label: "db.sql.insert", icon: Plus },
-  { template: "update", label: "db.sql.update", icon: Pencil },
-  { template: "delete", label: "db.sql.delete", icon: Trash2 },
-  { template: "create", label: "db.sql.create", icon: FileCode2, separated: true },
+  { template: "select", label: "db.sql.select", mongoLabel: "db.mql.find", icon: Search },
+  { template: "count", label: "db.sql.count", mongoLabel: "db.mql.count", icon: Hash },
+  { template: "insert", label: "db.sql.insert", mongoLabel: "db.mql.insert", icon: Plus },
+  { template: "update", label: "db.sql.update", mongoLabel: "db.mql.update", icon: Pencil },
+  { template: "delete", label: "db.sql.delete", mongoLabel: "db.mql.delete", icon: Trash2 },
+  { template: "create", label: "db.sql.create", icon: FileCode2, separated: true, sqlOnly: true },
   // Not offered on a view: a view holds no rows of its own, so `TRUNCATE` against one is an error
   // rather than a statement worth drafting. `DROP` is offered — it just becomes `DROP VIEW`.
-  { template: "truncate", label: "db.sql.truncate", icon: Eraser, appliesTo: ["table", "collection"] },
-  { template: "drop", label: "db.sql.drop", icon: Trash },
-  { template: "grant", label: "db.sql.grant", icon: KeyRound, separated: true },
-  { template: "revoke", label: "db.sql.revoke", icon: KeyRound },
+  {
+    template: "truncate",
+    label: "db.sql.truncate",
+    // `deleteMany({})` — the filterless delete that empties a collection and keeps it. Same intent
+    // as TRUNCATE, and the draft says so in a comment above it.
+    mongoLabel: "db.mql.truncate",
+    icon: Eraser,
+    appliesTo: ["table", "collection"],
+  },
+  { template: "drop", label: "db.sql.drop", mongoLabel: "db.mql.drop", icon: Trash },
+  { template: "grant", label: "db.sql.grant", icon: KeyRound, separated: true, sqlOnly: true },
+  { template: "revoke", label: "db.sql.revoke", icon: KeyRound, sqlOnly: true },
 ];
 
 /** `schema.table`, or just the name when there is no schema (Mongo). */
@@ -808,6 +841,7 @@ function ConnectionBranch({
   const children = useDbStore((s) => s.children[key]);
   const error = useDbStore((s) => s.nodeErrors[key]);
   const connected = useDbStore((s) => s.connected.includes(row.id));
+  const busy = useDbStore((s) => s.connecting.includes(row.id));
   const connections = useDbStore((s) => s.connections);
   // Filtered *outside* the selector: a selector that builds a new array returns a different snapshot
   // on every store read, which is an infinite render loop the moment anything else in the store
@@ -860,9 +894,19 @@ function ConnectionBranch({
       icon: FileCode2,
       onClick: () => store.newConsole(row.id),
     },
-    connected
-      ? { label: t("db.disconnect"), icon: Plug, onClick: () => void store.disconnect(row.id) }
-      : { label: t("db.connect"), icon: PlugZap, onClick: () => void store.connect(row.id) },
+    // While the round trip is in flight the entry says so and does nothing: clicking "Connect"
+    // twice would open a second session behind the first, and the menu is where that is easiest to
+    // do by accident.
+    busy
+      ? {
+          label: connected ? t("db.disconnecting") : t("db.connecting"),
+          icon: Loader2,
+          disabled: true,
+          onClick: () => {},
+        }
+      : connected
+        ? { label: t("db.disconnect"), icon: Plug, onClick: () => void store.disconnect(row.id) }
+        : { label: t("db.connect"), icon: PlugZap, onClick: () => void store.connect(row.id) },
     {
       label: t("db.refresh"),
       icon: RefreshCw,
@@ -973,7 +1017,7 @@ function ConnectionBranch({
           store.selectConnection(row.id);
           setMenu({ x: e.clientX, y: e.clientY });
         }}
-        leading={<ConnectionDot kind={row.kind} connected={connected} />}
+        leading={<ConnectionDot kind={row.kind} connected={connected} busy={busy} />}
       />
       {/* Saved consoles sit above the server's own tree: they are this workspace's work, and the
           reason to open a connection more often than the schema is. */}

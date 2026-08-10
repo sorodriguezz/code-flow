@@ -29,6 +29,29 @@ export interface EngineRecordModel {
    *  and one of them was reading "Row 3" over a document. */
   itemLabel: TranslationKey;
   /**
+   * The same noun again, in the four sentences a result panel writes.
+   *
+   * Separate from `countLabel` — which heads a modal and is written "3 record(s)" — because a
+   * status line is read at a glance and the parenthetical plural is noise there. Grouped rather
+   * than four more fields on the interface, since they are one decision: what this engine calls
+   * the things it just returned.
+   *
+   * These are what stopped a Mongo console reporting "50 filas" under a page of documents.
+   */
+  counts: {
+    /** "{n} rows" — the plain count. */
+    n: TranslationKey;
+    /** "{n} of {total}" — a page out of a known total. */
+    ofTotal: TranslationKey;
+    /** "{n} rows affected" — what a write reports back. */
+    affected: TranslationKey;
+    /** "{n} selected" — the gutter selection's badge. */
+    selected: TranslationKey;
+    /** What a grid says when the result has no fields at all to draw. "No columns" is a claim about
+     *  a schema, and a collection has none to be missing. */
+    empty: TranslationKey;
+  };
+  /**
    * The field that identifies a record, or `null` for an engine with no such notion.
    *
    * `badge` is what is drawn beside the field name, in the engine's own spelling: `PK` reads as
@@ -73,6 +96,13 @@ export interface EngineRecordModel {
 const RELATIONAL: EngineRecordModel = {
   countLabel: "db.countRows",
   itemLabel: "db.rowN",
+  counts: {
+    n: "db.rowsN",
+    ofTotal: "db.rowsOfTotal",
+    affected: "db.rowsAffected",
+    selected: "db.rowsSelectedN",
+    empty: "db.noColumns",
+  },
   identity: { label: "db.primaryKey", badge: "PK" },
   conventionalIdentity: [],
   fieldTypes: "schema",
@@ -97,6 +127,13 @@ export const ENGINE_RECORD_MODELS: Record<DbKind, EngineRecordModel> = {
   mongodb: {
     countLabel: "db.countDocuments",
     itemLabel: "db.documentN",
+    counts: {
+      n: "db.documentsN",
+      ofTotal: "db.documentsOfTotal",
+      affected: "db.documentsAffected",
+      selected: "db.documentsSelectedN",
+      empty: "db.noFields",
+    },
     identity: { label: "db.documentId", badge: "_id" },
     // Every document has one and no catalog read ever produces it — the flattened keys of a query
     // result are all these views are ever given.

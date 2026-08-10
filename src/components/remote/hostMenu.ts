@@ -1,10 +1,12 @@
 import {
   Copy,
   FolderOpen,
+  Inbox,
   Monitor,
   MonitorSmartphone,
   Pencil,
   Settings2,
+  Table2,
   Terminal,
   Trash2,
   Unplug,
@@ -24,6 +26,7 @@ import {
   parseHostSpec,
   type RemoteHostRow,
   type RemoteHostSpec,
+  type RemoteKind,
 } from "../../types/remote";
 
 /**
@@ -51,6 +54,8 @@ export function useHostMenu() {
   const openForwards = useRemoteStore((s) => s.openForwards);
   const openScreen = useRemoteStore((s) => s.openScreen);
   const openSftp = useRemoteStore((s) => s.openSftp);
+  const openQueues = useRemoteStore((s) => s.openQueues);
+  const openTables = useRemoteStore((s) => s.openTables);
   const openDetails = useRemoteStore((s) => s.openDetails);
   const duplicateHost = useRemoteStore((s) => s.duplicateHost);
   const deleteHost = useRemoteStore((s) => s.deleteHost);
@@ -60,11 +65,11 @@ export function useHostMenu() {
 
   return (host: RemoteHostRow, options: { onRename?: () => void } = {}): MenuItem[] => {
     const spec = parseHostSpec(host);
-    // What this host *can* do, by kind. An FTP host has files and nothing else, and a jailed SFTP
-    // account has no shell — so the menu doesn't offer either. The backend refuses the same three
-    // independently; this is what keeps the user from ever meeting that refusal.
+    // What this host *can* do, by kind. An FTP host has files and nothing else, a jailed SFTP
+    // account has no shell, and a screen host has neither — so the menu doesn't offer any of them.
+    // The backend refuses each independently; this is what keeps the user from ever meeting that
+    // refusal.
     const can = capabilities(spec);
-    const hasScreen = can.screen && spec.screen.protocol !== "none";
     const incomplete = !hasAddress(spec);
     const live =
       tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited) ||
@@ -84,7 +89,9 @@ export function useHostMenu() {
             },
           ]
         : []),
-      { label: t("remote.files"), icon: FolderOpen, onClick: act(() => openSftp(host.id)) },
+      ...(can.files
+        ? [{ label: t("remote.files"), icon: FolderOpen, onClick: act(() => openSftp(host.id)) }]
+        : []),
       ...(can.forwards
         ? [
             {
@@ -94,7 +101,7 @@ export function useHostMenu() {
             },
           ]
         : []),
-      ...(hasScreen
+      ...(can.screen
         ? [
             {
               label: t("remote.openScreen"),
@@ -102,6 +109,14 @@ export function useHostMenu() {
               onClick: act(() => void openScreen(host.id)),
             },
           ]
+        : []),
+      // Neither is a file, so neither is in the capability table's `files` column — each is its own
+      // one-action kind, and that action is the only thing the row can do.
+      ...(spec.kind === "azure_queue"
+        ? [{ label: t("remote.queues"), icon: Inbox, onClick: act(() => openQueues(host.id)) }]
+        : []),
+      ...(spec.kind === "azure_table"
+        ? [{ label: t("remote.tables"), icon: Table2, onClick: act(() => openTables(host.id)) }]
         : []),
       {
         label: t("remote.editHost"),
@@ -146,25 +161,25 @@ export function useHostMenu() {
  * The kinds of connection the (+) offers, as three families.
  *
  * One "New host" button could not say this. The three families are genuinely different machines to
- * set up — a screen has a protocol and a viewer and no shell to speak of, an FTP host has no
- * `~/.ssh/config` behind it, and SSH is the only one of the three that has all of it — and picking
- * the family *first* is what lets the editor open on the page that matters and with the fields that
- * don't apply already gone.
+ * set up — a screen has a viewer and no shell to speak of, an FTP host has no `~/.ssh/config`
+ * behind it, and SSH is the only one of the three that has a command line — and picking the family
+ * *first* is what lets the editor open with the fields that don't apply already gone.
  *
- * Each entry is a whole spec rather than a `kind` patch, because "remote desktop" is not a kind:
- * `RemoteKind` has no screen member, and a screen host is an SSH row whose `screen.protocol` is
- * set. That is the data model (see `types/remote`), and this menu is where the user meets it.
+ * Every entry is now a plain `kind`, which it did not use to be: a screen used to be an SSH row
+ * with `screen.protocol` set, so this menu had to hand-build a spec that the Type select could not
+ * name. The kind *is* the protocol now (see `types/remote`), so the menu offers exactly the six
+ * things that select offers, and a row created here reads back as what it was created as.
  */
 export interface NewConnection {
-  id: string;
+  id: RemoteKind;
   labelKey: TranslationKey;
   icon: LucideIcon;
-  /** Tacked onto the default name, so four fresh rows don't all read "New host". */
+  /** Tacked onto the default name, so six fresh rows don't all read "New host". */
   suffix: string;
   /** A hairline above this entry — what separates the three families. */
   separated?: boolean;
-  /** Which page of the editor to open on: the field that defines this kind isn't always on
-   *  Connection. */
+  /** Which page of the editor to open on. Connection for all of them: a screen row's address is
+   *  its screen's, so there is nothing left on the Screen page that has to be filled in first. */
   tab: RemoteDetailsTab;
   spec: () => RemoteHostSpec;
 }
@@ -175,24 +190,18 @@ export const NEW_CONNECTIONS: NewConnection[] = [
     labelKey: "remote.newScreenVnc",
     icon: Monitor,
     suffix: "VNC",
-    tab: "screen",
-    spec: () => {
-      const base = defaultHostSpec();
-      return { ...base, screen: { ...base.screen, protocol: "vnc", embedded: true } };
-    },
+    tab: "connection",
+    spec: () => ({ ...defaultHostSpec(), kind: "vnc" }),
   },
   {
     id: "rdp",
     labelKey: "remote.newScreenRdp",
     icon: MonitorSmartphone,
     suffix: "RDP",
-    tab: "screen",
-    spec: () => {
-      const base = defaultHostSpec();
-      // Windows by default — RDP is that machine, and it is the OS glyph the row will draw. Nothing
-      // stops the user changing it; it is a default, not a rule.
-      return { ...base, os: "windows", screen: { ...base.screen, protocol: "rdp" } };
-    },
+    tab: "connection",
+    // Windows by default — RDP is that machine, and it is the OS glyph the row will draw. Nothing
+    // stops the user changing it; it is a default, not a rule.
+    spec: () => ({ ...defaultHostSpec(), kind: "rdp", os: "windows" }),
   },
   {
     id: "ssh",
@@ -227,6 +236,50 @@ export const NEW_CONNECTIONS: NewConnection[] = [
     suffix: "FTPS",
     tab: "connection",
     spec: () => ({ ...defaultHostSpec(), kind: "ftps" }),
+  },
+  // The fourth family: an account in somebody's cloud rather than a machine. Separated from the
+  // file protocols above because what you fill in is not an address and a password — it is an
+  // account and a credential, and the editor swaps the whole block.
+  {
+    id: "s3",
+    labelKey: "remote.newS3",
+    icon: kindIcon("s3"),
+    suffix: "S3",
+    separated: true,
+    tab: "connection",
+    spec: () => ({ ...defaultHostSpec(), kind: "s3" }),
+  },
+  {
+    id: "azure_blob",
+    labelKey: "remote.newAzureBlob",
+    icon: kindIcon("azure_blob"),
+    suffix: "Blob",
+    tab: "connection",
+    spec: () => ({ ...defaultHostSpec(), kind: "azure_blob" }),
+  },
+  {
+    id: "azure_files",
+    labelKey: "remote.newAzureFiles",
+    icon: kindIcon("azure_files"),
+    suffix: "Files",
+    tab: "connection",
+    spec: () => ({ ...defaultHostSpec(), kind: "azure_files" }),
+  },
+  {
+    id: "azure_queue",
+    labelKey: "remote.newAzureQueue",
+    icon: kindIcon("azure_queue"),
+    suffix: "Queue",
+    tab: "connection",
+    spec: () => ({ ...defaultHostSpec(), kind: "azure_queue" }),
+  },
+  {
+    id: "azure_table",
+    labelKey: "remote.newAzureTable",
+    icon: kindIcon("azure_table"),
+    suffix: "Table",
+    tab: "connection",
+    spec: () => ({ ...defaultHostSpec(), kind: "azure_table" }),
   },
 ];
 

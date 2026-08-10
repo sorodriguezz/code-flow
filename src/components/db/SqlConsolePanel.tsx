@@ -5,33 +5,44 @@ import {
   AlertTriangle,
   Braces,
   Check,
+  CornerDownLeft,
   Database,
   Download,
   Copy,
   Layers,
+  List,
   Loader2,
   Play,
   Rows3,
   Save,
+  Sparkles,
   Square,
   Table2,
   Waypoints,
+  X,
 } from "lucide-react";
 import { OVERFLOW_SAFE_OPTIONS } from "../../lib/monacoSetup";
 import { installSqlCompletions } from "../../lib/db/sqlCompletion";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { Select } from "../common/Select";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { recordModel } from "../../lib/db/engineModel";
+import { DocumentList } from "./DocumentList";
+import { DocumentsView } from "./DocumentsView";
 import { ResultGrid } from "./ResultGrid";
 import { ScopePicker } from "./ScopePicker";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
-import { nodeKey, useDbStore, type DbConsoleTab } from "../../state/dbStore";
+import { nodeKey, useDbStore, type DbConsoleAi, type DbConsoleTab } from "../../state/dbStore";
+import { useDbCommandStore } from "../../state/dbCommandStore";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useDbObjectDragStore } from "../../state/dbObjectDragStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
+import { ThinkingOrb } from "../common/ThinkingOrb";
+import { RunEngineChip } from "../ai/AiRunLog";
+import { renderMarkdown } from "../../lib/markdown";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
 import { engineInfo, type DbKind, type DbNodeRef } from "../../types/database";
@@ -225,6 +236,35 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [acceptsDrop, objectDrag, endObjectDrag]);
 
+  /**
+   * Puts a proposed statement where the caret is, as one undoable edit.
+   *
+   * An insert and not an overwrite: the console is usually a script, and the answer to "give me a
+   * query for X" belongs next to what is already there rather than on top of it. ⌘Z takes it back,
+   * which is the whole reason this goes through Monaco instead of `updateConsole`.
+   */
+  const insertAtCursor = (text: string) => {
+    const editor = editorRef.current;
+    const position = editor?.getPosition();
+    if (!editor || !position) return;
+    // A statement dropped mid-line would weld itself to whatever is there; on its own line it is
+    // readable and, on the engines that split on `;`, separately runnable.
+    const padded = position.column > 1 ? `\n${text}\n` : `${text}\n`;
+    editor.executeEdits("cf-db-ai-insert", [
+      {
+        range: {
+          startLineNumber: position.lineNumber,
+          startColumn: position.column,
+          endLineNumber: position.lineNumber,
+          endColumn: position.column,
+        },
+        text: padded,
+        forceMoveMarkers: true,
+      },
+    ]);
+    editor.focus();
+  };
+
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => run(false));
@@ -236,6 +276,25 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
       void store.saveConsole(tab.id),
     );
   };
+
+  /**
+   * The keyboard's way into the assistant, through the shortcut registry rather than a chord bound
+   * here — so it is rebindable and shows up in the shortcuts list like every other action.
+   *
+   * Consumed whether or not it did anything, the same rule `DataTabPanel` follows: a request left
+   * pending replays itself the moment another tab mounts. Opening an already-open bar is not a
+   * close — a second press means "let me type the next question", so it only refocuses.
+   */
+  const request = useDbCommandStore((s) => s.request);
+  useEffect(() => {
+    if (!request) return;
+    useDbCommandStore.getState().consume();
+    if (request.command !== "askAi") return;
+    if (!tab.ai) store.toggleConsoleAi(tab.id);
+    window.dispatchEvent(new CustomEvent("cf-db-ai-focus", { detail: tab.id }));
+    // The nonce is what makes a repeated command a new one; `tab.ai` is read fresh on each.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request?.nonce]);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
@@ -334,6 +393,17 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
             <span className="text-[10px] font-bold">EX</span>
           </ToolbarButton>
           <ToolbarButton
+            onClick={() => store.toggleConsoleAi(tab.id)}
+            title={tab.ai?.running ? t("db.aiThinking") : t("db.aiHint")}
+            active={tab.ai !== null}
+            dataTour="db-ai"
+          >
+            {/* The orb reaches the toolbar too, so a console scrolled away from the answer panel
+                still shows that something is running — and so the button that would close the bar
+                (and cancel the run) says what it is about to interrupt. */}
+            {tab.ai?.running ? <ThinkingOrb size="sm" /> : <Sparkles size={13} />}
+          </ToolbarButton>
+          <ToolbarButton
             onClick={() => void store.saveConsole(tab.id)}
             title={tab.dirty ? t("db.saveConsole") : t("db.saved")}
             active={tab.dirty}
@@ -342,6 +412,8 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
           </ToolbarButton>
         </div>
       </div>
+
+      {tab.ai && <ConsoleAiBar tab={tab} ai={tab.ai} onInsert={insertAtCursor} />}
 
       {/* Editor */}
       <div
@@ -404,6 +476,173 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 }
 
 // ---------------------------------------------------------------------------
+// Assistant
+// ---------------------------------------------------------------------------
+
+/**
+ * Ask the connected database a question in words — ⌘I, or the sparkle in the toolbar.
+ *
+ * It sits between the toolbar and the editor rather than in the results pane, and that placement is
+ * the design: the answer is read *while* looking at the query it is about, and running a statement
+ * doesn't wipe it the way it wipes a plan. The two things a console gets asked — "write me a query
+ * for X" and "why does this one not return anything" — are one input here on purpose. Which of them
+ * was meant is obvious from the sentence, so making the user pick a mode first would be asking them
+ * to classify their own question before they are allowed to type it.
+ *
+ * The engine never touches the database. The schema is read by CodeFlow's own driver on the Rust
+ * side and put on stdin, and a proposed statement lands in the editor for the user to read and run
+ * — nothing here executes anything.
+ */
+function ConsoleAiBar({
+  tab,
+  ai,
+  onInsert,
+}: {
+  tab: DbConsoleTab;
+  ai: DbConsoleAi;
+  onInsert: (text: string) => void;
+}) {
+  const t = useT();
+  const store = useDbStore.getState();
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [copied, setCopied] = useState(false);
+
+  // Opening the bar puts the caret in it — the point of the shortcut is to type the question, and
+  // a second ⌘I with it already open comes back here rather than closing what is being read.
+  useEffect(() => {
+    inputRef.current?.focus();
+    const refocus = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === tab.id) inputRef.current?.focus();
+    };
+    window.addEventListener("cf-db-ai-focus", refocus);
+    return () => window.removeEventListener("cf-db-ai-focus", refocus);
+  }, [tab.id]);
+
+  const copy = (text: string) => {
+    void navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1200);
+  };
+
+  const answer = ai.answer;
+
+  return (
+    <div className="shrink-0 border-b border-[var(--cf-border)] bg-[var(--cf-surface-raised)]">
+      <div className="flex items-start gap-1.5 px-2 py-1.5">
+        <Sparkles size={13} className="mt-[5px] shrink-0 text-[var(--cf-accent)]" />
+        <textarea
+          ref={inputRef}
+          rows={1}
+          value={ai.question}
+          placeholder={t("db.aiPlaceholder")}
+          onChange={(e) => store.setConsoleAiQuestion(tab.id, e.target.value)}
+          onKeyDown={(e) => {
+            // Enter asks, ⇧Enter is a newline. A question long enough to need two lines is rare,
+            // but "why doesn't this work" pasted with a query is exactly that case.
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void store.askConsoleAi(tab.id);
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              store.toggleConsoleAi(tab.id);
+            }
+          }}
+          className="min-h-[24px] flex-1 resize-none bg-transparent py-[3px] text-[12.5px] leading-[18px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)]"
+        />
+        {ai.running ? (
+          <button
+            onClick={() => void store.cancelConsoleAi(tab.id)}
+            className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--cf-danger)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-danger)] hover:bg-[var(--cf-danger)]/10"
+          >
+            <Square size={10} />
+            {t("db.cancel")}
+          </button>
+        ) : (
+          <button
+            onClick={() => void store.askConsoleAi(tab.id)}
+            disabled={!ai.question.trim()}
+            className="flex shrink-0 items-center gap-1 rounded-md bg-[var(--cf-accent)] px-2 py-[3px] text-[11.5px] font-medium text-white hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            <CornerDownLeft size={10} />
+            {t("db.aiAsk")}
+          </button>
+        )}
+        <ToolbarButton onClick={() => store.toggleConsoleAi(tab.id)} title={t("common.close")}>
+          <X size={13} />
+        </ToolbarButton>
+      </div>
+
+      {ai.running && (
+        <div className="flex items-center gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
+          {/* The orb and not a spinner: this is an engine burning context, which is the one thing
+              the orb says and a rotating ring does not. Same mark the agent console uses. */}
+          <ThinkingOrb size="sm" />
+          {t("db.aiThinking")}
+          <RunEngineChip runId={ai.runId ?? undefined} />
+        </div>
+      )}
+
+      {ai.error && !ai.running && (
+        <div className="flex items-start gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5 text-[11.5px] text-[var(--cf-danger)]">
+          <AlertTriangle size={12} className="mt-[2px] shrink-0" />
+          <span className="min-w-0 break-words">{ai.error}</span>
+        </div>
+      )}
+
+      {answer && !ai.running && (
+        <div className="border-t border-[var(--cf-border)]">
+          {/* Capped and scrollable: the editor underneath is the point of the screen, and a long
+              answer must not push it out of view. */}
+          <div
+            className="cf-markdown-preview max-h-[260px] overflow-auto px-2.5 py-2 text-[12px] leading-relaxed"
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(answer.answer) }}
+          />
+          <div className="flex flex-wrap items-center gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5">
+            {answer.query && (
+              <>
+                <button
+                  onClick={() => onInsert(answer.query as string)}
+                  className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                >
+                  <CornerDownLeft size={10} />
+                  {t("db.aiInsert")}
+                </button>
+                <button
+                  onClick={() =>
+                    store.updateConsole(tab.id, { body: answer.query as string, dirty: true })
+                  }
+                  className="rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                >
+                  {t("db.aiReplace")}
+                </button>
+                <button
+                  onClick={() => copy(answer.query as string)}
+                  className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2 py-[3px] text-[11.5px] font-medium text-[var(--cf-text)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]"
+                >
+                  {copied ? <Check size={10} /> : <Copy size={10} />}
+                  {t("db.copy")}
+                </button>
+              </>
+            )}
+            {/* What the answer was based on. A model that names a table you don't have is nearly
+                always a model that was shown a different scope than the one you meant, so the
+                count and the truncation warning belong next to the answer, not in a log. */}
+            <span className="ml-auto flex items-center gap-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+              {answer.schema_truncated && (
+                <span className="text-[var(--cf-warning)]">{t("db.aiSchemaTruncated")}</span>
+              )}
+              {t("db.aiTablesSeen", { count: answer.tables_seen })}
+              <RunEngineChip runId={ai.runId ?? undefined} />
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Results
 // ---------------------------------------------------------------------------
 
@@ -416,18 +655,25 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
    *  for an unknown engine, for a console whose connection was deleted while its rows were up. */
   const kind: DbKind =
     useDbStore((s) => s.connections.find((c) => c.id === tab.connectionId)?.kind) ?? "postgres";
+  /** What this engine calls the things it just returned — "50 filas" under a page of documents was
+   *  the console describing a Mongo result in SQL's noun. */
+  const counts = recordModel(kind).counts;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const [jsonView, setJsonView] = useState(false);
+  /** Which of the three document views is up. Mirrors the data tab's switcher exactly, on purpose:
+   *  a document looked at from a `find()` and the same document looked at by opening the collection
+   *  should not be two different screens. */
+  const [docView, setDocView] = useState<"documents" | "json" | "grid">("documents");
   /** The same gutter selection the data grid has, for the same two reasons: export a few rows, and
    * read a wide one down the page. Read-only here — a console result has no row to delete. */
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const anchor = useRef<number | null>(null);
 
-  // A Mongo result carries real documents; the JSON view is the useful one for those, so it opens
-  // there rather than on a grid of flattened keys.
+  // Back to the list on every new result. A `find()` is read as documents — the grid's flattening
+  // invents a schema an arbitrary query has even less claim to than a collection does — and a view
+  // chosen for the last statement should not silently apply to the next one, which may not even be
+  // the same shape.
   useEffect(() => {
-    const active = tab.result?.results[tab.activeResult];
-    setJsonView((active?.documents.length ?? 0) > 0);
+    setDocView("documents");
   }, [tab.result, tab.activeResult]);
 
   // New rows, new indexes — a selection made against the previous result means nothing here.
@@ -585,11 +831,11 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
         <span className="tabular-nums">{formatDuration(active.duration_ms)}</span>
         {active.rows_affected !== null ? (
           <span className="tabular-nums">
-            {t("db.rowsAffected", { n: formatCount(active.rows_affected) })}
+            {t(counts.affected, { n: formatCount(active.rows_affected) })}
           </span>
         ) : (
           <span className="tabular-nums">
-            {t("db.rowsN", { n: formatCount(active.rows.length) })}
+            {t(counts.n, { n: formatCount(active.rows.length) })}
           </span>
         )}
         {active.truncated && (
@@ -603,18 +849,34 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
         )}
         {chosen.length > 0 && (
           <span className="rounded bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)] px-1.5 py-[1px] text-[10.5px] font-medium text-[var(--cf-text)]">
-            {t("db.rowsSelectedN", { n: String(chosen.length) })}
+            {t(counts.selected, { n: String(chosen.length) })}
           </span>
         )}
         <div className="ml-auto flex items-center gap-1">
           {active.documents.length > 0 && (
-            <ToolbarButton
-              onClick={() => setJsonView((current) => !current)}
-              active={jsonView}
-              title={jsonView ? t("db.showGrid") : t("db.showJson")}
-            >
-              <Braces size={12} />
-            </ToolbarButton>
+            <>
+              <ToolbarButton
+                onClick={() => setDocView("documents")}
+                active={docView === "documents"}
+                title={t("db.documentList")}
+              >
+                <List size={12} />
+              </ToolbarButton>
+              <ToolbarButton
+                onClick={() => setDocView("json")}
+                active={docView === "json"}
+                title={t("db.showJson")}
+              >
+                <Braces size={12} />
+              </ToolbarButton>
+              <ToolbarButton
+                onClick={() => setDocView("grid")}
+                active={docView === "grid"}
+                title={t("db.showGrid")}
+              >
+                <Table2 size={12} />
+              </ToolbarButton>
+            </>
           )}
           <ToolbarButton
             onClick={openRecords}
@@ -650,10 +912,12 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
             {active.statement}
           </pre>
         </div>
-      ) : jsonView && active.documents.length > 0 ? (
-        <pre className="min-h-0 flex-1 overflow-auto whitespace-pre p-2 font-mono text-[11.5px] text-[var(--cf-text)]">
-          {active.documents.join("\n")}
-        </pre>
+      ) : active.documents.length > 0 && docView !== "grid" ? (
+        docView === "documents" ? (
+          <DocumentList documents={active.documents} />
+        ) : (
+          <DocumentsView id={tab.id} documents={active.documents} />
+        )
       ) : (
         <div className="min-h-0 flex-1">
           <ResultGrid

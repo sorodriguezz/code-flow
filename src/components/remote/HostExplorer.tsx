@@ -451,12 +451,11 @@ function HostRow({
 
   const spec = useMemo(() => parseHostSpec(host), [host]);
   const renaming = renamingHostId === host.id;
-  // What this host can be asked to do, by kind. An FTP host has files and nothing else, and a
-  // jailed SFTP account has no shell — so the menu doesn't offer either. The backend refuses the
-  // same three independently (`RemoteHostSpec::require_shell` and friends); this is what keeps the
-  // user from ever meeting that refusal.
+  // What this host can be asked to do, by kind. An FTP host has files and nothing else, a jailed
+  // SFTP account has no shell, and a screen host has neither — so the row doesn't offer any of
+  // them. The backend refuses each independently (`RemoteHostSpec::require_shell` and friends);
+  // this is what keeps the user from ever meeting that refusal.
   const can = capabilities(spec);
-  const hasScreen = can.screen && spec.screen.protocol !== "none";
   const incomplete = !hasAddress(spec);
 
   /**
@@ -529,7 +528,16 @@ function HostRow({
           items: hostMenu(host, { onRename: () => setRenamingHost(host.id) }),
         });
       }}
-      style={riseDelay(at)}
+      style={{
+        ...riseDelay(at),
+        // The host's own colour, always drawn — this is the one the picker sets, and until now it
+        // only reached the state dot (which is grey unless something is *running*) and the active
+        // tab. A colour that appears once you have already connected cannot answer the question it
+        // exists for, which is "is this production?" asked *before* connecting. An inset edge
+        // rather than a fill, the same mark the terminal bench uses for its focused pane: it reads
+        // at a glance and does not fight the selected-row background for the same pixels.
+        boxShadow: host.color?.trim() ? `inset 2px 0 0 ${host.color}` : undefined,
+      }}
       className={`cf-rise group flex w-full cursor-default items-center gap-1.5 rounded-md py-[3px] pl-5 pr-1 text-left outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         beingDragged ? "opacity-40" : ""
       } ${
@@ -586,11 +594,13 @@ function HostRow({
                 onClick={() => act(() => void openSession(host.id))}
               />
             )}
-            <RowAction
-              icon={FolderOpen}
-              label={t("remote.files")}
-              onClick={() => act(() => openSftp(host.id))}
-            />
+            {can.files && (
+              <RowAction
+                icon={FolderOpen}
+                label={t("remote.files")}
+                onClick={() => act(() => openSftp(host.id))}
+              />
+            )}
             {can.forwards && (
               <RowAction
                 icon={Waypoints}
@@ -598,7 +608,7 @@ function HostRow({
                 onClick={() => act(() => openForwards(host.id))}
               />
             )}
-            {hasScreen && (
+            {can.screen && (
               <RowAction
                 icon={Monitor}
                 label={t("remote.openScreen")}

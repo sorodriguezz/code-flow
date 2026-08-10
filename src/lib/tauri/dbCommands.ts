@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  DbAiAnswer,
+  DbRunOutcome,
   DbConnectionConfig,
   DbConnectionRow,
   DbConsole,
@@ -208,3 +210,33 @@ export const dbSchemaObjects = (connectionId: string, node: DbNodeRef, runId: st
   invoke<DbObjectInfo[]>("db_schema_objects", { connectionId, node, runId });
 
 export const dbCancel = (runId: string) => invoke<void>("db_cancel", { runId });
+
+/**
+ * Asks the console's AI assistant about the connected database.
+ *
+ * The schema is *not* sent from here: the backend reads it with the same driver the explorer uses,
+ * scoped to the database and schema given. What travels from the webview is only what the webview
+ * knows — the question, what is in the editor, and how the last run went — because everything else
+ * would be a schema this side had to fetch and keep fresh for no reason.
+ *
+ * `runId` belongs to the AI run registry (`cancelAiRun`), not `dbCancel` — no statement is executed
+ * here, so there is nothing on the database to stop.
+ */
+export const dbAiAssist = (
+  connectionId: string,
+  database: string | null,
+  schema: string | null,
+  question: string,
+  editorSql: string,
+  lastResults: DbRunOutcome[],
+  runId: string,
+) =>
+  invoke<DbAiAnswer>("db_ai_assist", {
+    connectionId,
+    database,
+    schema,
+    question,
+    editorSql,
+    lastResults,
+    runId,
+  });

@@ -330,10 +330,15 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
 
         <div className="flex shrink-0 items-center gap-1">
           {/* Keys-only is the default for a reason: at the zoom where a schema fits on screen, a
-              hundred `varchar` rows are noise and the keys are the whole message. */}
+              hundred `varchar` rows are noise and the keys are the whole message.
+
+              Lit means the filter is *on* — keys only. It used to light up on `all`, which read as
+              "the key icon is active, so I am looking at keys" while the card showed every column:
+              the button said the opposite of what the canvas did. The title still describes the
+              click, not the state, which is the other half of getting a toggle right. */}
           <ToolbarButton
             onClick={() => setMode((current) => (current === "keys" ? "all" : "keys"))}
-            active={mode === "all"}
+            active={mode === "keys"}
             title={mode === "keys" ? t("db.diagram.showAllColumns") : t("db.diagram.showKeysOnly")}
           >
             <KeyRound size={12} />

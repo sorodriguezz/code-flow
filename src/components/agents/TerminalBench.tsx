@@ -218,12 +218,15 @@ function BenchTabButton({
  * shell's cursor state, alternate screen and colour attributes on top of a process that never set
  * them.
  *
- * **Closing is not stopping.** The × puts the panel away and does nothing else — see `benchStore`.
+ * **Closing is not stopping — and it is not unmounting either.** The × puts the panel away and does
+ * nothing else: the shells keep running (see `benchStore`), and the panel itself is hidden with a
+ * class by `AgentsView` rather than torn down, so what comes back is the terminal that was left
+ * rather than a new one replaying its transcript.
  */
 export function TerminalBench() {
   const t = useT();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const project = useWorkspaceStore((s) => s.activeProject());
+  const open = useBenchStore((s) => s.open);
   const tabs = useBenchStore((s) => s.tabs);
   const terminals = useBenchStore((s) => s.terminals);
   const layouts = useBenchStore((s) => s.layouts);
@@ -234,21 +237,49 @@ export function TerminalBench() {
 
   /** The right-clicked tab and where its menu goes, or `null`. */
   const [menu, setMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
+  // The menu portals to `document.body`, and this panel is now hidden rather than unmounted — left
+  // open, it would float over the task the closed bench just handed the column back to.
+  useEffect(() => {
+    if (!open) setMenu(null);
+  }, [open]);
+
+  /**
+   * Whether a read has landed since this panel first appeared.
+   *
+   * A pane replays its terminal's transcript **once, at mount**, and is keyed by session — so a pane
+   * mounted against the copy the store was still holding from an earlier read never gets the real
+   * one: the refresh arrives, the key has not changed, and the xterm is left blank in front of a
+   * shell that has been printing all along. `show` raises `open` before the read it is waiting on,
+   * which is exactly that moment, so the first set of panes waits for it.
+   *
+   * Latched, and deliberately not a live `loading` check. Every later read — a terminal picked from
+   * the tree, a workspace switch — happens with panes already on screen, and those must be left
+   * alone: tearing down a live xterm to put an identical one back is the very thing this panel now
+   * stays mounted to avoid.
+   */
+  const [ready, setReady] = useState(!loading);
+  useEffect(() => {
+    if (!loading) setReady(true);
+  }, [loading]);
   /** Which tab is being renamed in place — in the store, because the list in the left panel starts
    *  it too. See `benchStore.renamingTabId`. */
   const renaming = useBenchStore((s) => s.renamingTabId);
   const setRenaming = useBenchStore((s) => s.startRenameTab);
 
   /**
-   * Where a new shell starts.
+   * Where a new shell starts: **home**, always.
    *
-   * The selected repository when there is one, because that is overwhelmingly where the CLI you are
-   * about to run belongs — and the shell's own default when there isn't, which is a real state
-   * here: the agent console works in a workspace with no repository open, and a bench that refused
-   * to open a shell until you picked one would be refusing on behalf of `claude`, `gh` and `psql`,
-   * none of which need a working copy.
+   * It used to be the selected repository, on the reasoning that a CLI you are about to run belongs
+   * there. That reasoning was about the repository dock — this bench belongs to the *workspace*,
+   * and a workspace is a set of repositories, not one. So the shell opened inside whichever of them
+   * happened to be selected in another panel, and the first thing to do in it was work out where
+   * you were and `cd ..` back out. A terminal that starts somewhere you did not choose is worse
+   * than one that starts where every other terminal on the machine starts.
+   *
+   * Empty rather than a path read here, because the backend is where "no directory" is turned into
+   * the user's home (`terminal::start_dir`) — the webview has no business knowing what home is.
    */
-  const cwd = project?.local_path ?? "";
+  const cwd = "";
 
   const byId = new Map(terminals.map((terminal) => [terminal.id, terminal]));
 
@@ -275,7 +306,7 @@ export function TerminalBench() {
     terminals.some((terminal) => terminal.tab_id === tabId && terminal.session_id !== null);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+    <div data-tour="agents-bench" className="flex h-full min-h-0 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1">
         <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
         <span className="mr-1 shrink-0 truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
@@ -331,7 +362,7 @@ export function TerminalBench() {
       </div>
 
       <div className="relative min-h-0 flex-1">
-        {tabs.length === 0 ? (
+        {tabs.length === 0 || !ready ? (
           <EmptyState
             icon={TerminalSquare}
             title={loading ? t("bench.loading") : t("bench.empty")}
@@ -340,7 +371,11 @@ export function TerminalBench() {
         ) : (
           tabs.map((tab) => {
             const node = layouts[tab.id] ?? null;
-            const visible = tab.id === activeTabId;
+            // A closed bench is a hidden one, so every pane in it is off screen whichever tab is
+            // selected. It is what a pane refits on: xterm cannot measure a box that isn't being
+            // drawn, and this flipping back to `true` is what puts the terminal back at the size of
+            // the column it reappears in.
+            const visible = open && tab.id === activeTabId;
             return (
               <div key={tab.id} className={visible ? "flex h-full min-h-0" : "hidden"}>
                 {node && (

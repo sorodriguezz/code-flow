@@ -95,6 +95,20 @@ struct TerminalExitEvent {
 /// pty command. Nothing here reaches for `$SHELL` or a hardcoded path any more.
 /// `record` names the `workspace_terminals` row to record into, for a shell on the agent console's
 /// bench; `None` for the repository dock, which keeps no history.
+/// A blank `cwd` means "the user's home", not "wherever this process happens to be".
+///
+/// The distinction matters because the app's own working directory on a GUI launch is launchd's —
+/// `/` on macOS — and a shell that opens there is a shell nobody asked for. Home is what every
+/// terminal emulator on the machine does when it is not told otherwise, so it is the answer that
+/// needs no explaining. Resolved here rather than at each call site so a caller that has no
+/// directory to offer can simply say so.
+fn start_dir(cwd: &str) -> Option<String> {
+    if !cwd.trim().is_empty() {
+        return Some(cwd.to_string());
+    }
+    dirs::home_dir().map(|path| path.to_string_lossy().into_owned())
+}
+
 pub fn open_terminal(
     app: AppHandle,
     registry: &TerminalRegistry,
@@ -102,7 +116,14 @@ pub fn open_terminal(
     profile: &ShellProfile,
     record: Option<Recording>,
 ) -> Result<String, String> {
-    open_pty(app, registry, &profile.command, &profile.args, Some(&cwd), record)
+    open_pty(
+        app,
+        registry,
+        &profile.command,
+        &profile.args,
+        start_dir(&cwd).as_deref(),
+        record,
+    )
 }
 
 /// Any program, in a pty, registered as a terminal session.

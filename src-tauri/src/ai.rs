@@ -497,6 +497,9 @@ pub mod task {
     pub const WORKSPACE_DOC: &str = "workspace-doc";
     /// The retry that asks a model to repair its own malformed JSON.
     pub const REPAIR_JSON: &str = "repair-json";
+    /// The SQL/Mongo console's assistant — writing a query against the connected schema, or
+    /// explaining why one behaves the way it does.
+    pub const DB_ASSIST: &str = "db-assist";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -1893,6 +1896,180 @@ pub async fn inline_edit(
     inv.task = task::INLINE;
     let run = run(engine, binary, inv).await?;
     Ok(strip_code_fence(&run.text))
+}
+
+// ---------------------------------------------------------------------------
+// Database console assistant
+// ---------------------------------------------------------------------------
+
+/// The schema map's budget. A wide warehouse schema rendered column by column runs to hundreds of
+/// kilobytes, and the tail of it is tables the question never mentions — so the caller trims to the
+/// scope first and this is the backstop, not the plan.
+pub const MAX_DB_SCHEMA_CHARS: usize = 30_000;
+/// The console's own text, sent as context. Long enough for the pasted query the question is about
+/// plus the script around it; not a whole migration file.
+pub const MAX_DB_EDITOR_CHARS: usize = 12_000;
+
+pub const DEFAULT_DB_ASSISTANT_PROMPT: &str =
+    "Eres un ingeniero de bases de datos ayudando a alguien que está delante de una consola \
+     conectada a una base de datos real. Por stdin recibes el motor y su versión, el ámbito \
+     (base/esquema), el ESQUEMA de la base tal y como está hoy, lo que hay escrito ahora mismo en \
+     la consola, el resultado o el error de la última ejecución si lo hubo, y la pregunta del \
+     usuario.\n\n\
+     El usuario puede estar pidiendo dos cosas distintas, y tienes que distinguirlas por ti mismo:\n\
+     1. QUE ESCRIBAS UNA CONSULTA — \"necesito los usuarios con pagos sobre mil pesos\".\n\
+     2. QUE EXPLIQUES ALGO — por qué una consulta no devuelve filas, qué hace, por qué va lenta, \
+     cómo se relacionan dos tablas.\n\
+     Muchas preguntas son las dos a la vez: diagnostica y además propón la consulta corregida.\n\n\
+     Reglas de contenido:\n\
+     - Usa SOLO tablas y columnas que aparezcan en el ESQUEMA. Si algo que hace falta no está, \
+     dilo explícitamente en vez de inventarte un nombre plausible.\n\
+     - Escribe en el dialecto del motor indicado, no en SQL genérico: los tipos, las funciones de \
+     fecha, la sintaxis de límite y el entrecomillado son los suyos.\n\
+     - Cualifica las tablas con su esquema cuando el motor lo use.\n\
+     - Cuando diagnostiques, apóyate en el esquema: un JOIN que no cruza, un tipo que no compara \
+     como el usuario cree, un NULL que descarta filas, una comparación de texto sensible a \
+     mayúsculas, un id que es texto y no número. Nombra la causa concreta, no una lista de \
+     posibilidades genéricas.\n\
+     - Si la pregunta es ambigua, elige la lectura más razonable, escribe la consulta y di en una \
+     línea qué asumiste. No respondas con una pregunta de vuelta.\n\
+     - Sé breve. Un párrafo corto o unas viñetas; nadie lee un ensayo dentro de una consola.\n\n\
+     Reglas ESTRICTAS de formato:\n\
+     - Responde en Markdown y en el MISMO IDIOMA en el que te pregunten.\n\
+     - Cuando propongas una consulta ejecutable, ponla en un único bloque cercado etiquetado con \
+     el lenguaje del motor (```sql o ```javascript). Ese bloque es lo que se va a insertar en el \
+     editor del usuario: tiene que ser ejecutable tal cual, sin marcadores de posición inventados.\n\
+     - Cualquier otro fragmento que muestres (la consulta del usuario que estás citando, una \
+     salida de ejemplo, un mensaje de error) va en un bloque etiquetado ```text, NUNCA con la \
+     etiqueta del motor.\n\
+     - Si tu respuesta es solo una explicación y no propones ninguna consulta, no uses ningún \
+     bloque con la etiqueta del motor.";
+
+/// Everything the console can tell the model about where the question is being asked.
+///
+/// A struct rather than eight positional `&str`s because every one of them is a string and the
+/// compiler would not catch two of them swapped — which, with `schema` and `editor` adjacent, is a
+/// bug that answers confidently against the wrong text.
+pub struct DbAssistantContext<'a> {
+    /// `PostgreSQL 16.2`, `MongoDB 7.0` — the dialect to write in, with the version, because the
+    /// version decides whether things like `FETCH FIRST` or `$lookup` pipelines are available.
+    pub dialect: &'a str,
+    /// The console's database and schema, spelled the way that engine names them.
+    pub scope: &'a str,
+    /// The rendered schema map — see `db_cmd::render_schema`.
+    pub schema: &'a str,
+    /// What is in the editor right now. Usually the query the question is about: "por qué esta
+    /// query no trae datos" arrives with the query already on screen and not repeated in the ask.
+    pub editor: &'a str,
+    /// The last run's error or row count, when the console has one. The difference between "no
+    /// devuelve datos" meaning zero rows and meaning it never ran.
+    pub outcome: &'a str,
+    pub question: &'a str,
+}
+
+/// What came back: the prose, and the statement to drop into the editor if one was proposed.
+pub struct DbAssistantAnswer {
+    /// Markdown, rendered in the console's answer panel.
+    pub answer: String,
+    /// The fenced statement the user can insert with one click. `None` for a pure explanation,
+    /// which is a normal outcome here and not a parse failure.
+    pub query: Option<String>,
+}
+
+/// Answers a natural-language question about the connected database — writing the query, or
+/// explaining the one already on screen.
+///
+/// Text-in/text-out with no tools, deliberately: the engine never touches the database. Everything
+/// it knows about the schema was read by CodeFlow's own driver and put on stdin, and the statement
+/// it proposes lands in the editor for the user to read and run. That keeps the task routable to
+/// any provider — a local model included — and means a wrong answer costs a glance rather than a
+/// table.
+pub async fn db_assistant(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    language: &str,
+    ctx: DbAssistantContext<'_>,
+) -> Result<DbAssistantAnswer, String> {
+    if ctx.question.trim().is_empty() {
+        return Err("No hay ninguna pregunta que responder".to_string());
+    }
+
+    let schema: String = ctx.schema.chars().take(MAX_DB_SCHEMA_CHARS).collect();
+    let editor: String = ctx.editor.chars().take(MAX_DB_EDITOR_CHARS).collect();
+
+    let mut stdin_payload = format!(
+        "=== MOTOR ===\n{}\n\n\
+         === ÁMBITO ===\n{}\n\n\
+         === ESQUEMA ===\n{}\n",
+        ctx.dialect, ctx.scope, schema
+    );
+    // The optional sections are omitted rather than sent empty: a heading followed by nothing reads
+    // to a model as "there is no query and that is a fact about the situation", which is a different
+    // claim from "the console happens to be empty".
+    if !editor.trim().is_empty() {
+        stdin_payload.push_str(&format!("\n=== EN LA CONSOLA AHORA ===\n{editor}\n"));
+    }
+    if !ctx.outcome.trim().is_empty() {
+        stdin_payload.push_str(&format!("\n=== ÚLTIMA EJECUCIÓN ===\n{}\n", ctx.outcome));
+    }
+    stdin_payload.push_str(&format!("\n=== PREGUNTA ===\n{}", ctx.question));
+
+    let mut inv = AiInvocation::new(
+        "Responde la pregunta sobre esta base de datos.",
+        &stdin_payload,
+    );
+    inv.system_prompt = Some(DEFAULT_DB_ASSISTANT_PROMPT);
+    inv.model = model;
+    inv.task = task::DB_ASSIST;
+    let run = run(engine, binary, inv).await?;
+
+    let answer = run.text.trim().to_string();
+    if answer.is_empty() {
+        return Err("El modelo respondió vacío".to_string());
+    }
+    Ok(DbAssistantAnswer { query: runnable_block(&answer, language), answer })
+}
+
+/// The statement the answer proposes, out of the fenced blocks it contains.
+///
+/// The engine's own language tag is the marker — the prompt reserves it for the runnable statement
+/// and sends everything else to ```` ```text ````, so a diagnosis that quotes the user's broken
+/// query back at them does not offer the broken one for insertion. The untagged fallback is for the
+/// models that ignore that instruction and fence with bare ```` ``` ````; a block tagged as
+/// something else is never taken, because that tag is evidence it is not the answer.
+fn runnable_block(text: &str, language: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut blocks: Vec<(String, String)> = Vec::new();
+    let mut open: Option<(usize, String)> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if !is_fence(line) {
+            continue;
+        }
+        match open.take() {
+            Some((start, tag)) => blocks.push((tag, lines[start + 1..i].join("\n"))),
+            None => {
+                let tag = line.trim().trim_start_matches('`').trim().to_lowercase();
+                open = Some((i, tag));
+            }
+        }
+    }
+    // An unterminated fence runs to the end of the reply — a truncated answer still carries a
+    // usable statement, and dropping it would be the one case where the user gets nothing.
+    if let Some((start, tag)) = open {
+        blocks.push((tag, lines[start + 1..].join("\n")));
+    }
+
+    let aliases: &[&str] = match language {
+        "javascript" => &["javascript", "js", "mongodb", "mongo", "node"],
+        _ => &["sql", "postgresql", "postgres", "pgsql", "tsql", "mssql", "plsql", "mysql"],
+    };
+    blocks
+        .iter()
+        .find(|(tag, _)| aliases.contains(&tag.as_str()))
+        .or_else(|| blocks.iter().find(|(tag, _)| tag.is_empty()))
+        .map(|(_, body)| body.trim().to_string())
+        .filter(|body| !body.is_empty())
 }
 
 /// Tags a model can wrap its chain of thought in. `think` covers the DeepSeek-R1 family (and
@@ -3517,6 +3694,63 @@ pub async fn apply_finding_fix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the tagging rule: a diagnosis quotes the user's broken query back at
+    /// them, and the block offered for insertion has to be the *fix*, not the quote.
+    #[test]
+    fn takes_the_engine_tagged_block_and_not_the_quoted_one() {
+        let answer = "Tu consulta compara un texto con un número:\n\n\
+                      ```text\nSELECT * FROM pagos WHERE id = 32342\n```\n\n\
+                      Corregida:\n\n\
+                      ```sql\nSELECT * FROM pagos WHERE id = '32342'\n```\n";
+        assert_eq!(
+            runnable_block(answer, "sql").as_deref(),
+            Some("SELECT * FROM pagos WHERE id = '32342'")
+        );
+    }
+
+    /// A pure explanation proposes nothing. `None` here is the answer, not a parse failure — the
+    /// UI hides its "insert" button rather than reporting that something went wrong.
+    #[test]
+    fn finds_no_statement_in_an_explanation() {
+        let answer = "No devuelve filas porque `estado` es NULL en todas ellas, y \
+                      `estado <> 'baja'` descarta los NULL.\n\n```text\nestado IS NULL\n```";
+        assert_eq!(runnable_block(answer, "sql"), None);
+    }
+
+    /// Models that ignore the tagging instruction still fence their answer. A bare block is taken;
+    /// one tagged as something else never is.
+    #[test]
+    fn falls_back_to_an_untagged_block() {
+        assert_eq!(
+            runnable_block("Prueba:\n\n```\nSELECT 1\n```", "sql").as_deref(),
+            Some("SELECT 1")
+        );
+        assert_eq!(runnable_block("```json\n{\"a\": 1}\n```", "sql"), None);
+    }
+
+    /// Mongo consoles run JavaScript, so the tag that means "runnable" is a different one — and
+    /// `sql` in a Mongo answer is prose about another engine, not something to insert.
+    #[test]
+    fn reads_javascript_for_a_mongo_console() {
+        let answer = "```javascript\ndb.pagos.find({ monto: { $gt: 1000 } })\n```";
+        assert_eq!(
+            runnable_block(answer, "javascript").as_deref(),
+            Some("db.pagos.find({ monto: { $gt: 1000 } })")
+        );
+        assert_eq!(runnable_block("```sql\nSELECT 1\n```", "javascript"), None);
+    }
+
+    /// A reply cut off mid-block still carries a usable statement; dropping it is the one case
+    /// where the user is left with nothing at all.
+    #[test]
+    fn keeps_the_statement_of_a_truncated_answer() {
+        assert_eq!(
+            runnable_block("Aquí tienes:\n\n```sql\nSELECT count(*)\nFROM usuarios", "sql")
+                .as_deref(),
+            Some("SELECT count(*)\nFROM usuarios")
+        );
+    }
 
     #[test]
     fn strips_colour_codes_from_a_cli_error() {

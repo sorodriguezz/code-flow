@@ -174,6 +174,14 @@ export interface MenuItem {
   danger?: boolean;
   /** Draws a hairline above this item. */
   separated?: boolean;
+  /**
+   * Shown, greyed, and inert.
+   *
+   * For an action that exists but cannot be taken *right now* — a connect whose round trip is still
+   * in flight. Removing the entry instead would make the menu change length under the pointer, and
+   * leaving it live would let a second click start a second session.
+   */
+  disabled?: boolean;
 }
 
 /** A floating menu at a point, portalled so no scroll container can clip it. Positioned after
@@ -248,15 +256,22 @@ export function ContextMenu({
           {item.separated && i > 0 && <div className="my-1 h-px bg-[var(--cf-border)]" />}
           <button
             role="menuitem"
+            disabled={item.disabled}
             onClick={() => {
               onClose();
               item.onClick();
             }}
-            className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)] ${
-              item.danger ? "text-[var(--cf-danger)]" : "text-[var(--cf-text)]"
-            }`}
+            className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[12px] disabled:opacity-50 ${
+              item.disabled ? "cursor-default" : "hover:bg-[color-mix(in_oklab,var(--cf-accent)_16%,transparent)]"
+            } ${item.danger ? "text-[var(--cf-danger)]" : "text-[var(--cf-text)]"}`}
           >
-            {item.leading ?? (item.icon && <item.icon size={13} className="shrink-0 opacity-70" />)}
+            {item.leading ??
+              (item.icon && (
+                <item.icon
+                  size={13}
+                  className={`shrink-0 opacity-70 ${item.disabled ? "animate-spin" : ""}`}
+                />
+              ))}
             <span className="truncate">{item.label}</span>
           </button>
         </Fragment>

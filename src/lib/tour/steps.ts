@@ -401,6 +401,19 @@ const DB_TOUR: TourStep[] = [
     placement: "inside",
     stage: DB_STAGE,
   },
+  // Straight after the console, because it is a control *in* the console and the step before it
+  // has just said what a console is for. Anchored on the button rather than on the panel it opens:
+  // the panel only exists once it is asked for, and a tour cannot type the question.
+  {
+    id: "db.ai",
+    chapterKey: "tour.chapter.db",
+    titleKey: "tour.db.ai.title",
+    bodyKey: "tour.db.ai.body",
+    anchors: ['[data-tour="db-ai"]', '[data-tour="main-content"]'],
+    chord: "Mod+Alt+I",
+    padding: 6,
+    stage: DB_STAGE,
+  },
   {
     id: "db.grid",
     chapterKey: "tour.chapter.db",
@@ -468,6 +481,18 @@ const AGENTS_TOUR: TourStep[] = [
     anchors: ['[data-tour="main-content"]'],
     placement: "inside",
     stage: AGENTS_STAGE,
+  },
+  // Like the roster below it: a panel the app keeps closed, holding something nothing on the
+  // default screen mentions. Worth its own step because the bench is easy to mistake for the
+  // repository's terminal dock, and the difference — whose it is, and where it opens — is the
+  // entire reason it exists separately.
+  {
+    id: "agents.bench",
+    chapterKey: "tour.chapter.agents",
+    titleKey: "tour.agents.bench.title",
+    bodyKey: "tour.agents.bench.body",
+    anchors: ['[data-tour="agents-bench"]', '[data-tour="main-content"]'],
+    stage: { ...AGENTS_STAGE, agentsBench: true },
   },
   // The one step that needs a panel the app keeps closed by default, which is exactly why it is
   // worth a step: the roster is where an agent *is defined*, and nothing on the default screen
@@ -618,6 +643,18 @@ const REMOTE_TOUR: TourStep[] = [
     bodyKey: "tour.remote.files.body",
     anchors: ['[data-tour="main-content"]'],
     placement: "inside",
+    stage: REMOTE_STAGE,
+  },
+  // Anchored on the host list and not on a panel of its own, because that is the point being made:
+  // a bucket and a storage account are rows in the same list as an SSH machine, saved the same way
+  // and belonging to the same workspace. A step that pointed at a separate panel would be teaching
+  // the opposite.
+  {
+    id: "remote.cloud",
+    chapterKey: "tour.chapter.remote",
+    titleKey: "tour.remote.cloud.title",
+    bodyKey: "tour.remote.cloud.body",
+    anchors: ['[data-tour="remote-hosts"]', '[data-tour="main-content"]'],
     stage: REMOTE_STAGE,
   },
   {

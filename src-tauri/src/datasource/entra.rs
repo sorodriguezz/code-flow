@@ -57,7 +57,11 @@ pub async fn access_token(config: &DbConnectionConfig, resource: &str) -> Result
 }
 
 /// The token the Azure CLI already holds.
-async fn cli_token(tenant: &str, resource: &str) -> Result<String, String> {
+///
+/// `pub(crate)` because Azure SQL is no longer the only caller: an Azure Storage host whose tenant
+/// has disabled account keys borrows the same `az login` session, for the same reason and with the
+/// same failure messages — only the `resource` differs.
+pub(crate) async fn cli_token(tenant: &str, resource: &str) -> Result<String, String> {
     let mut cmd = command(azure_cli());
     cmd.args(["account", "get-access-token", "--resource", resource, "--output", "json"]);
     if !tenant.is_empty() {

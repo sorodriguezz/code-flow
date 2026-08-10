@@ -26,7 +26,7 @@ import { EmptyState } from "../common/EmptyState";
 import { Select, type SelectItems } from "../common/Select";
 import { EngineGlyph } from "./dbChrome";
 import { EngineMenu, menuAnchor } from "./EngineMenu";
-import { UNGROUPED, parseSpec, redactUrl, useDbStore } from "../../state/dbStore";
+import { UNGROUPED, parseSpec, redactUrl, urlHasPassword, useDbStore } from "../../state/dbStore";
 import { dbHasPassword, dbSchemaCatalog } from "../../lib/tauri/dbCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -183,6 +183,9 @@ export function ConnectionModal({
   /** Whether the keychain already holds one. Decides the placeholder and whether "clear" is shown. */
   const [hasStored, setHasStored] = useState(false);
   const [passwordTouched, setPasswordTouched] = useState(false);
+  /** Whether the URL on screen already carries a password, which is what makes the separate box
+   *  redundant rather than optional — see the box's own comment below. */
+  const passwordInUrl = mode === "url" && urlHasPassword(config.url);
   const [testing, setTesting] = useState(false);
   const [outcome, setOutcome] = useState<
     { ok: true; info: DbServerInfo } | { ok: false; error: string } | null
@@ -710,9 +713,19 @@ export function ConnectionModal({
                     </Row>
                   )}
 
-                  {/* The CLI path stores nothing, so there is no password box to show — the whole
-                      point is that the credential stays with `az`. */}
-                  {config.auth_method !== "entra_cli" && (
+                  {/* Two ways this box is absent, and they are different absences.
+                      The CLI path stores nothing — the whole point is that the credential stays
+                      with `az`. And a URL that already carries `user:pass@` has answered the
+                      question: every engine here prefers the URL's own credential, so the box would
+                      be a field you fill for nothing. What is left — a URL with a user and no
+                      password — is exactly when it matters, because then it is the only path to the
+                      keychain. */}
+                  {passwordInUrl && (
+                    <p className="text-[11px] leading-relaxed text-[var(--cf-text-muted)]">
+                      {t("db.passwordFromUrl")}
+                    </p>
+                  )}
+                  {config.auth_method !== "entra_cli" && !passwordInUrl && (
                   <Row
                     label={
                       config.auth_method === "entra_service_principal"

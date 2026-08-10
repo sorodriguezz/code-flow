@@ -3,6 +3,7 @@ import { AlertTriangle, Search, Trash2, X } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { History } from "lucide-react";
 import { ToolbarButton, formatCount, formatDuration } from "./dbChrome";
+import { recordModel } from "../../lib/db/engineModel";
 import { useDbStore } from "../../state/dbStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -119,7 +120,17 @@ export function DbHistoryList() {
                     </span>
                     {!entry.error && (
                       <span className="shrink-0 tabular-nums">
-                        · {t("db.rowsN", { n: formatCount(entry.row_count) })}
+                        ·{" "}
+                        {t(
+                          // The engine the statement ran on, not the workspace's default: a history
+                          // list mixing a Postgres and a Mongo connection would otherwise call both
+                          // of them rows.
+                          recordModel(
+                            connections.find((c) => c.id === entry.connection_id)?.kind ??
+                              "postgres",
+                          ).counts.n,
+                          { n: formatCount(entry.row_count) },
+                        )}
                       </span>
                     )}
                   </span>

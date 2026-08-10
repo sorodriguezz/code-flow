@@ -625,3 +625,337 @@ pub fn db_cancel(registry: State<DbRegistry>, run_id: String) -> Result<(), Stri
     registry.cancel(&run_id);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Console assistant
+// ---------------------------------------------------------------------------
+
+/// What the console's AI assistant answered.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DbAiAnswer {
+    /// The reply, in Markdown.
+    pub answer: String,
+    /// The statement it proposed, if it proposed one — what the "insert" button writes into the
+    /// editor. Absent for a pure explanation.
+    pub query: Option<String>,
+    /// How many relations of the scope were described to the model. Shown next to the answer,
+    /// because "it only saw 60 of your 300 tables" is the first thing to check when the answer
+    /// names something that isn't there.
+    pub tables_seen: usize,
+    /// Whether the schema map was cut to fit the prompt's budget.
+    pub schema_truncated: bool,
+}
+
+/// A relation's kind, spelled for a reader rather than as an enum variant.
+fn relation_word(kind: &DbNodeKind) -> &'static str {
+    match kind {
+        DbNodeKind::View => "vista",
+        DbNodeKind::Collection => "colección",
+        _ => "tabla",
+    }
+}
+
+/// Renders a schema diagram as the text the model reads.
+///
+/// Deliberately not JSON. This is the bulk of the prompt, and the same facts cost roughly half as
+/// many tokens laid out as aligned columns — which on a wide schema is the difference between the
+/// whole thing fitting and being cut off at table forty. It also reads the way a `\d` dump does,
+/// which is the shape these models have seen most.
+///
+/// Row estimates are included because they change the answer: which side of a join to drive from,
+/// and whether a sequential scan matters, are questions about size.
+fn render_schema(diagram: &DbSchemaDiagram) -> String {
+    let mut out = String::new();
+    for table in &diagram.tables {
+        let qualified = match &table.schema {
+            Some(schema) => format!("{schema}.{}", table.name),
+            None => table.name.clone(),
+        };
+        out.push_str(&format!("{} {}", relation_word(&table.kind).to_uppercase(), qualified));
+        if let Some(rows) = table.row_estimate {
+            out.push_str(&format!(" (~{rows} filas)"));
+        }
+        out.push('\n');
+        for column in &table.columns {
+            // Padded rather than tab-separated: a tab is one token wherever it lands, but the
+            // alignment is what makes a forty-column table skimmable for the model too.
+            let mut marks = Vec::new();
+            if column.primary_key {
+                marks.push("PK");
+            }
+            if column.foreign_key {
+                marks.push("FK");
+            }
+            if !column.nullable {
+                marks.push("NOT NULL");
+            }
+            out.push_str(&format!(
+                "  {:<28} {:<20} {}\n",
+                column.name,
+                column.data_type,
+                marks.join(" ")
+            ));
+        }
+    }
+
+    if !diagram.edges.is_empty() {
+        out.push_str("\nRELACIONES\n");
+        for edge in &diagram.edges {
+            let side = |schema: &Option<String>, table: &str, column: &str| match schema {
+                Some(s) => format!("{s}.{table}.{column}"),
+                None => format!("{table}.{column}"),
+            };
+            out.push_str(&format!(
+                "  {} -> {}{}\n",
+                side(&edge.from_schema, &edge.from_table, &edge.from_column),
+                side(&edge.to_schema, &edge.to_table, &edge.to_column),
+                // An inferred edge is a guess from a column name — Mongo has no other kind. Saying
+                // so is what stops the model presenting a join it invented as a declared constraint.
+                if edge.inferred { "  (inferida por el nombre, no declarada)" } else { "" }
+            ));
+        }
+    }
+
+    for note in &diagram.notes {
+        out.push_str(&format!("\nNOTA: {note}\n"));
+    }
+    out
+}
+
+/// How one statement of the console's last run went.
+///
+/// A trimmed [`DbStatementResult`] built on the frontend, and trimmed for two reasons. The rows are
+/// the user's data and the model has no use for them — what diagnoses a query is the *shape* of
+/// what came back, not its contents. And a five-thousand-row grid would otherwise be serialised
+/// back across the IPC boundary on every question asked about it.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DbRunOutcome {
+    pub error: Option<String>,
+    pub rows: usize,
+    pub rows_affected: Option<i64>,
+    pub duration_ms: u64,
+}
+
+/// Summarises the console's last run for the prompt.
+///
+/// "No me trae datos" is two different situations — zero rows, or a statement that never ran — and
+/// the console already knows which. Sending it turns a guess into a diagnosis.
+fn render_outcome(results: &[DbRunOutcome]) -> String {
+    results
+        .iter()
+        .map(|result| match &result.error {
+            Some(error) => format!("ERROR: {error}"),
+            None => match result.rows_affected {
+                Some(affected) => format!("OK — {affected} filas afectadas"),
+                None => {
+                    format!("OK — {} filas devueltas en {} ms", result.rows, result.duration_ms)
+                }
+            },
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Answers a natural-language question about the connected database.
+///
+/// The schema is read *here*, by CodeFlow's own driver, and handed to the model as text — the
+/// engine is never given the connection. That is the whole security shape of this feature: a
+/// credential in the keychain never reaches a subprocess, the model cannot run anything, and the
+/// statement it proposes is inserted into the editor for the user to read and run themselves.
+///
+/// The scope is the console's own database and schema rather than the whole server. A model given
+/// three hundred tables answers worse than one given the thirty the question is about, and the
+/// pickers in the console toolbar are already how the user says which those are.
+#[tauri::command]
+pub async fn db_ai_assist(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    database: Option<String>,
+    schema: Option<String>,
+    question: String,
+    editor_sql: String,
+    last_results: Vec<DbRunOutcome>,
+    run_id: Option<String>,
+) -> Result<DbAiAnswer, String> {
+    let config = resolve_config(&db, &connection_id)?;
+    let ai_config = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        super::claude_cmd::load_ai_config(&conn, super::claude_cmd::AiTask::DbQuery)?
+    };
+
+    // The node the schema is read for: the schema when one is picked, the database otherwise. Mongo
+    // has no schemas and resolves either to its own database, so both paths are valid there.
+    let node = DbNodeRef {
+        kind: if schema.is_some() { DbNodeKind::Schema } else { DbNodeKind::Database },
+        database: database.clone(),
+        schema: schema.clone(),
+        name: schema.clone().or_else(|| database.clone()),
+    };
+
+    let outcome = render_outcome(&last_results);
+    let language = if config.kind.sql() { "sql" } else { "javascript" };
+
+    // The catalog read is inside the run's scope, not before it. On a wide schema it is the slow
+    // part of this whole call, and a stop pressed while it is going has to be observed — otherwise
+    // the button does nothing for several seconds and then a subprocess starts anyway. See
+    // `ai_runs::scoped`, which arms the cancel before awaiting rather than at spawn time.
+    crate::ai_runs::scoped(app, run_id, async {
+        // `read` and not `session`: a console left open overnight is holding a connection the
+        // server has since dropped, and this retries once against a fresh one instead of failing
+        // the first question of the morning.
+        let (diagram, info) = registry
+            .read(&config, node.database.as_deref(), |session| {
+                let node = node.clone();
+                async move { Ok((session.schema_diagram(&node).await?, session.info())) }
+            })
+            .await?;
+
+        let rendered = render_schema(&diagram);
+        let schema_truncated = rendered.chars().count() > crate::ai::MAX_DB_SCHEMA_CHARS;
+
+        let dialect = format!("{} {}", config.kind.label(), info.version);
+        // Taken from the diagram and not from the request, because they can differ: a Postgres
+        // console with no schema picked is read as `public`, and telling the model "base «x»" while
+        // showing it one schema's tables is how it ends up writing unqualified names for a scope it
+        // was never told about — or assuming the thirty tables it saw are the whole database.
+        let scope = match (
+            diagram.database.as_deref().unwrap_or(&info.database),
+            diagram.schema.as_deref(),
+        ) {
+            (db, Some(s)) => format!("base «{db}», esquema «{s}» (solo se te muestra este esquema)"),
+            (db, None) => format!("base «{db}»"),
+        };
+
+        let answer = crate::ai::db_assistant(
+            &*ai_config.engine,
+            &ai_config.binary,
+            &ai_config.model,
+            language,
+            crate::ai::DbAssistantContext {
+                dialect: &dialect,
+                scope: &scope,
+                schema: &rendered,
+                editor: &editor_sql,
+                outcome: &outcome,
+                question: &question,
+            },
+        )
+        .await?;
+
+        Ok(DbAiAnswer {
+            answer: answer.answer,
+            query: answer.query,
+            tables_seen: diagram.tables.len(),
+            schema_truncated,
+        })
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datasource::{DbDiagramColumn, DbDiagramEdge, DbDiagramTable};
+
+    fn column(name: &str, ty: &str, pk: bool, fk: bool, nullable: bool) -> DbDiagramColumn {
+        DbDiagramColumn {
+            name: name.into(),
+            data_type: ty.into(),
+            nullable,
+            primary_key: pk,
+            foreign_key: fk,
+        }
+    }
+
+    fn diagram() -> DbSchemaDiagram {
+        DbSchemaDiagram {
+            database: Some("tienda".into()),
+            schema: Some("public".into()),
+            tables: vec![
+                DbDiagramTable {
+                    schema: Some("public".into()),
+                    name: "usuarios".into(),
+                    kind: DbNodeKind::Table,
+                    columns: vec![
+                        column("id", "integer", true, false, false),
+                        column("email", "text", false, false, false),
+                    ],
+                    row_estimate: Some(12_400),
+                },
+                DbDiagramTable {
+                    schema: Some("public".into()),
+                    name: "pagos".into(),
+                    kind: DbNodeKind::Table,
+                    columns: vec![column("usuario_id", "integer", false, true, false)],
+                    row_estimate: None,
+                },
+            ],
+            edges: vec![DbDiagramEdge {
+                constraint: "fk_pagos_usuario".into(),
+                from_schema: Some("public".into()),
+                from_table: "pagos".into(),
+                from_column: "usuario_id".into(),
+                to_schema: Some("public".into()),
+                to_table: "usuarios".into(),
+                to_column: "id".into(),
+                inferred: false,
+            }],
+            notes: vec!["Muestra de 100 documentos por colección.".into()],
+        }
+    }
+
+    /// The schema map is most of the prompt, so what it does and does not say is the feature. Keys
+    /// and nullability decide whether a proposed join is right; the row estimate decides which side
+    /// to drive it from; the note is the caveat that stops the model over-claiming.
+    #[test]
+    fn renders_a_schema_the_way_the_model_reads_it() {
+        let text = render_schema(&diagram());
+        assert!(text.contains("TABLA public.usuarios (~12400 filas)"), "{text}");
+        assert!(text.contains("id") && text.contains("PK NOT NULL"), "{text}");
+        // No estimate is left unsaid rather than reported as zero, which would read as an empty
+        // table and is the sort of thing a model plans a full scan around.
+        assert!(text.contains("TABLA public.pagos\n"), "{text}");
+        assert!(
+            text.contains("public.pagos.usuario_id -> public.usuarios.id"),
+            "{text}"
+        );
+        assert!(text.contains("NOTA: Muestra de 100 documentos"), "{text}");
+    }
+
+    /// An inferred edge is a guess from a column name — the only kind Mongo can have. Presenting it
+    /// as a declared constraint is how a model asserts a relationship that does not exist.
+    #[test]
+    fn marks_an_inferred_relationship_as_a_guess() {
+        let mut d = diagram();
+        d.edges[0].inferred = true;
+        assert!(render_schema(&d).contains("(inferida por el nombre, no declarada)"));
+    }
+
+    /// The distinction the whole "por qué no me trae datos" case turns on: a statement that ran and
+    /// found nothing is not a statement that failed.
+    #[test]
+    fn tells_zero_rows_apart_from_a_failure() {
+        let ran = DbRunOutcome { error: None, rows: 0, rows_affected: None, duration_ms: 12 };
+        assert_eq!(render_outcome(&[ran]), "OK — 0 filas devueltas en 12 ms");
+
+        let failed = DbRunOutcome {
+            error: Some("relation \"usuario\" does not exist".into()),
+            rows: 0,
+            rows_affected: None,
+            duration_ms: 3,
+        };
+        assert_eq!(
+            render_outcome(&[failed]),
+            "ERROR: relation \"usuario\" does not exist"
+        );
+    }
+
+    /// A console with no result yet says nothing at all — the caller omits the whole section rather
+    /// than sending a heading a model would read as "the query returned nothing".
+    #[test]
+    fn says_nothing_about_a_console_that_never_ran() {
+        assert_eq!(render_outcome(&[]), "");
+    }
+}

@@ -1,4 +1,5 @@
 import { useAgentsStore } from "../../state/agentsStore";
+import { useBenchStore } from "../../state/benchStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
 import { useDbModalStore, type DbModal } from "../../state/dbModalStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -37,6 +38,14 @@ export interface TourStage {
    * rail opened by one step has to be closed again by every step that doesn't ask for it. */
   agentsRoster?: boolean;
   /**
+   * The agent console's terminal bench, for the step about it.
+   *
+   * `open` is written straight onto the store like every other flag here, rather than going through
+   * `show()` — that one also re-reads the workspace's terminals, and a tour has no business firing a
+   * query per step. An empty bench still shows what a bench *is*, which is what the step is for.
+   */
+  agentsBench?: boolean;
+  /**
    * The database workspace's Data sources dialog, open on the whole set.
    *
    * The only dialog any tour opens, and it earns it: connections are the one thing in that app that
@@ -74,6 +83,7 @@ export interface AppSnapshot {
   apiSettingsTab: ApiSettingsTab | undefined;
   terminalOpen: boolean;
   agentsRosterOpen: boolean;
+  agentsBenchOpen: boolean;
   dbModal: DbModal | null;
 }
 
@@ -105,6 +115,7 @@ export function captureAppState(): AppSnapshot {
     apiSettingsTab: ui.apiSettingsTab,
     terminalOpen: useTerminalStore.getState().panelOpen,
     agentsRosterOpen: useAgentsStore.getState().rosterOpen,
+    agentsBenchOpen: useBenchStore.getState().open,
     dbModal: useDbModalStore.getState().modal,
   };
 }
@@ -122,6 +133,7 @@ export function restoreAppState(snapshot: AppSnapshot): void {
   });
   useTerminalStore.setState({ panelOpen: snapshot.terminalOpen });
   useAgentsStore.setState({ rosterOpen: snapshot.agentsRosterOpen });
+  useBenchStore.setState({ open: snapshot.agentsBenchOpen });
   useDbModalStore.setState({ modal: snapshot.dbModal });
 }
 
@@ -150,6 +162,7 @@ export function applyStage(stage: TourStage | undefined): void {
   });
   useTerminalStore.setState({ panelOpen: stage?.terminal ?? false });
   useAgentsStore.setState({ rosterOpen: stage?.agentsRoster ?? false });
+  useBenchStore.setState({ open: stage?.agentsBench ?? false });
   // `kind: "connections"` is the dialog opened from the workspace rather than from one connection's
   // menu — nothing preselected, which is the state a tour wants: the list first, then the form.
   useDbModalStore.setState({ modal: stage?.dbDataSources ? { kind: "connections" } : null });

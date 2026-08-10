@@ -255,6 +255,35 @@ export interface DbExecuteResult {
   duration_ms: number;
 }
 
+/**
+ * How one statement of the console's last run went, as the AI assistant is told about it.
+ *
+ * A trimmed `DbStatementResult`: the rows are the user's data and the assistant has no use for
+ * them — what diagnoses a query is the shape of what came back — and sending them would mean
+ * serialising a five-thousand-row grid back across IPC on every question asked about it.
+ */
+export interface DbRunOutcome {
+  error: string | null;
+  rows: number;
+  rows_affected: number | null;
+  duration_ms: number;
+}
+
+/** What the console's AI assistant answered. */
+export interface DbAiAnswer {
+  /** The reply, in Markdown. */
+  answer: string;
+  /** The statement it proposed, when it proposed one — what the "insert" button writes into the
+   * editor. `null` for a pure explanation, which is a normal answer here and not a failure. */
+  query: string | null;
+  /** How many relations of the scope the model was shown. Displayed with the answer, because "it
+   * only saw 60 of your 300 tables" is the first thing to check when it names one that isn't
+   * there. */
+  tables_seen: number;
+  /** Whether the schema map was cut to fit the prompt's budget. */
+  schema_truncated: boolean;
+}
+
 export interface DbServerInfo {
   kind: DbKind;
   version: string;

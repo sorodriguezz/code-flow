@@ -4,6 +4,11 @@ import {
   FolderTree,
   Globe,
   HardDrive,
+  Cloud,
+  Database,
+  Inbox,
+  Monitor,
+  MonitorSmartphone,
   Server,
   ShieldCheck,
   Terminal,
@@ -38,6 +43,21 @@ export function kindIcon(kind: RemoteKind): LucideIcon {
       return Globe;
     case "ftps":
       return ShieldCheck;
+    case "vnc":
+      return Monitor;
+    case "rdp":
+      return MonitorSmartphone;
+    // Object storage gets the cloud; the two that are not files get glyphs that say what they are
+    // instead, because a queue drawn as a cloud beside a blob drawn as a cloud is two rows the eye
+    // cannot separate.
+    case "s3":
+    case "azure_blob":
+    case "azure_files":
+      return Cloud;
+    case "azure_queue":
+      return Inbox;
+    case "azure_table":
+      return Database;
     default:
       return Terminal;
   }
@@ -55,6 +75,20 @@ export function kindColor(kind: RemoteKind): string {
     case "ftp":
       return "#c46720";
     case "ftps":
+      return "#2d86c2";
+    // The two screen kinds share a hue and differ only in glyph: they are the same family, and a
+    // row is told apart from its neighbours by the shape long before the tint.
+    case "vnc":
+    case "rdp":
+      return "#7a63c8";
+    // Each cloud keeps its own house colour, which is the fastest way to tell an S3 row from an
+    // Azure one in a list that now has both.
+    case "s3":
+      return "#c4801f";
+    case "azure_blob":
+    case "azure_files":
+    case "azure_queue":
+    case "azure_table":
       return "#2d86c2";
     default:
       return "#8b8b96";
@@ -224,16 +258,36 @@ export function ToolbarButton({
   );
 }
 
-/** A small labelled pill — the protocol on a screen tab, the direction on a forward row. */
-export function Pill({ children, tone = "muted" }: { children: React.ReactNode; tone?: "muted" | "accent" }) {
+/**
+ * A small labelled pill — the protocol on a screen tab, the direction on a forward row.
+ *
+ * `icon` and `title` exist for the one place two *different* things were being drawn as the same
+ * pill: a host card shows its group beside its tags, and those are not the same kind of fact. The
+ * group is where the host lives — one of them, structural, the folder in the tree. A tag is the
+ * crossing axis the one-level tree deliberately doesn't have — several of them, and a filter. Two
+ * identical grey capsules said neither, so the group takes a glyph and both take a title.
+ */
+export function Pill({
+  children,
+  tone = "muted",
+  icon: Icon,
+  title,
+}: {
+  children: React.ReactNode;
+  tone?: "muted" | "accent";
+  icon?: LucideIcon;
+  title?: string;
+}) {
   return (
     <span
-      className={`shrink-0 rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide ${
+      title={title}
+      className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-px text-[10px] font-medium uppercase tracking-wide ${
         tone === "accent"
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
           : "bg-black/[0.05] text-[var(--cf-text-muted)] dark:bg-white/[0.07]"
       }`}
     >
+      {Icon && <Icon size={9} className="shrink-0 opacity-70" />}
       {children}
     </span>
   );

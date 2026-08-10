@@ -312,7 +312,7 @@ pub fn remote_list_forwards() -> Vec<ActiveForward> {
 #[tauri::command]
 pub async fn remote_open_screen(db: State<'_, Db>, id: String) -> Result<ScreenLaunch, String> {
     let (row, spec) = load(&db, &id)?;
-    let detail = format!("{:?}", spec.screen.protocol);
+    let detail = spec.kind.label().to_string();
     logged(&db, &row, "screen", &detail, remotes::screen::open(&id, &spec).await)
 }
 
@@ -320,6 +320,157 @@ pub async fn remote_open_screen(db: State<'_, Db>, id: String) -> Result<ScreenL
 #[tauri::command]
 pub fn remote_close_screen(id: String) {
     remotes::screen::close(&id);
+}
+
+// ---------------------------------------------------------------------------
+// Azure Queue storage
+// ---------------------------------------------------------------------------
+//
+// One command per verb rather than one that takes an action string, so the argument each needs is
+// in its own signature — a `delete` that requires a pop receipt and a `peek` that must not have one
+// are not the same call with a flag.
+
+#[tauri::command]
+pub async fn remote_queues(db: State<'_, Db>, id: String) -> Result<Vec<remotes::cloud::queue::QueueSummary>, String> {
+    let (_, spec) = load(&db, &id)?;
+    remotes::cloud::queue::queues(&id, &spec).await
+}
+
+/// Reads the front of a queue **without consuming anything** — see `remotes::cloud::queue`.
+#[tauri::command]
+pub async fn remote_queue_peek(
+    db: State<'_, Db>,
+    id: String,
+    queue: String,
+    count: usize,
+) -> Result<Vec<remotes::cloud::queue::QueueMessage>, String> {
+    let (_, spec) = load(&db, &id)?;
+    remotes::cloud::queue::peek(&id, &spec, &queue, count).await
+}
+
+/// The destructive read. Logged, unlike a peek, because it changes what the next reader sees.
+#[tauri::command]
+pub async fn remote_queue_receive(
+    db: State<'_, Db>,
+    id: String,
+    queue: String,
+    count: usize,
+    visibility: u32,
+) -> Result<Vec<remotes::cloud::queue::QueueMessage>, String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::queue::receive(&id, &spec, &queue, count, visibility).await;
+    logged(&db, &row, "queue-receive", &queue, result)
+}
+
+#[tauri::command]
+pub async fn remote_queue_put(
+    db: State<'_, Db>,
+    id: String,
+    queue: String,
+    text: String,
+) -> Result<(), String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::queue::put(&id, &spec, &queue, &text).await;
+    logged(&db, &row, "queue-put", &queue, result)
+}
+
+#[tauri::command]
+pub async fn remote_queue_delete_message(
+    db: State<'_, Db>,
+    id: String,
+    queue: String,
+    message_id: String,
+    pop_receipt: String,
+) -> Result<(), String> {
+    let (row, spec) = load(&db, &id)?;
+    let result =
+        remotes::cloud::queue::delete(&id, &spec, &queue, &message_id, &pop_receipt).await;
+    logged(&db, &row, "queue-delete", &queue, result)
+}
+
+#[tauri::command]
+pub async fn remote_queue_clear(db: State<'_, Db>, id: String, queue: String) -> Result<(), String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::queue::clear(&id, &spec, &queue).await;
+    logged(&db, &row, "queue-clear", &queue, result)
+}
+
+#[tauri::command]
+pub async fn remote_queue_create(db: State<'_, Db>, id: String, queue: String) -> Result<(), String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::queue::create(&id, &spec, &queue).await;
+    logged(&db, &row, "queue-create", &queue, result)
+}
+
+#[tauri::command]
+pub async fn remote_queue_remove(db: State<'_, Db>, id: String, queue: String) -> Result<(), String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::queue::remove(&id, &spec, &queue).await;
+    logged(&db, &row, "queue-remove", &queue, result)
+}
+
+// ---------------------------------------------------------------------------
+// Azure Table storage
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn remote_tables(db: State<'_, Db>, id: String) -> Result<Vec<remotes::cloud::table::TableSummary>, String> {
+    let (_, spec) = load(&db, &id)?;
+    remotes::cloud::table::tables(&id, &spec).await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn remote_table_query(
+    db: State<'_, Db>,
+    id: String,
+    table: String,
+    filter: String,
+    select: String,
+    from_partition: String,
+    from_row: String,
+) -> Result<remotes::cloud::table::TablePage, String> {
+    let (_, spec) = load(&db, &id)?;
+    remotes::cloud::table::query(&id, &spec, &table, &filter, &select, &from_partition, &from_row).await
+}
+
+#[tauri::command]
+pub async fn remote_table_upsert(
+    db: State<'_, Db>,
+    id: String,
+    table: String,
+    entity: serde_json::Value,
+) -> Result<(), String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::table::upsert(&id, &spec, &table, entity).await;
+    logged(&db, &row, "table-upsert", &table, result)
+}
+
+#[tauri::command]
+pub async fn remote_table_delete_entity(
+    db: State<'_, Db>,
+    id: String,
+    table: String,
+    partition: String,
+    row_key: String,
+) -> Result<(), String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::table::delete_entity(&id, &spec, &table, &partition, &row_key).await;
+    logged(&db, &row, "table-delete", &table, result)
+}
+
+#[tauri::command]
+pub async fn remote_table_create(db: State<'_, Db>, id: String, table: String) -> Result<(), String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::table::create(&id, &spec, &table).await;
+    logged(&db, &row, "table-create", &table, result)
+}
+
+#[tauri::command]
+pub async fn remote_table_remove(db: State<'_, Db>, id: String, table: String) -> Result<(), String> {
+    let (row, spec) = load(&db, &id)?;
+    let result = remotes::cloud::table::remove(&id, &spec, &table).await;
+    logged(&db, &row, "table-remove", &table, result)
 }
 
 /// Parses a typed or pasted `ssh` command line. `None` when it names no destination — which is the

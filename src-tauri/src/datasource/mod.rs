@@ -35,6 +35,9 @@ pub mod mongo;
 pub mod mssql;
 pub mod postgres;
 pub mod sqlgen;
+/// Expanding `mongodb+srv://` by hand when the driver's own resolver can't read the system's
+/// DNS configuration. See the module for why that happens on an ordinary Mac.
+pub mod srv;
 pub mod tunnel;
 
 use std::collections::HashMap;
@@ -83,6 +86,28 @@ impl DbKind {
             DbKind::Iris => 1972,
             DbKind::Mongodb => 27017,
         }
+    }
+
+    /// The engine's name as a person writes it. Kept in step with `DB_ENGINES[].label` on the
+    /// frontend — the two are the same string in two places because this one goes into prompts,
+    /// where "the dialect is Sqlserver" and "the dialect is SQL Server" are not equally clear.
+    pub fn label(self) -> &'static str {
+        match self {
+            DbKind::Postgres => "PostgreSQL",
+            // Named as Postgres for anything that has to *generate* SQL: a model told the dialect
+            // is "Supabase" writes against a REST API it has read a lot about, and this is a
+            // Postgres wire connection.
+            DbKind::Supabase => "PostgreSQL (Supabase)",
+            DbKind::Sqlserver => "SQL Server",
+            DbKind::Iris => "InterSystems IRIS",
+            DbKind::Mongodb => "MongoDB",
+        }
+    }
+
+    /// Whether its console speaks SQL. Mongo's speaks JavaScript, which changes what a generated
+    /// statement should even look like.
+    pub fn sql(self) -> bool {
+        !matches!(self, DbKind::Mongodb)
     }
 }
 

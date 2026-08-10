@@ -588,6 +588,8 @@ function SqlLogPanel() {
   const t = useT();
   const entries = useDbStore((s) => s.sqlLog);
   const clear = useDbStore((s) => s.clearSqlLog);
+  /** Only to name each line's count in its own engine's noun — see the `counts` lookup below. */
+  const connections = useDbStore((s) => s.connections);
   const [open, setOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -659,7 +661,17 @@ function SqlLogPanel() {
                 <span className="shrink-0 whitespace-nowrap pt-[1px] text-[10px] tabular-nums text-[var(--cf-text-muted)]">
                   {[
                     entry.durationMs === null ? null : `${entry.durationMs} ms`,
-                    entry.rows === null ? null : t("db.rowsN", { n: String(entry.rows) }),
+                    entry.rows === null
+                      ? null
+                      : // Per entry, not per workspace: this log mixes every connection the
+                        // session touched, so one line can be rows and the next documents.
+                        t(
+                          recordModel(
+                            connections.find((c) => c.id === entry.connectionId)?.kind ??
+                              "postgres",
+                          ).counts.n,
+                          { n: String(entry.rows) },
+                        ),
                   ]
                     .filter(Boolean)
                     .join(" · ")}

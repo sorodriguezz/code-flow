@@ -1988,10 +1988,45 @@ async fn client_options(config: &DbConnectionConfig) -> Result<ClientOptions, St
     } else {
         // `mongodb+srv://` is the only form Atlas gives out, and it carries the replica set, the
         // TLS requirement and the auth source in one string — parsing beats re-deriving.
-        ClientOptions::parse(config.url.trim())
-            .await
-            .map_err(|e| format!("That connection URL couldn't be parsed: {e}"))?
+        let url = config.url.trim();
+        match ClientOptions::parse(url).await {
+            Ok(options) => options,
+            // The driver's own resolver could not read this machine's DNS configuration — which on
+            // macOS is the ordinary case, not an exotic one. Expanding the `+srv` here, with the
+            // nameservers that *are* usable, is the difference between Atlas working and not; see
+            // `super::srv`. Anything else keeps the driver's message, because anything else is a
+            // real failure that a second attempt would only restate.
+            Err(error) if super::srv::is_unreadable_resolver_config(&error.to_string()) => {
+                let expanded = super::srv::expand(url).await.map_err(|reason| {
+                    format!(
+                        "That connection URL couldn't be resolved. This machine's DNS list has an \
+                         entry the driver can't read, so CodeFlow tried to look the cluster up \
+                         itself and that failed too: {reason}"
+                    )
+                })?;
+                ClientOptions::parse(&expanded)
+                    .await
+                    .map_err(|e| format!("That connection URL couldn't be parsed: {e}"))?
+            }
+            Err(error) => {
+                return Err(format!("That connection URL couldn't be parsed: {error}"))
+            }
+        }
     };
+
+    // A URL with a user and no password still needs the keychain's, exactly as the Postgres driver
+    // does it (`pg_config`). Without this the field was read, stored and then silently dropped:
+    // the URL's credential is what `parse` produced, and an empty password in it stayed empty. The
+    // guard is deliberate on both halves — a URL that *does* carry a password keeps it, and a URL
+    // with no user at all gets nothing, since a password with nobody to authenticate as is not a
+    // credential this can complete.
+    if !config.password.is_empty() {
+        if let Some(credential) = options.credential.as_mut() {
+            if credential.password.is_none() && credential.username.is_some() {
+                credential.password = Some(config.password.clone());
+            }
+        }
+    }
 
     match config.ssl {
         DbSslMode::Disable => {}

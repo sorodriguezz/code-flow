@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  Folder,
   FolderOpen,
   LayoutGrid,
   List,
@@ -265,11 +266,20 @@ export function TagFilterRow() {
 function useOpenPrimary() {
   const openSession = useRemoteStore((s) => s.openSession);
   const openSftp = useRemoteStore((s) => s.openSftp);
+  const openScreen = useRemoteStore((s) => s.openScreen);
+  const openQueues = useRemoteStore((s) => s.openQueues);
+  const openTables = useRemoteStore((s) => s.openTables);
   const openDetails = useRemoteStore((s) => s.openDetails);
 
   return (host: RemoteHostRow, spec: RemoteHostSpec) => {
     if (!hasAddress(spec)) return openDetails(host.id);
-    if (capabilities(spec).shell) void openSession(host.id);
+    const can = capabilities(spec);
+    // In capability order, which is also "the biggest thing this host is": a shell if it has one, a
+    // screen if that is what it is, files otherwise. Every kind matches exactly one of the three.
+    if (can.shell) void openSession(host.id);
+    else if (can.screen) void openScreen(host.id);
+    else if (spec.kind === "azure_queue") openQueues(host.id);
+    else if (spec.kind === "azure_table") openTables(host.id);
     else openSftp(host.id);
   };
 }
@@ -285,8 +295,9 @@ function HostActions({ host }: { host: RemoteHostRow }) {
 
   const spec = parseHostSpec(host);
   const act = (run: () => void) => (hasAddress(spec) ? run() : openDetails(host.id));
-  // Same table the tree uses, for the same reason: an FTP host has files and nothing else, so it
-  // gets one action rather than four, three of which could not work.
+  // Same table the tree uses, for the same reason: an FTP host has files and nothing else, and a
+  // screen host has only its screen — so each gets one action rather than four, three of which
+  // could not work.
   const can = capabilities(spec);
 
   return (
@@ -294,11 +305,13 @@ function HostActions({ host }: { host: RemoteHostRow }) {
       {can.shell && (
         <Action icon={Terminal} label={t("remote.openShell")} onClick={() => act(() => void openSession(host.id))} />
       )}
-      <Action icon={FolderOpen} label={t("remote.files")} onClick={() => act(() => openSftp(host.id))} />
+      {can.files && (
+        <Action icon={FolderOpen} label={t("remote.files")} onClick={() => act(() => openSftp(host.id))} />
+      )}
       {can.forwards && (
         <Action icon={Waypoints} label={t("remote.portForwards")} onClick={() => act(() => openForwards(host.id))} />
       )}
-      {can.screen && spec.screen.protocol !== "none" && (
+      {can.screen && (
         <Action icon={Monitor} label={t("remote.openScreen")} onClick={() => act(() => void openScreen(host.id))} />
       )}
       <Action icon={Settings2} label={t("remote.editHost")} onClick={() => openDetails(host.id)} />
@@ -358,7 +371,16 @@ function HostCard({ host, at, onMenu }: { host: RemoteHostRow; at: number; onMen
           openPrimary(host, spec);
         }
       }}
-      style={riseDelay(at)}
+      style={{
+        ...riseDelay(at),
+        // The host's own colour, always drawn — this is the one the picker sets, and until now it
+        // only reached the state dot (which is grey unless something is *running*) and the active
+        // tab. A colour that appears once you have already connected cannot answer the question it
+        // exists for, which is "is this production?" asked *before* connecting. An inset edge
+        // rather than a fill, the same mark the terminal bench uses for its focused pane: it reads
+        // at a glance and does not fight the selected-row background for the same pixels.
+        boxShadow: host.color?.trim() ? `inset 2px 0 0 ${host.color}` : undefined,
+      }}
       className={`cf-rise group flex cursor-default flex-col gap-1.5 rounded-lg border p-2.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         selected
           ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]"
@@ -380,9 +402,18 @@ function HostCard({ host, at, onMenu }: { host: RemoteHostRow; at: number; onMen
 
       <div className="flex min-w-0 items-center gap-1">
         <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1 overflow-hidden">
-          {host.group_name && <Pill>{host.group_name}</Pill>}
+          {/* The group carries a glyph and the tags don't, because they are not the same fact —
+              see `Pill`. Drawn as two identical capsules, "test2" and "Test" were indistinguishable
+              and neither said which was which. */}
+          {host.group_name && (
+            <Pill icon={Folder} title={t("remote.fieldGroup")}>
+              {host.group_name}
+            </Pill>
+          )}
           {spec.tags.slice(0, 2).map((tag) => (
-            <Pill key={tag}>{tag}</Pill>
+            <Pill key={tag} title={t("remote.fieldTags")}>
+              {tag}
+            </Pill>
           ))}
         </span>
         {/* On hover or on the selected card, matching the tree's rows. */}
@@ -407,6 +438,7 @@ function HostListRow({ host, at, onMenu }: { host: RemoteHostRow; at: number; on
     s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited),
   );
   const hasForward = useRemoteStore((s) => s.forwards.some((f) => f.host_id === host.id));
+  const t = useT();
 
   const spec = parseHostSpec(host);
 
@@ -423,7 +455,16 @@ function HostListRow({ host, at, onMenu }: { host: RemoteHostRow; at: number; on
           openPrimary(host, spec);
         }
       }}
-      style={riseDelay(at)}
+      style={{
+        ...riseDelay(at),
+        // The host's own colour, always drawn — this is the one the picker sets, and until now it
+        // only reached the state dot (which is grey unless something is *running*) and the active
+        // tab. A colour that appears once you have already connected cannot answer the question it
+        // exists for, which is "is this production?" asked *before* connecting. An inset edge
+        // rather than a fill, the same mark the terminal bench uses for its focused pane: it reads
+        // at a glance and does not fight the selected-row background for the same pixels.
+        boxShadow: host.color?.trim() ? `inset 2px 0 0 ${host.color}` : undefined,
+      }}
       className={`cf-rise group flex cursor-default items-center gap-2 px-3 py-1.5 text-left outline-none transition-colors focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
         selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       }`}
@@ -437,9 +478,15 @@ function HostListRow({ host, at, onMenu }: { host: RemoteHostRow; at: number; on
         {describeHost(spec)}
       </span>
       <span className="hidden shrink-0 items-center gap-1 sm:flex">
-        {host.group_name && <Pill>{host.group_name}</Pill>}
+        {host.group_name && (
+          <Pill icon={Folder} title={t("remote.fieldGroup")}>
+            {host.group_name}
+          </Pill>
+        )}
         {spec.tags.slice(0, 2).map((tag) => (
-          <Pill key={tag}>{tag}</Pill>
+          <Pill key={tag} title={t("remote.fieldTags")}>
+            {tag}
+          </Pill>
         ))}
       </span>
       <span

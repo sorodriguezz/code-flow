@@ -203,7 +203,7 @@ export function ResultGrid({
   if (columns.length === 0) {
     return (
       <p className="flex h-full items-center justify-center text-[12px] text-[var(--cf-text-muted)]">
-        {t("db.noColumns")}
+        {t(recordModel(engine).counts.empty)}
       </p>
     );
   }

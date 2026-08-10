@@ -92,6 +92,41 @@ pub(super) struct Planned {
 // Dispatch
 // ---------------------------------------------------------------------------
 
+/// Which of the two file transports a kind lands on — and whether it has one at all.
+///
+/// Six entry points below ask the same question, so it is answered once, and this is also the whole
+/// of the files half of the capability table (the other three live on [`RemoteKind`] itself). A
+/// screen host has pixels and no filesystem behind them, and this is the line it stops at — in the
+/// backend, where a wrong `if` in the UI cannot get past it.
+enum Transport {
+    /// SSH's SFTP subsystem — [`RemoteKind::Ssh`] and [`RemoteKind::Sftp`].
+    Sftp,
+    /// A socket of its own — [`RemoteKind::Ftp`] and [`RemoteKind::Ftps`].
+    Ftp,
+    /// Signed HTTPS against a bucket — [`RemoteKind::S3`].
+    S3,
+    /// Signed HTTPS against a blob container — [`RemoteKind::AzureBlob`].
+    Blob,
+    /// Signed HTTPS against a file share — [`RemoteKind::AzureFiles`]. The only cloud transport
+    /// with real directories.
+    Share,
+}
+
+fn transport(spec: &RemoteHostSpec) -> Result<Transport, String> {
+    match spec.kind {
+        RemoteKind::Ssh | RemoteKind::Sftp => Ok(Transport::Sftp),
+        RemoteKind::Ftp | RemoteKind::Ftps => Ok(Transport::Ftp),
+        RemoteKind::S3 => Ok(Transport::S3),
+        RemoteKind::AzureBlob => Ok(Transport::Blob),
+        RemoteKind::AzureFiles => Ok(Transport::Share),
+        // Spelled out rather than left to a `_`, so a kind added later is a compile error here
+        // instead of a host quietly inheriting somebody else's file transport.
+        RemoteKind::Vnc | RemoteKind::Rdp | RemoteKind::AzureQueue | RemoteKind::AzureTable => {
+            Err(spec.kind.refuses("browse files"))
+        }
+    }
+}
+
 /// Lists a directory. An empty `path` means the login directory, which is where a browser should
 /// open — resolved by the server, not a guess at `/home/<user>`.
 pub async fn list(
@@ -99,9 +134,12 @@ pub async fn list(
     spec: &RemoteHostSpec,
     path: &str,
 ) -> Result<RemoteListing, String> {
-    match spec.kind {
-        RemoteKind::Ssh | RemoteKind::Sftp => super::sftp::list(host_id, spec, path).await,
-        RemoteKind::Ftp | RemoteKind::Ftps => super::ftp::list(host_id, spec, path).await,
+    match transport(spec)? {
+        Transport::Sftp => super::sftp::list(host_id, spec, path).await,
+        Transport::Ftp => super::ftp::list(host_id, spec, path).await,
+        Transport::S3 => super::cloud::s3::list(host_id, spec, path).await,
+        Transport::Blob => super::cloud::blob::list(host_id, spec, path).await,
+        Transport::Share => super::cloud::share::list(host_id, spec, path).await,
     }
 }
 
@@ -114,13 +152,12 @@ pub async fn download(
     remote_path: &str,
     local_path: &str,
 ) -> Result<(), String> {
-    match spec.kind {
-        RemoteKind::Ssh | RemoteKind::Sftp => {
-            super::sftp::download(app, id, host_id, spec, remote_path, local_path).await
-        }
-        RemoteKind::Ftp | RemoteKind::Ftps => {
-            super::ftp::download(app, id, host_id, spec, remote_path, local_path).await
-        }
+    match transport(spec)? {
+        Transport::Sftp => super::sftp::download(app, id, host_id, spec, remote_path, local_path).await,
+        Transport::Ftp => super::ftp::download(app, id, host_id, spec, remote_path, local_path).await,
+        Transport::S3 => super::cloud::s3::download(app, id, host_id, spec, remote_path, local_path).await,
+        Transport::Blob => super::cloud::blob::download(app, id, host_id, spec, remote_path, local_path).await,
+        Transport::Share => super::cloud::share::download(app, id, host_id, spec, remote_path, local_path).await,
     }
 }
 
@@ -133,20 +170,22 @@ pub async fn upload(
     local_path: &str,
     remote_path: &str,
 ) -> Result<(), String> {
-    match spec.kind {
-        RemoteKind::Ssh | RemoteKind::Sftp => {
-            super::sftp::upload(app, id, host_id, spec, local_path, remote_path).await
-        }
-        RemoteKind::Ftp | RemoteKind::Ftps => {
-            super::ftp::upload(app, id, host_id, spec, local_path, remote_path).await
-        }
+    match transport(spec)? {
+        Transport::Sftp => super::sftp::upload(app, id, host_id, spec, local_path, remote_path).await,
+        Transport::Ftp => super::ftp::upload(app, id, host_id, spec, local_path, remote_path).await,
+        Transport::S3 => super::cloud::s3::upload(app, id, host_id, spec, local_path, remote_path).await,
+        Transport::Blob => super::cloud::blob::upload(app, id, host_id, spec, local_path, remote_path).await,
+        Transport::Share => super::cloud::share::upload(app, id, host_id, spec, local_path, remote_path).await,
     }
 }
 
 pub async fn make_dir(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<(), String> {
-    match spec.kind {
-        RemoteKind::Ssh | RemoteKind::Sftp => super::sftp::make_dir(host_id, spec, path).await,
-        RemoteKind::Ftp | RemoteKind::Ftps => super::ftp::make_dir(host_id, spec, path).await,
+    match transport(spec)? {
+        Transport::Sftp => super::sftp::make_dir(host_id, spec, path).await,
+        Transport::Ftp => super::ftp::make_dir(host_id, spec, path).await,
+        Transport::S3 => super::cloud::s3::make_dir(host_id, spec, path).await,
+        Transport::Blob => super::cloud::blob::make_dir(host_id, spec, path).await,
+        Transport::Share => super::cloud::share::make_dir(host_id, spec, path).await,
     }
 }
 
@@ -161,9 +200,12 @@ pub async fn remove(
     path: &str,
     is_dir: bool,
 ) -> Result<(), String> {
-    match spec.kind {
-        RemoteKind::Ssh | RemoteKind::Sftp => super::sftp::remove(host_id, spec, path, is_dir).await,
-        RemoteKind::Ftp | RemoteKind::Ftps => super::ftp::remove(host_id, spec, path, is_dir).await,
+    match transport(spec)? {
+        Transport::Sftp => super::sftp::remove(host_id, spec, path, is_dir).await,
+        Transport::Ftp => super::ftp::remove(host_id, spec, path, is_dir).await,
+        Transport::S3 => super::cloud::s3::remove(host_id, spec, path, is_dir).await,
+        Transport::Blob => super::cloud::blob::remove(host_id, spec, path, is_dir).await,
+        Transport::Share => super::cloud::share::remove(host_id, spec, path, is_dir).await,
     }
 }
 
@@ -173,9 +215,12 @@ pub async fn rename(
     from: &str,
     to: &str,
 ) -> Result<(), String> {
-    match spec.kind {
-        RemoteKind::Ssh | RemoteKind::Sftp => super::sftp::rename(host_id, spec, from, to).await,
-        RemoteKind::Ftp | RemoteKind::Ftps => super::ftp::rename(host_id, spec, from, to).await,
+    match transport(spec)? {
+        Transport::Sftp => super::sftp::rename(host_id, spec, from, to).await,
+        Transport::Ftp => super::ftp::rename(host_id, spec, from, to).await,
+        Transport::S3 => super::cloud::s3::rename(host_id, spec, from, to).await,
+        Transport::Blob => super::cloud::blob::rename(host_id, spec, from, to).await,
+        Transport::Share => super::cloud::share::rename(host_id, spec, from, to).await,
     }
 }
 
@@ -187,11 +232,47 @@ pub async fn rename(
 pub async fn close(host_id: &str) {
     super::sftp::close(host_id).await;
     super::ftp::close(host_id).await;
+    // The cloud transports hold nothing, so these are no-ops — called anyway, so that adding state
+    // to one of them later is a change in that module rather than a bug here.
+    super::cloud::s3::close(host_id).await;
+    super::cloud::blob::close(host_id).await;
+    super::cloud::share::close(host_id).await;
 }
 
 // ---------------------------------------------------------------------------
 // Shared work
 // ---------------------------------------------------------------------------
+
+/// Emits one progress event.
+///
+/// [`pump`] does this on a timer while it copies, which covers every transport that can hand its
+/// bytes to a stream. Azure Files cannot: its writes are ranged, capped at four mebibytes each, so
+/// the unit of progress is a completed request rather than a chunk read. This is the same event in
+/// the same shape, reported by whoever *does* know a piece has landed — which is what keeps one bar
+/// meaning one thing across five transports.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn report(
+    app: &tauri::AppHandle,
+    id: &str,
+    name: &str,
+    done: u64,
+    total: u64,
+    file_index: u64,
+    files: u64,
+) {
+    use tauri::Emitter;
+    let _ = app.emit(
+        "remote:transfer",
+        TransferProgress {
+            id: id.to_string(),
+            name: name.to_string(),
+            done,
+            total,
+            file_index,
+            files,
+        },
+    );
+}
 
 /// Copies one stream to another, emitting progress on a timer rather than per chunk.
 #[allow(clippy::too_many_arguments)]

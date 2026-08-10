@@ -461,10 +461,28 @@ function FilePane({
               onPointerMove={(e) => {
                 const start = press.current;
                 if (!start) return;
+                // The button has to still be down. Without this, a press that ended anywhere this
+                // row never heard about — over the other pane, over the toolbar, outside the
+                // window — leaves the row armed, and the next *hover* across it starts a drag of
+                // whatever was clicked before. That is not a hypothetical: it left the grabbing
+                // cursor stuck on, ate the second click of a double-click so folders wouldn't
+                // open, and turned a plain click on the far pane into a real transfer.
+                if (e.buttons === 0) {
+                  press.current = null;
+                  return;
+                }
                 if (Math.hypot(e.clientX - start.x, e.clientY - start.y) < DRAG_THRESHOLD) return;
                 press.current = null;
                 setDragCursor(true);
                 onDragStart(start.entry);
+              }}
+              // Disarms with the release that ends the click, so the guard above is the backstop
+              // rather than the only thing holding this together.
+              onPointerUp={() => {
+                press.current = null;
+              }}
+              onPointerCancel={() => {
+                press.current = null;
               }}
               onClick={() => onSelect(entry)}
               onDoubleClick={() => entry.is_dir && onOpen(entry)}

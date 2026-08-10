@@ -18,48 +18,102 @@ export type RemoteOs = "linux" | "macos" | "windows" | "other";
 
 export type ForwardKind = "local" | "remote" | "dynamic";
 
-export type ScreenProtocol = "none" | "vnc" | "rdp";
+/** What a screen speaks. No `none`: a host either *is* a screen host or has no screen at all. */
+export type ScreenProtocol = "vnc" | "rdp";
 
 /**
  * What a host speaks, and therefore what it can be asked to do. Mirrors `remotes::RemoteKind`.
  *
- * Not a way to split one machine into several rows — see the Rust enum's comment. `ssh` is a
- * machine with everything; `sftp` is the same transport narrowed to files (a `ForceCommand
+ * **A row is one protocol, not one machine** — see the Rust enum's comment for the argument. `ssh`
+ * is a machine you work on; `sftp` is the same transport narrowed to files (a `ForceCommand
  * internal-sftp` account has no shell and never will); `ftp`/`ftps` are a different protocol
- * entirely, with no `~/.ssh/config`, no forwards and no screen.
+ * entirely, with no `~/.ssh/config` and no forwards; `vnc`/`rdp` are a machine you look at, and
+ * have nothing but their screen. A box you both administer and view is two rows.
  */
-export type RemoteKind = "ssh" | "sftp" | "ftp" | "ftps";
+export type RemoteKind =
+  | "ssh"
+  | "sftp"
+  | "ftp"
+  | "ftps"
+  | "vnc"
+  | "rdp"
+  | "s3"
+  | "azure_blob"
+  | "azure_files"
+  | "azure_queue"
+  | "azure_table";
 
-export const REMOTE_KINDS: RemoteKind[] = ["ssh", "sftp", "ftp", "ftps"];
+export const REMOTE_KINDS: RemoteKind[] = [
+  "ssh",
+  "sftp",
+  "ftp",
+  "ftps",
+  "vnc",
+  "rdp",
+  "s3",
+  "azure_blob",
+  "azure_files",
+  "azure_queue",
+  "azure_table",
+];
 
-/** The standard ports, applied when a screen leaves `port` at 0. */
-export const SCREEN_DEFAULT_PORT: Record<ScreenProtocol, number> = {
-  none: 0,
-  vnc: 5900,
-  rdp: 3389,
-};
+/** The cloud kinds — an account reached over HTTPS rather than a host reached over a socket. What
+ *  it gates is the shape of the editor: an account and a credential where SSH has a host and a
+ *  port. Mirrors `RemoteKind::is_cloud`. */
+export const isCloudKind = (kind: RemoteKind): boolean =>
+  kind === "s3" || kind === "azure_blob" || kind === "azure_files" || kind === "azure_queue" || kind === "azure_table";
+
+/** The Azure services, which share an account, a credential and a signing scheme and differ only in
+ *  which endpoint they ask for. Mirrors `RemoteKind::is_azure`. */
+export const isAzureKind = (kind: RemoteKind): boolean =>
+  kind === "azure_blob" || kind === "azure_files" || kind === "azure_queue" || kind === "azure_table";
 
 export const DEFAULT_SSH_PORT = 22;
 export const DEFAULT_FTP_PORT = 21;
 export const DEFAULT_FTPS_IMPLICIT_PORT = 990;
+export const DEFAULT_VNC_PORT = 5900;
+export const DEFAULT_RDP_PORT = 3389;
 
 /**
  * What each kind can do. The single source of truth for which buttons, tabs and menu items exist.
  *
  * Mirrored from `RemoteKind`'s methods in Rust, where the same table is enforced again before
- * anything spawns — see `RemoteHostSpec::require_shell` and friends. Duplicated deliberately: the
- * UI needs it to *not draw* the button, and the backend needs it so a bug in the UI can't make the
- * button work anyway. Files are absent because every kind has them.
+ * anything spawns — `RemoteHostSpec::require_shell` and friends for three of the four columns, and
+ * `remotes::files::transport` for `files`. Duplicated deliberately: the UI needs it to *not draw*
+ * the button, and the backend needs it so a bug in the UI can't make the button work anyway.
  */
 export const KIND_CAPABILITIES: Record<
   RemoteKind,
-  { shell: boolean; forwards: boolean; screen: boolean }
+  { shell: boolean; files: boolean; forwards: boolean; screen: boolean }
 > = {
-  ssh: { shell: true, forwards: true, screen: true },
-  sftp: { shell: false, forwards: false, screen: false },
-  ftp: { shell: false, forwards: false, screen: false },
-  ftps: { shell: false, forwards: false, screen: false },
+  ssh: { shell: true, files: true, forwards: true, screen: false },
+  sftp: { shell: false, files: true, forwards: false, screen: false },
+  ftp: { shell: false, files: true, forwards: false, screen: false },
+  ftps: { shell: false, files: true, forwards: false, screen: false },
+  // `forwards: false` is about the forwards *list* — the one the user raises and manages by hand.
+  // A screen host still tunnels; that forward is the app's, lives and dies with the screen, and
+  // never appears in that list. Same split as `RemoteKind::has_forwards` in Rust.
+  vnc: { shell: false, files: false, forwards: false, screen: true },
+  rdp: { shell: false, files: false, forwards: false, screen: true },
+  // Object storage is files and nothing else — no shell to open, no port to forward, no screen.
+  // What it *is* is covered in `remotes::cloud`: folders are synthesised, rename copies, and the
+  // account root lists buckets.
+  s3: { shell: false, files: true, forwards: false, screen: false },
+  azure_blob: { shell: false, files: true, forwards: false, screen: false },
+  azure_files: { shell: false, files: true, forwards: false, screen: false },
+  // Messages and entities, not files. Each needs a view of its own, which is why neither claims the
+  // file browser rather than claiming it and showing an empty tree.
+  azure_queue: { shell: false, files: false, forwards: false, screen: false },
+  azure_table: { shell: false, files: false, forwards: false, screen: false },
 };
+
+/** Which protocol a kind *is*, when it is a screen. The kind is the protocol — there is no second
+ *  field that could disagree with it. Mirrors `RemoteKind::screen_protocol`. */
+export function screenProtocolOf(kind: RemoteKind): ScreenProtocol | null {
+  if (kind === "vnc") return "vnc";
+  if (kind === "rdp") return "rdp";
+  return null;
+}
 
 /** What a kind is called in the UI. */
 export const KIND_LABEL: Record<RemoteKind, string> = {
@@ -67,7 +121,80 @@ export const KIND_LABEL: Record<RemoteKind, string> = {
   sftp: "SFTP",
   ftp: "FTP",
   ftps: "FTPS",
+  vnc: "VNC",
+  rdp: "RDP",
+  s3: "S3",
+  azure_blob: "Azure Blob",
+  azure_files: "Azure Files",
+  azure_queue: "Azure Queue",
+  azure_table: "Azure Table",
 };
+
+/** Where an S3 host's credentials come from. Mirrors `remotes::S3Auth`. */
+export type S3Auth = "profile" | "access_key";
+
+/** The S3-only half of a host. Mirrors `remotes::S3Spec`. */
+export interface S3Spec {
+  auth: S3Auth;
+  /** The `~/.aws` profile to borrow. Empty is whatever the CLI resolves unaided. */
+  profile: string;
+  access_key_id: string;
+  /** Empty means `us-east-1`. */
+  region: string;
+  /** A non-Amazon endpoint. Empty talks to AWS. */
+  endpoint: string;
+  /** Forced on for a custom endpoint whether or not this is set — see `S3Spec::path_style`. */
+  path_style: boolean;
+}
+
+/** How an Azure storage host authenticates. Mirrors `remotes::AzureAuth`. */
+export type AzureAuth = "account_key" | "sas" | "entra";
+
+/** The Azure-only half of a host. Mirrors `remotes::AzureSpec`. */
+export interface AzureSpec {
+  auth: AzureAuth;
+  account: string;
+  /** Empty means `core.windows.net`. */
+  endpoint_suffix: string;
+  /** A whole endpoint, replacing the one built from the account. For Azurite. */
+  endpoint: string;
+}
+
+/** One queue in an account. Mirrors `remotes::cloud::queue::QueueSummary`. */
+export interface QueueSummary {
+  name: string;
+  /** The service's own word, not a hedge in ours: the count is not transactional. -1 when the
+   *  metadata read failed for this queue alone. */
+  approximate_count: number;
+}
+
+/** One message. Mirrors `remotes::cloud::queue::QueueMessage`. */
+export interface QueueMessage {
+  id: string;
+  body: string;
+  /** False when the payload isn't text — shown as-is rather than mangled. */
+  is_text: boolean;
+  inserted_at: number;
+  expires_at: number;
+  /** Climbing here is the signature of a poison message. */
+  dequeue_count: number;
+  /** Only a *received* message has one, and deleting needs it. A peek leaves this empty. */
+  pop_receipt: string;
+}
+
+/** One table. Mirrors `remotes::cloud::table::TableSummary`. */
+export interface TableSummary {
+  name: string;
+}
+
+/** A page of entities. Mirrors `remotes::cloud::table::TablePage`. */
+export interface TablePage {
+  /** Built from the data, because a Table has no schema to read. */
+  columns: string[];
+  rows: Record<string, unknown>[];
+  next_partition_key: string;
+  next_row_key: string;
+}
 
 export interface ForwardSpec {
   id: string;
@@ -85,18 +212,19 @@ export interface ForwardSpec {
   label: string;
 }
 
+/**
+ * The settings a screen host has beyond its address.
+ *
+ * Small on purpose: the protocol is the kind, and the endpoint is the host's own `host`/`port`/
+ * `user`. A screen row *is* the screen, so it has no second address to disagree with the first.
+ */
 export interface ScreenSpec {
-  protocol: ScreenProtocol;
-  /** Empty means the host's own SSH address. */
-  host: string;
-  /** 0 means the protocol's default. */
-  port: number;
-  user: string;
   /**
    * Reach the screen through an SSH forward first.
    *
-   * The setting the whole menu exists for: a VNC server bound to `127.0.0.1:5900` is unreachable
-   * from here and fully reachable through the SSH this host already has.
+   * The setting the whole feature exists for: a VNC server bound to `127.0.0.1:5900` is unreachable
+   * from here and fully reachable over `ssh` to the same machine — this host's address at *its*
+   * default port, through `jump` when one is set.
    */
   tunnel: boolean;
   /** A viewer command line to use instead of the platform default. `{host}`, `{port}` and `{user}`
@@ -166,6 +294,10 @@ export interface RemoteHostSpec {
   forwards: ForwardSpec[];
   /** The FTP-only settings. Meaningless unless `kind` is `ftp` or `ftps`. */
   ftp: FtpSpec;
+  /** The S3-only settings. Meaningless unless `kind` is `s3`. */
+  s3: S3Spec;
+  /** The Azure-only settings. Meaningless unless `isAzureKind(kind)`. */
+  azure: AzureSpec;
   notes: string;
 }
 
@@ -334,10 +466,6 @@ export function defaultHostSpec(): RemoteHostSpec {
     command: "",
     directory: "",
     screen: {
-      protocol: "none",
-      host: "",
-      port: 0,
-      user: "",
       tunnel: false,
       viewer: "",
       embedded: true,
@@ -349,6 +477,8 @@ export function defaultHostSpec(): RemoteHostSpec {
       anonymous: false,
       accept_invalid_certs: false,
     },
+    s3: { auth: "profile", profile: "", access_key_id: "", region: "", endpoint: "", path_style: false },
+    azure: { auth: "account_key", account: "", endpoint_suffix: "", endpoint: "" },
     notes: "",
   };
 }
@@ -369,6 +499,8 @@ export function parseHostSpec(row: RemoteHostRow): RemoteHostSpec {
       ...parsed,
       screen: { ...base.screen, ...(parsed.screen ?? {}) },
       ftp: { ...base.ftp, ...(parsed.ftp ?? {}) },
+      s3: { ...base.s3, ...(parsed.s3 ?? {}) },
+      azure: { ...base.azure, ...(parsed.azure ?? {}) },
       forwards: parsed.forwards ?? [],
       options: parsed.options ?? [],
       tags: parsed.tags ?? [],
@@ -383,7 +515,7 @@ export function capabilities(spec: RemoteHostSpec) {
   return KIND_CAPABILITIES[spec.kind] ?? KIND_CAPABILITIES.ssh;
 }
 
-/** The port this kind implies when a spec leaves `port` at 0 — 22, 21 or 990. */
+/** The port this kind implies when a spec leaves `port` at 0 — 22, 21, 990, 5900 or 3389. */
 export function defaultPortFor(spec: RemoteHostSpec): number {
   switch (spec.kind) {
     case "ftp":
@@ -391,6 +523,18 @@ export function defaultPortFor(spec: RemoteHostSpec): number {
     case "ftps":
       // Explicit FTPS upgrades the control connection in place, so it stays on 21.
       return spec.ftp.implicit_tls ? DEFAULT_FTPS_IMPLICIT_PORT : DEFAULT_FTP_PORT;
+    case "vnc":
+      return DEFAULT_VNC_PORT;
+    case "rdp":
+      return DEFAULT_RDP_PORT;
+    case "s3":
+    case "azure_blob":
+    case "azure_files":
+    case "azure_queue":
+    case "azure_table":
+      // A cloud endpoint is a URL and its port is the scheme's. Naming 443 in a field would be a
+      // control that changes nothing.
+      return 443;
     default:
       return DEFAULT_SSH_PORT;
   }

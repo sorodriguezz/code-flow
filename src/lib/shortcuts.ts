@@ -41,6 +41,7 @@ export type ShortcutId =
   | "db.refresh"
   | "db.filter"
   | "db.apply"
+  | "db.askAi"
   | "view.next"
   | "view.prev"
   | "editor.goToFile"
@@ -585,6 +586,17 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "db.apply",
     defaultChord: "Mod+Alt+Enter",
     run: () => useDbCommandStore.getState().send("apply"),
+  },
+  // `Mod+Alt+I` and not the editor's `Mod+I`, which is the same idea one screen over. Two registry
+  // entries on one chord would be flagged by the settings screen's duplicate check — correctly, as
+  // far as it can see — even though the two are scoped to different editors. The database group's
+  // own convention is `Mod+Alt+…` anyway.
+  {
+    id: "db.askAi",
+    group: "database",
+    labelKey: "db.askAi",
+    defaultChord: "Mod+Alt+I",
+    run: () => useDbCommandStore.getState().send("askAi"),
   },
 
   {

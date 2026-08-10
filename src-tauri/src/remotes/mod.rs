@@ -37,6 +37,7 @@ pub mod files;
 pub mod forward;
 pub mod ftp;
 pub mod keys;
+pub mod cloud;
 pub mod parse;
 pub mod ping;
 pub mod screen;
@@ -54,29 +55,43 @@ pub const DEFAULT_SSH_PORT: u16 = 22;
 pub const DEFAULT_FTP_PORT: u16 = 21;
 /// Implicit FTPS: TLS before a byte of FTP is spoken, on a port of its own.
 pub const DEFAULT_FTPS_IMPLICIT_PORT: u16 = 990;
+/// RFB's first display — `:0`. A second server on one machine is 5901, which is why this is a
+/// default and not a constant the user cannot reach.
+pub const DEFAULT_VNC_PORT: u16 = 5900;
+/// RDP, which unlike VNC really is one port.
+pub const DEFAULT_RDP_PORT: u16 = 3389;
 
 /// What a host actually speaks — and therefore what it can be asked to do.
 ///
-/// **This is not a way to split one machine into several hosts.** The module's premise is that a
-/// host is a set of flags for a command line, and for an SSH machine that premise is what makes a
-/// shell, a file browser, a forward and a screen *the same host*: same `~/.ssh/config`, same
-/// `ProxyJump`, same `known_hosts`, by construction. Modelling SFTP as a separate connection would
-/// undo exactly that, and make the user keep two rows for one machine in sync by hand.
+/// **A row is one protocol, not one machine.** A host is a set of flags for a command line, and the
+/// flags an `ssh` needs and the flags a VNC viewer needs have almost nothing in common: a different
+/// port, a different user, a different idea of what a password is. Folding them into one row means
+/// every host carries the other's fields greyed out, and the editor stops being able to say what a
+/// given row *is*. So a machine you both administer and look at is two rows — an SSH host and a VNC
+/// host — and each shows only what it can actually do.
 ///
-/// What it *does* separate is the two honest cases the SSH premise cannot cover:
+/// The one thing that does cross the line is the tunnel, and it crosses it in the direction that
+/// costs nothing: a screen host reaches a loopback-bound server over `ssh` ([`screen`]) without
+/// needing to know that some other row describes the same machine.
 ///
+/// Where the line falls:
+///
+/// - [`Ssh`](Self::Ssh) is a machine you work *on*: shell, files, forwards. The default, and what
+///   every row written before this field existed loads as.
+/// - [`Sftp`](Self::Sftp) is the same `ssh` transport narrowed on purpose: an account jailed with
+///   `ForceCommand internal-sftp` has files and will never have a shell. Offering it a shell button
+///   is offering a button that cannot work.
 /// - [`Ftp`](Self::Ftp)/[`Ftps`](Self::Ftps) do not go through `ssh` at all. No shell, no forward,
-///   no screen, no config file — a different protocol on a socket of its own ([`ftp`]).
-/// - [`Sftp`](Self::Sftp) is the same `ssh` transport as [`Ssh`](Self::Ssh), narrowed on purpose:
-///   an account jailed with `ForceCommand internal-sftp` has files and will never have a shell.
-///   Offering it a shell button is offering a button that cannot work.
+///   no config file — a different protocol on a socket of its own ([`ftp`]).
+/// - [`Vnc`](Self::Vnc)/[`Rdp`](Self::Rdp) are a machine you *look at*. No shell, no files, no
+///   forwards of their own — one screen, and the tunnel that reaches it.
 ///
 /// So the variants gate *capabilities*, and the capability table below is the whole of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemoteKind {
-    /// A machine over SSH: shell, files, forwards, screen. The default, and what every host
-    /// written before this field existed loads as.
+    /// A machine over SSH: shell, files, forwards. The default, and what every host written before
+    /// this field existed loads as.
     Ssh,
     /// Files only, over SSH's SFTP subsystem.
     Sftp,
@@ -85,6 +100,23 @@ pub enum RemoteKind {
     /// Files only, over FTP with TLS — explicit `AUTH TLS` by default, implicit when
     /// [`FtpSpec::implicit_tls`] is set.
     Ftps,
+    /// A screen over RFB. The only kind that can be drawn inside the app rather than handed to a
+    /// viewer — see [`ScreenSpec::embedded`].
+    Vnc,
+    /// A screen over RDP. Always the platform's own viewer; there is no in-webview client.
+    Rdp,
+    /// An S3 bucket store — Amazon's, or anything that speaks the same API (MinIO, Cloudflare R2,
+    /// Wasabi, Ceph) via [`S3Spec::endpoint`]. Files, with the caveats in [`cloud`].
+    S3,
+    /// Azure Blob storage. Files, same caveats.
+    AzureBlob,
+    /// Azure File shares — SMB's protocol over HTTPS. The one Azure service in this list that has
+    /// real directories rather than synthesised ones.
+    AzureFiles,
+    /// Azure Queue storage. Not files at all: messages, with their own view.
+    AzureQueue,
+    /// Azure Table storage. Not files either: entities in a schemaless grid.
+    AzureTable,
 }
 
 impl Default for RemoteKind {
@@ -94,20 +126,37 @@ impl Default for RemoteKind {
 }
 
 impl RemoteKind {
-    /// An interactive shell. Only a full SSH host — a jailed SFTP account and an FTP server have
-    /// no command to run. Files are deliberately absent from this table: every kind has them, and
-    /// that is the one thing they all share.
+    /// An interactive shell. Only a full SSH host — a jailed SFTP account, an FTP server and a
+    /// screen have no command to run.
     pub fn has_shell(self) -> bool {
         matches!(self, Self::Ssh)
     }
 
-    /// Port forwards and screens both ride on an SSH connection, so both stop at the same line.
+    /// Files are not in this table, and where they *are* is [`files::transport`]: the question
+    /// "which file transport" and the question "any at all" have one answer, and splitting them
+    /// would be two places to add a kind to. Every kind but a screen has them.
+    ///
+    /// Forwards the user raises and manages by hand. An SSH host only.
+    ///
+    /// Not the same thing as the tunnel a screen host raises for itself ([`screen`]): that one is
+    /// this app's, lives and dies with the screen, and never appears in the forwards list — which
+    /// is why a [`Vnc`](Self::Vnc) host can have one without answering `true` here.
     pub fn has_forwards(self) -> bool {
         matches!(self, Self::Ssh)
     }
 
     pub fn has_screen(self) -> bool {
-        matches!(self, Self::Ssh)
+        matches!(self, Self::Vnc | Self::Rdp)
+    }
+
+    /// Which remote-desktop protocol this kind *is*, if it is one. The kind is the protocol: there
+    /// is no second field that could disagree with it.
+    pub fn screen_protocol(self) -> Option<ScreenProtocol> {
+        match self {
+            Self::Vnc => Some(ScreenProtocol::Vnc),
+            Self::Rdp => Some(ScreenProtocol::Rdp),
+            _ => None,
+        }
     }
 
     /// The port to assume when a spec leaves `port` at 0. `implicit_tls` only moves the answer for
@@ -119,6 +168,11 @@ impl RemoteKind {
             Self::Ftp => DEFAULT_FTP_PORT,
             Self::Ftps if implicit_tls => DEFAULT_FTPS_IMPLICIT_PORT,
             Self::Ftps => DEFAULT_FTP_PORT,
+            Self::Vnc => DEFAULT_VNC_PORT,
+            Self::Rdp => DEFAULT_RDP_PORT,
+            // A cloud endpoint is a URL, and its port is whatever the scheme says. Naming 443 here
+            // would put a port field in front of the user that changes nothing.
+            Self::S3 | Self::AzureBlob | Self::AzureFiles | Self::AzureQueue | Self::AzureTable => 443,
         }
     }
 
@@ -129,6 +183,13 @@ impl RemoteKind {
             Self::Sftp => "SFTP",
             Self::Ftp => "FTP",
             Self::Ftps => "FTPS",
+            Self::Vnc => "VNC",
+            Self::Rdp => "RDP",
+            Self::S3 => "S3",
+            Self::AzureBlob => "Azure Blob",
+            Self::AzureFiles => "Azure Files",
+            Self::AzureQueue => "Azure Queue",
+            Self::AzureTable => "Azure Table",
         }
     }
 
@@ -181,6 +242,85 @@ impl Default for FtpSpec {
     fn default() -> Self {
         Self { passive: true, implicit_tls: false, anonymous: false, accept_invalid_certs: false }
     }
+}
+
+/// Where an S3 host's credentials come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum S3Auth {
+    /// A named profile from `~/.aws`, resolved by **the AWS CLI itself** — see
+    /// [`cloud::aws::credentials`]. The default, and the one that works for a human being: SSO,
+    /// MFA, assumed roles and IMDS have all already happened in Amazon's own flow, and CodeFlow
+    /// stores no credential at all.
+    #[default]
+    Profile,
+    /// An access key ID and a secret access key, the secret in the OS keychain. For a machine
+    /// account, a MinIO box, or anyone without the CLI installed.
+    AccessKey,
+}
+
+/// The S3-only half of a host. Ignored unless `kind` is [`RemoteKind::S3`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct S3Spec {
+    #[serde(default)]
+    pub auth: S3Auth,
+    /// The `~/.aws` profile to borrow. Empty means whatever `AWS_PROFILE`, and then `default`,
+    /// resolve to — the same thing the CLI would do unaided.
+    #[serde(default)]
+    pub profile: String,
+    /// The access key ID for [`S3Auth::AccessKey`]. The secret half is in the keychain, and the
+    /// session token — for temporary credentials — beside it.
+    #[serde(default)]
+    pub access_key_id: String,
+    /// Where the bucket is. Empty means `us-east-1`, which is what the API assumes when a request
+    /// arrives unrouted, and what a signature has to claim to be accepted by the redirect.
+    #[serde(default)]
+    pub region: String,
+    /// A non-Amazon endpoint — `https://minio.internal:9000`, `https://<id>.r2.cloudflarestorage.com`.
+    /// Empty talks to AWS.
+    #[serde(default)]
+    pub endpoint: String,
+    /// Address buckets as `endpoint/bucket/key` rather than `bucket.endpoint/key`.
+    ///
+    /// Forced on for a custom endpoint whether or not this is set, because virtual-host addressing
+    /// against an IP or a bare hostname cannot work — there is no wildcard DNS in front of a MinIO
+    /// container. Exposed anyway for the S3-compatible services that *do* have it and prefer it.
+    #[serde(default)]
+    pub path_style: bool,
+}
+
+/// How an Azure storage host authenticates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AzureAuth {
+    /// One of the account's two access keys, in the keychain. Signs with Shared Key.
+    #[default]
+    AccountKey,
+    /// A shared access signature — the query string, with or without its leading `?`. Scoped and
+    /// expiring, which is what makes it the right thing to paste into somebody else's machine.
+    Sas,
+    /// A bearer token from `az account get-access-token`, for tenants where account keys are
+    /// disabled by policy. Borrows the session `az login` established, exactly as
+    /// [`crate::datasource::entra`] does for Azure SQL — CodeFlow registers no application and
+    /// stores no credential.
+    Entra,
+}
+
+/// The Azure-only half of a host. Ignored unless `kind` [`RemoteKind::is_azure`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AzureSpec {
+    #[serde(default)]
+    pub auth: AzureAuth,
+    /// The storage account name — the `contoso` in `contoso.blob.core.windows.net`.
+    #[serde(default)]
+    pub account: String,
+    /// The DNS suffix, for sovereign and government clouds. Empty means `core.windows.net`.
+    #[serde(default)]
+    pub endpoint_suffix: String,
+    /// A whole endpoint, replacing the one built from the account and suffix. For Azurite and for
+    /// accounts behind a private endpoint with a name of their own.
+    #[serde(default)]
+    pub endpoint: String,
 }
 
 /// How to authenticate. Only ever a *hint* to `ssh`: `Agent` adds no flags at all and lets the
@@ -256,55 +396,33 @@ pub struct ForwardSpec {
     pub label: String,
 }
 
-/// Which remote-desktop protocol a host answers on, if any.
+/// Which remote-desktop protocol a screen speaks.
+///
+/// There is no `None`: a host either *is* a screen host — [`RemoteKind::Vnc`] or
+/// [`RemoteKind::Rdp`] — or has no screen at all. This is what [`RemoteKind::screen_protocol`]
+/// hands back, and the only way to obtain one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScreenProtocol {
-    None,
     Vnc,
     Rdp,
 }
 
-impl Default for ScreenProtocol {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-impl ScreenProtocol {
-    pub fn default_port(self) -> u16 {
-        match self {
-            Self::Vnc => 5900,
-            Self::Rdp => 3389,
-            Self::None => 0,
-        }
-    }
-}
-
-/// The screen half of a host.
+/// The settings a screen host has beyond its address.
 ///
-/// Separate from the SSH half because they are genuinely different endpoints that merely usually
-/// live on one machine: a jump box has a shell and no screen, a Windows server has a screen whose
-/// SSH is only there to tunnel to it, and `host` being empty (meaning "same as the SSH host") is
-/// the common case rather than the only one.
+/// Small on purpose. The protocol is the kind, and the endpoint is the host's own `host`/`port`/
+/// `user` — a screen row *is* the screen, so it has no second address to disagree with the first.
+/// What is left is the three genuine choices: whether to reach it through `ssh`, whether to draw it
+/// here, and what to open it with.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScreenSpec {
-    #[serde(default)]
-    pub protocol: ScreenProtocol,
-    /// Empty means the host's own SSH address.
-    #[serde(default)]
-    pub host: String,
-    /// 0 means the protocol's default — 5900 for VNC, 3389 for RDP.
-    #[serde(default)]
-    pub port: u16,
-    #[serde(default)]
-    pub user: String,
-    /// Reach the screen through an SSH forward to this host first.
+    /// Reach the screen through an SSH forward first.
     ///
-    /// This is the setting the whole menu exists for. A VNC server bound to `127.0.0.1:5900` — the
-    /// only sane way to run one — is unreachable from here and fully reachable through the SSH
-    /// this host already has. With it on, opening the screen raises the forward, points the viewer
-    /// at loopback, and nothing is exposed to the network in between.
+    /// This is the setting the whole feature exists for. A VNC server bound to `127.0.0.1:5900` —
+    /// the only sane way to run one — is unreachable from here and fully reachable over `ssh` to
+    /// the same machine. With it on, opening the screen raises a `-L`, points the viewer at
+    /// loopback, and nothing is exposed to the network in between. See [`screen::open`] for which
+    /// `ssh` that is: this host's address at *its* default port, through `jump` when one is set.
     #[serde(default)]
     pub tunnel: bool,
     /// A viewer command line to use instead of the platform default. `{host}`, `{port}` and
@@ -384,6 +502,12 @@ pub struct RemoteHostSpec {
     /// The FTP-only settings. Meaningless unless `kind` is `Ftp` or `Ftps`.
     #[serde(default)]
     pub ftp: FtpSpec,
+    /// The S3-only settings. Meaningless unless `kind` is [`RemoteKind::S3`].
+    #[serde(default)]
+    pub s3: S3Spec,
+    /// The Azure-only settings. Meaningless unless [`RemoteKind::is_azure`].
+    #[serde(default)]
+    pub azure: AzureSpec,
     #[serde(default)]
     pub notes: String,
 }
@@ -508,6 +632,22 @@ impl RemoteHostSpec {
             Err(self.kind.refuses("open a screen"))
         }
     }
+
+    /// The `ssh` that reaches this screen host's tunnel.
+    ///
+    /// A screen row's `port` is the *screen's* port — 5900, 3389 — so it cannot also be the one
+    /// `ssh` dials. This hands back the same host with the port dropped back to 22 and the kind set
+    /// to [`RemoteKind::Ssh`], which is what [`screen::open`] forwards through. `jump`, `key_file`,
+    /// `agent_forward` and the verbatim `-o` options all survive, because those are about reaching
+    /// the machine and are as true here as anywhere.
+    ///
+    /// `user` does not: on a screen row it is the *screen's* user (`Administrator` on an RDP box),
+    /// and handing that to `ssh -l` would fail for a reason nothing on screen explains. The tunnel
+    /// therefore connects as `~/.ssh/config` says, which is what an SSH row with an empty user does
+    /// too. A tunnel that needs a different one says so in `jump` (`me@box`) or in an `-o User=`.
+    pub fn tunnel_via(&self) -> Self {
+        Self { kind: RemoteKind::Ssh, port: 0, user: String::new(), ..self.clone() }
+    }
 }
 
 /// The keychain key a host's password or key passphrase is stored under.
@@ -597,6 +737,41 @@ mod tests {
         assert_eq!(spec.host, "a.example.com");
         assert_eq!(spec.effective_port(), 22);
         assert_eq!(spec.auth, RemoteAuth::Agent);
-        assert_eq!(spec.screen.protocol, ScreenProtocol::None);
+        // No `kind` in the blob means SSH, which is what every row written before the field
+        // existed is — and, now that screens are kinds of their own, also what keeps such a row
+        // out of the screen paths rather than half into them.
+        assert_eq!(spec.kind, RemoteKind::Ssh);
+        assert!(!spec.screen.tunnel);
+    }
+
+    /// A screen row's `port` is the screen's, so the `ssh` its tunnel rides on has to go back to
+    /// 22 — and drop the screen's user, which is not an SSH account.
+    #[test]
+    fn a_screen_tunnel_dials_ssh_rather_than_the_screens_own_port() {
+        let mut s = spec();
+        s.kind = RemoteKind::Vnc;
+        s.user = "Administrator".into();
+        s.jump = "bastion".into();
+        assert_eq!(s.effective_port(), DEFAULT_VNC_PORT);
+
+        let via = s.tunnel_via();
+        assert_eq!(via.effective_port(), DEFAULT_SSH_PORT);
+        assert_eq!(via.destination(), "web-01.example.com");
+        // What reaching the machine needs survives; what logging into the screen needs does not.
+        assert_eq!(via.jump, "bastion");
+        assert!(!via.base_args(false).contains(&"-p".to_string()));
+    }
+
+    #[test]
+    fn a_screen_has_only_its_screen() {
+        for kind in [RemoteKind::Vnc, RemoteKind::Rdp] {
+            assert!(kind.has_screen());
+            assert!(!kind.has_shell());
+            assert!(!kind.has_forwards());
+        }
+        assert!(!RemoteKind::Ssh.has_screen(), "an SSH row is a machine you work on, not one you look at");
+        assert_eq!(RemoteKind::Vnc.screen_protocol(), Some(ScreenProtocol::Vnc));
+        assert_eq!(RemoteKind::Rdp.screen_protocol(), Some(ScreenProtocol::Rdp));
+        assert_eq!(RemoteKind::Ssh.screen_protocol(), None);
     }
 }

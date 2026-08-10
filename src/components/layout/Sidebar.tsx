@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { ActivePill } from "../common/ActivePill";
 import {
   Archive,
   Check,
@@ -83,8 +84,14 @@ import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 // The hover-revealed actions on a project row: the same square chip the "clone"/"add repository"
 // buttons above the list wear, so every icon-only control in the sidebar answers the pointer the
 // same way. Reveal stays tied to the row's own `group` hover.
+// `relative` so the action sits above the selected row's sliding fill, which is absolutely
+// positioned over the whole row — see `ActivePill`.
 const ROW_ACTION_CLASS =
-  "flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 hover:bg-black/[0.05] hover:text-[var(--cf-text)] group-hover:opacity-100 dark:hover:bg-white/[0.08]";
+  "relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-black/[0.05] hover:text-[var(--cf-text)] group-hover:opacity-100 dark:hover:bg-white/[0.08]";
+
+/** How the repository's tree unfolds. The same curve `cf-rise` uses, so a list arriving and a tree
+ *  opening move alike; a touch slower, because this one travels a lot further. */
+const UNFOLD = { duration: 0.24, ease: [0.22, 1, 0.36, 1] } as const;
 
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 440;
@@ -136,7 +143,7 @@ function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: ()
             aria-label={project.name}
             aria-current={project.id === activeProjectId ? "true" : undefined}
             style={{ ...riseDelay(at), background: project.color }}
-            className={`cf-rise flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white transition-shadow ${
+            className={`cf-rise flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white transition-[box-shadow,opacity] ${
               project.id === activeProjectId
                 ? "ring-2 ring-[var(--cf-accent)] ring-offset-2 ring-offset-[var(--cf-surface)]"
                 : "opacity-70 hover:opacity-100"
@@ -973,6 +980,8 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
   const [revealing, setRevealing] = useState(false);
   const [openingVsCode, setOpeningVsCode] = useState(false);
 
+  const reduceMotion = useReducedMotion();
+
   const select = () => setActiveProject(project.id);
 
   const otherWorkspaces = workspaces.filter((w) => w.id !== project.workspace_id);
@@ -986,12 +995,17 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
       <div
         onClick={select}
         style={riseDelay(at)}
-        className={`cf-rise group relative flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${
+        className={`cf-rise group relative flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors ${
           isActive
-            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
+            ? "text-[var(--cf-text)]"
             : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
         }`}
       >
+        {/* The fill *slides* from the project you left to the one you picked, instead of blinking
+            off one row and on at another — the same shared pill the Settings nav uses, and the same
+            spring, so the two selections in the app move at one speed. The rows stay mounted while
+            it travels, which is the condition the tween needs (see `ActivePill`). */}
+        {isActive && <ActivePill layoutId="cf-project-pill" radius="rounded-lg" />}
         <button
           title={t("sidebar.revealInFileManager")}
           onClick={async (e) => {
@@ -1005,7 +1019,15 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
           }}
           // `cf-chip-button` rings the square on hover (see index.css) — without it the chip was
           // the one control in the row that gave no sign of being one.
-          className="cf-chip-button flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-white"
+          //
+          // Dimmed while this isn't the open project, the same as the folded rail does it. The row
+          // already says which one is open twice — a tinted background and a brighter label — but
+          // the chip is the most saturated thing in the whole column, and four of them at full
+          // strength drowned both. On hover it comes back, so pointing at a row still shows its
+          // colour as it really is.
+          className={`cf-chip-button relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-white transition-opacity ${
+            isActive ? "" : "opacity-60 group-hover:opacity-100"
+          }`}
           style={{ background: project.color }}
         >
           {revealing ? <Loader2 size={12} className="animate-spin" /> : <Folder size={12} />}
@@ -1018,7 +1040,7 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
             e.stopPropagation();
             select();
           }}
-          className="flex min-w-0 flex-1 items-center gap-2 self-stretch text-left"
+          className="relative flex min-w-0 flex-1 items-center gap-2 self-stretch text-left"
         >
           <span className="min-w-0 flex-1 truncate font-medium">{project.name}</span>
         </button>
@@ -1059,13 +1081,28 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
 
       {showMoveModal && <MoveProjectModal project={project} onClose={() => setShowMoveModal(false)} />}
 
-      {isActive && projectLoading && (
+      {/* The whole branch/stash/PR tree unfolds instead of appearing, and folds away on the row you
+          left instead of vanishing — which is what makes switching repository read as one movement
+          rather than two panels swapping. Height is animated from 0 to `auto`, so the rows below
+          slide down with it rather than being shoved. `initial={false}` keeps the app's first paint
+          from playing it: on launch there is no previous project to have come from. */}
+      <AnimatePresence initial={false}>
+        {isActive && (
+          <motion.div
+            key="project-tree"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={reduceMotion ? { duration: 0 } : UNFOLD}
+            className="overflow-hidden"
+          >
+      {projectLoading && (
         <div className="ml-6 mt-1 border-l border-[var(--cf-border)] pl-3">
           <SkeletonRows count={5} className="p-0" />
         </div>
       )}
 
-      {isActive && !projectLoading && (
+      {!projectLoading && (
         <div className="ml-6 mt-1 space-y-3 border-l border-[var(--cf-border)] pl-3">
           <CollapsibleSection
             icon={GitBranch}
@@ -1193,6 +1230,9 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
           <PullRequestsSection project={project} />
         </div>
       )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {showCreateBranch && (
         <CreateBranchModal branches={branches} onClose={() => setShowCreateBranch(false)} />
