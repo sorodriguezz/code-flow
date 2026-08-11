@@ -17,7 +17,9 @@
 
 use tokio::io::AsyncReadExt as _;
 
-use super::super::files::{plan_upload, pump, report, sort_entries, Planned, RemoteFile, RemoteListing};
+use super::super::files::{
+    plan_upload, pump, report, sort_entries, ListPage, Planned, RemoteFile, RemoteListing, PAGE,
+};
 use super::super::RemoteHostSpec;
 use super::azure::{self, Credential, Service};
 use super::{child_path, container_row, rfc1123_seconds, Location};
@@ -37,17 +39,18 @@ pub async fn list(
     host_id: &str,
     spec: &RemoteHostSpec,
     path: &str,
+    page: &ListPage,
 ) -> Result<RemoteListing, String> {
     let at = Location::parse(path);
     let credential = azure::credential(host_id, spec).await?;
 
-    let mut entries = if at.is_account_root() {
-        shares(spec, &credential).await?
+    let (mut entries, next) = if at.is_account_root() {
+        shares(spec, &credential, page).await?
     } else {
-        entries_of(spec, &credential, &at).await?
+        entries_of(spec, &credential, &at, page).await?
     };
     sort_entries(&mut entries);
-    Ok(RemoteListing { path: at.path(), entries })
+    Ok(RemoteListing { path: at.path(), entries, next })
 }
 
 pub async fn download(
@@ -206,9 +209,11 @@ pub async fn remove(
 ) -> Result<(), String> {
     let at = Location::parse(path);
     if at.key.is_empty() {
+        // See `blob::remove` — the ordinary delete never takes a whole top-level resource, and the
+        // verb that does asks for the name first.
         return Err(
-            "Deleting a whole share isn't something this browser does — it would take everything \
-             inside it with it. Do it in the Azure portal."
+            "That's a share, not a file. Deleting one takes everything inside it, so it goes \
+             through its own confirmation — the browser asks you to type the name."
                 .into(),
         );
     }
@@ -334,35 +339,37 @@ async fn ensure_parents(
     Ok(())
 }
 
-async fn shares(spec: &RemoteHostSpec, credential: &Credential) -> Result<Vec<RemoteFile>, String> {
-    let mut rows = Vec::new();
-    let mut marker = String::new();
-    loop {
-        let mut url = azure::endpoint(spec, Service::File)?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("comp", "list");
-            if !marker.is_empty() {
-                query.append_pair("marker", &marker);
-            }
+async fn shares(
+    spec: &RemoteHostSpec,
+    credential: &Credential,
+    page: &ListPage,
+) -> Result<(Vec<RemoteFile>, String), String> {
+    let mut url = azure::endpoint(spec, Service::File)?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("comp", "list");
+        query.append_pair("maxresults", &PAGE.to_string());
+        let prefix = page.prefix.trim();
+        if !prefix.is_empty() {
+            query.append_pair("prefix", prefix);
         }
-        let response = azure::send(spec, credential, "GET", &url, &[], None).await?;
-        if !response.status().is_success() {
-            return Err(super::explain("list shares", response).await);
-        }
-        let body = response.text().await.map_err(|e| format!("Couldn't read the share list: {e}"))?;
-
-        for share in elements(&body, "Share") {
-            let Some(name) = super::xml_text(&share, "Name") else { continue };
-            let modified = super::xml_text(&share, "Last-Modified").unwrap_or_default();
-            rows.push(container_row(&name, rfc1123_seconds(&modified)));
-        }
-        match super::xml_text(&body, "NextMarker") {
-            Some(next) if !next.is_empty() => marker = next,
-            _ => break,
+        if !page.marker.is_empty() {
+            query.append_pair("marker", &page.marker);
         }
     }
-    Ok(rows)
+    let response = azure::send(spec, credential, "GET", &url, &[], None).await?;
+    if !response.status().is_success() {
+        return Err(super::explain("list shares", response).await);
+    }
+    let body = response.text().await.map_err(|e| format!("Couldn't read the share list: {e}"))?;
+
+    let mut rows = Vec::new();
+    for share in elements(&body, "Share") {
+        let Some(name) = super::xml_text(&share, "Name") else { continue };
+        let modified = super::xml_text(&share, "Last-Modified").unwrap_or_default();
+        rows.push(container_row(&name, rfc1123_seconds(&modified)));
+    }
+    Ok((rows, super::xml_text(&body, "NextMarker").unwrap_or_default()))
 }
 
 /// One directory's contents. Real entries, so no prefix arithmetic.
@@ -370,16 +377,23 @@ async fn entries_of(
     spec: &RemoteHostSpec,
     credential: &Credential,
     at: &Location,
-) -> Result<Vec<RemoteFile>, String> {
+    page: &ListPage,
+) -> Result<(Vec<RemoteFile>, String), String> {
     let mut rows = Vec::new();
-    let mut marker = String::new();
-    loop {
+    {
         let mut url = directory_url(spec, at)?;
         {
             let mut query = url.query_pairs_mut();
             query.append_pair("comp", "list");
-            if !marker.is_empty() {
-                query.append_pair("marker", &marker);
+            query.append_pair("maxresults", &PAGE.to_string());
+            // A share is a real directory, so the prefix is a name filter within it rather than a
+            // key prefix — which is exactly what the service's own `prefix` does here.
+            let prefix = page.prefix.trim();
+            if !prefix.is_empty() {
+                query.append_pair("prefix", prefix);
+            }
+            if !page.marker.is_empty() {
+                query.append_pair("marker", &page.marker);
             }
         }
         let response = azure::send(spec, credential, "GET", &url, &[], None).await?;
@@ -400,6 +414,7 @@ async fn entries_of(
                     .map(|value| rfc1123_seconds(&value))
                     .unwrap_or(0),
                 permissions: String::new(),
+                ..Default::default()
             });
         }
         for file in elements(&body, "File") {
@@ -416,14 +431,14 @@ async fn entries_of(
                     .map(|value| rfc1123_seconds(&value))
                     .unwrap_or(0),
                 permissions: String::new(),
+                // A share is a real filesystem: `Content-Type` is not in its listing, and asking
+                // per file would be one round trip per row.
+                content_type: String::new(),
+                ..Default::default()
             });
         }
-        match super::xml_text(&body, "NextMarker") {
-            Some(next) if !next.is_empty() => marker = next,
-            _ => break,
-        }
+        Ok((rows, super::xml_text(&body, "NextMarker").unwrap_or_default()))
     }
-    Ok(rows)
 }
 
 /// Everything under `remote_path`, flattened.
@@ -462,7 +477,21 @@ async fn plan_download(
     let mut planned = Vec::new();
     let mut queue = vec![(at.clone(), std::path::PathBuf::from(local_path))];
     while let Some((directory, into)) = queue.pop() {
-        for entry in entries_of(spec, credential, &directory).await? {
+        // Every page, not one: a download of a directory is a statement about all of it, which is
+        // the opposite of what the browser wants and the reason paging is a parameter rather than a
+        // policy baked into the listing.
+        let mut walked = Vec::new();
+        let mut marker = String::new();
+        loop {
+            let page = ListPage { prefix: String::new(), marker: marker.clone() };
+            let (rows, next) = entries_of(spec, credential, &directory, &page).await?;
+            walked.extend(rows);
+            if next.is_empty() {
+                break;
+            }
+            marker = next;
+        }
+        for entry in walked {
             let child = Location::parse(&entry.path);
             let local = into.join(&entry.name);
             if entry.is_dir {
@@ -586,5 +615,26 @@ mod tests {
                 "bytes=8388608-10485759".to_string(),
             ]
         );
+    }
+}
+
+/// Deletes a share and everything in it. Separate from [`remove`] for the reason
+/// [`super::blob::remove_container`] is: the blast radius, not the API.
+pub async fn remove_share(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<(), String> {
+    let at = Location::parse(path);
+    if at.container.is_empty() {
+        return Err("Which share?".into());
+    }
+    if !at.key.is_empty() {
+        return Err("That is a file inside a share, not the share itself.".into());
+    }
+    let credential = azure::credential(host_id, spec).await?;
+
+    let url = share_url(spec, &at.container, "share")?;
+    let response = azure::send(spec, &credential, "DELETE", &url, &[], None).await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(super::explain(&format!("delete the share {}", at.container), response).await)
     }
 }

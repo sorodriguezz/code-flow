@@ -181,7 +181,7 @@ pub async fn list(
     let mut entries = read_dir(&mut stream, &resolved).await?;
     sort_entries(&mut entries);
 
-    Ok(RemoteListing { path: resolved, entries })
+    Ok(RemoteListing { path: resolved, entries, ..Default::default() })
 }
 
 /// One file or one whole directory, from the far side to here.
@@ -367,6 +367,7 @@ fn entry(dir: &str, file: &FtpFile, permissions: String) -> RemoteFile {
             .unwrap_or(0),
         permissions,
         name,
+        ..Default::default()
     }
 }
 

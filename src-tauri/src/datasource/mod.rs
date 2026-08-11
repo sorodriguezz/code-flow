@@ -853,6 +853,48 @@ pub struct DbTableDataRequest {
     /// is the point — this is a database client, and the user is entitled to write predicates.
     #[serde(default)]
     pub filter: String,
+    /// The rest of the query, for the engines that have one. Empty for every SQL engine, which
+    /// expresses all of this in the statement itself.
+    #[serde(default)]
+    pub options: DbQueryOptions,
+}
+
+/// The parts of a MongoDB read that aren't the filter.
+///
+/// Every field is the text the user typed, parsed by the driver module rather than here: `sort` and
+/// `projection` are documents in the shell dialect, `hint` is either a document or an index name,
+/// and the three numbers are written into a box that also has to be allowed to be empty. Parsing
+/// them at the edge would mean inventing a second dialect for the same syntax the filter box
+/// already accepts.
+///
+/// Blank means "not set" throughout — never "set to zero". A `limit` of 0 is Mongo's own word for
+/// no limit, so the two must stay distinguishable.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DbQueryOptions {
+    /// `{field: 1}` — which fields come back.
+    #[serde(default)]
+    pub projection: String,
+    /// `{field: -1}`. Takes precedence over `sort` above: a sort written out by hand is the more
+    /// specific instruction, and the grid's column headers can't express `{"a.b": 1}`.
+    #[serde(default)]
+    pub sort: String,
+    /// `{locale: "es", strength: 2}` — how strings compare, which decides both the order and what
+    /// an equality match finds.
+    #[serde(default)]
+    pub collation: String,
+    /// `{field: 1}` or `"indexName"` — the index to use instead of the one the planner picks.
+    #[serde(default)]
+    pub hint: String,
+    /// How long the server may spend before giving up, in milliseconds.
+    #[serde(default)]
+    pub max_time_ms: String,
+    /// Documents to skip *before* paging — added to the page's own offset, so it moves the whole
+    /// window rather than fighting with it.
+    #[serde(default)]
+    pub skip: String,
+    /// A ceiling on how many documents the query may return in total, across every page.
+    #[serde(default)]
+    pub limit: String,
 }
 
 /// One column of this table, and the column it points at.
@@ -1021,6 +1063,15 @@ pub struct DbRowEdit {
     /// value of the row. Empty for an insert.
     #[serde(default)]
     pub keys: Vec<DbCell>,
+    /// A whole document, in the shell dialect, standing in for `values`. MongoDB only.
+    ///
+    /// The cell list can say "set these fields to these strings" and nothing else, which is enough
+    /// for a grid and not enough for a document: removing a field, reordering an array, changing a
+    /// number to a string, or nesting one object inside another are all ordinary edits that have no
+    /// spelling as a list of columns. So the document views send the document itself, and the
+    /// driver replaces the stored one with it — `keys` still says which document.
+    #[serde(default)]
+    pub document: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1231,11 +1282,19 @@ impl Session {
         Ok(diagram)
     }
 
-    pub async fn row_count(&self, node: &DbNodeRef, filter: &str) -> Result<i64, String> {
+    /// The total under the current filter. `options` narrows it further on the engines that have
+    /// them — a `limit` the user set caps the count as well, or the pager would offer pages the
+    /// query will never return.
+    pub async fn row_count(
+        &self,
+        node: &DbNodeRef,
+        filter: &str,
+        options: &DbQueryOptions,
+    ) -> Result<i64, String> {
         match self {
             Session::Postgres(s) => s.row_count(node, filter).await,
             Session::Mssql(s) => s.row_count(node, filter).await,
-            Session::Mongo(s) => s.row_count(node, filter).await,
+            Session::Mongo(s) => s.row_count(node, filter, options).await,
             Session::Iris(s) => s.row_count(node, filter).await,
         }
     }

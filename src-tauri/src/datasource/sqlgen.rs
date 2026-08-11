@@ -167,6 +167,12 @@ pub fn edit_statement(
     edit: &DbRowEdit,
 ) -> Result<String, String> {
     let target = qualify(node, dialect)?;
+    // A document edit has no SQL spelling — see `DbRowEdit::document`. It only ever comes from the
+    // Mongo document views, so reaching a SQL dialect with one means something is routed wrong, and
+    // saying so beats writing a statement out of the cells it deliberately left empty.
+    if edit.document.is_some() {
+        return Err("This engine edits rows and columns, not whole documents.".to_string());
+    }
     match edit.kind {
         DbRowEditKind::Insert => {
             if edit.values.is_empty() {

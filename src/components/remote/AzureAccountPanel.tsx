@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { SftpPanel } from "./SftpPanel";
+import { ObjectBrowser } from "./ObjectBrowser";
 import { QueuePanel } from "./QueuePanel";
 import { TablePanel } from "./TablePanel";
 import { AZURE_SERVICE_ICON, AZURE_SERVICE_LABEL } from "./remoteChrome";
@@ -11,6 +11,7 @@ import {
   azureServiceRoot,
   parseHostSpec,
   type AzureService,
+  type RemoteHostSpec,
 } from "../../types/remote";
 
 /**
@@ -52,7 +53,10 @@ export function AzureAccountPanel({ tab }: { tab: RemoteAzureTab }) {
 
   return (
     <div className="flex h-full min-h-0">
-      <nav className="flex w-[168px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-[var(--cf-border)] p-2">
+      {/* Wide enough for the longest label in the longest language, which is not English: "Blob
+          containers" fits in 168px and "Contenedores de blob" does not. A rail sized to the
+          language it was written in truncates every entry in every other one. */}
+      <nav className="flex w-[204px] shrink-0 flex-col gap-0.5 overflow-y-auto border-r border-[var(--cf-border)] p-2">
         <p className="truncate px-2 pb-1 text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
           {spec.azure.account.trim() || host.name}
         </p>
@@ -89,10 +93,15 @@ export function AzureAccountPanel({ tab }: { tab: RemoteAzureTab }) {
             className={`absolute inset-0 ${service === tab.service ? "" : "hidden"}`}
           >
             {service === "blob" || service === "files" ? (
-              <SftpPanel
+              <ObjectBrowser
                 hostId={tab.hostId}
                 root={azureServiceRoot(service)}
-                title={`${host.name} · ${t(AZURE_SERVICE_LABEL[service])}`}
+                title={t(AZURE_SERVICE_LABEL[service])}
+                rootChild={service === "files" ? "share" : "container"}
+                // Snapshots, tiers and properties are Blob's alone — a file share has none of them,
+                // and a toolbar that offered them there would be offering a 400.
+                blobFeatures={service === "blob"}
+                linkFor={(entry) => blobUrl(spec, service, entry.path)}
               />
             ) : service === "queues" ? (
               <QueuePanel hostId={tab.hostId} />
@@ -104,6 +113,21 @@ export function AzureAccountPanel({ tab }: { tab: RemoteAzureTab }) {
       </div>
     </div>
   );
+}
+
+/**
+ * The address of one entry, for the browser's Copy URL.
+ *
+ * The path the browser holds is `/blob/container/key` — the service in front, which is this panel's
+ * doing (see `remotes::cloud::account`). The URL is the service's own endpoint with that first
+ * segment taken back off, and it is the thing people actually paste into a ticket, a `curl` or an
+ * SDK. It is not a credential: reaching it still needs the key or a SAS.
+ */
+function blobUrl(spec: RemoteHostSpec, service: AzureService, path: string): string {
+  const base = azureEndpoint(spec, ENDPOINT_OF[service]).replace(/\/+$/, "");
+  const inner = path.replace(/^\/+/, "").split("/").slice(1).join("/");
+  if (!base || !inner) return path;
+  return `${base}/${inner}`;
 }
 
 /** Which endpoint a page talks to. The service names differ from the rail's ids by a plural — the

@@ -28,6 +28,7 @@
 //! for that, and the services within a cloud share it.
 
 pub mod account;
+pub mod arm;
 pub mod aws;
 pub mod azure;
 pub mod blob;
@@ -78,7 +79,10 @@ pub async fn check(host_id: &str, spec: &super::RemoteHostSpec) -> Result<usize,
     // `/blob` rather than `/` for Azure: the account root is a synthesised listing of the two file
     // services (see [`account`]), which would answer "2" without a single request leaving here.
     let root = if spec.kind.is_azure() { "/blob" } else { "/" };
-    Ok(super::files::list(host_id, spec, root).await?.entries.len())
+    Ok(super::files::list(host_id, spec, root, &super::files::ListPage::default())
+        .await?
+        .entries
+        .len())
 }
 
 /// Where a browser path points inside an account.
@@ -173,6 +177,7 @@ pub fn container_row(name: &str, modified: u64) -> super::files::RemoteFile {
         // Deliberately blank rather than a plausible `drwxr-xr-x`. There are no POSIX modes here,
         // and inventing one would put a number in a column that no operation respects.
         permissions: String::new(),
+        ..Default::default()
     }
 }
 
@@ -189,6 +194,7 @@ pub fn folder_row(at: &Location, key: &str) -> super::files::RemoteFile {
         // share a beginning. 0 is the contract's "the server didn't say".
         modified: 0,
         permissions: String::new(),
+        ..Default::default()
     }
 }
 
@@ -203,6 +209,7 @@ pub fn object_row(at: &Location, key: &str, size: u64, modified: u64) -> super::
         size,
         modified,
         permissions: String::new(),
+        ..Default::default()
     }
 }
 

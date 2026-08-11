@@ -13,7 +13,9 @@
 
 use tokio::io::AsyncWriteExt as _;
 
-use super::super::files::{plan_upload, pump, sort_entries, Planned, RemoteFile, RemoteListing};
+use super::super::files::{
+    plan_upload, pump, sort_entries, ListPage, Planned, RemoteFile, RemoteListing, PAGE,
+};
 use super::super::RemoteHostSpec;
 use super::aws::{self, Body, Credentials};
 use super::{
@@ -23,8 +25,6 @@ use super::{
 /// How many keys one listing request asks for.
 ///
 /// The service's own maximum. Fewer requests for a large prefix, and the browser shows the whole
-/// listing at once anyway — there is no paging in the UI to align a smaller page size with.
-const PAGE: usize = 1000;
 
 /// Nothing is held open, so there is nothing to close. See the module comment.
 pub async fn close(_host_id: &str) {}
@@ -38,17 +38,20 @@ pub async fn list(
     host_id: &str,
     spec: &RemoteHostSpec,
     path: &str,
+    page: &ListPage,
 ) -> Result<RemoteListing, String> {
     let at = Location::parse(path);
     let creds = aws::credentials(host_id, spec).await?;
 
-    let mut entries = if at.is_account_root() {
-        buckets(spec, &creds).await?
+    let (mut entries, next) = if at.is_account_root() {
+        // `ListBuckets` has no paging and no prefix of its own — an account's buckets are tens, not
+        // millions — so the prefix is applied here and there is never a second page.
+        (buckets(spec, &creds, page).await?, String::new())
     } else {
-        objects(spec, &creds, &at).await?
+        objects(spec, &creds, &at, page).await?
     };
     sort_entries(&mut entries);
-    Ok(RemoteListing { path: at.path(), entries })
+    Ok(RemoteListing { path: at.path(), entries, next })
 }
 
 /// One object, or one whole prefix, from the bucket to here.
@@ -203,7 +206,13 @@ pub async fn remove(
 ) -> Result<(), String> {
     let at = Location::parse(path);
     if at.container.is_empty() {
-        return Err("Deleting a bucket isn't something this browser does.".into());
+        // See `blob::remove` — the ordinary delete never takes a whole top-level namespace, and the
+        // verb that does asks for the name first.
+        return Err(
+            "That's a bucket, not an object. Deleting one goes through its own confirmation — the \
+             browser asks you to type the name."
+                .into(),
+        );
     }
     let creds = aws::credentials(host_id, spec).await?;
 
@@ -211,7 +220,8 @@ pub async fn remove(
         // A prefix is not a thing that can be deleted; what can is the marker, and only once
         // nothing is under it. Checking first turns "the folder is still there" — which is what
         // deleting only the marker looks like — into a sentence saying why.
-        let listing = objects(spec, &creds, &at).await?;
+        // One page is enough: the question is "is anything under here", not "how much".
+        let (listing, _) = objects(spec, &creds, &at, &ListPage::default()).await?;
         if !listing.is_empty() {
             return Err(format!(
                 "\"{}\" still has {} item(s) in it. Object storage has no recursive delete here: \
@@ -299,7 +309,11 @@ pub async fn rename(
 // ---------------------------------------------------------------------------
 
 /// The account's buckets, as folders.
-async fn buckets(spec: &RemoteHostSpec, creds: &Credentials) -> Result<Vec<RemoteFile>, String> {
+async fn buckets(
+    spec: &RemoteHostSpec,
+    creds: &Credentials,
+    page: &ListPage,
+) -> Result<Vec<RemoteFile>, String> {
     let url = aws::url(spec, "", "")?;
     let response = aws::send(spec, creds, "GET", &url, &[], Body::Empty).await?;
     if !response.status().is_success() {
@@ -307,71 +321,73 @@ async fn buckets(spec: &RemoteHostSpec, creds: &Credentials) -> Result<Vec<Remot
     }
     let body = response.text().await.map_err(|e| format!("Couldn't read the bucket list: {e}"))?;
 
+    let filter = page.prefix.trim().to_lowercase();
     let mut rows = Vec::new();
     for bucket in elements(&body, "Bucket") {
         let Some(name) = super::xml_text(&bucket, "Name") else { continue };
+        if !filter.is_empty() && !name.to_lowercase().starts_with(&filter) {
+            continue;
+        }
         let created = super::xml_text(&bucket, "CreationDate").unwrap_or_default();
         rows.push(container_row(&name, iso8601_seconds(&created)));
     }
     Ok(rows)
 }
 
-/// One page at a time until the service says there are no more.
+/// One page, and the token the next one starts from.
 async fn objects(
     spec: &RemoteHostSpec,
     creds: &Credentials,
     at: &Location,
-) -> Result<Vec<RemoteFile>, String> {
-    let prefix = at.prefix();
+    page: &ListPage,
+) -> Result<(Vec<RemoteFile>, String), String> {
+    let folder = at.prefix();
+    // The search narrows *within* this folder, so it extends the prefix rather than replacing it.
+    let prefix = format!("{folder}{}", page.prefix.trim());
     let mut rows = Vec::new();
-    let mut token = String::new();
 
-    loop {
-        let mut url = aws::url(spec, &at.container, "")?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("list-type", "2");
-            // The delimiter is what turns a flat keyspace into one level of a tree: everything
-            // sharing a prefix up to the next `/` collapses into one `CommonPrefixes` entry
-            // instead of arriving as a thousand keys the browser would have to group itself.
-            query.append_pair("delimiter", "/");
-            query.append_pair("max-keys", &PAGE.to_string());
-            if !prefix.is_empty() {
-                query.append_pair("prefix", &prefix);
-            }
-            if !token.is_empty() {
-                query.append_pair("continuation-token", &token);
-            }
+    let mut url = aws::url(spec, &at.container, "")?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("list-type", "2");
+        // The delimiter is what turns a flat keyspace into one level of a tree: everything sharing
+        // a prefix up to the next `/` collapses into one `CommonPrefixes` entry instead of arriving
+        // as a thousand keys the browser would have to group itself.
+        query.append_pair("delimiter", "/");
+        query.append_pair("max-keys", &PAGE.to_string());
+        if !prefix.is_empty() {
+            query.append_pair("prefix", &prefix);
         }
-
-        let response = aws::send(spec, creds, "GET", &url, &[], Body::Empty).await?;
-        if !response.status().is_success() {
-            return Err(super::explain(&format!("list {}", at.path()), response).await);
-        }
-        let body = response.text().await.map_err(|e| format!("Couldn't read the listing: {e}"))?;
-
-        for folder in elements(&body, "CommonPrefixes") {
-            if let Some(key) = super::xml_text(&folder, "Prefix") {
-                rows.push(folder_row(at, &key));
-            }
-        }
-        for object in elements(&body, "Contents") {
-            let Some(key) = super::xml_text(&object, "Key") else { continue };
-            if is_own_marker(&key, &prefix) {
-                continue;
-            }
-            let size = super::xml_text(&object, "Size").and_then(|s| s.parse().ok()).unwrap_or(0);
-            let modified = super::xml_text(&object, "LastModified").unwrap_or_default();
-            rows.push(object_row(at, &key, size, iso8601_seconds(&modified)));
-        }
-
-        // `IsTruncated` and a token, or we have the whole listing.
-        match super::xml_text(&body, "NextContinuationToken") {
-            Some(next) if !next.is_empty() => token = next,
-            _ => break,
+        if !page.marker.is_empty() {
+            query.append_pair("continuation-token", &page.marker);
         }
     }
-    Ok(rows)
+
+    let response = aws::send(spec, creds, "GET", &url, &[], Body::Empty).await?;
+    if !response.status().is_success() {
+        return Err(super::explain(&format!("list {}", at.path()), response).await);
+    }
+    let body = response.text().await.map_err(|e| format!("Couldn't read the listing: {e}"))?;
+
+    for entry in elements(&body, "CommonPrefixes") {
+        if let Some(key) = super::xml_text(&entry, "Prefix") {
+            rows.push(folder_row(at, &key));
+        }
+    }
+    for object in elements(&body, "Contents") {
+        let Some(key) = super::xml_text(&object, "Key") else { continue };
+        // Against the folder's own prefix, not the searched one: the marker object belongs to the
+        // directory being listed, and a search that happened to match it should still hide it.
+        if is_own_marker(&key, &folder) {
+            continue;
+        }
+        let size = super::xml_text(&object, "Size").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let modified = super::xml_text(&object, "LastModified").unwrap_or_default();
+        rows.push(object_row(at, &key, size, iso8601_seconds(&modified)));
+    }
+
+    // `IsTruncated` and a token, or this was the whole listing.
+    Ok((rows, super::xml_text(&body, "NextContinuationToken").unwrap_or_default()))
 }
 
 /// Everything under `remote_path`, flattened into one file per object.
@@ -572,5 +588,31 @@ mod tests {
         let body = "<Contents><Key>a &amp; b/c&lt;d&gt;.txt</Key><Size>1</Size></Contents>";
         let key = super::super::xml_text(&elements(body, "Contents")[0], "Key").unwrap();
         assert_eq!(key, "a & b/c<d>.txt");
+    }
+}
+
+/// Deletes a bucket.
+///
+/// **Unlike Azure's container delete, this one is not recursive and cannot be.** S3 refuses to
+/// delete a bucket that still has objects in it, and that refusal is the service's own — so this is
+/// the rare destructive verb where the far side, not this browser, is the thing standing between a
+/// click and a mistake. The typed confirmation in front of it is still worth having: a bucket name
+/// is global to AWS, and deleting one gives it back to whoever asks for it next.
+pub async fn remove_bucket(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<(), String> {
+    let at = Location::parse(path);
+    if at.container.is_empty() {
+        return Err("Which bucket?".into());
+    }
+    if !at.key.is_empty() {
+        return Err("That is an object inside a bucket, not the bucket itself.".into());
+    }
+    let creds = aws::credentials(host_id, spec).await?;
+
+    let url = aws::url(spec, &at.container, "")?;
+    let response = aws::send(spec, &creds, "DELETE", &url, &[], Body::Empty).await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(super::explain(&format!("delete the bucket {}", at.container), response).await)
     }
 }

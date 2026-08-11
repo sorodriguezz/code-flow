@@ -57,6 +57,19 @@ export type DbModal =
       primaryKeys?: Set<string>;
       foreignKeys?: Map<string, DbForeignKey>;
     }
+  /**
+   * One document, edited as a document.
+   *
+   * Confirming stages a replacement (or an insert, when cloning) — it does not write. See
+   * `DocumentEditorModal` for why a document can't be edited as a row of cells.
+   */
+  | {
+      kind: "document";
+      title: string;
+      text: string;
+      mode: "edit" | "clone";
+      onSave: (text: string) => void;
+    }
   /** The statements a pending batch of edits would run, before it runs them. */
   | { kind: "preview"; title: string; statements: string[]; onConfirm: () => void };
 

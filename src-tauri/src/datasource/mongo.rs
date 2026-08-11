@@ -26,7 +26,7 @@ use serde::Deserialize;
 use super::{
     describe_db_error, read_only_refusal, DbColumn, DbColumnInfo, DbConnectionConfig,
     DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbEditResult, DbExecContext, DbExecuteResult,
-    DbKind, DbNode, DbNodeKind, DbNodeRef, DbObjectInfo, DbRowEdit, DbRowEditKind,
+    DbKind, DbNode, DbNodeKind, DbNodeRef, DbObjectInfo, DbQueryOptions, DbRowEdit, DbRowEditKind,
     DbSchemaDiagram, DbServerInfo,
     DbSslMode, DbStatementResult, DbTableDataRequest,
 };
@@ -626,26 +626,56 @@ impl MongoSession {
         } else {
             parse_relaxed_document(&request.filter)?
         };
+        let options = &request.options;
+
+        // What the user's own `skip` and `limit` do to paging. `skip` moves the whole window, so it
+        // is added to the page's offset; `limit` is a ceiling on the *whole* query, so the page can
+        // only ask for what is left of it — and a page past the ceiling asks for nothing rather
+        // than for the server's default batch.
+        let skip = number_option(&options.skip, "Skip")?.unwrap_or(0);
+        let ceiling = number_option(&options.limit, "Limit")?;
+        let offset = request.offset as i64;
+        let page = match ceiling {
+            Some(total) if total > 0 => (total - offset).clamp(0, request.limit as i64),
+            _ => request.limit as i64,
+        };
+        // Past the ceiling there is nothing to ask for — and asking anyway would be worse than a
+        // wasted round trip: `find` reads a `limit` of 0 as *no limit*, so the page beyond a limit
+        // of 40 would come back as the whole collection.
+        if page == 0 {
+            let mut result = DbStatementResult::empty(&format!("db.{collection}.find(…)"));
+            fill_from_documents(&mut result, Vec::new());
+            return Ok(result);
+        }
 
         let mut command = doc! {
             "find": collection,
             "filter": filter,
-            "skip": request.offset as i64,
-            "limit": request.limit as i64,
-            "batchSize": request.limit as i64,
+            "skip": skip + offset,
+            "limit": page,
+            "batchSize": page,
         };
         // A sort document keeps its key order in BSON, so the keys the grid collected sort in the
-        // order it collected them — the same meaning the SQL engines give an `ORDER BY` list.
+        // order it collected them — the same meaning the SQL engines give an `ORDER BY` list. A
+        // sort typed into the options wins: it is the more specific instruction, and it can say
+        // things a column header cannot (`{"address.city": 1}`).
         let mut sort = doc! {};
         for key in request.sort.iter().filter(|key| !key.column.is_empty()) {
             sort.insert(key.column.clone(), if key.descending { -1 } else { 1 });
         }
+        if !options.sort.trim().is_empty() {
+            sort = parse_relaxed_document(&options.sort)?;
+        }
         if !sort.is_empty() {
             command.insert("sort", sort);
         }
+        if !options.projection.trim().is_empty() {
+            command.insert("projection", parse_relaxed_document(&options.projection)?);
+        }
+        apply_shared_options(&mut command, options)?;
 
         let (documents, truncated) = self
-            .cursor_command(&database, command, Some(request.limit as usize))
+            .cursor_command(&database, command, Some(page as usize))
             .await?;
         let mut result = DbStatementResult::empty(&format!("db.{collection}.find(…)"));
         result.truncated = truncated;
@@ -653,7 +683,12 @@ impl MongoSession {
         Ok(result)
     }
 
-    pub async fn row_count(&self, node: &DbNodeRef, filter: &str) -> Result<i64, String> {
+    pub async fn row_count(
+        &self,
+        node: &DbNodeRef,
+        filter: &str,
+        options: &DbQueryOptions,
+    ) -> Result<i64, String> {
         let database = node.db().unwrap_or(&self.database).to_string();
         let collection = node.name()?;
         let query = if filter.trim().is_empty() {
@@ -661,9 +696,17 @@ impl MongoSession {
         } else {
             parse_relaxed_document(filter)?
         };
-        let answer = self
-            .command(&database, doc! { "count": collection, "query": query })
-            .await?;
+        let mut command = doc! { "count": collection, "query": query };
+        // `count` takes the same skip and limit a `find` does and answers with what the find would
+        // have returned — so the pager's total agrees with the pages it can actually turn to.
+        if let Some(skip) = number_option(&options.skip, "Skip")? {
+            command.insert("skip", skip);
+        }
+        if let Some(limit) = number_option(&options.limit, "Limit")? {
+            command.insert("limit", limit);
+        }
+        apply_shared_options(&mut command, options)?;
+        let answer = self.command(&database, command).await?;
         Ok(answer
             .get_i64("n")
             .or_else(|_| answer.get_i32("n").map(i64::from))
@@ -849,6 +892,48 @@ fn bson_type_name(value: &Bson) -> &'static str {
         Bson::MinKey => "minKey",
         Bson::DbPointer(_) => "dbPointer",
     }
+}
+
+/// The options that mean the same thing to `find` and to `count`: which index, how strings compare,
+/// and how long the server may spend.
+///
+/// Shared so the pager's total is counted under exactly the rules the page was read under — a
+/// collation the count ignored would make it disagree with the documents on screen for every
+/// accent-insensitive filter.
+fn apply_shared_options(command: &mut Document, options: &DbQueryOptions) -> Result<(), String> {
+    if !options.collation.trim().is_empty() {
+        command.insert("collation", parse_relaxed_document(&options.collation)?);
+    }
+    if !options.hint.trim().is_empty() {
+        // Either a key pattern or an index's name — the two forms the server itself accepts, and
+        // both of what a user has in hand: `{email: 1}` from the index list, `"email_1"` from a
+        // colleague's message.
+        let hint = options.hint.trim();
+        if hint.starts_with('{') {
+            command.insert("hint", parse_relaxed_document(hint)?);
+        } else {
+            command.insert("hint", unquote(hint));
+        }
+    }
+    if let Some(max_time) = number_option(&options.max_time_ms, "Max time MS")? {
+        command.insert("maxTimeMS", max_time);
+    }
+    Ok(())
+}
+
+/// A number typed into an option box, or `None` for a box left empty.
+///
+/// Empty and zero are kept apart on purpose: `limit: 0` is Mongo's own spelling of "no limit", so a
+/// blank box that parsed as zero would silently mean something the user did not write.
+fn number_option(value: &str, label: &str) -> Result<Option<i64>, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    trimmed
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|_| format!("{label} has to be a whole number — `{trimmed}` isn't one."))
 }
 
 /// The number of documents a write touched, from whichever field the command reports it in.
@@ -1750,6 +1835,38 @@ fn edit_command(collection: &str, edit: &DbRowEdit) -> Result<Document, String> 
         }
         Ok(filter)
     };
+
+    // A whole document was edited as a document — see `DbRowEdit::document`. It replaces the cell
+    // list entirely rather than being merged with it: the two describe the same write, and a
+    // `$set` layered on top of a replacement would apply changes the user already made by hand.
+    if let Some(text) = edit.document.as_deref() {
+        let document = parse_relaxed_document(text)?;
+        return match edit.kind {
+            DbRowEditKind::Insert => Ok(doc! { "insert": collection, "documents": [document] }),
+            DbRowEditKind::Update => {
+                // A replacement, not an update: no `$set`, so a field the user deleted in the
+                // editor is deleted in the collection. That is what editing a document *as* a
+                // document means, and it is why the panel shows the command before running it.
+                if document.keys().any(|key| key.starts_with('$')) {
+                    return Err(
+                        "A replacement document can't start its fields with `$` — that would be \
+                         read as update operators. Use the console for an operator update."
+                            .to_string(),
+                    );
+                }
+                Ok(doc! {
+                    "update": collection,
+                    "updates": [doc! { "q": identity(&edit.keys)?, "u": document, "multi": false }],
+                })
+            }
+            // Nothing to send: a delete is identified by its keys, and the document text would only
+            // be the same information twice.
+            DbRowEditKind::Delete => Ok(doc! {
+                "delete": collection,
+                "deletes": [doc! { "q": identity(&edit.keys)?, "limit": 1 }],
+            }),
+        };
+    }
 
     match edit.kind {
         DbRowEditKind::Insert => {

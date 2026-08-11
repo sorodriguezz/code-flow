@@ -554,15 +554,20 @@ pub async fn remote_ping(db: State<'_, Db>, id: String) -> Result<Option<u32>, S
 // Files
 // ---------------------------------------------------------------------------
 
-/// Lists a directory on the far side. An empty `path` means the login directory.
+/// Lists one page of a directory on the far side. An empty `path` means the login directory.
+///
+/// `page` carries the prefix and the continuation marker. Omitting it lists from the beginning with
+/// no filter, which is what every caller that is not the object browser wants.
 #[tauri::command]
 pub async fn remote_list_files(
     db: State<'_, Db>,
     host_id: String,
     path: String,
+    page: Option<remotes::files::ListPage>,
 ) -> Result<remotes::files::RemoteListing, String> {
     let (row, spec) = load(&db, &host_id)?;
-    let outcome = remotes::files::list(&host_id, &spec, &path).await;
+    let page = page.unwrap_or_default();
+    let outcome = remotes::files::list(&host_id, &spec, &path, &page).await;
     // Only the *first* listing of a session is logged — every directory the user clicks into would
     // otherwise be a row, and the interesting event is whether the file session opened at all.
     if outcome.is_err() || path.trim().is_empty() {
@@ -738,4 +743,158 @@ pub fn remote_update_snippet(db: State<Db>, snippet: RemoteSnippet) -> Result<()
 pub fn remote_delete_snippet(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     remote_queries::delete_snippet(&conn, &id).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Blob storage beyond the seven verbs
+// ---------------------------------------------------------------------------
+
+/// Which module answers for a path, given the host's kind.
+///
+/// The five commands below are Azure Blob's alone — S3 has no snapshots, SFTP has no access tier —
+/// so rather than five copies of the same refusal they share one gate, and it names the kind that
+/// arrived instead of failing somewhere deeper with a signature error.
+fn blob_path(spec: &RemoteHostSpec, path: &str) -> Result<String, String> {
+    if !spec.kind.is_azure() {
+        return Err(spec.kind.refuses("do this"));
+    }
+    remotes::cloud::account::blob_leg(path)
+}
+
+/// Deletes a whole top-level namespace and everything in it — a container, a share or a bucket.
+///
+/// **One command for the three names because it is one idea**: the thing the root of a store holds,
+/// which every service spells differently and which none of them lets you delete by accident. Its
+/// own command rather than a flag on `remote_remove_file`, because the difference is not a
+/// parameter: the ordinary delete is what a selected row and a keypress reach, and this takes
+/// everything under a name with it. The UI asks the user to type that name first; the split here is
+/// what makes that more than a UI convention.
+///
+/// The two services do differ in one way worth knowing: Azure's delete is recursive and takes every
+/// blob with it, while S3 refuses a bucket that still has objects in it. Neither is emulated here —
+/// each service's own rule is the one that applies.
+#[tauri::command]
+pub async fn remote_delete_container(
+    db: State<'_, Db>,
+    host_id: String,
+    path: String,
+) -> Result<(), String> {
+    let (row, spec) = load(&db, &host_id)?;
+    let outcome = if spec.kind.is_azure() {
+        remotes::cloud::account::remove_top(&host_id, &spec, &path).await
+    } else if spec.kind == remotes::RemoteKind::S3 {
+        remotes::cloud::s3::remove_bucket(&host_id, &spec, &path).await
+    } else {
+        Err(spec.kind.refuses("delete a container"))
+    };
+    // Logged whatever happens, unlike an ordinary delete: this is the one irreversible thing the
+    // browser can do, and "who removed that container" is a question that gets asked later.
+    log(&db, &row, "files", &format!("delete container {path}"), outcome.as_ref().err().map(String::as_str).unwrap_or_default());
+    outcome
+}
+
+/// Copies a blob to another path, server-side — the bytes never come through this machine.
+#[tauri::command]
+pub async fn remote_blob_copy(
+    db: State<'_, Db>,
+    host_id: String,
+    from: String,
+    to: String,
+) -> Result<(), String> {
+    let (_, spec) = load(&db, &host_id)?;
+    let from = blob_path(&spec, &from)?;
+    let to = blob_path(&spec, &to)?;
+    remotes::cloud::blob::copy(&host_id, &spec, &from, &to).await
+}
+
+/// Everything the service will say about one blob or container.
+#[tauri::command]
+pub async fn remote_blob_properties(
+    db: State<'_, Db>,
+    host_id: String,
+    path: String,
+) -> Result<remotes::cloud::blob::Properties, String> {
+    let (_, spec) = load(&db, &host_id)?;
+    let inner = blob_path(&spec, &path)?;
+    let mut properties = remotes::cloud::blob::properties(&host_id, &spec, &inner).await?;
+    // Back into the browser's own vocabulary, where the service is the first segment.
+    properties.path = path;
+    Ok(properties)
+}
+
+/// Freezes the blob as it is now. Returns the stamp that identifies the snapshot.
+#[tauri::command]
+pub async fn remote_blob_snapshot(
+    db: State<'_, Db>,
+    host_id: String,
+    path: String,
+) -> Result<String, String> {
+    let (_, spec) = load(&db, &host_id)?;
+    let inner = blob_path(&spec, &path)?;
+    remotes::cloud::blob::snapshot(&host_id, &spec, &inner).await
+}
+
+/// Every snapshot of one blob, newest first.
+#[tauri::command]
+pub async fn remote_blob_snapshots(
+    db: State<'_, Db>,
+    host_id: String,
+    path: String,
+) -> Result<Vec<remotes::cloud::blob::Snapshot>, String> {
+    let (_, spec) = load(&db, &host_id)?;
+    let inner = blob_path(&spec, &path)?;
+    remotes::cloud::blob::snapshots(&host_id, &spec, &inner).await
+}
+
+/// Deletes one snapshot, leaving the blob and the rest of its history alone.
+#[tauri::command]
+pub async fn remote_blob_delete_snapshot(
+    db: State<'_, Db>,
+    host_id: String,
+    path: String,
+    stamp: String,
+) -> Result<(), String> {
+    let (_, spec) = load(&db, &host_id)?;
+    let inner = blob_path(&spec, &path)?;
+    remotes::cloud::blob::delete_snapshot(&host_id, &spec, &inner, &stamp).await
+}
+
+/// Puts a snapshot's bytes back over the blob it came from.
+#[tauri::command]
+pub async fn remote_blob_restore_snapshot(
+    db: State<'_, Db>,
+    host_id: String,
+    path: String,
+    stamp: String,
+) -> Result<(), String> {
+    let (_, spec) = load(&db, &host_id)?;
+    let inner = blob_path(&spec, &path)?;
+    remotes::cloud::blob::restore_snapshot(&host_id, &spec, &inner, &stamp).await
+}
+
+// ---------------------------------------------------------------------------
+// Signing in with a Microsoft account
+// ---------------------------------------------------------------------------
+
+/// One storage account the signed-in identity can see, ready to become a host row.
+#[derive(serde::Serialize)]
+pub struct DiscoveredHost {
+    pub account: remotes::cloud::arm::DiscoveredAccount,
+    /// The row this would create, so the picker can show exactly what it is about to save and the
+    /// caller can hand it straight to `remote_create_host` without rebuilding it.
+    pub spec: RemoteHostSpec,
+}
+
+/// Every storage account the Azure CLI's session can reach, across every enabled subscription.
+///
+/// No key is fetched and none is stored: the rows come back configured for Entra, so the identity
+/// that listed the accounts is the identity that will read them. See [`remotes::cloud::arm`] for why
+/// the sign-in is the CLI's rather than one of our own.
+#[tauri::command]
+pub async fn remote_discover_azure(tenant: String) -> Result<Vec<DiscoveredHost>, String> {
+    let accounts = remotes::cloud::arm::discover(tenant.trim()).await?;
+    Ok(accounts
+        .into_iter()
+        .map(|account| DiscoveredHost { spec: account.spec(), account })
+        .collect())
 }

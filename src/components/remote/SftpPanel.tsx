@@ -16,9 +16,11 @@ import {
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { TransferBar, formatSize, joinRemote, parentRemote } from "./remoteChrome";
 import { useRemoteStore } from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
+import { promptAction } from "../../state/promptStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { onRemoteTransfer, type RemoteTransferEvent } from "../../lib/tauri/events";
@@ -318,35 +320,6 @@ export function SftpPanel({ hostId, root = "", title }: SftpPanelProps) {
   );
 }
 
-/**
- * One bar for the whole transfer.
- *
- * The count is only shown for more than one file: on a single file "1 of 1" is noise, and on a
- * folder it is the only thing that says how much is left to start.
- */
-function TransferBar({ progress }: { progress: RemoteTransferEvent }) {
-  const percent = progress.total > 0 ? Math.min(100, (progress.done / progress.total) * 100) : 0;
-  return (
-    <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-1.5">
-      <div className="flex items-center gap-2 text-[11px] text-[var(--cf-text-muted)]">
-        <span className="min-w-0 flex-1 truncate font-mono">{progress.name}</span>
-        {progress.files > 1 && (
-          <span className="shrink-0 tabular-nums">
-            {progress.file_index}/{progress.files}
-          </span>
-        )}
-        <span className="shrink-0 tabular-nums">{Math.round(percent)}%</span>
-      </div>
-      <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.08]">
-        <div
-          className="h-full rounded-full bg-[var(--cf-accent)] transition-[width] duration-150"
-          style={{ width: `${percent}%` }}
-        />
-      </div>
-    </div>
-  );
-}
-
 function TransferButton({
   icon: Icon,
   label,
@@ -438,10 +411,11 @@ function FilePane({
         {onMakeDir && (
           <button
             type="button"
-            onClick={() => {
-              const name = window.prompt(t("remote.sftpNewFolder"));
-              if (name?.trim()) onMakeDir(name.trim());
-            }}
+            onClick={() =>
+              void promptAction(t("remote.sftpNewFolder"), {
+                confirmLabel: t("common.create"),
+              }).then((name) => name && onMakeDir(name))
+            }
             title={t("remote.sftpNewFolder")}
             aria-label={t("remote.sftpNewFolder")}
             className="shrink-0 rounded p-0.5 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
@@ -548,8 +522,10 @@ function FilePane({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      const name = window.prompt(t("remote.sftpRename"), entry.name);
-                      if (name?.trim() && name.trim() !== entry.name) onRename(entry, name.trim());
+                      void promptAction(t("remote.sftpRename"), {
+                        initial: entry.name,
+                        confirmLabel: t("remote.objRenameConfirm"),
+                      }).then((name) => name && name !== entry.name && onRename(entry, name));
                     }}
                     aria-label={t("remote.sftpRename")}
                     title={t("remote.sftpRename")}
@@ -581,17 +557,6 @@ function FilePane({
   );
 }
 
-/** Remote paths are always `/`-separated, even when the server is Windows. */
-function joinRemote(dir: string, name: string): string {
-  return dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
-}
-
-function parentRemote(path: string): string {
-  const trimmed = path.replace(/\/+$/, "");
-  const cut = trimmed.lastIndexOf("/");
-  return cut <= 0 ? "/" : trimmed.slice(0, cut);
-}
-
 /** Local paths use whichever separator the listing came back with, so this works on both. */
 function joinLocal(dir: string, name: string): string {
   const sep = dir.includes("\\") && !dir.includes("/") ? "\\" : "/";
@@ -609,14 +574,3 @@ function parentLocal(path: string): string {
   return /^[a-z]:$/i.test(parent) ? `${parent}\\` : parent;
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes / 1024;
-  let unit = 0;
-  while (value >= 1024 && unit < units.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
-}

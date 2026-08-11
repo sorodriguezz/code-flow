@@ -71,6 +71,35 @@ fn split(path: &str) -> Result<(Leg, String), String> {
     Ok((leg, format!("/{rest}")))
 }
 
+/// The blob-service path inside a browser path, for the operations only Blob has.
+///
+/// Snapshots, access tiers and public access are not things a file share has, so the commands that
+/// use them refuse a `/files/…` path here rather than sending a request the service would answer
+/// with something unrelated.
+pub fn blob_leg(path: &str) -> Result<String, String> {
+    match split(path)? {
+        (Leg::Blob, inner) => Ok(inner),
+        (Leg::Files, _) => Err(
+            "That's a file share. Snapshots, tiers and public access belong to blob containers — \
+             a share has none of them."
+                .into(),
+        ),
+    }
+}
+
+/// Deletes a container or a share — whichever the path's first segment names.
+///
+/// The one operation that reads the leg to pick between two *different* verbs rather than the same
+/// verb on two services: a container and a share are deleted by the same shape of request against
+/// different endpoints, and neither is reachable through the ordinary [`remove`].
+pub async fn remove_top(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<(), String> {
+    let (leg, inner) = split(path)?;
+    match leg {
+        Leg::Blob => super::blob::remove_container(host_id, spec, &inner).await,
+        Leg::Files => super::share::remove_share(host_id, spec, &inner).await,
+    }
+}
+
 /// Puts the service back on a path the transport answered with.
 fn rejoin(leg: Leg, path: &str) -> String {
     let inner = path.trim().trim_start_matches('/').trim_end_matches('/');
@@ -98,22 +127,24 @@ fn root() -> RemoteListing {
         // nothing here can justify.
         modified: 0,
         permissions: String::new(),
+        ..Default::default()
     };
-    RemoteListing { path: "/".to_string(), entries: vec![folder(BLOB), folder(FILES)] }
+    RemoteListing { path: "/".to_string(), entries: vec![folder(BLOB), folder(FILES)], ..Default::default() }
 }
 
 pub async fn list(
     host_id: &str,
     spec: &RemoteHostSpec,
     path: &str,
+    page: &super::super::files::ListPage,
 ) -> Result<RemoteListing, String> {
     if is_root(path) {
         return Ok(root());
     }
     let (leg, inner) = split(path)?;
     let mut listing = match leg {
-        Leg::Blob => super::blob::list(host_id, spec, &inner).await?,
-        Leg::Files => super::share::list(host_id, spec, &inner).await?,
+        Leg::Blob => super::blob::list(host_id, spec, &inner, page).await?,
+        Leg::Files => super::share::list(host_id, spec, &inner, page).await?,
     };
     listing.path = rejoin(leg, &listing.path);
     for entry in &mut listing.entries {

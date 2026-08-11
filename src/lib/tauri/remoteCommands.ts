@@ -19,6 +19,10 @@ import type {
   QueueSummary,
   TablePage,
   TableSummary,
+  ListPage,
+  BlobProperties,
+  BlobSnapshot,
+  DiscoveredHost,
 } from "../../types/remote";
 
 /**
@@ -229,10 +233,15 @@ export const remoteClearLogs = (workspaceId: string) =>
 
 // ---------- files (SFTP) ----------
 
-/** Lists a directory on the far side. An empty `path` means the login directory. The transport is
- *  still the system `ssh` — see `remotes::sftp` for how. */
-export const remoteListFiles = (hostId: string, path: string) =>
-  invoke<RemoteListing>("remote_list_files", { hostId, path });
+/**
+ * Lists *one page* of a directory on the far side. An empty `path` means the login directory.
+ *
+ * `page` carries a prefix filter and the continuation marker from a previous page; omitting it
+ * means "from the beginning, unfiltered", which is what every caller but the object browser wants.
+ * The service does the filtering wherever it has such a thing — see `remotes::files::ListPage`.
+ */
+export const remoteListFiles = (hostId: string, path: string, page?: ListPage) =>
+  invoke<RemoteListing>("remote_list_files", { hostId, path, page });
 
 /** The local half of the dual pane. Takes no host: it is this machine. */
 export const remoteListLocalFiles = (path: string) =>
@@ -266,6 +275,50 @@ export const remoteRenameFile = (hostId: string, from: string, to: string) =>
   invoke<void>("remote_rename_file", { hostId, from, to });
 
 export const remoteCloseFiles = (hostId: string) => invoke<void>("remote_close_files", { hostId });
+
+// ---------- blob storage beyond the seven verbs ----------
+
+/**
+ * Deletes a whole container or file share, and everything inside it.
+ *
+ * Its own command rather than a flag on `remoteRemoveFile`: the ordinary delete is what a selected
+ * row and a keypress reach, and this takes every blob under a name with it. The caller is expected
+ * to have made the user type that name.
+ */
+export const remoteDeleteContainer = (hostId: string, path: string) =>
+  invoke<void>("remote_delete_container", { hostId, path });
+
+/** Copies a blob server-side. Paste, in other words — the bytes never come through this machine. */
+export const remoteBlobCopy = (hostId: string, from: string, to: string) =>
+  invoke<void>("remote_blob_copy", { hostId, from, to });
+
+/** Everything the service will say about one blob or container, as name/value rows. */
+export const remoteBlobProperties = (hostId: string, path: string) =>
+  invoke<BlobProperties>("remote_blob_properties", { hostId, path });
+
+/** Freezes the blob as it is now; resolves to the stamp identifying the snapshot. */
+export const remoteBlobSnapshot = (hostId: string, path: string) =>
+  invoke<string>("remote_blob_snapshot", { hostId, path });
+
+export const remoteBlobSnapshots = (hostId: string, path: string) =>
+  invoke<BlobSnapshot[]>("remote_blob_snapshots", { hostId, path });
+
+export const remoteBlobDeleteSnapshot = (hostId: string, path: string, stamp: string) =>
+  invoke<void>("remote_blob_delete_snapshot", { hostId, path, stamp });
+
+/** Puts a snapshot's bytes back over the blob. A copy — Azure has no restore verb. */
+export const remoteBlobRestoreSnapshot = (hostId: string, path: string, stamp: string) =>
+  invoke<void>("remote_blob_restore_snapshot", { hostId, path, stamp });
+
+/**
+ * Every storage account the signed-in Microsoft account can reach, across every subscription.
+ *
+ * The session is the Azure CLI's (`az login`) — see `remotes::cloud::arm` for why it is borrowed
+ * rather than built. No key is fetched and none is stored: the rows come back set to Entra, so the
+ * identity that listed the accounts is the one that reads them.
+ */
+export const remoteDiscoverAzure = (tenant: string) =>
+  invoke<DiscoveredHost[]>("remote_discover_azure", { tenant });
 
 // ---------- ~/.ssh/config ----------
 

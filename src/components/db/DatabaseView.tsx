@@ -18,6 +18,7 @@ import { DbExplorer } from "./DbExplorer";
 import { SqlConsolePanel } from "./SqlConsolePanel";
 import { DataTabPanel } from "./DataTabPanel";
 import { DdlPanel } from "./DdlPanel";
+import { DocumentEditorModal } from "./DocumentEditorModal";
 import { DiagramPanel } from "./DiagramPanel";
 import { SchemaPanel } from "./SchemaPanel";
 import { ConnectionModal } from "./ConnectionModal";
@@ -131,6 +132,9 @@ export function DatabaseView() {
         />
       )}
       {modal?.kind === "cell" && <CellModal modal={modal} onClose={closeModal} />}
+      {modal?.kind === "document" && (
+        <DocumentEditorModal modal={modal} onClose={closeModal} />
+      )}
       {modal?.kind === "records" && <RecordsModal modal={modal} onClose={closeModal} />}
       {modal?.kind === "preview" && <PreviewModal modal={modal} onClose={closeModal} />}
     </>

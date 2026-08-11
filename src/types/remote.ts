@@ -473,11 +473,58 @@ export interface RemoteFile {
   modified: number;
   /** `drwxr-xr-x`, rendered by the backend. Empty on Windows, which has no such thing. */
   permissions: string;
+  /** `application/json`, `image/png`. Empty for anything that keeps no such thing — which is every
+   *  real filesystem, and why the browser draws the column only when a listing filled it. */
+  content_type: string;
+  /** `Hot`, `Cool`, `Archive`. Empty where the concept doesn't exist. */
+  tier: string;
+  /** `BlockBlob`, `PageBlob`, `AppendBlob`. A page blob is a VM disk and an append blob is a log;
+   *  neither takes the plain overwrite an upload does. */
+  blob_type: string;
+  /** `available`, `leased`, `broken`… A leased blob refuses writes with a 412 that names no lease. */
+  lease_state: string;
 }
 
 export interface RemoteListing {
   path: string;
   entries: RemoteFile[];
+  /** Where the next page starts, opaque. Empty means this was the whole directory — a store is not
+   *  a directory and reading one whole is how a container with a million blobs becomes a hang. */
+  next: string;
+}
+
+/** Which slice of a directory to fetch. Both halves are the service's job wherever it has one. */
+export interface ListPage {
+  prefix: string;
+  marker: string;
+}
+
+/** Everything the service will say about one blob or container. Pairs rather than a struct: the
+ *  fields differ by resource and by account feature, and the panel only draws name/value rows. */
+export interface BlobProperties {
+  path: string;
+  url: string;
+  rows: [string, string][];
+}
+
+/** One frozen copy of a blob. The stamp *is* the identifier. */
+export interface BlobSnapshot {
+  stamp: string;
+  size: number;
+  modified: number;
+}
+
+/** A storage account the signed-in Microsoft account can see, and the host row it would become. */
+export interface DiscoveredHost {
+  account: {
+    name: string;
+    subscription: string;
+    resource_group: string;
+    location: string;
+    blob_endpoint: string;
+    suffix: string;
+  };
+  spec: RemoteHostSpec;
 }
 
 /**

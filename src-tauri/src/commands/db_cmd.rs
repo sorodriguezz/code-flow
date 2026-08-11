@@ -13,8 +13,8 @@ use tauri::State;
 
 use crate::datasource::{
     filter_children, scope_to_current_database, DbConnectionConfig, DbEditResult, DbExecContext,
-    DbExecuteResult, DbForeignKey, DbNode, DbNodeKind, DbNodeRef, DbObjectInfo, DbRegistry,
-    DbRowEdit,
+    DbExecuteResult, DbForeignKey, DbNode, DbNodeKind, DbNodeRef, DbObjectInfo, DbQueryOptions,
+    DbRegistry, DbRowEdit,
     DbSchemaDiagram, DbSchemaGroup, DbServerInfo, DbStatementResult, DbTableDataRequest, Session,
 };
 use crate::db::datasource_queries as queries;
@@ -516,13 +516,17 @@ pub async fn db_row_count(
     connection_id: String,
     node: DbNodeRef,
     filter: String,
+    // The same options the page was read with — see `DbQueryOptions`. Optional rather than
+    // required, because every SQL engine's caller has nothing to put here.
+    options: Option<DbQueryOptions>,
     run_id: String,
 ) -> Result<i64, String> {
     let config = resolve_config(&db, &connection_id)?;
     let session = registry.session(&config, node.database.as_deref()).await?;
     let key = DbRegistry::session_key(&connection_id, node.database.as_deref());
+    let options = options.unwrap_or_default();
     registry
-        .run(&run_id, &session, &key, session.row_count(&node, &filter))
+        .run(&run_id, &session, &key, session.row_count(&node, &filter, &options))
         .await
 }
 

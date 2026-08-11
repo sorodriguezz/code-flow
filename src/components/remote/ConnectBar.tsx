@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AzureSignInModal } from "./AzureSignInModal";
 import { AlertTriangle, Cloud, CornerDownLeft, Save, TerminalSquare } from "lucide-react";
 import { useRemoteStore } from "../../state/remoteStore";
 import {
@@ -57,6 +58,7 @@ export function ConnectBar() {
   const [parsed, setParsed] = useState<ParsedCommand | null>(null);
   const [azure, setAzure] = useState<ParsedAzureConnection | null>(null);
   const [busy, setBusy] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
 
   // Debounced: the parse is an IPC round trip and this fires on every keystroke. 150ms is under
   // the threshold where the preview feels like it lags the typing.
@@ -172,6 +174,17 @@ export function ConnectBar() {
           {azure && <Cloud size={13} />}
           {azure ? t("remote.azAddAccount") : t("remote.connect")}
         </button>
+        {/* The other way in, and for most people the better one: rather than pasting a connection
+            string per account, sign in once and pick from what you already have access to. */}
+        <button
+          type="button"
+          onClick={() => setSigningIn(true)}
+          title={t("remote.azSignIn")}
+          aria-label={t("remote.azSignIn")}
+          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-md border border-[var(--cf-border)] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
+        >
+          <Cloud size={13} />
+        </button>
         {/* Absent for an account, not disabled: adding one already saves it, so a second button
             meaning "save" would be a button with nothing left to do. */}
         {!azure && (
@@ -190,6 +203,8 @@ export function ConnectBar() {
 
       {parsed && <ParsePreview parsed={parsed} />}
       {azure && <AzurePreview parsed={azure} />}
+
+      {signingIn && <AzureSignInModal onClose={() => setSigningIn(false)} />}
     </div>
   );
 }

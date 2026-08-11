@@ -404,6 +404,46 @@ export interface DbTableDataRequest {
   sort: DbSortKey[];
   /** A `WHERE` fragment (SQL) or a filter document (Mongo), exactly as typed. */
   filter: string;
+  /** The rest of the query, on the engines that have one. See `DbQueryOptions`. */
+  options: DbQueryOptions;
+}
+
+/**
+ * The parts of a MongoDB read that aren't the filter — the query bar's Options panel.
+ *
+ * Every field is the text as typed, parsed by the backend: `projection`, `sort` and `collation` are
+ * documents in the shell dialect, `hint` is either a document or an index name, and the numbers are
+ * strings because their boxes have to be allowed to be empty. Blank means "not set" and never "set
+ * to zero" — `limit: 0` is Mongo's own word for no limit, so the two cannot be the same value.
+ */
+export interface DbQueryOptions {
+  projection: string;
+  /** Wins over the grid's column-header sort: it is the more specific instruction, and it can say
+   * things a header cannot (`{"address.city": 1}`). */
+  sort: string;
+  collation: string;
+  hint: string;
+  /** Snake_case like every other field here: these cross the wire to serde as they are written. */
+  max_time_ms: string;
+  /** Skipped before paging — it moves the whole window rather than fighting with the pager. */
+  skip: string;
+  /** A ceiling on the whole query, across every page. */
+  limit: string;
+}
+
+export const EMPTY_QUERY_OPTIONS: DbQueryOptions = {
+  projection: "",
+  sort: "",
+  collation: "",
+  hint: "",
+  max_time_ms: "",
+  skip: "",
+  limit: "",
+};
+
+/** Whether any option was filled in — what decides if the Options panel shows a marker. */
+export function hasQueryOptions(options: DbQueryOptions): boolean {
+  return Object.values(options).some((value) => value.trim() !== "");
 }
 
 export type DbRowEditKind = "insert" | "update" | "delete";
@@ -421,6 +461,15 @@ export interface DbRowEdit {
   values: DbCell[];
   /** How to find the row again: the primary key, else every original value. Empty for an insert. */
   keys: DbCell[];
+  /**
+   * A whole document, in the shell dialect, standing in for `values`. MongoDB only.
+   *
+   * A cell list can say "set these fields to these strings" and nothing more, which is enough for a
+   * grid and not for a document: removing a field, reordering an array or nesting an object have no
+   * spelling as columns. The document views send the document itself and the driver replaces the
+   * stored one; `keys` still says which document.
+   */
+  document?: string;
 }
 
 export interface DbEditResult {

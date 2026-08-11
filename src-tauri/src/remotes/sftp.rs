@@ -147,13 +147,14 @@ pub async fn list(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<Re
                 modified: metadata.mtime.unwrap_or(0) as u64,
                 permissions: permissions(&metadata),
                 name,
+                ..Default::default()
             }
         })
         .collect();
 
     sort_entries(&mut entries);
 
-    Ok(RemoteListing { path: resolved, entries })
+    Ok(RemoteListing { path: resolved, entries, ..Default::default() })
 }
 
 /// One file or one whole directory, from the far side to here.

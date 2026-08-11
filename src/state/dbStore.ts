@@ -46,6 +46,7 @@ import { useWorkspaceStore } from "./workspaceStore";
 import {
   DEFAULT_MAX_ROWS,
   DEFAULT_PAGE_SIZE,
+  EMPTY_QUERY_OPTIONS,
   defaultConnectionConfig,
   engineInfo,
   type DbAiAnswer,
@@ -60,6 +61,7 @@ import {
   type DbNode,
   type DbNodeRef,
   type DbQueryHistoryEntry,
+  type DbQueryOptions,
   type DbRowEdit,
   type DbObjectInfo,
   type DbSchemaDiagram,
@@ -169,6 +171,14 @@ export interface DbDataTab {
    * on every keystroke. */
   filterDraft: string;
   /**
+   * The rest of the query, on the engines that have one — projection, collation, hint and the
+   * skip/limit ceiling. Empty strings throughout on every SQL engine, where the panel doesn't draw
+   * the boxes at all.
+   */
+  options: DbQueryOptions;
+  /** The options being typed, applied together with the filter — same split, same reason. */
+  optionsDraft: DbQueryOptions;
+  /**
    * The sort, in the order the columns were added to it.
    *
    * A list rather than one column and a direction, because "newest first, then by name" is an
@@ -201,6 +211,18 @@ export interface DbDataTab {
   deleted: number[];
   /** Rows staged for insertion, in the result's column order. */
   inserted: (string | null)[][];
+  /**
+   * Whole documents rewritten in the document editor, keyed by row index — MongoDB only.
+   *
+   * Kept apart from `pending` because it is a different write: `pending` is a `$set` of the fields
+   * that changed, and this is a *replacement*, which is the only way to say that a field was
+   * removed or an array reordered. A row that has both would be two writes describing the same
+   * document, so staging a document edit clears that row's cell edits and vice versa.
+   */
+  replaced: Record<number, string>;
+  /** Documents staged for insertion as text — what Clone produces, and what a new document typed
+   *  by hand produces. Alongside `inserted`, which is the grid's own column-shaped version. */
+  insertedDocs: string[];
   error: string | null;
 }
 
@@ -435,6 +457,14 @@ interface DbState {
   addRow: (tabId: string) => void;
   setInsertedCell: (tabId: string, row: number, column: string, value: string | null) => void;
   removeInsertedRow: (tabId: string, row: number) => void;
+  /** Stages a whole document in place of the one at `row`. `null` drops the staged rewrite and puts
+   *  the server's document back. MongoDB only — see `DbDataTab.replaced`. */
+  setDocument: (tabId: string, row: number, document: string | null) => void;
+  /** Stages a new document — Clone, or a document written from scratch. Returns nothing; the card
+   *  appears at the end of the page, tinted like every other staged insert. */
+  addDocument: (tabId: string, document: string) => void;
+  setInsertedDocument: (tabId: string, index: number, document: string) => void;
+  removeInsertedDocument: (tabId: string, index: number) => void;
   revertEdits: (tabId: string) => void;
   applyEdits: (tabId: string) => Promise<void>;
 
@@ -1472,6 +1502,8 @@ export const useDbStore = create<DbState>((set, get) => ({
       limit: DEFAULT_PAGE_SIZE,
       filter,
       filterDraft: filter,
+      options: EMPTY_QUERY_OPTIONS,
+      optionsDraft: EMPTY_QUERY_OPTIONS,
       sort: [],
       loading: false,
       runId: null,
@@ -1483,6 +1515,8 @@ export const useDbStore = create<DbState>((set, get) => ({
       pending: {},
       deleted: [],
       inserted: [],
+      replaced: {},
+      insertedDocs: [],
       error: null,
     });
     void get().loadData(id);
@@ -1598,6 +1632,8 @@ export const useDbStore = create<DbState>((set, get) => ({
       pending: {},
       deleted: [],
       inserted: [],
+      replaced: {},
+      insertedDocs: [],
     }));
     try {
       const result = await dbTableData(
@@ -1608,6 +1644,7 @@ export const useDbStore = create<DbState>((set, get) => ({
           limit: tab.limit,
           sort: tab.sort,
           filter: tab.filter,
+          options: tab.options,
         },
         runId,
       );
@@ -1636,7 +1673,7 @@ export const useDbStore = create<DbState>((set, get) => ({
       // user gives up and closes the tab.
       const countRunId = newRunId();
       patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, countRunId }));
-      void dbRowCount(tab.connectionId, tab.node, tab.filter, countRunId)
+      void dbRowCount(tab.connectionId, tab.node, tab.filter, tab.options, countRunId)
         .then((total) =>
           patchTab<DbDataTab>(set, tabId, "data", (current) => ({ ...current, total })),
         )
@@ -1726,12 +1763,54 @@ export const useDbStore = create<DbState>((set, get) => ({
     }));
   },
 
+  setDocument: (tabId, row, document) => {
+    patchTab<DbDataTab>(set, tabId, "data", (tab) => {
+      const replaced = { ...tab.replaced };
+      if (document === null) delete replaced[row];
+      else replaced[row] = document;
+      return {
+        ...tab,
+        replaced,
+        // The cell edits on this row would be a second write describing the same document, and the
+        // document the user just wrote by hand is the one they mean.
+        pending: Object.fromEntries(
+          Object.entries(tab.pending).filter(([key]) => Number(key.split(":")[0]) !== row),
+        ),
+      };
+    });
+  },
+
+  addDocument: (tabId, document) => {
+    patchTab<DbDataTab>(set, tabId, "data", (tab) => ({
+      ...tab,
+      insertedDocs: [...tab.insertedDocs, document],
+    }));
+  },
+
+  setInsertedDocument: (tabId, index, document) => {
+    patchTab<DbDataTab>(set, tabId, "data", (tab) => ({
+      ...tab,
+      insertedDocs: tab.insertedDocs.map((entry, position) =>
+        position === index ? document : entry,
+      ),
+    }));
+  },
+
+  removeInsertedDocument: (tabId, index) => {
+    patchTab<DbDataTab>(set, tabId, "data", (tab) => ({
+      ...tab,
+      insertedDocs: tab.insertedDocs.filter((_, position) => position !== index),
+    }));
+  },
+
   revertEdits: (tabId) => {
     patchTab<DbDataTab>(set, tabId, "data", (tab) => ({
       ...tab,
       pending: {},
       deleted: [],
       inserted: [],
+      replaced: {},
+      insertedDocs: [],
     }));
   },
 
@@ -2029,12 +2108,22 @@ export function buildEdits(tab: DbDataTab): DbRowEdit[] {
 
   const edits: DbRowEdit[] = [];
 
+  // A document rewritten as a whole replaces the stored one, keyed the same way an `UPDATE` is.
+  // First, alongside the cell updates, and for the same reason they come first: a row staged for
+  // deletion is not also rewritten.
+  for (const row of Object.keys(tab.replaced)
+    .map(Number)
+    .sort((a, b) => a - b)) {
+    if (tab.deleted.includes(row)) continue;
+    edits.push({ kind: "update", values: [], keys: keysFor(row), document: tab.replaced[row] });
+  }
+
   // Updates first, then deletes, then inserts. Deleting before updating would make an update to a
   // deleted row fail; inserting last means a new row can reuse a unique value a delete just freed.
   const touchedRows = new Set<number>();
   for (const key of Object.keys(tab.pending)) {
     const row = Number(key.split(":")[0]);
-    if (!tab.deleted.includes(row)) touchedRows.add(row);
+    if (!tab.deleted.includes(row) && !(row in tab.replaced)) touchedRows.add(row);
   }
   for (const row of [...touchedRows].sort((a, b) => a - b)) {
     const values = Object.entries(tab.pending)
@@ -2064,6 +2153,10 @@ export function buildEdits(tab: DbDataTab): DbRowEdit[] {
     if (values.length > 0) edits.push({ kind: "insert", values, keys: [] });
   }
 
+  for (const document of tab.insertedDocs) {
+    edits.push({ kind: "insert", values: [], keys: [], document });
+  }
+
   return edits;
 }
 
@@ -2074,12 +2167,29 @@ export function hasPrimaryKey(tab: DbDataTab): boolean {
 }
 
 export function pendingCount(tab: DbDataTab): number {
+  // One row is one staged change however many of its cells were touched — and a row rewritten as a
+  // document counts once too, never twice, since staging one clears the other.
   const updatedRows = new Set(
-    Object.keys(tab.pending)
-      .map((key) => Number(key.split(":")[0]))
-      .filter((row) => !tab.deleted.includes(row)),
+    [
+      ...Object.keys(tab.pending).map((key) => Number(key.split(":")[0])),
+      ...Object.keys(tab.replaced).map(Number),
+    ].filter((row) => !tab.deleted.includes(row)),
   );
-  return updatedRows.size + tab.deleted.length + tab.inserted.length;
+  return (
+    updatedRows.size + tab.deleted.length + tab.inserted.length + tab.insertedDocs.length
+  );
+}
+
+/**
+ * The text a document view should draw for a row: the staged rewrite if there is one, else what the
+ * server sent.
+ *
+ * The document counterpart of `displayCell`, and there for the same reason — a card that kept
+ * showing the server's version after being edited would make Apply look like it was about to write
+ * something nobody typed.
+ */
+export function displayDocument(tab: DbDataTab, row: number): string {
+  return tab.replaced[row] ?? tab.result?.documents[row] ?? "";
 }
 
 /** The value a cell currently shows: the staged edit if there is one, else what the server sent. */
@@ -2380,6 +2490,8 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
     limit: DEFAULT_PAGE_SIZE,
     filter: "",
     filterDraft: "",
+    options: EMPTY_QUERY_OPTIONS,
+    optionsDraft: EMPTY_QUERY_OPTIONS,
     sort: [],
     loading: false,
     runId: null,
@@ -2393,6 +2505,8 @@ function rehydrateTab(persisted: PersistedTab, tree: { consoles: DbConsole[] }):
     pending: {},
     deleted: [],
     inserted: [],
+    replaced: {},
+    insertedDocs: [],
     error: null,
   };
 }

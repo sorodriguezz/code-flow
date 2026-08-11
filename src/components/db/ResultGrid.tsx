@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowDown, ArrowUp, ExternalLink, Maximize2 } from "lucide-react";
+import { ArrowDown, ArrowUp, ExternalLink, Maximize2, type LucideIcon } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useT } from "../../state/languageStore";
@@ -50,6 +50,17 @@ export interface GridEdit {
   row: number;
   column: string;
   value: string | null;
+}
+
+/** One button in a row's pinned action strip — see `ResultGridProps.rowActions`. */
+export interface GridRowAction {
+  /** Stable across renders, so React keeps the button rather than rebuilding the strip on hover. */
+  id: string;
+  icon: LucideIcon;
+  label: string;
+  onClick: () => void;
+  danger?: boolean;
+  disabled?: boolean;
 }
 
 export interface ResultGridProps {
@@ -118,6 +129,19 @@ export interface ResultGridProps {
   /** Columns that point at another table, keyed by column name. */
   foreignKeys?: Map<string, DbForeignKey>;
   /**
+   * Buttons pinned to the right of every server row, revealed on hover.
+   *
+   * Here rather than only in the context menu because these are the actions a document store's grid
+   * is *read* for — edit, copy, clone, delete one record — and a menu you have to know is there is
+   * not an affordance. The grid asks the caller what a row's buttons are rather than holding a list
+   * of its own: what they do depends on the engine and on what the panel has staged, and neither is
+   * anything a grid can know.
+   *
+   * Inserted rows get none: an inserted row exists only in this tab, and every one of these actions
+   * is about a record the server has.
+   */
+  rowActions?: (row: number) => GridRowAction[];
+  /**
    * Follow a foreign key. `value` is the cell's, or `null` for "the whole referenced table" — which
    * is what the header's arrow means.
    *
@@ -149,6 +173,7 @@ export function ResultGrid({
   sort,
   primaryKeys,
   foreignKeys,
+  rowActions,
   onFollowForeignKey,
 }: ResultGridProps) {
   const t = useT();
@@ -382,7 +407,7 @@ export function ResultGrid({
                     display: "flex",
                     minWidth: "100%",
                   }}
-                  className={`border-b border-[var(--cf-border)] ${
+                  className={`group/row border-b border-[var(--cf-border)] ${
                     inserted
                       ? "bg-[var(--cf-success)]/[0.07]"
                       : deleted
@@ -531,6 +556,42 @@ export function ResultGrid({
                       </div>
                     );
                   })}
+                  {/* Pinned to the right edge and revealed on hover, so a hundred rows of buttons
+                      never compete with the data — and pinned rather than trailing the last column,
+                      because on a table wider than the panel a trailing strip is somewhere off
+                      screen.
+
+                      The track is zero-width and the strip hangs off it, so a row is exactly as
+                      wide as its columns: a strip that took real width would make every row wider
+                      than the header above it, and the grid would scroll a hundred pixels past its
+                      own last column. `pointer-events-none` on the track lets a click land on the
+                      cell underneath when no button is under the pointer. */}
+                  {!inserted && rowActions && (
+                    <div className="pointer-events-none sticky right-0 z-[6] ml-auto w-0">
+                      <div className="pointer-events-auto absolute right-0 top-0 flex h-full items-center gap-0.5 rounded-l-md border-y border-l border-[var(--cf-border)] bg-[var(--cf-surface)] px-1 opacity-0 shadow-[var(--cf-shadow)] transition-opacity focus-within:opacity-100 group-hover/row:opacity-100">
+                        {rowActions(row).map((action) => (
+                          <button
+                            key={action.id}
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              action.onClick();
+                            }}
+                            title={action.label}
+                            aria-label={action.label}
+                            disabled={action.disabled}
+                            className={`flex h-[18px] w-[18px] items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-white/[0.08] ${
+                              action.danger
+                                ? "hover:text-[var(--cf-danger)]"
+                                : "hover:text-[var(--cf-text)]"
+                            }`}
+                          >
+                            <action.icon size={11} />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}

@@ -27,7 +27,12 @@ use super::{RemoteHostSpec, RemoteKind};
 /// `permissions` is the `drwxr-xr-x` string rather than a mode integer: it is what the user reads,
 /// it is what `ls -l` shows them, and rendering it here means the frontend never has to know about
 /// octal modes. FTP servers that report no mode at all leave it empty rather than inventing one.
-#[derive(Debug, Clone, Serialize)]
+///
+/// **The last two fields are what a filesystem has no answer for.** A directory listing over SFTP
+/// has a mode and no content type; an object store has a content type, a storage tier and no mode
+/// at all. Rather than two shapes and two browsers, every source fills what it knows and leaves the
+/// rest empty — and the browser draws a column only when something in the listing filled it.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RemoteFile {
     pub name: String,
     /// Absolute path on the far side, so the frontend never has to join paths itself and get the
@@ -41,14 +46,56 @@ pub struct RemoteFile {
     /// Unix epoch seconds, or 0 when the server didn't say.
     pub modified: u64,
     pub permissions: String,
+    /// The MIME type the store has recorded — `application/json`, `image/png`. Empty for anything
+    /// that keeps no such thing, which is every real filesystem.
+    pub content_type: String,
+    /// The storage tier: `Hot`, `Cool`, `Archive`. Empty where the concept does not exist. Worth a
+    /// column of its own because it is the field that decides what a download *costs* — an archived
+    /// blob cannot be read at all until it is rehydrated.
+    pub tier: String,
+    /// `BlockBlob`, `PageBlob`, `AppendBlob`. Not decoration: a page blob is a VM disk and an
+    /// append blob is a log, and neither takes the ordinary overwrite this browser's upload does.
+    pub blob_type: String,
+    /// `available`, `leased`, `broken`… A leased blob refuses writes with a 412 that says nothing
+    /// about a lease, so the column is the only warning there is before trying.
+    pub lease_state: String,
 }
 
 /// A directory, and where it is.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RemoteListing {
     pub path: String,
     pub entries: Vec<RemoteFile>,
+    /// Where the next page starts, opaque and belonging to whoever issued it. Empty means this was
+    /// the whole directory.
+    ///
+    /// **A store is not a directory and cannot be read like one.** A container can hold millions of
+    /// blobs; the browser used to follow every continuation token before drawing a single row, so a
+    /// real container was a hang with no progress and no way out. One page at a time is the only
+    /// honest shape, and it is why every object browser ever written has a "load more".
+    pub next: String,
 }
+
+/// Which slice of a directory to fetch.
+///
+/// Both fields are the *service's* job wherever the service has one: a prefix filter run here would
+/// mean paging through a million names to show three, which is the failure this type exists to
+/// prevent. Transports with no such thing (SFTP, FTP) get the prefix applied by the dispatcher and
+/// ignore the marker, because a directory listing over SFTP arrives whole or not at all.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct ListPage {
+    /// Only entries whose name starts with this, within the directory being listed.
+    pub prefix: String,
+    /// The `next` of the page before this one. Empty starts at the beginning.
+    pub marker: String,
+}
+
+/// How many entries one page holds.
+///
+/// Storage Explorer shows 100. 200 is the same idea with fewer round trips on the wide grid this
+/// app draws — small enough that the first page is instant on any container.
+pub const PAGE: usize = 200;
 
 /// How much of a transfer is done, as the UI sees it.
 ///
@@ -137,13 +184,27 @@ pub async fn list(
     host_id: &str,
     spec: &RemoteHostSpec,
     path: &str,
+    page: &ListPage,
 ) -> Result<RemoteListing, String> {
     match transport(spec)? {
-        Transport::Sftp => super::sftp::list(host_id, spec, path).await,
-        Transport::Ftp => super::ftp::list(host_id, spec, path).await,
-        Transport::S3 => super::cloud::s3::list(host_id, spec, path).await,
-        Transport::Azure => super::cloud::account::list(host_id, spec, path).await,
+        // The two that arrive whole. The prefix is honoured here rather than refused, so the
+        // browser's search box means the same thing on every kind of host — it is only the *cost*
+        // that differs, and on a directory that already came over the wire the cost is nothing.
+        Transport::Sftp => filtered(super::sftp::list(host_id, spec, path).await?, page),
+        Transport::Ftp => filtered(super::ftp::list(host_id, spec, path).await?, page),
+        Transport::S3 => super::cloud::s3::list(host_id, spec, path, page).await,
+        Transport::Azure => super::cloud::account::list(host_id, spec, path, page).await,
     }
+}
+
+/// Applies a prefix to a listing that arrived whole. Case-insensitive, unlike the services' own —
+/// which are not, and cannot be asked to be.
+fn filtered(mut listing: RemoteListing, page: &ListPage) -> Result<RemoteListing, String> {
+    let prefix = page.prefix.trim().to_lowercase();
+    if !prefix.is_empty() {
+        listing.entries.retain(|entry| entry.name.to_lowercase().starts_with(&prefix));
+    }
+    Ok(listing)
 }
 
 /// One file or one whole directory, from the far side to here.
@@ -448,11 +509,12 @@ pub fn list_local(path: &str) -> Result<RemoteListing, String> {
                 .unwrap_or(0),
             permissions: local_permissions(&metadata),
             name,
+            ..Default::default()
         });
     }
     sort_entries(&mut entries);
 
-    Ok(RemoteListing { path: target.to_string_lossy().to_string(), entries })
+    Ok(RemoteListing { path: target.to_string_lossy().to_string(), entries, ..Default::default() })
 }
 
 /// The permission string for a local entry.

@@ -20,9 +20,12 @@ const DOCUMENTS_DISPLAY_LIMIT = 5 * 1024 * 1024;
  * several documents in one buffer are not one valid program and never will be; the point here is
  * the colours, and a screen of red squiggles under correct output is worse than none.
  *
- * Shared by the console and the data tab so the two read identically. That is the whole reason it
- * is a module and not a local component: a document looked at from a `find()` and the same document
- * looked at by opening the collection should not be two different screens.
+ * **The console's JSON view, not the table browser's.** The two diverged when documents became
+ * editable: in a data tab a document is something you act on — edit, clone, delete — and those are
+ * per-document affordances a single shared buffer has nowhere to put, so that panel draws JSON as
+ * cards (`DocumentList` in `json` mode) with the buttons on them. A console result has no one
+ * collection to write back to, so there is nothing to put on a card, and what is worth having
+ * instead is exactly what an editor gives: ⌘F across five hundred documents, and folding.
  */
 export function DocumentsView({ id, documents }: { id: string; documents: string[] }) {
   const monacoTheme = useThemeStore((s) => s.monacoTheme);

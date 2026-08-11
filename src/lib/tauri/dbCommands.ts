@@ -13,6 +13,7 @@ import type {
   DbNode,
   DbNodeRef,
   DbQueryHistoryEntry,
+  DbQueryOptions,
   DbRowEdit,
   DbObjectInfo,
   DbSchemaDiagram,
@@ -185,8 +186,11 @@ export const dbRowCount = (
   connectionId: string,
   node: DbNodeRef,
   filter: string,
+  /** The same options the page was read with, so the total counts what the pages will show —
+   * `null` on the engines that have none. */
+  options: DbQueryOptions | null,
   runId: string,
-) => invoke<number>("db_row_count", { connectionId, node, filter, runId });
+) => invoke<number>("db_row_count", { connectionId, node, filter, options, runId });
 
 export const dbApplyEdits = (connectionId: string, node: DbNodeRef, edits: DbRowEdit[]) =>
   invoke<DbEditResult>("db_apply_edits", { connectionId, node, edits });

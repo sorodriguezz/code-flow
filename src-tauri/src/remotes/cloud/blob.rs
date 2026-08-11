@@ -12,14 +12,13 @@
 
 use tokio::io::AsyncWriteExt as _;
 
-use super::super::files::{plan_upload, pump, sort_entries, Planned, RemoteFile, RemoteListing};
+use super::super::files::{
+    plan_upload, pump, sort_entries, ListPage, Planned, RemoteFile, RemoteListing, PAGE,
+};
 use super::super::RemoteHostSpec;
 use super::azure::{self, Credential, Service};
 use super::{container_row, folder_row, is_own_marker, object_row, rfc1123_seconds, Location};
 use futures_util::StreamExt as _;
-
-/// How many blobs one listing request asks for. The service's own maximum.
-const PAGE: usize = 5000;
 
 /// Nothing is held open — see [`super::s3::close`].
 pub async fn close(_host_id: &str) {}
@@ -32,17 +31,20 @@ pub async fn list(
     host_id: &str,
     spec: &RemoteHostSpec,
     path: &str,
+    page: &ListPage,
 ) -> Result<RemoteListing, String> {
     let at = Location::parse(path);
     let credential = azure::credential(host_id, spec).await?;
 
-    let mut entries = if at.is_account_root() {
-        containers(spec, &credential).await?
+    let (mut entries, next) = if at.is_account_root() {
+        containers(spec, &credential, page).await?
     } else {
-        blobs(spec, &credential, &at).await?
+        blobs(spec, &credential, &at, page).await?
     };
+    // Within the page only. Sorting across pages would need the whole container, which is the thing
+    // this no longer does — the service returns names in lexical order and that is the order shown.
     sort_entries(&mut entries);
-    Ok(RemoteListing { path: at.path(), entries })
+    Ok(RemoteListing { path: at.path(), entries, next })
 }
 
 pub async fn download(
@@ -197,15 +199,20 @@ pub async fn remove(
     // this browser holds to is that deleting removes what you pointed at, and pointing at a
     // container the browser drew as a folder is not consent to delete what is inside it.
     if at.key.is_empty() {
+        // Still refused *here*: `remove` is the browser's ordinary delete, reached by selecting a
+        // row and pressing a key, and one keystroke must never be able to take a million blobs with
+        // it. Deleting a container is a real and reasonable thing to do — it has its own verb below,
+        // and its own consent.
         return Err(
-            "Deleting a whole container isn't something this browser does — it would take \
-             everything inside it with it. Do it in the Azure portal."
+            "That's a container, not a blob. Deleting one takes everything inside it, so it goes \
+             through its own confirmation — the browser asks you to type the name."
                 .into(),
         );
     }
 
     if is_dir {
-        let inside = blobs(spec, &credential, &at).await?;
+        // One page is enough: the question is "is anything under here", not "how much".
+        let (inside, _) = blobs(spec, &credential, &at, &ListPage::default()).await?;
         if !inside.is_empty() {
             return Err(format!(
                 "\"{}\" still has {} item(s) in it. Blob storage has no recursive delete here: \
@@ -231,24 +238,41 @@ pub async fn remove(
     }
 }
 
-pub async fn rename(
-    host_id: &str,
+/// Copies one blob to another path, server-side. The bytes never come here.
+///
+/// **This is the half of `rename` that is worth having on its own.** Paste is a copy, and a copy
+/// that went through this machine would move gigabytes over the wire twice to put a blob beside
+/// itself. `x-ms-copy-source` is the service doing it internally; within one account it finishes
+/// before the response comes back, which is the property `rename` leans on to know it is safe to
+/// delete the source.
+pub async fn copy(host_id: &str, spec: &RemoteHostSpec, from: &str, to: &str) -> Result<(), String> {
+    let credential = azure::credential(host_id, spec).await?;
+    let (_, _) = copy_blob(spec, &credential, from, to).await?;
+    Ok(())
+}
+
+/// The copy itself, returning both URLs so `rename` can delete the source it just read.
+async fn copy_blob(
     spec: &RemoteHostSpec,
+    credential: &Credential,
     from: &str,
     to: &str,
-) -> Result<(), String> {
+) -> Result<(url::Url, url::Url), String> {
     let source = Location::parse(from);
     let target = Location::parse(to);
     if source.key.is_empty() || target.key.is_empty() {
-        return Err("A container can't be renamed — Azure has no such operation.".into());
+        return Err(
+            "A container isn't a blob — Azure has no operation that copies or renames one whole. \
+             Make the container and move what is in it."
+                .into(),
+        );
     }
-    let credential = azure::credential(host_id, spec).await?;
 
     let source_url = blob_url(spec, &source)?;
     let url = blob_url(spec, &target)?;
     let response = azure::send(
         spec,
-        &credential,
+        credential,
         "PUT",
         &url,
         &[("x-ms-copy-source".to_string(), source_url.to_string())],
@@ -272,6 +296,17 @@ pub async fn rename(
              was left alone."
         ));
     }
+    Ok((source_url, url))
+}
+
+pub async fn rename(
+    host_id: &str,
+    spec: &RemoteHostSpec,
+    from: &str,
+    to: &str,
+) -> Result<(), String> {
+    let credential = azure::credential(host_id, spec).await?;
+    let (source_url, _) = copy_blob(spec, &credential, from, to).await?;
 
     let response = azure::send(spec, &credential, "DELETE", &source_url, &[], None).await?;
     if response.status().is_success() {
@@ -306,92 +341,108 @@ fn blob_url(spec: &RemoteHostSpec, at: &Location) -> Result<url::Url, String> {
     Ok(url)
 }
 
-async fn containers(spec: &RemoteHostSpec, credential: &Credential) -> Result<Vec<RemoteFile>, String> {
-    let mut rows = Vec::new();
-    let mut marker = String::new();
-    loop {
-        let mut url = azure::endpoint(spec, Service::Blob)?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("comp", "list");
-            if !marker.is_empty() {
-                query.append_pair("marker", &marker);
-            }
+/// One page of the account's containers, and where the next one starts.
+async fn containers(
+    spec: &RemoteHostSpec,
+    credential: &Credential,
+    page: &ListPage,
+) -> Result<(Vec<RemoteFile>, String), String> {
+    let mut url = azure::endpoint(spec, Service::Blob)?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("comp", "list");
+        query.append_pair("maxresults", &PAGE.to_string());
+        let prefix = page.prefix.trim();
+        if !prefix.is_empty() {
+            query.append_pair("prefix", prefix);
         }
-        let response = azure::send(spec, credential, "GET", &url, &[], None).await?;
-        if !response.status().is_success() {
-            return Err(super::explain("list containers", response).await);
-        }
-        let body = response.text().await.map_err(|e| format!("Couldn't read the container list: {e}"))?;
-
-        for container in elements(&body, "Container") {
-            let Some(name) = super::xml_text(&container, "Name") else { continue };
-            let modified = super::xml_text(&container, "Last-Modified").unwrap_or_default();
-            rows.push(container_row(&name, rfc1123_seconds(&modified)));
-        }
-        match super::xml_text(&body, "NextMarker") {
-            Some(next) if !next.is_empty() => marker = next,
-            _ => break,
+        if !page.marker.is_empty() {
+            query.append_pair("marker", &page.marker);
         }
     }
-    Ok(rows)
+    let response = azure::send(spec, credential, "GET", &url, &[], None).await?;
+    if !response.status().is_success() {
+        return Err(super::explain("list containers", response).await);
+    }
+    let body = response.text().await.map_err(|e| format!("Couldn't read the container list: {e}"))?;
+
+    let mut rows = Vec::new();
+    for container in elements(&body, "Container") {
+        let Some(name) = super::xml_text(&container, "Name") else { continue };
+        let modified = super::xml_text(&container, "Last-Modified").unwrap_or_default();
+        let mut row = container_row(&name, rfc1123_seconds(&modified));
+        // A leased container cannot be deleted, and the lease is the only thing that explains the
+        // 412 that would otherwise come back naming nothing.
+        row.lease_state = super::xml_text(&container, "LeaseState").unwrap_or_default();
+        rows.push(row);
+    }
+    Ok((rows, super::xml_text(&body, "NextMarker").unwrap_or_default()))
 }
 
 async fn blobs(
     spec: &RemoteHostSpec,
     credential: &Credential,
     at: &Location,
-) -> Result<Vec<RemoteFile>, String> {
-    let prefix = at.prefix();
+    page: &ListPage,
+) -> Result<(Vec<RemoteFile>, String), String> {
+    let folder = at.prefix();
+    // The search box narrows *within* the folder being listed, so it extends the folder's prefix
+    // rather than replacing it. Done by the service: filtering here would mean paging through a
+    // million names to show three, which is the whole failure this page-at-a-time shape prevents.
+    let prefix = format!("{folder}{}", page.prefix.trim());
     let mut rows = Vec::new();
-    let mut marker = String::new();
 
-    loop {
-        let mut url = azure::endpoint(spec, Service::Blob)?;
-        url.path_segments_mut()
-            .map_err(|_| "Couldn't build the listing URL".to_string())?
-            .pop_if_empty()
-            .push(&at.container);
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair("restype", "container");
-            query.append_pair("comp", "list");
-            query.append_pair("delimiter", "/");
-            query.append_pair("maxresults", &PAGE.to_string());
-            if !prefix.is_empty() {
-                query.append_pair("prefix", &prefix);
-            }
-            if !marker.is_empty() {
-                query.append_pair("marker", &marker);
-            }
+    let mut url = azure::endpoint(spec, Service::Blob)?;
+    url.path_segments_mut()
+        .map_err(|_| "Couldn't build the listing URL".to_string())?
+        .pop_if_empty()
+        .push(&at.container);
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("restype", "container");
+        query.append_pair("comp", "list");
+        query.append_pair("delimiter", "/");
+        query.append_pair("maxresults", &PAGE.to_string());
+        if !prefix.is_empty() {
+            query.append_pair("prefix", &prefix);
         }
-
-        let response = azure::send(spec, credential, "GET", &url, &[], None).await?;
-        if !response.status().is_success() {
-            return Err(super::explain(&format!("list {}", at.path()), response).await);
-        }
-        let body = response.text().await.map_err(|e| format!("Couldn't read the listing: {e}"))?;
-
-        for folder in elements(&body, "BlobPrefix") {
-            if let Some(key) = super::xml_text(&folder, "Name") {
-                rows.push(folder_row(at, &key));
-            }
-        }
-        for blob in elements(&body, "Blob") {
-            let Some(key) = super::xml_text(&blob, "Name") else { continue };
-            if is_own_marker(&key, &prefix) {
-                continue;
-            }
-            let size = super::xml_text(&blob, "Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
-            let modified = super::xml_text(&blob, "Last-Modified").unwrap_or_default();
-            rows.push(object_row(at, &key, size, rfc1123_seconds(&modified)));
-        }
-        match super::xml_text(&body, "NextMarker") {
-            Some(next) if !next.is_empty() => marker = next,
-            _ => break,
+        if !page.marker.is_empty() {
+            query.append_pair("marker", &page.marker);
         }
     }
-    Ok(rows)
+
+    let response = azure::send(spec, credential, "GET", &url, &[], None).await?;
+    if !response.status().is_success() {
+        return Err(super::explain(&format!("list {}", at.path()), response).await);
+    }
+    let body = response.text().await.map_err(|e| format!("Couldn't read the listing: {e}"))?;
+
+    for entry in elements(&body, "BlobPrefix") {
+        if let Some(key) = super::xml_text(&entry, "Name") {
+            rows.push(folder_row(at, &key));
+        }
+    }
+    for blob in elements(&body, "Blob") {
+        let Some(key) = super::xml_text(&blob, "Name") else { continue };
+        // Against the *folder's* prefix, not the searched one: the marker blob belongs to the
+        // directory being listed, and a search that happened to match it should still hide it.
+        if is_own_marker(&key, &folder) {
+            continue;
+        }
+        let size = super::xml_text(&blob, "Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
+        let modified = super::xml_text(&blob, "Last-Modified").unwrap_or_default();
+        let mut row = object_row(at, &key, size, rfc1123_seconds(&modified));
+        // All four are already in the listing's `<Properties>`, so they cost nothing: no extra
+        // request, no round trip per row. Two of them change what the user can *do* — an `Archive`
+        // blob is unreadable until rehydrated, and a leased one refuses writes — and finding either
+        // out from a failed operation is finding it out too late.
+        row.content_type = super::xml_text(&blob, "Content-Type").unwrap_or_default();
+        row.tier = super::xml_text(&blob, "AccessTier").unwrap_or_default();
+        row.blob_type = super::xml_text(&blob, "BlobType").unwrap_or_default();
+        row.lease_state = super::xml_text(&blob, "LeaseState").unwrap_or_default();
+        rows.push(row);
+    }
+    Ok((rows, super::xml_text(&body, "NextMarker").unwrap_or_default()))
 }
 
 async fn plan_download(
@@ -568,5 +619,266 @@ mod tests {
                 .as_str(),
             "https://contoso.blob.core.windows.net/photos/2024/"
         );
+    }
+}
+
+/// Deletes a container and everything in it.
+///
+/// **Separate from [`remove`] on purpose, and not because Azure needs it to be.** `DELETE
+/// ?restype=container` is one first-class request — unlike a *folder*, which is a prefix that
+/// storage has no recursive delete for. What makes this its own verb is the blast radius: `remove`
+/// is what a selected row and the Delete key reach, and no keystroke should be able to take a
+/// million blobs. A caller has to mean this one specifically, and the browser makes the user type
+/// the name before it does.
+///
+/// The service reports the delete as accepted and then does the work; the container stops appearing
+/// in listings immediately but the name is not reusable until the deletion finishes.
+pub async fn remove_container(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<(), String> {
+    let at = Location::parse(path);
+    if at.container.is_empty() {
+        return Err("Which container?".into());
+    }
+    if !at.key.is_empty() {
+        return Err("That is a blob inside a container, not the container itself.".into());
+    }
+    let credential = azure::credential(host_id, spec).await?;
+
+    let mut url = azure::endpoint(spec, Service::Blob)?;
+    url.path_segments_mut()
+        .map_err(|_| "Couldn't build the container URL".to_string())?
+        .pop_if_empty()
+        .push(&at.container);
+    url.query_pairs_mut().append_pair("restype", "container");
+    let response = azure::send(spec, &credential, "DELETE", &url, &[], None).await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(super::explain(&format!("delete the container {}", at.container), response).await)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Beyond the seven verbs: properties and snapshots
+// ---------------------------------------------------------------------------
+
+/// Everything the service will say about one blob or one container, flattened.
+///
+/// **Deliberately a list of pairs rather than a struct.** A container answers with a public access
+/// level and a lease; a blob answers with a type, a tier, an ETag, a content type and a dozen
+/// `x-ms-*` fields that differ by account feature. A struct would either be mostly `None` or would
+/// need a new field every time Azure adds a header — and the panel that draws this only ever renders
+/// name/value rows anyway.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Properties {
+    pub path: String,
+    /// The URL the thing is reachable at. Not a credential: reaching it still needs a key or a SAS.
+    pub url: String,
+    pub rows: Vec<(String, String)>,
+}
+
+/// The headers worth showing, in the order they read best. Anything else the service returns is
+/// appended after these, so a feature we have never heard of still shows up.
+const SHOWN: [(&str, &str); 10] = [
+    ("x-ms-blob-type", "Blob type"),
+    ("content-type", "Content type"),
+    ("content-length", "Size"),
+    ("x-ms-access-tier", "Access tier"),
+    ("x-ms-blob-public-access", "Public access"),
+    ("x-ms-lease-state", "Lease state"),
+    ("x-ms-lease-status", "Lease status"),
+    ("last-modified", "Last modified"),
+    ("etag", "ETag"),
+    ("x-ms-creation-time", "Created"),
+];
+
+/// `HEAD` against a blob, or against a container with `?restype=container`.
+///
+/// A HEAD rather than a GET: every one of these values arrives as a response header, and a GET would
+/// pull the blob's bytes down to read them.
+pub async fn properties(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<Properties, String> {
+    let at = Location::parse(path);
+    if at.container.is_empty() {
+        return Err("Pick a container or a blob — the account root has no properties of its own.".into());
+    }
+    let credential = azure::credential(host_id, spec).await?;
+
+    let mut url = blob_url(spec, &at)?;
+    if at.key.is_empty() {
+        url.query_pairs_mut().append_pair("restype", "container");
+    }
+    let response = azure::send(spec, &credential, "HEAD", &url, &[], None).await?;
+    if !response.status().is_success() {
+        return Err(super::explain(&format!("read the properties of {path}"), response).await);
+    }
+
+    let headers = response.headers().clone();
+    let read = |name: &str| {
+        headers.get(name).and_then(|value| value.to_str().ok()).unwrap_or_default().to_string()
+    };
+    let mut rows: Vec<(String, String)> = SHOWN
+        .iter()
+        .map(|(header, label)| ((*label).to_string(), read(header)))
+        .filter(|(_, value)| !value.is_empty())
+        .collect();
+    // Everything else the service chose to say. Kept because the interesting header is often the one
+    // this list was written too early to know about — immutability, versioning, encryption scope.
+    let known: Vec<&str> = SHOWN.iter().map(|(header, _)| *header).collect();
+    for (name, value) in headers.iter() {
+        let name = name.as_str();
+        if !name.starts_with("x-ms-") || known.contains(&name) || name == "x-ms-request-id" {
+            continue;
+        }
+        if let Ok(value) = value.to_str() {
+            rows.push((name.to_string(), value.to_string()));
+        }
+    }
+
+    let mut shown = blob_url(spec, &at)?;
+    shown.set_query(None);
+    Ok(Properties { path: path.to_string(), url: shown.to_string(), rows })
+}
+
+/// One snapshot of a blob, as a row.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Snapshot {
+    /// The timestamp that identifies it — this *is* the identifier, passed back as `?snapshot=`.
+    pub stamp: String,
+    pub size: u64,
+    pub modified: u64,
+}
+
+/// Freezes the blob as it is now.
+///
+/// A snapshot is read-only and shares storage with the blob until one of them changes, which is why
+/// this is cheap and why it is the thing to do before an overwrite you are not sure about.
+pub async fn snapshot(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<String, String> {
+    let at = Location::parse(path);
+    if at.key.is_empty() {
+        return Err("Only a blob can be snapshotted — a container has no such operation.".into());
+    }
+    let credential = azure::credential(host_id, spec).await?;
+
+    let mut url = blob_url(spec, &at)?;
+    url.query_pairs_mut().append_pair("comp", "snapshot");
+    let response = azure::send(spec, &credential, "PUT", &url, &[], None).await?;
+    if !response.status().is_success() {
+        return Err(super::explain(&format!("snapshot {path}"), response).await);
+    }
+    Ok(response
+        .headers()
+        .get("x-ms-snapshot")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// Every snapshot of one blob, newest first.
+///
+/// Listed rather than fetched one by one because there is no "get the snapshots of this blob" call:
+/// the container listing includes them when asked, and they arrive as ordinary `<Blob>` entries
+/// carrying a `<Snapshot>` stamp. Filtering by exact key is what makes it about one blob.
+pub async fn snapshots(
+    host_id: &str,
+    spec: &RemoteHostSpec,
+    path: &str,
+) -> Result<Vec<Snapshot>, String> {
+    let at = Location::parse(path);
+    if at.key.is_empty() {
+        return Err("Only a blob has snapshots.".into());
+    }
+    let credential = azure::credential(host_id, spec).await?;
+
+    let mut url = azure::endpoint(spec, Service::Blob)?;
+    url.path_segments_mut()
+        .map_err(|_| "Couldn't build the listing URL".to_string())?
+        .pop_if_empty()
+        .push(&at.container);
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("restype", "container");
+        query.append_pair("comp", "list");
+        query.append_pair("include", "snapshots");
+        query.append_pair("prefix", &at.key);
+    }
+    let response = azure::send(spec, &credential, "GET", &url, &[], None).await?;
+    if !response.status().is_success() {
+        return Err(super::explain(&format!("list the snapshots of {path}"), response).await);
+    }
+    let body = response.text().await.map_err(|e| format!("Couldn't read the listing: {e}"))?;
+
+    let mut rows = Vec::new();
+    for blob in elements(&body, "Blob") {
+        // The prefix matches longer names too — `photo.png` also returns `photo.png.bak` — so the
+        // key has to match exactly or the panel would show another blob's history.
+        if super::xml_text(&blob, "Name").as_deref() != Some(at.key.as_str()) {
+            continue;
+        }
+        let Some(stamp) = super::xml_text(&blob, "Snapshot") else { continue };
+        rows.push(Snapshot {
+            stamp,
+            size: super::xml_text(&blob, "Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0),
+            modified: rfc1123_seconds(&super::xml_text(&blob, "Last-Modified").unwrap_or_default()),
+        });
+    }
+    rows.sort_by(|a, b| b.stamp.cmp(&a.stamp));
+    Ok(rows)
+}
+
+/// Deletes one snapshot, leaving the blob and its other snapshots alone.
+pub async fn delete_snapshot(
+    host_id: &str,
+    spec: &RemoteHostSpec,
+    path: &str,
+    stamp: &str,
+) -> Result<(), String> {
+    let at = Location::parse(path);
+    if at.key.is_empty() || stamp.trim().is_empty() {
+        return Err("A snapshot is identified by a blob and a timestamp.".into());
+    }
+    let credential = azure::credential(host_id, spec).await?;
+
+    let mut url = blob_url(spec, &at)?;
+    url.query_pairs_mut().append_pair("snapshot", stamp.trim());
+    let response = azure::send(spec, &credential, "DELETE", &url, &[], None).await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(super::explain(&format!("delete the snapshot {stamp}"), response).await)
+    }
+}
+
+/// Puts a snapshot's bytes back over the blob it came from.
+///
+/// A copy, not a "restore": Azure has no restore verb. The blob keeps its own snapshots — including
+/// one taken of the state being replaced, if the caller took one — because a copy over a blob does
+/// not touch its history.
+pub async fn restore_snapshot(
+    host_id: &str,
+    spec: &RemoteHostSpec,
+    path: &str,
+    stamp: &str,
+) -> Result<(), String> {
+    let at = Location::parse(path);
+    if at.key.is_empty() || stamp.trim().is_empty() {
+        return Err("A snapshot is identified by a blob and a timestamp.".into());
+    }
+    let credential = azure::credential(host_id, spec).await?;
+
+    let url = blob_url(spec, &at)?;
+    let mut source = url.clone();
+    source.query_pairs_mut().append_pair("snapshot", stamp.trim());
+    let response = azure::send(
+        spec,
+        &credential,
+        "PUT",
+        &url,
+        &[("x-ms-copy-source".to_string(), source.to_string())],
+        None,
+    )
+    .await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(super::explain(&format!("restore the snapshot {stamp}"), response).await)
     }
 }

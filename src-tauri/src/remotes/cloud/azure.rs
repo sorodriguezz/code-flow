@@ -69,6 +69,18 @@ pub enum Credential {
     Bearer(String),
 }
 
+/// A pasted secret with every space and line break taken out of it.
+///
+/// **Wrapping is the whole reason this exists.** An account key is base64 and a SAS is a query
+/// string; neither can legitimately contain whitespace, and both are routinely copied out of
+/// something that wrapped them — a terminal, a README, a chat message, a portal page that hands
+/// back a non-breaking space. Trimming is not enough, because the break lands in the *middle* of
+/// the value: what comes out is a base64 error that reads as "you copied the wrong thing" to
+/// somebody who copied exactly the right thing.
+fn unwrapped(secret: &str) -> String {
+    secret.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// This host's credential, resolved fresh.
 ///
 /// The keychain slot is the same one every other kind's password uses, and it holds whichever of
@@ -84,7 +96,10 @@ pub async fn credential(host_id: &str, spec: &RemoteHostSpec) -> Result<Credenti
     let saved = crate::secrets::get_secret(&super::super::password_key(host_id))
         .unwrap_or_default()
         .unwrap_or_default();
-    let saved = saved.trim();
+    // Here rather than only where it is pasted, because the keychain already holds the secrets
+    // pasted before this line existed, and a key that was saved wrapped is a key that would
+    // otherwise stay broken until somebody thought to paste it again.
+    let saved = unwrapped(&saved);
 
     match spec.azure.auth {
         AzureAuth::AccountKey => {
@@ -96,7 +111,7 @@ pub async fn credential(host_id: &str, spec: &RemoteHostSpec) -> Result<Credenti
                 );
             }
             let decoded = base64::engine::general_purpose::STANDARD
-                .decode(saved)
+                .decode(&saved)
                 .map_err(|_| {
                     "That account key isn't valid base64. Copy it again from the portal — the whole \
                      value, including any trailing `==`."
@@ -110,7 +125,7 @@ pub async fn credential(host_id: &str, spec: &RemoteHostSpec) -> Result<Credenti
             }
             // Pasted from the portal it may be a whole URL, or start with `?`. What is wanted is
             // the query string, and taking it apart here means the user does not have to.
-            let token = saved.rsplit('?').next().unwrap_or(saved);
+            let token = saved.rsplit('?').next().unwrap_or(saved.as_str());
             Ok(Credential::Sas(token.trim_start_matches('?').to_string()))
         }
         AzureAuth::Entra => {
@@ -271,12 +286,15 @@ pub fn parse_connection_string(text: &str) -> Option<ConnectionString> {
                 parsed.account = value.to_string();
                 found = true;
             }
+            // The two secrets are the two values a wrapped paste destroys silently — see
+            // [`unwrapped`]. Everything else on the line either survives a stray space or fails
+            // with a message that names the field.
             "accountkey" => {
-                parsed.key = value.to_string();
+                parsed.key = unwrapped(value);
                 found = true;
             }
             "sharedaccesssignature" => {
-                parsed.sas = value.trim_start_matches('?').to_string();
+                parsed.sas = unwrapped(value.trim_start_matches('?'));
                 found = true;
             }
             "endpointsuffix" => parsed.suffix = value.to_string(),
@@ -624,6 +642,30 @@ pub async fn send_table(
     }
     let signed = sign_table(spec, credential, method, url, &headers)?;
 
+    let mut request = wire(method, &signed)?;
+    if let Some(body) = body {
+        request = request.body(body);
+    }
+    request
+        .send()
+        .await
+        .map_err(|e| format!("Couldn't reach {}: {e}", signed.url.host_str().unwrap_or("Azure")))
+}
+
+/// The request exactly as it will leave, headers and all, short of its body.
+///
+/// **`signed.headers` is the whole set and the only list to walk** — what the caller asked for,
+/// plus the version, the date and the authorization the signer added. Sending the caller's list
+/// *and* the signed one broke twice over, and neither break says anything in the response:
+/// `reqwest::header` appends rather than replaces, so `content-length` went out twice and the
+/// request died at the HTTP framing layer with a bodyless 400; and the dedup written to stop that
+/// tested a name against both lists, which is true in both passes, so `x-ms-blob-type` was dropped
+/// from *every* one — signed into the canonical headers, absent from the wire, which real Azure
+/// answers with the same opaque 403 as any other signature failure.
+///
+/// Split out from [`send`] so a test can look at the result. A header sent twice and a header not
+/// sent at all are both invisible from the far side's reply.
+fn wire(method: &str, signed: &Signed) -> Result<reqwest::RequestBuilder, String> {
     let mut request = super::http().request(
         reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|_| format!("'{method}' is not a valid HTTP method"))?,
@@ -632,13 +674,7 @@ pub async fn send_table(
     for (name, value) in signed.headers.iter() {
         request = request.header(name, value);
     }
-    if let Some(body) = body {
-        request = request.body(body);
-    }
-    request
-        .send()
-        .await
-        .map_err(|e| format!("Couldn't reach {}: {e}", signed.url.host_str().unwrap_or("Azure")))
+    Ok(request)
 }
 
 /// Signs and sends one request.
@@ -657,19 +693,7 @@ pub async fn send(
     }
     let signed = sign(spec, credential, method, url, &headers, length)?;
 
-    let mut request = super::http().request(
-        reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|_| format!("'{method}' is not a valid HTTP method"))?,
-        signed.url.clone(),
-    );
-    for (name, value) in headers.iter().chain(signed.headers.iter()) {
-        // The signer added the version and the date to its own list; sending them twice would make
-        // the canonical headers disagree with the wire.
-        if headers.iter().any(|(n, _)| n == name) && signed.headers.iter().any(|(n, _)| n == name) && name.starts_with("x-ms-") {
-            continue;
-        }
-        request = request.header(name, value);
-    }
+    let mut request = wire(method, &signed)?;
     if let Some((body, _)) = body {
         request = request.body(body);
     }
@@ -829,6 +853,39 @@ mod tests {
         assert_eq!(parsed.account, "devstoreaccount1");
     }
 
+    /// The shape a connection string arrives in when it was copied out of anything that wraps:
+    /// entries on their own lines, and the break landing inside the key itself. Every character of
+    /// the key is there — putting it back together is not the user's job.
+    #[test]
+    fn a_key_that_arrived_wrapped_is_still_one_key() {
+        let parsed = parse_connection_string(
+            "DefaultEndpointsProtocol=http;\n\
+             AccountName=devstoreaccount1;\n\
+             AccountKey=YWJjZGVmZ2hpamts\n  bW5vcHFyc3R1dnd4eXo=;\n\
+             BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;\n",
+        )
+        .expect("a wrapped connection string still names an account");
+        assert_eq!(parsed.key, "YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXo=");
+        assert!(
+            base64::engine::general_purpose::STANDARD.decode(&parsed.key).is_ok(),
+            "the whole point: what comes out of the parser is what the signer can decode",
+        );
+        assert_eq!(parsed.account, "devstoreaccount1");
+        assert_eq!(parsed.endpoint, "http://127.0.0.1:10000/devstoreaccount1");
+    }
+
+    /// A SAS breaks the same way, one step later: whitespace inside the query is not a decode
+    /// error, it is a 403 from the far side with nothing in it to work back from.
+    #[test]
+    fn a_sas_that_arrived_wrapped_is_still_one_token() {
+        let parsed = parse_connection_string(
+            "BlobEndpoint=https://contoso.blob.core.windows.net;\n\
+             SharedAccessSignature=sv=2021-08-06&ss=b&\n  sig=abc",
+        )
+        .unwrap();
+        assert_eq!(parsed.sas, "sv=2021-08-06&ss=b&sig=abc");
+    }
+
     #[test]
     fn a_line_that_names_nothing_is_not_a_connection_string() {
         assert!(parse_connection_string("").is_none());
@@ -867,6 +924,78 @@ mod tests {
         s.azure.account = String::new();
         s.azure.endpoint = "http://127.0.0.1:10000/devstoreaccount1".into();
         assert_eq!(account(&s), "devstoreaccount1");
+    }
+
+    /// The invariant `send` rests on: what comes back from the signer is the *whole* request's
+    /// headers, each exactly once.
+    ///
+    /// Worth pinning down because both ways of getting it wrong are silent and neither looks like a
+    /// header bug. A name sent twice is a bodyless 400 from the HTTP layer — `Content-Length`
+    /// appearing twice is a framing violation, not an Azure error, so nothing in the response says
+    /// what happened. A name signed but not sent is a 403 with the same opaque text every other
+    /// signature failure has.
+    #[test]
+    fn the_signer_returns_every_header_the_request_will_carry_exactly_once() {
+        let spec = spec();
+        let credential = Credential::Key(b"secret".to_vec());
+        let url = Url::parse("https://contoso.blob.core.windows.net/pics/a.png").unwrap();
+        // What an upload passes: one `x-ms-` header of its own, plus the length `send` appends.
+        let asked = vec![
+            ("x-ms-blob-type".to_string(), "BlockBlob".to_string()),
+            ("content-length".to_string(), "4".to_string()),
+        ];
+
+        let signed = sign(&spec, &credential, "PUT", &url, &asked, Some(4)).unwrap();
+
+        for (name, value) in &asked {
+            let seen: Vec<_> = signed.headers.iter().filter(|(n, _)| n == name).collect();
+            assert_eq!(seen.len(), 1, "{name} should appear once, found {}", seen.len());
+            assert_eq!(&seen[0].1, value);
+        }
+        for expected in ["x-ms-version", "x-ms-date", "authorization"] {
+            let seen = signed.headers.iter().filter(|(n, _)| n == expected).count();
+            assert_eq!(seen, 1, "the signer owes exactly one {expected}");
+        }
+        let mut names: Vec<&str> = signed.headers.iter().map(|(n, _)| n.as_str()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(names.len(), before, "no header may be listed twice: {names:?}");
+    }
+
+    /// The same invariant one step further along — on the built request, which is what the far side
+    /// actually receives.
+    ///
+    /// This is the one that catches the upload bug: the signer was always right, and the request
+    /// built from it carried `content-length` twice (a bodyless 400, from the HTTP layer rather
+    /// than from Azure) and `x-ms-blob-type` not at all.
+    #[test]
+    fn an_upload_carries_its_length_once_and_its_blob_type_at_all() {
+        let spec = spec();
+        let credential = Credential::Key(b"secret".to_vec());
+        let url = Url::parse("https://contoso.blob.core.windows.net/pics/a.png").unwrap();
+        let asked = vec![
+            ("x-ms-blob-type".to_string(), "BlockBlob".to_string()),
+            ("content-length".to_string(), "4".to_string()),
+        ];
+        let signed = sign(&spec, &credential, "PUT", &url, &asked, Some(4)).unwrap();
+
+        let request = wire("PUT", &signed).unwrap().build().unwrap();
+        let sent = request.headers();
+
+        assert_eq!(
+            sent.get_all("content-length").iter().count(),
+            1,
+            "two Content-Length headers is a framing violation, and the 400 it earns has no body \
+             to explain itself",
+        );
+        assert_eq!(
+            sent.get("x-ms-blob-type").map(|value| value.to_str().unwrap()),
+            Some("BlockBlob"),
+            "Put Blob requires it, and it was signed — leaving it off the wire is a 403",
+        );
+        assert!(sent.contains_key("authorization"));
+        assert_eq!(sent.get_all("x-ms-date").iter().count(), 1);
     }
 
     /// A key pasted with its `?`, or as a whole URL, is still a key. The user should not have to

@@ -27,6 +27,7 @@ import { UpdateAlert } from "./components/layout/UpdateAlert";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
 import { ConfirmModal } from "./components/common/ConfirmModal";
+import { PromptModal } from "./components/common/PromptModal";
 import { TourOverlay } from "./components/tour/TourOverlay";
 import { useThemeStore } from "./state/themeStore";
 import { useUiStore, type MainView } from "./state/uiStore";
@@ -389,6 +390,7 @@ export default function App() {
       <RequirementsModal />
       <ToastContainer />
       <ConfirmModal />
+      <PromptModal />
       {/* Last, and above everything: the guided tour dims the whole window and drives the panels
           above from its own steps, so it has to outrank every modal it walks the user through. */}
       <TourOverlay />

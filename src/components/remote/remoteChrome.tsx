@@ -15,6 +15,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { KIND_LABEL, type AzureService, type RemoteKind, type RemoteOs } from "../../types/remote";
+import type { RemoteTransferEvent } from "../../lib/tauri/events";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 /**
@@ -325,4 +326,60 @@ export function Pill({
       {children}
     </span>
   );
+}
+
+/**
+ * One bar for the whole transfer, wherever the transfer was started from.
+ *
+ * Shared by the two file browsers because it is the same statement in both: a transfer is a
+ * transfer, and two bars that drew progress differently would be two things for the user to learn.
+ *
+ * The count is only shown for more than one file: on a single file "1 of 1" is noise, and on a
+ * folder it is the only thing that says how much is left to start.
+ */
+export function TransferBar({ progress }: { progress: RemoteTransferEvent }) {
+  const percent = progress.total > 0 ? Math.min(100, (progress.done / progress.total) * 100) : 0;
+  return (
+    <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-1.5">
+      <div className="flex items-center gap-2 text-[11px] text-[var(--cf-text-muted)]">
+        <span className="min-w-0 flex-1 truncate font-mono">{progress.name}</span>
+        {progress.files > 1 && (
+          <span className="shrink-0 tabular-nums">
+            {progress.file_index}/{progress.files}
+          </span>
+        )}
+        <span className="shrink-0 tabular-nums">{Math.round(percent)}%</span>
+      </div>
+      <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.08]">
+        <div
+          className="h-full rounded-full bg-[var(--cf-accent)] transition-[width] duration-150"
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** `1.2 MB`. Binary units, because that is what every file browser on every platform shows. */
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+/** Remote paths are always `/`-separated, even when the server is Windows. */
+export function joinRemote(dir: string, name: string): string {
+  return dir.endsWith("/") ? `${dir}${name}` : `${dir}/${name}`;
+}
+
+export function parentRemote(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  const cut = trimmed.lastIndexOf("/");
+  return cut <= 0 ? "/" : trimmed.slice(0, cut);
 }

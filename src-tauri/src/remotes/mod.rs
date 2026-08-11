@@ -234,7 +234,10 @@ impl RemoteKind {
     /// Enforced in the backend rather than only by hiding the button, and that is the point: the
     /// capability table is what keeps an FTP host from ever reaching a code path that spawns `ssh`,
     /// and a guarantee that lives only in the UI is a guarantee one wrong `if` removes.
-    fn refuses(self, what: &str) -> String {
+    /// `pub(crate)` because the command layer is now a caller too: the blob-only operations
+    /// (snapshots, tiers, properties) refuse a non-Azure host before dispatch, and refusing in the
+    /// same sentence as everywhere else is the point of having one helper.
+    pub(crate) fn refuses(self, what: &str) -> String {
         format!("This is a {} host — it can't {what}.", self.label())
     }
 }

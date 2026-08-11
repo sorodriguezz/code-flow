@@ -16,7 +16,7 @@ import { HostDetailsPanel } from "./HostDetailsPanel";
 import { ImportSshConfigModal } from "./ImportSshConfigModal";
 import { ForwardsPanel } from "./ForwardsPanel";
 import { AllForwardsPanel } from "./AllForwardsPanel";
-import { SftpPanel } from "./SftpPanel";
+import { FileBrowser } from "./FileBrowser";
 import { AzureAccountPanel } from "./AzureAccountPanel";
 import { LogPanel } from "./LogPanel";
 import { ScreenPanel } from "./ScreenPanel";
@@ -145,9 +145,10 @@ export function RemoteView() {
                       <ScreenPanel tab={activeTab} />
                     </div>
                   )}
+                  {/* Two browsers, picked by what is on the far side — see `FileBrowser`. */}
                   {activeTab?.kind === "sftp" && (
                     <div className="absolute inset-0">
-                      <SftpPanel hostId={activeTab.hostId} />
+                      <FileBrowser hostId={activeTab.hostId} />
                     </div>
                   )}
                   {/* A whole storage account — the four services in one tab. See
