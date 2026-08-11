@@ -5,6 +5,7 @@ import {
   PhysicalSize,
   type Window,
 } from "@tauri-apps/api/window";
+import { getSetting } from "./tauri/commands";
 
 /**
  * Maximize and restore for the window this app draws its own title bar into.
@@ -75,6 +76,29 @@ async function centeredFallback(): Promise<Bounds> {
 }
 
 /**
+ * The windowed rectangle the *previous* session ended on, as `window_state.rs` wrote it down.
+ *
+ * Read straight out of settings rather than through a command of its own, because that row is one
+ * value with one owner and this is the only thing on this side that wants to look at it. The shape
+ * is `WindowState` in that module; a row from a future version that no longer parses is treated the
+ * same as no row at all.
+ */
+async function lastSessionBounds(): Promise<Bounds | null> {
+  const raw = await getSetting("window_state").catch(() => null);
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    const { x, y, width, height } = parsed as Partial<Bounds>;
+    if (![x, y, width, height].every((n) => typeof n === "number" && Number.isFinite(n))) return null;
+    if (width! <= 0 || height! <= 0) return null;
+    return { x: x!, y: y!, width: width!, height: height! };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Keeps `restoreBounds` up to date with the last size and position the window had while it was not
  * maximized. Idempotent; called once from `App`.
  */
@@ -88,6 +112,14 @@ export async function startWindowBoundsTracking(): Promise<void> {
     if (await win.isMaximized().catch(() => false)) return;
     restoreBounds = await readBounds(win).catch(() => restoreBounds ?? null);
   };
+
+  // Launched maximized, because that is how the app was left — see `window_state.rs`. `remember`
+  // below has nothing to record in that case: the only rectangle on offer is the screen. So the
+  // windowed one is taken from where the last session ended, and the first press of the maximize
+  // button puts the window back the size it was yesterday instead of at `centeredFallback`.
+  if (await win.isMaximized().catch(() => false)) {
+    restoreBounds = await lastSessionBounds();
+  }
 
   await remember();
   await win.onResized(() => void remember());

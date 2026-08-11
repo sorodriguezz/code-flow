@@ -85,6 +85,13 @@ interface RepoState {
   renameStash: (index: number, newMessage: string) => Promise<void>;
 
   fetch: () => Promise<void>;
+  /**
+   * The same fetch, run because the user moved around rather than because they asked for one.
+   *
+   * Files no notification, raises no toast and does not touch `error` — see `lib/backgroundFetch`,
+   * which owns *when* this runs and is the only thing that should be calling it.
+   */
+  fetchSilently: () => Promise<void>;
   pull: () => Promise<void>;
   push: (setUpstream?: boolean) => Promise<void>;
 }
@@ -131,6 +138,29 @@ function translate(key: TranslationKey, params?: Record<string, string>): string
   if (!params) return raw;
   return Object.entries(params).reduce((acc, [name, value]) => acc.split(`{${name}}`).join(value), raw);
 }
+
+/**
+ * How long a background fetch may keep the remote buttons disabled — see `fetchSilently`.
+ *
+ * Far above any fetch that is merely slow (a large repository over a bad connection is seconds,
+ * not tens of them), because releasing the lock early on a fetch that is still running is the one
+ * thing this is trying not to do. It is a bound on the pathological case, not a deadline.
+ */
+const SILENT_FETCH_LOCK_MS = 45_000;
+
+/**
+ * When the background fetch currently out there started, or `null` when there is none.
+ *
+ * Keeps two of them from overlapping, which `remoteOp` alone stopped doing the moment the watchdog
+ * above was introduced: past the timeout the lock is gone but the `git` process is not.
+ *
+ * A timestamp and not a boolean, and that is the whole point. The case this exists for is a fetch
+ * whose promise never settles — a flag cleared in a `finally` would never be cleared at all, and
+ * the failure would not be a stuck button but background fetching quietly never happening again
+ * for the rest of the session, with nothing on screen to say so. Held for as long as the lock is,
+ * so at worst a hung fetch costs one interval and then the feature carries on around it.
+ */
+let silentFetchStartedAt: number | null = null;
 
 /** Set by the Rust side on the one checkout failure that has a way out — see
  * `CHECKOUT_CONFLICT_PREFIX` in `src-tauri/src/git/branch.rs`. */
@@ -657,6 +687,69 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail: where });
     } finally {
       set({ remoteOp: null });
+    }
+  },
+
+  fetchSilently: async () => {
+    // A previous background fetch that has already handed the status bar back but has not come
+    // home — see `silentFetchStartedAt`.
+    if (silentFetchStartedAt !== null && Date.now() - silentFetchStartedAt < SILENT_FETCH_LOCK_MS) {
+      return;
+    }
+    const { repoPath, remoteOp } = get();
+    if (!repoPath || remoteOp) return;
+    silentFetchStartedAt = Date.now();
+    // Through the same `remoteOp` mutex as the other three rather than around it. Two `git`
+    // processes on one working copy contend for the same ref lockfiles, and the one that would
+    // lose that race here is a pull the user is watching — so a background fetch waits its turn
+    // exactly like the timed one already does, and what makes it *silent* is everything below.
+    set({ remoteOp: "fetch" });
+
+    // …but it does not get to hold that turn forever. `git fetch` against a host that is neither
+    // reachable nor refusing — a VPN that dropped, a server behind a black hole — sits in a TCP
+    // connect with no deadline of its own, and until this change nothing reached the remote
+    // unless the user asked it to. Now that arriving anywhere fetches, a single hung process
+    // would leave Pull and Push greyed out for the rest of the session, with nothing on screen
+    // saying why. So the lock is given up on a timer whether or not `git` has come back.
+    //
+    // Only the *lock* is released — the fetch itself is left to finish or die on its own, and
+    // `backgroundFetch` will not start another while it is still out there. Releasing early costs
+    // at worst the ref-lock contention described above, in the one case where the alternative is
+    // a window whose remote buttons never come back.
+    let released = false;
+    const release = () => {
+      // Whoever gets here first wins, and only while the lock is still the one this took: past
+      // the timeout it may already belong to a pull the user started in the meantime, and
+      // clearing that would re-enable the buttons underneath their own running operation.
+      if (released) return;
+      released = true;
+      if (get().remoteOp === "fetch") set({ remoteOp: null });
+    };
+    const watchdog = setTimeout(release, SILENT_FETCH_LOCK_MS);
+
+    try {
+      // A repository with no remote has nothing to fetch from, and this runs often enough that
+      // spawning `git fetch origin` to be told so on every click is worth one local read to
+      // avoid. Read lazily rather than from the state captured above: this fires alongside the
+      // `refreshAll` that a repository switch starts, so the list has usually not landed yet.
+      if (get().remotes.length === 0) await get().refreshRemotes();
+      if (get().remotes.length === 0 || get().repoPath !== repoPath) return;
+      await api.gitFetch(repoPath);
+      // Switching repository is one of the things that *starts* a background fetch, so landing
+      // back here for a repo the user has already left is ordinary rather than exceptional —
+      // and `refreshBranches` reads whatever `repoPath` is now, which would file the new
+      // repository's branches as this fetch's answer.
+      if (get().repoPath !== repoPath) return;
+      await get().refreshBranches();
+    } catch {
+      // Swallowed on purpose, and the whole difference from `fetch` above. Nobody aimed this at
+      // the remote — it came from opening a menu — so a laptop on a train would otherwise answer
+      // every click with a toast about a host it cannot reach, and fill the bell with the same
+      // failure a hundred times over. The ahead/behind counts simply stay as they were.
+    } finally {
+      clearTimeout(watchdog);
+      release();
+      silentFetchStartedAt = null;
     }
   },
 

@@ -50,8 +50,9 @@ import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { startWindowBoundsTracking } from "./lib/windowControls";
+import { backgroundFetch } from "./lib/backgroundFetch";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
-import { onRepoFsChanged } from "./lib/tauri/events";
+import { onAppForeground, onRepoFsChanged } from "./lib/tauri/events";
 
 const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "graph", render: () => <GraphView /> },
@@ -135,6 +136,10 @@ export default function App() {
   const resolvedTheme = useThemeStore((s) => s.resolved);
   const accentId = useAccentStore((s) => s.accentId);
   const activeView = useUiStore((s) => s.activeView);
+  // Subscribed to for the background fetch below and nothing else: the API tab is two tools behind
+  // one view, so opening the database side from the rail is an arrival that `activeView` alone
+  // cannot see.
+  const apiWorkspace = useUiStore((s) => s.apiWorkspace);
   const aiPanelOpen = useUiStore((s) => s.aiPanelOpen);
   const terminalPanelOpen = useTerminalStore((s) => s.panelOpen);
   const commandPaletteOpen = useUiStore((s) => s.commandPaletteOpen);
@@ -305,6 +310,37 @@ export default function App() {
     }, 1000);
     return () => clearInterval(id);
   }, [autoFetchSeconds, project?.local_path]);
+
+  // Arriving somewhere fetches, quietly.
+  //
+  // The countdown above is the same fetch on a clock; this is the same fetch on the user. Opening
+  // the app, picking a repository in the sidebar, opening a tool from the rail or a tab from the
+  // bar — each is a moment where an ahead/behind count is about to be read, and reading one that
+  // was true ten minutes ago is how "nothing to pull" turns out to be wrong. Declared *after* the
+  // effect that calls `setRepoPath`, so by the time this runs the store already points at the
+  // repository being arrived at rather than the one being left.
+  //
+  // No interval of its own, no cleanup: `backgroundFetch` owns how often this is allowed to
+  // actually reach the remote, precisely because these are clicks and clicks come in bursts.
+  useEffect(() => {
+    backgroundFetch();
+  }, [project?.local_path, activeView, apiWorkspace]);
+
+  // And coming back to the window, through both of the doors that has.
+  //
+  // `focus` is alt-tab and clicking the app after a spell in a browser. `app:foreground` is the
+  // close button's other half — the window was hidden to the tray, the webview kept running and
+  // never lost focus, so there is no `focus` to wait for. Either way the repository has been out
+  // of sight for a while, which is exactly when it is most likely to have moved.
+  useEffect(() => {
+    const onFocus = () => backgroundFetch();
+    window.addEventListener("focus", onFocus);
+    const unlisten = onAppForeground(() => backgroundFetch());
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      void unlisten.then((f) => f());
+    };
+  }, []);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden">

@@ -31,12 +31,24 @@ export function canPush(branch: BranchInfo | null | undefined): boolean {
   return !!branch?.upstream && branch.ahead > 0 && !branch.is_locked;
 }
 
+/**
+ * Puts the auto-fetch countdown back to full.
+ *
+ * Called by anything that has just fetched, whoever asked for it: the timer exists to say "the
+ * remote was last asked N seconds ago", and letting it run down to zero after a fetch that already
+ * happened would spend a second one answering a question nobody still has. A no-op when auto-fetch
+ * is switched off, which is when there is no countdown to restart.
+ */
+export function restartAutoFetchCountdown(): void {
+  const { autoFetchSeconds } = usePreferencesStore.getState();
+  if (autoFetchSeconds) useFetchTimerStore.getState().setRemaining(autoFetchSeconds);
+}
+
 /** Fetch now, and restart the auto-fetch countdown — an explicit fetch makes the pending
  * automatic one redundant. */
 export function fetchNow(): void {
   void useRepoStore.getState().fetch();
-  const { autoFetchSeconds } = usePreferencesStore.getState();
-  if (autoFetchSeconds) useFetchTimerStore.getState().setRemaining(autoFetchSeconds);
+  restartAutoFetchCountdown();
 }
 
 export function pullNow(): void {

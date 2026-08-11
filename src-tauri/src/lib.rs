@@ -47,6 +47,7 @@ mod supabase;
 mod terminal;
 mod tray;
 mod watcher;
+mod window_state;
 
 use tauri::Manager;
 use api::ApiRegistry;
@@ -134,7 +135,13 @@ pub fn run() {
         .manage(DbRegistry::default())
         .manage(WatcherRegistry::default())
         .manage(tray::QuittingFlag::default())
+        .manage(window_state::WindowTracker::default())
         .setup(|app| {
+            // First, and before anything that can fail out of this closure: the window is created
+            // hidden (`"visible": false` in `tauri.conf.json`) so that being resized and maximized
+            // back to where the last session left it does not happen in front of the user, and
+            // this is what ends that — a `?` above it would leave the app running with no window.
+            window_state::restore(app.handle());
             tray::setup(&app.handle())?;
             // The usage meter's way to the database. Set here because `setup` is the only place
             // with an `AppHandle`, and the recording point is deep inside `ai::run`, where threading
@@ -167,12 +174,29 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // Where the window is and how big, kept current as it happens rather than asked for
+            // at the end: by the time the app is quitting, a window may already be gone, and on
+            // the close path below it is about to be hidden — which is not a size to reopen at.
+            // Cheap enough to sit under a drag; see `window_state::record`.
+            if matches!(
+                event,
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
+            ) {
+                window_state::record(window);
+            }
+
             // The custom title bar's close button and the OS's own close paths (Alt+F4, the
             // red traffic light, right-click "Close window" on the taskbar) all raise this
             // same event — hiding instead of exiting is what keeps background jobs (Claude
             // reviews, terminals) alive while the window is "closed", Docker Desktop–style.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
+                // Written down here as well as on the way out, because these two ends of the app
+                // are further apart than they look: closing the window leaves it running in the
+                // background for hours, and whatever ends that session — a real quit, a reboot, a
+                // process killed from the task manager — may never reach the exit handler. The
+                // size the user last had is banked at the moment they last had it.
+                window_state::save(app);
                 if !app.state::<tray::QuittingFlag>().is_quitting() {
                     api.prevent_close();
                     // Said out loud before hiding. The webview keeps running, which is the whole
@@ -703,6 +727,9 @@ pub fn run() {
             //
             // Blocking is correct here: the point is to finish before the process does.
             if let tauri::RunEvent::Exit = _event {
+                // The quit paths that never touch the close handler: the tray's Quit, ⌘Q, the
+                // in-app quit. All three end in `AppHandle::exit`, which is here.
+                window_state::save(_app_handle);
                 // The last four seconds of every bench terminal's output, which the flusher's timer
                 // has not come round for. The shells themselves die with the process — that is what
                 // a pty is — so this is the whole of what "don't lose my work" can mean here, and

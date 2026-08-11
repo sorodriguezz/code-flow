@@ -44,6 +44,17 @@ export const onSkillsProgress = (handler: (event: { line: string }) => void) =>
   listen<{ line: string }>("skills:progress", (e) => handler(e.payload));
 
 /**
+ * The window coming back on screen after the close button put it in the background.
+ *
+ * Not the same event as the DOM's `focus`, and neither one covers the other. `focus` is alt-tab:
+ * it fires often and says the webview is in front. This one is the tray restore, where the webview
+ * never lost focus in the first place and so has none to regain — the emit in `tray.rs` is the
+ * only signal that the app is on screen again. Anything that should happen "when the user comes
+ * back" wants both.
+ */
+export const onAppForeground = (handler: () => void) => listen("app:foreground", () => handler());
+
+/**
  * A backup starting and finishing, whether it was the button or the scheduler that started it.
  *
  * The settings panel follows this for two things at once: a "Back up now" it must not let you press
