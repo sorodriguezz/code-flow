@@ -295,6 +295,7 @@ mod tests {
             kind: DbRowEditKind::Update,
             values: vec![cell("name", Some("Ana"))],
             keys: vec![cell("id", Some("7")), cell("deleted_at", None)],
+            document: None,
         };
         let sql = edit_statement(&node(), SqlDialect::Postgres, &edit).unwrap();
         assert!(sql.contains("\"deleted_at\" IS NULL"), "{sql}");
@@ -306,7 +307,8 @@ mod tests {
     #[test]
     fn an_unidentifiable_row_is_refused_rather_than_widened() {
         for kind in [DbRowEditKind::Update, DbRowEditKind::Delete] {
-            let edit = DbRowEdit { kind, values: vec![cell("name", Some("x"))], keys: Vec::new() };
+            let edit =
+                DbRowEdit { kind, values: vec![cell("name", Some("x"))], keys: Vec::new(), document: None };
             assert!(edit_statement(&node(), SqlDialect::Postgres, &edit).is_err());
         }
     }

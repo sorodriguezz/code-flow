@@ -336,6 +336,19 @@ pub async fn remote_queues(db: State<'_, Db>, id: String) -> Result<Vec<remotes:
     remotes::cloud::queue::queues(&id, &spec).await
 }
 
+/// The depths of a batch of queues. Separate from the listing so the names can be drawn before the
+/// numbers exist — see `remotes::cloud::queue::queues`. The caller asks in batches so that a panel
+/// can count up as they land rather than waiting for all of them.
+#[tauri::command]
+pub async fn remote_queue_depths(
+    db: State<'_, Db>,
+    id: String,
+    queues: Vec<String>,
+) -> Result<Vec<i64>, String> {
+    let (_, spec) = load(&db, &id)?;
+    remotes::cloud::queue::depths(&id, &spec, &queues).await
+}
+
 /// Reads the front of a queue **without consuming anything** — see `remotes::cloud::queue`.
 #[tauri::command]
 pub async fn remote_queue_peek(

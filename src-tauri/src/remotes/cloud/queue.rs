@@ -19,6 +19,15 @@ use super::rfc1123_seconds;
 /// How many messages a peek asks for. The service's maximum, and small enough to render at once.
 const PEEK_MAX: usize = 32;
 
+/// How many depth reads are in flight at once.
+///
+/// The number exists because the listing does not carry a depth: one `comp=metadata` request per
+/// queue is the only way to get it, and an account with two hundred queues is two hundred requests.
+/// Done one after another that is a minute of a panel saying "Loading…"; done all at once it is two
+/// hundred sockets and a service that starts answering 503. Twelve keeps the wire busy without
+/// either.
+const DEPTH_CONCURRENCY: usize = 12;
+
 /// One queue in an account.
 #[derive(Debug, Clone, Serialize)]
 pub struct QueueSummary {
@@ -48,7 +57,14 @@ pub struct QueueMessage {
     pub pop_receipt: String,
 }
 
-/// The account's queues.
+/// The account's queues, names only.
+///
+/// **The depth is deliberately not read here.** It used to be: the listing came back and then this
+/// function walked it, one metadata request per queue, one after another, before returning
+/// anything. On the two-queue account it was written against that is invisible; on an account with
+/// a couple of hundred it is a minute in which the panel can say nothing except "Loading…", because
+/// there is nothing to say until the last queue answers. Splitting it lets the names — which arrive
+/// in one request — go on screen at once, and the numbers arrive after, counted, over [`depths`].
 pub async fn queues(host_id: &str, spec: &RemoteHostSpec) -> Result<Vec<QueueSummary>, String> {
     let credential = azure::credential(host_id, spec).await?;
     let mut found = Vec::new();
@@ -79,11 +95,27 @@ pub async fn queues(host_id: &str, spec: &RemoteHostSpec) -> Result<Vec<QueueSum
         }
     }
 
-    // The depth is a separate request per queue — the listing doesn't carry it. Done here rather
-    // than lazily in the UI so the panel opens with the one number anybody came for, and a queue
-    // whose metadata read fails keeps its -1 rather than taking the whole listing down with it.
-    for queue in &mut found {
-        queue.approximate_count = depth(spec, &credential, &queue.name).await.unwrap_or(-1);
+    Ok(found)
+}
+
+/// The approximate depth of each of `names`, in the order given.
+///
+/// One request per queue, [`DEPTH_CONCURRENCY`] of them at a time — the service has no batch form,
+/// so the only lever is how many are in the air. A queue whose metadata read fails keeps its `-1`
+/// rather than taking the batch down with it: one queue the credential can't see is not a reason to
+/// leave the other hundred and ninety-nine without a number.
+pub async fn depths(
+    host_id: &str,
+    spec: &RemoteHostSpec,
+    names: &[String],
+) -> Result<Vec<i64>, String> {
+    let credential = azure::credential(host_id, spec).await?;
+    let mut found = Vec::with_capacity(names.len());
+    for batch in names.chunks(DEPTH_CONCURRENCY) {
+        let answers =
+            futures_util::future::join_all(batch.iter().map(|name| depth(spec, &credential, name)))
+                .await;
+        found.extend(answers.into_iter().map(|one| one.unwrap_or(-1)));
     }
     Ok(found)
 }

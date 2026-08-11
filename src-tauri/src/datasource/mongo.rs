@@ -2389,6 +2389,7 @@ mod tests {
                 value: Some("507f1f77bcf86cd799439011".into()),
                 type_name: "objectId".into(),
             }],
+            document: None,
         };
         let command = edit_command("users", &edit).unwrap();
         let update = command.get_array("updates").unwrap()[0].as_document().unwrap();

@@ -120,11 +120,79 @@ export function HostDetailsPanel() {
   const dirty = useRef(false);
   const passwordDirty = useRef(false);
 
+  /**
+   * Which of the three row fields the *user* has touched since the last write.
+   *
+   * **The panel does not own the row — it owns the edits.** Name, group and colour are all editable
+   * from outside this panel as well: F2 in the tree renames, dragging onto a folder regroups,
+   * renaming or deleting a folder rewrites `group_name` on every host in it, and the row's context
+   * menu sets the colour. The panel loads those three into local state exactly once, so the moment
+   * any of that happens the boxes here hold values that are no longer true — and the next edit to
+   * *anything*, a checkbox on the Advanced page included, wrote all three back. A host renamed in
+   * the tree and dragged into a folder would silently take its old name and jump back out of the
+   * folder as soon as you changed its port.
+   *
+   * So a write carries a field only if this panel is what changed it. Everything else is taken from
+   * the row as it stands, which is the value the rest of the app just set.
+   */
+  const touched = useRef({ name: false, group: false, color: false });
+
+  /**
+   * The row's three values as this panel last saw them — which is not the same as what it last
+   * *showed*.
+   *
+   * It is what lets "the tree renamed this host" be told apart from "our own write came back". Both
+   * arrive as a changed `host` object, and only the first should pull the value into the boxes: a
+   * name field the user has just emptied in order to retype must not refill itself half a second
+   * later with the name the row still carries.
+   */
+  const seen = useRef({ name: "", group: "", color: "" });
+
+  /** What the three boxes hold right now, for the callbacks that run an IPC round trip later. */
+  const live = useRef({ name: "", group: "", color: "" });
+  live.current = { name, group, color };
+
+  /** Adopts a row as the baseline, and hands ownership of all three fields back to it. Used when a
+   *  host is loaded, where there are by definition no edits to protect. */
+  const adopt = (from: RemoteHostRow) => {
+    seen.current = { name: from.name, group: from.group_name, color: from.color };
+    touched.current = { name: false, group: false, color: false };
+  };
+
+  /**
+   * A write landed. Records what is now on the row, and hands back only the fields it settled.
+   *
+   * Both halves matter, and both are about the round trip in the middle.
+   *
+   * **A field the user has kept typing into is still theirs.** Type "prod-", let the debounce fire,
+   * add a "1" while the request is in the air: releasing `name` when the answer comes back would
+   * make the very next render rebuild the row from `host` — reverting the box's own value to
+   * "prod-" and losing the character for good, since nothing would ever write it again.
+   *
+   * **And a write for another host settles nothing here.** By the time a save for host A resolves
+   * the panel may be showing host B, whose load has already set both of these; writing A's values
+   * over them leaves `seen` describing a row that isn't on screen, and the next external change to
+   * B would then read as "somebody renamed this" and wipe what is being typed into it.
+   */
+  const settled = (row: RemoteHostRow) => {
+    if (loadedId.current !== row.id) return;
+    seen.current = { name: row.name, group: row.group_name, color: row.color };
+    // `|| row.name` mirrors how the row is built: an emptied Name box writes the existing name, so
+    // an empty box after that write is settled, not pending.
+    if ((live.current.name.trim() || row.name) === row.name) touched.current.name = false;
+    if (live.current.group.trim() === row.group_name) touched.current.group = false;
+    if (live.current.color === row.color) touched.current.color = false;
+  };
+
   const flush = () => {
     const pending = latest.current;
     if (dirty.current && pending) {
       dirty.current = false;
-      void saveHost(pending.row, pending.spec);
+      void saveHost(pending.row, pending.spec).then((ok) => {
+        // Only on success: a write that failed still has an edit in it, and forgetting which field
+        // it was would drop it from the retry.
+        if (ok) settled(pending.row);
+      });
     }
     if (passwordDirty.current && pending) {
       passwordDirty.current = false;
@@ -145,6 +213,7 @@ export function HostDetailsPanel() {
     loadedId.current = host.id;
     dirty.current = false;
     passwordDirty.current = false;
+    adopt(host);
     setSpec(parseHostSpec(host));
     setName(host.name);
     setGroup(host.group_name);
@@ -154,6 +223,32 @@ export function HostDetailsPanel() {
     setTab("connection");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host?.id]);
+
+  // The other half of `touched`: when somebody *else* changes one of the three, the box follows and
+  // this panel stops claiming it. Without this the panel would keep showing the stale name it no
+  // longer writes, which is the same lie one screen earlier.
+  //
+  // Gated on the value having moved away from `seen` rather than on the object changing, because
+  // the object changes on our own save too — and re-adopting there would undo an edit still being
+  // typed.
+  useEffect(() => {
+    if (!host || loadedId.current !== host.id) return;
+    if (host.name !== seen.current.name) {
+      seen.current.name = host.name;
+      touched.current.name = false;
+      setName(host.name);
+    }
+    if (host.group_name !== seen.current.group) {
+      seen.current.group = host.group_name;
+      touched.current.group = false;
+      setGroup(host.group_name);
+    }
+    if (host.color !== seen.current.color) {
+      seen.current.color = host.color;
+      touched.current.color = false;
+      setColor(host.color);
+    }
+  }, [host, host?.name, host?.group_name, host?.color]);
 
   // After the effect above, and that ordering is the whole point: adopting a host resets the panel
   // to Connection, so a caller that asked for a page — the (+)'s VNC entry wants Screen — has to
@@ -185,15 +280,34 @@ export function HostDetailsPanel() {
   }, [host?.id]);
 
   const row: RemoteHostRow | null = host
-    ? { ...host, name: name.trim() || host.name, group_name: group.trim(), color }
+    ? {
+        ...host,
+        // Only what this panel changed — see `touched`.
+        name: touched.current.name ? name.trim() || host.name : host.name,
+        group_name: touched.current.group ? group.trim() : host.group_name,
+        color: touched.current.color ? color : host.color,
+      }
     : null;
-  if (row && spec) latest.current = { row, spec };
+  // Only while the panel is still *showing* the host it loaded. On the render where `detailsHostId`
+  // moves to another host, `host` is already the new one while `name`/`group`/`spec` are still the
+  // old one's — and the very next effect calls `flush()`. Latching that render would write host A's
+  // edits onto host B's row, which is the same clobber one level up.
+  if (row && spec && host && loadedId.current === host.id) latest.current = { row, spec };
 
   useEffect(() => {
     if (!dirty.current || !row || !spec) return;
     const timer = window.setTimeout(() => {
+      // Read at fire time rather than from the closure: 600ms is long enough for the tree to have
+      // regrouped or recoloured this host, and the row captured when the timer was set would put
+      // that back the way it was.
+      // Re-checked at fire time as well: `flush()` disarms nothing, so a Connect or a host switch
+      // inside the window would otherwise write the same edit a second time.
+      const pending = latest.current;
+      if (!pending || !dirty.current) return;
       dirty.current = false;
-      void saveHost(row, spec);
+      void saveHost(pending.row, pending.spec).then((ok) => {
+        if (ok) settled(pending.row);
+      });
     }, SAVE_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -232,10 +346,14 @@ export function HostDetailsPanel() {
     dirty.current = true;
     setSpec({ ...spec, ...changes });
   };
-  const edit = <T,>(setter: (value: T) => void) => (value: T) => {
-    dirty.current = true;
-    setter(value);
-  };
+  /** An edit to one of the three fields the row carries directly. Marks it as this panel's, so the
+   *  next write includes it and the resync above stops overwriting it. */
+  const editRow =
+    (field: "name" | "group" | "color", setter: (value: string) => void) => (value: string) => {
+      dirty.current = true;
+      touched.current[field] = true;
+      setter(value);
+    };
 
   // Forwards and Screen are SSH-only, so an FTP host shows two tabs rather than four. Hidden
   // rather than disabled: a disabled tab is a promise that filling something in will enable it,
@@ -312,9 +430,9 @@ export function HostDetailsPanel() {
               spec={spec}
               password={password}
               showPassword={showPassword}
-              onName={edit(setName)}
-              onGroup={edit(setGroup)}
-              onColor={edit(setColor)}
+              onName={editRow("name", setName)}
+              onGroup={editRow("group", setGroup)}
+              onColor={editRow("color", setColor)}
               onPatch={patch}
               onPassword={(value) => {
                 passwordDirty.current = true;
@@ -1087,7 +1205,7 @@ function EndpointPreview({ spec }: { spec: RemoteHostSpec }) {
 }
 
 /** A value no group can have, so picking it is unambiguously "make a new one". */
-const NEW_GROUP = " new";
+const NEW_GROUP = "\u0000new";
 
 /**
  * The FTP-only settings.

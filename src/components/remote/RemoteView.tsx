@@ -145,19 +145,41 @@ export function RemoteView() {
                       <ScreenPanel tab={activeTab} />
                     </div>
                   )}
-                  {/* Two browsers, picked by what is on the far side — see `FileBrowser`. */}
-                  {activeTab?.kind === "sftp" && (
-                    <div className="absolute inset-0">
-                      <FileBrowser hostId={activeTab.hostId} />
-                    </div>
-                  )}
-                  {/* A whole storage account — the four services in one tab. See
-                      `AzureAccountPanel` for why it wraps the three panels above rather than
-                      replacing them. */}
-                  {activeTab?.kind === "azure" && (
-                    <div className="absolute inset-0">
-                      <AzureAccountPanel tab={activeTab} />
-                    </div>
+                  {/*
+                    Browsers: mounted per tab and hidden with CSS, exactly like the sessions above.
+
+                    **Rendering only the active one was a correctness bug, not a saving.** With two
+                    storage accounts open, React reconciled the *same* `AzureAccountPanel` instance
+                    across the switch — same position, same type — so `hostId` changed under a panel
+                    that was still holding the previous account's selected table, and the first
+                    thing the new account got asked for was a table it has never had. The user sees
+                    "404 — The table specified does not exist" against a tree that is plainly
+                    showing something else. Keying by `tab.id` is what makes two tabs two panels.
+
+                    Kept mounted rather than merely keyed for the same reason a terminal is: a tab
+                    holds a place — the container you are three folders deep in, the query you just
+                    ran — and re-listing it every time you glance at another account is both slower
+                    and lossier than the CSS.
+                  */}
+                  {tabs.map((tab) =>
+                    tab.kind === "sftp" ? (
+                      <div
+                        key={tab.id}
+                        className={`absolute inset-0 ${tab.id === activeTabId ? "" : "hidden"}`}
+                      >
+                        <FileBrowser hostId={tab.hostId} />
+                      </div>
+                    ) : tab.kind === "azure" ? (
+                      <div
+                        key={tab.id}
+                        className={`absolute inset-0 ${tab.id === activeTabId ? "" : "hidden"}`}
+                      >
+                        {/* A whole storage account — the four services in one tab. See
+                            `AzureAccountPanel` for why it wraps the three panels above rather than
+                            replacing them. */}
+                        <AzureAccountPanel tab={tab} />
+                      </div>
+                    ) : null,
                   )}
                   {activeTab?.kind === "log" && (
                     <div className="absolute inset-0">

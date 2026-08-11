@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ExternalLink, Maximize2, type LucideIcon } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
+import { ColumnResizer, MIN_COLUMN_WIDTH, useRowSweep } from "../common/gridBits";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useT } from "../../state/languageStore";
 import { fieldFacts, recordModel } from "../../lib/db/engineModel";
@@ -40,7 +41,9 @@ const HEADER_HEIGHT = 40;
 const OVERSCAN = 12;
 /** Wide enough for five digits and, when the panel asks for one, a select-all box over them. */
 const GUTTER_WIDTH = 52;
-export const MIN_COLUMN_WIDTH = 64;
+/** Re-exported: `RecordGrid` reads it from here, and the seam it belongs to now lives beside the
+ *  other grid mechanics in `common/gridBits` so all three grids drag the same way. */
+export { MIN_COLUMN_WIDTH };
 const DEFAULT_COLUMN_WIDTH = 160;
 /** Beyond this a cell is shown truncated with an expander — a 40KB JSON document in a 26px row is
  * unreadable, and laying it out costs more than reading it. */
@@ -189,6 +192,7 @@ export function ResultGrid({
   const sweep = useRowSweep({
     scrollRef,
     headerHeight: HEADER_HEIGHT,
+    rowHeight: ROW_HEIGHT,
     rowCount: rows.length,
     onSelectRange,
   });
@@ -602,114 +606,6 @@ export function ResultGrid({
   );
 }
 
-/**
- * Press-and-drag row selection.
- *
- * The hard part is that this grid **doesn't render the rows you're dragging past**: it keeps a
- * window around the viewport, so a drag that relied on `pointerenter` firing per row would select
- * nothing below the fold and would stop dead the moment it outran the window. So the sweep never
- * looks at rows at all — it converts the pointer's y into a row index arithmetically, from the
- * scroll offset and the fixed row height, which is right whether or not that row exists in the DOM.
- *
- * Two things follow from the same choice. Pointer capture is taken on the **scroll container**, not
- * on the row number that was pressed: that row unmounts as soon as the sweep scrolls it out of the
- * window, and capture dies with the element — the drag would stop dead a screenful in. Capturing on
- * the container also keeps the moves coming after the pointer leaves the grid or the window.
- *
- * **The whole drag runs off one animation frame loop**, and that is what makes it feel like dragging
- * rather than like a series of jumps. `move` writes the pointer's position to a ref and returns —
- * it renders nothing. Once per frame the loop scrolls, works out which row is under the pointer, and
- * updates the selection at most once. A pointer device sending 120 events a second would otherwise
- * push 120 renders a second through a grid of several hundred cells, and the edge scroll on a timer
- * moved in visible steps between them.
- */
-function useRowSweep({
-  scrollRef,
-  headerHeight,
-  rowCount,
-  onSelectRange,
-}: {
-  scrollRef: React.RefObject<HTMLDivElement | null>;
-  headerHeight: number;
-  rowCount: number;
-  onSelectRange?: (from: number, to: number, additive: boolean) => void;
-}) {
-  const state = useRef<{
-    anchor: number;
-    additive: boolean;
-    clientY: number;
-    last: number;
-    time: number;
-  } | null>(null);
-  const frame = useRef<number | null>(null);
-  // Read through a ref so the loop, which is started once per drag, always calls the current
-  // handler instead of the one that existed when the pointer went down.
-  const latest = useRef({ headerHeight, rowCount, onSelectRange });
-  latest.current = { headerHeight, rowCount, onSelectRange };
-
-  const stop = () => {
-    if (frame.current !== null) cancelAnimationFrame(frame.current);
-    frame.current = null;
-  };
-
-  useEffect(() => stop, []);
-
-  const tick = (now: number) => {
-    const current = state.current;
-    const element = scrollRef.current;
-    if (!current || !element) {
-      frame.current = null;
-      return;
-    }
-    // Clamped, so one dropped frame — a garbage collection, a slow paint — doesn't teleport the
-    // scroll a thousand rows.
-    const elapsed = Math.min(64, current.time === 0 ? 16 : now - current.time);
-    current.time = now;
-
-    const box = element.getBoundingClientRect();
-    const above = box.top + latest.current.headerHeight - current.clientY;
-    const below = current.clientY - box.bottom;
-    const past = above > 0 ? -above : below > 0 ? below : 0;
-    if (past !== 0) {
-      // Pixels per second, ramped by how far past the edge the pointer is: a hair over the edge
-      // creeps, an inch past it flies. Multiplied by the frame's own duration, so the speed is the
-      // same on a 60Hz panel and a 120Hz one.
-      const speed = Math.sign(past) * Math.min(3000, 260 + Math.abs(past) * 26);
-      element.scrollTop += (speed * elapsed) / 1000;
-    }
-
-    const y = current.clientY - box.top + element.scrollTop - latest.current.headerHeight;
-    const row = Math.min(
-      latest.current.rowCount - 1,
-      Math.max(0, Math.floor(y / ROW_HEIGHT)),
-    );
-    if (row !== current.last) {
-      current.last = row;
-      latest.current.onSelectRange?.(current.anchor, row, current.additive);
-    }
-    frame.current = requestAnimationFrame(tick);
-  };
-
-  return {
-    start: (e: React.PointerEvent, row: number, additive: boolean) => {
-      if (!onSelectRange) return;
-      e.preventDefault();
-      scrollRef.current?.setPointerCapture?.(e.pointerId);
-      state.current = { anchor: row, additive, clientY: e.clientY, last: row, time: 0 };
-      stop();
-      frame.current = requestAnimationFrame(tick);
-    },
-    move: (e: React.PointerEvent) => {
-      // Deliberately just a write. Everything the move implies happens on the next frame.
-      if (state.current) state.current.clientY = e.clientY;
-    },
-    end: () => {
-      state.current = null;
-      stop();
-    },
-  };
-}
-
 /** Long values are shown as one line: a newline inside a 26px row would be invisible anyway, and
  * seeing `\n` is how you know it's there. */
 export function preview(value: string): string {
@@ -766,32 +662,3 @@ export function CellEditor({
   );
 }
 
-/** The seam between two column headers. Invisible until hovered — four visible dividers in a 28px
- * header row read as a barred table and end up heavier than the labels they separate. */
-function ColumnResizer({
-  width,
-  onChange,
-}: {
-  width: number;
-  onChange: (width: number) => void;
-}) {
-  const start = useRef<{ x: number; width: number } | null>(null);
-  return (
-    <div
-      onPointerDown={(e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        e.currentTarget.setPointerCapture(e.pointerId);
-        start.current = { x: e.clientX, width };
-      }}
-      onPointerMove={(e) => {
-        if (!start.current) return;
-        onChange(Math.max(MIN_COLUMN_WIDTH, start.current.width + (e.clientX - start.current.x)));
-      }}
-      onPointerUp={() => {
-        start.current = null;
-      }}
-      className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize hover:bg-[var(--cf-accent)]/40"
-    />
-  );
-}

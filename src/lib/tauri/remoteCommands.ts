@@ -129,7 +129,14 @@ export const remoteOpenScreen = (id: string) => invoke<ScreenLaunch>("remote_ope
 // Neither is a file, so neither goes through `remoteListFiles` — these are the two services whose
 // content the dual-pane browser has no shape for. See `remotes::cloud::queue` and `::table`.
 
+/** The account's queues, **names only** — every `approximate_count` comes back as -1. The depth is
+ *  a request per queue and is fetched after, in batches, by `remoteQueueDepths`. */
 export const remoteQueues = (id: string) => invoke<QueueSummary[]>("remote_queues", { id });
+
+/** The depths of a batch of queues, in the order asked. -1 is "this one's metadata read failed",
+ *  which is not the same as empty. Batched by the caller so a long account counts up on screen. */
+export const remoteQueueDepths = (id: string, queues: string[]) =>
+  invoke<number[]>("remote_queue_depths", { id, queues });
 
 /** Reads the front of a queue **without consuming anything**. The default, and the safe one. */
 export const remoteQueuePeek = (id: string, queue: string, count: number) =>

@@ -35,8 +35,13 @@ pub struct TablePage {
     pub columns: Vec<String>,
     /// Each entity as a JSON object, values left as the service typed them.
     pub rows: Vec<serde_json::Value>,
-    /// The continuation, when the answer was cut short. Two opaque tokens rather than one, because
-    /// that is how the service paginates: a partition and a row to resume from.
+    /// The continuation, when the answer was cut short.
+    ///
+    /// **`next_partition_key` alone means there is more.** The service names a partition to resume
+    /// from whenever it truncated the answer, and names a row within it only when the next page
+    /// starts part-way through that partition; a page that ended exactly on a boundary has no row to
+    /// name. So the caller pages on while the partition token is non-empty, and passes back whichever
+    /// of the two it was given.
     pub next_partition_key: String,
     pub next_row_key: String,
 }
@@ -99,11 +104,21 @@ pub async fn query(
         if !select.trim().is_empty() {
             query.append_pair("$select", select.trim());
         }
-        // Both halves or neither: resuming from a partition without its row restarts that partition
-        // from the beginning, which silently repeats rows.
-        if !from_partition.is_empty() && !from_row.is_empty() {
+        // The partition token alone is a valid continuation, and requiring both silently truncated
+        // every paged read that hit a partition boundary.
+        //
+        // The service returns `x-ms-continuation-NextPartitionKey` always and
+        // `x-ms-continuation-NextRowKey` only when the next page resumes *inside* a partition; when
+        // the page ended exactly on a boundary there is no row to name, and the documented meaning
+        // of the partition token on its own is "start at the beginning of this partition". So
+        // whichever tokens came back are sent, and the caller pages on while the partition token is
+        // there. The old guard read a missing row key as "no more entities" and stopped early — a
+        // table whose page happened to end on a boundary simply appeared shorter than it is.
+        if !from_partition.is_empty() {
             query.append_pair("NextPartitionKey", from_partition);
-            query.append_pair("NextRowKey", from_row);
+            if !from_row.is_empty() {
+                query.append_pair("NextRowKey", from_row);
+            }
         }
     }
 
@@ -258,8 +273,15 @@ fn columns_of(rows: &[serde_json::Value]) -> Vec<String> {
     for row in rows {
         let Some(object) = row.as_object() else { continue };
         for key in object.keys() {
-            // `odata.*` are the service's annotations, not the user's data.
-            if key.starts_with("odata.") || columns.iter().any(|existing| existing == key) {
+            // `odata.*` are the service's annotations, not the user's data — and so is the
+            // `Name@odata.type` form, which is how a property's EDM type rides alongside its value.
+            // The panel writes those on an upsert (see `EntityEditorModal`), so a request level
+            // that echoed them back would otherwise put a column called `Age@odata.type` beside
+            // `Age` in the grid.
+            if key.starts_with("odata.")
+                || key.contains("@odata.")
+                || columns.iter().any(|existing| existing == key)
+            {
                 continue;
             }
             columns.push(key.clone());
@@ -312,6 +334,20 @@ mod tests {
     fn a_schemaless_page_keeps_every_column_it_saw() {
         let rows = vec![serde_json::json!({ "RowKey": "1", "Only": true })];
         assert!(columns_of(&rows).contains(&"Only".to_string()));
+    }
+
+    /// The type annotations are the wire's, not the user's — a column named `Age@odata.type` beside
+    /// `Age` is the shape of the bug this filter exists to stop.
+    #[test]
+    fn odata_type_annotations_are_not_columns() {
+        let rows = vec![serde_json::json!({
+            "PartitionKey": "eu",
+            "RowKey": "1",
+            "Age": "9007199254740993",
+            "Age@odata.type": "Edm.Int64",
+            "odata.etag": "W/\"x\"",
+        })];
+        assert_eq!(columns_of(&rows), vec!["PartitionKey", "RowKey", "Timestamp", "Age"]);
     }
 
     /// A key with an apostrophe in it — `O'Brien` — addresses nothing at all unless it is doubled.

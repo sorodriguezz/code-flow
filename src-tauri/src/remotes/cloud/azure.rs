@@ -588,9 +588,19 @@ pub fn sign_table(
 
     let mut all: Vec<(String, String)> = headers.to_vec();
     all.push(("x-ms-version".to_string(), VERSION.to_string()));
-    // `nometadata` because the grid wants values, not type annotations and edit links — it is the
-    // difference between a row of data and a row of data wrapped in three times its weight in URLs.
-    all.push(("accept".to_string(), "application/json;odata=nometadata".to_string()));
+    // `minimalmetadata`, which is the level that answers the one question JSON cannot.
+    //
+    // Four of the EDM types a property can have — `Int64`, `DateTime`, `Guid`, `Binary` — have no
+    // JSON representation, so the service sends all four as strings. Under `nometadata` that is all
+    // you get, and a 19-digit `Int64` is then indistinguishable from a string of digits: the entity
+    // editor would read one back as a String and write it back as a String, quietly changing the
+    // stored type of a property nobody touched. `minimalmetadata` adds a `Name@odata.type` beside
+    // exactly those four and nothing else — it does *not* bring the `odata.editLink` / `odata.id`
+    // pair per entity that made `fullmetadata` cost three times its own weight in URLs.
+    //
+    // The annotations are stripped from the grid's columns (`table::columns_of`) and from the
+    // editor's property list; they are read where the type is the point.
+    all.push(("accept".to_string(), "application/json;odata=minimalmetadata".to_string()));
     all.push(("dataserviceversion".to_string(), "3.0;NetFx".to_string()));
 
     match credential {

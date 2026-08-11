@@ -554,6 +554,7 @@ pub fn run() {
             commands::remote_cmd::remote_open_screen,
             commands::remote_cmd::remote_close_screen,
             commands::remote_cmd::remote_queues,
+            commands::remote_cmd::remote_queue_depths,
             commands::remote_cmd::remote_queue_peek,
             commands::remote_cmd::remote_queue_receive,
             commands::remote_cmd::remote_queue_put,
