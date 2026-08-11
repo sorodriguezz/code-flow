@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import {
   ArrowUp,
@@ -48,6 +48,7 @@ import {
   type SummaryMemory,
 } from "../../lib/parseAnalysis";
 import { Checkbox } from "../common/Checkbox";
+import { Markdown } from "../common/Markdown";
 import {
   FindingCard,
   QualityGateBadges,
@@ -1012,9 +1013,9 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
 
         {!loading && !error && reviewText && findings.length === 0 && (
           summary.length > SHORT_SUMMARY_MAX ? (
-            <div
+            <Markdown
+              source={summary}
               className="cf-markdown-preview rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-4"
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(summary) }}
             />
           ) : (
             <p className="rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 text-[12px] leading-relaxed text-[var(--cf-text)]">
@@ -1026,9 +1027,9 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
         {!loading && !error && reviewText && findings.length > 0 && (
           <div className="space-y-3">
             {summary && (
-              <div
+              <Markdown
+                source={summary}
                 className="cf-markdown-preview rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3.5 py-2.5"
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(summary) }}
               />
             )}
             {/* Explicit "Claude's findings" header (with a severity tally) so the AI-generated
@@ -1433,7 +1434,20 @@ function dayDivider(message: ChatMessage, previous: ChatMessage | undefined, loc
   return when.toLocaleDateString(locale, { day: "numeric", month: "long", year: "numeric" });
 }
 
-function ChatBubble({ message }: { message: ChatMessage }) {
+/**
+ * One turn in the transcript.
+ *
+ * Memoised on `message` alone, which is enough because the store never mutates a message: a turn
+ * is appended whole (the question when it is asked, the answer when it lands) and its object is
+ * never touched again — see `chatStore.send`. So an unchanged identity really does mean unchanged
+ * content, and the bubble whose content *did* change still re-renders on the very same commit.
+ * Without this, every keystroke in the composer below (which is `ChatSection` state) re-rendered
+ * the whole transcript, markdown subtrees and all.
+ *
+ * If a future engine ever streams tokens into an existing message, it must replace the message
+ * object each time rather than mutating `content` in place, or the answer will appear frozen.
+ */
+const ChatBubble = memo(function ChatBubble({ message }: { message: ChatMessage }) {
   const t = useT();
   const [copied, copy] = useCopy();
   const [traceOpen, setTraceOpen] = useState(false);
@@ -1517,7 +1531,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
       <ChatStamp message={message} />
     </div>
   );
-}
+});
 
 function ChatSection({ projectId }: { projectId: string }) {
   const t = useT();

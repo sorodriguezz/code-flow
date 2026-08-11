@@ -23,15 +23,41 @@
 //! (the Codex desktop app is the clearest case), and no shell can report a directory its profile
 //! never mentions. The two compose — this widens `PATH` to what the user has, and that list adds
 //! what nobody put on it.
+//!
+//! **Why the answer is cached.** Asking costs a *login and interactive* shell, and a real one —
+//! oh-my-zsh, nvm, pyenv, asdf, direnv — routinely takes 300ms to 1.5s to finish sourcing itself.
+//! This runs as the very first statement of `run()`, before the database is opened and long before
+//! a window exists, so every one of those milliseconds is spent with nothing at all on screen. That
+//! is the worst place in the app to spend them.
+//!
+//! So the resolved value is written to a small file next to the database and adopted from there on
+//! the next launch, in microseconds, while a background thread re-asks the shell and rewrites the
+//! file for the launch after that. The cache is therefore always exactly one launch behind: install
+//! a new tool and the first launch after it still runs on yesterday's `PATH`. That is acceptable
+//! here and nowhere near as bad as it sounds — `PATH` gains directories far more often than it
+//! loses them, `ai::install_dirs` covers the engines regardless, and the stale entry is corrected
+//! before the user has finished noticing it.
 
 #[cfg(not(target_os = "windows"))]
 use std::time::Duration;
 
-/// How long the shell gets. A profile that runs `nvm use` or an asdf hook can genuinely take a
-/// second or two, so this is generous — but it is a hard ceiling on how long a broken or
-/// input-blocked startup file can delay the app's own launch.
+/// How long the shell gets before the app gives up *waiting on the main thread* for it.
+///
+/// Only the very first launch ever waits at all — after that there is a cache to start from — so
+/// this is the price of a cold start and nothing else, which is what makes it much tighter than the
+/// five seconds this used to be. A profile slower than this is not abandoned: the same shell is
+/// left running on a background thread (see [`REFRESH_TIMEOUT`]) so its answer still lands in the
+/// cache and the *second* launch is correct and instant.
 #[cfg(not(target_os = "windows"))]
-const TIMEOUT: Duration = Duration::from_secs(5);
+const COLD_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// How long the shell gets when nobody is waiting for it.
+///
+/// Generous, because it costs the user nothing: this deadline is only ever waited on from a
+/// background thread whose entire job is to rewrite the cache file. A profile that runs `nvm use`
+/// or an asdf hook can genuinely take a second or two, and this is the path that lets it.
+#[cfg(not(target_os = "windows"))]
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Markers around the value, so what comes back can be found inside whatever else the shell said.
 ///
@@ -53,6 +79,16 @@ const CLOSE: &str = "__CF_PATH_CLOSE__";
 /// `git` and `ssh` invocations, the pty — then reads the widened value without knowing this
 /// happened.
 ///
+/// **That constraint survives the cache, and it is what shapes the design below.** This function
+/// does spawn threads now, so the rule has to hold in a stronger form than "don't call me late":
+/// *only the caller's thread ever writes the environment, and it always finishes writing it before
+/// any thread is spawned.* The background threads here write the cache **file** and nothing else —
+/// they never touch `PATH`. That is the whole reason a late answer is banked for the next launch
+/// instead of being adopted the moment it arrives: adopting it would mean a `set_var` landing in a
+/// process that is by then running a webview, a tokio runtime and a dozen of our own threads, which
+/// is precisely the unsound thing this note has always been about. This launch uses what it had;
+/// the next launch is the one that gets the correction.
+///
 /// Silent on every failure, and deliberately: the app worked before this existed and works after a
 /// shell that won't answer. There is nothing here worth a dialog, and nothing the user could do
 /// about it if there were.
@@ -61,12 +97,96 @@ pub fn import_login_path() {
     let Some(shell) = std::env::var_os("SHELL").map(std::path::PathBuf::from) else {
         return;
     };
-    let Some(imported) = query(&shell) else { return };
-    let merged = merge(&imported, std::env::var("PATH").ok().as_deref());
-    if merged.is_empty() {
+
+    // The warm path, which is every launch but the first. Adopt, then spawn — in that order, so the
+    // one `set_var` in this process is over and done with while this is still the only thread.
+    if let Some(cached) = read_cache() {
+        adopt(&cached);
+        std::thread::spawn(move || {
+            let Some(rx) = probe(&shell) else { return };
+            if let Some(fresh) = collect(&rx, REFRESH_TIMEOUT) {
+                write_cache(&fresh);
+            }
+        });
+        return;
+    }
+
+    // The cold path: first launch, or the first after a reset. There is nothing to start from, so
+    // this is the one time the app waits — briefly — for a shell.
+    let Some(rx) = probe(&shell) else { return };
+    match collect(&rx, COLD_TIMEOUT) {
+        Some(imported) => {
+            adopt(&imported);
+            write_cache(&imported);
+        }
+        // The shell is merely slow (or it failed, in which case the sender is already gone and this
+        // thread ends immediately). Either way the receiver moves off the main thread, which keeps
+        // the *same* shell invocation rather than starting a second one, and whatever it eventually
+        // prints becomes the cache. This launch runs on the un-widened `PATH` exactly as it did
+        // before any of this existed; the next one does not.
+        None => {
+            std::thread::spawn(move || {
+                if let Some(late) = collect(&rx, REFRESH_TIMEOUT) {
+                    write_cache(&late);
+                }
+            });
+        }
+    }
+}
+
+/// Merges an answer into the process `PATH`. Main thread only — see [`import_login_path`].
+#[cfg(not(target_os = "windows"))]
+fn adopt(imported: &str) {
+    let merged = merge(imported, std::env::var("PATH").ok().as_deref());
+    // `set_var` *panics* on a value containing a NUL byte, and the two things feeding this are a
+    // shell's stdout and a file on disk — neither of which is ours to vouch for. A truncated write
+    // or a filesystem that padded the tail is a strange enough state to walk away from, but it is
+    // not one to take the whole launch down with.
+    if merged.is_empty() || merged.contains('\0') {
         return;
     }
     std::env::set_var("PATH", merged);
+}
+
+/// The cache file: one line, the resolved `PATH`, next to the database.
+///
+/// A plain file rather than a row in the settings table, and deliberately. This whole module runs
+/// before `db::init()` — it must, because everything downstream resolves programs against the `PATH`
+/// it leaves behind — so reading the cache from the settings table would mean either opening the
+/// database first or reordering `run()` around it. Neither is worth it for one string: a file costs
+/// no connection, needs no schema and cannot deadlock against one.
+///
+/// It lives in `paths::base_dir()` so that "wipe everything" takes it with it, like the rest of the
+/// app's state. `run()` does that wipe *before* calling in here, on purpose — see the comment there.
+#[cfg(not(target_os = "windows"))]
+fn cache_path() -> std::path::PathBuf {
+    crate::paths::base_dir().join(".shell-path")
+}
+
+/// The cached `PATH`, or `None` if there isn't a usable one.
+#[cfg(not(target_os = "windows"))]
+fn read_cache() -> Option<String> {
+    let cached = std::fs::read_to_string(cache_path()).ok()?;
+    let cached = cached.trim();
+    (!cached.is_empty()).then(|| cached.to_string())
+}
+
+/// Banks an answer for the next launch. Called from a background thread as often as not.
+#[cfg(not(target_os = "windows"))]
+fn write_cache(path: &str) {
+    let target = cache_path();
+    let Some(dir) = target.parent() else { return };
+    // First launch writes this before `paths::ensure_dirs` has ever run.
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    // Written beside and renamed over, so the next launch reads either the old value or the new one
+    // and never half of either. A `PATH` truncated mid-entry names a directory that does not exist,
+    // which is the kind of failure that looks like the tool was uninstalled.
+    let staging = target.with_extension("tmp");
+    if std::fs::write(&staging, path).is_ok() && std::fs::rename(&staging, &target).is_err() {
+        let _ = std::fs::remove_file(&staging);
+    }
 }
 
 /// Windows has no equivalent problem to solve: `PATH` is machine and user state in the registry,
@@ -76,9 +196,14 @@ pub fn import_login_path() {
 #[cfg(target_os = "windows")]
 pub fn import_login_path() {}
 
-/// Runs the shell and returns whatever came back between the markers.
+/// Starts the shell and hands back the channel its output will arrive on.
+///
+/// Split from the waiting half ([`collect`]) so that the deadline is the *caller's* and can change
+/// hands: the cold path waits [`COLD_TIMEOUT`] on the main thread and, if that runs out, passes this
+/// same receiver to a background thread to go on waiting. One shell invocation, two deadlines —
+/// rather than abandoning the first and paying for a second.
 #[cfg(not(target_os = "windows"))]
-fn query(shell: &std::path::Path) -> Option<String> {
+fn probe(shell: &std::path::Path) -> Option<std::sync::mpsc::Receiver<Option<std::process::Output>>> {
     let name = shell.file_name()?.to_string_lossy().into_owned();
     let mut command = crate::proc::std_command(shell);
     for arg in login_args(&name) {
@@ -95,15 +220,28 @@ fn query(shell: &std::path::Path) -> Option<String> {
     // Read on a thread so the wait can be given a deadline. `output()` has none of its own, and a
     // startup file that hangs would hang the app's launch behind it with no way out.
     //
-    // On timeout the thread and its child are abandoned rather than killed: the handle lives on the
-    // other side of the channel, and a shell that is merely slow will finish and exit on its own
-    // moments later. The cost of being wrong is one short-lived orphaned process, once, against
-    // plumbing a kill through a second channel to reclaim it.
+    // Once every deadline has passed the thread and its child are abandoned rather than killed: the
+    // handle lives on the other side of the channel, and a shell that is merely slow will finish and
+    // exit on its own moments later. The cost of being wrong is one short-lived orphaned process,
+    // once, against plumbing a kill through a second channel to reclaim it.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(command.output().ok());
     });
-    let output = rx.recv_timeout(TIMEOUT).ok()??;
+    Some(rx)
+}
+
+/// Waits out `timeout` for the shell started by [`probe`] and returns what was between the markers.
+///
+/// A receiver whose sender is already gone answers instantly with `Disconnected` rather than
+/// sitting out the deadline, which is what makes it safe to call this a second time on a channel
+/// that has already delivered — the "the shell answered, but with nothing usable" case.
+#[cfg(not(target_os = "windows"))]
+fn collect(
+    rx: &std::sync::mpsc::Receiver<Option<std::process::Output>>,
+    timeout: Duration,
+) -> Option<String> {
+    let output = rx.recv_timeout(timeout).ok()??;
     if !output.status.success() {
         return None;
     }

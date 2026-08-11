@@ -1,4 +1,14 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   Bookmark,
@@ -348,10 +358,10 @@ interface TreeRowProps {
    * Folds the row without activating it. Containers always have one; a request only when it has
    * examples, which is also what decides whether it gets a twisty instead of the spacer.
    */
-  onToggle?: () => void;
+  onToggle?: (node: NodeRef) => void;
   /** Collections only: current pin state, and the toggle for it. */
   pinned?: boolean;
-  onTogglePin?: () => void;
+  onTogglePin?: (node: NodeRef) => void;
   /** Collections only: `null` when the collection isn't shared. */
   share?: ShareHealth | null;
   /** Requests only: this record is frozen waiting for a decision. */
@@ -362,18 +372,27 @@ interface TreeRowProps {
   dragging: boolean;
   /** The pointer is aiming *into* this container, as opposed to at a gap beside it. */
   dropInto: boolean;
-  onActivate: () => void;
-  onMenu: (x: number, y: number) => void;
+  onActivate: (node: NodeRef) => void;
+  onMenu: (node: NodeRef, x: number, y: number) => void;
   /** Containers only: the inline "+" that starts a new request without opening the menu. */
-  onQuickAdd?: () => void;
-  onBeginDrag?: (e: React.PointerEvent<HTMLElement>) => void;
-  onRename: (name: string) => void;
+  onQuickAdd?: (node: NodeRef) => void;
+  onBeginDrag?: (e: React.PointerEvent<HTMLElement>, node: NodeRef) => void;
+  onRename: (node: NodeRef, name: string) => void;
   onCancelRename: () => void;
   /** True once, right after a drag, so the trailing click doesn't also open the request. */
   suppressClick: () => boolean;
 }
 
-function TreeRow({
+/**
+ * Every handler here takes the row's own `node` rather than closing over it, and every one of them
+ * arrives already stabilised with `useCallback` — that, plus the `node` objects being built once per
+ * change to the collections rather than once per render, is what lets the `memo()` below actually
+ * hold. It has to: the tree subscribes to the drag store's `origin`, so **the whole tree re-renders
+ * on every pointer move of a drag**, and without the memo that is several hundred rows reconciled at
+ * pointer-event rate to move one ghost and one insertion line. A single unstable prop would turn the
+ * memo into pure comparison cost.
+ */
+function TreeRowBase({
   node,
   depth,
   at = 0,
@@ -416,7 +435,7 @@ function TreeRow({
       // A div rather than a button because the row carries its own "…" button, and a button
       // inside a button is invalid — so focus and the Enter/Space activation come back by hand.
       tabIndex={renaming ? -1 : 0}
-      onPointerDown={onBeginDrag}
+      onPointerDown={onBeginDrag ? (e) => onBeginDrag(e, node) : undefined}
       onPointerEnter={() => useRowHoverStore.getState().enter(hoverKey)}
       onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
       // Kills the browser's own press-and-sweep text selection without costing the `click` that
@@ -424,18 +443,18 @@ function TreeRow({
       onMouseDown={(e) => e.preventDefault()}
       onClick={() => {
         if (suppressClick()) return;
-        onActivate();
+        onActivate(node);
       }}
       onKeyDown={(e) => {
         if (renaming || e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
-          onActivate();
+          onActivate(node);
         }
       }}
       onContextMenu={(e) => {
         e.preventDefault();
-        onMenu(e.clientX, e.clientY);
+        onMenu(node, e.clientX, e.clientY);
       }}
       style={{ paddingLeft: depth * INDENT + ROW_PAD, ...riseDelay(at) }}
       className={`cf-rise group relative flex cursor-pointer items-center gap-1.5 rounded-md py-0.5 pr-1 text-[13px] ${
@@ -463,7 +482,7 @@ function TreeRow({
             onClick={(e) => {
               if (!onToggle) return;
               e.stopPropagation();
-              onToggle();
+              onToggle(node);
             }}
             style={{ width: TWISTY_W }}
             className={`flex shrink-0 justify-center text-[var(--cf-text-muted)] ${
@@ -493,7 +512,7 @@ function TreeRow({
               onPointerDown={(e) => e.stopPropagation()}
               onClick={(e) => {
                 e.stopPropagation();
-                onToggle();
+                onToggle(node);
               }}
               style={{ width: TWISTY_W }}
               className="flex shrink-0 items-center justify-center text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
@@ -519,7 +538,7 @@ function TreeRow({
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
-              onRename(e.currentTarget.value);
+              onRename(node, e.currentTarget.value);
             } else if (e.key === "Escape") {
               e.preventDefault();
               onCancelRename();
@@ -583,7 +602,7 @@ function TreeRow({
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
-            onTogglePin();
+            onTogglePin(node);
           }}
           className={`flex h-4 w-4 shrink-0 items-center justify-center rounded ${
             pinned
@@ -604,7 +623,7 @@ function TreeRow({
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
-            onQuickAdd();
+            onQuickAdd(node);
           }}
           className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] group-hover:opacity-100"
         >
@@ -619,7 +638,7 @@ function TreeRow({
         onClick={(e) => {
           e.stopPropagation();
           const rect = e.currentTarget.getBoundingClientRect();
-          onMenu(rect.left, rect.bottom + 2);
+          onMenu(node, rect.left, rect.bottom + 2);
         }}
         className="flex h-4 w-4 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] group-hover:opacity-100"
       >
@@ -628,6 +647,8 @@ function TreeRow({
     </div>
   );
 }
+
+const TreeRow = memo(TreeRowBase);
 
 /**
  * One saved example, nested under the request it was captured from.
@@ -876,16 +897,61 @@ export function CollectionTree() {
   const childRequests = (collectionId: string, parentId: string | null) =>
     grouped.requests.get(containerKey(collectionId, parentId)) ?? [];
 
-  const toggle = (id: string) =>
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  /**
+   * One `NodeRef` per row, rebuilt only when the collections, folders or requests change.
+   *
+   * These used to be object literals inside the render functions, which meant a fresh `node` for
+   * every row on every render — and `node` is a prop of a `memo`'d row, so that alone would have
+   * defeated the memo entirely. Keyed by kind as well as id, because nothing promises the three
+   * tables can't hand out the same id.
+   */
+  const nodeRefs = useMemo(() => {
+    const map = new Map<string, NodeRef>();
+    for (const collection of collections) {
+      map.set(`collection:${collection.id}`, {
+        kind: "collection",
+        id: collection.id,
+        collectionId: collection.id,
+        parentId: null,
+        name: collection.name,
+      });
+    }
+    for (const folder of folders) {
+      map.set(`folder:${folder.id}`, {
+        kind: "folder",
+        id: folder.id,
+        collectionId: folder.collection_id,
+        parentId: folder.parent_id,
+        name: folder.name,
+      });
+    }
+    for (const request of requests) {
+      map.set(`request:${request.id}`, {
+        kind: "request",
+        id: request.id,
+        collectionId: request.collection_id,
+        parentId: request.folder_id,
+        name: request.name,
+      });
+    }
+    return map;
+  }, [collections, folders, requests]);
 
-  const expand = (id: string) =>
-    setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+  const toggle = useCallback(
+    (id: string) =>
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      }),
+    [],
+  );
+
+  const expand = useCallback(
+    (id: string) => setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id))),
+    [],
+  );
 
   /**
    * What clicking a container does: unfold it *and* put its settings on screen.
@@ -895,17 +961,23 @@ export function CollectionTree() {
    * the single most common gesture in the sidebar. The tab is reused, so a second click on the
    * same row folds it back without piling up tabs.
    */
-  const activateContainer = (kind: "collection" | "folder", id: string) => {
-    toggle(id);
-    useApiStore.getState().openEntityTab(kind, id);
-  };
+  const activateContainer = useCallback(
+    (kind: "collection" | "folder", id: string) => {
+      toggle(id);
+      useApiStore.getState().openEntityTab(kind, id);
+    },
+    [toggle],
+  );
 
   // ---------- mutations ----------
 
-  const startDraft = (kind: "folder" | "request", collectionId: string, parentId: string | null) => {
-    expand(parentId ?? collectionId);
-    setDraft({ kind, collectionId, parentId });
-  };
+  const startDraft = useCallback(
+    (kind: "folder" | "request", collectionId: string, parentId: string | null) => {
+      expand(parentId ?? collectionId);
+      setDraft({ kind, collectionId, parentId });
+    },
+    [expand],
+  );
 
   const submitDraft = async (name: string) => {
     if (!draft) return;
@@ -926,7 +998,7 @@ export function CollectionTree() {
     if (created) useApiStore.getState().openRequest(created.id);
   };
 
-  const commitRename = async (node: NodeRef, name: string) => {
+  const commitRename = useCallback(async (node: NodeRef, name: string) => {
     setRenaming(null);
     const trimmed = name.trim();
     if (!trimmed || trimmed === node.name) return;
@@ -941,7 +1013,7 @@ export function CollectionTree() {
       const request = state.requests.find((r) => r.id === node.id);
       if (request) await state.updateRequest({ ...request, name: trimmed });
     }
-  };
+  }, []);
 
   const remove = async (node: NodeRef) => {
     const message =
@@ -1148,7 +1220,7 @@ export function CollectionTree() {
    * slivers of a folder aim at the gaps around it, the middle aims inside, and a request — which
    * can't contain anything — splits cleanly in half.
    */
-  const zoneAt = (x: number, y: number, dragged: ApiDrag): ApiDropZone | null => {
+  const zoneAt = useCallback((x: number, y: number, dragged: ApiDrag): ApiDropZone | null => {
     const element = document.elementFromPoint(x, y);
     const row = element?.closest<HTMLElement>("[data-cf-apirow]") ?? null;
     const kind = row?.dataset.cfApikind as ApiNodeKind | undefined;
@@ -1204,18 +1276,18 @@ export function CollectionTree() {
       zone = between(collectionId, parentId, "request", id, fraction < 0.5 ? "before" : "after");
     }
     return canDrop(dragged, zone, useApiStore.getState().folders) ? zone : null;
-  };
+  }, []);
 
-  const isCurrentSlot = (dragged: ApiDrag, zone: ApiDropZone): boolean => {
+  const isCurrentSlot = useCallback((dragged: ApiDrag, zone: ApiDropZone): boolean => {
     const siblings =
       dragged.kind === "folder"
         ? (groupedRef.current.folders.get(containerKey(zone.collectionId, zone.parentId)) ?? [])
         : (groupedRef.current.requests.get(containerKey(zone.collectionId, zone.parentId)) ?? []);
     const at = siblings.findIndex((n) => n.id === dragged.id);
     return at >= 0 && at === zone.index;
-  };
+  }, []);
 
-  const beginDrag = (e: React.PointerEvent<HTMLElement>, node: NodeRef) => {
+  const beginDrag = useCallback((e: React.PointerEvent<HTMLElement>, node: NodeRef) => {
     if (e.button !== 0 || node.kind === "collection" || renamingRef.current) return;
     const from = { x: e.clientX, y: e.clientY };
     const dragged: ApiDrag = {
@@ -1272,13 +1344,52 @@ export function CollectionTree() {
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
-  };
+  }, [expand, isCurrentSlot, zoneAt]);
 
-  const takeSuppressedClick = () => {
+  const takeSuppressedClick = useCallback(() => {
     if (!suppressClickRef.current) return false;
     suppressClickRef.current = false;
     return true;
-  };
+  }, []);
+
+  // ---------- row handlers ----------
+  //
+  // One stable handler per thing a row can do, each taking the row's own node. They are what makes
+  // `memo(TreeRow)` hold — see the note above `TreeRowBase`. All of them either write through a
+  // functional setter or read the store with `getState()`, so none of them needs a dependency on
+  // rendered data and none of them ever changes identity.
+
+  const handleToggle = useCallback((node: NodeRef) => toggle(node.id), [toggle]);
+
+  const handleActivate = useCallback(
+    (node: NodeRef) => {
+      if (node.kind === "request") useApiStore.getState().openRequest(node.id);
+      else activateContainer(node.kind, node.id);
+    },
+    [activateContainer],
+  );
+
+  const handleMenu = useCallback((node: NodeRef, x: number, y: number) => setMenu({ x, y, node }), []);
+
+  /** The container's inline "+": a folder files the new request under itself, a collection at its
+   *  own top level — which is exactly `parentId` for the node either way. */
+  const handleQuickAdd = useCallback(
+    (node: NodeRef) =>
+      startDraft("request", node.collectionId, node.kind === "folder" ? node.id : null),
+    [startDraft],
+  );
+
+  const handleRename = useCallback(
+    (node: NodeRef, name: string) => void commitRename(node, name),
+    [commitRename],
+  );
+
+  const handleCancelRename = useCallback(() => setRenaming(null), []);
+
+  const handleTogglePin = useCallback(
+    (node: NodeRef) => void useApiStore.getState().toggleCollectionPinned(node.id),
+    [],
+  );
 
   // ---------- render ----------
 
@@ -1355,13 +1466,7 @@ export function CollectionTree() {
   };
 
   const renderRequest = (request: ApiRequestRow, depth: number, at: number) => {
-    const node: NodeRef = {
-      kind: "request",
-      id: request.id,
-      collectionId: request.collection_id,
-      parentId: request.folder_id,
-      name: request.name,
-    };
+    const node = nodeRefs.get(`request:${request.id}`)!;
     const examples = examplesByRequest.get(request.id);
     const isExpanded = examples !== undefined && expanded.has(request.id);
     const row = (
@@ -1370,18 +1475,18 @@ export function CollectionTree() {
         depth={depth}
         at={at}
         expanded={examples ? isExpanded : undefined}
-        onToggle={examples ? () => toggle(request.id) : undefined}
+        onToggle={examples ? handleToggle : undefined}
         protocol={request.protocol}
         method={request.method}
         conflicted={conflictedIds.has(request.id)}
         renaming={renaming?.id === request.id}
         dragging={drag?.id === request.id}
         dropInto={false}
-        onActivate={() => useApiStore.getState().openRequest(request.id)}
-        onMenu={(x, y) => setMenu({ x, y, node })}
-        onBeginDrag={(e) => beginDrag(e, node)}
-        onRename={(name) => void commitRename(node, name)}
-        onCancelRename={() => setRenaming(null)}
+        onActivate={handleActivate}
+        onMenu={handleMenu}
+        onBeginDrag={beginDrag}
+        onRename={handleRename}
+        onCancelRename={handleCancelRename}
         suppressClick={takeSuppressedClick}
       />
     );
@@ -1408,13 +1513,7 @@ export function CollectionTree() {
   };
 
   const renderFolder = (folder: ApiFolder, depth: number, at: number) => {
-    const node: NodeRef = {
-      kind: "folder",
-      id: folder.id,
-      collectionId: folder.collection_id,
-      parentId: folder.parent_id,
-      name: folder.name,
-    };
+    const node = nodeRefs.get(`folder:${folder.id}`)!;
     const isExpanded = expanded.has(folder.id);
     return (
       <div>
@@ -1423,16 +1522,16 @@ export function CollectionTree() {
           depth={depth}
           at={at}
           expanded={isExpanded}
-          onToggle={() => toggle(folder.id)}
+          onToggle={handleToggle}
           renaming={renaming?.id === folder.id}
           dragging={drag?.id === folder.id}
           dropInto={over?.mode === "into" && over.parentId === folder.id}
-          onActivate={() => activateContainer("folder", folder.id)}
-          onMenu={(x, y) => setMenu({ x, y, node })}
-          onQuickAdd={() => startDraft("request", folder.collection_id, folder.id)}
-          onBeginDrag={(e) => beginDrag(e, node)}
-          onRename={(name) => void commitRename(node, name)}
-          onCancelRename={() => setRenaming(null)}
+          onActivate={handleActivate}
+          onMenu={handleMenu}
+          onQuickAdd={handleQuickAdd}
+          onBeginDrag={beginDrag}
+          onRename={handleRename}
+          onCancelRename={handleCancelRename}
           suppressClick={takeSuppressedClick}
         />
         {isExpanded && renderChildren(folder.collection_id, folder.id, depth + 1)}
@@ -1447,13 +1546,7 @@ export function CollectionTree() {
           <EmptyState icon={Boxes} title={t("api.noCollections")} />
         ) : (
           ordered.map((collection, at) => {
-            const node: NodeRef = {
-              kind: "collection",
-              id: collection.id,
-              collectionId: collection.id,
-              parentId: null,
-              name: collection.name,
-            };
+            const node = nodeRefs.get(`collection:${collection.id}`)!;
             const isExpanded = expanded.has(collection.id);
             return (
               <div key={collection.id}>
@@ -1462,18 +1555,18 @@ export function CollectionTree() {
                   depth={0}
                   at={at}
                   expanded={isExpanded}
-                  onToggle={() => toggle(collection.id)}
+                  onToggle={handleToggle}
                   pinned={collection.pinned}
-                  onTogglePin={() => void useApiStore.getState().toggleCollectionPinned(collection.id)}
+                  onTogglePin={handleTogglePin}
                   share={sharedIds.has(collection.id) ? shareHealth(collection.id) : null}
                   renaming={renaming?.id === collection.id}
                   dragging={false}
                   dropInto={over?.mode === "into" && over.parentId === null && over.collectionId === collection.id}
-                  onActivate={() => activateContainer("collection", collection.id)}
-                  onMenu={(x, y) => setMenu({ x, y, node })}
-                  onQuickAdd={() => startDraft("request", collection.id, null)}
-                  onRename={(name) => void commitRename(node, name)}
-                  onCancelRename={() => setRenaming(null)}
+                  onActivate={handleActivate}
+                  onMenu={handleMenu}
+                  onQuickAdd={handleQuickAdd}
+                  onRename={handleRename}
+                  onCancelRename={handleCancelRename}
                   suppressClick={takeSuppressedClick}
                 />
                 {isExpanded && renderChildren(collection.id, null, 1)}

@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
 import { translations, type Language, type TranslationKey } from "../lib/i18n/translations";
@@ -37,9 +38,27 @@ function render(
   );
 }
 
+/**
+ * The translator, stable for as long as the language is.
+ *
+ * The identity matters as much as the result: `useT` is called in ~200 components, and a fresh
+ * closure per render silently defeats every `useMemo`/`useCallback`/`memo` that has `t` anywhere
+ * in its dependency chain — which is most of them, since almost every label goes through it.
+ * Three call sites had already hand-rolled a `tRef` to work around it (EditorView, EditorPane,
+ * FileTree); those refs stay correct, they are just no longer load-bearing.
+ *
+ * Memoising is only safe because `render` reads nothing mutable beyond `language`: `translations`
+ * is a frozen-by-convention module constant, so a cached closure can never hand back a stale
+ * string. If `render` ever grows another reactive input (a per-workspace override, a pluraliser
+ * that reads a locale), it has to join this dependency array or the UI will keep the old wording
+ * after a switch.
+ */
 export function useT() {
   const language = useLanguageStore((s) => s.language);
-  return (key: TranslationKey, params?: Record<string, string | number>) => render(language, key, params);
+  return useMemo(
+    () => (key: TranslationKey, params?: Record<string, string | number>) => render(language, key, params),
+    [language],
+  );
 }
 
 /**

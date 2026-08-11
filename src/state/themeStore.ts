@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { getSetting, setSetting } from "../lib/tauri/commands";
+import { getSettings, setSetting } from "../lib/tauri/commands";
 import {
   applyThemeVars,
   findTheme,
@@ -61,11 +61,18 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   monacoTheme: monacoThemeName(resolve("system") === "dark" ? DEFAULT_DARK_THEME : DEFAULT_LIGHT_THEME),
 
   init: async () => {
-    const [storedPref, storedDark, storedLight] = await Promise.all([
-      getSetting(SETTING_KEY).catch(() => null),
-      getSetting(DARK_KEY).catch(() => null),
-      getSetting(LIGHT_KEY).catch(() => null),
-    ]);
+    // One round-trip for the three keys, not a `Promise.all` of three. The parallelism was
+    // imaginary: `get_setting` takes the database mutex per key, so the Rust end served them one
+    // after another — and this read is on the critical path of the very first paint, since the
+    // window shows a default palette until it lands. `?? null` keeps unset behaving exactly as
+    // `getSetting`'s `null` did (`getSettings` omits absent keys), so a preference deliberately
+    // stored as "" is still distinct from one that was never written.
+    const stored = await getSettings([SETTING_KEY, DARK_KEY, LIGHT_KEY]).catch(
+      () => ({}) as Record<string, string>,
+    );
+    const storedPref = stored[SETTING_KEY] ?? null;
+    const storedDark = stored[DARK_KEY] ?? null;
+    const storedLight = stored[LIGHT_KEY] ?? null;
     const preference = (storedPref as ThemePreference | null) ?? "system";
     const darkThemeId = findTheme(storedDark ?? DEFAULT_DARK_THEME, "dark").id;
     const lightThemeId = findTheme(storedLight ?? DEFAULT_LIGHT_THEME, "light").id;

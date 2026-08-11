@@ -6,7 +6,7 @@ import { useJobsStore, EMPTY_JOBS } from "../../state/jobsStore";
 import { useAnalyzeUiStore } from "../../state/analyzeUiStore";
 import { useT } from "../../state/languageStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
-import { renderMarkdown } from "../../lib/markdown";
+import { Markdown } from "../common/Markdown";
 import { FindingCard, QualityGateBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
 import { AiErrorBanner } from "./AiErrorBanner";
 import { AiRunLog } from "./AiRunLog";
@@ -160,9 +160,9 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
             // Nothing matched the expected "### finding" format at all — rather than lose
             // the model's actual answer, render the raw response as markdown instead of a
             // wall of unstyled plain text.
-            <div
+            <Markdown
+              source={summary}
               className="cf-markdown-preview rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] p-4"
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(summary) }}
             />
           ) : (
             <div className="flex flex-col items-center justify-center gap-2 py-10 text-center">
@@ -179,9 +179,9 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
         {!loading && !cancelled && !error && findings.length > 0 && (
           <div className="space-y-3">
             {summary && (
-              <div
+              <Markdown
+                source={summary}
                 className="cf-markdown-preview rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-3.5 py-2.5"
-                dangerouslySetInnerHTML={{ __html: renderMarkdown(summary) }}
               />
             )}
             <div className="space-y-2">

@@ -169,10 +169,7 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
     }
   };
 
-  const notices: string[] = [];
-  if (maxResponseBytes > 0 && response.size_bytes >= maxResponseBytes) {
-    notices.push(t("api.response.truncated", { size: formatBytes(response.size_bytes) }));
-  }
+  const truncated = wasTruncated(response, maxResponseBytes);
 
   const testsPassed = response.tests.filter((test) => test.passed).length;
 
@@ -235,6 +232,20 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
         </div>
       </div>
 
+      {/* A banner rather than a line inside the body editor, which is where this warning used to
+          live. The editor is one of four renderings, and the other three — the binary card, the
+          image/HTML preview, the visualizer — showed nothing at all, so a capped PDF read as a
+          complete one right next to a Save button that would write half a file. A body that stops
+          short has to say so wherever it is being looked at. */}
+      {truncated && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_12%,transparent)] px-3 py-1 text-[11px] text-[var(--cf-text)]">
+          <AlertTriangle size={12} className="shrink-0 text-[var(--cf-warning)]" />
+          <span className="min-w-0">
+            {t("api.response.truncated", { size: formatBytes(response.size_bytes) })}
+          </span>
+        </div>
+      )}
+
       {response.error ? (
         <ErrorView response={response} />
       ) : (
@@ -278,12 +289,11 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
                       text={pretty.text}
                       language={pretty.language}
                       defaultWrap
-                      notices={[
-                        ...notices,
-                        ...(pretty.skipped
+                      notices={
+                        pretty.skipped
                           ? [t("api.response.prettySkipped", { size: formatBytes(bodyText.length) })]
-                          : []),
-                      ]}
+                          : []
+                      }
                     />
                   ))}
 
@@ -295,7 +305,7 @@ export function ResponsePanel({ tabId }: { tabId: string }) {
                       path={`inmemory://api-response/${tabId}/raw`}
                       text={bodyText}
                       language="plaintext"
-                      notices={notices}
+                      notices={[]}
                     />
                   ))}
 
@@ -581,6 +591,10 @@ function BodyEditor({
           value={shown}
           theme={monacoTheme}
           onMount={handleMount}
+          // See `CodeSnippetPanel`: the library's per-path view-state `Map` is module-level and
+          // never pruned, and these paths carry the tab id — one entry per tab, per rendering,
+          // forever. A read-only body has no cursor state worth keeping across a remount.
+          saveViewState={false}
           options={{
             ...OVERFLOW_SAFE_OPTIONS,
             readOnly: true,
@@ -918,6 +932,25 @@ function useCopyFlag(): [boolean, () => void] {
 function headerValue(headers: [string, string][], name: string): string {
   const wanted = name.toLowerCase();
   return headers.find(([key]) => key.toLowerCase() === wanted)?.[1] ?? "";
+}
+
+/**
+ * Whether this body stopped short of what the server sent.
+ *
+ * The backend now says so outright: `read_body` sets `truncated` only when it actually left bytes
+ * on the wire, which the old test here could not tell apart from two innocent cases — a payload
+ * whose length is exactly the cap, and a response read back from history or an example, which was
+ * capped by whatever the setting said *then* while this compares against what it says *now*.
+ *
+ * The size comparison stays as the fallback, because the flag is absent on everything stored
+ * before it existed and `undefined` there must not read as "complete". `ApiResponse` mirrors the
+ * Rust `HttpResponse`, which has grown the field; the local widening is what lets this land
+ * without the shared type having to change in the same breath.
+ */
+function wasTruncated(response: ApiResponse, maxResponseBytes: number): boolean {
+  const flag = (response as ApiResponse & { truncated?: boolean }).truncated;
+  if (typeof flag === "boolean") return flag;
+  return maxResponseBytes > 0 && response.size_bytes >= maxResponseBytes;
 }
 
 function mimeOf(contentType: string): string {

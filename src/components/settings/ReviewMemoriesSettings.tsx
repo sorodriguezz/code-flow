@@ -31,7 +31,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import { renderMarkdown } from "../../lib/markdown";
+import { Markdown } from "../common/Markdown";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { FpSuppression, ReviewRunDetail, ReviewRunSummary, SavedFinding } from "../../types/domain";
 import { Skeleton } from "../common/Skeleton";
@@ -457,9 +457,9 @@ export function ReviewMemoriesSettings() {
                     ) : (
                       <>
                         <RunFindings detail={detail} onMarked={() => void refreshDetail(detail.id)} />
-                        <div
+                        <Markdown
+                          source={detail.review_md}
                           className="cf-markdown-preview max-h-80 overflow-auto border-t border-[var(--cf-border)] pt-3 text-[12px]"
-                          dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.review_md) }}
                         />
                       </>
                     )}

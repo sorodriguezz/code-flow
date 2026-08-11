@@ -22,8 +22,9 @@ import type { CodeSnapTarget } from "./CodeSnapModal";
 import { modelPathFor } from "../../lib/editorModel";
 import { languageForPath } from "../../lib/monacoLanguage";
 import { FileGlyph } from "../common/FileGlyph";
-import { parseDbml } from "../../lib/dbml";
+import type { DbmlSchema } from "../../lib/dbml";
 import { reconstructSides } from "../../lib/diffText";
+import { getFileDiff } from "../../lib/tauri/commands";
 import { anchorColor, anchorTagClass, parseAnchors } from "../../lib/anchors";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { useBookmarkStore } from "../../state/bookmarkStore";
@@ -35,6 +36,91 @@ import { useShortcutsStore } from "../../state/shortcutsStore";
 import { BouncingDots } from "../common/BouncingDots";
 import { EmptyState } from "../common/EmptyState";
 import type { FileDiffInfo, Project } from "../../types/domain";
+
+/**
+ * The DBML parser, once any pane has pulled it in.
+ *
+ * `@dbml/core` is by a wide margin the heaviest thing in this app — 21.3 MB on disk, ~15.6 MB
+ * minified, two thirds of the whole bundle — and the *only* thing that ever calls into it is the
+ * `parseDbml` below, for a file whose name ends in `.dbml`. Imported statically it landed in the
+ * entry chunk and was parsed before the window painted, in every session, including the
+ * overwhelming majority that never open one.
+ *
+ * So it is fetched on demand, and remembered here at module scope rather than per pane: the first
+ * `.dbml` file opened in a session pays a chunk load, every one after it (and every keystroke in
+ * the one that is open) parses synchronously exactly as before. Without this cache the diagram
+ * would flash its loading state on every keystroke, since a fresh `import()` is still a promise.
+ */
+let dbmlParser: ((source: string) => DbmlSchema) | null = null;
+
+/**
+ * Full-context diffs of files the diff tab has shown, keyed by repo + path + the change's
+ * signature, most recently added last.
+ *
+ * At module scope rather than in the component for two reasons: two editor groups showing the same
+ * file each want it, and a group that is closed and reopened (or a tab switched away from and back)
+ * should not re-cross IPC for a diff nothing has changed.
+ *
+ * Kept deliberately small. One entry is a whole file's worth of `DiffLine` objects — the very thing
+ * this change stopped holding for every file at once — and a generated lockfile is tens of
+ * megabytes of them on its own. Four is enough for "toggle the diff off and on" and "flip between
+ * the two files you are working on" to be instant, which is what the cache is for; the fifth is a
+ * single small IPC call, not a stall.
+ */
+const fullDiffCache = new Map<string, FileDiffInfo>();
+const FULL_DIFF_CACHE_LIMIT = 4;
+
+/**
+ * A cheap identity for "this file's change, as git currently sees it right now" — every added and
+ * removed line verbatim plus the hunk headers that place them.
+ *
+ * `fileDiffFor` reads the store's `workingDiff`/`stagedDiff`, which the filesystem watcher rebuilds
+ * from scratch several times a second, so the diff object has a fresh identity on every tick even
+ * when the file has not moved. Keying the fetch below on the object would put an IPC round trip on
+ * every tick, which is the exact cost this is here to avoid; keying it on the content means a tick
+ * that found the same change refetches nothing, and any real edit reloads the pane.
+ *
+ * Context lines are left out on purpose: they are precisely what the narrow list diff does not
+ * carry, so a signature that included them would depend on what it cannot see.
+ *
+ * (`ChangesPanel` has its own copy of this for its diff pane. Worth lifting into `lib/diffText.ts`
+ * if a third caller appears.)
+ */
+function diffSignature(file: FileDiffInfo): string {
+  const parts: string[] = [file.status, file.new_path ?? "", file.old_path ?? ""];
+  for (const hunk of file.hunks) {
+    parts.push(hunk.header);
+    for (const line of hunk.lines) {
+      if (line.origin !== " ") parts.push(`${line.origin}${line.old_lineno ?? ""}:${line.new_lineno ?? ""}:${line.content}`);
+    }
+  }
+  return parts.join(" ");
+}
+
+/**
+ * One file's diff at whole-file context, which is the only thing `reconstructSides` can rebuild two
+ * complete file texts out of — see `lib/diffText.ts`.
+ *
+ * Working tree first, index second: that is exactly the "unstaged wins, else staged" precedence
+ * `EditorView`'s `fileDiffFor` uses to pick the entry this pane was handed. It gives us the merged
+ * answer without saying which side it came from, so the order is reproduced here rather than
+ * plumbed down as another prop. The second call only ever happens for a file whose only change is
+ * staged, and only once per change thanks to the cache.
+ */
+async function loadFullFileDiff(repoPath: string, path: string, key: string): Promise<FileDiffInfo | null> {
+  const cached = fullDiffCache.get(key);
+  if (cached) return cached;
+  const file = (await getFileDiff(repoPath, path, false)) ?? (await getFileDiff(repoPath, path, true));
+  if (file) {
+    fullDiffCache.set(key, file);
+    // Map iteration is insertion-ordered, so the first key is the oldest.
+    if (fullDiffCache.size > FULL_DIFF_CACHE_LIMIT) {
+      const oldest = fullDiffCache.keys().next().value;
+      if (oldest !== undefined) fullDiffCache.delete(oldest);
+    }
+  }
+  return file;
+}
 
 export type PreviewKind = "markdown" | "dbml" | null;
 /** `preview`/`split` are the rendered-output modes, and only mean anything for a file with a
@@ -223,17 +309,105 @@ export function EditorPane({
   const content = activeTab?.content ?? "";
   const dirty = activeTab ? activeTab.content !== activeTab.originalContent : false;
   const previewKind = previewKindFor(activePath);
-  const dbmlSchema = useMemo(() => (previewKind === "dbml" ? parseDbml(content) : null), [previewKind, content]);
-  /** The file's uncommitted change, when it has one — what the diff mode shows both sides of. */
+  /** The parser, held in state so its arrival re-renders. `useState`'s initialiser form is what
+   * stores a *function* rather than calling it — same for `setParseDbml` below. */
+  const [parseDbml, setParseDbml] = useState<((source: string) => DbmlSchema) | null>(() => dbmlParser);
+  /** A chunk that failed to load. Surfaced through the diagram's own error box rather than
+   * swallowed: an empty diagram would read as a `.dbml` file with nothing in it. */
+  const [dbmlLoadError, setDbmlLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (previewKind !== "dbml") return;
+    const loaded = dbmlParser;
+    if (loaded) {
+      // Another pane pulled the chunk in while this one was showing something else, so there is
+      // no load left to wait on — adopt it. Setting the same function back is a no-op re-render
+      // React bails out of, which is what makes this safe to run on every switch to a `.dbml` tab.
+      setParseDbml(() => loaded);
+      return;
+    }
+    let cancelled = false;
+    void import("../../lib/dbml")
+      .then((module) => {
+        dbmlParser = module.parseDbml;
+        if (!cancelled) setParseDbml(() => module.parseDbml);
+      })
+      .catch((e) => {
+        if (!cancelled) setDbmlLoadError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [previewKind]);
+
+  const dbmlSchema = useMemo<DbmlSchema | null>(() => {
+    if (previewKind !== "dbml") return null;
+    // A parser that arrived wins over an earlier failure: opening a second `.dbml` file retries
+    // the chunk, and a retry that succeeded must not keep showing the error from the one before.
+    if (parseDbml) return parseDbml(content);
+    if (dbmlLoadError) return { tables: [], refs: [], error: dbmlLoadError };
+    return null;
+  }, [previewKind, content, parseDbml, dbmlLoadError]);
+  /** `null` schema on a `.dbml` file means the parser hasn't landed yet — the one case the diagram
+   * must show as a wait rather than as an empty schema. */
+  const dbmlLoading = previewKind === "dbml" && dbmlSchema === null;
+  /** Whether the file has an uncommitted change at all, and where its changed lines are. Comes from
+   * the store's narrow list diff, which answers both of those exactly as it always did — what it
+   * cannot answer is what the *whole file* looked like before, which is `fullActiveDiff` below. */
   const activeDiff = activePath ? fileDiffFor(activePath) : undefined;
   // A tab left in diff mode whose change then goes away — committed, discarded, staged from
   // under it — falls back to the code rather than to an empty pane.
   const viewMode: ViewMode =
     activeTab?.viewMode === "diff" && !activeDiff ? "code" : (activeTab?.viewMode ?? "code");
-  const diffSides = useMemo(() => (viewMode === "diff" && activeDiff ? reconstructSides(activeDiff) : null), [
-    viewMode,
-    activeDiff,
-  ]);
+
+  /** The active file's change, identified by content — see `diffSignature`. `null` when the file
+   * has no change to show. */
+  const activeDiffKey = useMemo(
+    () =>
+      activePath && activeDiff ? `${project.local_path} ${activePath} ${diffSignature(activeDiff)}` : null,
+    [project.local_path, activePath, activeDiff],
+  );
+  const [fullDiff, setFullDiff] = useState<{ path: string; key: string; file: FileDiffInfo } | null>(null);
+
+  /**
+   * Fetches the whole-file copy as soon as the active file has a change, **not** when the diff
+   * toggle is pressed.
+   *
+   * The toggle used to be instant because the store already held every file at full context; that
+   * is the thing that cost ~1.8 MB of JSON per watcher tick. Loading it for the one file that is
+   * open keeps the press instant for what it costs to open a changed file once — and if the user
+   * never presses it, that is a single small IPC call against a per-tick megabyte.
+   */
+  useEffect(() => {
+    if (!activeDiffKey || !activePath) return;
+    const cached = fullDiffCache.get(activeDiffKey);
+    if (cached) {
+      setFullDiff({ path: activePath, key: activeDiffKey, file: cached });
+      return;
+    }
+    let cancelled = false;
+    const path = activePath;
+    void loadFullFileDiff(project.local_path, path, activeDiffKey).then((file) => {
+      if (!cancelled && file) setFullDiff({ path, key: activeDiffKey, file });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDiffKey, activePath, project.local_path]);
+
+  /**
+   * What the side-by-side actually renders.
+   *
+   * Matched on the *path*, not on the key: while a refetch triggered by an edit is in flight the
+   * pane keeps showing the copy from a moment ago rather than blanking, which is no more stale than
+   * a diff already is between two watcher ticks. Matching on the key would drop the whole editor on
+   * every keystroke that reached disk.
+   */
+  const fullActiveDiff = fullDiff && fullDiff.path === activePath ? fullDiff.file : null;
+  const diffSides = useMemo(
+    () => (viewMode === "diff" && fullActiveDiff ? reconstructSides(fullActiveDiff) : null),
+    [viewMode, fullActiveDiff],
+  );
 
   const tRef = useRef(t);
   useEffect(() => {
@@ -786,31 +960,41 @@ export function EditorPane({
               <div className="flex h-full items-center justify-center">
                 <BouncingDots />
               </div>
-            ) : viewMode === "diff" && diffSides ? (
-              /* Read-only on purpose: this is the change as git has it, and the editable copy is
-                 one click away on the same toolbar. `renderSideBySide` is the whole request —
-                 before on the left, now on the right — so it never falls back to inline. */
-              <DiffEditor
-                height="100%"
-                language={languageForPath(activeTab.path)}
-                original={diffSides.original}
-                modified={diffSides.modified}
-                theme={monacoTheme}
-                options={{
-                  readOnly: true,
-                  fontSize: 13,
-                  renderSideBySide: true,
-                  useInlineViewWhenSpaceIsLimited: false,
-                  automaticLayout: true,
-                  maxComputationTime: 2000,
-                  scrollBeyondLastLine: false,
-                }}
-              />
+            ) : viewMode === "diff" ? (
+              diffSides ? (
+                /* Read-only on purpose: this is the change as git has it, and the editable copy is
+                   one click away on the same toolbar. `renderSideBySide` is the whole request —
+                   before on the left, now on the right — so it never falls back to inline. */
+                <DiffEditor
+                  height="100%"
+                  language={languageForPath(activeTab.path)}
+                  original={diffSides.original}
+                  modified={diffSides.modified}
+                  theme={monacoTheme}
+                  options={{
+                    readOnly: true,
+                    fontSize: 13,
+                    renderSideBySide: true,
+                    useInlineViewWhenSpaceIsLimited: false,
+                    automaticLayout: true,
+                    maxComputationTime: 2000,
+                    scrollBeyondLastLine: false,
+                  }}
+                />
+              ) : (
+                /* Whole-file context is a fetch now (see `loadFullFileDiff`), and `viewMode` has
+                   already established the file *has* a change — so this is the brief gap before it
+                   lands, and it gets the same wait the file's own load does. Falling through to the
+                   code editor here would flash the file in and straight back out. */
+                <div className="flex h-full items-center justify-center">
+                  <BouncingDots />
+                </div>
+              )
             ) : viewMode === "preview" ? (
               previewKind === "markdown" ? (
                 <MarkdownPreview content={content} />
               ) : (
-                <DbmlDiagram schema={dbmlSchema!} />
+                <DbmlDiagram schema={dbmlSchema} loading={dbmlLoading} />
               )
             ) : viewMode === "split" ? (
               <div className="flex h-full">
@@ -819,7 +1003,7 @@ export function EditorPane({
                   {previewKind === "markdown" ? (
                     <MarkdownPreview content={content} ref={previewScrollRef} />
                   ) : (
-                    <DbmlDiagram schema={dbmlSchema!} ref={previewScrollRef} />
+                    <DbmlDiagram schema={dbmlSchema} loading={dbmlLoading} ref={previewScrollRef} />
                   )}
                 </div>
               </div>

@@ -11,9 +11,10 @@
 //! that already carry a job id (PR review, change analysis) that id doubles as the run id, which
 //! is what lets the job list show live output for the row it already renders.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -32,13 +33,32 @@ const MAX_LINE_CHARS: usize = 2_000;
 /// since the tail is what explains how a turn ended up where it did.
 const MAX_TRACE_LINES: usize = 300;
 
+/// How long a batch of output waits before it goes out as one event.
+///
+/// A busy agentic turn under `--output-format stream-json --verbose` produces 20-60 lines a
+/// second, and one IPC message + one JS callback + one React render *per line* is what makes the
+/// window stutter while an agent is thinking. 100ms is the deliberate middle: fast enough that the
+/// log still reads as live streaming (ten repaints a second is past what the eye reads as
+/// continuous), slow enough that a burst collapses into a single render instead of sixty.
+const BATCH_INTERVAL: Duration = Duration::from_millis(100);
+
+/// A batch that reaches this many lines goes out immediately rather than waiting for the tick, so
+/// a firehose never builds a queue the user is waiting behind.
+const BATCH_MAX_LINES: usize = 32;
+
 #[derive(Clone)]
 pub struct RunCtx {
     pub app: AppHandle,
     pub run_id: String,
     /// Everything emitted for this run, so a finished turn can still show how it got there.
     /// Shared because the pumps that fill it run in their own tasks.
-    trace: Arc<Mutex<Vec<TraceLine>>>,
+    ///
+    /// A `VecDeque` and not a `Vec` for one reason: the cap is enforced on every single line, and
+    /// dropping the oldest of 300 elements out of a `Vec` memmoves the other 299 each time. Serde
+    /// writes a `VecDeque` as the same JSON array, so the stored trace is byte-identical.
+    trace: Arc<Mutex<VecDeque<TraceLine>>>,
+    /// Lines emitted since the last batch went out. See [`flush_batch`].
+    batch: Arc<Mutex<Vec<TraceLine>>>,
 }
 
 /// One recorded line of a run, in the shape the frontend already renders.
@@ -52,13 +72,19 @@ tokio::task_local! {
     static CURRENT: RunCtx;
 }
 
+/// A run's output, several lines at a time — the only output event there is.
+///
+/// It replaced a per-line `ai:output`, which cost one IPC message, one JS callback and one React
+/// render *per line* of a stream that runs at 20-60 lines a second. The two were emitted side by
+/// side for exactly as long as it took `aiRunStore` to switch over; the per-line one is gone now
+/// that nothing listens for it, and the run log costs one render per 100ms instead of one per line.
+/// Same lines, same order — see [`flush_batch`] for how the order is held under a racing flush, and
+/// [`Ticker`] for why the tail can never arrive after the run's completion.
 #[derive(Clone, Serialize)]
-struct AiOutputEvent {
+struct AiOutputBatchEvent {
     run_id: String,
-    /// `"stdout"` or `"stderr"` — the UI dims the latter, since most CLIs use it for progress
-    /// chatter rather than for failures.
-    stream: &'static str,
-    line: String,
+    /// In arrival order, oldest first. Never empty — an empty batch is simply not emitted.
+    lines: Vec<TraceLine>,
 }
 
 /// Which engine and model a run is actually about to use, announced the moment it starts.
@@ -106,14 +132,77 @@ pub async fn scoped_with_trace<F: Future>(
     if let Ok(mut map) = registry().lock() {
         map.insert(run_id.clone(), tx);
     }
-    let trace = Arc::new(Mutex::new(Vec::new()));
-    let ctx = RunCtx { app, run_id: run_id.clone(), trace: Arc::clone(&trace) };
-    let output = CURRENT.scope(ctx, fut).await;
+    let trace = Arc::new(Mutex::new(VecDeque::new()));
+    let ctx = RunCtx {
+        app,
+        run_id: run_id.clone(),
+        trace: Arc::clone(&trace),
+        batch: Arc::new(Mutex::new(Vec::new())),
+    };
+    // The heartbeat that makes a batch feel live: without it a run that goes quiet after twenty
+    // lines would sit on them until it produced thirty-two more. `Delay` and not the default
+    // burst behaviour, because a tick missed while the machine was busy must not turn into two
+    // flushes back to back — there is nothing to catch up on, only the current batch to send.
+    let ticker = Ticker(
+        {
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(BATCH_INTERVAL);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tick.tick().await;
+                    flush_batch(&ctx);
+                }
+            })
+        },
+        ctx.clone(),
+    );
+    let output = CURRENT.scope(ctx.clone(), fut).await;
+    // Dropped here by hand rather than at the end of the scope, because dropping it is what sends
+    // the last partial batch (see [`Ticker`]) and that has to happen before this function returns:
+    // the caller emits its "this run is done" event the moment it gets control back, and the tail
+    // of a run must never arrive after the signal that the run is over.
+    drop(ticker);
     if let Ok(mut map) = registry().lock() {
         map.remove(&run_id);
     }
-    let collected = trace.lock().map(|t| t.clone()).unwrap_or_default();
+    let collected = trace.lock().map(|t| t.iter().cloned().collect()).unwrap_or_default();
     (output, collected)
+}
+
+/// The batch ticker, plus the promise that whatever it was holding still goes out.
+///
+/// A guard and not two plain statements after the await, because there is a third way a run can
+/// end: the whole future being dropped — a command cancelled out from under us, or the app shutting
+/// down mid-run. That path never reaches any line written after the await, and without this it
+/// would leak a task ticking every 100ms forever, holding an `AppHandle`, and swallow the last few
+/// lines of the run with it. `abort` before the flush is safe in either order: it only takes effect
+/// at an await point, and [`flush_batch`] has none.
+struct Ticker(tokio::task::JoinHandle<()>, RunCtx);
+
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        self.0.abort();
+        flush_batch(&self.1);
+    }
+}
+
+/// Sends whatever has accumulated since the last batch, as one event. A no-op when nothing has.
+///
+/// The take and the emit happen under the same lock on purpose. Two flushes can race — the ticker
+/// against a batch that just hit [`BATCH_MAX_LINES`] — and if one took its half and were then
+/// preempted before emitting, the other's half would reach the frontend first and the run log
+/// would read scrambled. Nothing parks under this lock: `emit` serializes and posts, it never
+/// awaits.
+fn flush_batch(ctx: &RunCtx) {
+    let Ok(mut batch) = ctx.batch.lock() else { return };
+    if batch.is_empty() {
+        return;
+    }
+    let lines = std::mem::take(&mut *batch);
+    let _ = ctx
+        .app
+        .emit("ai:output-batch", AiOutputBatchEvent { run_id: ctx.run_id.clone(), lines });
 }
 
 /// The run the current task belongs to, if it was started through [`scoped`].
@@ -164,8 +253,8 @@ pub fn emit_engine(ctx: &RunCtx, engine: &str, model: &str) {
     );
 }
 
-/// Pushes one line of a run's output to the frontend. Blank lines are dropped — the CLIs pad
-/// their output generously and the log reads better without the gaps.
+/// Records one line of a run's output and queues it for the frontend. Blank lines are dropped —
+/// the CLIs pad their output generously and the log reads better without the gaps.
 pub fn emit_line(ctx: &RunCtx, stream: &'static str, line: &str) {
     let line = line.trim_end();
     if line.is_empty() {
@@ -178,11 +267,23 @@ pub fn emit_line(ctx: &RunCtx, stream: &'static str, line: &str) {
     };
     if let Ok(mut trace) = ctx.trace.lock() {
         if trace.len() >= MAX_TRACE_LINES {
-            trace.remove(0);
+            trace.pop_front();
         }
-        trace.push(TraceLine { stream, line: line.clone() });
+        trace.push_back(TraceLine { stream, line: line.clone() });
     }
-    let _ = ctx.app.emit("ai:output", AiOutputEvent { run_id: ctx.run_id.clone(), stream, line });
+    // Queued, not emitted: the line goes out with the next batch — on the 100ms tick, immediately
+    // if this one fills the batch, or from the [`Ticker`] guard if the run ends first. This is the
+    // only path to the frontend now that `ai:output` is gone, so nothing here may drop a line.
+    let full = match ctx.batch.lock() {
+        Ok(mut batch) => {
+            batch.push(TraceLine { stream, line });
+            batch.len() >= BATCH_MAX_LINES
+        }
+        Err(_) => false,
+    };
+    if full {
+        flush_batch(ctx);
+    }
 }
 
 /// Kills a spawned CLI *and its children*.

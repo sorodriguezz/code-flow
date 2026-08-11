@@ -66,21 +66,20 @@ function UnreadDot({ burst }: { burst: number }) {
       ))}
 
       {/* The halo breathes for as long as there is anything unread. Opacity and scale only — a
-          `box-shadow` in `color-mix()` is not something framer-motion can interpolate. */}
-      <motion.span
-        className="absolute -inset-[3px] rounded-full bg-[var(--cf-accent)] blur-[3px]"
-        animate={{ opacity: [0.2, 0.55, 0.2], scale: [0.85, 1.1, 0.85] }}
-        transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
-      />
+          `box-shadow` in `color-mix()` is not something an animation can interpolate anyway.
+
+          CSS rather than framer-motion, and that is the whole point: this loop and the one below
+          run for as long as *anything* is unread, which is the resting state here. Driving them
+          from JS meant a rAF loop that never quiesced, and scaling this blurred layer from the
+          main thread re-rasterized the blur every frame. `cf-bell-halo`/`cf-bell-breath` in
+          `index.css` are the same keyframes at the same 2.2s ease-in-out, composited. */}
+      <span className="cf-bell-halo absolute -inset-[3px] rounded-full bg-[var(--cf-accent)] blur-[3px]" />
 
       {/* Two nested spans rather than one: the outer one breathes forever, the inner one springs in
           once per arrival. Keyframes that did both would have to re-derive the resting loop from
-          wherever the spring left off. */}
-      <motion.span
-        className="absolute inset-0"
-        animate={{ scale: [1, 1.16, 1] }}
-        transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
-      >
+          wherever the spring left off. Which is also why only the outer one moved to CSS — the
+          spring is finite, belongs to the arrival, and stays where it was. */}
+      <span className="cf-bell-breath absolute inset-0">
         <motion.span
           key={burst}
           className="block h-full w-full rounded-full bg-[var(--cf-accent)] ring-2 ring-[var(--cf-surface)]"
@@ -88,7 +87,7 @@ function UnreadDot({ burst }: { burst: number }) {
           animate={{ scale: 1 }}
           transition={{ type: "spring", stiffness: 700, damping: 14 }}
         />
-      </motion.span>
+      </span>
     </span>
   );
 }

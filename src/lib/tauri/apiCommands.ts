@@ -121,6 +121,22 @@ export const apiDuplicateEnvironment = (id: string) =>
 export const apiListHistory = (workspaceId: string, limit: number) =>
   invoke<ApiHistoryEntry[]>("api_list_history", { workspaceId, limit });
 
+/** The history list without the `snapshot` blob.
+ *
+ * The sidebar only ever draws the method, URL, status and duration, but every row carries the full
+ * request-and-response JSON of that send — so hydrating 500 of them parsed several MB on the UI
+ * thread the first time the API workspace opened. Rows come back with `snapshot: ""`, which means
+ * "not loaded here", never "this send had no request": `apiGetHistorySnapshot` fetches the real one
+ * for the entry the user actually clicks. Nothing is dropped from the database and a replay still
+ * restores byte for byte. */
+export const apiListHistoryMeta = (workspaceId: string, limit: number) =>
+  invoke<ApiHistoryEntry[]>("api_list_history_meta", { workspaceId, limit });
+
+/** One entry's stored snapshot. `null` means the row is gone — deleted, or evicted by the hard cap
+ * while its list row was still on screen — which is not the same answer as an empty string. */
+export const apiGetHistorySnapshot = (id: string) =>
+  invoke<string | null>("api_get_history_snapshot", { id });
+
 /** The workspace comes from the entry itself, and is what the trim-to-limit is counted within. */
 export const apiAddHistory = (entry: ApiHistoryEntry) => invoke<void>("api_add_history", { entry });
 

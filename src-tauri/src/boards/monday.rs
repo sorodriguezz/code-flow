@@ -57,8 +57,12 @@ const CRITERIA_HEADING: &str = "Criterios de aceptación";
 
 // ---------- talking to the host ----------
 
+/// One client for the process, cloned per call — see `crate::github::client` for why building a
+/// rustls client per request cost a full TLS handshake and an unshared connection pool every time.
+/// Nothing here varies the transport per call, so the pool is pure gain.
 fn client() -> reqwest::Client {
-    reqwest::Client::new()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
 }
 
 #[derive(Deserialize)]

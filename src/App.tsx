@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { Suspense, lazy, useEffect, useState, type ReactElement } from "react";
 import { AnimatePresence } from "framer-motion";
 import { FolderGit2 } from "lucide-react";
 import { useT } from "./state/languageStore";
@@ -10,17 +10,6 @@ import { StatusBar } from "./components/layout/StatusBar";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
 import { AiPanel } from "./components/ai/AiPanel";
-import { EditorView } from "./components/editor/EditorView";
-import { ApiView } from "./components/api/ApiView";
-import { AgentsView } from "./components/agents/AgentsView";
-import { StoriesView } from "./components/stories/StoriesView";
-import { RemoteView } from "./components/remote/RemoteView";
-import { TerminalDock } from "./components/terminal/TerminalDock";
-import { SettingsView } from "./components/settings/SettingsView";
-import { CommandPalette } from "./components/layout/CommandPalette";
-import { ShortcutsModal } from "./components/layout/ShortcutsModal";
-import { BranchSwitcherModal } from "./components/layout/BranchSwitcherModal";
-import { OpenPrLinkModal } from "./components/layout/OpenPrLinkModal";
 import { UpdateNotesModal } from "./components/layout/UpdateNotesModal";
 import { RequirementsModal } from "./components/layout/RequirementsModal";
 import { UpdateAlert } from "./components/layout/UpdateAlert";
@@ -29,6 +18,7 @@ import { ToastContainer } from "./components/common/Toast";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
 import { TourOverlay } from "./components/tour/TourOverlay";
+import { PaletteSkeleton, SettingsSkeleton, ViewSkeleton } from "./components/common/ViewSkeleton";
 import { useThemeStore } from "./state/themeStore";
 import { useUiStore, type MainView } from "./state/uiStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
@@ -54,6 +44,131 @@ import { startWindowBoundsTracking } from "./lib/windowControls";
 import { backgroundFetch } from "./lib/backgroundFetch";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
 import { onAppForeground, onRepoFsChanged } from "./lib/tauri/events";
+
+/**
+ * Everything below is split out of the entry chunk rather than compiled into it.
+ *
+ * The app already knew *when* each of these first becomes visible — `visited` below, and the
+ * `xxxOpen` flags at the bottom of `App` — but until now knowing that bought nothing: every one
+ * of them was a static import, so xterm, noVNC, the whole settings tree and every view's worth of
+ * components were parsed and evaluated before the first frame of the graph could paint, on every
+ * launch, whether or not the user ever opened them.
+ *
+ * Monaco is the one that this does *not* fix, and it is worth knowing why before someone measures
+ * the entry chunk and wonders: `main.tsx` imports `lib/monacoSetup` for its side effects, and that
+ * module imports `monaco-editor` at the top level, so the editor is a static dependency of the
+ * entry no matter how lazily `EditorView` is mounted. Making that setup lazy is a change to
+ * `main.tsx`, not to this file.
+ *
+ * `React.lazy` moves that cost to the moment the thing is actually asked for. Two rules go with
+ * it and neither is optional:
+ *
+ *  1. One `<Suspense>` per view, *inside* each view's own `<div key>`. A single boundary wrapped
+ *     around `MainContent` would unmount the entire subtree while any one chunk loaded — which is
+ *     precisely the teardown of live terminal sessions and API WebSocket/MQTT connections that the
+ *     never-unmount policy documented in `MainContent` exists to prevent.
+ *  2. Graph and Changes stay static. `uiStore` starts on "graph", so making them lazy would only
+ *     buy a skeleton flash on every launch.
+ */
+const EditorView = lazy(() => import("./components/editor/EditorView").then((m) => ({ default: m.EditorView })));
+const ApiView = lazy(() => import("./components/api/ApiView").then((m) => ({ default: m.ApiView })));
+const AgentsView = lazy(() => import("./components/agents/AgentsView").then((m) => ({ default: m.AgentsView })));
+const StoriesView = lazy(() => import("./components/stories/StoriesView").then((m) => ({ default: m.StoriesView })));
+const RemoteView = lazy(() => import("./components/remote/RemoteView").then((m) => ({ default: m.RemoteView })));
+
+const loadTerminalDock = () =>
+  import("./components/terminal/TerminalDock").then((m) => ({ default: m.TerminalDock }));
+const loadSettingsView = () =>
+  import("./components/settings/SettingsView").then((m) => ({ default: m.SettingsView }));
+const loadCommandPalette = () =>
+  import("./components/layout/CommandPalette").then((m) => ({ default: m.CommandPalette }));
+const loadShortcutsModal = () =>
+  import("./components/layout/ShortcutsModal").then((m) => ({ default: m.ShortcutsModal }));
+const loadBranchSwitcherModal = () =>
+  import("./components/layout/BranchSwitcherModal").then((m) => ({ default: m.BranchSwitcherModal }));
+const loadOpenPrLinkModal = () =>
+  import("./components/layout/OpenPrLinkModal").then((m) => ({ default: m.OpenPrLinkModal }));
+
+const TerminalDock = lazy(loadTerminalDock);
+const SettingsView = lazy(loadSettingsView);
+const CommandPalette = lazy(loadCommandPalette);
+const ShortcutsModal = lazy(loadShortcutsModal);
+const BranchSwitcherModal = lazy(loadBranchSwitcherModal);
+const OpenPrLinkModal = lazy(loadOpenPrLinkModal);
+
+/**
+ * The chunks above that open from a keystroke, warmed once the app has finished starting.
+ *
+ * These six are the ones where a Suspense fallback would actually be *noticed*: Ctrl+K and the
+ * terminal toggle are reflexes, and a skeleton between the key and the panel would read as the
+ * app being slower than it was. Fetching them on an idle callback after boot costs nothing the
+ * user can feel — the main thread is already free by then — and means the fallback is only ever
+ * reached in the pathological case where the key is pressed inside the first idle window.
+ *
+ * The heavy views are deliberately *not* in this list. Monaco alone is hundreds of milliseconds
+ * of parse; doing that speculatively is how an idle callback turns into a dropped keystroke. They
+ * pay for themselves on first open, behind a skeleton, which is strictly better than the
+ * synchronous freeze they used to cause at launch.
+ */
+const WARM_CHUNKS = [
+  loadTerminalDock,
+  loadSettingsView,
+  loadCommandPalette,
+  loadShortcutsModal,
+  loadBranchSwitcherModal,
+  loadOpenPrLinkModal,
+];
+
+/**
+ * How long the filesystem watcher has to go quiet before the working tree is re-read, and before
+ * the rest of the repository is.
+ *
+ * Trailing edge, both of them, and never leading. `src-tauri/src/watcher.rs` carries the scar:
+ * a plain leading-edge throttle there emitted the first event of a burst and dropped the rest,
+ * which lost every file but the first when an agent's Edit tool wrote several in a row, and left
+ * the app showing a state that had never existed. A trailing edge can be late but it cannot be
+ * wrong — the timer only ever fires after the last event, so what it reads is the final state.
+ */
+const FS_NEAR_WAIT_MS = 600;
+const FS_FAR_WAIT_MS = 3000;
+/**
+ * ...and the ceiling on each, because the watcher does not always go quiet. It emits at most once
+ * per 400ms for as long as files keep landing, so a checkout or an `npm install` that runs for ten
+ * seconds would reset a 600ms timer twenty-five times in a row and refresh nothing at all until it
+ * finished — a regression on the old behaviour, not an optimisation of it. Past the ceiling the
+ * refresh happens whether or not the burst has stopped, and the trailing timer is re-armed after
+ * it, so the last event is still read once things do settle.
+ */
+const FS_NEAR_MAX_WAIT_MS = 2000;
+const FS_FAR_MAX_WAIT_MS = 10000;
+
+type Debounced = { (): void; cancel: () => void };
+
+/** Trailing-edge debounce with a maximum wait. See the constants above for why it is both. */
+function trailingDebounce(fn: () => void, waitMs: number, maxWaitMs: number): Debounced {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // When the current burst started, so the ceiling is measured from the *first* event of it and
+  // not from the last — which is the whole difference between a max-wait and a longer debounce.
+  let burstStartedAt = 0;
+  const reset = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    burstStartedAt = 0;
+  };
+  return Object.assign(
+    () => {
+      const now = Date.now();
+      if (burstStartedAt === 0) burstStartedAt = now;
+      if (timer !== undefined) clearTimeout(timer);
+      const remaining = burstStartedAt + maxWaitMs - now;
+      timer = setTimeout(() => {
+        reset();
+        fn();
+      }, Math.max(0, Math.min(waitMs, remaining)));
+    },
+    { cancel: reset },
+  );
+}
 
 const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "graph", render: () => <GraphView /> },
@@ -100,18 +215,23 @@ function MainContent() {
   // in-progress state — the Terminal's shell session, and now also the API client's live
   // WebSocket/MQTT connections and unsaved request drafts, all of which would otherwise be
   // torn down every time you tabbed away. Views never opened yet aren't mounted at all.
+  //
+  // The `<Suspense>` is *per view*, inside the per-view `<div>`, and must stay that way: one
+  // boundary hoisted up here would cover every mounted view at once, so the first open of any
+  // lazy view would replace all of them with a fallback — unmounting exactly the sessions and
+  // sockets the paragraph above exists to keep alive.
   return (
     <>
       {project &&
         PROJECT_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
           <div key={id} className={activeView === id ? "h-full" : "hidden"}>
-            {render()}
+            <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
           </div>
         ))}
       {workspaceId !== null &&
         WORKSPACE_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
           <div key={id} className={activeView === id ? "h-full" : "hidden"}>
-            {render()}
+            <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
           </div>
         ))}
     </>
@@ -152,20 +272,28 @@ export default function App() {
   const closeBranchSwitcher = useUiStore((s) => s.closeBranchSwitcher);
   const prLinkModalOpen = useUiStore((s) => s.prLinkModalOpen);
   const closePrLinkModal = useUiStore((s) => s.closePrLinkModal);
+  // Read here, not only inside `SettingsView`, because the panel is a lazy chunk now and this is
+  // the flag that decides whether that chunk is ever asked for. See the render below.
+  const settingsOpen = useUiStore((s) => s.settingsOpen);
 
   useGlobalShortcuts();
 
   useEffect(() => {
     (async () => {
-      // Ahead of the batch, and on its own, because its answer decides one thing inside it.
+      // What `initRequirements` decides: whether the guided tour is allowed to open itself.
       //
-      // On every launch but the first of an installation this is a single settings read that
-      // returns immediately — the flag is set and nothing is probed. Only on that first launch does
-      // it cost a `git --version` and a file write, and only then can it come back saying the tour
-      // must not open itself over the dialog it is about to show. Ordering stated rather than left
-      // to a 1100 ms timer to win by being slower. See `requirementsStore`.
-      const clearToTour = await initRequirements();
+      // It used to be awaited *ahead* of the batch, alone, purely so its answer would be in hand
+      // before `initTour` ran inside it. That serialised a whole round trip in front of the entire
+      // boot for a single boolean. It runs in the batch now and hands its answer to `initTour`
+      // *after* the batch instead — which states the same ordering more strongly than being one of
+      // ten concurrent promises ever did. On every launch but the first of an installation this is
+      // a single settings read that returns immediately anyway; only on that first launch does it
+      // cost a `git --version` and a file write. See `requirementsStore`.
+      let clearToTour = true;
       await Promise.all([
+        initRequirements().then((ok) => {
+          clearToTour = ok;
+        }),
         initTheme(),
         initLayout(),
         initPreferences(),
@@ -177,15 +305,26 @@ export default function App() {
         // Read with the rest of the look-and-feel settings: the explorer paints its first tree
         // within a frame or two of this batch, and rules arriving after it would repaint every row.
         initIconRules(),
-        // Reads whether the guided tour has already been run, and — if it hasn't — arms the
-        // first-launch opening. Deliberately inside this batch: the tour rearranges panels, and
-        // it must not start before the layout and language it rearranges have loaded.
-        initTour({ autoOpen: clearToTour }),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
         startWindowBoundsTracking(),
       ]);
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
+      // Reads whether the guided tour has already been run, and — if it hasn't — arms the
+      // first-launch opening. Deliberately *after* the batch: the tour rearranges panels, and it
+      // must not start before the layout and language it rearranges have loaded.
+      void initTour({ autoOpen: clearToTour });
+      // Last, and only once there is nothing left to do: pull in the chunks that open from a
+      // keystroke, so the first Ctrl+K of the session doesn't have to wait for one. Idle rather
+      // than immediate — this must never be what the first frame is waiting on.
+      const warm = () => {
+        for (const load of WARM_CHUNKS) void load().catch(() => {});
+      };
+      if ("requestIdleCallback" in window) {
+        window.requestIdleCallback(warm, { timeout: 4000 });
+      } else {
+        setTimeout(warm, 2000);
+      }
     })();
   }, [
     initTheme,
@@ -223,18 +362,34 @@ export default function App() {
   // The API client's collections, environments, history and cookies belong to the workspace, so
   // a switch has to swap them the way the repo above swaps. Only the id is passed: the store
   // owns the teardown of what the previous workspace left running (live WebSocket/MQTT
-  // connections, open request tabs), so there is nothing here to keep in step with it.
+  // connections, open request tabs), so there is nothing here to keep in step with it. Same for
+  // the database workspace — connections, saved consoles, query history, and the live sessions
+  // belonging to the connections it is about to drop — and for Remote, whose open sessions are
+  // `ssh` processes that have to be closed rather than left as children nothing on screen names.
+  //
+  // But a *switch* is the only thing this effect is for now. It used to fire on the very first
+  // workspace too, which meant every launch paid for three full tree loads and about seventeen
+  // IPC round trips in front of the first frame — for three views `MainContent` does not even
+  // mount unless the user goes to them. Each of those views hydrates itself on mount already
+  // (`ensureApiStoreLoaded`, `ensureDbStoreLoaded`, `ensureRemoteStoreLoaded`), so the first load
+  // is simply left to whichever of them the user opens, if any.
+  //
+  // The guard is what keeps the teardown honest: a store that has never loaded has nothing to
+  // tear down and no stale workspace to show, so calling `setWorkspace` on it would only be
+  // re-introducing the eager load through the back door. `workspaceId !== null` is the store's own
+  // record of having been hydrated (every `init` sets it before its first await); `loading` covers
+  // the sliver where a first load is in flight but has not written it yet.
   useEffect(() => {
     if (!workspaceId) return;
-    void useApiStore.getState().setWorkspace(workspaceId);
-    // The database workspace is scoped the same way and swaps on the same signal: its connections,
-    // saved consoles and query history belong to the workspace, and its live sessions belong to the
-    // connections it is about to drop.
-    void useDbStore.getState().setWorkspace(workspaceId);
-    // And the Remote workspace, whose hosts belong to the workspace and whose open sessions are
-    // `ssh` processes belonging to those hosts — so the switch has to close them rather than leave
-    // children behind that nothing on screen names.
-    void useRemoteStore.getState().setWorkspace(workspaceId);
+    if (useApiStore.getState().workspaceId !== null || useApiStore.getState().loading) {
+      void useApiStore.getState().setWorkspace(workspaceId);
+    }
+    if (useDbStore.getState().workspaceId !== null || useDbStore.getState().loading) {
+      void useDbStore.getState().setWorkspace(workspaceId);
+    }
+    if (useRemoteStore.getState().workspaceId !== null || useRemoteStore.getState().loading) {
+      void useRemoteStore.getState().setWorkspace(workspaceId);
+    }
   }, [workspaceId]);
 
   // Looks for a newer release: once on launch, then every hour for as long as the app is open.
@@ -278,15 +433,44 @@ export default function App() {
   }, [project?.local_path]);
 
   useEffect(() => {
+    // Everything the working tree changing implies, still refreshed — an external change can just
+    // as easily be a branch switch, a stash or a merge, all of which used to go stale until
+    // something else happened to trigger a refresh. What changed is *when*, not *whether*.
+    //
+    // The near timer carries what the user is looking at while files land: the status lists and
+    // the merge/conflict state. The far one carries what only moves when something bigger
+    // happened — the commit list, branches, stashes, remotes, and the unpushed count that hangs
+    // off the commit list. Splitting them is what stops a branch switch, which touches a few
+    // thousand files, from firing seven git invocations per burst tick for as long as it runs.
+    const refreshNear = trailingDebounce(
+      () => {
+        void useRepoStore.getState().refreshStatus();
+        void useRepoStore.getState().refreshMergeState();
+      },
+      FS_NEAR_WAIT_MS,
+      FS_NEAR_MAX_WAIT_MS,
+    );
+    const refreshFar = trailingDebounce(
+      () => {
+        const repo = useRepoStore.getState();
+        void repo.refreshCommits();
+        void repo.refreshUnpushedCommits();
+        void repo.refreshBranches();
+        void repo.refreshStashes();
+        void repo.refreshRemotes();
+      },
+      FS_FAR_WAIT_MS,
+      FS_FAR_MAX_WAIT_MS,
+    );
     const unlisten = onRepoFsChanged((e) => {
       const activePath = useWorkspaceStore.getState().activeProject()?.local_path;
       if (e.repo_path !== activePath) return;
-      // Full refresh, not just status/commits — an external change can just as easily be a
-      // branch switch, a stash, or a merge (all of which used to go stale until something
-      // else happened to trigger a refresh).
-      void useRepoStore.getState().refreshAll();
+      refreshNear();
+      refreshFar();
     });
     return () => {
+      refreshNear.cancel();
+      refreshFar.cancel();
       void unlisten.then((f) => f());
     };
   }, []);
@@ -358,8 +542,20 @@ export default function App() {
           <div data-tour="main-content" className="cf-ambient-bg min-h-[120px] flex-1 overflow-hidden">
             <MainContent />
           </div>
+          {/* The boundary sits *inside* `AnimatePresence` and keeps the dock's key, so presence is
+              still tracked per-dock and the height exit animation still runs (the dock's own
+              `motion.div` reads the presence context through the `Suspense`, which is just another
+              component in the tree). The fallback is `null` rather than a placeholder on purpose:
+              the dock animates open from zero height anyway, so "nothing yet" is what the frame
+              before it looks like either way — a shimmering bar at full height would be the only
+              way to make the chunk load visible. In practice it is never reached: this chunk is in
+              `WARM_CHUNKS` and is fetched on the first idle callback after boot. */}
           <AnimatePresence initial={false}>
-            {terminalPanelOpen && <TerminalDock key="terminal-dock" />}
+            {terminalPanelOpen && (
+              <Suspense key="terminal-dock" fallback={null}>
+                <TerminalDock />
+              </Suspense>
+            )}
           </AnimatePresence>
         </div>
         {/* Between the view and the chat, and a sibling of both: the workspace's apps are a column
@@ -375,13 +571,42 @@ export default function App() {
         <UpdateAlert />
         <StatusBar />
       </div>
-      <SettingsView />
+      {/* Gated on `settingsOpen` here rather than mounted always and returning `null` from inside,
+          which is what it used to do. The two are equivalent — a component that returns `null`
+          renders no children either — and the gate is what lets the panel be a lazy chunk at all:
+          rendered unconditionally it would be fetched at boot, which is the whole cost being
+          avoided. Checked before moving it: the Escape handler inside `SettingsView` already
+          starts with `if (!open) return`, so it never listened while closed and nothing about the
+          Escape key changes. */}
+      {settingsOpen && (
+        <Suspense fallback={<SettingsSkeleton />}>
+          <SettingsView />
+        </Suspense>
+      )}
       {/* All four are reachable from the keyboard anywhere in the app, so they're mounted at the
-          root rather than inside whichever panel happens to have a button for them. */}
-      {commandPaletteOpen && <CommandPalette scope={commandPaletteScope} onClose={closeCommandPalette} />}
-      {shortcutsModalOpen && <ShortcutsModal onClose={closeShortcutsModal} />}
-      {branchSwitcherOpen && <BranchSwitcherModal onClose={closeBranchSwitcher} />}
-      {prLinkModalOpen && <OpenPrLinkModal onClose={closePrLinkModal} />}
+          root rather than inside whichever panel happens to have a button for them. A boundary
+          each, never a shared one — a shared boundary would blank whichever of them was already
+          open while another loaded. */}
+      {commandPaletteOpen && (
+        <Suspense fallback={<PaletteSkeleton />}>
+          <CommandPalette scope={commandPaletteScope} onClose={closeCommandPalette} />
+        </Suspense>
+      )}
+      {shortcutsModalOpen && (
+        <Suspense fallback={<PaletteSkeleton />}>
+          <ShortcutsModal onClose={closeShortcutsModal} />
+        </Suspense>
+      )}
+      {branchSwitcherOpen && (
+        <Suspense fallback={<PaletteSkeleton />}>
+          <BranchSwitcherModal onClose={closeBranchSwitcher} />
+        </Suspense>
+      )}
+      {prLinkModalOpen && (
+        <Suspense fallback={<PaletteSkeleton />}>
+          <OpenPrLinkModal onClose={closePrLinkModal} />
+        </Suspense>
+      )}
       {/* Owns its own open flag rather than one in uiStore: nothing but the update badge and the
           Settings panel ever opens it, and both go through the update store already. */}
       <UpdateNotesModal />

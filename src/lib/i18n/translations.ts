@@ -2494,6 +2494,8 @@ export const translations = {
     "checkpoints.confirmRestore": "Restore {n} file(s) to their state before this run? Any later change to them is lost.",
     "checkpoints.restored": "{n} file(s) restored",
     "checkpoints.andMore": "+{n} more",
+    "checkpoints.files": "Files",
+    "checkpoints.filesCount": "{n} file(s)",
     "checkpoints.kindChat": "Chat",
     "checkpoints.kindFix": "Fix with AI",
     "checkpoints.kindReplace": "Replace in project",
@@ -4517,7 +4519,7 @@ export const translations = {
 
     "tour.db.sources.title": "Data sources",
     "tour.db.sources.body":
-      "Every connection this workspace has, and the form for whichever one is selected. The list down the left adds, removes, duplicates and reorders them; the tabs on the right are the connection itself — General for the engine, host, port, database and user, or a plain URL if you would rather paste one; Options for the driver's own switches and Read-only, which refuses anything that is not a read before it is sent; SSH/SSL for a tunnel, forwarded through your own ssh so your keys and ~/.ssh/config work exactly as they do for git; and Schemas for which of them to read. Test connection proves it before you save, and passwords stay on this machine.",
+      "Every connection this workspace has, and the form for whichever one is selected. The list down the left adds, removes and duplicates them — their order is arranged by dragging them in the tree, where a drag also files one into another group; the tabs on the right are the connection itself — General for the engine, host, port, database and user, or a plain URL if you would rather paste one; Options for the driver's own switches and Read-only, which refuses anything that is not a read before it is sent; SSH/SSL for a tunnel, forwarded through your own ssh so your keys and ~/.ssh/config work exactly as they do for git; and Schemas for which of them to read. Test connection proves it before you save, and passwords stay on this machine.",
 
     "tour.db.explorer.title": "The tree",
     "tour.db.explorer.body":
@@ -7137,6 +7139,8 @@ export const translations = {
     "checkpoints.confirmRestore": "¿Restaurar {n} archivo(s) al estado previo a esta ejecución? Se pierde cualquier cambio posterior en ellos.",
     "checkpoints.restored": "{n} archivo(s) restaurados",
     "checkpoints.andMore": "+{n} más",
+    "checkpoints.files": "Archivos",
+    "checkpoints.filesCount": "{n} archivo(s)",
     "checkpoints.kindChat": "Chat",
     "checkpoints.kindFix": "Corregir con IA",
     "checkpoints.kindReplace": "Reemplazo en el proyecto",
@@ -9162,7 +9166,7 @@ export const translations = {
 
     "tour.db.sources.title": "Orígenes de datos",
     "tour.db.sources.body":
-      "Todas las conexiones de este workspace, y el formulario de la que tengas seleccionada. La lista de la izquierda agrega, elimina, duplica y reordena; las pestañas de la derecha son la conexión en sí: General para el motor, host, puerto, base y usuario, o una URL pelada si prefieres pegarla; Opciones para los interruptores del driver y para Solo lectura, que rechaza todo lo que no sea una lectura antes de enviarlo; SSH/SSL para un túnel, reenviado por tu propio ssh para que tus llaves y tu ~/.ssh/config funcionen igual que para git; y Esquemas para elegir cuáles leer. Probar conexión te lo confirma antes de guardar, y las contraseñas se quedan en esta máquina.",
+      "Todas las conexiones de este workspace, y el formulario de la que tengas seleccionada. La lista de la izquierda agrega, elimina y duplica — el orden se arma arrastrándolas en el árbol, donde además un arrastre las archiva en otro grupo; las pestañas de la derecha son la conexión en sí: General para el motor, host, puerto, base y usuario, o una URL pelada si prefieres pegarla; Opciones para los interruptores del driver y para Solo lectura, que rechaza todo lo que no sea una lectura antes de enviarlo; SSH/SSL para un túnel, reenviado por tu propio ssh para que tus llaves y tu ~/.ssh/config funcionen igual que para git; y Esquemas para elegir cuáles leer. Probar conexión te lo confirma antes de guardar, y las contraseñas se quedan en esta máquina.",
 
     "tour.db.explorer.title": "El árbol",
     "tour.db.explorer.body":

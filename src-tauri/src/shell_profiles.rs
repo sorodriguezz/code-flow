@@ -5,7 +5,9 @@
 //! * **Built-in** — detected on this machine at every launch (Git Bash, PowerShell and cmd on
 //!   Windows; `$SHELL`, zsh, bash, fish, sh elsewhere). Deliberately *not* persisted: re-detecting
 //!   means a shell installed after CodeFlow was first run shows up on its own, and one that was
-//!   uninstalled stops being offered, with nothing for the user to edit either way.
+//!   uninstalled stops being offered, with nothing for the user to edit either way. Detection is
+//!   memoised for [`DETECT_TTL`] so that property costs a subprocess a minute rather than a
+//!   subprocess a click — see [`detect_cached`].
 //! * **Custom** — added by the user in Settings and stored in `app_settings` under
 //!   [`PROFILES_KEY`], alongside the chosen default's id under [`DEFAULT_PROFILE_KEY`].
 //!
@@ -14,6 +16,8 @@
 //! invocation rather than a general shell-exec surface.
 
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -176,6 +180,44 @@ fn detect() -> Vec<ShellProfile> {
     found
 }
 
+/// How long a detection result is reused before the machine is searched again.
+///
+/// [`detect`] is not cheap. It stat-walks every `PATH` entry, and on Windows it spawns
+/// `git --exec-path` as a *subprocess* and waits for it: a `CreateProcess` plus wait is 10-30ms,
+/// and it happened on the UI thread — with the window not repainting — every time a terminal
+/// profile picker opened, every time a bench terminal was resumed, and once per terminal when a
+/// workspace restored its bench. That is the freeze this TTL exists to remove.
+///
+/// A TTL and not a permanent cache, deliberately: re-detecting is a *declared property* of
+/// built-in profiles (see the module docs). A shell installed while CodeFlow is running still has
+/// to show up on its own, and one that was uninstalled still has to stop being offered. Thirty
+/// seconds keeps both true — nobody installs a shell and reaches the picker faster than that —
+/// while collapsing the burst of calls that one user gesture actually produces.
+const DETECT_TTL: Duration = Duration::from_secs(30);
+
+/// [`detect`], memoised for [`DETECT_TTL`].
+///
+/// The timestamp is an `Option` rather than a pre-aged `Instant` because `Instant - Duration`
+/// panics on platforms where the result would precede the clock's origin — "never detected yet"
+/// deserves a `None`, not an arithmetic edge case at startup.
+fn detect_cached() -> Vec<ShellProfile> {
+    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<ShellProfile>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    // A poisoned lock means some earlier caller panicked mid-detection. Detecting again is strictly
+    // better than propagating that as "you cannot open a terminal".
+    let Ok(mut slot) = cache.lock() else { return detect() };
+    if let Some((at, found)) = slot.as_ref() {
+        if at.elapsed() < DETECT_TTL {
+            return found.clone();
+        }
+    }
+    // Detection runs with the lock held on purpose: two pickers opened at once should wait for one
+    // `git --exec-path` rather than each spawn their own.
+    let found = detect();
+    *slot = Some((Instant::now(), found.clone()));
+    found
+}
+
 fn setting(db: &State<'_, Db>, key: &str) -> Result<Option<String>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::get_setting(&conn, key).map_err(|e| e.to_string())
@@ -184,8 +226,13 @@ fn setting(db: &State<'_, Db>, key: &str) -> Result<Option<String>, String> {
 /// Built-ins followed by the user's own profiles. A custom profile whose id collides with a
 /// built-in is dropped rather than shadowing it — ids are generated, so a collision means
 /// corrupted settings, not an intentional override.
+///
+/// Only the *built-in* half is memoised ([`detect_cached`]); the custom half is re-read from
+/// `app_settings` on every call, so a profile added or edited in Settings appears in the very next
+/// picker with no delay. Caching the whole list would have made the user's own edit look ignored
+/// for up to half a minute.
 pub fn list(db: &State<'_, Db>) -> Result<Vec<ShellProfile>, String> {
-    let mut profiles = detect();
+    let mut profiles = detect_cached();
     if let Some(raw) = setting(db, PROFILES_KEY)? {
         if let Ok(custom) = serde_json::from_str::<Vec<ShellProfile>>(&raw) {
             for mut entry in custom {

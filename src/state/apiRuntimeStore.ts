@@ -44,6 +44,22 @@ export interface ExampleView {
 }
 
 interface ApiRuntimeState {
+  /**
+   * The live response per tab. Freed on tab close and at no other point.
+   *
+   * Deliberately **not** capped the way `messages` and `consoleLines` are, and this is the one
+   * place in the store where that is a decision rather than an oversight. Those two are streams of
+   * independent frames, so dropping the oldest loses context and nothing else. A body is one
+   * value: `saveResponseToFile`, copy-response, save-as-example and the test-script runner all read
+   * `body_text` in full, and handing them a silently shortened string would write a corrupt file,
+   * store a corrupt example and fail an assertion on text the server never sent — with nothing on
+   * screen to say why.
+   *
+   * The honest fix is upstream, where the size is actually known: lower the backend's 50 MB
+   * default, and have it flag what it cut (`truncated: true`) so the panel can say so in a banner
+   * and the writers above can refuse rather than lie. Until then this grows, bounded only by how
+   * many tabs are open.
+   */
   responses: Record<string, ApiResponse | null>;
   /**
    * The example a tab is currently showing instead of its response, by tab id.

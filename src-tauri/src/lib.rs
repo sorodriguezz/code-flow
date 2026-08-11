@@ -87,24 +87,63 @@ fn hide_to_background(window: &tauri::Window) {
     });
 }
 
+/// Hides the window for the "keep running in the background" close path, off macOS.
+///
+/// The Windows half is not a nicety. `window.hide()` hides the tao HWND and stops there; the
+/// WebView2 controller parented to it is never told anything, so it goes on compositing, goes on
+/// running its render loop and goes on holding its full working set for a window nobody can see —
+/// on the path people take *specifically* to get the app out of the way. `Webview::hide()` reaches
+/// `ICoreWebView2Controller::put_IsVisible(false)`, which is the documented way to say it.
+///
+/// **What it does not stop, which is the point:** JavaScript, timers, IPC and everything the Rust
+/// side is doing keep running exactly as before. `IsVisible` governs rendering, not execution. A
+/// review, an agent chain or a terminal running when the user closes the window keeps running —
+/// that is the whole reason this app hides instead of exiting, and nothing here touches it. What
+/// *is* suspended along with rendering is `requestAnimationFrame`, so a frontend animation that
+/// schedules its own teardown on a rAF frame stalls until the window is shown again (see the note
+/// in `NotificationBell.tsx`, which is written not to depend on one).
+///
+/// Whoever brings the window back has to undo both halves, and undo the webview's first — see
+/// [`tray::show_main_window`], which is the single door every restore path goes through.
+///
+/// macOS is deliberately not part of this: `orderOut:` already parks WKWebView's display link, and
+/// the macOS variant above has the fullscreen dance to do first.
 #[cfg(not(target_os = "macos"))]
 fn hide_to_background(window: &tauri::Window) {
+    #[cfg(windows)]
+    if let Some(webview_window) = window.get_webview_window(window.label()) {
+        // `as_ref()` is the `WebviewWindow -> Webview` view, and the annotation is what selects it:
+        // `WebviewWindow::hide` is the *window's* hide — the one we already have on the line below —
+        // and only the inner `Webview` carries the controller-level one.
+        let webview: &tauri::Webview<_> = webview_window.as_ref();
+        let _ = webview.hide();
+    }
     let _ = window.hide();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // First of all, and it has to be first: this writes a process-wide environment variable, which
-    // is only sound while this is still the only thread. Everything after it — the AI CLIs, the
-    // pty, `git`, `ssh` — resolves programs against the `PATH` it leaves behind, so a widening that
-    // landed later would be a widening half the app had already read past. See `shell_env`.
-    shell_env::import_login_path();
-
     // Must happen before `db::init()` opens the SQLite connection below — see
     // `paths::reset_marker_path`'s doc comment for why the delete can't happen live.
+    //
+    // Ahead of `import_login_path` rather than behind it, which it used to be: that call now keeps a
+    // cache file inside this same directory and rewrites it from a background thread, so a wipe
+    // running afterwards would be racing it — the delete would land first and the late write would
+    // recreate the directory holding a value the user just asked to be rid of. Wiping first leaves
+    // the import to find no cache, which is exactly what a reset should look like to it.
     if paths::reset_marker_path().exists() {
         let _ = std::fs::remove_dir_all(paths::base_dir());
     }
+
+    // Before anything can spawn a thread, and it has to be: this writes a process-wide environment
+    // variable, which is only sound while this is still the only thread. Everything after it — the
+    // AI CLIs, the pty, `git`, `ssh` — resolves programs against the `PATH` it leaves behind, so a
+    // widening that landed later would be a widening half the app had already read past.
+    //
+    // It no longer *blocks* on a login shell to do it: the answer is cached from the previous launch
+    // and adopted in microseconds, with the re-probe moved to a background thread that only rewrites
+    // the cache. Only a genuinely first launch waits, and then for at most 1.5s. See `shell_env`.
+    shell_env::import_login_path();
 
     // rustls 0.23 panics from `ClientConfig::builder()` when it can't tell which crypto provider to
     // use, and several dependencies (reqwest, mongodb, tokio-postgres-rustls, tonic) each build one.
@@ -278,6 +317,7 @@ pub fn run() {
             commands::git_ops::rename_stash,
             commands::git_ops::get_working_diff,
             commands::git_ops::get_staged_diff,
+            commands::git_ops::get_file_diff,
             commands::git_ops::get_commit_diff,
             commands::git_ops::stage_file,
             commands::git_ops::stage_all,
@@ -303,6 +343,7 @@ pub fn run() {
             commands::git_ops::git_pull,
             commands::git_ops::git_push,
             commands::settings::get_setting,
+            commands::settings::get_settings,
             commands::settings::set_setting,
             commands::settings::get_locked_branch_rules,
             commands::settings::set_locked_branch_rules,
@@ -412,6 +453,7 @@ pub fn run() {
             commands::claude_cmd::cancel_ai_run,
             commands::claude_cmd::inline_edit_with_ai,
             commands::checkpoint_cmd::list_ai_checkpoints,
+            commands::checkpoint_cmd::ai_checkpoint_changed_paths,
             commands::checkpoint_cmd::restore_ai_checkpoint,
             commands::checkpoint_cmd::delete_ai_checkpoint,
             commands::ado_cmd::ado_verify_pat,
@@ -509,6 +551,7 @@ pub fn run() {
             commands::fs_cmd::open_in_vscode,
             commands::activity_cmd::list_chat_conversations,
             commands::activity_cmd::get_chat_conversation,
+            commands::activity_cmd::get_turn_trace,
             commands::activity_cmd::delete_chat_conversation,
             commands::activity_cmd::rename_chat_conversation,
             commands::activity_cmd::list_job_history,
@@ -665,6 +708,8 @@ pub fn run() {
             commands::api_cmd::api_delete_environment,
             commands::api_cmd::api_duplicate_environment,
             commands::api_cmd::api_list_history,
+            commands::api_cmd::api_list_history_meta,
+            commands::api_cmd::api_get_history_snapshot,
             commands::api_cmd::api_add_history,
             commands::api_cmd::api_delete_history,
             commands::api_cmd::api_clear_history,

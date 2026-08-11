@@ -6,6 +6,7 @@ import {
   type Window,
 } from "@tauri-apps/api/window";
 import { getSetting } from "./tauri/commands";
+import { isMac } from "./platform";
 
 /**
  * Maximize and restore for the window this app draws its own title bar into.
@@ -99,31 +100,122 @@ async function lastSessionBounds(): Promise<Bounds | null> {
 }
 
 /**
- * Keeps `restoreBounds` up to date with the last size and position the window had while it was not
- * maximized. Idempotent; called once from `App`.
+ * What the window currently *is*, for the two controls in the title bar that have to say so.
+ *
+ * ## Why this is a store and not four `useEffect`s
+ *
+ * It used to be four independent subscriptions to `onResized`/`onMoved` — `isFullscreen()` for the
+ * traffic-light spacer, `isMaximized()` for the maximize button, `isMaximized()` again for the
+ * bounds tracker, and `outerPosition()` + `innerSize()` for the rectangle itself. tao emits those
+ * events once per WM_MOVE/WM_SIZE, which while a window is being dragged with a high-polling mouse
+ * is hundreds a second, and each subscription answered with its own async IPC round-trip. Five
+ * round-trips per event, plus two `setState`s re-rendering the whole title bar.
+ *
+ * Now: one listener, coalesced to one batch per animation frame, published to whoever asked.
  */
-export async function startWindowBoundsTracking(): Promise<void> {
+export interface WindowStatus {
+  maximized: boolean;
+  fullscreen: boolean;
+}
+
+/** Replaced rather than mutated, and only when something actually changed, so a subscriber reading
+ * it through `useSyncExternalStore` doesn't re-render on every frame of a drag. */
+let status: WindowStatus = { maximized: false, fullscreen: false };
+const statusListeners = new Set<() => void>();
+
+export function getWindowStatus(): WindowStatus {
+  return status;
+}
+
+/** Subscribing is also what starts the tracking, so a component that wants the state never has to
+ * care whether `App` got there first. */
+export function subscribeWindowStatus(listener: () => void): () => void {
+  statusListeners.add(listener);
+  void startWindowBoundsTracking();
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
+
+async function sampleStatus(win: Window): Promise<void> {
+  const [maximized, fullscreen] = await Promise.all([
+    win.isMaximized().catch(() => status.maximized),
+    // macOS-only question: the only thing that reads it is the gap left for the traffic lights, and
+    // no other platform has any. Asking regardless was one more IPC round-trip per event on the
+    // platform that emits the most of them.
+    isMac() ? win.isFullscreen().catch(() => status.fullscreen) : Promise.resolve(false),
+  ]);
+  if (maximized === status.maximized && fullscreen === status.fullscreen) return;
+  status = { maximized, fullscreen };
+  for (const listener of statusListeners) listener();
+}
+
+/** How long after the last move/resize the restore rectangle is written down. The rectangle only
+ * has to be right when the drag *ends* — every intermediate one is overwritten microseconds later,
+ * and reading it costs two IPC round-trips. */
+const REMEMBER_DEBOUNCE_MS = 150;
+
+let tracking: Promise<void> | null = null;
+
+/**
+ * Keeps `restoreBounds` up to date with the last size and position the window had while it was not
+ * maximized, and `status` up to date with what the window is. Idempotent; called once from `App`,
+ * and again by anything that subscribes.
+ */
+export function startWindowBoundsTracking(): Promise<void> {
+  tracking ??= track();
+  return tracking;
+}
+
+async function track(): Promise<void> {
   const win = getCurrentWindow();
 
   const remember = async () => {
-    // The maximized rectangle is not a restore target. `isMaximized` is asked on every event rather
-    // than tracked, because a maximize can also arrive from the OS (snap, double-click) with no
-    // moment of ours to hook.
-    if (await win.isMaximized().catch(() => false)) return;
+    // The maximized rectangle is not a restore target, and whether the window is maximized is read
+    // from the window rather than tracked, because a maximize can also arrive from the OS (snap,
+    // double-click) with no moment of ours to hook. It stays a real read even though `status`
+    // carries the answer: this runs debounced, once per settle rather than once per event, so the
+    // round-trip costs nothing here — and refreshing the store from a path driven by `setTimeout`
+    // is also what unsticks the button icon if `requestAnimationFrame` was suspended (minimized
+    // window, occluded document) across the change.
+    await sampleStatus(win);
+    if (status.maximized) return;
     restoreBounds = await readBounds(win).catch(() => restoreBounds ?? null);
   };
 
+  await sampleStatus(win);
+
   // Launched maximized, because that is how the app was left — see `window_state.rs`. `remember`
-  // below has nothing to record in that case: the only rectangle on offer is the screen. So the
-  // windowed one is taken from where the last session ended, and the first press of the maximize
-  // button puts the window back the size it was yesterday instead of at `centeredFallback`.
-  if (await win.isMaximized().catch(() => false)) {
+  // has nothing to record in that case: the only rectangle on offer is the screen. So the windowed
+  // one is taken from where the last session ended, and the first press of the maximize button puts
+  // the window back the size it was yesterday instead of at `centeredFallback`.
+  if (status.maximized) {
     restoreBounds = await lastSessionBounds();
   }
 
   await remember();
-  await win.onResized(() => void remember());
-  await win.onMoved(() => void remember());
+
+  // One handler for both events. The status read is coalesced with `requestAnimationFrame` — the
+  // button icon is a feedback indicator and must flip the moment the window changes, and a frame is
+  // both the soonest anyone could see it and less than the IPC round-trip it replaces. The bounds
+  // read trails on a timer instead: nobody is looking at it, and a suspended rAF (minimized window,
+  // hidden document) must not be able to strand it, which is why it is a `setTimeout` and not a
+  // second passenger on the frame.
+  let frame = 0;
+  let rememberTimer = 0;
+  const onWindowEvent = () => {
+    if (!frame) {
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        void sampleStatus(win);
+      });
+    }
+    clearTimeout(rememberTimer);
+    rememberTimer = window.setTimeout(() => void remember(), REMEMBER_DEBOUNCE_MS);
+  };
+
+  await win.onResized(onWindowEvent);
+  await win.onMoved(onWindowEvent);
 }
 
 /**

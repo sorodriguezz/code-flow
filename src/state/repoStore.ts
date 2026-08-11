@@ -24,7 +24,16 @@ interface RepoState {
   stashes: StashInfo[];
   remotes: RemoteInfo[];
   selectedCommitId: string | null;
+  /**
+   * Every unstaged/untracked file's diff, at `LIST_DIFF_CONTEXT_LINES` of context — a *list*, not
+   * a renderable whole-file diff. Read for what changed, where, and by how much: the Changes
+   * lists, `firstChangedLine`, the editor's changed-line gutter markers, the change map.
+   *
+   * **Nothing that rebuilds a complete file text may read this** — see `lib/diffText.ts`. Those
+   * callers ask `getFileDiff` for the one file they are showing, at full context.
+   */
   workingDiff: FileDiffInfo[];
+  /** The staged side of the same thing, under the same rule — see `workingDiff` above. */
   stagedDiff: FileDiffInfo[];
   commitDiff: FileDiffInfo[];
   busy: boolean;
@@ -43,10 +52,10 @@ interface RepoState {
   projectLoading: boolean;
 
   setRepoPath: (path: string | null) => Promise<void>;
-  refreshAll: () => Promise<void>;
-  refreshStatus: () => Promise<void>;
+  refreshAll: (options?: RefreshOptions) => Promise<void>;
+  refreshStatus: (options?: RefreshOptions) => Promise<void>;
   refreshBranches: () => Promise<void>;
-  refreshCommits: () => Promise<void>;
+  refreshCommits: (options?: RefreshOptions) => Promise<void>;
   refreshUnpushedCommits: () => Promise<void>;
   refreshStashes: () => Promise<void>;
   refreshRemotes: () => Promise<void>;
@@ -96,14 +105,42 @@ interface RepoState {
   push: (setUpstream?: boolean) => Promise<void>;
 }
 
+/**
+ * How a refresh was asked for.
+ *
+ * `silent` is for the refreshes nobody asked for — the filesystem watcher's, which fires on every
+ * save, every `git` command run in a terminal, every branch switch made outside the app. Those are
+ * *polling*, not actions, and an action's indicators are the wrong vocabulary for them: `busy`
+ * disables the commit button and the whole sidebar's remote controls, and `commitsLoading` swaps
+ * the commit table for skeleton rows. Flashing either because a file changed on disk reads as the
+ * app doing something the user did not ask for, and it happens several times a second while a
+ * build is running.
+ *
+ * It is *only* the indicators that are suppressed. Errors still land in `error` and still raise a
+ * toast, because a background refresh that fails is exactly the case where nothing else on screen
+ * would say so. Every user-initiated path leaves the option off and behaves as it always has.
+ *
+ * There is a second, larger reason: one `refreshAll` is eleven separate `set()` calls resolving
+ * from independent awaits in different microtasks, which React cannot batch — so each one is its
+ * own render pass over the commit table. Dropping the `busy` pair and the `commitsLoading` pair
+ * takes that from eleven to seven for the watcher's case.
+ */
+interface RefreshOptions {
+  silent?: boolean;
+}
+
 /** Returns whether `fn` got through. Almost every caller ignores it — the toast and `error` are
  * the report — but the remote operations need to know, because they also file a notification and
- * "Push finished" on a failed push would be a lie. */
+ * "Push finished" on a failed push would be a lie.
+ *
+ * `silent` skips the `busy` pair only — see `RefreshOptions`. The failure path is untouched. */
 async function guarded(
   set: (partial: Partial<RepoState>) => void,
   fn: () => Promise<void>,
+  options?: RefreshOptions,
 ): Promise<boolean> {
-  set({ busy: true, error: null });
+  const silent = options?.silent === true;
+  if (!silent) set({ busy: true, error: null });
   try {
     await fn();
     return true;
@@ -113,7 +150,7 @@ async function guarded(
     pushErrorToast(message);
     return false;
   } finally {
-    set({ busy: false });
+    if (!silent) set({ busy: false });
   }
 }
 
@@ -161,6 +198,31 @@ const SILENT_FETCH_LOCK_MS = 45_000;
  * so at worst a hung fetch costs one interval and then the feature carries on around it.
  */
 let silentFetchStartedAt: number | null = null;
+
+/**
+ * How much context `workingDiff`/`stagedDiff` are fetched with.
+ *
+ * These two are refreshed by the filesystem watcher — on every save, every `git` run in a terminal,
+ * every build that touches a file — and at the backend's default (1,000,000 context lines, i.e. the
+ * whole file) that was measured on this repository at ~1.84 MB of JSON for 19 KB of real `git diff`,
+ * ~95x, because every source line crosses IPC as two heap strings. Serialized in Rust, parsed into
+ * ~16,700 objects, ~4-5 MB of V8 heap, and thrown away on the next tick.
+ *
+ * 3 is git's own default, and it is enough for everything that reads these arrays: the changed
+ * lines themselves (`+`/`-` with their line numbers) are present at *any* context, so the file
+ * lists, the per-file stats, `firstChangedLine`, the editor's changed-line decorations and the
+ * change map all see exactly what they saw before. Not 0 — that would still satisfy those callers
+ * but leaves an array that is no longer a diff anyone could read, and the few lines it saves are
+ * not the ones that cost anything.
+ *
+ * What it is *not* enough for is rebuilding a whole file from its hunks (`reconstructSides`), which
+ * at this context would render almost the entire file as deleted. Every caller that does that —
+ * the Changes screen's diff pane, the editor's diff tab — now fetches `getFileDiff` for the single
+ * file it is showing, at full context. That is the trade: whole-file context is still available
+ * everywhere it was, it is just paid for one file at a time instead of for the whole changeset on
+ * every watcher tick.
+ */
+const LIST_DIFF_CONTEXT_LINES = 3;
 
 /** Set by the Rust side on the one checkout failure that has a way out — see
  * `CHECKOUT_CONFLICT_PREFIX` in `src-tauri/src/git/branch.rs`. */
@@ -296,11 +358,11 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     }
   },
 
-  refreshAll: async () => {
+  refreshAll: async (options) => {
     await Promise.all([
-      get().refreshStatus(),
+      get().refreshStatus(options),
       get().refreshBranches(),
-      get().refreshCommits(),
+      get().refreshCommits(options),
       get().refreshUnpushedCommits(),
       get().refreshStashes(),
       get().refreshRemotes(),
@@ -308,17 +370,24 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     ]);
   },
 
-  refreshStatus: async () => {
+  refreshStatus: async (options) => {
     const { repoPath } = get();
     if (!repoPath) return;
-    await guarded(set, async () => {
-      const [status, workingDiff, stagedDiff] = await Promise.all([
-        api.getStatus(repoPath),
-        api.getWorkingDiff(repoPath),
-        api.getStagedDiff(repoPath),
-      ]);
-      set({ status, workingDiff, stagedDiff });
-    });
+    await guarded(
+      set,
+      async () => {
+        // Narrow context on purpose — see `LIST_DIFF_CONTEXT_LINES`. This is the watcher's hot
+        // path, and whole-file context here was shipping megabytes of JSON per tick for a pair of
+        // arrays nobody renders a file out of.
+        const [status, workingDiff, stagedDiff] = await Promise.all([
+          api.getStatus(repoPath),
+          api.getWorkingDiff(repoPath, LIST_DIFF_CONTEXT_LINES),
+          api.getStagedDiff(repoPath, LIST_DIFF_CONTEXT_LINES),
+        ]);
+        set({ status, workingDiff, stagedDiff });
+      },
+      options,
+    );
   },
 
   refreshBranches: async () => {
@@ -328,15 +397,24 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     set({ branches });
   },
 
-  refreshCommits: async () => {
+  refreshCommits: async (options) => {
     const { repoPath } = get();
     if (!repoPath) return;
-    set({ commitsLoading: true });
+    // Silent refreshes never touch `commitsLoading`: the skeleton belongs to "you asked for this
+    // and it hasn't arrived", not to a watcher tick — see `RefreshOptions`.
+    const silent = options?.silent === true;
+    if (!silent) set({ commitsLoading: true });
     try {
       const commits = await api.listCommits(repoPath, true, 500);
-      set({ commits });
-    } finally {
-      set({ commitsLoading: false });
+      // One write, not two. `commits` and `commitsLoading` used to land in separate `set()` calls
+      // either side of a `finally`, and because the table re-renders on both that was three render
+      // passes per refresh over up to 500 rows. Merged, the success path is two.
+      set(silent ? { commits } : { commits, commitsLoading: false });
+    } catch (e) {
+      // The old `finally` cleared the flag on the failure path too, and it still has to: a listing
+      // that throws must not leave the table showing skeletons forever.
+      if (!silent) set({ commitsLoading: false });
+      throw e;
     }
   },
 

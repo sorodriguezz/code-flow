@@ -19,7 +19,7 @@ import {
   REPO_BUSY_MARKER,
 } from "../lib/tauri/commands";
 import { notifyTurnSettled } from "./agentEvents";
-import { isCancellation, newRunId, useAiRunStore } from "./aiRunStore";
+import { isCancellation, newRunId, snapshotTrace, useAiRunStore } from "./aiRunStore";
 import { parseTrace, type ChatMessage } from "./chatStore";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
@@ -77,6 +77,43 @@ const EMPTY_LIVE: AgentTaskLive = {
   sending: false,
   loaded: false,
 };
+
+/**
+ * How many task transcripts stay in memory.
+ *
+ * `live` only ever grew: a workspace switch keeps the turns still in flight and drops the rest,
+ * but browsing thirty tasks inside one workspace left thirty full transcripts — every message of
+ * every turn, each carrying the process trace that produced it.
+ *
+ * Collapsing one is safe *only* because `select` already reads a transcript back from
+ * `activity_log` when `loaded` is false, and puts the engine's resume token back with it. That is
+ * the same path a task opened for the first time takes, so a collapsed task reopens identically —
+ * see `evictableLive` for the three cases where it would not.
+ */
+const MAX_LIVE_TASKS = 5;
+
+/** Task ids in the order their transcript was last opened, oldest first. Bookkeeping rather than
+ * state — nothing renders it. */
+let recentTasks: string[] = [];
+
+function touchTask(taskId: string): void {
+  recentTasks = recentTasks.filter((id) => id !== taskId);
+  recentTasks.push(taskId);
+}
+
+/**
+ * Whether a transcript can be put back on disk without losing anything.
+ *
+ * A turn in flight keeps its entry for the reason `setWorkspace` gives: the spinner, the stop
+ * button, the one-run-per-repository guard and `settle`'s landing place all live in it. A *stopped*
+ * turn keeps its entry because the backend never writes one — the muted "stopped" note and the
+ * question above it exist nowhere else. And an entry with turns on screen but nothing loaded from
+ * disk is one whose row has not been read yet; collapsing it would be collapsing the optimistic
+ * copy of a question that has not been recorded.
+ */
+function evictableLive(entry: AgentTaskLive): boolean {
+  return entry.loaded && !entry.sending && !entry.messages.some((m) => m.isCancelled);
+}
 
 /** Which tab of the list panel is showing. `tree` is the folders-and-pins arrangement of work in
  * progress and the only one that draws a chain as a chain; `status` is a flat cut across it; and
@@ -270,6 +307,8 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   select: async (taskId) => {
     set({ selectedId: taskId });
     if (!taskId) return;
+    touchTask(taskId);
+    pruneLive();
     const task = get().tasks.find((candidate) => candidate.id === taskId);
     if (!task || get().live[taskId]?.loaded) return;
     // Mark it loaded up front so a second click while the read is in flight doesn't start another.
@@ -323,6 +362,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       selectedId: task.id,
       live: { ...s.live, [task.id]: { ...EMPTY_LIVE, loaded: true } },
     }));
+    touchTask(task.id);
     return task;
   },
 
@@ -351,6 +391,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
   adopt: (task) =>
     set((s) => {
       if (s.tasks.some((candidate) => candidate.id === task.id)) return s;
+      touchTask(task.id);
       return {
         tasks: [task, ...s.tasks],
         live: { ...s.live, [task.id]: { ...EMPTY_LIVE, loaded: true } },
@@ -397,6 +438,9 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     const current = get().live[taskId] ?? EMPTY_LIVE;
 
     const runId = opts?.runId ?? newRunId("agent");
+    // A turn is the strongest possible "I am using this task", so it counts for the memory cap's
+    // recency — a chain step's task included, which is never `select`ed at all.
+    touchTask(taskId);
     // Before the invoke, or the first lines the engine prints have nowhere to land.
     useAiRunStore.getState().start(runId);
     const startedAt = Date.now();
@@ -468,8 +512,9 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     })
       .then((reply) => {
         // The live log is already in memory and formatted; attaching it to the message is what
-        // keeps "what did it actually do?" answerable after the run ends.
-        const trace = useAiRunStore.getState().linesFor(runId);
+        // keeps "what did it actually do?" answerable after the run ends. A copy, never the
+        // store's own array — see `snapshotTrace`.
+        const trace = snapshotTrace(runId);
         settle(
           (live) => ({
             ...live,
@@ -520,7 +565,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       })
       .catch((e: unknown) => {
         const cancelled = isCancellation(e);
-        const trace = useAiRunStore.getState().linesFor(runId);
+        const trace = snapshotTrace(runId);
 
         // The repository was already taken, so this turn never reached an engine: nothing was
         // recorded, nothing was edited, no restore point was taken. Treating it as a failure would
@@ -692,3 +737,39 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     await deleteChatConversation(task.project_id, task.conversation_id).catch(() => undefined);
   },
 }));
+
+/**
+ * Puts the least recently opened transcripts back on disk, keeping `MAX_LIVE_TASKS` of them.
+ *
+ * The entry is dropped rather than blanked: `select` treats a missing entry and one with
+ * `loaded: false` identically (`get().live[taskId]?.loaded` is falsy either way) and re-reads the
+ * conversation, and `liveFor` already answers `EMPTY_LIVE` for anything absent — so dropping the
+ * key costs nothing and frees the object with it.
+ */
+function pruneLive(): void {
+  const { live, selectedId } = useAgentsStore.getState();
+  const ids = Object.keys(live);
+  // Ids of tasks that have since been deleted would otherwise sit in the list for ever.
+  recentTasks = recentTasks.filter((id) => live[id] !== undefined);
+  if (ids.length <= MAX_LIVE_TASKS) return;
+
+  const gone = new Set<string>();
+  for (const id of recentTasks) {
+    if (ids.length - gone.size <= MAX_LIVE_TASKS) break;
+    // The task on screen is never collapsed, whatever its place in the order — `select` touches it
+    // before this runs, so this only guards a selection made some other way.
+    if (id === selectedId) continue;
+    if (evictableLive(live[id])) gone.add(id);
+  }
+  if (gone.size === 0) return;
+  recentTasks = recentTasks.filter((id) => !gone.has(id));
+  // Read and write are one synchronous stretch, so nothing can have started sending in between —
+  // `gone` is still true of the state being replaced.
+  useAgentsStore.setState((s) => {
+    const next: Record<string, AgentTaskLive> = {};
+    for (const id of Object.keys(s.live)) {
+      if (!gone.has(id)) next[id] = s.live[id];
+    }
+    return { live: next };
+  });
+}

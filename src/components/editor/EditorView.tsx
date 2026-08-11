@@ -91,7 +91,7 @@ export function EditorView() {
   const shortcutHint = useShortcutHint();
   const project = useWorkspaceStore((s) => s.activeProject());
   const status = useRepoStore((s) => s.status);
-  const changedPaths = useMemo(() => {
+  const { changedPaths, changedDirs } = useMemo(() => {
     const map = new Map<string, string>();
     if (status) {
       // Untracked/unstaged first, then staged overwrites — an already-staged edit that's
@@ -100,7 +100,23 @@ export function EditorView() {
       for (const e of status.unstaged) map.set(e.path, e.status);
       for (const e of status.staged) if (!map.has(e.path)) map.set(e.path, e.status);
     }
-    return map;
+    // Every ancestor directory of a changed path, walked once here rather than rediscovered by
+    // each directory row. The tree used to answer "does anything inside me differ?" by spreading
+    // this map's keys into an array and scanning it — per directory row, per render — which on a
+    // repo with a few hundred changed files was the most expensive thing the explorer did.
+    const dirs = new Set<string>();
+    for (const path of map.keys()) {
+      let cut = path.lastIndexOf("/");
+      while (cut > 0) {
+        const dir = path.slice(0, cut);
+        // Everything above an ancestor already in the set is in it too — the walk that put it
+        // there went all the way up.
+        if (dirs.has(dir)) break;
+        dirs.add(dir);
+        cut = dir.lastIndexOf("/");
+      }
+    }
+    return { changedPaths: map, changedDirs: dirs };
   }, [status]);
   const resolved = useThemeStore((s) => s.resolved);
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
@@ -452,31 +468,67 @@ export function EditorView() {
   // edit in another editor, a branch checkout — instead of silently showing stale content
   // until the user happens to reopen them. Tabs with unsaved local edits are skipped so this
   // never clobbers work in progress; the user's own edit wins until they save or discard it.
+  const syncOpenTabs = useCallback(() => {
+    if (!project) return;
+    for (const tab of tabsRef.current) {
+      if (tab.loading || tab.content !== tab.originalContent) continue;
+      void readFileText(project.local_path, tab.path)
+        .then((text) => {
+          // The overwhelmingly common case: the watcher fired for *some* file in the repo and
+          // this one came back byte for byte identical. Writing state anyway rebuilt the `tabs`
+          // array and every tab object in it, which re-rendered this view, every `EditorPane`
+          // (each holding a live Monaco instance) and the whole file tree — for no change.
+          if (text === tab.content) return;
+          setTabs((prev) =>
+            prev.map((item) =>
+              // Re-check dirtiness against the latest state: the read is async and the
+              // user may have started typing in this tab while it was in flight.
+              item.path === tab.path && item.content === item.originalContent
+                ? { ...item, content: text, originalContent: text }
+                : item,
+            ),
+          );
+        })
+        .catch(() => {});
+    }
+  }, [project]);
+
+  /** Set when the watcher fired for this repo while the Editor was off screen, so the sweep can be
+   * deferred to the moment it comes back rather than run behind another view. */
+  const missedFsChangeRef = useRef(false);
+
   useEffect(() => {
     if (!project) return;
     const unlisten = onRepoFsChanged((e) => {
       if (e.repo_path !== project.local_path) return;
-      for (const tab of tabsRef.current) {
-        if (tab.loading || tab.content !== tab.originalContent) continue;
-        void readFileText(project.local_path, tab.path)
-          .then((text) => {
-            setTabs((prev) =>
-              prev.map((item) =>
-                // Re-check dirtiness against the latest state: the read is async and the
-                // user may have started typing in this tab while it was in flight.
-                item.path === tab.path && item.content === item.originalContent
-                  ? { ...item, content: text, originalContent: text }
-                  : item,
-              ),
-            );
-          })
-          .catch(() => {});
+      // This panel stays mounted behind every other view (that is what keeps its Monaco
+      // instances and their undo stacks alive), so a `git` command run from the terminal tab
+      // would otherwise re-read every open file while nobody is looking at any of them.
+      if (activeViewRef.current !== "editor") {
+        missedFsChangeRef.current = true;
+        return;
       }
+      syncOpenTabs();
     });
     return () => {
       void unlisten.then((f) => f());
     };
-  }, [project]);
+  }, [project, syncOpenTabs]);
+
+  // The catch-up, and the reason the skip above is safe: coming back to the Editor runs the sweep
+  // that was deferred while it was hidden. Without this, a file changed on disk from another tab
+  // would sit stale in its pane until it was closed and reopened — which is exactly the bug the
+  // sweep exists to prevent.
+  useEffect(() => {
+    if (activeView !== "editor" || !missedFsChangeRef.current) return;
+    missedFsChangeRef.current = false;
+    syncOpenTabs();
+  }, [activeView, syncOpenTabs]);
+
+  /** The tree's two open gestures, as stable identities. Inline arrows here would re-identify on
+   * every render of this view and defeat the `memo` on every row of `FileTree`. */
+  const selectFileInTree = useCallback((path: string) => void openFile(path), [openFile]);
+  const openFileInTree = useCallback((path: string) => void openFile(path, { pin: true }), [openFile]);
 
   /** Opens a file in the focused group and jumps to a position in it. */
   const openHit = useCallback(
@@ -952,12 +1004,13 @@ export function EditorView() {
             <FileTree
               repoPath={project.local_path}
               selectedPath={activePath}
-              onSelectFile={(path) => void openFile(path)}
-              onOpenFile={(path) => void openFile(path, { pin: true })}
+              onSelectFile={selectFileInTree}
+              onOpenFile={openFileInTree}
               onPathMoved={handlePathMoved}
               onPathRemoved={handlePathRemoved}
               command={explorerCommand}
               changedPaths={changedPaths}
+              changedDirs={changedDirs}
             />
           )}
         </div>

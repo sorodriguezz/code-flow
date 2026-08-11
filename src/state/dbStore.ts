@@ -373,20 +373,18 @@ interface DbState {
   /** Returns the copy, so a caller that has somewhere to put it — the dialog's list — can select it. */
   duplicateConnection: (id: string) => Promise<DbConnectionRow | null>;
   reorderConnections: (ids: string[]) => Promise<void>;
-  /** Points the explorer's ordering controls at a connection, or at nothing. */
+  /** Points the explorer's per-row ordering gestures at a connection, or at nothing. */
   selectConnection: (id: string | null) => void;
   /**
    * Moves a connection one place among the rows it is drawn with — its group's members, or the
    * loose list when it is in no group.
    *
    * Order is stored globally, as one list of ids, so a move inside a folder swaps the two rows'
-   * places in the full list and leaves every other connection exactly where it was. Lives here
-   * rather than in the row that owns the "move up" menu item because the panel's toolbar needs the
-   * same move, and two implementations of "one place up" is one too many.
+   * places in the full list and leaves every other connection exactly where it was. The single
+   * nudge, for the tree's context menu and `Alt`+arrows; [`dropConnection`] is the gesture that can
+   * also carry a row into another folder.
    */
   moveConnection: (id: string, direction: -1 | 1) => Promise<void>;
-  /** Whether [`moveConnection`] would do anything — what the toolbar's arrows are disabled by. */
-  canMoveConnection: (id: string | null, direction: -1 | 1) => boolean;
 
   /** Creates an empty folder. Idempotent on the name — the backend deduplicates. */
   createGroup: (name: string) => Promise<void>;
@@ -872,9 +870,6 @@ export const useDbStore = create<DbState>((set, get) => ({
     const swapped = swapWithNeighbour(get().connections, id, direction);
     if (swapped) await get().reorderConnections(swapped);
   },
-
-  canMoveConnection: (id, direction) =>
-    id !== null && swapWithNeighbour(get().connections, id, direction) !== null,
 
   // ------------------------------------------------------------------ groups
 

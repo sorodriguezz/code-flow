@@ -33,8 +33,21 @@ fn graphql_root(host: &str) -> String {
     }
 }
 
+/// One client for the process, cloned per call.
+///
+/// It used to be `Client::new()` at every call site. With rustls that is not cheap: each one
+/// builds a fresh `ClientConfig` and populates a root certificate store, and — worse — each one
+/// gets its own empty connection pool, so every request re-handshaked TLS to api.github.com and
+/// no two could share an HTTP/2 connection. Reviewing a PR is a dozen requests to one host, so
+/// that was ~100-300ms of pure handshake per call, on top of a UI waiting for the answer.
+///
+/// Cloning is free (a `reqwest::Client` is an `Arc` around the inner state) and the clone shares
+/// the pool, which is the whole point. Kept returning by value rather than `&'static` so no call
+/// site has to change. Nothing here varies the transport per request — no proxy toggle, no
+/// per-request certificate trust — so one shared client is behaviour-identical to the old code.
 fn client() -> reqwest::Client {
-    reqwest::Client::new()
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
 }
 
 /// Both classic and fine-grained personal access tokens authenticate as a Bearer token on the

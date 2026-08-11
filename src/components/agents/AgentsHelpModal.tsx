@@ -1,7 +1,7 @@
 import { CircleHelp } from "lucide-react";
 import { AGENTS_GUIDE_EN, AGENTS_GUIDE_ES } from "./agentsGuide";
 import { ApiModal } from "../api/ApiModal";
-import { renderMarkdown } from "../../lib/markdown";
+import { Markdown } from "../common/Markdown";
 import { useLanguageStore, useT } from "../../state/languageStore";
 
 /**
@@ -25,9 +25,11 @@ export function AgentsHelpModal({ onClose }: { onClose: () => void }) {
       width="max-w-2xl"
       onClose={onClose}
     >
-      <div
+      {/* The guide is a constant per language, so `Markdown`'s memo means it is parsed and
+          sanitised once — not again on every unrelated re-render of the modal. */}
+      <Markdown
+        source={content}
         className="cf-markdown-preview min-h-0 flex-1 overflow-y-auto px-5 py-4 text-[13px]"
-        dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
       />
     </ApiModal>
   );

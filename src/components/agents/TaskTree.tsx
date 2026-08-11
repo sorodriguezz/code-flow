@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -199,6 +199,13 @@ export function TaskTree({
     setMove(null);
   };
 
+  /** The one task menu opener, stable, shared by the loose rows and by the ones nested under a
+   *  chain — see the note on `TaskRowBase`. */
+  const taskMenu = useCallback(
+    (x: number, y: number, id: string) => setMenu({ x, y, kind: "task", id }),
+    [],
+  );
+
   const renderItem = (item: Item, depth: number, chip?: string, at = 0) =>
     item.kind === "chain" ? (
       <ChainGroup
@@ -211,7 +218,7 @@ export function TaskTree({
         chip={chip}
         onToggle={() => toggleOpen(`chain:${item.chain.id}`)}
         onMenu={(x, y) => setMenu({ x, y, kind: "chain", id: item.chain.id })}
-        onTaskMenu={(x, y, id) => setMenu({ x, y, kind: "task", id })}
+        onTaskMenu={taskMenu}
       />
     ) : renaming?.kind === "task" && renaming.id === item.task.id ? (
       <RenameRow
@@ -231,7 +238,7 @@ export function TaskTree({
         depth={depth}
         at={at}
         chip={chip}
-        onMenu={(x, y) => setMenu({ x, y, kind: "task", id: item.task.id })}
+        onMenu={taskMenu}
       />
     );
 
@@ -640,7 +647,10 @@ function ChainGroup({
                   task={task}
                   depth={depth + 1}
                   at={step}
-                  onMenu={(x, y) => onTaskMenu(x, y, task.id)}
+                  // Passed straight through rather than wrapped: `onTaskMenu` already carries the
+                  // task's id, and a wrapper here would be a new function per render — which is
+                  // exactly what the memo on `TaskRow` cannot survive.
+                  onMenu={onTaskMenu}
                 />
               );
             }
@@ -667,7 +677,16 @@ function ChainGroup({
   );
 }
 
-function TaskRow({
+/**
+ * One task row.
+ *
+ * `memo`'d, and `onMenu` takes the task's id rather than closing over it so that the one handler the
+ * tree hands down can be a `useCallback` — with an inline arrow here the memo would compare a fresh
+ * function every time and never hold. It earns that: the tree above re-renders whenever *any* task's
+ * live state moves, and a workspace mid-run has a task streaming several times a second, while each
+ * row already subscribes narrowly to its own `live[task.id].sending`.
+ */
+function TaskRowBase({
   task,
   depth,
   at,
@@ -678,7 +697,7 @@ function TaskRow({
   depth: number;
   at: number;
   chip?: string;
-  onMenu: (x: number, y: number) => void;
+  onMenu: (x: number, y: number, taskId: string) => void;
 }) {
   const t = useT();
   const selected = useAgentsStore((s) => s.selectedId === task.id);
@@ -715,10 +734,12 @@ function TaskRow({
         void useChainStore.getState().select(null);
         void useAgentsStore.getState().select(task.id);
       }}
-      onMenu={onMenu}
+      onMenu={(x, y) => onMenu(x, y, task.id)}
     />
   );
 }
+
+const TaskRow = memo(TaskRowBase);
 
 function TemplateRow({
   templateId,

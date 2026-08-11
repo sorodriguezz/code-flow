@@ -169,6 +169,30 @@ pub fn api_list_history(db: State<Db>, workspace_id: String, limit: i64) -> Resu
     api_queries::list_history(&conn, &workspace_id, limit).map_err(|e| e.to_string())
 }
 
+/// The history list without the `snapshot` blob — see `api_queries::list_history_meta`.
+///
+/// The list only ever draws the method, URL, status and duration, but every row used to carry the
+/// full request-and-response JSON of that send, so opening the API workspace parsed several MB on
+/// the UI thread to render a sidebar. `snapshot` comes back as `""`, meaning "not loaded"; the one
+/// entry the user clicks fetches the real thing through `api_get_history_snapshot`.
+#[tauri::command(async)]
+pub fn api_list_history_meta(
+    db: State<Db>,
+    workspace_id: String,
+    limit: i64,
+) -> Result<Vec<ApiHistoryEntry>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::list_history_meta(&conn, &workspace_id, limit).map_err(|e| e.to_string())
+}
+
+/// One entry's stored snapshot. `None` means the row is gone — deleted, or evicted by the hard cap
+/// while its list row was still on screen — which is not the same answer as `Some("")`.
+#[tauri::command(async)]
+pub fn api_get_history_snapshot(db: State<Db>, id: String) -> Result<Option<String>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    api_queries::get_history_snapshot(&conn, &id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn api_add_history(db: State<Db>, entry: ApiHistoryEntry) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;

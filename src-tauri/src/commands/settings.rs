@@ -9,6 +9,27 @@ pub fn get_setting(db: State<Db>, key: String) -> Result<Option<String>, String>
     queries::get_setting(&conn, &key).map_err(|e| e.to_string())
 }
 
+/// The same read as [`get_setting`], for many keys at once.
+///
+/// Boot asks for roughly ninety settings. The frontend already batches them into `Promise.all`
+/// waves, but that only makes the *requests* concurrent — every one of them still queues behind the
+/// single connection mutex on this side, and the window is not painting while that happens. One
+/// call takes the lock once.
+///
+/// Absence is signalled the same way `get_setting` signals it, so callers need no new rule: a key
+/// with no row is simply missing from the map (never `""`, which is a legitimately stored value).
+///
+/// Deliberately left non-`async`: it holds the `Db` mutex, and everything that touches that mutex
+/// stays on the one thread that already serialises it.
+#[tauri::command]
+pub fn get_settings(
+    db: State<Db>,
+    keys: Vec<String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::get_settings(&conn, &keys).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn set_setting(db: State<Db>, key: String, value: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -900,6 +921,26 @@ mod tests {
 
         let kept = read_rules(&dir.join(RULES_FILE));
         assert_eq!(kept.len(), 2, "the narrower second export must not shrink the file");
+    }
+
+    /// The contract the bulk read has to honour for callers to be able to swap `get_setting` for
+    /// it without changing how they read the answer: a key that was never set is *missing* from the
+    /// map, exactly as `get_setting` answers `None` — and an empty string that really was stored is
+    /// present, because `""` is a value someone chose, not an absence.
+    #[test]
+    fn a_bulk_read_omits_only_the_keys_that_were_never_set() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        queries::set_setting(&conn, "cf_test_theme", "dark").unwrap();
+        queries::set_setting(&conn, "cf_test_blank", "").unwrap();
+
+        let keys = vec!["cf_test_theme".to_string(), "cf_test_blank".to_string(), "cf_test_never".to_string()];
+        let got = queries::get_settings(&conn, &keys).unwrap();
+
+        assert_eq!(got.get("cf_test_theme").map(String::as_str), Some("dark"));
+        assert_eq!(got.get("cf_test_blank").map(String::as_str), Some(""));
+        assert!(!got.contains_key("cf_test_never"));
+        assert_eq!(got.len(), 2, "nothing but the keys that were asked for and exist");
     }
 
     #[test]

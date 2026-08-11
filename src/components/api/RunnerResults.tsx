@@ -441,10 +441,7 @@ function DetailPane({ item, onClose }: { item: RunnerResultItem; onClose: () => 
           </div>
           {capture.requestBody !== "" && (
             <div className="min-h-0 flex-1 border-t border-[var(--cf-border)]">
-              <BodyView
-                text={capture.requestBody}
-                path={`runner-req-${item.iteration}-${item.requestId}`}
-              />
+              <BodyView text={capture.requestBody} path={REQUEST_BODY_MODEL} />
             </div>
           )}
         </div>
@@ -460,7 +457,7 @@ function DetailPane({ item, onClose }: { item: RunnerResultItem; onClose: () => 
           ) : (
             <BodyView
               text={formatJson(capture.responseBody)}
-              path={`runner-res-${item.iteration}-${item.requestId}`}
+              path={RESPONSE_BODY_MODEL}
               language={languageOf(headerValue(capture.responseHeaders, "content-type"))}
             />
           )}
@@ -494,6 +491,34 @@ function HeaderTable({ rows }: { rows: [string, string][] }) {
   );
 }
 
+/**
+ * The two model URIs this pane owns — **constants, one per panel, not one per row**.
+ *
+ * `@monaco-editor/react` mints a model on every new `path` (`getOrCreateModel` → `setModel`) and
+ * never disposes the one it just left; only the model an editor is holding at unmount goes away.
+ * These paths used to carry the iteration and the request id, so a 50-request run over 20
+ * iterations left a thousand live text models behind after the user clicked through the report —
+ * models nothing could ever show again, since the same row re-selected produces the same URI and
+ * gets the cached one.
+ *
+ * Two constants are safe here for reasons that are worth stating, because they are what would
+ * break if this pane grew a third editor:
+ *
+ *  - The editors are `readOnly`, so the library's `value` effect takes its `setValue` branch
+ *    rather than `executeEdits` — the buffer is replaced wholesale, with no undo stop to carry
+ *    the previous row's text into the next one.
+ *  - `language` is a prop too, and its own effect calls `setModelLanguage`, so a JSON row followed
+ *    by an HTML row still highlights correctly on the shared model.
+ *  - The request and response panels live in mutually exclusive branches of the tab switch
+ *    (`tab === "request"` vs. the response arm), so they are never mounted at once and cannot race
+ *    each other for a URI.
+ *
+ * The cost is per-row scroll position, which a read-only report does not carry between rows
+ * anyway. Nothing else keys off these strings: grep for `runner-` finds only this file.
+ */
+const REQUEST_BODY_MODEL = "runner-req";
+const RESPONSE_BODY_MODEL = "runner-res";
+
 function BodyView({
   text,
   path,
@@ -511,6 +536,10 @@ function BodyView({
       language={language}
       value={text}
       theme={monacoTheme}
+      // The library keeps a module-level, never-pruned `Map` of view states keyed by path, written
+      // on every path change and on unmount. A read-only pane has no cursor or selection worth
+      // restoring, so opting out costs nothing and stops feeding a map that only grows.
+      saveViewState={false}
       options={{
         ...OVERFLOW_SAFE_OPTIONS,
         readOnly: true,

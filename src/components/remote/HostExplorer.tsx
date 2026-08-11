@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -419,7 +419,17 @@ function GroupSection({
   );
 }
 
-function HostRow({
+/**
+ * One host.
+ *
+ * `memo`'d, and it holds without any work at the call site: its three props are the store's own row
+ * object, its index, and `setMenu` — a state setter, so stable by construction. Everything else the
+ * row reacts to it subscribes to itself, narrowly, and *that* is what the memo protects. Hovering a
+ * row mid-drag writes `overHostId`, which re-renders the group heading and with it every host under
+ * it; before this, dragging one host repainted the whole tree at pointer-event rate to move a single
+ * one-pixel line.
+ */
+function HostRowBase({
   host,
   at,
   onMenu,
@@ -637,6 +647,8 @@ function HostRow({
     </div>
   );
 }
+
+const HostRow = memo(HostRowBase);
 
 /**
  * Ends a drag, wherever it was released.

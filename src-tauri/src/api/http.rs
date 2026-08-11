@@ -128,7 +128,7 @@ async fn send_inner(req: HttpSendRequest) -> Result<HttpResponse, String> {
     let set_cookies = parse_set_cookies(response.headers(), &final_url);
 
     let download_started = Instant::now();
-    let body = read_body(response, req.options.max_response_bytes, &final_url).await?;
+    let (body, truncated) = read_body(response, req.options.max_response_bytes, &final_url).await?;
     let download_ms = download_started.elapsed().as_millis() as i64;
     let size_bytes = body.len() as u64;
 
@@ -151,6 +151,7 @@ async fn send_inner(req: HttpSendRequest) -> Result<HttpResponse, String> {
         body_text,
         body_base64,
         size_bytes,
+        truncated,
         duration_ms: total_ms,
         timings: ResponseTimings {
             // reqwest hands back a `Response`, not a connection trace: the DNS lookup, the TCP
@@ -801,32 +802,44 @@ fn preview_bytes(bytes: &[u8]) -> String {
 
 /// Reads at most `cap` bytes (0 = unlimited) and returns what it got: hitting the cap is a
 /// truncation, not a failure — a 2 GB response should still show its first megabyte.
+/// Reads the body, stopping at `cap` bytes (0 = unlimited).
+///
+/// Returns `(bytes, truncated)`. `truncated` is only true when bytes were actually left behind:
+/// filling the buffer to exactly `cap` is *not* truncation on its own, because a payload can be
+/// exactly that long, and flagging it would put a "this body is incomplete" warning over a
+/// complete one. Telling the two apart costs one more `chunk()` poll, which is the same await the
+/// loop was going to make anyway — and at most one, since we break either way.
 async fn read_body(
     mut response: reqwest::Response,
     cap: u64,
     url: &Url,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, bool), String> {
+    let describe = |e: reqwest::Error| match crate::api::root_cause(&e) {
+        Some(cause) => format!("Reading the response body from {url} failed: {cause}"),
+        None => format!("Reading the response body from {url} failed: {e}"),
+    };
+
     let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| match crate::api::root_cause(&e) {
-            Some(cause) => format!("Reading the response body from {url} failed: {cause}"),
-            None => format!("Reading the response body from {url} failed: {e}"),
-        })?
-    {
+    let mut truncated = false;
+    while let Some(chunk) = response.chunk().await.map_err(describe)? {
         if cap == 0 {
             body.extend_from_slice(&chunk);
             continue;
         }
         let room = (cap - body.len() as u64) as usize;
-        if chunk.len() >= room {
+        if chunk.len() > room {
             body.extend_from_slice(&chunk[..room]);
+            truncated = true;
             break;
         }
         body.extend_from_slice(&chunk);
+        if body.len() as u64 == cap {
+            // Full to the byte. Whether anything followed is the whole question.
+            truncated = response.chunk().await.map_err(describe)?.is_some();
+            break;
+        }
     }
-    Ok(body)
+    Ok((body, truncated))
 }
 
 fn parse_set_cookies(headers: &HeaderMap, url: &Url) -> Vec<ParsedCookie> {
@@ -1271,19 +1284,24 @@ fn decode_body(bytes: Vec<u8>, content_type: Option<&str>) -> (String, Option<St
         Some(ct) => is_textual_type(ct),
         None => !looks_binary(&bytes),
     };
+    // Each branch drops `bytes` the moment the decoded form exists, before the tuple is returned.
+    // Letting the frame hold both means a body is resident twice at the peak — and for the base64
+    // branch the second copy is 4/3 the size of the first, so a capped 4 MB download briefly cost
+    // ~9 MB for no reason other than where the `drop` happened to land.
     if !textual {
-        return (
-            String::new(),
-            Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
-        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        drop(bytes);
+        return (String::new(), Some(encoded));
     }
 
-    match content_type.and_then(charset_of).as_deref() {
+    let text = match content_type.and_then(charset_of).as_deref() {
         Some("iso-8859-1" | "latin1" | "latin-1" | "windows-1252" | "cp1252") => {
-            (bytes.iter().map(|&b| b as char).collect(), None)
+            bytes.iter().map(|&b| b as char).collect()
         }
-        _ => (String::from_utf8_lossy(&bytes).into_owned(), None),
-    }
+        _ => String::from_utf8_lossy(&bytes).into_owned(),
+    };
+    drop(bytes);
+    (text, None)
 }
 
 #[cfg(test)]

@@ -846,6 +846,89 @@ pub async fn probe(engine: &dyn AiEngine, binary: &str) -> (bool, String) {
     }
 }
 
+/// How much of a pipe's *beginning* and *end* is kept for the engine's interpreter.
+///
+/// The buffer used to be uncapped, unlike its two siblings here (the `pending` line buffer and the
+/// run trace, both bounded): under `--output-format stream-json --verbose` a long agentic turn
+/// prints tens of megabytes, and every one of them was then copied twice more — once by
+/// `from_utf8_lossy`, once by `strip_ansi` — with the original still alive. Hundreds of megabytes
+/// of peak, for a buffer nobody displays.
+///
+/// **Head *and* tail, because the interpreters read both ends.** Verified against every engine's
+/// `interpret`: `claude` and `gemini` scan backwards for the last `result` line (tail); `codex`,
+/// `grok` and `opencode` read a reply that a single turn puts at the end and, on failure, an error
+/// message that can be the first thing printed (head). Nothing parses across the middle except
+/// `grok`'s whole-buffer JSON and `opencode`'s per-line text concatenation — and both of those are
+/// a model's reply, capped by the model's own output limit at a few hundred KB, orders of
+/// magnitude under 2 MB. So the elision can only ever land inside a stream-json event log, where
+/// the middle is tool chatter nobody parses.
+const COLLECT_EDGE_CAP: usize = 2 * 1024 * 1024;
+
+/// What a capped buffer says where the missing bytes were. Deliberately not JSON and not starting
+/// with `{`, so every line-oriented interpreter skips it exactly as it skips a CLI's plain-text
+/// banners, and a human reading it in an error message is told rather than misled.
+fn elision_marker(bytes: usize) -> String {
+    format!("…[CodeFlow: {bytes} bytes de salida intermedia omitidos]…\n")
+}
+
+/// The head + tail of one pipe, bounded. See [`COLLECT_EDGE_CAP`].
+#[derive(Default)]
+struct Collected {
+    /// The first [`COLLECT_EDGE_CAP`] bytes, whole.
+    head: Vec<u8>,
+    /// Everything after the head, trimmed from the front as it grows.
+    tail: Vec<u8>,
+    /// How much has been dropped from between the two. Zero means [`Collected::finish`] returns
+    /// the output byte-for-byte as it arrived, which is the case for all but runaway runs.
+    elided: usize,
+}
+
+impl Collected {
+    fn push(&mut self, chunk: &[u8]) {
+        if self.head.len() < COLLECT_EDGE_CAP {
+            let room = COLLECT_EDGE_CAP - self.head.len();
+            let take = room.min(chunk.len());
+            self.head.extend_from_slice(&chunk[..take]);
+            if take == chunk.len() {
+                return;
+            }
+            self.tail.extend_from_slice(&chunk[take..]);
+        } else {
+            self.tail.extend_from_slice(chunk);
+        }
+        // Trimmed only once the tail is twice its allowance, so the memmove is paid once per
+        // megabyte rather than once per read — the same amortisation the terminal transcript uses.
+        // The cut lands on a line boundary because the interpreters parse lines: a tail starting
+        // mid-JSON would hand `claude`'s scan a fragment that can never parse.
+        if self.tail.len() <= COLLECT_EDGE_CAP * 2 {
+            return;
+        }
+        let overflow = self.tail.len() - COLLECT_EDGE_CAP;
+        let cut = self.tail[overflow..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|at| overflow + at + 1)
+            .unwrap_or(overflow);
+        self.tail.drain(..cut);
+        self.elided += cut;
+    }
+
+    fn finish(mut self) -> Vec<u8> {
+        if self.elided == 0 {
+            self.head.extend_from_slice(&self.tail);
+            return self.head;
+        }
+        // The head was cut at a byte count, so its last line is half a line. Dropped for the same
+        // reason the tail starts at a boundary, and counted into the marker so the number is honest.
+        let keep = self.head.iter().rposition(|b| *b == b'\n').map(|at| at + 1).unwrap_or(0);
+        self.elided += self.head.len() - keep;
+        self.head.truncate(keep);
+        self.head.extend_from_slice(elision_marker(self.elided).as_bytes());
+        self.head.extend_from_slice(&self.tail);
+        self.head
+    }
+}
+
 /// Drains one of the child's pipes: accumulates the raw bytes for the engine's own interpreter
 /// while streaming complete lines to the frontend as they arrive.
 ///
@@ -858,8 +941,8 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
     stream: &'static str,
     ctx: Option<RunCtx>,
 ) -> Vec<u8> {
-    let mut collected: Vec<u8> = Vec::new();
-    let Some(mut pipe) = pipe else { return collected };
+    let mut collected = Collected::default();
+    let Some(mut pipe) = pipe else { return collected.finish() };
 
     let mut buf = [0u8; 8192];
     let mut pending: Vec<u8> = Vec::new();
@@ -868,7 +951,7 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        collected.extend_from_slice(&buf[..read]);
+        collected.push(&buf[..read]);
         let Some(ctx) = &ctx else { continue };
 
         pending.extend_from_slice(&buf[..read]);
@@ -888,7 +971,7 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
             ai_runs::emit_line(ctx, stream, &strip_ansi(&String::from_utf8_lossy(&pending)));
         }
     }
-    collected
+    collected.finish()
 }
 
 /// Shared subprocess plumbing for every headless AI invocation: builds the engine's command,
@@ -1104,11 +1187,20 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     // escape bytes — least of all the UI, which would render them as literal `[91m` noise. The
     // same argument applies to a reasoning model's `<think>` block: no caller ever wants it, so it
     // goes here too rather than in each engine's `interpret`.
+    //
+    // Each raw buffer is dropped the moment its stripped copy exists, rather than at the end of
+    // the function. `from_utf8_lossy` may copy and `strip_ansi` always does, so leaving the
+    // originals alive across `interpret` held three copies of a multi-megabyte agent log at once
+    // for no reason — the interpreters only ever see the stripped text.
+    let stdout_text = strip_ansi(&String::from_utf8_lossy(&stdout));
+    drop(stdout);
+    let stderr_text = strip_ansi(&String::from_utf8_lossy(&stderr));
+    drop(stderr);
     let outcome = without_reasoning(engine.interpret(
         status.success(),
         &status.to_string(),
-        &strip_ansi(&String::from_utf8_lossy(&stdout)),
-        &strip_ansi(&String::from_utf8_lossy(&stderr)),
+        &stdout_text,
+        &stderr_text,
     ));
     // Filed here because this is the one place every subprocess engine passes through, so nothing
     // that spends tokens can forget to say so. Only successful runs: a refused or crashed one has
@@ -3750,6 +3842,59 @@ mod tests {
                 .as_deref(),
             Some("SELECT count(*)\nFROM usuarios")
         );
+    }
+
+    /// The case that must stay byte-for-byte identical, which is every run anyone actually has:
+    /// an engine's output is a reply of a few KB and the cap never comes near it.
+    #[test]
+    fn ordinary_output_is_collected_untouched() {
+        let mut collected = Collected::default();
+        collected.push(b"{\"type\":\"system\"}\n");
+        collected.push(b"{\"type\":\"result\",\"result\":\"done\"}\n");
+        assert_eq!(
+            String::from_utf8(collected.finish()).unwrap(),
+            "{\"type\":\"system\"}\n{\"type\":\"result\",\"result\":\"done\"}\n"
+        );
+    }
+
+    /// The runaway agent run: tens of MB of stream-json in the middle. What has to survive is both
+    /// ends — the head, because a CLI's failure banner is the first thing it prints, and the tail,
+    /// because the `result` line every interpreter scans backwards for is the very last.
+    #[test]
+    fn a_runaway_run_keeps_both_ends_and_says_what_it_dropped() {
+        let mut collected = Collected::default();
+        collected.push(b"{\"type\":\"system\",\"subtype\":\"init\"}\n");
+        let noise = format!("{}\n", "x".repeat(4095));
+        for _ in 0..(COLLECT_EDGE_CAP * 3 / noise.len()) {
+            collected.push(noise.as_bytes());
+        }
+        collected.push(b"{\"type\":\"result\",\"result\":\"done\"}\n");
+
+        let out = String::from_utf8(collected.finish()).unwrap();
+        assert!(out.len() < COLLECT_EDGE_CAP * 3, "kept {} bytes", out.len());
+        assert!(out.starts_with("{\"type\":\"system\",\"subtype\":\"init\"}\n"));
+        assert!(out.ends_with("{\"type\":\"result\",\"result\":\"done\"}\n"));
+        assert!(out.contains("bytes de salida intermedia omitidos"));
+    }
+
+    /// Every surviving line has to be a *whole* line: half a JSON object at either side of the gap
+    /// would be a line the interpreters try to parse and can't.
+    #[test]
+    fn the_elision_lands_on_line_boundaries() {
+        let mut collected = Collected::default();
+        let noise = format!("{}\n", "y".repeat(511));
+        for _ in 0..(COLLECT_EDGE_CAP * 4 / noise.len()) {
+            collected.push(noise.as_bytes());
+        }
+        let out = String::from_utf8(collected.finish()).unwrap();
+        let marker = out.find('…').expect("the gap is marked");
+        assert!(out[..marker].ends_with('\n'), "the head stops at a line end");
+        for line in out.lines() {
+            assert!(
+                line.starts_with('y') || line.starts_with('…'),
+                "a fragment survived: {line}"
+            );
+        }
     }
 
     #[test]

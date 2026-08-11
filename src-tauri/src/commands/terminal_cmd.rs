@@ -6,8 +6,12 @@ use crate::shell_profiles::{self, ShellProfile};
 use crate::terminal::{self, TerminalRegistry};
 
 /// Every shell the terminal can open with — detected built-ins plus the user's own profiles.
-/// Re-read on each call rather than cached, so a shell installed while the app is running (or a
-/// profile edited in Settings) shows up in the picker without a restart.
+///
+/// Never persisted, so a shell installed while the app is running (or a profile edited in Settings)
+/// shows up in the picker without a restart. The user's own profiles are re-read from the database
+/// on every call; the built-in *detection* behind them is memoised for `shell_profiles::DETECT_TTL`
+/// because it spawns a subprocess on Windows and this command runs on the UI thread — see
+/// `shell_profiles::detect_cached`.
 #[tauri::command]
 pub fn list_shell_profiles(db: State<Db>) -> Result<Vec<ShellProfile>, String> {
     shell_profiles::list(&db)

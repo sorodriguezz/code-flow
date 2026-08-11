@@ -393,6 +393,69 @@ body {
   }
 }
 
+/* The unread notification dot at rest — the halo behind it breathing, and the dot itself swelling
+   with it. Both 2.2s, in phase, so the mark reads as one thing breathing rather than two.
+
+   These were two framer-motion `repeat: Infinity` animations and they are CSS now for one reason:
+   "anything unread" is the resting state of an app that notifies on every agent run, so those two
+   loops ran essentially forever. A JS animation loop that never stops keeps the renderer
+   non-quiescent — on Windows WebView2 never lowers its memory-usage target while frames are being
+   produced — and a main-thread `scale` on a `filter: blur()` layer re-rasterizes the blur every
+   single frame. Transform and opacity only, from CSS: the blurred layer rasterizes once and the
+   compositor moves it from there. Same pixels, no main thread, no per-frame raster.
+
+   The arrival burst stays in framer-motion and stays exactly as it was: it is finite, it is keyed
+   off the burst counter so a second notification restarts it mid-flight, and it is the part that
+   carries the actual signal. See `NotificationBell`. */
+@keyframes cf-bell-halo {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.85);
+  }
+  50% {
+    opacity: 0.55;
+    transform: scale(1.1);
+  }
+}
+
+@keyframes cf-bell-breath {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.16);
+  }
+}
+
+/* `will-change` on both, so the compositor keeps a layer for each and the blur underneath the halo
+   is rasterized once instead of on every step of the scale. Two elements in the whole app, so the
+   usual objection to `will-change` (a layer per node, forever) doesn't apply. */
+.cf-bell-halo {
+  will-change: transform, opacity;
+  animation: cf-bell-halo 2.2s ease-in-out infinite;
+}
+
+.cf-bell-breath {
+  will-change: transform;
+  animation: cf-bell-breath 2.2s ease-in-out infinite;
+}
+
+/* `NotificationBell` already renders a plain static dot with no halo under reduced motion, so in
+   practice neither class is ever mounted in that state. Kept anyway, with the halo pinned near the
+   middle of its own range rather than at the 100% opacity `animation: none` would otherwise leave
+   it at — a dead rule that would look wrong if it ever did apply is worse than none. */
+@media (prefers-reduced-motion: reduce) {
+  .cf-bell-halo {
+    animation: none;
+    opacity: 0.35;
+  }
+  .cf-bell-breath {
+    animation: none;
+  }
+}
+
 /* "Thinking" reactor — what stands in for a spinner wherever an engine is actually working
    (agent turns, story generation, the review stages, the wiki write).
 

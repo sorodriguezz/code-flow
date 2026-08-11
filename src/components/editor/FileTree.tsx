@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown,
@@ -29,7 +29,9 @@ import { useHiddenFilesStore } from "../../state/hiddenFilesStore";
 import { SkeletonRows } from "../common/Skeleton";
 import type { FileEntry } from "../../types/domain";
 import { fileStatusColor, fileStatusLabelKey } from "../../lib/fileStatus";
-import { FileGlyph } from "../common/FileGlyph";
+import { FileGlyph, FileGlyphView } from "../common/FileGlyph";
+import { useIconRulesStore } from "../../state/iconRulesStore";
+import type { IconRule } from "../../lib/icons/rules";
 import { useRepoStore } from "../../state/repoStore";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRowHoverStore } from "../../state/rowHoverStore";
@@ -150,7 +152,16 @@ function DraftRow({
   );
 }
 
-function TreeNode({
+/**
+ * One row, and its subtree when it is an expanded folder.
+ *
+ * `memo`'d, which is what keeps the tree still while things happen *around* it: opening the context
+ * menu, the refresh spinner, a drag crossing folders, the drop-target ring on the root. Every prop
+ * below is stable by construction — the callbacks are `useCallback`s in `FileTree` (and, for the
+ * two that come from outside, in `EditorView`), the maps and sets are `useMemo`s — because a single
+ * re-identified prop turns this from a wall into a per-row comparison that never stops anything.
+ */
+const TreeNode = memo(function TreeNode({
   entry,
   depth,
   selectedPath,
@@ -171,6 +182,9 @@ function TreeNode({
   onBeginDrag,
   suppressClick,
   changedPaths,
+  changedDirs,
+  iconRules,
+  defaultFolderIcon,
   at,
 }: {
   entry: FileEntry;
@@ -204,15 +218,24 @@ function TreeNode({
   /** True once, right after a drag, so the trailing click doesn't also select the row. */
   suppressClick: () => boolean;
   changedPaths: Map<string, string>;
+  /** Every directory with something changed *under* it, pre-walked once in `EditorView`. */
+  changedDirs: Set<string>;
+  /** The active icon profile, subscribed to once at the tree's root and handed down — see
+   * `FileGlyphView` for why this is a prop and not a store read. */
+  iconRules: IconRule[];
+  defaultFolderIcon: string | null;
 }) {
   const t = useT();
   const isExpanded = entry.is_dir && expanded.has(entry.path);
   const children = childrenByDir.get(entry.path) ?? null;
 
-  const drag = useTreeDragStore((s) => s.drag);
-  const overDir = useTreeDragStore((s) => s.overDir);
-  const isDragging = drag?.path === entry.path;
-  const isDropTarget = entry.is_dir && overDir === entry.path;
+  // Subscribed as *booleans about this row*, never as the raw drag state: `hover(dir)` fires on
+  // every folder the pointer crosses, and a row that took `drag`/`overDir` themselves would
+  // re-render every row in the tree on each of those. The same shape `CollectionTree` and
+  // `HostExplorer` use.
+  const anyDrag = useTreeDragStore((s) => s.drag !== null);
+  const isDragging = useTreeDragStore((s) => s.drag?.path === entry.path);
+  const isDropTarget = useTreeDragStore((s) => s.overDir === entry.path && entry.is_dir);
   // Only this row and the one being left re-render when the pointer moves between them, which is
   // what makes tracking hover in state affordable on a tree this size.
   const hoverKey = `tree:${entry.path}`;
@@ -221,10 +244,10 @@ function TreeNode({
   const isSelected = entry.is_dir ? focusedDir === entry.path : selectedPath === entry.path;
   const ownStatus = changedPaths.get(entry.path);
   // A directory doesn't have its own git status, but VS Code-style explorers still color
-  // it when something inside changed — cheap to check since we already have every
-  // changed path in hand, no need to have fetched this directory's children yet.
-  const hasChangedDescendant =
-    entry.is_dir && !ownStatus && [...changedPaths.keys()].some((p) => p.startsWith(`${entry.path}/`));
+  // it when something inside changed. One Set lookup: this used to spread `changedPaths.keys()`
+  // into an array and scan it *per directory row, per render*, which on a repo with a few hundred
+  // changed files was the single most expensive line in the tree.
+  const hasChangedDescendant = entry.is_dir && !ownStatus && changedDirs.has(entry.path);
   const status = ownStatus ?? (hasChangedDescendant ? "modified" : undefined);
   const color = status ? fileStatusColor(status) : undefined;
 
@@ -269,7 +292,7 @@ function TreeNode({
           isSelected
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
             : // Nothing but the drop target is highlighted while a drag is in flight.
-              isHovered && !drag
+              isHovered && !anyDrag
               ? "cf-row-hover"
               : ""
         } ${isSelected ? "" : color ? "" : "text-[var(--cf-text-muted)]"} ${
@@ -283,11 +306,13 @@ function TreeNode({
             ) : (
               <ChevronRight size={12} className="shrink-0" />
             )}
-            <FileGlyph
+            <FileGlyphView
               path={entry.path}
               isFolder
               open={isExpanded}
               color={!isSelected && color ? color : undefined}
+              rules={iconRules}
+              defaultFolderIcon={defaultFolderIcon}
             />
           </>
         ) : (
@@ -297,7 +322,12 @@ function TreeNode({
                 modified first, the same way it does in the Changes tab. A custom icon is the one
                 exception — it carries its own brand colours and tinting it would make an Angular
                 file that changed look like neither. */}
-            <FileGlyph path={entry.path} color={isSelected ? undefined : (color ?? undefined)} />
+            <FileGlyphView
+              path={entry.path}
+              color={isSelected ? undefined : (color ?? undefined)}
+              rules={iconRules}
+              defaultFolderIcon={defaultFolderIcon}
+            />
           </>
         )}
         <span className="truncate" style={!isSelected && color ? { color } : undefined}>
@@ -347,6 +377,9 @@ function TreeNode({
               onBeginDrag={onBeginDrag}
               suppressClick={suppressClick}
               changedPaths={changedPaths}
+              changedDirs={changedDirs}
+              iconRules={iconRules}
+              defaultFolderIcon={defaultFolderIcon}
             />
           ))}
           {children && children.length === 0 && !draftHere && (
@@ -362,7 +395,7 @@ function TreeNode({
       )}
     </div>
   );
-}
+});
 
 export function FileTree({
   repoPath,
@@ -373,6 +406,7 @@ export function FileTree({
   onPathRemoved,
   command,
   changedPaths,
+  changedDirs,
 }: {
   repoPath: string;
   selectedPath: string | null;
@@ -391,6 +425,10 @@ export function FileTree({
    * only read by `reveal`, and names the directory to open and re-list. */
   command?: { command: ExplorerCommand; nonce: number; path?: string } | null;
   changedPaths: Map<string, string>;
+  /** Every directory with a changed file somewhere under it. Derived alongside `changedPaths` in
+   * `EditorView`, in the same walk, so a directory row can answer "does anything inside me differ?"
+   * with one lookup instead of a scan of every changed path. */
+  changedDirs: Set<string>;
 }) {
   const t = useT();
   // Expansion and the listing cache both live here rather than in each node, so "collapse
@@ -416,6 +454,10 @@ export function FileTree({
   const hiddenEntries = useHiddenFilesStore((s) => s.entries);
   const loadHidden = useHiddenFilesStore((s) => s.load);
   const hideEntry = useHiddenFilesStore((s) => s.hide);
+  /** Subscribed once here rather than twice per row: every row's glyph wants these, and this
+   * component re-renders as a whole when they change, so the rows can take them as props. */
+  const iconRules = useIconRulesStore((s) => s.rules);
+  const defaultFolderIcon = useIconRulesStore((s) => s.defaultFolderIcon);
 
   useEffect(() => {
     childrenRef.current = childrenByDir;
@@ -713,7 +755,9 @@ export function FileTree({
   const suppressClickRef = useRef(false);
   const ghostRef = useRef<HTMLDivElement | null>(null);
   const treeDrag = useTreeDragStore((s) => s.drag);
-  const treeOverDir = useTreeDragStore((s) => s.overDir);
+  // A boolean, not `overDir` itself: this component only ever asks "is the *root* the target", and
+  // subscribing to the raw value re-rendered the whole tree on every folder the pointer crossed.
+  const rootIsDropTarget = useTreeDragStore((s) => s.overDir === "");
   const treeOrigin = useTreeDragStore((s) => s.origin);
 
   const applyMove = useCallback(
@@ -914,7 +958,7 @@ export function FileTree({
         }}
         // Dropping on that same empty space moves to the repo root.
         className={`min-h-0 flex-1 overflow-auto py-1 ${
-          treeOverDir === "" ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
+          rootIsDropTarget ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
         }`}
       >
         {!rootEntries ? (
@@ -948,6 +992,9 @@ export function FileTree({
                 onBeginDrag={beginDrag}
                 suppressClick={takeSuppressedClick}
                 changedPaths={changedPaths}
+                changedDirs={changedDirs}
+                iconRules={iconRules}
+                defaultFolderIcon={defaultFolderIcon}
               />
             ))}
           </>

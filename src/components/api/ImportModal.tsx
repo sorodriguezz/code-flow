@@ -362,11 +362,21 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
       setResult(null);
       return;
     }
-    const timer = setTimeout(
-      () => setResult(importAny(text, { includeExamples, sourceUrl: sourceUrl ?? undefined })),
-      PARSE_DEBOUNCE_MS,
-    );
-    return () => clearTimeout(timer);
+    // `importAny` is async (it loads the YAML parser on demand, only for a YAML document), so the
+    // timer alone is no longer enough to serialise this: clearing it cancels a parse that hasn't
+    // started, but a parse already in flight still resolves afterwards and would overwrite the
+    // newer document's result with the older one's tree. `live` is the latch — the effect cleanup
+    // drops it, and a resolve that arrives for a superseded input throws its result away.
+    let live = true;
+    const timer = setTimeout(() => {
+      void importAny(text, { includeExamples, sourceUrl: sourceUrl ?? undefined }).then((parsed) => {
+        if (live) setResult(parsed);
+      });
+    }, PARSE_DEBOUNCE_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
   }, [text, includeExamples, sourceUrl]);
 
   // A fresh document starts fully selected; a re-parse of the same one (toggling examples) keeps

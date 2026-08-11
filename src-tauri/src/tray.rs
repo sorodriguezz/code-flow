@@ -21,8 +21,27 @@ impl QuittingFlag {
     }
 }
 
+/// Brings the main window back, from wherever it went.
+///
+/// **Every** restore path goes through here, and that is load-bearing rather than tidy: the tray
+/// icon's click and its "Show" item, a second launch of the binary (the `single_instance` callback
+/// in `lib.rs`), and clicking the Dock icon on macOS. Anything new that raises the window belongs
+/// here too, because of what the first line does.
 pub fn show_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        // The exact inverse of `hide_to_background`, and it has to come *before* `show()`.
+        //
+        // On Windows, hiding to the tray also tells the WebView2 controller it is invisible, which
+        // is what stops it rendering and holding a compositor's worth of memory for a window nobody
+        // can see. Showing the tao window without undoing that puts a window on screen with a
+        // webview inside it that has been told not to draw — the app comes back *blank*, which is a
+        // far worse bug than the one the hiding fixes. No-op on the launches where it was never
+        // hidden, so it is safe on every path in unconditionally.
+        #[cfg(windows)]
+        {
+            let webview: &tauri::Webview<_> = window.as_ref();
+            let _ = webview.show();
+        }
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();

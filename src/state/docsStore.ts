@@ -34,6 +34,25 @@ import type { DocPage, DocScope } from "../types/domain";
  */
 
 interface DocsState {
+  /**
+   * Every document of the workspace, **body included**.
+   *
+   * `list_doc_pages` projects the whole row, so opening this view holds the full markdown of every
+   * document at once when the list only ever renders titles, scope and status. Making it lazy is a
+   * backend change and not a frontend one: it needs `list_doc_pages` to stop selecting `content`
+   * *and* a `get_doc_page` command to fetch one body on `select`. Rust has the query
+   * (`queries::get_doc_page`) but it is not registered in `lib.rs`, so there is nothing to invoke
+   * yet — dropping `content` from the list today would blank the editor, `publish` and the
+   * `save` short-circuit that compares the draft against it.
+   *
+   * And a hydrate-after-select would not be enough on its own, which is the part that is easy to
+   * get wrong: `WikiView` renders `bodyOf(page, draft)` — i.e. `page.content` — straight into
+   * `MarkdownEditor` with no loading state, and the editor keeps an undo history keyed by
+   * `page.id`. A body that arrives as `""` and is replaced a tick later is an *edit* as far as that
+   * history is concerned, so the user could undo back to an empty document and save it over their
+   * page. Whoever makes this lazy has to give the editor a "loading" state for a page whose body is
+   * not in yet — the store cannot do it alone.
+   */
   pages: DocPage[];
   selectedId: string | null;
   loading: boolean;

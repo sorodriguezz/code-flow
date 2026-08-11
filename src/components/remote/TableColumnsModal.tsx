@@ -105,7 +105,12 @@ export function TableColumnsModal({
         </>
       }
     >
-      <div className="space-y-2">
+      {/* `ApiModal`'s body brings no padding or scroll of its own, so this takes the house body:
+          inset to the same `px-4` the header and footer are, and scrolling rather than clipping.
+          The column list below caps itself at 46vh and scrolls on its own — that is the list's
+          scroll, not the panel's, and it is what keeps the add-a-column row and its hint on screen
+          instead of pushing them past the footer. The body's scroll is for everything else. */}
+      <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3">
         <div className="max-h-[46vh] overflow-y-auto rounded-md border border-[var(--cf-border)] p-1">
           {order.map((column, index) => (
             <div

@@ -951,6 +951,49 @@ pub fn list_history(conn: &Connection, workspace_id: &str, limit: i64) -> rusqli
     rows.collect()
 }
 
+/// The same rows `list_history` returns, minus the one column that costs anything.
+///
+/// `snapshot` holds the request *and* the response of a send — a JSON blob that is routinely tens
+/// of kilobytes and occasionally megabytes. The API workspace opens by listing 500 of them, and
+/// `limit` is a row count, not a byte budget: every one of those blobs crossed the IPC boundary
+/// and was parsed on the UI thread before the panel could paint, to render a list that shows only
+/// the method, the URL, the status and the duration.
+///
+/// So the list stops carrying it. `snapshot` comes back as `""` — the column is not read at all,
+/// not read and thrown away — and `get_history_snapshot` fetches the real one for the single entry
+/// the user clicks. Nothing is dropped from the database and a replay still restores byte for
+/// byte; the blob simply arrives when it is needed instead of 500 at a time.
+///
+/// **A caller that renders the snapshot must fetch it.** An empty `snapshot` here means "not
+/// loaded", never "this send had no request" — see `get_history_snapshot`.
+pub fn list_history_meta(
+    conn: &Connection,
+    workspace_id: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<ApiHistoryEntry>> {
+    // Spelled out rather than derived from `HISTORY_COLUMNS` so the literal `''` sits where the
+    // column it stands in for would be, and `map_history` can stay the single row mapper.
+    let mut stmt = conn.prepare(
+        "SELECT id, workspace_id, request_id, name, protocol, method, url, status, duration_ms,
+                size_bytes, '' AS snapshot, created_at
+           FROM api_history WHERE workspace_id = ?1 ORDER BY created_at DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![workspace_id, limit.max(0)], map_history)?;
+    rows.collect()
+}
+
+/// The `snapshot` blob of one entry, or `None` when the row is gone (deleted, or evicted by
+/// `HISTORY_HARD_CAP` while its list row was still on screen). `Some("")` is a real stored empty
+/// snapshot and is not the same answer.
+pub fn get_history_snapshot(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT snapshot FROM api_history WHERE id = ?1")?;
+    let mut rows = stmt.query(params![id])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row.get(0)?)),
+        None => Ok(None),
+    }
+}
+
 /// Inserts one send and trims that workspace's history back to `HISTORY_HARD_CAP`. The workspace
 /// comes from the entry itself, and the trim is scoped to it: a busy workspace must not evict the
 /// history of one the user has not opened in a while.

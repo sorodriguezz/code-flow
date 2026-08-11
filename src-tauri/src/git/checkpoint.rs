@@ -15,6 +15,7 @@
 //! Checkpoints are ordinary git objects: they survive restarts, are inspectable with plain git,
 //! and need no table of their own.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use git2::{DiffOptions, Repository};
@@ -156,6 +157,12 @@ fn diff_paths(repo: &Repository, commit: &git2::Commit) -> Result<Vec<String>, S
         .diff_tree_to_workdir_with_index(Some(&tree), Some(&mut opts))
         .map_err(|e| e.message().to_string())?;
 
+    // Deduplicated through a set rather than `paths.contains(&path)`: a typechange or a
+    // rename reports the same path from more than one delta, and the linear scan made this
+    // quadratic in the number of changed files — a run that touched a few hundred paths spent
+    // more time in `contains` than in the walk itself. The `Vec` is still what's returned, so
+    // callers (and the ordering below) are unaffected.
+    let mut seen: HashSet<String> = HashSet::new();
     let mut paths: Vec<String> = Vec::new();
     for delta in diff.deltas() {
         let path = delta
@@ -164,7 +171,7 @@ fn diff_paths(repo: &Repository, commit: &git2::Commit) -> Result<Vec<String>, S
             .or_else(|| delta.old_file().path())
             .map(|p| p.to_string_lossy().replace('\\', "/"));
         if let Some(path) = path {
-            if !paths.contains(&path) {
+            if seen.insert(path.clone()) {
                 paths.push(path);
             }
         }
@@ -173,7 +180,28 @@ fn diff_paths(repo: &Repository, commit: &git2::Commit) -> Result<Vec<String>, S
     Ok(paths)
 }
 
+/// The changed paths of a *single* checkpoint, for a caller that wants one row's detail without
+/// paying for every other row's working-tree walk.
+///
+/// Exists because [`list`] computes this for all [`MAX_CHECKPOINTS`] entries eagerly, and each one
+/// is a full `diff_tree_to_workdir_with_index` with recursive untracked scanning — up to twenty
+/// walks of the whole working tree in a single call. On a large repo that is the slowest thing the
+/// checkpoints modal does. Splitting it out lets the frontend fetch the paths per row instead;
+/// [`list`] keeps filling `changed_paths` until it does, so nothing is lost in the meantime.
+pub fn changed_paths(path: &str, id: &str) -> Result<Vec<String>, String> {
+    let repo = open(path)?;
+    let commit = read_checkpoint(&repo, id)?;
+    diff_paths(&repo, &commit)
+}
+
 /// Every checkpoint of this repo, newest first.
+///
+/// `changed_paths` is filled eagerly for every entry, which costs one full working-tree walk per
+/// checkpoint — up to [`MAX_CHECKPOINTS`] of them in one call. That is deliberate *for now*: the
+/// modal renders each row's paths inline, with no expand affordance to hang a lazy fetch off, and
+/// the count is what the restore confirmation asks about. [`changed_paths`] is the per-row
+/// equivalent the UI should move to; until it does, dropping the field here would silently delete
+/// what the modal draws.
 pub fn list(path: &str) -> Result<Vec<CheckpointInfo>, String> {
     let repo = open(path)?;
     let refs = match repo.references_glob(&format!("{REF_PREFIX}*")) {
@@ -288,6 +316,10 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].kind, "fix-finding");
         assert_eq!(listed[0].changed_paths, vec!["new.txt", "tracked.txt"]);
+
+        // The per-row command has to answer exactly what the list embeds, or moving the UI onto it
+        // would quietly change what the modal shows and what the restore confirmation counts.
+        assert_eq!(changed_paths(path, &id).unwrap(), listed[0].changed_paths);
 
         let restored = restore(path, &id).unwrap();
         assert_eq!(restored, vec!["new.txt", "tracked.txt"]);

@@ -240,7 +240,13 @@ fn render_value(object: &Value) -> Variable {
 /// beat after the process starts, and connecting too early just fails.
 async fn discover_ws_url(port: u16) -> Result<String, String> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ATTACH_TIMEOUT_MS);
-    let client = reqwest::Client::new();
+    // One client for the process rather than one per attach. Building a reqwest client is not free
+    // even for plain HTTP — rustls still constructs a `ClientConfig` and a root certificate store —
+    // and this runs on the path where the user just pressed "Debug" and is watching the button.
+    // Cloning is free (a `reqwest::Client` is an `Arc` around the inner state); the loop below then
+    // reuses the same kept-alive connection to the inspector across every poll, as it already did.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(reqwest::Client::new).clone();
     let mut last_error = "inspector never answered".to_string();
     while std::time::Instant::now() < deadline {
         match client.get(format!("http://127.0.0.1:{port}/json/list")).send().await {

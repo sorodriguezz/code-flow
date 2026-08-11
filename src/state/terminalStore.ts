@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { closeTerminal, getSetting, openTerminal, setSetting } from "../lib/tauri/commands";
+import { onTerminalExit, onTerminalOutput } from "../lib/tauri/events";
 
 export interface TerminalTab {
   id: string;
@@ -54,11 +55,139 @@ interface TerminalState {
   rename: (projectId: string, id: string, title: string) => void;
 }
 
+/** What a mounted `TerminalPane` hands the router: where to put this session's bytes, and what
+ * to do when its shell ends. */
+export interface TerminalSink {
+  write: (data: string) => void;
+  exit: () => void;
+}
+
+/**
+ * `terminal:output` / `terminal:exit`, routed once for the whole app.
+ *
+ * Every terminal ever opened stays mounted (see the note in `TerminalDock`), and each pane used
+ * to hold its own `terminal:output` subscription that compared `e.id` against its own session id
+ * and threw away everything else. A dozen shells open across a few projects therefore meant a
+ * dozen closure calls and a dozen string compares for *every* pty chunk, most of them on behalf
+ * of panes the user cannot even see. This does the lookup once, in a `Map`.
+ *
+ * Order is preserved for free: Tauri delivers to this one listener in order, and the sink is
+ * called synchronously from inside it — no queue, no batching, no reordering.
+ */
+const sinks = new Map<string, TerminalSink>();
+
+/**
+ * Output that arrived before this session's *first* pane existed.
+ *
+ * Only ever the first: once a pane has registered, a session that goes back to having none is
+ * treated exactly as it always was — the chunks are dropped. That is deliberate, not laziness.
+ * The agent bench replays a transcript **the backend records for itself** whenever a pane mounts,
+ * so holding output across an unmount would hand that pane the same bytes twice, once from the
+ * transcript and once from here. The gap worth closing is the one at the very start, where no
+ * transcript covers it either.
+ */
+interface PendingOutput {
+  chunks: string[];
+  bytes: number;
+  exited: boolean;
+}
+const pending = new Map<string, PendingOutput>();
+/** Sessions that have had a pane at some point, and so are past the window `pending` covers. */
+const introduced = new Set<string>();
+
+/**
+ * Safety valve, not a scrollback. It only bounds the one case `pending` exists for: a session
+ * that is spawned and then, for whatever reason, never gets a pane. Half a megabyte is several
+ * times what xterm's 1000-line scrollback can hold, so anything evicted here had already scrolled
+ * out of reach of the pane that would eventually receive it.
+ */
+const PENDING_LIMIT_BYTES = 512 * 1024;
+
+/** The buffer for a session still waiting on its first pane, or `null` once it has had one. */
+function holdForLater(id: string): PendingOutput | null {
+  if (introduced.has(id)) return null;
+  let held = pending.get(id);
+  if (!held) {
+    held = { chunks: [], bytes: 0, exited: false };
+    pending.set(id, held);
+  }
+  return held;
+}
+
+let routerStarted = false;
+
+/**
+ * Attaches the app's single pair of terminal listeners. Idempotent, and deliberately never torn
+ * down: it has to already be listening *before* the first session exists, because the per-pane
+ * listeners it replaces were attached after an `await listen(...)` — anything the shell printed
+ * between `open_terminal` returning and that promise resolving was simply lost. Buffering here
+ * closes that window instead of reopening it.
+ */
+export function startTerminalRouter(): void {
+  if (routerStarted) return;
+  routerStarted = true;
+  void onTerminalOutput((e) => {
+    const sink = sinks.get(e.id);
+    if (sink) {
+      sink.write(e.data);
+      return;
+    }
+    const held = holdForLater(e.id);
+    if (!held) return;
+    held.chunks.push(e.data);
+    held.bytes += e.data.length;
+    while (held.bytes > PENDING_LIMIT_BYTES && held.chunks.length > 1) {
+      held.bytes -= held.chunks.shift()!.length;
+    }
+  });
+  void onTerminalExit((e) => {
+    const sink = sinks.get(e.id);
+    if (sink) sink.exit();
+    else {
+      const held = holdForLater(e.id);
+      if (held) held.exited = true;
+    }
+  });
+}
+
+/**
+ * Points this session's output at a pane. Returns the unregister function.
+ *
+ * On a session's *first* pane, whatever the shell printed before the pane existed is flushed
+ * synchronously and in order before this returns, so it starts where the shell actually is
+ * rather than a prompt short. See `pending` for why it is only the first.
+ */
+export function registerTerminalSink(id: string, sink: TerminalSink): () => void {
+  startTerminalRouter();
+  sinks.set(id, sink);
+  const held = pending.get(id);
+  introduced.add(id);
+  if (held) {
+    pending.delete(id);
+    for (const chunk of held.chunks) sink.write(chunk);
+    if (held.exited) sink.exit();
+  }
+  return () => {
+    // Identity-checked, so a pane that remounts before the old one's cleanup runs (React 19's
+    // double-invoked effects in dev, a `sessionId` swap) cannot unregister the live sink.
+    if (sinks.get(id) === sink) sinks.delete(id);
+  };
+}
+
+/** Drops the router's bookkeeping for a session that is gone for good, so closing a tab does not
+ * leave its last chunks parked in the map forever. */
+function forgetTerminal(id: string): void {
+  pending.delete(id);
+  introduced.delete(id);
+}
+
 export const useTerminalStore = create<TerminalState>((set, get) => ({
   panelOpen: false,
   byProject: {},
 
   init: async () => {
+    // At app start, so the router is live well before any pane asks for one.
+    startTerminalRouter();
     const raw = await getSetting(PANEL_OPEN_KEY).catch(() => null);
     set({ panelOpen: raw === "1" });
   },
@@ -70,6 +199,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   openNew: async (projectId, cwd, opts) => {
+    // Before the await, not after: the shell can print its first prompt while `open_terminal` is
+    // still returning, and that chunk has to land in the router's buffer rather than on the floor.
+    startTerminalRouter();
     const { id, profile_name } = await openTerminal(cwd, opts?.profileId);
     set((s) => {
       const proj = s.byProject[projectId] ?? emptyProject();
@@ -92,6 +224,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
 
   close: async (projectId, id) => {
     await closeTerminal(id).catch(() => {});
+    forgetTerminal(id);
     set((s) => {
       const proj = s.byProject[projectId];
       if (!proj) return s;

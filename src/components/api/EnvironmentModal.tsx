@@ -185,7 +185,7 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
 
     setImporting(true);
     try {
-      const result = importAny(await apiReadTextFile(path));
+      const result = await importAny(await apiReadTextFile(path));
       if (result.environments.length === 0) {
         pushErrorToast(t("api.env.importNothing"));
         return;

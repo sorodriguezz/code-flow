@@ -21,6 +21,21 @@ use crate::ai::{AiEngine, AiInvocation, AiRun, AiUsage, Transport};
 /// a remote/alternate host by editing the endpoint field.
 pub const DEFAULT_ENDPOINT: &str = "http://localhost:11434";
 
+/// One client for the process, cloned per call.
+///
+/// Every request here used to build its own `Client::new()`, which with rustls means constructing a
+/// fresh `ClientConfig` and root certificate store — and, worse, a fresh empty connection pool, so
+/// nothing was ever reused between the probe, the model list and the completion. Cloning is free
+/// (a `reqwest::Client` is an `Arc` around the inner state) and the clone shares the pool.
+///
+/// One shared client is safe here because nothing varies the transport per request: no timeout
+/// override (a local model can legitimately think for minutes, so there deliberately isn't one),
+/// no proxy, no certificate trust toggle.
+fn client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
 pub struct OllamaEngine;
 
 impl AiEngine for OllamaEngine {
@@ -123,7 +138,7 @@ pub async fn complete(base_url: &str, inv: &AiInvocation<'_>) -> Result<AiRun, S
         body["format"] = serde_json::json!("json");
     }
 
-    let res = reqwest::Client::new()
+    let res = client()
         .post(&url)
         .json(&body)
         .send()
@@ -189,7 +204,7 @@ struct TagModel {
 /// this is also the reachability check behind [`crate::ai::probe`].
 pub async fn fetch_tags(base_url: &str) -> Result<Vec<String>, String> {
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    let res = reqwest::Client::new()
+    let res = client()
         .get(&url)
         .send()
         .await

@@ -18,7 +18,7 @@ import {
   apiDuplicateRequest,
   apiListCookies,
   apiListEnvironments,
-  apiListHistory,
+  apiListHistoryMeta,
   apiLoadTree,
   apiMoveNode,
   apiReorderCollections,
@@ -30,6 +30,9 @@ import {
   apiUpsertCookie,
 } from "../lib/tauri/apiCommands";
 import { getSetting, setSetting } from "../lib/tauri/commands";
+// Free, bundle-wise: `main.tsx` imports `lib/monacoSetup` for its side effects, so monaco-editor
+// is already a static dependency of the entry chunk (see the note at the top of `App.tsx`).
+import { monaco } from "../lib/monacoSetup";
 import { translations, type TranslationKey } from "../lib/i18n/translations";
 import { pushErrorToast } from "./toastStore";
 import { useLanguageStore } from "./languageStore";
@@ -354,7 +357,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
       const [tree, environments, history, cookies] = await Promise.all([
         apiLoadTree(workspaceId),
         apiListEnvironments(workspaceId),
-        apiListHistory(workspaceId, settings.historyLimit),
+        apiListHistoryMeta(workspaceId, settings.historyLimit),
         apiListCookies(workspaceId),
       ]);
 
@@ -465,7 +468,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
   reloadHistory: async () => {
     const workspaceId = get().workspaceId;
     if (workspaceId === null) return;
-    set({ history: await apiListHistory(workspaceId, get().settings.historyLimit) });
+    set({ history: await apiListHistoryMeta(workspaceId, get().settings.historyLimit) });
   },
 
   reloadCookies: async () => {
@@ -1177,9 +1180,10 @@ function schedulePersistTabs(get: () => ApiState) {
 }
 
 /**
- * Everything a tab owns outside this store: its live socket and its runtime buffers.
+ * Everything a tab owns outside this store: its live socket, its runtime buffers and its Monaco
+ * models.
  *
- * A tab is the last owner of both; whether it goes away because the user closed it or because
+ * A tab is the last owner of all three; whether it goes away because the user closed it or because
  * the workspace it belonged to was left behind, skipping this keeps the connection open and the
  * response body in memory for the rest of the session.
  */
@@ -1188,6 +1192,70 @@ function releaseTab(tabId: string) {
   const connection = runtime.connections[tabId];
   if (connection) void apiStreamDisconnect(connection.id).catch(() => {});
   runtime.disposeTab(tabId);
+  disposeTabModels(tabId);
+}
+
+/**
+ * The URI schemes whose models an API tab owns. Every one of these paths is built from a tab id by
+ * one of the request panels:
+ *
+ *   `cf-api:/body/<tab>`                        BodyPanel
+ *   `cf-api:/graphql/<tab>.graphql`             GraphqlPanel (and `<tab>.variables.json`)
+ *   `cf-api-auth:/<tab>/jwt-<kind>.json`        AuthPanel / EntitySettingsView
+ *   `cf-api-script:/<tab>/<kind>.js`            ScriptsPanel
+ *   `inmemory://api-response/<tab>/pretty|raw`  ResponsePanel
+ *   `inmemory://api-snippet/<tab>`              CodeSnippetPanel
+ *
+ * `cf-editor:` is deliberately absent, and so is `cf-db:`: the file editor sweeps its own models
+ * against the set of files *it* has open, and under the keep-mounted policy it and the DB explorer
+ * are alive at the same time as this view. Disposing another owner's live model does not fail
+ * here — it fails the next time that owner touches it, somewhere else entirely.
+ */
+const TAB_MODEL_SCHEMES = new Set(["cf-api", "cf-api-auth", "cf-api-script", "inmemory"]);
+
+/**
+ * Disposes the models a closed tab left behind.
+ *
+ * They are not collected on their own. `@monaco-editor/react` creates a model per `path` and only
+ * ever disposes the one an editor is still holding when it unmounts — so of a tab's six-odd
+ * buffers, the panel that happened to be on screen at close is the only one that goes away, and
+ * everything the user tabbed *through* (the body, the two GraphQL buffers, both script buffers,
+ * the other body rendering) stays live for the rest of the session.
+ *
+ * Two guards, and both are load-bearing:
+ *
+ *  1. **Deferred a turn.** `closeTab` calls this straight after `set()`, and React has not
+ *     re-rendered yet — the panels are still mounted, still holding these models. Disposing one
+ *     under a live editor throws on its next layout, not here.
+ *  2. **Never an attached model.** Whatever is still on screen after that turn belongs to an
+ *     editor that outlived the close (a tab strip mid-animation, a panel React kept), and the
+ *     library disposes its own current model at unmount anyway.
+ */
+function disposeTabModels(tabId: string) {
+  setTimeout(() => {
+    const attached = new Set(
+      monaco.editor.getEditors().map((editor) => editor.getModel()?.uri.toString() ?? ""),
+    );
+    for (const model of monaco.editor.getModels()) {
+      if (!TAB_MODEL_SCHEMES.has(model.uri.scheme)) continue;
+      if (!pathOwnedBy(model.uri.path, tabId)) continue;
+      if (attached.has(model.uri.toString())) continue;
+      model.dispose();
+    }
+  }, 0);
+}
+
+/**
+ * Whether a model URI's path was built from this tab id.
+ *
+ * Segment-wise rather than `includes`, so one tab id can never match another's path, and with the
+ * `<tab>.graphql` / `<tab>.variables.json` stems allowed as a prefix. Tab ids are `tab-<base36>-
+ * <base36>` (see `newId`), so they contain neither `/` nor `.` and the split is unambiguous.
+ */
+function pathOwnedBy(path: string, tabId: string): boolean {
+  return path
+    .split("/")
+    .some((segment) => segment === tabId || segment.startsWith(`${tabId}.`));
 }
 
 /**

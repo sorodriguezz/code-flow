@@ -2,7 +2,7 @@ import { create } from "zustand";
 import {
   defaultLockedBranchRules,
   getLockedBranchRules,
-  getSetting,
+  getSettings,
   setLockedBranchRules,
   setSetting,
 } from "../lib/tauri/commands";
@@ -68,15 +68,25 @@ export const usePreferencesStore = create<PreferencesState>((set) => ({
   lockedBranchRules: null,
 
   init: async () => {
-    const [raw, scanRaw, soundRaw, rules] = await Promise.all([
-      getSetting(KEY).catch(() => null),
-      getSetting(SECRET_SCAN_KEY).catch(() => null),
-      getSetting(NOTIFICATION_SOUND_KEY).catch(() => null),
+    // The three plain settings go in one `getSettings`: three `getSetting` calls inside a
+    // `Promise.all` looked concurrent but weren't, since each one takes the database mutex on the
+    // Rust side. The rules stay a separate command — it is not a settings row, it re-seeds the
+    // cache the git guards read — so it keeps its own slot in the `Promise.all`, where it really
+    // does overlap with the batch.
+    const [stored, rules] = await Promise.all([
+      getSettings([KEY, SECRET_SCAN_KEY, NOTIFICATION_SOUND_KEY]).catch(
+        () => ({}) as Record<string, string>,
+      ),
       // Deliberately no local fallback list: the defaults are named in Rust, and inventing them
       // here would mean the screen shows rules that may not be the ones being enforced. A failure
       // stays `null` and the settings screen says so rather than drawing an empty list.
       getLockedBranchRules().catch(() => null),
     ]);
+    // `?? null` reproduces `getSetting`'s answer for an unset key, which `getSettings` reports by
+    // omission — load-bearing just below, where `null` and `"false"` take different branches.
+    const raw = stored[KEY] ?? null;
+    const scanRaw = stored[SECRET_SCAN_KEY] ?? null;
+    const soundRaw = stored[NOTIFICATION_SOUND_KEY] ?? null;
     set({
       autoFetchSeconds: raw ? clamp(Number(raw)) : 0,
       // Unset (first run) defaults to enabled — the gate is opt-out, not opt-in.

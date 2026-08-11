@@ -89,9 +89,25 @@ fn collect_diff(diff: &Diff) -> Result<Vec<FileDiffInfo>, String> {
 /// Large enough that every hunk effectively covers the whole file — the Changes tab
 /// wants full-file context with the edited lines highlighted, not just the changed
 /// lines with a few lines of context like a compact PR-review diff.
+///
+/// This is a **correctness** requirement, not a display preference: `src/lib/diffText.ts`
+/// rebuilds both complete file texts out of the hunk list to feed Monaco's side-by-side
+/// DiffEditor, and it can only do that because every context line of the file is in there.
+/// Anything that shows a file split — the Changes screen's split mode, the editor's diff tab —
+/// must be fed a diff produced at this context, or almost the whole file renders as deleted.
 const FULL_FILE_CONTEXT_LINES: u32 = 1_000_000;
 
-pub fn get_working_diff(path: &str) -> Result<Vec<FileDiffInfo>, String> {
+/// The working diff at a caller-chosen context. `None` means [`FULL_FILE_CONTEXT_LINES`].
+///
+/// The context is a parameter because full-file context is enormously expensive for a *list*: on
+/// this repository 19 KB of real `git diff` expands to ~1.8 MB of JSON across ~16,700 line objects,
+/// all of which cross the IPC boundary and are parsed, for a panel that only needs to know which
+/// files changed and by how much. A caller that is going to render one file side-by-side asks for
+/// full context — see [`get_file_diff`], which is the cheap way to get exactly that one file.
+pub fn get_working_diff_with_context(
+    path: &str,
+    context_lines: Option<u32>,
+) -> Result<Vec<FileDiffInfo>, String> {
     let repo = open(path)?;
     let mut opts = DiffOptions::new();
     // `include_untracked` alone only makes a new file *appear* in the diff as a bare
@@ -102,22 +118,78 @@ pub fn get_working_diff(path: &str) -> Result<Vec<FileDiffInfo>, String> {
     opts.include_untracked(true)
         .show_untracked_content(true)
         .recurse_untracked_dirs(true)
-        .context_lines(FULL_FILE_CONTEXT_LINES);
+        .context_lines(context_lines.unwrap_or(FULL_FILE_CONTEXT_LINES));
     let diff = repo
         .diff_index_to_workdir(None, Some(&mut opts))
         .map_err(|e| e.message().to_string())?;
     collect_diff(&diff)
 }
 
-pub fn get_staged_diff(path: &str) -> Result<Vec<FileDiffInfo>, String> {
+/// The whole working diff at full file context — what every existing caller has always got.
+pub fn get_working_diff(path: &str) -> Result<Vec<FileDiffInfo>, String> {
+    get_working_diff_with_context(path, None)
+}
+
+/// The staged diff at a caller-chosen context. `None` means [`FULL_FILE_CONTEXT_LINES`].
+pub fn get_staged_diff_with_context(
+    path: &str,
+    context_lines: Option<u32>,
+) -> Result<Vec<FileDiffInfo>, String> {
     let repo = open(path)?;
     let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
     let mut opts = DiffOptions::new();
-    opts.context_lines(FULL_FILE_CONTEXT_LINES);
+    opts.context_lines(context_lines.unwrap_or(FULL_FILE_CONTEXT_LINES));
     let diff = repo
         .diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))
         .map_err(|e| e.message().to_string())?;
     collect_diff(&diff)
+}
+
+/// The whole staged diff at full file context — what every existing caller has always got.
+pub fn get_staged_diff(path: &str) -> Result<Vec<FileDiffInfo>, String> {
+    get_staged_diff_with_context(path, None)
+}
+
+/// One file's diff, always at full file context — the split view's and the editor diff tab's
+/// supply, and what an expanded row in the Changes list asks for.
+///
+/// The point is that the *whole-file* context nobody can do without stays available without
+/// paying for it across every changed file at once: libgit2 is told the pathspec up front, so it
+/// never walks, reads or diffs the rest of the tree.
+///
+/// `Ok(None)` when that path has no diff on the requested side — the file was staged, discarded or
+/// committed between the list being drawn and the row being opened, which is a race, not a failure.
+pub fn get_file_diff(path: &str, file_path: &str, staged: bool) -> Result<Option<FileDiffInfo>, String> {
+    let repo = open(path)?;
+    let mut opts = DiffOptions::new();
+    opts.context_lines(FULL_FILE_CONTEXT_LINES);
+    opts.pathspec(file_path);
+
+    let diff = if staged {
+        let head_tree = repo.head().ok().and_then(|h| h.peel_to_tree().ok());
+        repo.diff_tree_to_index(head_tree.as_ref(), None, Some(&mut opts))
+    } else {
+        // Same three untracked flags as the full working diff, for the same reason: without them a
+        // brand-new file opens as an empty delta with no lines at all.
+        opts.include_untracked(true)
+            .show_untracked_content(true)
+            .recurse_untracked_dirs(true);
+        repo.diff_index_to_workdir(None, Some(&mut opts))
+    }
+    .map_err(|e| e.message().to_string())?;
+
+    let files = collect_diff(&diff)?;
+    // A pathspec can still match more than one delta (a rename reports both sides), so pick the one
+    // that actually names the file rather than trusting the first entry. Falling back to index 0
+    // covers a rename whose delta carries neither the old nor the new path verbatim; on an empty
+    // result `nth(0)` is `None`, which is the "no diff on that side" answer.
+    let wanted = files
+        .iter()
+        .position(|f| {
+            f.new_path.as_deref() == Some(file_path) || f.old_path.as_deref() == Some(file_path)
+        })
+        .unwrap_or(0);
+    Ok(files.into_iter().nth(wanted))
 }
 
 pub fn get_commit_diff(path: &str, oid: &str) -> Result<Vec<FileDiffInfo>, String> {
@@ -429,6 +501,64 @@ mod tests {
             repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
         (dir, repo)
+    }
+
+    /// The invariant `src/lib/diffText.ts` leans on. `reconstructSides` rebuilds both complete file
+    /// texts out of the hunk list for Monaco's side-by-side DiffEditor, which only works while the
+    /// diff carries every context line of the file. The *list* is allowed to be narrow — that is
+    /// what `context_lines` is for, and it is where the JSON bloat lives — but the single-file
+    /// command that feeds the split view must never be. Lowering it there would not read as a
+    /// performance trade-off, it would render almost the whole file as deleted.
+    #[test]
+    fn one_file_comes_back_whole_even_when_the_list_is_narrow() {
+        let (dir, repo) = fixture();
+        let path = dir.to_str().unwrap();
+
+        let mut lines: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+        fs::write(dir.join("wide.txt"), format!("{}\n", lines.join("\n"))).unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(Path::new("wide.txt")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let sig = Signature::now("Test", "test@example.com").unwrap();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, "wide", &tree, &[&parent]).unwrap();
+        }
+
+        // One line changed in the middle of thirty.
+        lines[14] = "line 15 edited".to_string();
+        fs::write(dir.join("wide.txt"), format!("{}\n", lines.join("\n"))).unwrap();
+
+        let narrow = get_working_diff_with_context(path, Some(3)).unwrap();
+        let narrow_lines: usize =
+            narrow.iter().flat_map(|f| f.hunks.iter()).map(|h| h.lines.len()).sum();
+        assert!(narrow_lines < 20, "a narrow list diff must not carry the whole file, got {narrow_lines}");
+
+        let whole = get_file_diff(path, "wide.txt", false).unwrap().expect("the edited file");
+        // Exactly what `reconstructSides` does for the left-hand side.
+        let original: Vec<&str> = whole
+            .hunks
+            .iter()
+            .flat_map(|h| h.lines.iter())
+            .filter(|l| l.origin != "+")
+            .map(|l| l.content.as_str())
+            .collect();
+        assert_eq!(original.len(), 30, "the original side must be the whole file");
+        assert_eq!(original[0], "line 1");
+        assert_eq!(original[14], "line 15");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A path with nothing to show on the requested side is a race, not an error — the row was
+    /// opened just after the file was staged.
+    #[test]
+    fn a_file_with_no_diff_on_that_side_is_none() {
+        let (dir, _repo) = fixture();
+        let path = dir.to_str().unwrap();
+        assert!(get_file_diff(path, "tracked.txt", false).unwrap().is_none());
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

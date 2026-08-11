@@ -1,32 +1,26 @@
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import { Folder, FolderOpen } from "lucide-react";
 import {
-  iconCatalogReady,
+  iconCatalogVersion,
   iconEntry,
-  loadIconCatalog,
-  onIconCatalogReady,
   openedVariant,
+  subscribeIconCatalog,
   type CatalogIcon,
 } from "../../lib/icons/catalog";
-import { customIconFor } from "../../lib/icons/rules";
+import { customIconFor, type IconRule } from "../../lib/icons/rules";
 import { fileIconFor } from "../../lib/fileIcon";
 import { useIconRulesStore } from "../../state/iconRulesStore";
 
 /**
- * Re-renders the caller once the icon catalogue has loaded.
+ * Re-renders the caller each time a set of the icon catalogue lands.
  *
- * The catalogue arrives asynchronously and is then permanent, so this is a subscription that fires
- * at most once per mount. Cheaper than threading a loading flag through a store nothing else reads,
- * and it keeps "the icons are here now" a fact about the module that owns them.
+ * `useSyncExternalStore` rather than the `useState` + `useEffect` pair this used to be: this hook
+ * runs once *per drawn row*, and on a cold explorer that pair was a state initialiser, an effect
+ * and a re-render each, for a subscription that fires twice a session at most. Subscribing is also
+ * what triggers the load — see `subscribeIconCatalog`, which pulls the file set only.
  */
-function useIconCatalog(): boolean {
-  const [ready, setReady] = useState(iconCatalogReady);
-  useEffect(() => {
-    if (ready) return;
-    void loadIconCatalog();
-    return onIconCatalogReady(() => setReady(true));
-  }, [ready]);
-  return ready;
+function useIconCatalog(): number {
+  return useSyncExternalStore(subscribeIconCatalog, iconCatalogVersion);
 }
 
 /** One catalogue glyph, drawn inline. */
@@ -48,8 +42,10 @@ export function CatalogGlyph({ icon, size = 13 }: { icon: CatalogIcon; size?: nu
 /** A catalogue glyph by id, with nothing drawn until it resolves. For the rule list and the picker,
  * which are always talking about a specific icon rather than about a path. */
 export function IconGlyph({ id, size = 13 }: { id: string; size?: number }) {
-  const ready = useIconCatalog();
-  const icon = ready ? iconEntry(id) : null;
+  // Subscribed for the re-render, not for the value: `iconEntry` answers `null` on its own until
+  // the set holding this id has arrived (and asks for it, when the id is a brand mark).
+  useIconCatalog();
+  const icon = iconEntry(id);
   if (!icon) return <span style={{ width: size, height: size }} className="inline-block shrink-0" />;
   return <CatalogGlyph icon={icon} size={size} />;
 }
@@ -67,13 +63,13 @@ export function IconGlyph({ id, size = 13 }: { id: string; size?: number }) {
  * few hundred milliseconds of a cold start, and what it keeps drawing forever if the catalogue
  * fails to load. The explorer never has a column of empty squares.
  */
-export function FileGlyph({
-  path,
-  isFolder = false,
-  open = false,
-  size = 13,
-  color,
-}: {
+export function FileGlyph(props: FileGlyphProps) {
+  const rules = useIconRulesStore((s) => s.rules);
+  const defaultFolderIcon = useIconRulesStore((s) => s.defaultFolderIcon);
+  return <FileGlyphView {...props} rules={rules} defaultFolderIcon={defaultFolderIcon} />;
+}
+
+interface FileGlyphProps {
   path: string;
   isFolder?: boolean;
   /** Folders only: whether the row is expanded, for the built-in glyph. */
@@ -82,10 +78,30 @@ export function FileGlyph({
   /** Overrides the built-in colour — the git status tint the tree applies to a changed file. Never
    * applied to a catalogue glyph, which carries the brand's own colours inside its markup. */
   color?: string;
-}) {
-  const rules = useIconRulesStore((s) => s.rules);
-  const defaultFolderIcon = useIconRulesStore((s) => s.defaultFolderIcon);
-  const ready = useIconCatalog();
+}
+
+/**
+ * `FileGlyph` with the rules handed in rather than subscribed to.
+ *
+ * For callers that draw *many* rows at once — the explorer. `FileGlyph` opens two `iconRulesStore`
+ * subscriptions, which is nothing once and several hundred of them on a big tree; a caller that
+ * already re-renders as a whole when the rules change can subscribe once at its root and prop them
+ * down. Deliberately props and not `useIconRulesStore.getState()`: reading the store without
+ * subscribing would sever the notification path, and editing a rule in the icons panel would stop
+ * updating the tree.
+ */
+export function FileGlyphView({
+  path,
+  isFolder = false,
+  open = false,
+  size = 13,
+  color,
+  rules,
+  defaultFolderIcon,
+}: FileGlyphProps & { rules: IconRule[]; defaultFolderIcon: string | null }) {
+  // Subscribed for the re-render, not for the value: the lookups below answer `null` on their own
+  // until the set holding the id has landed, and re-answer once it has.
+  useIconCatalog();
 
   // A rule first, then — for folders only — whatever the user chose as the default. A file with no
   // rule keeps the built-in table, which already knows sixty extensions by colour.
@@ -93,7 +109,7 @@ export function FileGlyph({
   // Expanded folders take the `-opened` twin when the set has one, so a custom icon keeps the
   // open/closed signal the plain folder always carried.
   const resolved = chosen && isFolder && open ? (openedVariant(chosen) ?? chosen) : chosen;
-  const custom = resolved && ready ? iconEntry(resolved) : null;
+  const custom = resolved ? iconEntry(resolved) : null;
   if (custom) return <CatalogGlyph icon={custom} size={size} />;
 
   if (isFolder) {

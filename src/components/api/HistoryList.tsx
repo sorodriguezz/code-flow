@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { History, Trash2, X } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { MethodBadge } from "./CollectionTree";
+import { apiGetHistorySnapshot } from "../../lib/tauri/apiCommands";
 import { useApiStore } from "../../state/apiStore";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -75,8 +76,15 @@ export function HistoryList() {
    * the send came from: the history row is a record of what was sent then, and reopening it must
    * not become a way to overwrite what that request says now.
    */
-  const restore = (entry: ApiHistoryEntry) => {
-    const snapshot = parseSnapshot(entry.snapshot);
+  const restore = async (entry: ApiHistoryEntry) => {
+    // The list is loaded without snapshots — `apiListHistoryMeta` leaves them empty so that opening
+    // the workspace doesn't parse every past send's request and response at once — so the blob for
+    // *this* row is fetched on the click that needs it. A row that already carries one is a send
+    // made this session, which `addHistory` puts on the front of the list with its snapshot intact;
+    // reopening that costs no round-trip. A fetch that fails leaves `raw` empty, and the tab opens
+    // as a blank scratch request rather than not opening at all.
+    const raw = entry.snapshot || (await apiGetHistorySnapshot(entry.id).catch(() => null)) || "";
+    const snapshot = parseSnapshot(raw);
     const state = useApiStore.getState();
     const tabId = state.openScratchTab(entry.protocol);
     if (snapshot) state.updateDraft(tabId, snapshot.request);
@@ -118,7 +126,7 @@ export function HistoryList() {
               {group.items.map((entry, at) => (
                 <div
                   key={entry.id}
-                  onClick={() => restore(entry)}
+                  onClick={() => void restore(entry)}
                   title={entry.name ? `${entry.name}\n${entry.url}` : entry.url}
                   style={riseDelay(at)}
                   className="cf-rise group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"

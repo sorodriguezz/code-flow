@@ -16,9 +16,19 @@ const SETTLE_MS = 500;
 
 const MARK = "data-cf-scrolling";
 
+/** One frame at 60Hz. The most often the settle timer is worth re-arming — see `onScroll`. */
+const FRAME_MS = 16;
+
+interface Settle {
+  /** The pending `removeAttribute` timer. */
+  timer: number;
+  /** When it was armed, so a frame's worth of scroll events arms it once instead of 120 times. */
+  at: number;
+}
+
 /** Per-element, so two panes scrolling at once don't clear each other's mark. Weak so a pane that
  * unmounts mid-scroll takes its entry with it. */
-const settling = new WeakMap<Element, number>();
+const settling = new WeakMap<Element, Settle>();
 
 export function startScrollFeedback(): () => void {
   const onScroll = (event: Event) => {
@@ -27,16 +37,27 @@ export function startScrollFeedback(): () => void {
     // its own here — the app root is `overflow: hidden`.
     if (!(target instanceof Element)) return;
 
-    target.setAttribute(MARK, "");
+    // Only when it isn't already there. `setAttribute` with the value it already has is not a
+    // no-op: it invalidates style for the scroller's whole subtree through the `[data-cf-scrolling]`
+    // selector. This handler sees every scroll event from every pane in the app — 60-120/s per
+    // flick, across ~186 scrollable containers — so the redundant writes were most of them.
+    if (!target.hasAttribute(MARK)) target.setAttribute(MARK, "");
+
+    const now = performance.now();
     const pending = settling.get(target);
-    if (pending !== undefined) clearTimeout(pending);
-    settling.set(
-      target,
-      window.setTimeout(() => {
+    // Re-arming the removal timer more than once a frame buys nothing measurable: the mark would
+    // outlive the last event by at most one extra frame against a 500ms settle. The bar still
+    // widens on the very first event of a flick and still goes back to its hairline SETTLE_MS
+    // after the last one; what goes away is a clearTimeout/setTimeout pair per event.
+    if (pending && now - pending.at < FRAME_MS) return;
+    if (pending) clearTimeout(pending.timer);
+    settling.set(target, {
+      at: now,
+      timer: window.setTimeout(() => {
         target.removeAttribute(MARK);
         settling.delete(target);
       }, SETTLE_MS),
-    );
+    });
   };
 
   // Capture, because `scroll` does not bubble: listening at the document only sees the scroll of

@@ -138,6 +138,9 @@ pub struct NetworkOptions {
     /// Cookies the caller already matched against this URL, as `(name, value)`.
     pub cookies: Vec<(String, String)>,
     /// Hard cap on how much of a response body is buffered; 0 = unlimited.
+    ///
+    /// When it bites, `HttpResponse::truncated` says so — a body that stops short must never be
+    /// indistinguishable from one that ended there.
     pub max_response_bytes: u64,
 }
 
@@ -154,7 +157,16 @@ impl Default for NetworkOptions {
             client_cert_password: String::new(),
             ca_cert_path: String::new(),
             cookies: Vec::new(),
-            max_response_bytes: 50 * 1024 * 1024,
+            // 4 MB, not 50. The old value was picked as "surely nobody sends more than this", but
+            // it is the *buffer* a single response is allowed to occupy in a desktop app that also
+            // has to stay fluid — and the webview's own body editor refuses to render past 5 MB
+            // anyway, so the tail of a 50 MB body was memory nothing could ever put on screen.
+            //
+            // Note for whoever measures this: the frontend sends `max_response_bytes` on every
+            // request (`settings.maxResponseBytes`), so this default is only what a Rust-side
+            // caller that builds `NetworkOptions` itself would get. The number the app actually
+            // runs with lives in `defaultApiSettings()`.
+            max_response_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -246,6 +258,14 @@ pub struct HttpResponse {
     pub body_text: String,
     pub body_base64: Option<String>,
     pub size_bytes: u64,
+    /// `true` when `max_response_bytes` bit and bytes were left on the wire, so `size_bytes` is
+    /// what we kept rather than what the server sent.
+    ///
+    /// Deliberately a flag rather than something the UI infers from `size_bytes >= cap`: a body
+    /// that is exactly the cap long is complete, and a response read back from history was capped
+    /// by whatever the setting said *then*, not by what it says now. Both of those read wrong when
+    /// the comparison is redone at display time.
+    pub truncated: bool,
     pub duration_ms: i64,
     pub timings: ResponseTimings,
     /// Every hop when redirects were followed; the final URL is last.

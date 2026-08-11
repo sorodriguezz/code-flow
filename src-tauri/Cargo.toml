@@ -17,6 +17,23 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Release builds are optimized for how the app actually feels, not for how long CI takes: cross-crate
+# inlining is what lets the hot paths (git2 diffing, the PTY read loop, JSON (de)serialization on
+# every IPC call) stop paying a call through a crate boundary per iteration.
+#
+# DO NOT add `panic = "abort"`. Several places deliberately survive a panic that happened on another
+# thread, and they can only do that because unwinding leaves a *poisoned* lock behind instead of
+# killing the process: the terminal reader skips the transcript append when the flush thread
+# panicked (`terminal.rs`, the `if let Ok(mut recorded) = transcript.lock()` in the read loop), and
+# `secrets.rs` / `git/lock_rules.rs` recover the data with `unwrap_or_else(|e| e.into_inner())`.
+# With `panic = "abort"` every one of those becomes a process kill — which, for an app whose whole
+# point is that agent runs and terminals keep living in the tray after the window closes, means
+# silently losing the user's background work.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"

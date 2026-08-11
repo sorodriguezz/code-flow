@@ -70,9 +70,28 @@ export interface AiOutputEvent {
   line: string;
 }
 
-/** One line of a running AI process's output, as it happens. */
+/** One line of a running AI process's output, as it happens.
+ *
+ * Superseded by `onAiOutputBatch` for anything that renders the stream — see there for why. Kept
+ * for callers that genuinely want a per-line callback. */
 export const onAiOutput = (handler: (event: AiOutputEvent) => void) =>
   listen<AiOutputEvent>("ai:output", (e) => handler(e.payload));
+
+export interface AiOutputBatchEvent {
+  run_id: string;
+  lines: { stream: "stdout" | "stderr"; line: string }[];
+}
+
+/** The same output as `onAiOutput`, coalesced into ~100 ms batches.
+ *
+ * An agentic turn with `--output-format stream-json --verbose` emits 20-60 lines a second, and a
+ * per-line subscription turns each one into an IPC message, a store write and a render. The batch
+ * carries the identical lines in the identical order — the backend flushes any partial batch before
+ * the run's completion event, so nothing can be lost or arrive out of order — but costs one render
+ * per frame-ish instead of one per line. 100 ms is deliberately short enough to still read as live.
+ */
+export const onAiOutputBatch = (handler: (event: AiOutputBatchEvent) => void) =>
+  listen<AiOutputBatchEvent>("ai:output-batch", (e) => handler(e.payload));
 
 export interface AiEngineEvent {
   run_id: string;

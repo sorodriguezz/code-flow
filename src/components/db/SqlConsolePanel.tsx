@@ -42,7 +42,7 @@ import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { RunEngineChip } from "../ai/AiRunLog";
-import { renderMarkdown } from "../../lib/markdown";
+import { Markdown } from "../common/Markdown";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
 import { engineInfo, type DbKind, type DbNodeRef } from "../../types/database";
@@ -594,9 +594,9 @@ function ConsoleAiBar({
         <div className="border-t border-[var(--cf-border)]">
           {/* Capped and scrollable: the editor underneath is the point of the screen, and a long
               answer must not push it out of view. */}
-          <div
+          <Markdown
+            source={answer.answer}
             className="cf-markdown-preview max-h-[260px] overflow-auto px-2.5 py-2 text-[12px] leading-relaxed"
-            dangerouslySetInnerHTML={{ __html: renderMarkdown(answer.answer) }}
           />
           <div className="flex flex-wrap items-center gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5">
             {answer.query && (

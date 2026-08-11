@@ -253,6 +253,11 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
               language={target.language}
               value={code}
               theme={monacoTheme}
+              // `@monaco-editor/react` stores a view state per path in a module-level `Map` it
+              // never prunes — once on every path change, once more at unmount. This editor is
+              // read-only and its path carries the tab id, so every tab ever opened would leave an
+              // entry behind for a cursor position nobody can move. Opting out loses nothing.
+              saveViewState={false}
               options={{
             ...OVERFLOW_SAFE_OPTIONS,
                 readOnly: true,

@@ -23,10 +23,13 @@ export function referenceLabel(key: DbForeignKey): string {
  *    `UPDATE`, the CSV export, the copied cell) keeps the distinction, so the grid has to be where
  *    the user can see it.
  *
- * 2. **It windows rows rather than virtualizing them.** A fixed row height and a slice around the
- *    scroll position is ~40 lines and handles the tens of thousands of rows a page limit allows. A
- *    virtualization library would handle millions, which this grid never shows — the page limit
- *    exists precisely so it doesn't have to.
+ * 2. **It windows rows and columns rather than virtualizing them.** A fixed row height and a slice
+ *    around the scroll position is ~40 lines and handles the tens of thousands of rows a page limit
+ *    allows. A virtualization library would handle millions, which this grid never shows — the page
+ *    limit exists precisely so it doesn't have to. Columns are windowed the same way, against a
+ *    prefix-sum of the (draggable) widths, with a spacer div standing in for the run off each side;
+ *    a 200-column result was reconciling ~28,000 elements per scroll event before that, because the
+ *    window covered the rows but every one of them still rendered every column.
  *
  * 3. **Editing is staged.** `onEdit` records a pending value; nothing here writes to a database.
  *    Changed cells are tinted, deleted rows struck through, and new rows marked — so "what am I
@@ -39,6 +42,10 @@ export const ROW_HEIGHT = 26;
 const HEADER_HEIGHT = 40;
 /** Rows rendered above and below the viewport, so a fast scroll doesn't flash empty space. */
 const OVERSCAN = 12;
+/** Columns rendered left and right of the viewport, for the same reason — and because the scroll
+ * position is now only sampled once per frame, so a fast horizontal fling is always a frame behind
+ * where the pointer already is. Three is enough at any column width the resizer allows. */
+const COLUMN_OVERSCAN = 3;
 /** Wide enough for five digits and, when the panel asks for one, a select-all box over them. */
 const GUTTER_WIDTH = 52;
 /** Re-exported: `RecordGrid` reads it from here, and the seam it belongs to now lives beside the
@@ -183,7 +190,9 @@ export function ResultGrid({
   const model = recordModel(engine);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
+  const [scrollLeft, setScrollLeft] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(400);
+  const [viewportWidth, setViewportWidth] = useState(1200);
   const [widths, setWidths] = useState<Record<string, number>>({});
   const [editing, setEditing] = useState<{ row: number; column: string; inserted: boolean } | null>(
     null,
@@ -197,15 +206,43 @@ export function ResultGrid({
     onSelectRange,
   });
 
-  // The viewport's height decides how many rows to render, and it isn't known until layout.
+  // The viewport's height decides how many rows to render, its width how many columns, and neither
+  // is known until layout.
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
-    const observer = new ResizeObserver(() => setViewportHeight(element.clientHeight));
+    const measure = () => {
+      setViewportHeight(element.clientHeight);
+      setViewportWidth(element.clientWidth);
+    };
+    const observer = new ResizeObserver(measure);
     observer.observe(element);
-    setViewportHeight(element.clientHeight);
+    measure();
     return () => observer.disconnect();
   }, []);
+
+  // Scroll is sampled once per animation frame, not once per event.
+  //
+  // WebView2 fires `scroll` at the pointing device's rate — 60-120Hz on a precision trackpad, and
+  // faster still during a fling — and each event used to push the position straight into state, so
+  // a wide result reconciled its whole window two or three times per frame for scroll positions
+  // nobody ever saw painted. The overscan above absorbs the frame of latency this costs.
+  const scrollFrame = useRef<number | null>(null);
+  useEffect(() => () => {
+    if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
+  }, []);
+  const handleScroll = () => {
+    if (scrollFrame.current !== null) return;
+    scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = null;
+      // Read off the element, not off the event: by the time the frame runs the synthetic event is
+      // long gone and `currentTarget` is null.
+      const element = scrollRef.current;
+      if (!element) return;
+      setScrollTop(element.scrollTop);
+      setScrollLeft(element.scrollLeft);
+    });
+  };
 
   // A new result invalidates the scroll position: row 8000 of the previous page is nowhere in this
   // one, and leaving the viewport there shows a blank grid over real data.
@@ -216,6 +253,20 @@ export function ResultGrid({
   }, [columns, rows]);
 
   const widthOf = (column: string) => widths[column] ?? DEFAULT_COLUMN_WIDTH;
+  // Prefix sum of the column widths: `offsets[i]` is where column `i` starts, `offsets[length]` is
+  // the whole run. Recomputed only when the columns or a dragged width change — the horizontal
+  // window is derived from it on every scroll frame, and doing it by summing the widths there would
+  // be the O(n²) this exists to avoid.
+  const { offsets, columnsWidth } = useMemo(() => {
+    const acc = new Array<number>(columns.length + 1);
+    let total = 0;
+    for (let index = 0; index < columns.length; index += 1) {
+      acc[index] = total;
+      total += widths[columns[index].name] ?? DEFAULT_COLUMN_WIDTH;
+    }
+    acc[columns.length] = total;
+    return { offsets: acc, columnsWidth: total };
+  }, [columns, widths]);
   const totalRows = rows.length + insertedRows.length;
   // Server rows only: an inserted row exists nowhere yet, so "select everything" can't include one.
   const allSelected = rows.length > 0 && (selectedRows?.size ?? 0) >= rows.length;
@@ -228,6 +279,45 @@ export function ResultGrid({
     () => Array.from({ length: Math.max(0, last - first) }, (_, index) => first + index),
     [first, last],
   );
+
+  /**
+   * The horizontal window: which columns are near the viewport, and how much dead width stands in
+   * for the ones on either side.
+   *
+   * The spacers are what keep the grid honest. Every row and the header render the *same* pair, so
+   * a header cell and the cells under it sit at the same x; and because the two spacers plus the
+   * rendered run always add up to `columnsWidth`, the scrollable width — and therefore the length
+   * of the horizontal scrollbar — is exactly what it was when every column was drawn.
+   *
+   * The gutter is sticky, so it covers the first `GUTTER_WIDTH` pixels of the scrolled content
+   * rather than adding to them; the visible run of columns starts that far in.
+   */
+  const { firstColumn, lastColumn, leftSpacer, rightSpacer } = useMemo(() => {
+    const viewLeft = scrollLeft - GUTTER_WIDTH;
+    const viewRight = viewLeft + viewportWidth;
+    let start = 0;
+    while (start < columns.length - 1 && offsets[start + 1] <= viewLeft) start += 1;
+    let end = start;
+    while (end < columns.length && offsets[end] < viewRight) end += 1;
+    start = Math.max(0, start - COLUMN_OVERSCAN);
+    end = Math.min(columns.length, Math.max(end + COLUMN_OVERSCAN, start + 1));
+    // A cell being edited stays mounted even if the user scrolls its column out of the window:
+    // unmounting the input blurs it, and blur commits the draft. Scrolling sideways must not save.
+    if (editing) {
+      const index = columns.findIndex((column) => column.name === editing.column);
+      if (index >= 0) {
+        start = Math.min(start, index);
+        end = Math.max(end, index + 1);
+      }
+    }
+    return {
+      firstColumn: start,
+      lastColumn: end,
+      leftSpacer: offsets[start],
+      rightSpacer: columnsWidth - offsets[end],
+    };
+  }, [columns, offsets, columnsWidth, scrollLeft, viewportWidth, editing]);
+  const windowColumns = columns.slice(firstColumn, lastColumn);
 
   if (columns.length === 0) {
     return (
@@ -263,7 +353,7 @@ export function ResultGrid({
       <div
         ref={scrollRef}
         className="min-h-0 flex-1 overflow-auto"
-        onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+        onScroll={handleScroll}
         onPointerMove={sweep.move}
         onPointerUp={sweep.end}
         onPointerCancel={sweep.end}
@@ -297,7 +387,10 @@ export function ResultGrid({
                 />
               )}
             </div>
-            {columns.map((column, columnIndex) => {
+            {/* Stands in for the columns scrolled off the left — see the horizontal window. */}
+            {leftSpacer > 0 && <div className="shrink-0" style={{ width: leftSpacer }} />}
+            {windowColumns.map((column, windowIndex) => {
+              const columnIndex = firstColumn + windowIndex;
               const sortIndex = sort?.findIndex((key) => key.column === column.name) ?? -1;
               const sortKey = sortIndex >= 0 ? sort?.[sortIndex] : undefined;
               const facts = fieldFacts(model, column, { primaryKeys, foreignKeys });
@@ -389,6 +482,8 @@ export function ResultGrid({
               </div>
               );
             })}
+            {/* …and for the ones off the right, so the header is exactly as wide as the rows. */}
+            {rightSpacer > 0 && <div className="shrink-0" style={{ width: rightSpacer }} />}
           </div>
 
           <div style={{ height: totalRows * ROW_HEIGHT, position: "relative" }}>
@@ -469,7 +564,9 @@ export function ResultGrid({
                       </button>
                     )}
                   </div>
-                  {columns.map((column, columnIndex) => {
+                  {leftSpacer > 0 && <div className="shrink-0" style={{ width: leftSpacer }} />}
+                  {windowColumns.map((column, windowIndex) => {
+                    const columnIndex = firstColumn + windowIndex;
                     const value = valueAt(row, columnIndex);
                     const isChanged =
                       inserted || (changed?.has(`${row}:${column.name}`) ?? false);
@@ -560,6 +657,7 @@ export function ResultGrid({
                       </div>
                     );
                   })}
+                  {rightSpacer > 0 && <div className="shrink-0" style={{ width: rightSpacer }} />}
                   {/* Pinned to the right edge and revealed on hover, so a hundred rows of buttons
                       never compete with the data — and pinned rather than trailing the last column,
                       because on a table wider than the panel a trailing strip is somewhere off

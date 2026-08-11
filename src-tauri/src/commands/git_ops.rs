@@ -3,22 +3,41 @@ use tauri::AppHandle;
 use crate::git::{branch, diff, graph, identity, merge, remotes, repo, stash};
 use crate::remote;
 
-#[tauri::command]
+// ---------- why the read commands carry `(async)` and the write ones don't ----------
+//
+// A plain `#[tauri::command]` on a sync function runs **inline on the UI thread** — tauri's macro
+// dispatches it through `body_blocking`, which executes inside the IPC handler. A repository with
+// a lot of history makes `list_commits` or `get_working_diff` take long enough for the window to
+// stop painting, and the OS to put "Not Responding" in the title bar. `(async)` on the *same sync
+// function* makes the macro emit `body_async` instead, which spawns the unchanged body onto
+// tauri's async runtime rather than running it in the IPC handler. The body stays sync
+// deliberately: git2's handles are not `Send`, so an `async fn` holding one across an `.await`
+// would not compile — the attribute is the mechanism that gets the work off this thread without
+// touching the code that does it.
+//
+// Only reads get it, and that limit is load-bearing rather than cautious. Today the UI thread is
+// an implicit global lock over the index: stage, unstage, discard and commit each open the
+// repository themselves and cannot currently interleave with each other or with the watcher's
+// `refreshStatus`. Moving those off the UI thread would make them genuinely concurrent and expose
+// real races on `index.write()`. Reads are safe to run concurrently because libgit2 reads take
+// their own snapshot — a read racing a write returns stale data or an error, never corruption.
+
+#[tauri::command(async)]
 pub fn get_status(repo_path: String) -> Result<repo::RepoStatusInfo, String> {
     repo::get_status(&repo_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_commits(repo_path: String, all_refs: bool, limit: usize) -> Result<Vec<graph::CommitInfo>, String> {
     graph::list_commits(&repo_path, all_refs, limit)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_unpushed_commits(repo_path: String) -> Result<Vec<graph::CommitInfo>, String> {
     graph::list_unpushed_commits(&repo_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_branches(repo_path: String) -> Result<Vec<branch::BranchInfo>, String> {
     branch::list_branches(&repo_path)
 }
@@ -53,7 +72,7 @@ pub fn checkout_remote_tracking(repo_path: String, remote_branch: String) -> Res
     branch::checkout_remote_tracking(&repo_path, &remote_branch)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_stashes(repo_path: String) -> Result<Vec<stash::StashInfo>, String> {
     stash::list_stashes(&repo_path)
 }
@@ -83,14 +102,41 @@ pub fn rename_stash(repo_path: String, index: usize, new_message: String) -> Res
     stash::rename_stash(&repo_path, index, &new_message)
 }
 
-#[tauri::command]
-pub fn get_working_diff(repo_path: String) -> Result<Vec<diff::FileDiffInfo>, String> {
-    diff::get_working_diff(&repo_path)
+/// `context_lines` is optional and defaults to full-file context, so a caller that doesn't pass it
+/// gets byte-for-byte what it always got. A caller that only needs the *list* of changed files
+/// should pass a small number: at full context this command turns tens of kilobytes of real diff
+/// into megabytes of JSON to cross the IPC boundary. Anything that renders a file side-by-side
+/// must **not** lower it — see `git::diff::FULL_FILE_CONTEXT_LINES` and `src/lib/diffText.ts` —
+/// and should ask for that one file through [`get_file_diff`] instead.
+#[tauri::command(async)]
+pub fn get_working_diff(
+    repo_path: String,
+    context_lines: Option<u32>,
+) -> Result<Vec<diff::FileDiffInfo>, String> {
+    diff::get_working_diff_with_context(&repo_path, context_lines)
 }
 
-#[tauri::command]
-pub fn get_staged_diff(repo_path: String) -> Result<Vec<diff::FileDiffInfo>, String> {
-    diff::get_staged_diff(&repo_path)
+/// Same contract as [`get_working_diff`]: absent `context_lines` means full-file context.
+#[tauri::command(async)]
+pub fn get_staged_diff(
+    repo_path: String,
+    context_lines: Option<u32>,
+) -> Result<Vec<diff::FileDiffInfo>, String> {
+    diff::get_staged_diff_with_context(&repo_path, context_lines)
+}
+
+/// One file's diff at full file context, for the views that reconstruct both sides of the file:
+/// the Changes screen's split mode, the editor's diff tab, an expanded row.
+///
+/// `null` when the path no longer has a diff on that side — the file was staged, discarded or
+/// committed between the list being drawn and the row being opened.
+#[tauri::command(async)]
+pub fn get_file_diff(
+    repo_path: String,
+    path: String,
+    staged: bool,
+) -> Result<Option<diff::FileDiffInfo>, String> {
+    diff::get_file_diff(&repo_path, &path, staged)
 }
 
 #[tauri::command]
@@ -143,7 +189,7 @@ pub fn reset_to_commit(repo_path: String, oid: String, mode: String) -> Result<(
     repo::reset_to_commit(&repo_path, &oid, &mode)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_remotes(repo_path: String) -> Result<Vec<remotes::RemoteInfo>, String> {
     remotes::list_remotes(&repo_path)
 }
@@ -168,12 +214,12 @@ pub fn merge_branch(repo_path: String, branch_name: String) -> Result<merge::Mer
     merge::merge_branch(&repo_path, &branch_name)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn is_merging(repo_path: String) -> Result<bool, String> {
     merge::is_merging(&repo_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_conflicts(repo_path: String) -> Result<Vec<merge::ConflictFile>, String> {
     merge::list_conflicts(&repo_path)
 }

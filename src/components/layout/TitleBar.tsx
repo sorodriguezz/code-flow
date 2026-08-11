@@ -1,12 +1,12 @@
-import { useEffect, useState } from "react";
+import { useState, useSyncExternalStore } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Copy, Glasses, MessageCircle, Minus, Sparkles, Square, X, Zap } from "lucide-react";
-import { usePlatform } from "../../lib/platform";
+import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { usePrStore } from "../../state/prStore";
 import { useT } from "../../state/languageStore";
-import { toggleMaximize } from "../../lib/windowControls";
+import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 
 const win = getCurrentWindow();
 
@@ -16,25 +16,19 @@ const win = getCurrentWindow();
  *
  * Read from the window rather than tracked locally, for the reason `WindowsControls` gives below:
  * the green button, `⌃⌘F` and the menu bar all enter fullscreen without passing through this app.
- * `onResized` is the signal because entering and leaving fullscreen always resizes the window.
+ * `onResized` is the signal because entering and leaving fullscreen always resizes the window —
+ * but the listener is not ours: `windowControls` runs one for the whole app and coalesces every
+ * question about the window into a single batch per frame. This used to be its own subscription
+ * doing its own `isFullscreen()` IPC on every WM_SIZE.
+ *
+ * Off macOS this is `false` and nothing is asked at all — the only consumer is the traffic-light
+ * spacer, and there are no traffic lights anywhere else.
  */
 function useIsFullscreen(): boolean {
-  const [fullscreen, setFullscreen] = useState(false);
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    const sync = () => void win.isFullscreen().then(setFullscreen).catch(() => {});
-    sync();
-    void win.onResized(sync).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-  return fullscreen;
+  return useSyncExternalStore(
+    subscribeWindowStatus,
+    () => platformIsMac() && getWindowStatus().fullscreen,
+  );
 }
 
 /// On macOS the traffic lights are the real system buttons (see `tauri.macos.conf.json`:
@@ -57,22 +51,14 @@ function WindowsControls() {
    * Read from the window rather than toggled locally: the OS maximizes it too — double-clicking the
    * drag region, or dragging it to the top edge — and a flag flipped only by this button would then
    * be describing the opposite of what is on screen.
+   *
+   * Through `windowControls`' store rather than a subscription of its own, so the answer costs one
+   * shared `isMaximized()` per frame instead of one per WM_SIZE. The icon still flips as soon as the
+   * state does: the store publishes on the first frame after the event, which is sooner than the
+   * IPC round-trip this used to wait for. A boolean and not the whole status object, so a fullscreen
+   * change on macOS doesn't re-render these three buttons for nothing.
    */
-  const [maximized, setMaximized] = useState(false);
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let disposed = false;
-    const sync = () => void win.isMaximized().then(setMaximized).catch(() => {});
-    sync();
-    void win.onResized(sync).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
+  const maximized = useSyncExternalStore(subscribeWindowStatus, () => getWindowStatus().maximized);
 
   return (
     // `data-window-control` on each button: these three belong to the window rather than to the

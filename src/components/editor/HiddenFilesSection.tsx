@@ -2,18 +2,12 @@ import { useState } from "react";
 import { ChevronDown, ChevronRight, Eye, EyeOff, Folder } from "lucide-react";
 import { useHiddenFilesStore } from "../../state/hiddenFilesStore";
 import { FileGlyph } from "../common/FileGlyph";
+import { splitPath } from "../../lib/splitPath";
 import { useT } from "../../state/languageStore";
-
-/** Splits a repo-relative path into the folders leading to it and its own name, so the name can be
- *  the readable part of a row that is mostly path. */
-function split(path: string): { dir: string; name: string } {
-  const i = path.lastIndexOf("/");
-  return i < 0 ? { dir: "", name: path } : { dir: path.slice(0, i + 1), name: path.slice(i + 1) };
-}
 
 function HiddenRow({ path, isDir, onShow }: { path: string; isDir: boolean; onShow: () => void }) {
   const t = useT();
-  const { dir, name } = split(path);
+  const { dir, name } = splitPath(path);
 
   return (
     <button
@@ -32,7 +26,7 @@ function HiddenRow({ path, isDir, onShow }: { path: string; isDir: boolean; onSh
       {/* The folders it sits in stay dimmer than the name: two entries called `index.ts` are only
           told apart by the path, so it has to be there — but it is not what you read first. */}
       <span className="min-w-0 flex-1 truncate" title={path}>
-        {dir && <span className="opacity-50">{dir}</span>}
+        {dir && <span className="opacity-50">{dir}/</span>}
         {name}
       </span>
       <Eye

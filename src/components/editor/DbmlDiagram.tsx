@@ -2,6 +2,7 @@ import { forwardRef, useLayoutEffect, useRef, useState } from "react";
 import { KeyRound, Table2 } from "lucide-react";
 import type { DbmlSchema } from "../../lib/dbml";
 import { useT } from "../../state/languageStore";
+import { BouncingDots } from "../common/BouncingDots";
 import { EmptyState } from "../common/EmptyState";
 
 interface Line {
@@ -12,8 +13,20 @@ interface Line {
   label: string;
 }
 
-export const DbmlDiagram = forwardRef<HTMLDivElement, { schema: DbmlSchema; onScroll?: () => void }>(
-  function DbmlDiagram({ schema, onScroll }, ref) {
+export const DbmlDiagram = forwardRef<
+  HTMLDivElement,
+  {
+    /** `null` while the parser is still on its way — see `loading`. */
+    schema: DbmlSchema | null;
+    /** The DBML parser is its own chunk, fetched the first time a `.dbml` file is opened in a
+     * session (see `EditorPane`). Until it lands there is nothing parsed to draw, and the honest
+     * answer is "loading" — an empty diagram would read as "this file declares no tables", which
+     * is a different claim and a wrong one. */
+    loading?: boolean;
+    onScroll?: () => void;
+  }
+>(
+  function DbmlDiagram({ schema, loading = false, onScroll }, ref) {
     const t = useT();
     const contentRef = useRef<HTMLDivElement>(null);
     const cardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -22,7 +35,7 @@ export const DbmlDiagram = forwardRef<HTMLDivElement, { schema: DbmlSchema; onSc
 
     useLayoutEffect(() => {
       const content = contentRef.current;
-      if (!content) return;
+      if (!content || !schema) return;
 
       const recompute = () => {
         const next: Line[] = [];
@@ -47,6 +60,16 @@ export const DbmlDiagram = forwardRef<HTMLDivElement, { schema: DbmlSchema; onSc
       observer.observe(content);
       return () => observer.disconnect();
     }, [schema]);
+
+    // Same shape the pane uses for a file that hasn't finished reading, so waiting for the parser
+    // looks like every other wait in the editor rather than like a fourth kind of blank.
+    if (loading || !schema) {
+      return (
+        <div className="flex h-full items-center justify-center">
+          <BouncingDots />
+        </div>
+      );
+    }
 
     if (schema.error) {
       return (

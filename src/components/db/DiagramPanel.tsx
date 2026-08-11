@@ -74,6 +74,25 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
   const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
   const frameRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
+  /**
+   * The pan/zoom, again, as a ref — and the group it is written to.
+   *
+   * `view` state is only ever read to *render* the transform. Everything that moves the canvas reads
+   * and writes `viewRef` and pushes the result straight onto the `<g>` with `setAttribute`, then
+   * commits the ref into state once the gesture stops. A wheel or a drag therefore costs one
+   * attribute write per event instead of a React render that reconciles every path and every table
+   * box on the canvas — ~10,000 SVG elements on a large schema, at trackpad event rates.
+   *
+   * This is safe because React only touches a DOM attribute when the *prop* changed since the last
+   * render: a re-render that happens mid-gesture for some other reason (a selection, a search) sees
+   * the same stale transform string it rendered last time and leaves the attribute — and therefore
+   * our imperative value — alone. The commit at the end of the gesture is what puts the two back in
+   * agreement. Nothing else reads `view`: the export deliberately resets the transform.
+   */
+  const viewRef = useRef(view);
+  const canvasRef = useRef<SVGGElement>(null);
+  /** The pending "gesture is over, sync React" timer — wheel has no pointerup to hang it on. */
+  const commitTimer = useRef<number | null>(null);
   /** What a drag is currently moving: the canvas, or one table. */
   const dragRef = useRef<
     | { kind: "canvas"; x: number; y: number; viewX: number; viewY: number }
@@ -95,6 +114,45 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
     [tab.diagram, mode, pinned, density],
   );
   const stats = useMemo(() => (tab.diagram ? diagramStats(tab.diagram) : null), [tab.diagram]);
+  /** The nodes by id, because every link has to find both of its ends. Two `.find()` scans per link
+   * is 900 × 300 × 2 array walks on a large schema — a quarter of a million comparisons — and they
+   * used to be redone on every render, which during a pan meant every frame. */
+  const nodeById = useMemo(
+    () => new Map(layout.nodes.map((node) => [node.id, node])),
+    [layout.nodes],
+  );
+
+  /** Writes the transform to the canvas group without going through React. */
+  const applyView = (next: { x: number; y: number; k: number }) => {
+    viewRef.current = next;
+    canvasRef.current?.setAttribute(
+      "transform",
+      `translate(${next.x} ${next.y}) scale(${next.k})`,
+    );
+  };
+
+  /** The gesture has settled: let React's idea of the transform catch up with the DOM's. */
+  const commitView = () => {
+    if (commitTimer.current !== null) {
+      clearTimeout(commitTimer.current);
+      commitTimer.current = null;
+    }
+    setView(viewRef.current);
+  };
+
+  /** For gestures with no end event — the wheel. Long enough that a fling commits once, not once
+   * per notch, and short enough that nothing observes the two out of step. */
+  const scheduleCommit = () => {
+    if (commitTimer.current !== null) clearTimeout(commitTimer.current);
+    commitTimer.current = window.setTimeout(commitView, 160);
+  };
+
+  useEffect(
+    () => () => {
+      if (commitTimer.current !== null) clearTimeout(commitTimer.current);
+    },
+    [],
+  );
 
   const fit = () => {
     const frame = frameRef.current;
@@ -105,11 +163,12 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
       1,
     );
     const scale = Math.max(ZOOM_MIN, k);
-    setView({
+    applyView({
       k: scale,
       x: (frame.clientWidth - layout.width * scale) / 2,
       y: (frame.clientHeight - layout.height * scale) / 2,
     });
+    commitView();
   };
 
   // Fits once per fresh diagram, not on every layout change: re-fitting after a drag or a column
@@ -121,21 +180,21 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
   }, [tab.diagram, density]);
 
   const zoomBy = (factor: number, origin?: { x: number; y: number }) => {
-    setView((current) => {
-      const k = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, current.k * factor));
-      const frame = frameRef.current;
-      const point = origin ?? {
-        x: (frame?.clientWidth ?? 0) / 2,
-        y: (frame?.clientHeight ?? 0) / 2,
-      };
-      // Keeps whatever is under `point` under `point`: zooming towards the cursor rather than
-      // towards the origin is the difference between navigating a diagram and hunting for it.
-      return {
-        k,
-        x: point.x - ((point.x - current.x) / current.k) * k,
-        y: point.y - ((point.y - current.y) / current.k) * k,
-      };
+    const current = viewRef.current;
+    const k = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, current.k * factor));
+    const frame = frameRef.current;
+    const point = origin ?? {
+      x: (frame?.clientWidth ?? 0) / 2,
+      y: (frame?.clientHeight ?? 0) / 2,
+    };
+    // Keeps whatever is under `point` under `point`: zooming towards the cursor rather than
+    // towards the origin is the difference between navigating a diagram and hunting for it.
+    applyView({
+      k,
+      x: point.x - ((point.x - current.x) / current.k) * k,
+      y: point.y - ((point.y - current.y) / current.k) * k,
     });
+    scheduleCommit();
   };
 
   const onWheel = (e: React.WheelEvent) => {
@@ -148,7 +207,9 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
     }
     // A plain wheel pans, because on a trackpad a plain wheel *is* a two-finger scroll and having
     // that zoom makes the canvas impossible to read.
-    setView((current) => ({ ...current, x: current.x - e.deltaX, y: current.y - e.deltaY }));
+    const current = viewRef.current;
+    applyView({ ...current, x: current.x - e.deltaX, y: current.y - e.deltaY });
+    scheduleCommit();
   };
 
   const onPointerDown = (e: React.PointerEvent, node?: DiagramNode) => {
@@ -159,7 +220,13 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
     frameRef.current?.setPointerCapture?.(e.pointerId);
     dragRef.current = node
       ? { kind: "node", id: node.id, x: e.clientX, y: e.clientY, nodeX: node.x, nodeY: node.y }
-      : { kind: "canvas", x: e.clientX, y: e.clientY, viewX: view.x, viewY: view.y };
+      : {
+          kind: "canvas",
+          x: e.clientX,
+          y: e.clientY,
+          viewX: viewRef.current.x,
+          viewY: viewRef.current.y,
+        };
     if (node) setSelected(node.id);
   };
 
@@ -169,17 +236,19 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
     const dx = e.clientX - drag.x;
     const dy = e.clientY - drag.y;
     if (drag.kind === "canvas") {
-      setView((current) => ({ ...current, x: drag.viewX + dx, y: drag.viewY + dy }));
+      applyView({ ...viewRef.current, x: drag.viewX + dx, y: drag.viewY + dy });
     } else {
       // Divided by the zoom, so a box follows the cursor at every scale instead of racing it.
       setPinned((current) => ({
         ...current,
-        [drag.id]: { x: drag.nodeX + dx / view.k, y: drag.nodeY + dy / view.k },
+        [drag.id]: { x: drag.nodeX + dx / viewRef.current.k, y: drag.nodeY + dy / viewRef.current.k },
       }));
     }
   };
 
   const endDrag = () => {
+    // Only a canvas drag moved the transform behind React's back; a node drag went through state.
+    if (dragRef.current?.kind === "canvas") commitView();
     dragRef.current = null;
   };
 
@@ -443,10 +512,14 @@ export function DiagramPanel({ tab }: { tab: DbDiagramTab }) {
               <path d="M 0 0 L 8 4 L 0 8 z" fill="var(--cf-accent)" />
             </marker>
           </defs>
-          <g id="cf-er-canvas" transform={`translate(${view.x} ${view.y}) scale(${view.k})`}>
+          <g
+            ref={canvasRef}
+            id="cf-er-canvas"
+            transform={`translate(${view.x} ${view.y}) scale(${view.k})`}
+          >
             {layout.links.map((link) => {
-              const from = layout.nodes.find((node) => node.id === link.from);
-              const to = layout.nodes.find((node) => node.id === link.to);
+              const from = nodeById.get(link.from);
+              const to = nodeById.get(link.to);
               if (!from || !to) return null;
               const dim = related !== null && !(related.has(link.from) && related.has(link.to));
               return (

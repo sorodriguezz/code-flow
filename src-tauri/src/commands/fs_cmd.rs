@@ -83,13 +83,22 @@ pub fn open_in_vscode(path: String) -> Result<(), String> {
 /// Every non-ignored file in the repo — what "go to file" filters over. Listed once per open
 /// rather than streamed: even a large repo is a few thousand short strings, and filtering in the
 /// frontend keeps typing instant.
-#[tauri::command]
+///
+/// `(async)` because a plain `#[tauri::command]` on a sync function runs inline on the UI thread,
+/// and this one walks the entire working directory — on a large repository that is long enough to
+/// stall painting and earn a "Not Responding". The attribute leaves the body sync and spawns it on
+/// tauri's async runtime instead. Safe to run concurrently: it only reads.
+#[tauri::command(async)]
 pub fn list_repo_files(repo_path: String) -> Result<Vec<String>, String> {
     search::list_files(&repo_path)
 }
 
 /// Content search across the repo's text files, with the toggles the find box exposes.
-#[tauri::command]
+///
+/// `(async)` for the same reason as [`list_repo_files`], and more so — this reads every text file
+/// in the repository. Note that `replace_in_repo` below deliberately does **not** get it: that one
+/// writes, and the UI thread is what currently keeps it from interleaving with anything else.
+#[tauri::command(async)]
 pub fn search_repo(
     repo_path: String,
     query: String,

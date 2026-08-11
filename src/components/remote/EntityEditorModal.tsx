@@ -204,8 +204,12 @@ export function EntityEditorModal({
         </>
       }
     >
-      <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-2">
+      {/* `ApiModal`'s body brings no padding or scroll of its own — see the note in
+          `DocumentEditorModal`. This one is a plain form, so it takes the house body: inset to the
+          same `px-4` the header and footer are, and scrolling rather than clipping if a long form
+          outgrows the panel's 80vh cap. */}
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+        <div className="grid grid-cols-2 gap-3">
           <label className="block">
             <span className="mb-1 block text-[11px] font-medium text-[var(--cf-text-muted)]">
               PartitionKey
@@ -227,7 +231,7 @@ export function EntityEditorModal({
         )}
 
         <div className="rounded-md border border-[var(--cf-border)]">
-          <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1">
+          <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-2.5 py-1.5">
             <span className="mr-auto text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
               {t("remote.entityProperties")}
             </span>
@@ -243,14 +247,17 @@ export function EntityEditorModal({
               {t("remote.entityAddProperty")}
             </GhostButton>
           </div>
-          <div className="max-h-[42vh] overflow-y-auto p-1.5">
+          {/* Capped rather than left to grow, so the two keys above stay on screen while a wide
+              entity's properties scroll. The cap is what keeps the body's own scrollbar a safety
+              net instead of a second bar beside this one. */}
+          <div className="max-h-[42vh] space-y-1 overflow-y-auto p-2">
             {properties.length === 0 ? (
-              <p className="px-1.5 py-2 text-[11px] text-[var(--cf-text-muted)]">
+              <p className="px-1 py-2 text-[11px] text-[var(--cf-text-muted)]">
                 {t("remote.entityNoProperties")}
               </p>
             ) : (
               properties.map((property) => (
-                <div key={property.id} className="flex items-center gap-1.5 py-0.5">
+                <div key={property.id} className="flex items-center gap-1.5">
                   <div className="w-[34%] min-w-0">
                     <Field
                       value={property.name}

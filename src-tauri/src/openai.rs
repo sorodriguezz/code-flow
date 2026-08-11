@@ -23,6 +23,21 @@ use crate::ai::{AiEngine, AiInvocation, AiRun, AiUsage, Transport};
 /// is the whole configuration step.
 pub const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1";
 
+/// One client for the process, cloned per call.
+///
+/// Every request here used to build its own `Client::new()`, which with rustls means constructing a
+/// fresh `ClientConfig` and root certificate store, plus an empty connection pool — so the probe,
+/// the model list and every completion each paid a full TLS handshake to the same host. Cloning is
+/// free (a `reqwest::Client` is an `Arc` around the inner state) and the clone shares the pool.
+///
+/// Safe to share because nothing varies the transport per request: the API key travels as a
+/// per-request `bearer_auth` header rather than a client default, and there is no timeout,
+/// proxy or certificate-trust override to lose.
+fn client() -> reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(reqwest::Client::new).clone()
+}
+
 pub struct OpenAiEngine {
     /// Read from the OS keyring when the engine is constructed. Empty means "not configured yet",
     /// which [`complete`] turns into an actionable message instead of a 401.
@@ -151,7 +166,7 @@ pub async fn complete(base_url: &str, api_key: &str, inv: &AiInvocation<'_>) -> 
     }
     messages.push(serde_json::json!({ "role": "user", "content": user }));
 
-    let res = reqwest::Client::new()
+    let res = client()
         .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
         .bearer_auth(api_key)
         .json(&serde_json::json!({ "model": model, "messages": messages, "stream": false }))
@@ -249,7 +264,7 @@ fn is_chat_model(id: &str) -> bool {
 /// Every chat model id the endpoint reports, via `GET /v1/models`. Errors propagate so this
 /// doubles as the reachability + credential check behind [`crate::ai::probe`].
 pub async fn fetch_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
-    let res = reqwest::Client::new()
+    let res = client()
         .get(format!("{}/models", base_url.trim_end_matches('/')))
         .bearer_auth(api_key)
         .send()

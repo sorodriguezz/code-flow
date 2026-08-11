@@ -1,9 +1,10 @@
 import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
 import { resizeTerminal, writeTerminal } from "../../lib/tauri/commands";
-import { onTerminalExit, onTerminalOutput } from "../../lib/tauri/events";
+import { registerTerminalSink } from "../../state/terminalStore";
 import { useThemeStore } from "../../state/themeStore";
 import { TypedLineBuffer } from "../../lib/remote/typedLines";
 import { isMac } from "../../lib/platform";
@@ -11,6 +12,15 @@ import { pushErrorToast } from "../../state/toastStore";
 
 const LIGHT_THEME = { background: "#ffffff", foreground: "#1c1c26", cursor: "#1c1c26" };
 const DARK_THEME = { background: "#1e1e27", foreground: "#eceef5", cursor: "#eceef5" };
+
+/**
+ * How far back you can scroll in one terminal. Stated rather than inherited: it used to be
+ * whatever xterm's default happened to be (1000), which is a per-instance cost multiplied by
+ * every terminal ever opened, since none of them is ever unmounted. Same number as before on
+ * purpose — the memory lever worth pulling is the *number* of retained terminals, not how much
+ * of each one's history the user is allowed to scroll back to.
+ */
+const SCROLLBACK_LINES = 1000;
 
 /**
  * Copy and paste, wired by hand.
@@ -58,10 +68,12 @@ function clipboardKeys(term: Terminal, sessionId: string) {
   });
 }
 
-/** One xterm.js instance attached to an *already-open* backend pty session (creation/closing
- * is owned by `terminalStore`, not this component) — it mounts once for the lifetime of that
- * session and is only ever hidden via CSS (`visible=false`) while a different pane/project is
- * shown, never unmounted, so scrollback and the shell process both survive switching away. */
+/** One xterm.js instance attached to an *already-open* backend pty session (creation/closing is
+ * owned by `terminalStore`, which also owns the app's single `terminal:output` listener — this
+ * pane registers a writer with it rather than subscribing itself) — it mounts once for the
+ * lifetime of that session and is only ever hidden via CSS (`visible=false`) while a different
+ * pane/project is shown, never unmounted, so scrollback and the shell process both survive
+ * switching away. */
 export function TerminalPane({
   sessionId,
   visible,
@@ -99,17 +111,22 @@ export function TerminalPane({
   const replayRef = useRef(replay);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  // Read by the terminal-construction effect, which deliberately does not depend on `visible` —
+  // a visibility change must not tear down a live shell.
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
 
   useEffect(() => {
     if (!containerRef.current) return;
-    let unlistenOutput: (() => void) | undefined;
-    let unlistenExit: (() => void) | undefined;
 
     const term = new Terminal({
       fontSize: 13,
       fontFamily: "ui-monospace, Menlo, Consolas, monospace",
       theme: resolved === "dark" ? DARK_THEME : LIGHT_THEME,
-      cursorBlink: true,
+      // Only the pane on screen blinks — see the effect below for why that matters when a dozen
+      // hidden terminals are still mounted.
+      cursorBlink: visibleRef.current,
+      scrollback: SCROLLBACK_LINES,
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
@@ -117,6 +134,37 @@ export function TerminalPane({
     termRef.current = term;
     fitRef.current = fitAddon;
     clipboardKeys(term, sessionId);
+
+    /**
+     * GPU rendering, with the DOM renderer as the safety net.
+     *
+     * xterm's default renderer builds a `<div>` per visible row and a `<span>` per style run and
+     * re-lays that text out on every output frame. In a webview that text is not GPU-accelerated,
+     * so a chatty command (a build log, `npm install`) turned into a layout storm that stuttered
+     * the whole window, not just this pane. WebGL draws the same glyphs off a texture atlas.
+     *
+     * It is visually identical *here* specifically because the themes above are opaque hex with
+     * no alpha and `allowTransparency` is off — WebGL's known divergences are transparency and
+     * custom glyph rendering, and this pane uses neither.
+     *
+     * `onContextLoss` is not paranoia: a browser only keeps a handful of live WebGL contexts, and
+     * every terminal ever opened stays mounted, so opening enough of them will have the webview
+     * drop the oldest contexts. Disposing the addon hands that pane back to the DOM renderer —
+     * exactly what it used to be — rather than leaving it blank.
+     */
+    let renderer: WebglAddon | null = null;
+    try {
+      const webgl = new WebglAddon();
+      webgl.onContextLoss(() => {
+        renderer = null;
+        webgl.dispose();
+      });
+      term.loadAddon(webgl);
+      renderer = webgl;
+    } catch {
+      // No WebGL in this webview. Nothing to do: not loading the addon *is* the DOM renderer.
+      renderer = null;
+    }
 
     // Before `onData` is wired and before the output listener is attached, so the replay can never
     // interleave with what the live shell is saying — the whole of the past, then the present.
@@ -134,28 +182,35 @@ export function TerminalPane({
       if (line) onCommandRef.current?.(line);
     });
 
-    (async () => {
-      unlistenOutput = await onTerminalOutput((e) => {
-        if (e.id === sessionId) term.write(e.data);
-      });
-      unlistenExit = await onTerminalExit((e) => {
-        if (e.id === sessionId) term.write("\r\n[process exited]\r\n");
-      });
-      // Measured here, not captured earlier. This used to send `term.cols/rows` read from the
-      // synchronous `fit()` above — and that fit ran while the dock was still at the `height: 0`
-      // its open animation starts from, so it produced **one row** and told the shell so. The
-      // `ResizeObserver` then corrected xterm as the dock grew, but this call landed *after* those
-      // awaits and re-told the PTY the stale geometry. bash drew its prompt for a terminal one row
-      // shorter than the one on screen, which is why the last line sat half under the status bar
-      // and why making the dock shrinkable did not finish the job: the misalignment was never in
-      // the layout, it was in what the shell had been told about it.
-      fitAndReport(term, fitAddon);
-    })();
+    // Synchronous, and no longer a per-pane `terminal:output` subscription: the store owns one
+    // listener for the whole app and hands each chunk straight to the session that asked for it.
+    // Registering also flushes, in order, whatever the shell printed between being spawned and
+    // this — its first pane — mounting; that used to fall in the gap before `await listen(...)`
+    // resolved.
+    const unregister = registerTerminalSink(sessionId, {
+      write: (data) => term.write(data),
+      exit: () => term.write("\r\n[process exited]\r\n"),
+    });
+
+    // Measured here, not captured earlier. This used to send `term.cols/rows` read from the
+    // synchronous `fit()` above — and that fit ran while the dock was still at the `height: 0`
+    // its open animation starts from, so it produced **one row** and told the shell so. The
+    // `ResizeObserver` then corrected xterm as the dock grew, but this call landed *later* and
+    // re-told the PTY the stale geometry. bash drew its prompt for a terminal one row shorter
+    // than the one on screen, which is why the last line sat half under the status bar and why
+    // making the dock shrinkable did not finish the job: the misalignment was never in the
+    // layout, it was in what the shell had been told about it.
+    //
+    // The deferral used to come for free from awaiting two `listen()` calls; with the listeners
+    // gone it is spelled out. A frame is the right amount of later — it is the first moment the
+    // container can have been laid out at a non-zero height.
+    const fitFrame = requestAnimationFrame(() => fitAndReport(term, fitAddon));
 
     return () => {
+      cancelAnimationFrame(fitFrame);
       dataDisposable.dispose();
-      unlistenOutput?.();
-      unlistenExit?.();
+      unregister();
+      renderer?.dispose();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -166,6 +221,21 @@ export function TerminalPane({
   useEffect(() => {
     if (termRef.current) termRef.current.options.theme = resolved === "dark" ? DARK_THEME : LIGHT_THEME;
   }, [resolved]);
+
+  /**
+   * The cursor blinks in the pane you are looking at, and only there.
+   *
+   * xterm drives the blink off a timer that schedules a render, and that timer pauses on
+   * `document.visibilityState` but knows nothing about `display: none`. Since no pane is ever
+   * unmounted, every terminal the user has ever opened was asking for a render twice a second
+   * forever, from behind a `hidden` class, on top of whatever the visible one was doing.
+   *
+   * The visible pane is unchanged: it blinks exactly as before, and switching back to a pane
+   * restarts its blink on the spot.
+   */
+  useEffect(() => {
+    if (termRef.current) termRef.current.options.cursorBlink = visible;
+  }, [visible]);
 
   /**
    * Fits xterm to its box and tells the PTY — but only once the box has one.

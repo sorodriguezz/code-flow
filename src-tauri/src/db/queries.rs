@@ -2891,9 +2891,23 @@ pub fn add_activity_log(
     Ok(entry)
 }
 
-/// The column list every `activity_log` read shares, so the row indices below can't drift apart.
+/// The column list every read that returns a whole [`ActivityLogEntry`] shares, so the row indices
+/// in [`read_activity_row`] can't drift apart from it.
+///
+/// Not every `activity_log` read wants the whole row: the ones that only need to *describe* turns
+/// go through [`conversation_turns`] instead, because `trace` is the heaviest column in the
+/// database and reading it to build a list of titles is pure waste.
 const ACTIVITY_COLUMNS: &str =
     "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version";
+
+/// [`ACTIVITY_COLUMNS`] with `trace` replaced by a literal `NULL`, so [`read_activity_row`] can
+/// read it unchanged and the turn comes back with `trace: None`.
+///
+/// This exists because reopening a conversation returned every turn *with* its trace: 30 turns at
+/// the 600 KB ceiling is ~18 MB in a single IPC response, which is a visible freeze on the click
+/// that opens it. A trace read this way is fetched per turn, on demand, by [`get_turn_trace`].
+const ACTIVITY_COLUMNS_NO_TRACE: &str =
+    "id, project_id, session_id, engine_session_id, question, answer, NULL, created_at, response_time_ms, is_error, provider, model, engine_version";
 
 fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> {
     Ok(ActivityLogEntry {
@@ -2913,12 +2927,45 @@ fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> 
     })
 }
 
-fn all_activity_log_entries(conn: &Connection, project_id: &str) -> rusqlite::Result<Vec<ActivityLogEntry>> {
+/// The slice of an `activity_log` row a conversation *summary* actually needs.
+///
+/// Deliberately not [`ActivityLogEntry`]. That struct carries `trace`, whose ceiling is
+/// `ai_runs::MAX_TRACE_LINES` (300) x `MAX_LINE_CHARS` (2000) — roughly 600 KB per turn — and
+/// building the history sidebar used to read *every* turn of the project through it just to reach
+/// `session_id`, `question` and `created_at`. On a project with a few hundred turns that is
+/// hundreds of megabytes read, allocated and thrown away to produce a list of titles.
+struct ConversationTurn {
+    session_id: String,
+    question: String,
+    /// Empty string unless the caller is searching — see [`conversation_turns`]. The only reader
+    /// is the search filter, and answers are the second-largest column in the table.
+    answer: String,
+    created_at: String,
+}
+
+/// Every turn of a project that belongs to a conversation, oldest first, projected down to
+/// [`ConversationTurn`]. `with_answer` is what decides whether the `answer` column is read at all:
+/// the summary itself never needs it, only the search filter does.
+fn conversation_turns(
+    conn: &Connection,
+    project_id: &str,
+    with_answer: bool,
+) -> rusqlite::Result<Vec<ConversationTurn>> {
+    // A literal `''` rather than a second query string, so the row indices below stay the same in
+    // both modes and cannot drift apart.
+    let answer_column = if with_answer { "answer" } else { "''" };
     let mut stmt = conn.prepare(&format!(
-        "SELECT {ACTIVITY_COLUMNS}
+        "SELECT session_id, question, {answer_column}, created_at
          FROM activity_log WHERE project_id = ?1 AND session_id IS NOT NULL ORDER BY created_at ASC"
     ))?;
-    let rows = stmt.query_map(params![project_id], read_activity_row)?;
+    let rows = stmt.query_map(params![project_id], |row| {
+        Ok(ConversationTurn {
+            session_id: row.get(0)?,
+            question: row.get(1)?,
+            answer: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    })?;
     rows.collect()
 }
 
@@ -2926,20 +2973,27 @@ fn all_activity_log_entries(conn: &Connection, project_id: &str) -> rusqlite::Re
 /// `updated_at` = latest turn) — the conversation-level list the history sidebar/modal show.
 /// `search`, when given, keeps only conversations where *any* turn's question or answer
 /// contains it, so search covers full past exchanges, not just the title.
+///
+/// The grouping is still done here rather than in SQL, because the two things that make it correct
+/// — the Unicode-aware `to_lowercase()` the search uses (SQLite's `LIKE`/`LOWER` are ASCII-only, so
+/// searching "análisis" would stop matching "Análisis") and the exact `starts_with` on the agent
+/// prefix — have no faithful SQL equivalent here. What changed is *what is read*: turns now come
+/// back as [`ConversationTurn`], without `trace` and without `answer` unless something is being
+/// searched for. That is the whole cost of this call; the loop below was never the problem.
 pub fn list_chat_conversations(
     conn: &Connection,
     project_id: &str,
     search: Option<&str>,
 ) -> rusqlite::Result<Vec<ChatConversationSummary>> {
-    let entries = all_activity_log_entries(conn, project_id)?;
     let needle = search.map(|s| s.to_lowercase());
+    let entries = conversation_turns(conn, project_id, needle.is_some())?;
 
     let mut order: Vec<String> = Vec::new();
     let mut by_session: std::collections::HashMap<String, ChatConversationSummary> = std::collections::HashMap::new();
     let mut matched: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for e in &entries {
-        let Some(sid) = e.session_id.clone() else { continue };
+        let sid = e.session_id.clone();
         // An agent task's turns live in this table too, but the Agents view owns their lifecycle.
         // Listed here they would show up as ordinary chats, where deleting one would wipe the
         // transcript of a task that still exists — and rename it under a title the task never sees.
@@ -3019,6 +3073,43 @@ pub fn get_conversation_messages(
     ))?;
     let rows = stmt.query_map(params![project_id, session_id], read_activity_row)?;
     rows.collect()
+}
+
+/// [`get_conversation_messages`] without the traces — every turn comes back with `trace: None`.
+///
+/// Same rows, same order, same everything else; the difference is that the click that reopens a
+/// long conversation no longer moves ~18 MB through IPC in one response (see
+/// [`ACTIVITY_COLUMNS_NO_TRACE`]). The trace of any single turn is still reachable, one at a time,
+/// through [`get_turn_trace`] — which is what the "how it got there" disclosure in the chat log
+/// must call when the user expands it. **A caller that uses this without wiring that disclosure
+/// silently loses the trace**, so the eager reader above is kept rather than removed, and the
+/// command picks between the two on an explicit flag that defaults to the eager one.
+pub fn get_conversation_messages_lite(
+    conn: &Connection,
+    project_id: &str,
+    session_id: &str,
+) -> rusqlite::Result<Vec<ActivityLogEntry>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {ACTIVITY_COLUMNS_NO_TRACE}
+         FROM activity_log WHERE project_id = ?1 AND session_id = ?2 ORDER BY created_at ASC"
+    ))?;
+    let rows = stmt.query_map(params![project_id, session_id], read_activity_row)?;
+    rows.collect()
+}
+
+/// One turn's stored trace, by row id.
+///
+/// `None` covers both "this turn never had one" (it predates traces, or the engine printed
+/// nothing) and "no such row" — the caller draws no disclosure either way, which is exactly what
+/// the eager path does today with a `null` trace.
+pub fn get_turn_trace(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT trace FROM activity_log WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
 }
 
 /// Provider id that answered the most recent turn of a conversation, when one was recorded.
@@ -3101,12 +3192,40 @@ pub fn add_job_history(
     Ok(entry)
 }
 
-pub fn list_job_history(conn: &Connection, project_id: &str) -> rusqlite::Result<Vec<JobHistoryEntry>> {
+/// One page of a project's finished runs, newest first.
+///
+/// This used to select the whole table unconditionally, and that is a freeze rather than merely a
+/// memory cost: `result` holds the *entire text* of every PR review and every pre-commit analysis,
+/// nothing ever prunes `job_history`, so on a long-lived install the first open of the AI panel
+/// dragged megabytes across IPC and deserialised them on the UI thread. `jobsStore` now asks for a
+/// page at a time and **appends**, so no run becomes unreachable — see `PAGE_SIZE` there.
+///
+/// `limit = None` keeps the old "everything" behaviour byte for byte, which is what the command
+/// still does when the caller sends no limit; SQLite reads a negative `LIMIT` as "no limit", so
+/// that arm needs no second SQL string.
+///
+/// `result` is deliberately **still** in the projection. Dropping it is the bigger win, but the
+/// Activity list feeds `AiPanel` and `AnalyzeSection` straight from these rows — both read
+/// `job.result` synchronously off the selected row — so a list without it would show an empty
+/// review until a second fetch landed. Bounding the page is the half that can be done without
+/// touching those readers.
+///
+/// The `id` tiebreak matters only because of `OFFSET`: two runs that finished in the same
+/// millisecond have equal `created_at`, and without a total order a page boundary could land
+/// between them and skip one. The frontend re-sorts by timestamp anyway, so this changes nothing
+/// visible.
+pub fn list_job_history(
+    conn: &Connection,
+    project_id: &str,
+    limit: Option<i64>,
+    offset: i64,
+) -> rusqlite::Result<Vec<JobHistoryEntry>> {
     let mut stmt = conn.prepare(
         "SELECT id, project_id, kind, label, custom_label, status, result, error, meta, created_at
-         FROM job_history WHERE project_id = ?1 ORDER BY created_at DESC",
+         FROM job_history WHERE project_id = ?1 ORDER BY created_at DESC, id DESC
+         LIMIT ?2 OFFSET ?3",
     )?;
-    let rows = stmt.query_map(params![project_id], |row| {
+    let rows = stmt.query_map(params![project_id, limit.unwrap_or(-1), offset], |row| {
         Ok(JobHistoryEntry {
             id: row.get(0)?,
             project_id: row.get(1)?,
@@ -3183,15 +3302,21 @@ pub fn add_workspace_activity(
     Ok(entry)
 }
 
+/// [`list_job_history`]'s twin, and paged for the same reason and on the same terms — read that
+/// doc comment. One Activity list mixes rows from both tables, so if only one of them were bounded
+/// the panel would still stall on whichever bucket was not.
 pub fn list_workspace_activity(
     conn: &Connection,
     workspace_id: &str,
+    limit: Option<i64>,
+    offset: i64,
 ) -> rusqlite::Result<Vec<WorkspaceActivityEntry>> {
     let mut stmt = conn.prepare(
         "SELECT id, workspace_id, kind, label, custom_label, status, result, error, meta, created_at
-         FROM workspace_activity WHERE workspace_id = ?1 ORDER BY created_at DESC",
+         FROM workspace_activity WHERE workspace_id = ?1 ORDER BY created_at DESC, id DESC
+         LIMIT ?2 OFFSET ?3",
     )?;
-    let rows = stmt.query_map(params![workspace_id], |row| {
+    let rows = stmt.query_map(params![workspace_id, limit.unwrap_or(-1), offset], |row| {
         Ok(WorkspaceActivityEntry {
             id: row.get(0)?,
             workspace_id: row.get(1)?,
@@ -3228,6 +3353,34 @@ pub fn get_setting(conn: &Connection, key: &str) -> rusqlite::Result<Option<Stri
         |row| row.get(0),
     )
     .optional()
+}
+
+/// Many settings in one pass over one prepared statement.
+///
+/// Exists because the app asks for roughly ninety of these during boot — every AI task's three
+/// keys, every persisted layout slot — and one command per key means one acquisition of the global
+/// connection mutex per key, all of them serialised behind whatever else wants the database.
+///
+/// Only keys that exist come back, which is what lets a caller tell "unset" from "set to empty"
+/// exactly as [`get_setting`]'s `None` does: an absent entry is an absent row, not `""`.
+///
+/// A prepared statement reused per key rather than one `IN (…)`: binding a variable-length list
+/// means building SQL at runtime and staying under SQLite's parameter ceiling, and the cost this
+/// is here to remove is the mutex and the IPC round trip, not the lookups — `key` is the primary
+/// key, so each one is a single index probe.
+pub fn get_settings(
+    conn: &Connection,
+    keys: &[String],
+) -> rusqlite::Result<std::collections::HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT value FROM app_settings WHERE key = ?1")?;
+    let mut out = std::collections::HashMap::with_capacity(keys.len());
+    for key in keys {
+        let value: Option<String> = stmt.query_row(params![key], |row| row.get(0)).optional()?;
+        if let Some(value) = value {
+            out.insert(key.clone(), value);
+        }
+    }
+    Ok(out)
 }
 
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
@@ -4202,10 +4355,10 @@ mod tests {
         )
         .unwrap();
 
-        let rows = list_workspace_activity(&conn, &mine.id).unwrap();
+        let rows = list_workspace_activity(&conn, &mine.id, None, 0).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "#42 acme/widgets · Fix login");
-        assert!(list_workspace_activity(&conn, &other.id).unwrap().is_empty());
+        assert!(list_workspace_activity(&conn, &other.id, None, 0).unwrap().is_empty());
     }
 
     /// Renaming and deleting have to reach these rows too — they show in the same list, with the
@@ -4220,12 +4373,12 @@ mod tests {
 
         rename_workspace_activity(&conn, "job-1", "Revisión del viernes").unwrap();
         assert_eq!(
-            list_workspace_activity(&conn, &ws.id).unwrap()[0].custom_label.as_deref(),
+            list_workspace_activity(&conn, &ws.id, None, 0).unwrap()[0].custom_label.as_deref(),
             Some("Revisión del viernes")
         );
 
         delete_workspace_activity(&conn, "job-1").unwrap();
-        assert!(list_workspace_activity(&conn, &ws.id).unwrap().is_empty());
+        assert!(list_workspace_activity(&conn, &ws.id, None, 0).unwrap().is_empty());
     }
 
     fn story_fixture() -> (Connection, StoryBatch) {

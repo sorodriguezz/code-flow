@@ -132,7 +132,15 @@ async fn service_principal_token(
         );
     }
     let url = format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token");
-    let response = reqwest::Client::new()
+    // One client for the process rather than one per token fetch. Tokens are deliberately not
+    // cached (see the module docs), so this runs on every connect — and a fresh rustls client each
+    // time means a fresh `ClientConfig`, a fresh root certificate store and an empty connection
+    // pool, i.e. a full TLS handshake to login.microsoftonline.com every single time. Cloning is
+    // free (a `reqwest::Client` is an `Arc` around the inner state) and shares the pool. Nothing
+    // varies the transport per call here, so this is behaviour-identical.
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let response = CLIENT
+        .get_or_init(reqwest::Client::new)
         .post(&url)
         .form(&[
             ("grant_type", "client_credentials"),

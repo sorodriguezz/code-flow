@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  ArrowDown,
-  ArrowUp,
   CheckCircle2,
   Copy,
   Database,
@@ -479,25 +477,13 @@ export function ConnectionModal({
             <IconButton onClick={() => void clone()} title={t("db.duplicate")}>
               <Copy size={12} />
             </IconButton>
-            {/* Ordering lives here rather than on the sidebar's own header: the order of the estate
-                is something you set once while arranging it, not something the panel you browse
-                databases from needs a permanent pair of buttons for. Arranging it is what this
-                dialog is. The tree keeps the two ways that are about *one* row — its context menu
-                and `Alt`+arrows — which is where a single nudge belongs. */}
-            <IconButton
-              onClick={() => selected && void store.moveConnection(selected, -1)}
-              disabled={!store.canMoveConnection(selected, -1)}
-              title={t("db.moveUp")}
-            >
-              <ArrowUp size={13} />
-            </IconButton>
-            <IconButton
-              onClick={() => selected && void store.moveConnection(selected, 1)}
-              disabled={!store.canMoveConnection(selected, 1)}
-              title={t("db.moveDown")}
-            >
-              <ArrowDown size={13} />
-            </IconButton>
+            {/* No ordering controls here. This list is flat and the estate is not — since
+                connections were filed into groups, a pair of arrows acting on a flat list could
+                only ever move a row within its own folder while appearing to skip the neighbours
+                filed elsewhere. Ordering is the tree's gesture now: dragging a row is the one act
+                that both reorders it and moves it between folders, which is a thing two arrows
+                cannot express. The tree also keeps its context menu and `Alt`+arrows for a single
+                nudge within a folder. */}
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto p-1">
@@ -507,9 +493,8 @@ export function ConnectionModal({
                 glyph={<EngineGlyph kind={entry.kind} />}
                 name={entry.name}
                 // The folder rides the host line, and only when there is one. This list is flat
-                // while the tree is not, and moving is *within a folder* — so without naming it, a
-                // connection stepping over a neighbour that happens to be filed elsewhere reads as
-                // the arrows skipping a row.
+                // while the tree is not, so the folder is the only thing on the row that says where
+                // the connection will actually appear once the dialog closes.
                 detail={[parseSpec(entry)?.host ?? "", entry.group_name.trim()]
                   .filter((part) => part !== UNGROUPED)
                   .join(" · ")}

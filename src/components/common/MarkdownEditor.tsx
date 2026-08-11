@@ -14,7 +14,7 @@ import {
   Undo2,
 } from "lucide-react";
 import { chordLabel } from "../../lib/keys";
-import { renderMarkdown } from "../../lib/markdown";
+import { Markdown } from "./Markdown";
 import { isMac } from "../../lib/platform";
 import { useTextHistory } from "../../lib/useTextHistory";
 import { useT } from "../../state/languageStore";
@@ -219,10 +219,10 @@ export function MarkdownEditor({
       {preview ? (
         <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
           {value.trim() ? (
-            <div
-              className="cf-markdown-preview text-[12.5px]"
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(value) }}
-            />
+            // Memoised on `value`: this pane re-renders with every parent update and with every
+            // toolbar/undo-state change, but the text itself only moves when the user types. Same
+            // HTML as before — `Markdown` runs the same `renderMarkdown`, just not on every render.
+            <Markdown source={value} className="cf-markdown-preview text-[12.5px]" />
           ) : (
             <p className="text-[11.5px] italic text-[var(--cf-text-muted)]">{placeholder}</p>
           )}

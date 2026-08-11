@@ -2,9 +2,9 @@ import { create } from "zustand";
 import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
 import {
   listJobHistory,
+  listWorkspaceActivity,
   renameJobHistoryEntry,
   deleteJobHistoryEntry,
-  listWorkspaceActivity,
   renameWorkspaceActivityEntry,
   deleteWorkspaceActivityEntry,
 } from "../lib/tauri/commands";
@@ -45,9 +45,70 @@ export interface Job {
 
 const EMPTY_JOBS: Job[] = [];
 
+/**
+ * How many persisted rows a page holds.
+ *
+ * `list_job_history` and `list_workspace_activity` now take this as a `LIMIT` (they used to
+ * `SELECT` the whole table), and every row still carries `result` — the entire text of a PR review
+ * — so on a long-lived install the un-paged read handed the first open of the AI panel megabytes to
+ * deserialise and render in one go. That was the freeze, not the memory.
+ *
+ * `result` stays in the projection on purpose: `AiPanel` and `AnalyzeSection` read `job.result`
+ * straight off the row they have, so a list without it would show an empty review until a second
+ * fetch landed. Only the page is bounded.
+ */
+const PAGE_SIZE = 50;
+
+/** How many persisted rows each bucket has read so far — the offset the next page starts at.
+ * Bookkeeping rather than state: nothing renders it. */
+const fetchedRows = new Map<string, number>();
+/** Buckets with a page in flight, so a double click on "load more" doesn't fetch it twice. */
+const pagingBuckets = new Set<string>();
+/** Buckets whose background read-through has already been started, so it happens once per
+ * session no matter how many times a view remounts and calls `load`. */
+const drainedBuckets = new Set<string>();
+
+/** Runs `fn` when the main thread has nothing better to do, with a ceiling so it still happens on
+ * a busy app. The fallback matters for nothing in production (the webview has
+ * `requestIdleCallback`) but keeps this callable under a test DOM. */
+function whenIdle(fn: () => void): void {
+  if (typeof requestIdleCallback === "function") requestIdleCallback(() => fn(), { timeout: 500 });
+  else setTimeout(fn, 0);
+}
+
+/**
+ * Reads the rest of a bucket's history in the background, one page at a time.
+ *
+ * This is what makes the `LIMIT` above safe. Nothing in the UI offers a "load more" row today, so
+ * a bounded first read on its own would put every run older than a page out of the user's reach —
+ * and out of `notificationStore`'s reach too, which finds a notified job by scanning `byProject`.
+ * Reading through to the end keeps the list exactly as complete as it was before.
+ *
+ * What changes is *when*: the panel paints after one page instead of after the whole table, and
+ * each further page is a separate small task with an idle gap in front of it, so the main thread
+ * gets a turn between them rather than blocking once for the lot.
+ *
+ * Stops if something else is already paging this bucket — the only such caller would be a future
+ * "load more" click, and two walkers sharing one offset would read the same page twice.
+ */
+function drainHistory(projectId: string): void {
+  const step = () => {
+    const state = useJobsStore.getState();
+    if (!state.hasMore[projectId] || pagingBuckets.has(projectId)) return;
+    void state.loadMore(projectId).then(() => whenIdle(step));
+  };
+  whenIdle(step);
+}
+
 interface JobsState {
   byProject: Record<string, Job[]>;
   loaded: Record<string, boolean>;
+  /** Whether a bucket may still have older rows on disk than the ones in `byProject`.
+   *
+   * True between the first page landing and the background read-through finishing (see
+   * `drainHistory`), and it is also what a "load more" row in the Activity list would be gated on
+   * if one is ever added. */
+  hasMore: Record<string, boolean>;
   /** Kicks off `task` immediately and tracks it as a job entry that survives project/view
    * switches — the promise itself already keeps running in the background regardless of what
    * the UI shows (Tauri's `invoke` doesn't get cancelled by React unmounting), this just makes
@@ -69,8 +130,15 @@ interface JobsState {
    * from `job_history`, or a workspace's link reviews from `workspace_activity`. `run()` only
    * ever lived in memory, so without this every past result vanished on restart. Runs once per
    * bucket per session; a job already in memory (freshly run before this resolves) is merged in
-   * rather than replaced. */
+   * rather than replaced.
+   *
+   * Resolves once the *first* page is on screen; the rest of the history keeps arriving after that
+   * through `drainHistory`, which is what lets the panel paint without waiting for the whole
+   * table. */
   load: (projectId: string) => Promise<void>;
+  /** Reads the next page of a bucket's history and **appends** it, so nothing already on screen
+   * moves or is replaced. A no-op while `hasMore[projectId]` is false. */
+  loadMore: (projectId: string) => Promise<void>;
   rename: (projectId: string, jobId: string, label: string) => Promise<void>;
   /** Best-effort against the persisted row — a job still `running` has no `job_history` row
    * yet, so there's nothing there to delete, but it's removed from the in-memory list either
@@ -192,9 +260,30 @@ function notifyJobSettled(job: Job, ok: boolean): void {
   });
 }
 
+/**
+ * Reads one page of a bucket's persisted rows.
+ *
+ * A workspace bucket reads the other table: everything reviewed from a link, which belongs to no
+ * repository and so follows the workspace instead. See `targetKey`.
+ *
+ * `offset` counts rows already read for this bucket rather than being a cursor, which is what the
+ * `LIMIT ?/OFFSET ?` on both queries takes. The window can shift under a page if a row is deleted
+ * mid-walk; a row *added* mid-walk only ever re-reads one, and the append below dedupes by id.
+ * Neither is worth a keyset cursor here: the walk lasts a few hundred ms and only runs once per
+ * bucket per session.
+ */
+async function fetchActivityPage(projectId: string, offset: number): Promise<ActivityRow[]> {
+  const workspaceId = workspaceIdFromBucket(projectId);
+  return await (workspaceId === null
+    ? listJobHistory(projectId, PAGE_SIZE, offset)
+    : listWorkspaceActivity(workspaceId, PAGE_SIZE, offset)
+  ).catch(() => []);
+}
+
 export const useJobsStore = create<JobsState>((set, get) => ({
   byProject: {},
   loaded: {},
+  hasMore: {},
 
   run: ({ projectId, kind, label, meta = {}, task }) => {
     const id = `job-${Date.now()}-${seq++}`;
@@ -265,13 +354,8 @@ export const useJobsStore = create<JobsState>((set, get) => ({
     // React two list items with the same key, which then misbinds clicks on nearby rows).
     set((s) => ({ loaded: { ...s.loaded, [projectId]: true } }));
 
-    // A workspace bucket reads the other table: everything reviewed from a link, which belongs to
-    // no repository and so follows the workspace instead. See `targetKey`.
-    const workspaceId = workspaceIdFromBucket(projectId);
-    const rows: ActivityRow[] = await (workspaceId === null
-      ? listJobHistory(projectId)
-      : listWorkspaceActivity(workspaceId)
-    ).catch(() => []);
+    const rows = await fetchActivityPage(projectId, 0);
+    fetchedRows.set(projectId, rows.length);
     const loadedJobs: Job[] = rows.map((row) => toJob(projectId, row));
     set((s) => {
       const existing = s.byProject[projectId] ?? [];
@@ -279,8 +363,48 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       const merged = [...loadedJobs.filter((j) => !existingIds.has(j.id)), ...existing].sort(
         (a, b) => b.createdAt - a.createdAt,
       );
-      return { byProject: { ...s.byProject, [projectId]: merged } };
+      return {
+        byProject: { ...s.byProject, [projectId]: merged },
+        // A full page back means there may be another one; a short read is the end of the history.
+        // `loadMore` retires the flag itself the moment a page adds nothing, which covers the
+        // boundary case of a history that is an exact multiple of `PAGE_SIZE`.
+        hasMore: { ...s.hasMore, [projectId]: rows.length === PAGE_SIZE },
+      };
     });
+    // The list is on screen now; the rest of it follows in the background rather than being left
+    // behind a "load more" nothing in the UI draws yet. See `drainHistory`.
+    if (!drainedBuckets.has(projectId)) {
+      drainedBuckets.add(projectId);
+      drainHistory(projectId);
+    }
+  },
+
+  loadMore: async (projectId) => {
+    if (!get().hasMore[projectId] || pagingBuckets.has(projectId)) return;
+    pagingBuckets.add(projectId);
+    try {
+      const offset = fetchedRows.get(projectId) ?? 0;
+      const rows = await fetchActivityPage(projectId, offset);
+      fetchedRows.set(projectId, offset + rows.length);
+      const older: Job[] = rows.map((row) => toJob(projectId, row));
+      set((s) => {
+        const existing = s.byProject[projectId] ?? [];
+        const existingIds = new Set(existing.map((j) => j.id));
+        const fresh = older.filter((j) => !existingIds.has(j.id));
+        return {
+          byProject: {
+            ...s.byProject,
+            [projectId]: [...existing, ...fresh].sort((a, b) => b.createdAt - a.createdAt),
+          },
+          // A page that brought nothing new is the end of the history, whatever its length said.
+          // Belt and braces around the length check: it is also what stops `drainHistory` if a
+          // caller ever hands back a page it has already seen.
+          hasMore: { ...s.hasMore, [projectId]: fresh.length > 0 && rows.length === PAGE_SIZE },
+        };
+      });
+    } finally {
+      pagingBuckets.delete(projectId);
+    }
   },
 
   rename: async (projectId, jobId, label) => {

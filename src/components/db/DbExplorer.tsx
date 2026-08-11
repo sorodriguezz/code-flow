@@ -1609,8 +1609,8 @@ export function DbExplorer() {
             {t("db.title")}
           </span>
           {/* The whole set, not one connection: the way into "set my databases up" that doesn't
-              require having a connection to right-click first — including arranging the order,
-              which is a pair of arrows in there rather than a permanent pair up here. */}
+              require having a connection to right-click first. Arranging the order is not in there
+              — that is this tree's own job, by dragging a row. */}
           <ToolbarButton
             onClick={() => openModal({ kind: "connections" })}
             title={t("db.manageConnections")}

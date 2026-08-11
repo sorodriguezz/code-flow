@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { getSetting, setSetting } from "../lib/tauri/commands";
+import { getSettings, setSetting } from "../lib/tauri/commands";
 
 export type LayoutKey =
   | "sidebarWidth"
@@ -162,24 +162,38 @@ export const useLayoutStore = create<LayoutState>((set) => ({
   sizes: { ...LAYOUT_DEFAULTS },
   flags: { ...FLAG_DEFAULTS },
 
+  // Every stored size and flag in ONE round-trip. This used to be 33 `getSetting` calls plus 2 more
+  // for the flags, wrapped in `Promise.all` — which bought nothing: `get_setting` takes the database
+  // mutex per key, so the Rust end queued all 35 behind the same lock while the window waited. The
+  // whole block is 35 statically-known keys, so it is one `getSettings`.
+  //
+  // Absence still means "default", exactly as before: `getSetting` answered `null` for an unset key,
+  // `getSettings` simply omits it, and `?? null` puts the two back on the same footing — so a size
+  // stored as "" still falls through to `LAYOUT_DEFAULTS` and a flag stored as "" is still `false`
+  // rather than its default.
   init: async () => {
-    const loaded = await Promise.all(
-      (Object.keys(STORAGE_KEYS) as LayoutKey[]).map(async (key) => {
-        const raw = await getSetting(STORAGE_KEYS[key]).catch(() => null);
-        const num = raw ? Number(raw) : NaN;
-        return [key, Number.isFinite(num) ? num : LAYOUT_DEFAULTS[key]] as const;
-      }),
-    );
-    const flags = await Promise.all(
-      (Object.keys(FLAG_STORAGE_KEYS) as LayoutFlag[]).map(async (key) => {
-        const raw = await getSetting(FLAG_STORAGE_KEYS[key]).catch(() => null);
-        return [key, raw === null ? FLAG_DEFAULTS[key] : raw === "1"] as const;
-      }),
-    );
-    set({
-      sizes: Object.fromEntries(loaded) as Record<LayoutKey, number>,
-      flags: Object.fromEntries(flags) as Record<LayoutFlag, boolean>,
-    });
+    const sizeKeys = Object.keys(STORAGE_KEYS) as LayoutKey[];
+    const flagKeys = Object.keys(FLAG_STORAGE_KEYS) as LayoutFlag[];
+    // One `.catch` for the batch where there used to be one per key. A failure here is the database
+    // being unreachable, which failed every individual read too — so the outcome is the same it has
+    // always been: the whole layout comes up on its defaults instead of blocking the launch.
+    const stored = await getSettings([
+      ...sizeKeys.map((key) => STORAGE_KEYS[key]),
+      ...flagKeys.map((key) => FLAG_STORAGE_KEYS[key]),
+    ]).catch(() => ({}) as Record<string, string>);
+
+    const sizes = {} as Record<LayoutKey, number>;
+    for (const key of sizeKeys) {
+      const raw = stored[STORAGE_KEYS[key]] ?? null;
+      const num = raw ? Number(raw) : NaN;
+      sizes[key] = Number.isFinite(num) ? num : LAYOUT_DEFAULTS[key];
+    }
+    const flags = {} as Record<LayoutFlag, boolean>;
+    for (const key of flagKeys) {
+      const raw = stored[FLAG_STORAGE_KEYS[key]] ?? null;
+      flags[key] = raw === null ? FLAG_DEFAULTS[key] : raw === "1";
+    }
+    set({ sizes, flags });
   },
 
   setSize: (key, value) => set((s) => ({ sizes: { ...s.sizes, [key]: value } })),

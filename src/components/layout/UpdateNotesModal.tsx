@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { Download, Loader2, RotateCw, Sparkles, TriangleAlert, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { renderMarkdown } from "../../lib/markdown";
+import { Markdown } from "../common/Markdown";
 import { useUpdateStore } from "../../state/updateStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 
@@ -92,11 +92,7 @@ export function UpdateNotesModal() {
 
         <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
           {notes ? (
-            <div
-              className="cf-markdown-preview text-[13px]"
-              onClick={openLinkExternally}
-              dangerouslySetInnerHTML={{ __html: renderMarkdown(notes) }}
-            />
+            <Markdown source={notes} className="cf-markdown-preview text-[13px]" onClick={openLinkExternally} />
           ) : (
             <p className="text-[12px] text-[var(--cf-text-muted)]">{t("update.noNotes")}</p>
           )}

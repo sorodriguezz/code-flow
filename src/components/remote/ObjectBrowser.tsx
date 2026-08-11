@@ -170,7 +170,16 @@ export function ObjectBrowser({
   const [history, setHistory] = useState<string[]>([root]);
   const [historyAt, setHistoryAt] = useState(0);
 
-  const [selected, setSelected] = useState<string[]>([]);
+  /**
+   * The picked paths.
+   *
+   * A `Set`, not an array, because the row render asks "am I selected?" once per row: with an array
+   * that is a `.includes()` scan per row, so selecting everything in a 5,000-object container cost
+   * ~25 million string comparisons per render — and the listing renders twice for one click. The
+   * *order* of a selection is never used; `picked` below re-derives it from `entries`, which is the
+   * order the user sees.
+   */
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [anchor, setAnchor] = useState<number | null>(null);
 
   /** Copied paths, waiting for a paste. Server-side, so this holds names and never bytes. */
@@ -217,7 +226,7 @@ export function ObjectBrowser({
         setRows(listing.entries);
         setNext(listing.next);
         setPath(listing.path);
-        setSelected([]);
+        setSelected(new Set());
         setAnchor(null);
         setDrawer(null);
         setError(null);
@@ -301,16 +310,25 @@ export function ObjectBrowser({
   }, [rows, sort]);
 
   // Drawn only where the service fills them. See the note at the top.
-  const columns = {
-    tier: entries.some((entry) => entry.tier),
-    type: entries.some((entry) => entry.content_type),
-    blobType: entries.some((entry) => entry.blob_type),
-    lease: entries.some((entry) => entry.lease_state),
-  };
+  //
+  // One pass, memoised: this was four full `entries.some()` scans of the listing on every render —
+  // including every render caused by hovering a row or dragging one — where a listing can be five
+  // thousand blobs long. Early-exits the moment all four columns are accounted for.
+  const columns = useMemo(() => {
+    const found = { tier: false, type: false, blobType: false, lease: false };
+    for (const entry of entries) {
+      if (entry.tier) found.tier = true;
+      if (entry.content_type) found.type = true;
+      if (entry.blob_type) found.blobType = true;
+      if (entry.lease_state) found.lease = true;
+      if (found.tier && found.type && found.blobType && found.lease) break;
+    }
+    return found;
+  }, [entries]);
   const columnCount = 3 + Object.values(columns).filter(Boolean).length;
 
   const picked = useMemo(
-    () => entries.filter((entry) => selected.includes(entry.path)),
+    () => entries.filter((entry) => selected.has(entry.path)),
     [entries, selected],
   );
 
@@ -320,20 +338,20 @@ export function ObjectBrowser({
 
   const select = (index: number, entry: RemoteFile, event: React.MouseEvent) => {
     if (event.metaKey || event.ctrlKey) {
-      setSelected((current) =>
-        current.includes(entry.path)
-          ? current.filter((one) => one !== entry.path)
-          : [...current, entry.path],
-      );
+      setSelected((current) => {
+        const next = new Set(current);
+        if (!next.delete(entry.path)) next.add(entry.path);
+        return next;
+      });
       setAnchor(index);
       return;
     }
     if (event.shiftKey && anchor !== null) {
       const [from, to] = anchor < index ? [anchor, index] : [index, anchor];
-      setSelected(entries.slice(from, to + 1).map((one) => one.path));
+      setSelected(new Set(entries.slice(from, to + 1).map((one) => one.path)));
       return;
     }
-    setSelected([entry.path]);
+    setSelected(new Set([entry.path]));
     setAnchor(index);
   };
 
@@ -636,7 +654,7 @@ export function ObjectBrowser({
           <Action
             icon={CopyCheck}
             label={t("remote.objSelectAll")}
-            onClick={() => setSelected(entries.map((entry) => entry.path))}
+            onClick={() => setSelected(new Set(entries.map((entry) => entry.path)))}
             disabled={entries.length === 0}
           />
           <Action
@@ -843,7 +861,7 @@ export function ObjectBrowser({
                       language={language}
                       rootIcon={rootIcon}
                       columns={columns}
-                      selected={selected.includes(entry.path)}
+                      selected={selected.has(entry.path)}
                       dropping={dropOn === entry.path}
                       onSelect={(event) => select(at, entry, event)}
                       onOpen={() => (entry.is_dir ? go(entry.path) : void openLocally())}

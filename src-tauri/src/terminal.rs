@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
@@ -17,6 +18,36 @@ use crate::shell_profiles::ShellProfile;
 /// far more than the scrollback anyone scrolls back through, and small enough to write on a timer
 /// without thinking about it.
 const TRANSCRIPT_LIMIT: usize = 256 * 1024;
+
+/// The most often a session may emit — one frame.
+///
+/// A `cargo build` in a pty produces hundreds of reads a second, and each one used to be its own
+/// IPC message, its own JS callback and its own `xterm.write`. xterm parses one large write far
+/// more cheaply than twenty small ones, so under sustained output the reader hands it a frame's
+/// worth at a time. One frame and no more: this is an interactive terminal, and a keystroke's echo
+/// arriving 16ms late is imperceptible while 50ms is not.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(16);
+
+/// A pending chunk this big goes out without waiting for the frame to end. Past a certain size the
+/// win from coalescing is already banked and all that is left is latency.
+const FLUSH_MAX_BYTES: usize = 32 * 1024;
+
+/// What the reader has read and the emitter has not yet sent.
+///
+/// The two are separate threads for one reason: `Read::read` on a pty master blocks with no
+/// timeout, so a reader that decided on its own when to flush could only decide *while holding
+/// output it had just read* — and if the program then went quiet, that output would sit
+/// unflushed until the next byte arrived, which might be never. Output shown late is a bug; output
+/// shown only after the user presses a key is a worse one. Splitting it means the emitter's clock
+/// runs whether or not the child says anything.
+#[derive(Default)]
+struct Outbox {
+    pending: String,
+    /// The pty closed: the child is gone and no more will be read. The emitter sends what is left
+    /// and only then announces the exit, so nothing a program printed on its way out can be lost
+    /// or arrive after the pane has been told the session ended.
+    closed: bool,
+}
 
 /// A bounded copy of what a session has printed, and which stored terminal it belongs to.
 ///
@@ -199,16 +230,21 @@ pub fn open_pty(
         );
     }
 
-    let reader_id = id.clone();
-    let reader_app = app.clone();
+    let outbox = Arc::new((Mutex::new(Outbox::default()), Condvar::new()));
+
+    let reader_outbox = Arc::clone(&outbox);
     std::thread::spawn(move || {
-        let mut buf = [0u8; 4096];
+        // 64 KB rather than 4 KB: a `read` returns as soon as *any* byte is available, so a lone
+        // keystroke still comes back as one byte and echoes instantly, while a build that has
+        // filled the pty's buffer comes back in one call instead of sixteen.
+        let mut buf = [0u8; 64 * 1024];
+        let (lock, ready) = &*reader_outbox;
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    // Recorded before it is emitted, and holding the lock for no longer than the
+                    // Recorded before it is queued, and holding the lock for no longer than the
                     // append: a `poisoned` lock (a panic in the flush) must not take the terminal
                     // down with it, so the record is skipped and the output still reaches the pane.
                     if let Some(transcript) = &transcript {
@@ -216,21 +252,69 @@ pub fn open_pty(
                             recorded.push(&data);
                         }
                     }
-                    let _ = reader_app.emit(
-                        "terminal:output",
-                        TerminalOutputEvent {
-                            id: reader_id.clone(),
-                            data,
-                        },
-                    );
+                    lock_outbox(lock).pending.push_str(&data);
+                    ready.notify_one();
                 }
                 Err(_) => break,
             }
         }
-        let _ = reader_app.emit("terminal:exit", TerminalExitEvent { id: reader_id });
+        lock_outbox(lock).closed = true;
+        ready.notify_one();
+    });
+
+    let emitter_id = id.clone();
+    let emitter_app = app;
+    std::thread::spawn(move || {
+        let (lock, ready) = &*outbox;
+        // Far enough in the past that the very first byte of a session is emitted on sight rather
+        // than held for a frame — a shell's prompt must not appear to arrive late.
+        let mut last_flush = Instant::now() - FLUSH_INTERVAL;
+        loop {
+            let mut queued = lock_outbox(lock);
+            // Parked, not polled: an idle terminal costs nothing at all, and an idle bench of six
+            // shells costs six times nothing. The thread only wakes when there is output.
+            while queued.pending.is_empty() && !queued.closed {
+                queued = ready.wait(queued).unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            // Empty and closed: the pty is gone and everything it printed has been sent.
+            if queued.pending.is_empty() {
+                break;
+            }
+            // Coalesce only when something was *just* sent. That is the whole trick: typing into a
+            // shell flushes every keystroke on sight (nothing went out 16ms ago), while a build
+            // firing continuously collects a frame's worth per event. The wait is bounded by the
+            // frame either way, so output is never held longer than that — and the exit path below
+            // cannot run until this buffer is empty, so nothing can be left behind.
+            let since = last_flush.elapsed();
+            if since < FLUSH_INTERVAL && queued.pending.len() < FLUSH_MAX_BYTES {
+                queued = ready
+                    .wait_timeout(queued, FLUSH_INTERVAL - since)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .0;
+            }
+            let data = std::mem::take(&mut queued.pending);
+            drop(queued);
+            last_flush = Instant::now();
+            let _ = emitter_app.emit(
+                "terminal:output",
+                TerminalOutputEvent { id: emitter_id.clone(), data },
+            );
+        }
+        let _ = emitter_app.emit("terminal:exit", TerminalExitEvent { id: emitter_id });
     });
 
     Ok(id)
+}
+
+/// The outbox, poisoning ignored.
+///
+/// Unlike the transcript — where a poisoned lock means "skip the recording, keep the terminal
+/// alive" — there is no skipping this one: a reader that gave up on the lock would silently stop
+/// delivering output, and an emitter that gave up would never announce the exit. The guarded data
+/// is a `String` and a `bool` with no invariant between them, so a panicking holder leaves nothing
+/// half-updated to be careful about.
+fn lock_outbox(lock: &Mutex<Outbox>) -> std::sync::MutexGuard<'_, Outbox> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub fn write_terminal(registry: &TerminalRegistry, id: &str, data: &str) -> Result<(), String> {

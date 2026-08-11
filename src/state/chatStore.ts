@@ -6,7 +6,7 @@ import {
   REPO_BUSY_MARKER,
 } from "../lib/tauri/commands";
 import { useChatHistoryStore } from "./activityStore";
-import { isCancellation, newRunId, useAiRunStore, type AiRunLine } from "./aiRunStore";
+import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
 import { notify } from "./notificationStore";
@@ -153,6 +153,86 @@ const EMPTY_CHAT: ChatSession = newSession("", "");
 
 const EMPTY_LIVE: ChatSession[] = [];
 
+/**
+ * How many reopened transcripts stay in memory.
+ *
+ * Nothing used to leave `byConversation` except a delete, so a session spent reading twenty past
+ * conversations ended up holding all twenty — messages *and* the process trace of every turn in
+ * them. Five is what the panel can plausibly be moved between without paying for a reload.
+ *
+ * A collapsed conversation is not lost: `switchTo` reads it back from `activity_log` exactly as it
+ * does one that was never opened this session. That reload is only trustworthy for a conversation
+ * the backend actually wrote a row for, which is what `evictable` below is checking.
+ */
+const MAX_LIVE_CONVERSATIONS = 5;
+
+/** Conversation ids in the order they were last opened, oldest first. Bookkeeping rather than
+ * state: nothing renders it, so keeping it in the store would re-render every subscriber on each
+ * switch for nothing. */
+let recentConversations: string[] = [];
+
+/**
+ * The model the last reply of a collapsed conversation ran on.
+ *
+ * Reopening reads the transcript back from disk, and the archived rows carry no model — so without
+ * this the composer's chip would silently fall back to the configured setting for a chat the user
+ * was talking to a minute ago. Two dozen bytes per conversation to keep the chip saying the same
+ * thing before and after an eviction the user never asked for and cannot see.
+ */
+const modelOfCollapsed = new Map<string, string>();
+
+function touchConversation(conversationId: string): void {
+  recentConversations = recentConversations.filter((id) => id !== conversationId);
+  recentConversations.push(conversationId);
+}
+
+/**
+ * Collapses the least recently opened transcripts back to what is on disk.
+ *
+ * What is deliberately **never** collapsed, because none of it could be read back:
+ * - a turn still in flight (its reply has nowhere to land, and the panel is showing it);
+ * - whatever a project is currently pointing at (the panel would go blank under the user);
+ * - an unpersisted conversation — one whose only turn was stopped or is still running has no row
+ *   on disk at all, and would disappear from Activity as well as from the panel;
+ * - one holding a stopped turn: the backend never writes those, so the muted "stopped" note and
+ *   the question above it exist only here.
+ */
+function pruneConversations(): void {
+  const { byConversation, activeByProject } = useChatStore.getState();
+  const ids = Object.keys(byConversation);
+  if (ids.length <= MAX_LIVE_CONVERSATIONS) return;
+  const active = new Set(Object.values(activeByProject).filter((id): id is string => id !== null));
+  // Anything never touched counts as freshest, so an unknown id is simply not a candidate. Ids of
+  // conversations that have since gone would otherwise sit in the list for ever.
+  recentConversations = recentConversations.filter((id) => byConversation[id] !== undefined);
+  const candidates = recentConversations;
+
+  const evictable = (session: ChatSession): boolean =>
+    !session.sending &&
+    session.persisted &&
+    !active.has(session.conversationId) &&
+    !session.messages.some((m) => m.isCancelled);
+
+  const gone = new Set<string>();
+  for (const id of candidates) {
+    if (ids.length - gone.size <= MAX_LIVE_CONVERSATIONS) break;
+    const session = byConversation[id];
+    if (evictable(session)) {
+      if (session.model) modelOfCollapsed.set(id, session.model);
+      gone.add(id);
+    }
+  }
+  if (gone.size === 0) return;
+  recentConversations = recentConversations.filter((id) => !gone.has(id));
+  useChatStore.setState((s) => {
+    const rest: Record<string, ChatSession> = {};
+    for (const id of Object.keys(s.byConversation)) {
+      if (!gone.has(id)) rest[id] = s.byConversation[id];
+    }
+    return { byConversation: rest };
+  });
+}
+
 interface ChatState {
   byConversation: Record<string, ChatSession>;
   /** Which conversation each project is currently *showing*. `null`/absent means the panel is on
@@ -204,6 +284,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (existing?.sending) return;
 
     const conversationId = existing?.conversationId ?? `conv-${crypto.randomUUID()}`;
+    // Asking a question is the strongest possible "I am using this one", so it counts for the
+    // memory cap's recency just as opening it does.
+    touchConversation(conversationId);
     const base = existing ?? newSession(projectId, conversationId);
     const runId = newRunId("chat");
     useAiRunStore.getState().start(runId);
@@ -245,7 +328,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       .then((reply) => {
         // The live log is already in memory and formatted; attaching it to the message is what
         // keeps "what did it do?" answerable after the run ends, without a second round trip.
-        const trace = useAiRunStore.getState().linesFor(runId);
+        // A copy, never the store's own array — see `snapshotTrace`.
+        const trace = snapshotTrace(runId);
         settle((session) => ({
           ...session,
           messages: [
@@ -307,7 +391,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return;
         }
         const cancelled = isCancellation(e);
-        const trace = useAiRunStore.getState().linesFor(runId);
+        const trace = snapshotTrace(runId);
         settle((session) => ({
           ...session,
           // The failure joins the transcript rather than sitting in a separate banner that the
@@ -367,10 +451,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   switchTo: async (projectId, conversationId) => {
+    touchConversation(conversationId);
     // Already in memory: just point at it. This is what makes returning to a conversation that is
     // still answering free — its messages, its run id and its "sending" flag were never touched.
     if (get().byConversation[conversationId]) {
       set((s) => ({ activeByProject: { ...s.activeByProject, [projectId]: conversationId } }));
+      pruneConversations();
       return;
     }
 
@@ -412,8 +498,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             messages,
             sessionId: engineSession,
             // No model recorded for archived turns — the chip falls back to the configured
-            // setting until this conversation gets a fresh reply.
-            model: null,
+            // setting until this conversation gets a fresh reply. Unless this is a conversation
+            // the memory cap collapsed a moment ago, which remembered what it was answering on.
+            model: modelOfCollapsed.get(conversationId) ?? null,
             title: liveTitle(entries[0]?.question ?? ""),
             createdAt: firstAt ? new Date(firstAt).getTime() : Date.now(),
             updatedAt: lastAt ? new Date(lastAt).getTime() : Date.now(),
@@ -423,9 +510,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         activeByProject: { ...s.activeByProject, [projectId]: conversationId },
       };
     });
+    pruneConversations();
   },
 
   discard: (conversationId) => {
+    // Deleted from history: there is nothing left to reload, so the cap's bookkeeping about it
+    // goes too rather than outliving the thing it describes.
+    recentConversations = recentConversations.filter((id) => id !== conversationId);
+    modelOfCollapsed.delete(conversationId);
     set((s) => {
       if (!s.byConversation[conversationId]) return s;
       const { [conversationId]: _dropped, ...rest } = s.byConversation;

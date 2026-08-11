@@ -209,11 +209,30 @@ export const listBranches = (repoPath: string) => invoke<BranchInfo[]>("list_bra
 
 export const listStashes = (repoPath: string) => invoke<StashInfo[]>("list_stashes", { repoPath });
 
-export const getWorkingDiff = (repoPath: string) =>
-  invoke<FileDiffInfo[]>("get_working_diff", { repoPath });
+/** Every changed file, with `contextLines` of surrounding context per hunk.
+ *
+ * Omitting `contextLines` keeps the historical behaviour — near-unlimited context, i.e. the whole
+ * file — which is what `reconstructSides` in `../diffText` needs to rebuild both sides of a file
+ * from hunks alone. That is expensive: on a working tree with a few large touched files it turns
+ * ~19 KB of real `git diff` into ~1.8 MB of JSON, because every line crosses IPC as two heap
+ * strings. Callers that only need to *list* what changed should pass a small number and reach for
+ * `getFileDiff` when the user actually opens a file.
+ */
+export const getWorkingDiff = (repoPath: string, contextLines?: number) =>
+  invoke<FileDiffInfo[]>("get_working_diff", { repoPath, contextLines });
 
-export const getStagedDiff = (repoPath: string) =>
-  invoke<FileDiffInfo[]>("get_staged_diff", { repoPath });
+export const getStagedDiff = (repoPath: string, contextLines?: number) =>
+  invoke<FileDiffInfo[]>("get_staged_diff", { repoPath, contextLines });
+
+/** One file's diff at full context — the counterpart to a narrow `getWorkingDiff`/`getStagedDiff`.
+ *
+ * Split view, the editor's diff tab and an expanded row in Changes all reconstruct the two file
+ * texts from hunks, so they need every line. Asking for one path keeps that whole-file cost to the
+ * file being looked at instead of paying it for the entire changeset on every watcher tick.
+ * Resolves to `null` when the path has no diff on that side.
+ */
+export const getFileDiff = (repoPath: string, path: string, staged: boolean) =>
+  invoke<FileDiffInfo | null>("get_file_diff", { repoPath, path, staged });
 
 export const getCommitDiff = (repoPath: string, oid: string) =>
   invoke<FileDiffInfo[]>("get_commit_diff", { repoPath, oid });
@@ -407,6 +426,18 @@ export const gitPush = (repoPath: string, setUpstream: boolean) =>
 // ---------- settings ----------
 
 export const getSetting = (key: string) => invoke<string | null>("get_setting", { key });
+
+/** Many settings in one round-trip, for the callers that read a whole block of them at once.
+ *
+ * `getSetting` is one key, one command, one acquisition of the database mutex — so a store that
+ * hydrates 30-odd keys pays 30 serialized round-trips at startup no matter how it batches them on
+ * the JS side, because the Rust end queues them all behind the same lock. This takes the lock once.
+ *
+ * A key that was never set is simply absent from the map, exactly as `getSetting` answers `null`
+ * for it, so a value deliberately stored as `""` stays distinguishable from one that is unset.
+ */
+export const getSettings = (keys: string[]) =>
+  invoke<Record<string, string>>("get_settings", { keys });
 
 export const setSetting = (key: string, value: string) => invoke<void>("set_setting", { key, value });
 
@@ -932,6 +963,14 @@ export interface AiCheckpoint {
 export const listAiCheckpoints = (repoPath: string) =>
   invoke<AiCheckpoint[]>("list_ai_checkpoints", { repoPath });
 
+/** The changed paths for a single checkpoint.
+ *
+ * `listAiCheckpoints` fills in `changed_paths` for every row, and each one costs a full working
+ * tree walk with recursive untracked — so listing twenty checkpoints is twenty walks. This is the
+ * per-row version, for a UI that computes them only for the row the user opens. */
+export const aiCheckpointChangedPaths = (repoPath: string, checkpointId: string) =>
+  invoke<string[]>("ai_checkpoint_changed_paths", { repoPath, checkpointId });
+
 /** Restores the checkpoint's files. Returns the paths that were put back. */
 export const restoreAiCheckpoint = (repoPath: string, checkpointId: string) =>
   invoke<string[]>("restore_ai_checkpoint", { repoPath, checkpointId });
@@ -1347,7 +1386,15 @@ export const deleteChatConversation = (projectId: string, sessionId: string) =>
 export const renameChatConversation = (projectId: string, sessionId: string, title: string) =>
   invoke<void>("rename_chat_conversation", { projectId, sessionId, title });
 
-export const listJobHistory = (projectId: string) => invoke<JobHistoryEntry[]>("list_job_history", { projectId });
+/** One project's job history, newest first.
+ *
+ * `limit`/`offset` page it. Omitting them returns the whole table, which is what this did before
+ * paging existed — every PR review and analysis the project has ever run, each carrying its full
+ * result text, in one IPC response. Callers that render a list should page; the store's
+ * "load more" path is what keeps the older entries reachable. */
+export const listJobHistory = (projectId: string, limit?: number, offset?: number) =>
+  invoke<JobHistoryEntry[]>("list_job_history", { projectId, limit, offset });
+
 
 export const renameJobHistoryEntry = (id: string, label: string) => invoke<void>("rename_job_history_entry", { id, label });
 
@@ -1356,9 +1403,11 @@ export const deleteJobHistoryEntry = (id: string) => invoke<void>("delete_job_hi
 // ---------- workspace activity (reviews of PRs with no repository here) ----------
 
 /** Everything reviewed from a link in this workspace, newest first. Repository-agnostic by
- * design: these runs have no project, so they follow the workspace instead. */
-export const listWorkspaceActivity = (workspaceId: string) =>
-  invoke<WorkspaceActivityEntry[]>("list_workspace_activity", { workspaceId });
+ * design: these runs have no project, so they follow the workspace instead.
+ *
+ * Paged the same way as `listJobHistory`, and for the same reason. */
+export const listWorkspaceActivity = (workspaceId: string, limit?: number, offset?: number) =>
+  invoke<WorkspaceActivityEntry[]>("list_workspace_activity", { workspaceId, limit, offset });
 
 export const renameWorkspaceActivityEntry = (id: string, label: string) =>
   invoke<void>("rename_workspace_activity_entry", { id, label });

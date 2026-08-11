@@ -12,6 +12,37 @@ const POLL_MS = 10_000;
 
 const EMPTY: UsageSummary = { session: [], week: [], since: "" };
 
+/** Whether two reads say the same thing.
+ *
+ * The summary arrives deserialized from IPC, so every tick hands back a brand-new object graph
+ * even when not a single number moved — and publishing it re-rendered the status bar every ten
+ * seconds for nothing. This is the whole comparison: eight numbers per provider, over a handful of
+ * providers, run once per poll. */
+function sameWindows(a: UsageWindow[], b: UsageWindow[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const x = a[i];
+    const y = b[i];
+    if (
+      x.provider !== y.provider ||
+      x.runs !== y.runs ||
+      x.input_tokens !== y.input_tokens ||
+      x.output_tokens !== y.output_tokens ||
+      x.cache_read_tokens !== y.cache_read_tokens ||
+      x.cache_write_tokens !== y.cache_write_tokens ||
+      x.cost_usd !== y.cost_usd ||
+      x.costed_runs !== y.costed_runs
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function sameSummary(a: UsageSummary, b: UsageSummary): boolean {
+  return a.since === b.since && sameWindows(a.session, b.session) && sameWindows(a.week, b.week);
+}
+
 interface UsageState {
   summary: UsageSummary;
   /** True until the first read lands, so the bar can stay out of the way rather than flash a zero. */
@@ -33,25 +64,48 @@ export const useUsageStore = create<UsageState>((set, get) => ({
     const summary = await aiUsageSummary().catch(() => null);
     // Kept as it was on failure rather than blanked: a meter that empties itself because one read
     // failed reads as "nothing has been spent", which is the one thing it must never say wrongly.
-    if (summary) set({ summary, loading: false });
-    else set({ loading: false });
+    if (!summary) {
+      if (get().loading) set({ loading: false });
+      return;
+    }
+    // Same numbers, new object: publishing it would re-render the status bar for nothing. The
+    // first read still lands, because `loading` changes with it.
+    if (!get().loading && sameSummary(get().summary, summary)) return;
+    set({ summary, loading: false });
   },
 
   watch: () => {
     watchers += 1;
     if (watchers === 1) {
       void get().refresh();
-      timer = setInterval(() => void get().refresh(), POLL_MS);
+      // Gated on visibility rather than on the meter being mounted: `UsageMeter` renders from both
+      // of the status bar's branches, so the reference count never reaches zero and this was the
+      // one timer in the app that genuinely ran for ever. Each tick is an IPC hop plus a SQLite
+      // aggregate behind the global mutex — worth nothing at all while the window is hidden.
+      timer = setInterval(() => {
+        if (document.visibilityState !== "visible") return;
+        void get().refresh();
+      }, POLL_MS);
+      // …and the number has to be right the instant the window comes back, not up to ten seconds
+      // later: a hidden window is exactly when an agent turn lands unwatched.
+      document.addEventListener("visibilitychange", onVisibilityChange);
     }
     return () => {
       watchers -= 1;
       if (watchers === 0 && timer) {
         clearInterval(timer);
         timer = null;
+        document.removeEventListener("visibilitychange", onVisibilityChange);
       }
     };
   },
 }));
+
+function onVisibilityChange(): void {
+  if (document.visibilityState === "visible" && watchers > 0) {
+    void useUsageStore.getState().refresh();
+  }
+}
 
 /** An agent turn that just landed is a moment the meter is certainly stale, so it does not wait out
  * the poll. Only agent turns raise this — a chat turn, a review or a generated commit message spend

@@ -1,4 +1,3 @@
-import { parse as parseYaml } from "yaml";
 import {
   defaultAuth,
   defaultRequestSpec,
@@ -245,10 +244,16 @@ export function detectFormat(text: string): ImportFormat | null {
 // Entry point
 // ---------------------------------------------------------------------------
 
-export function importAny(text: string, options: ImportOptions = {}): ImportResult {
+/**
+ * Async only because of the YAML fallback — see `parseDocument`. Everything downstream of it is
+ * still ordinary synchronous work, so a JSON document resolves on the first microtask; nothing here
+ * waits on I/O. Callers that awaited a file read already were unaffected; the one that runs on a
+ * keystroke debounce (`ImportModal`) has to guard against an out-of-order resolve, and does.
+ */
+export async function importAny(text: string, options: ImportOptions = {}): Promise<ImportResult> {
   const warnings: string[] = [];
   const format = detectFormat(text);
-  const result = runImport(text, format, warnings, options);
+  const result = await runImport(text, format, warnings, options);
   // The same unmapped construct usually repeats once per request; one line per distinct problem
   // is a report, one per occurrence is a wall.
   result.warnings = [...new Set(result.warnings)];
@@ -261,23 +266,30 @@ export function importAny(text: string, options: ImportOptions = {}): ImportResu
  * YAML is a superset of JSON, so `parseYaml` alone would read both — but it is an order of
  * magnitude slower, and the documents that arrive here are routinely several megabytes and get
  * re-parsed on a keystroke debounce. The fast path stays the common one.
+ *
+ * The `yaml` package is also ~40 kB of the API chunk that a Postman/HAR/Insomnia/cURL/JSON-OpenAPI
+ * import never touches, so it is imported *inside* the fallback — after the JSON fast path has
+ * already returned. That is the whole reason this function (and `runImport`, and `importAny`) are
+ * async; nothing else in the import pipeline awaits anything. `detectFormat` deliberately stays
+ * synchronous: it only regex-sniffs YAML, never parses it, and it runs on every keystroke.
  */
-function parseDocument(text: string): unknown {
+async function parseDocument(text: string): Promise<unknown> {
   const json = parseJsonSafe(text);
   if (json !== undefined) return json;
   try {
+    const { parse: parseYaml } = await import("yaml");
     return parseYaml(text, { maxAliasCount: 1000 });
   } catch {
     return undefined;
   }
 }
 
-function runImport(
+async function runImport(
   text: string,
   format: ImportFormat | null,
   warnings: string[],
   options: ImportOptions,
-): ImportResult {
+): Promise<ImportResult> {
   const empty = (f: ImportFormat): ImportResult => ({
     format: f,
     collections: [],
@@ -293,7 +305,7 @@ function runImport(
     return empty("codeflow");
   }
 
-  const doc = parseDocument(text);
+  const doc = await parseDocument(text);
   if (!isObj(doc)) {
     warnings.push("The document isn't valid JSON or YAML.");
     return empty(format);
