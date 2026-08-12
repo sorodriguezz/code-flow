@@ -3,9 +3,10 @@ import {
   remoteCheckCloud,
   remoteCloseForward,
   remoteCloseFiles,
-  remoteCloseHostForwards,
   remoteCloseScreen,
   remoteCreateGroup,
+  remoteDisconnectHost,
+  remoteHostHolds,
   remoteCreateHost,
   remoteCreateSnippet,
   remoteDeleteGroup,
@@ -39,6 +40,7 @@ import {
   type RemoteGroupRow,
   type RemoteHostRow,
   type RemoteHostSpec,
+  type HostHold,
   type RemoteSnippet,
   type ScreenLaunch,
 } from "../types/remote";
@@ -55,7 +57,8 @@ import {
  * 1. **A session tab holds a terminal id, not a connection.** Opening one asks the backend to put
  *    `ssh` in a pty and hands back the same kind of id a local shell has, so the pane that renders
  *    it is the existing xterm component and closing a tab is `closeTerminal`. There is no connected
- *    / disconnected state to model: a session exists while its process does.
+ *    / disconnected state to model *for a shell*: a session exists while its process does. That is
+ *    not true of everything else a host holds — see point 4.
  *
  * 2. **`forwards` is polled, not derived.** It is the backend's list of live `ssh -N` children, and
  *    the interesting change — one dying because the network dropped — produces no event. A forward
@@ -65,6 +68,13 @@ import {
  *    `remotes::session`), so they live and die with the terminal. That is the point of marking one
  *    auto, and it is why the forwards panel shows them as "with the session" rather than as rows
  *    that could be closed on their own.
+ *
+ * 4. **A shell is not the only thing a host holds.** A file session is an `ssh -s … sftp` child kept
+ *    alive per host until something closes it (`remotes::sftp`), an FTP row holds a logged-in control
+ *    socket, and a screen's tunnel and its loopback bridge route outlive the viewer window. None of
+ *    those is a tab and none of them produces an event, so `holds` is polled beside `forwards` and is
+ *    what "this host has something to disconnect" means. A cloud account is the one kind that never
+ *    appears in it: it holds nothing between requests, on purpose.
  */
 
 const collapsedKey = (workspaceId: string) => `remote_collapsed_groups:${workspaceId}`;
@@ -213,6 +223,24 @@ interface RemoteState {
   groups: RemoteGroupRow[];
   snippets: RemoteSnippet[];
   forwards: ActiveForward[];
+  /**
+   * What the backend says each host is holding open, by host id. Absent means holding nothing.
+   *
+   * **Polled, like `forwards`, and for the same reason** — an `ssh` that died pushes nothing. Kept as
+   * a map rather than the array the command returns because every host row reads its own entry, and a
+   * `find` per row per tick is the shape that gets slower as the estate grows.
+   */
+  holds: Record<string, HostHold>;
+  /**
+   * Host ids whose disconnect is in flight.
+   *
+   * A *third* state rather than a shade of the other two, for the reason `dbStore.connecting` gives: a
+   * release closes a pooled SFTP channel, kills two or three `ssh` children and waits on a socket that
+   * may be mid-transfer, all of which are slower than the click. Without it the row held its old dot
+   * for the whole round trip and then flipped, so the only reading available was that the click had
+   * not registered.
+   */
+  disconnecting: string[];
   /** Group names the user has collapsed. Persisted: a collapsed group is a decision about how much
    *  room a set of hosts deserves, and re-making it every launch is the reason `layoutStore` keeps
    *  its own flags rather than leaving them to session state. */
@@ -381,6 +409,17 @@ interface RemoteState {
  */
 let pendingLoad: { workspaceId: string; promise: Promise<void> } | null = null;
 
+/**
+ * Bumped by every deliberate release, so a poll that left before it cannot put back what it saw.
+ *
+ * `pollForwards` replaces `forwards` and `holds` wholesale with what the backend said a round trip
+ * ago, and it is the only writer that does. Without this, a tick that overlapped the click is how a
+ * host the user just disconnected comes back looking connected for four seconds — and a host drawn as
+ * holding nothing is a host whose Disconnect entry is not in the menu, so the drift would hide the one
+ * command that would fix it.
+ */
+let holdsEpoch = 0;
+
 export function ensureRemoteStoreLoaded(): Promise<void> {
   const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
   if (workspaceId === null) return Promise.resolve();
@@ -462,6 +501,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   groups: [],
   snippets: [],
   forwards: [],
+  holds: {},
+  disconnecting: [],
   collapsedGroups: [],
   query: "",
   tagFilter: [],
@@ -485,8 +526,15 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     // children nothing on screen names.
     for (const tab of get().tabs) {
       if (tab.kind === "session") void closeTerminal(tab.sessionId).catch(() => {});
-      if (tab.kind === "screen") void remoteCloseScreen(tab.hostId).catch(() => {});
-      if (tab.kind === "sftp") void remoteCloseFiles(tab.hostId).catch(() => {});
+    }
+    // And whatever the outgoing workspace's hosts are holding without a tab to show it — a file
+    // session, a forward, a screen's bridge route. Per host rather than a single release-everything:
+    // the backend's registries carry no workspace id, so releasing all of them would kill forwards the
+    // *incoming* workspace's hosts may own. The tab loop above used to be the whole teardown, which
+    // left three leaks behind every switch: forwards were never closed, an `azure` tab's file session
+    // was skipped, and a host holding a file session with no tab open was never touched at all.
+    for (const hostId of Object.keys(get().holds)) {
+      void remoteDisconnectHost(hostId).catch(() => {});
     }
 
     // Cleared rather than left to be overwritten: for the length of the load the view would
@@ -498,6 +546,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       groups: [],
       snippets: [],
       forwards: [],
+      holds: {},
+      disconnecting: [],
       tabs: [],
       activeTabId: null,
       query: "",
@@ -638,17 +688,25 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   },
 
   deleteHost: async (id) => {
-    // Its tabs go first: a session tab pointing at a host that no longer exists has nothing to
-    // render a title from, and its `ssh` would outlive everything naming it.
-    for (const tab of get().tabs.filter((tab) => tab.hostId === id)) {
-      await get().closeTab(tab.id);
-    }
+    // Everything it holds goes first, not just its tabs: a session tab pointing at a host that no
+    // longer exists has nothing to render a title from and its `ssh` would outlive everything naming
+    // it — and a file session or a bridge token keyed by an id no row names is worse still, because
+    // no command left in the app can reach it.
+    await disconnectHost(id);
     try {
       await remoteDeleteHost(id);
-      set((s) => ({
-        hosts: s.hosts.filter((host) => host.id !== id),
-        detailsHostId: s.detailsHostId === id ? null : s.detailsHostId,
-      }));
+      set((s) => {
+        const holds = { ...s.holds };
+        const cloudStatus = { ...s.cloudStatus };
+        delete holds[id];
+        delete cloudStatus[id];
+        return {
+          hosts: s.hosts.filter((host) => host.id !== id),
+          detailsHostId: s.detailsHostId === id ? null : s.detailsHostId,
+          holds,
+          cloudStatus,
+        };
+      });
       await get().pollForwards();
     } catch (error) {
       pushErrorToast(`${translate("remote.deleteFailed")}: ${String(error)}`);
@@ -1059,8 +1117,17 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       set({ latency: null });
     }
 
+    const epoch = holdsEpoch;
     try {
-      set({ forwards: await remoteListForwards() });
+      // Two calls on one tick rather than one command returning both: the forwards list is read by
+      // two panels and needs `listen_port`, the holds map is read by every row and needs none of
+      // that, and both are a lock and some arithmetic in the backend. Fusing them would make the
+      // panels' data shape depend on what the dots want.
+      const [forwards, holds] = await Promise.all([remoteListForwards(), remoteHostHolds()]);
+      // Dropped rather than merged: what arrived describes the registries as they were *before* the
+      // user's own release, and merging it is how a host they just disconnected reappears connected.
+      if (epoch !== holdsEpoch) return;
+      set({ forwards, holds: Object.fromEntries(holds.map((hold) => [hold.host_id, hold])) });
     } catch {
       // A failed poll is not worth a toast: the next one is four seconds away, and the list it
       // would be reporting on is advisory.
@@ -1225,15 +1292,97 @@ async function saveCollapsed(workspaceId: string, groups: string[]): Promise<voi
   await setSetting(collapsedKey(workspaceId), JSON.stringify(groups)).catch(() => {});
 }
 
-/** Closes every forward a host owns — what "Disconnect" on a host row does, alongside closing its
- *  session tabs. Exported rather than a store action because the confirm dialog calls it from
- *  outside React. */
+/**
+ * Lets go of everything one host is holding — what "Disconnect" on a host row does.
+ *
+ * Its tabs, then the backend's side of it in one call: forwards, the screen's tunnel and bridge
+ * route, and the file session. It used to close only forwards and files, which is why a host with a
+ * screen open kept a loopback route to the far machine alive after being "disconnected".
+ *
+ * Exported rather than a store action because the menu calls it from outside React.
+ */
 export async function disconnectHost(hostId: string): Promise<void> {
   const store = useRemoteStore.getState();
-  for (const tab of store.tabs.filter((tab) => tab.hostId === hostId)) {
-    await store.closeTab(tab.id);
+  // Read before any await, so two clicks landing in the same frame cannot both get past it. The menu
+  // entry is disabled too — this is the guard for the gesture that reached the store anyway.
+  if (store.disconnecting.includes(hostId)) return;
+  useRemoteStore.setState((s) => ({
+    disconnecting: s.disconnecting.includes(hostId) ? s.disconnecting : [...s.disconnecting, hostId],
+  }));
+  try {
+    // Tabs first, and every one of them including a session whose pty already exited: `exited` says
+    // the far side hung up, not that this machine let go — the registry entry and its pty master are
+    // held until `closeTerminal`.
+    for (const tab of store.tabs.filter((tab) => tab.hostId === hostId)) {
+      await store.closeTab(tab.id);
+    }
+    holdsEpoch += 1;
+    await remoteDisconnectHost(hostId).catch(() => {});
+    // Dropped here rather than waited for on the next tick: the row's dot and its menu entry both read
+    // `holds`, and four seconds of a host still drawn as connected after the click is the drift this
+    // whole thing exists to remove. `cloudStatus` goes with it — a green dot meaning "this credential
+    // answered at 14:02" must not survive a deliberate disconnect.
+    useRemoteStore.setState((s) => {
+      const holds = { ...s.holds };
+      const cloudStatus = { ...s.cloudStatus };
+      delete holds[hostId];
+      delete cloudStatus[hostId];
+      return { holds, cloudStatus };
+    });
+    await store.pollForwards();
+  } finally {
+    // Cleared in `finally`, so a release that threw stops looking busy rather than spinning until the
+    // next click.
+    useRemoteStore.setState((s) => ({
+      disconnecting: s.disconnecting.filter((id) => id !== hostId),
+    }));
   }
-  await remoteCloseHostForwards(hostId).catch(() => {});
-  await remoteCloseFiles(hostId).catch(() => {});
-  await store.pollForwards();
+}
+
+/**
+ * What a host's dot draws, and whether its menu may offer a disconnect — in one place.
+ *
+ * Three copies of this rule lived in the tree row and both gallery layouts, and they had already
+ * drifted from the context menu's own idea of "live": a host with a file browser open was drawn idle
+ * by all three and offered a disconnect by none.
+ *
+ * Three selectors returning primitives, never one returning an object — a selector that builds a
+ * fresh object re-renders on every write, and the tick that writes `holds` comes every four seconds.
+ */
+export function useHostLiveness(hostId: string): { session: boolean; active: boolean; busy: boolean } {
+  // A shell that is running, or — for an account, which has no process — a credential that answered.
+  const session = useRemoteStore(
+    (s) =>
+      s.tabs.some((tab) => tab.kind === "session" && tab.hostId === hostId && !tab.exited) ||
+      (s.cloudStatus[hostId]?.ok ?? false),
+  );
+  // Something of this host's is held without a shell being live: a tunnel, a file session, a screen —
+  // or a session whose pty exited, which still holds its registry entry and its pty master.
+  const active = useRemoteStore((s) => {
+    const hold = s.holds[hostId];
+    return (
+      (hold?.forwards ?? 0) > 0 ||
+      (hold?.files ?? false) ||
+      (hold?.screen ?? false) ||
+      s.tabs.some((tab) => tab.kind === "session" && tab.hostId === hostId && tab.exited)
+    );
+  });
+  const busy = useRemoteStore((s) => s.disconnecting.includes(hostId));
+  return { session, active, busy };
+}
+
+/** Whether a host has anything at all that `disconnectHost` would release. The menu's test, and the
+ *  one the old `live` got wrong by only ever looking at tabs and forwards. */
+export function hostIsHolding(
+  hostId: string,
+  tabs: RemoteTab[],
+  holds: Record<string, HostHold>,
+): boolean {
+  const hold = holds[hostId];
+  return (
+    tabs.some((tab) => tab.kind === "session" && tab.hostId === hostId) ||
+    (hold?.files ?? false) ||
+    (hold?.forwards ?? 0) > 0 ||
+    (hold?.screen ?? false)
+  );
 }

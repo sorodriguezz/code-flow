@@ -4,6 +4,7 @@ import { useWorkspaceStore } from "../state/workspaceStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { useNavigationStore } from "../state/navigationStore";
 import { useEditorCommandStore } from "../state/editorCommandStore";
+import { useApiCommandStore } from "../state/apiCommandStore";
 import { useDbCommandStore } from "../state/dbCommandStore";
 import { useDbStore } from "../state/dbStore";
 import { useDbModalStore } from "../state/dbModalStore";
@@ -182,6 +183,24 @@ function newDbConsole(): void {
     return;
   }
   db.newConsole(connectionId);
+}
+
+/**
+ * Saves whatever the screen is showing: the open request in the API client, otherwise the file in
+ * the editor.
+ *
+ * One chord, two owners, because ⌘S means the same thing in both and `activeChords` only keeps one
+ * command per chord — a second registry entry for the API client would silently lose the binding to
+ * this one, and the settings screen would list two rows fighting over ⌘S.
+ *
+ * The API client is offered it first and answers whether it took it, so the fallback is not a guess
+ * about which view is up. The editor's own bus does the same check on its side (see
+ * `editorCommandStore.send`), which is why a ⌘S pressed anywhere else stays a no-op rather than
+ * saving a file nobody is looking at.
+ */
+function saveActive(): void {
+  if (useApiCommandStore.getState().send("save")) return;
+  useEditorCommandStore.getState().send("save");
 }
 
 function cycleProject(delta: number): void {
@@ -477,7 +496,8 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     group: "editor",
     labelKey: "editor.save",
     defaultChord: "Mod+S",
-    run: () => useEditorCommandStore.getState().send("save"),
+    // Not the editor's alone, despite the group it is listed under: see `saveActive`.
+    run: saveActive,
   },
   {
     id: "editor.closeTab",

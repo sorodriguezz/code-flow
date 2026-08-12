@@ -298,6 +298,32 @@ pub async fn close(host_id: &str) {
     super::cloud::share::close(host_id).await;
 }
 
+/// Every host holding a file session, whichever transport it is on.
+///
+/// Deduped, because a host edited from SFTP to FTP and browsed on both sides of the change can be in
+/// both maps, and the answer this feeds is "does this row have something to disconnect" — which is
+/// one yes.
+pub async fn open_hosts() -> Vec<String> {
+    let mut hosts = super::sftp::open_hosts().await;
+    for host in super::ftp::open_hosts().await {
+        if !hosts.contains(&host) {
+            hosts.push(host);
+        }
+    }
+    hosts
+}
+
+/// Drops every file session, both transports.
+///
+/// No cloud equivalent, and deliberately not three more no-ops like [`close`] has: what the cloud
+/// transports actually hold between requests is one process-wide connection pool
+/// ([`super::cloud::http`]) that belongs to no host and that no disconnect can drop. Bounding that is
+/// `pool_idle_timeout`'s job, not this function's.
+pub async fn close_all() {
+    super::sftp::close_all().await;
+    super::ftp::close_all().await;
+}
+
 // ---------------------------------------------------------------------------
 // Shared work
 // ---------------------------------------------------------------------------

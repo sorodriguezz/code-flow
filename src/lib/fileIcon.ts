@@ -54,6 +54,9 @@ const BY_EXT: Record<string, FileIcon> = {
   kt: { Icon: FileCode, color: "#a97bff" },
   cs: { Icon: FileCode, color: "#68217a" },
   cls: { Icon: FileCode, color: "#5c9ead" },
+  inc: { Icon: FileCode, color: "#5c9ead" },
+  mac: { Icon: FileCode, color: "#5c9ead" },
+  int: { Icon: FileCode, color: "#5c9ead" },
   rb: { Icon: FileCode, color: "#cc342d" },
   php: { Icon: FileCode, color: "#7a86b8" },
   c: { Icon: FileCode, color: "#5a9fd4" },
@@ -117,4 +120,30 @@ export function fileIconFor(path: string): FileIcon {
   if (byName) return byName;
   const ext = name.includes(".") ? name.split(".").pop()! : "";
   return BY_EXT[ext] ?? FALLBACK;
+}
+
+/**
+ * Extensions whose default icon is a catalogue glyph rather than a Lucide silhouette.
+ *
+ * A second built-in table rather than a shipped icon rule, for two reasons. A rule only reaches
+ * installs that have no stored profiles yet — the stored blob is read back verbatim — so anybody who
+ * has ever opened the icons panel would never see it. And appending to the default rule list changes
+ * its length, which the legacy-migration check compares, so every pre-profiles install would be
+ * migrated into a "Custom" profile instead of the one it had.
+ *
+ * This is consulted *below* the user's own rules, so a rule for `*.cls` still wins.
+ */
+const CATALOG_BY_EXT: Record<string, string> = {
+  cls: "cf:iris",
+  inc: "cf:iris",
+  mac: "cf:iris",
+  int: "cf:iris",
+};
+
+/** The catalogue id a path gets when no user rule claims it, or `null` to fall through to the Lucide
+ *  table above. */
+export function catalogIconFor(path: string): string | null {
+  const name = (path.split(/[\\/]/).pop() ?? path).toLowerCase();
+  const ext = name.includes(".") ? (name.split(".").pop() ?? "") : "";
+  return CATALOG_BY_EXT[ext] ?? null;
 }

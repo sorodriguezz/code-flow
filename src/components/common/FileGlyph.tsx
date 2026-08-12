@@ -8,7 +8,7 @@ import {
   type CatalogIcon,
 } from "../../lib/icons/catalog";
 import { customIconFor, type IconRule } from "../../lib/icons/rules";
-import { fileIconFor } from "../../lib/fileIcon";
+import { catalogIconFor, fileIconFor } from "../../lib/fileIcon";
 import { useIconRulesStore } from "../../state/iconRulesStore";
 
 /**
@@ -32,8 +32,9 @@ export function CatalogGlyph({ icon, size = 13 }: { icon: CatalogIcon; size?: nu
       viewBox={`0 0 ${icon.width} ${icon.height}`}
       className="shrink-0"
       aria-hidden
-      // The markup comes from the icon packages and never from anything the user typed — the rules
-      // only ever store an *id*, which is looked up here. See the note on `CatalogIcon.body`.
+      // The markup comes from the icon packages or from this repo's own bundled set, never from
+      // anything the user typed — the rules only ever store an *id*, which is looked up here. See the
+      // note on `CatalogIcon.body`.
       dangerouslySetInnerHTML={{ __html: icon.body }}
     />
   );
@@ -53,8 +54,10 @@ export function IconGlyph({ id, size = 13 }: { id: string; size?: number }) {
 /**
  * The icon for a path, wherever a path is drawn: the tree, the tabs, search hits, bookmarks.
  *
- * Three sources, in the order that lets the specific beat the general. **The user's rules** first —
- * they are the only ones that know `.spec.ts` is a test rather than TypeScript. Then the **built-in
+ * Four sources, in the order that lets the specific beat the general. **The user's rules** first —
+ * they are the only ones that know `.spec.ts` is a test rather than TypeScript. Then, for a handful of
+ * extensions, a **built-in catalogue id** (`catalogIconFor`): the file types whose right answer is a
+ * glyph rather than a silhouette, `.cls` and its ObjectScript siblings among them. Then the **built-in
  * Lucide table**, which covers extensions and well-known filenames and needs no download. A folder
  * with no rule keeps the plain folder, open or closed, because the open/closed state is information
  * the catalogue's static glyphs cannot carry.
@@ -105,7 +108,8 @@ export function FileGlyphView({
 
   // A rule first, then — for folders only — whatever the user chose as the default. A file with no
   // rule keeps the built-in table, which already knows sixty extensions by colour.
-  const chosen = customIconFor(rules, path, isFolder) ?? (isFolder ? defaultFolderIcon : null);
+  const chosen =
+    customIconFor(rules, path, isFolder) ?? (isFolder ? defaultFolderIcon : catalogIconFor(path));
   // Expanded folders take the `-opened` twin when the set has one, so a custom icon keeps the
   // open/closed signal the plain folder always carried.
   const resolved = chosen && isFolder && open ? (openedVariant(chosen) ?? chosen) : chosen;

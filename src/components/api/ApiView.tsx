@@ -18,6 +18,7 @@ import { tabActions } from "./tabActions";
 import { CARD } from "./panelChrome";
 import { EmptyState } from "../common/EmptyState";
 import { ensureApiStoreLoaded, useApiStore } from "../../state/apiStore";
+import { useApiCommandStore } from "../../state/apiCommandStore";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useUiStore } from "../../state/uiStore";
 import { useToastStore } from "../../state/toastStore";
@@ -27,7 +28,8 @@ import { useT } from "../../state/languageStore";
 /**
  * The API client's shell: sidebar, tab strip, request builder, response pane and the code-snippet
  * panel. Every panel below reads `apiStore`/`apiRuntimeStore` on its own — this file only decides
- * what is on screen, owns the modals, and binds the three keyboard shortcuts.
+ * what is on screen, owns the modals, and answers the three keyboard shortcuts: ⌘S through the
+ * shortcut registry's `apiCommandStore`, ⌘Enter and ⌘W on its own listener.
  *
  * There is deliberately no toolbar row of its own: the environment picker sits at the foot of the
  * sidebar and every action it used to hold lives in the sidebar header or its overflow menu, so
@@ -125,7 +127,33 @@ export function ApiView() {
     useApiStore.getState().closeTab(tab.id);
   }, [t]);
 
-  // Scoped to the view: it stays mounted once opened, so an unscoped ⌘S would save an API request
+  /**
+   * ⌘S, arriving through `apiCommandStore` rather than through the listener below.
+   *
+   * It used to be a branch in that listener and it never once ran: ⌘S is a registered shortcut, the
+   * registry's handler is bound in `App` — ahead of a view that mounts lazily on first visit — and
+   * its `preventDefault` meant everything here bailed on `defaultPrevented`. The chord is offered to
+   * this workspace first now, so the save happens where the logic already lives.
+   */
+  const apiCommand = useApiCommandStore((s) => s.request);
+  useEffect(() => {
+    if (!apiCommand) return;
+    useApiCommandStore.getState().consume();
+    // A modal covers the builder; ⌘S there would save the request behind it.
+    if (useApiModalStore.getState().modal !== null) return;
+    const store = useApiStore.getState();
+    const tabId = store.activeTabId;
+    if (!tabId) return;
+    // A settings tab has no `TabActions` — its save is one store call, with none of the script
+    // running and scope writing that makes a request's save worth registering.
+    if (store.entityTabs.some((tab) => tab.id === tabId)) {
+      void store.saveEntityTab(tabId);
+      return;
+    }
+    tabActions(tabId)?.save();
+  }, [apiCommand]);
+
+  // Scoped to the view: it stays mounted once opened, so an unscoped ⌘W would close a request tab
   // while the user is looking at the diff of a commit.
   useEffect(() => {
     // Also scoped to the requests side: the database workspace binds ⌘W to its own tab strip, and
@@ -137,21 +165,16 @@ export function ApiView() {
       if (useApiModalStore.getState().modal !== null) return;
       const tabId = useApiStore.getState().activeTabId;
       if (!tabId) return;
-      // A settings tab has no `TabActions` — its save is one store call, with none of the script
-      // running and scope writing that makes a request's save worth registering.
+      // A settings tab has no `TabActions`: Send means nothing for one, so ⌘W is all it takes.
       const entity = useApiStore.getState().entityTabs.some((tab) => tab.id === tabId);
       if (entity) {
-        if (e.key === "s" || e.key === "w") {
+        if (e.key === "w") {
           e.preventDefault();
-          if (e.key === "s") void useApiStore.getState().saveEntityTab(tabId);
-          else void closeActiveTab();
+          void closeActiveTab();
         }
         return;
       }
-      if (e.key === "s") {
-        e.preventDefault();
-        tabActions(tabId)?.save();
-      } else if (e.key === "Enter") {
+      if (e.key === "Enter") {
         e.preventDefault();
         tabActions(tabId)?.send();
       } else if (e.key === "w") {

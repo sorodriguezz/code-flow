@@ -206,6 +206,19 @@ pub fn close_host(host_id: &str) {
     }
 }
 
+/// Closes every forward, whatever host it belongs to.
+///
+/// The exit path's, for the reason [`crate::datasource::tunnel`] gives for having the same function:
+/// the map is a `static`, the kill happens when [`Running`] drops, and the process ends through
+/// `std::process::exit`, which runs no destructors. So without this every quit leaves an `ssh -N`
+/// behind — a forwarded port still listening and an authenticated session still open on the far
+/// host, reparented to init. Draining the map is what makes the drop, and therefore the kill, happen.
+pub fn close_all() {
+    if let Ok(mut map) = registry().lock() {
+        map.clear();
+    }
+}
+
 /// Every live forward.
 ///
 /// Liveness is the child still being in the map *and* not having exited — an `ssh` that died

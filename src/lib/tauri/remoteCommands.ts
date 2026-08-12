@@ -13,6 +13,7 @@ import type {
   RemoteListing,
   RemoteLogEntry,
   RemoteWorkspaceTree,
+  HostHold,
   SshKey,
   ScreenLaunch,
   QueueMessage,
@@ -121,6 +122,17 @@ export const remoteListForwards = () => invoke<ActiveForward[]>("remote_list_for
 // ---------- screen ----------
 
 export const remoteOpenScreen = (id: string) => invoke<ScreenLaunch>("remote_open_screen", { id });
+
+// ---------- connections held open ----------
+
+/** What every host is holding open. Polled on the forwards tick — nothing pushes when an `ssh`
+ *  dies. A host holding nothing is absent, not present with zeros. */
+export const remoteHostHolds = () => invoke<HostHold[]>("remote_host_holds");
+
+/** Releases one host's forwards, screen tunnel, bridge route and file session. **Not its shells** —
+ *  those are terminal sessions, ended with `closeTerminal`. */
+export const remoteDisconnectHost = (hostId: string) =>
+  invoke<void>("remote_disconnect_host", { hostId });
 
 // ---------------------------------------------------------------------------
 // Azure Queue and Table storage

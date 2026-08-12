@@ -173,6 +173,28 @@ pub fn close(host_id: &str) {
     }
 }
 
+/// Hosts whose embedded screen has a bridge route published.
+///
+/// The half of a screen that outlives its tunnel: revoking the token is the only thing that makes a
+/// stale `ws://` URL stop working, so a host can be holding this with no forward left to show.
+pub fn bridged_hosts() -> Vec<String> {
+    tokens()
+        .lock()
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Retires every host's bridge token. The tunnels themselves are [`super::forward::close_all`]'s;
+/// this is the half that would otherwise leave a loopback route to a far host live for the rest of
+/// the process.
+pub fn close_all() {
+    if let Ok(mut map) = tokens().lock() {
+        for (_, token) in map.drain() {
+            super::wsbridge::revoke(&token);
+        }
+    }
+}
+
 /// The viewer command line: the user's own if they set one, otherwise the platform's.
 fn viewer_command(
     protocol: ScreenProtocol,

@@ -323,6 +323,37 @@ pub fn remote_close_screen(id: String) {
 }
 
 // ---------------------------------------------------------------------------
+// Connections held open
+// ---------------------------------------------------------------------------
+//
+// Two commands rather than one taking a verb, because the UI has two different questions — "may I
+// honestly offer Disconnect on this row" and "let go of this one".
+//
+// Note what neither of them releases: a shell. A remote session is a terminal session (see the
+// module header), so `close_terminal` is what ends one, and the tab that owns its id is the only
+// thing that knows which host it belongs to.
+
+/// What every host is holding open right now.
+///
+/// Polled on the same tick as [`remote_list_forwards`], and for the same reason: an `ssh` that dies
+/// pushes no event. A host holding nothing is absent rather than present with zeros.
+#[tauri::command]
+pub async fn remote_host_holds() -> Vec<remotes::hold::HostHold> {
+    remotes::hold::all().await
+}
+
+/// Lets go of everything one host is holding: its forwards, its screen's tunnel and bridge route,
+/// and its file session.
+///
+/// Not logged, unlike opening any of them. The log records what was *opened* against a host and how
+/// it went; a release has no outcome, and it must work for a host whose row has already been
+/// deleted — which is exactly when `load` could not find a name to log against.
+#[tauri::command]
+pub async fn remote_disconnect_host(host_id: String) {
+    remotes::hold::release(&host_id).await;
+}
+
+// ---------------------------------------------------------------------------
 // Azure Queue storage
 // ---------------------------------------------------------------------------
 //

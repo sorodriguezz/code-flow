@@ -15,7 +15,7 @@ import {
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { HostDot, KindGlyph, OsGlyph, Pill } from "./remoteChrome";
 import { useHostMenu, useNewConnectionMenu, useOpenPrimary } from "./hostMenu";
-import { allTags, hostMatches, useRemoteStore } from "../../state/remoteStore";
+import { allTags, hostMatches, useHostLiveness, useRemoteStore } from "../../state/remoteStore";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
 import {
@@ -336,13 +336,9 @@ function HostCard({ host, at, onMenu }: { host: RemoteHostRow; at: number; onMen
   const cardMenu = useCardMenu(onMenu);
   const selectHost = useRemoteStore((s) => s.selectHost);
   const selected = useRemoteStore((s) => s.selectedHostId === host.id);
-  // A shell that is running, or — for an account, which has no process — a credential that answered.
-  const hasSession = useRemoteStore(
-    (s) =>
-      s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited) ||
-      (s.cloudStatus[host.id]?.ok ?? false),
-  );
-  const hasForward = useRemoteStore((s) => s.forwards.some((f) => f.host_id === host.id));
+  // One rule for what this dot draws, shared with the tree and the other gallery layout — the three
+  // copies of it had already drifted from the menu's own idea of "live".
+  const { session, active, busy } = useHostLiveness(host.id);
   const t = useT();
 
   const spec = parseHostSpec(host);
@@ -378,7 +374,7 @@ function HostCard({ host, at, onMenu }: { host: RemoteHostRow; at: number; onMen
       }`}
     >
       <div className="flex min-w-0 items-center gap-1.5">
-        <HostDot session={hasSession} active={hasForward} color={host.color} />
+        <HostDot session={session} active={active} busy={busy} color={host.color} />
         <OsGlyph os={spec.os} size={14} />
         <KindGlyph kind={spec.kind} size={13} />
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--cf-text)]">
@@ -424,13 +420,9 @@ function HostListRow({ host, at, onMenu }: { host: RemoteHostRow; at: number; on
   const cardMenu = useCardMenu(onMenu);
   const selectHost = useRemoteStore((s) => s.selectHost);
   const selected = useRemoteStore((s) => s.selectedHostId === host.id);
-  // A shell that is running, or — for an account, which has no process — a credential that answered.
-  const hasSession = useRemoteStore(
-    (s) =>
-      s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited) ||
-      (s.cloudStatus[host.id]?.ok ?? false),
-  );
-  const hasForward = useRemoteStore((s) => s.forwards.some((f) => f.host_id === host.id));
+  // One rule for what this dot draws, shared with the tree and the other gallery layout — the three
+  // copies of it had already drifted from the menu's own idea of "live".
+  const { session, active, busy } = useHostLiveness(host.id);
   const t = useT();
 
   const spec = parseHostSpec(host);
@@ -462,7 +454,7 @@ function HostListRow({ host, at, onMenu }: { host: RemoteHostRow; at: number; on
         selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
       }`}
     >
-      <HostDot session={hasSession} active={hasForward} color={host.color} />
+      <HostDot session={session} active={active} busy={busy} color={host.color} />
       <OsGlyph os={spec.os} size={13} />
       <span className="w-[160px] shrink-0 truncate text-[12px] font-medium text-[var(--cf-text)]">
         {host.name}

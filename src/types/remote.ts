@@ -444,6 +444,26 @@ export interface ActiveForward {
   label: string;
 }
 
+/**
+ * What one host is holding open on somebody else's machine.
+ *
+ * Mirrors `remotes::hold::HostHold`, whose fields these are. **A host holding nothing is absent from
+ * the map**, not present with zeros — so presence is exactly "this row has something to disconnect",
+ * which is the question both the dot and the menu entry ask.
+ *
+ * A shell is not in here: a remote session is a terminal session keyed by its own id, and the tab
+ * that owns that id is the only thing that knows which host it belongs to.
+ */
+export interface HostHold {
+  host_id: string;
+  /** A file session, either transport — an `ssh -s … sftp` child or a logged-in FTP control socket. */
+  files: boolean;
+  /** Standalone `ssh -N` children. The screen's own `-L` is `screen`, not one of these. */
+  forwards: number;
+  /** The screen's tunnel, its loopback bridge route, or both. */
+  screen: boolean;
+}
+
 /** Where the viewer was actually pointed. `tunnelled` is not a detail — the user asked for
  *  `10.0.0.7:5900` and the viewer opened on `127.0.0.1:49213`. */
 export interface ScreenLaunch {

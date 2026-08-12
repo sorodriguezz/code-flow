@@ -30,8 +30,23 @@ tauri-build = { version = "2", features = [] }
 # point is that agent runs and terminals keep living in the tray after the window closes, means
 # silently losing the user's background work.
 [profile.release]
-lto = "fat"
-codegen-units = 1
+# `thin`, not `fat`, and no `codegen-units = 1`. Both of those were tried on v1.14.13 and took the
+# Windows release job past 29 minutes on their own.
+#
+# The reason is the shape of this dependency graph rather than anything about the app: 757 crates,
+# several of which build C (rusqlite ships SQLite, git2 ships libgit2), plus reqwest+rustls,
+# tonic/prost, mongodb, tiberius, tokio-postgres and russh-sftp. `codegen-units = 1` removes the
+# parallelism *within* every one of those crates, and `lto = "fat"` is a single-threaded
+# whole-program pass over the lot at link time — a pass that depends on the final binary, so
+# `rust-cache` can never restore it and every release pays it again from scratch.
+#
+# `thin` keeps the part that actually matters here (cross-crate inlining) while running in
+# parallel and incrementally. The measured-in-anger difference between thin and fat on a graph
+# like this one is small; the difference in build time is not.
+#
+# Deliberately NOT `panic = "abort"`: there are places that recover from a poisoned mutex (see
+# `terminal.rs`) and one that catches a panic while flushing, and all of them need unwinding.
+lto = "thin"
 strip = "symbols"
 
 [dependencies]

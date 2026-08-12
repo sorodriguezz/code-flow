@@ -2,6 +2,7 @@ import * as monaco from "monaco-editor";
 import { loader } from "@monaco-editor/react";
 import { ALL_THEMES, monacoThemeName, tokenRulesFor } from "./codeThemes";
 import { installGoToDefinition } from "./goToDefinition";
+import { registerObjectScript } from "./monacoObjectScript";
 // Subpaths go through the package's own `exports` map (`./*` → `./esm/vs/*.js`), so these are
 // the mapped specifiers, not the on-disk paths.
 import editorWorker from "monaco-editor/editor/editor.worker?worker";
@@ -111,6 +112,11 @@ for (const theme of ALL_THEMES) {
 }
 
 export { monaco };
+
+// ObjectScript, for `.cls` / `.mac` / `.int` / `.inc`. Registered *above* `installGoToDefinition`,
+// which snapshots the language list at call time — a language registered after it gets no
+// Ctrl/Cmd+click, which is exactly why `graphql` has none.
+registerObjectScript();
 
 // Ctrl/Cmd+click to jump to a definition. Registered here, once, because both halves of it (the
 // definition provider and the editor opener) are global to Monaco rather than per-instance —

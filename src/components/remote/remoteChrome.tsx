@@ -7,14 +7,17 @@ import {
   Cloud,
   Database,
   Inbox,
+  Loader2,
   Monitor,
   MonitorSmartphone,
   Server,
   ShieldCheck,
   Terminal,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { KIND_LABEL, type AzureService, type RemoteKind, type RemoteOs } from "../../types/remote";
+import { useT } from "../../state/languageStore";
 import type { RemoteTransferEvent } from "../../lib/tauri/events";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -209,53 +212,63 @@ export const HOST_COLORS = [
 /**
  * A host's state, as one dot.
  *
- * Three states rather than two, because "has a live session" and "has a live tunnel" are genuinely
- * different things to know about a machine and collapsing them would make a host with a forward up
- * look idle. Filled = a session is open; ringed = no session but something of this host's is
- * running; hollow = nothing.
- */
-/**
- * The row's state light: filled while something is live, ringed while something is up, hollow
- * otherwise.
+ * **Four states, not three.** Filled = a shell is running — and for a cloud account, which has no
+ * process, that is a credential that answered (see `cloudStatus` in the remote store); same light for
+ * both because it answers one question, "is this thing working right now", and a second kind of dot
+ * beside it would only make the reader ask which one to believe. Ringed = no shell, but this host is
+ * holding something: a tunnel, a file session, a screen's loopback route, or a session whose pty
+ * exited and whose pty master is still open. Hollow = nothing.
  *
- * `session` is what "live" means, and for a cloud account that is not a process but a credential
- * that answered — see `cloudStatus` in the remote store. Same light for both because it answers one
- * question ("is this thing working right now") and a second kind of dot beside it would only make
- * the reader ask which one to believe.
+ * `busy` is the one in between, while a release is in flight. Without it the dot held its old value
+ * for the whole round trip — closing a pooled SFTP channel and killing two or three `ssh` children is
+ * slower than the click — and then flipped, so the only reading available was that the click had not
+ * registered.
+ *
+ * Drawn as a halo pulsing out of the dot rather than as a spinner, the same way `ConnectionDot` does
+ * it: at seven pixels a spinner is a grey smudge, and the halo keeps the dot itself — which carries
+ * the host's colour and the actual state — legible underneath. It sits in an overlay, so nothing in
+ * the row moves when it appears.
  */
 export function HostDot({
   session,
   active,
+  busy = false,
   color,
 }: {
   session: boolean;
   active: boolean;
+  busy?: boolean;
   color?: string;
 }) {
   const tint = color?.trim() || "var(--cf-accent)";
-  if (session) {
-    return (
-      <span
-        aria-hidden
-        className="h-[7px] w-[7px] shrink-0 rounded-full"
-        style={{ background: tint }}
-      />
-    );
-  }
-  if (active) {
-    return (
-      <span
-        aria-hidden
-        className="h-[7px] w-[7px] shrink-0 rounded-full border"
-        style={{ borderColor: tint }}
-      />
-    );
-  }
-  return (
+  const dot = session ? (
+    <span
+      aria-hidden
+      className="h-[7px] w-[7px] shrink-0 rounded-full"
+      style={{ background: tint }}
+    />
+  ) : active ? (
+    <span
+      aria-hidden
+      className="h-[7px] w-[7px] shrink-0 rounded-full border"
+      style={{ borderColor: tint }}
+    />
+  ) : (
     <span
       aria-hidden
       className="h-[7px] w-[7px] shrink-0 rounded-full border border-[var(--cf-text-muted)]/40"
     />
+  );
+  if (!busy) return dot;
+  return (
+    <span className="relative flex h-[7px] w-[7px] shrink-0 items-center justify-center">
+      <span
+        aria-hidden
+        className="absolute inset-0 animate-ping rounded-full opacity-75 motion-reduce:animate-none motion-reduce:animate-pulse"
+        style={{ backgroundColor: tint }}
+      />
+      {dot}
+    </span>
   );
 }
 
@@ -266,6 +279,7 @@ export function ToolbarButton({
   onClick,
   disabled,
   active,
+  title,
 }: {
   icon: LucideIcon;
   label: string;
@@ -274,11 +288,21 @@ export function ToolbarButton({
   onClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
   disabled?: boolean;
   active?: boolean;
+  /**
+   * The hover, when it is not the name.
+   *
+   * For the button whose *consequence* is worth a sentence and whose accessible name is not — Receive
+   * takes messages off a live queue for a visibility window, and that is what a tooltip is for, while
+   * "Receive" is what a screen reader should say. Collapsing the two would make the accessible name a
+   * paragraph, which is how an icon-only toolbar becomes unusable to the people who need the label
+   * most. Defaults to the label, which is what every other button wants.
+   */
+  title?: string;
 }) {
   return (
     <button
       type="button"
-      title={label}
+      title={title ?? label}
       aria-label={label}
       disabled={disabled}
       onClick={onClick}
@@ -360,6 +384,76 @@ export function TransferBar({ progress }: { progress: RemoteTransferEvent }) {
   );
 }
 
+/**
+ * One line for a long-running *loop* — an import of 900 rows, a count over a whole table, a delete
+ * of forty blobs — as opposed to `TransferBar`, which reports one transfer's bytes.
+ *
+ * Here for the same reason `TransferBar` is: three panels had already written it, and the piece that
+ * would have gone missing from the fourth copy is the Stop. A loop of round trips is the one kind of
+ * work in this app the user cannot get out of any other way — no request is slow enough to cancel,
+ * and the hundredth is as far away as the first — so the bar and the way out of it are one component.
+ *
+ * Determinate where a total is known and a running tally where it is not, because "how many so far"
+ * is the only honest answer to a scan whose length nobody knows in advance. A percentage over a
+ * total of zero would be a number the code invented.
+ */
+export function WorkBar({
+  label,
+  done,
+  total,
+  onStop,
+  compact = false,
+}: {
+  label: string;
+  done: number;
+  /** 0 means "nobody knows how many" — a bare tally and a pulsing bar rather than a lying
+   *  percentage. */
+  total: number;
+  onStop?: () => void;
+  /** The 10px variant, for the 224px rail. */
+  compact?: boolean;
+}) {
+  const t = useT();
+  return (
+    <div
+      className={`shrink-0 border-b border-[var(--cf-border)] py-1.5 ${compact ? "px-2" : "px-3"}`}
+    >
+      <div
+        className={`flex items-center text-[var(--cf-text-muted)] ${
+          compact ? "gap-1.5 text-[10px]" : "gap-2 text-[11px]"
+        }`}
+      >
+        <Loader2 size={compact ? 10 : 11} className="shrink-0 animate-spin" />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {/* The spaces go with the roomy variant only: in a rail this narrow the label is the thing
+            worth the width, and `12 / 40` costs two characters of it to say what `12/40` says. */}
+        <span className="shrink-0 tabular-nums">
+          {total > 0 ? (compact ? `${done}/${total}` : `${done} / ${total}`) : done}
+        </span>
+        {onStop && (
+          <button
+            type="button"
+            onClick={onStop}
+            title={t("remote.gridStop")}
+            aria-label={t("remote.gridStop")}
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
+          >
+            <X size={12} />
+          </button>
+        )}
+      </div>
+      <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.08]">
+        <div
+          className={`h-full rounded-full bg-[var(--cf-accent)] ${
+            total > 0 ? "transition-[width] duration-150" : "animate-pulse"
+          }`}
+          style={{ width: total > 0 ? `${(done / total) * 100}%` : "100%" }}
+        />
+      </div>
+    </div>
+  );
+}
+
 /** `1.2 MB`. Binary units, because that is what every file browser on every platform shows. */
 export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -371,6 +465,27 @@ export function formatSize(bytes: number): string {
     unit += 1;
   }
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+/**
+ * An epoch-seconds stamp as a date somebody can read, in their own locale.
+ *
+ * Here rather than in either panel that wants it because "0 is not 1970" is the shared half: every
+ * remote listing in this app reports a missing timestamp as a zero — a `BlobPrefix` row has no
+ * modified date, a peeked message may carry no expiry — and a formatter that answered
+ * `1 Jan 1970, 00:00` would put a wrong fact in a column instead of leaving it empty. Short month and
+ * no seconds because these are columns, and a listing whose dates are 24 characters wide is a listing
+ * with room for two columns.
+ */
+export function formatWhen(epochSeconds: number, language: string): string {
+  if (!epochSeconds) return "";
+  return new Date(epochSeconds * 1000).toLocaleString(language, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 /** Remote paths are always `/`-separated, even when the server is Windows. */

@@ -14,7 +14,14 @@ const EXT_TO_LANGUAGE: Record<string, string> = {
   go: "go",
   java: "java",
   cs: "csharp",
-  cls: "objectscript",
+  // Two ids because the two dialects have different top levels — a class body is declarations, a
+  // routine is statements. `.cls` deliberately displaces Monaco's Apex claim on the extension; every
+  // editor in the app passes `language` explicitly, so which one wins is decided here and nowhere
+  // else. See `monacoObjectScript`.
+  cls: "objectscript-class",
+  inc: "objectscript",
+  mac: "objectscript",
+  int: "objectscript",
   rb: "ruby",
   php: "php",
   sql: "sql",

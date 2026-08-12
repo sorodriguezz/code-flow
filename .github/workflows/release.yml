@@ -145,10 +145,15 @@ jobs:
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # `beforeBuildCommand` runs `vite build`, which bundles Monaco (a ~20 MB chunk) and
-          # peaks well above Node's default heap on the macOS runner — it died at ~2 GB there
-          # with "Ineffective mark-compacts near heap limit". The runner has 7 GB, so 4 GB is
-          # headroom without risking swap. Raise this if the bundle grows a lot.
+          # `beforeBuildCommand` runs `vite build`, which peaks well above Node's default heap on
+          # the macOS runner — it died at ~2 GB there with "Ineffective mark-compacts near heap
+          # limit". The runner has 7 GB, so 4 GB is headroom without risking swap. Raise this if
+          # the bundle grows a lot.
+          #
+          # It used to be Monaco in a ~20 MB entry chunk that did it. Since v1.14.13 the entry is
+          # ~1.4 MB and the weight lives in lazily-imported chunks instead, but the peak is a
+          # minifier working on the largest single chunk — now `@dbml/core` at ~15.6 MB — so the
+          # ceiling still has to clear it.
           NODE_OPTIONS: --max-old-space-size=4096
           # Updater signing — required so the app can verify and auto-install updates.
           # Add ONE repository secret (Settings › Secrets and variables › Actions):

@@ -29,6 +29,8 @@
 //! - [`files`] — the file browser's one entry point, dispatching on [`RemoteKind`] to:
 //! - [`sftp`] — files over SSH's SFTP subsystem, and
 //! - [`ftp`] — files over FTP/FTPS, the one transport that owns its own socket.
+//! - [`hold`] — what a host is holding open, and letting go of it. The one file that knows the
+//!   others' registries exist at the same time.
 //! - [`sshconfig`] — reading `~/.ssh/config`, because nobody's first host should be typed in.
 //! - [`parse`] — turning a pasted `ssh user@host -p 2222` into a spec, because that is the shape an
 //!   address actually arrives in.
@@ -36,6 +38,7 @@
 pub mod files;
 pub mod forward;
 pub mod ftp;
+pub mod hold;
 pub mod keys;
 pub mod cloud;
 pub mod parse;

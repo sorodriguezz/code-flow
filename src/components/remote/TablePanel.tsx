@@ -19,17 +19,21 @@ import {
   X,
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
+import { ColumnsModal } from "../common/ColumnsModal";
+import { DataGrid, autoFitWidth, autoFitWidths } from "../common/DataGrid";
+import { range } from "../common/gridBits";
+import { useColumnPrefs } from "../common/useColumnPrefs";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { EntityEditorModal } from "./EntityEditorModal";
-import { TableColumnsModal } from "./TableColumnsModal";
-import { EntityGrid, autoFitWidth, autoFitWidths, cellText } from "./EntityGrid";
-import { CARD, ToolbarButton } from "./remoteChrome";
+import { cellText, entityColumns } from "./EntityGrid";
+import { CARD, ToolbarButton, WorkBar } from "./remoteChrome";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { writeFileBytes } from "../../lib/tauri/commands";
 import { apiReadTextFile } from "../../lib/tauri/apiCommands";
+import { parseCsvGrid, toCsv } from "../../lib/csv";
 import {
   remoteTableCreate,
   remoteTableDeleteEntity,
@@ -49,7 +53,7 @@ import type { TablePage, TableSummary } from "../../types/remote";
  * three are the only ones the service guarantees. The union is kept across queries rather than
  * rebuilt from each page, because Azure stores no nulls: a property nothing currently sets is a
  * column that would otherwise vanish and come back as the data changes under it. What the service
- * genuinely cannot supply, "Customize columns" pins by hand — see `TableColumnsModal`.
+ * genuinely cannot supply, "Customize columns" pins by hand — see `common/ColumnsModal`.
  *
  * **The filter box says what a filter costs.** A query on both keys is a point read; one on the
  * partition scans that partition; one on neither scans the table and is billed accordingly. The
@@ -73,19 +77,6 @@ const PINNED = ["PartitionKey", "RowKey", "Timestamp"];
 
 /** A value the sort may compare as a number. Deliberately narrower than `Number` — see the sort. */
 const DECIMAL = /^-?\d+(\.\d+)?$/;
-
-/** What the user has decided about one table's columns, kept for as long as the tab is open so
- *  clicking away to another table and back doesn't undo it. */
-interface ColumnPrefs {
-  /** Pinned display order, or `null` to follow the data. */
-  order: string[] | null;
-  hidden: Set<string>;
-  /** Columns the user named that no entity has yet carried — kept apart from `known` so that
-   *  "Reset" can drop them and a fresh query cannot. */
-  extra: string[];
-  /** Widths the user dragged. Anything not in here is auto-fitted to the content. */
-  widths: Record<string, number>;
-}
 
 export function TablePanel({ hostId }: { hostId: string }) {
   const t = useT();
@@ -164,18 +155,13 @@ export function TablePanel({ hostId }: { hostId: string }) {
    * than an abort: the request in flight finishes, and nothing after it is sent.
    */
   const stopped = useRef(false);
-  const prefs = useRef(new Map<string, ColumnPrefs>());
+  /** Keyed by table name, cleared by the hook when `hostId` changes — see `useColumnPrefs` for why
+   *  this is a ref with a counter beside it rather than state. */
+  const { prefsFor, update: updatePrefs, version: prefsVersion } = useColumnPrefs(hostId);
 
   const fail = (e: unknown) => pushErrorToast(String(e));
-  const prefsFor = (table: string): ColumnPrefs =>
-    prefs.current.get(table) ?? { order: null, hidden: new Set(), extra: [], widths: {} };
   /** Bumped by each *fresh* query, never by a continuation — the grid's scroll-to-top signal. */
   const [queryEpoch, setQueryEpoch] = useState(0);
-  const [prefsVersion, setPrefsVersion] = useState(0);
-  const updatePrefs = (table: string, changes: Partial<ColumnPrefs>) => {
-    prefs.current.set(table, { ...prefsFor(table), ...changes });
-    setPrefsVersion((n) => n + 1);
-  };
 
   // A different account is a different everything. Without this the rail would keep the previous
   // account's tables under the new account's name until the listing came back, and — the bug this
@@ -194,7 +180,8 @@ export function TablePanel({ hostId }: { hostId: string }) {
     setFilter("");
     setStats(null);
     setTableSearch("");
-    prefs.current.clear();
+    // The column preferences are cleared by `useColumnPrefs`, which watches the same `hostId` — it
+    // owns the map, so it owns the reset.
   }, [hostId]);
 
   const loadTables = useCallback(async () => {
@@ -316,6 +303,17 @@ export function TablePanel({ hostId }: { hostId: string }) {
     [allColumns, prefsVersion, selected],
   );
 
+  /**
+   * The same list as `columns`, as the grid wants it: a property name is not a column, it is the
+   * identity of one.
+   *
+   * Kept beside `columns` rather than replacing it because three other things in this panel want the
+   * names and nothing else — the entity editor's field list, the "which of these did the user pin"
+   * check the columns modal applies, and the width map's keys. `t` is in the dependency list because
+   * the columns close over it for the absent-value hover, and a language switch has to redraw those.
+   */
+  const gridColumns = useMemo(() => entityColumns(columns, t), [columns, t]);
+
   const rows = page?.table === selected ? page.data.rows : [];
 
   /**
@@ -358,12 +356,12 @@ export function TablePanel({ hostId }: { hostId: string }) {
   useEffect(() => {
     if (!selected || rows.length === 0) return;
     const current = prefsFor(selected);
-    const missing = columns.filter((column) => current.widths[column] === undefined);
+    const missing = gridColumns.filter((column) => current.widths[column.key] === undefined);
     if (missing.length === 0) return;
     const fitted = autoFitWidths(missing, rows);
     updatePrefs(selected, { widths: { ...current.widths, ...fitted } });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected, columns, rows]);
+  }, [selected, gridColumns, rows]);
 
   // -------------------------------------------------------------------------
   // Selection
@@ -594,8 +592,15 @@ export function TablePanel({ hostId }: { hostId: string }) {
     if (!path) return;
     const json = path.toLowerCase().endsWith(".json");
     // The columns as drawn, so an export matches what was on screen — including a hidden column
-    // being absent from it, which is the reason someone hid it.
-    const text = json ? JSON.stringify(chosen, null, 2) : toCsv(columns, chosen);
+    // being absent from it, which is the reason someone hid it. Each cell's text comes from the
+    // column itself for the same reason: the file says what the grid said, not what a second reading
+    // of the entity would have said.
+    const text = json
+      ? JSON.stringify(chosen, null, 2)
+      : toCsv(
+          gridColumns.map((column) => column.label),
+          chosen.map((row) => gridColumns.map((column) => column.text(row))),
+        );
     try {
       await writeFileBytes(path, new TextEncoder().encode(text));
       useToastStore
@@ -843,7 +848,7 @@ export function TablePanel({ hostId }: { hostId: string }) {
           />
           <ToolbarButton
             icon={Columns3}
-            label={t("remote.tableColumns")}
+            label={t("remote.gridColumns")}
             onClick={() => setCustomizing(true)}
             disabled={!selected}
             active={settings.hidden.size > 0 || settings.extra.length > 0}
@@ -908,40 +913,17 @@ export function TablePanel({ hostId }: { hostId: string }) {
           </div>
         )}
 
-        {/* One line for a long-running loop — an import of 900 rows, a count over a whole table.
-            Determinate where a total is known and a running tally where it is not, because "how many
-            so far" is the only honest answer to a scan whose length nobody knows in advance. */}
+        {/* An import of 900 rows, a count over a whole table — the two loops in this panel that are
+            long enough to need a way out. */}
         {working && (
-          <div className="shrink-0 border-b border-[var(--cf-border)] px-3 py-1.5">
-            <div className="flex items-center gap-2 text-[11px] text-[var(--cf-text-muted)]">
-              <Loader2 size={11} className="shrink-0 animate-spin" />
-              <span className="min-w-0 flex-1 truncate">{working.label}</span>
-              <span className="shrink-0 tabular-nums">
-                {working.total > 0 ? `${working.done} / ${working.total}` : working.done}
-              </span>
-              <button
-                type="button"
-                onClick={() => {
-                  stopped.current = true;
-                }}
-                title={t("remote.tableStop")}
-                aria-label={t("remote.tableStop")}
-                className="flex h-5 w-5 shrink-0 items-center justify-center rounded hover:bg-black/[0.05] hover:text-[var(--cf-danger)] dark:hover:bg-white/[0.08]"
-              >
-                <X size={12} />
-              </button>
-            </div>
-            <div className="mt-1 h-[3px] overflow-hidden rounded-full bg-black/[0.06] dark:bg-white/[0.08]">
-              <div
-                className={`h-full rounded-full bg-[var(--cf-accent)] ${
-                  working.total > 0 ? "transition-[width] duration-150" : "animate-pulse"
-                }`}
-                style={{
-                  width: working.total > 0 ? `${(working.done / working.total) * 100}%` : "100%",
-                }}
-              />
-            </div>
-          </div>
+          <WorkBar
+            label={working.label}
+            done={working.done}
+            total={working.total}
+            onStop={() => {
+              stopped.current = true;
+            }}
+          />
         )}
 
         <div className="min-h-0 flex-1 overflow-hidden">
@@ -960,19 +942,23 @@ export function TablePanel({ hostId }: { hostId: string }) {
               subtitle={t("remote.tableNoRowsHint")}
             />
           ) : (
-            <EntityGrid
+            <DataGrid
               resetKey={`${selected}/${queryEpoch}`}
-              columns={columns}
+              columns={gridColumns}
               rows={view}
               widths={settings.widths}
-              onWidth={(column, width) =>
-                updatePrefs(selected, { widths: { ...settings.widths, [column]: width } })
+              onWidth={(key, width) =>
+                updatePrefs(selected, { widths: { ...settings.widths, [key]: width } })
               }
-              onAutoFit={(column) =>
+              onAutoFit={(key) => {
+                // The grid reports a key; the measurement needs the column, because what a cell says
+                // is the column's answer and not the property's.
+                const column = gridColumns.find((one) => one.key === key);
+                if (!column) return;
                 updatePrefs(selected, {
-                  widths: { ...settings.widths, [column]: autoFitWidth(column, rows) },
-                })
-              }
+                  widths: { ...settings.widths, [key]: autoFitWidth(column, rows) },
+                });
+              }}
               sort={sort}
               onSort={(column) =>
                 setSort((current) =>
@@ -1092,8 +1078,11 @@ export function TablePanel({ hostId }: { hostId: string }) {
         />
       )}
       {customizing && selected && (
-        <TableColumnsModal
-          columns={allColumns}
+        <ColumnsModal
+          // Label equals key here, and that is the Table's own doing: these are property names the
+          // user wrote, so there is nothing to translate and nothing that would move with the
+          // language.
+          columns={allColumns.map((column) => ({ key: column, label: column }))}
           hidden={settings.hidden}
           onApply={(order, hidden) =>
             updatePrefs(selected, {
@@ -1105,35 +1094,21 @@ export function TablePanel({ hostId }: { hostId: string }) {
             })
           }
           onClose={() => setCustomizing(false)}
+          // A Table's column list is a guess — see the modal's own note — so this is the one caller
+          // that gets the add-a-column field.
+          addable={{
+            placeholder: t("remote.tableColumnAddPlaceholder"),
+            hint: t("remote.tableColumnAddHint"),
+          }}
         />
       )}
     </div>
   );
 }
 
-/** `[from..to]`, inclusive. Written out because a selection's ends are both real rows. */
-function range(from: number, to: number): number[] {
-  if (to < from) return [];
-  return Array.from({ length: to - from + 1 }, (_, at) => from + at);
-}
-
 // ---------------------------------------------------------------------------
-// CSV
+// Files in, entities out
 // ---------------------------------------------------------------------------
-
-/** RFC 4180: quote anything containing a comma, a quote or a newline, and double the quotes. */
-function csvCell(value: string | null): string {
-  if (value === null) return "";
-  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
-}
-
-function toCsv(columns: string[], rows: Record<string, unknown>[]): string {
-  const lines = [columns.map((column) => csvCell(column)).join(",")];
-  for (const row of rows) {
-    lines.push(columns.map((column) => csvCell(cellText(row, column))).join(","));
-  }
-  return `${lines.join("\n")}\n`;
-}
 
 /**
  * An array of objects, or one object. Anything else is not a set of entities.
@@ -1160,46 +1135,14 @@ function parseJsonRows(text: string): Record<string, unknown>[] {
 /**
  * A CSV into entities, header row first.
  *
- * Written out rather than split on commas because a `RowKey` holding a path — which is most of them
- * on the tables people actually keep — contains commas, and a naive split turns one entity into
- * three columns of nonsense. Values stay strings: the service infers the type, and guessing that
- * `007` is the number seven is how a key stops matching.
+ * The parsing is `lib/csv`'s, because RFC 4180 is nobody's service in particular. What is this
+ * service's, and stays here, is which of a file's columns may be sent back: `Timestamp` is the
+ * service's own and rejected on write, and an `@odata.` annotation is a statement *about* a property
+ * rather than one. Everything else goes through as a string — the service infers the type, and
+ * guessing that `007` is the number seven is how a key stops matching.
  */
 function parseCsv(text: string): Record<string, unknown>[] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let quoted = false;
-  for (let at = 0; at < text.length; at += 1) {
-    const character = text[at];
-    if (quoted) {
-      if (character === '"') {
-        if (text[at + 1] === '"') {
-          cell += '"';
-          at += 1;
-        } else quoted = false;
-      } else cell += character;
-      continue;
-    }
-    if (character === '"') quoted = true;
-    else if (character === ",") {
-      row.push(cell);
-      cell = "";
-    } else if (character === "\n" || character === "\r") {
-      // A `\r\n` is one break, not two.
-      if (character === "\r" && text[at + 1] === "\n") at += 1;
-      row.push(cell);
-      rows.push(row);
-      row = [];
-      cell = "";
-    } else cell += character;
-  }
-  if (cell !== "" || row.length > 0) {
-    row.push(cell);
-    rows.push(row);
-  }
-
-  const [header, ...body] = rows.filter((one) => one.some((value) => value !== ""));
+  const [header, ...body] = parseCsvGrid(text);
   if (!header) return [];
   return body.map((values) => {
     const entity: Record<string, unknown> = {};

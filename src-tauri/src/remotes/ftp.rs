@@ -163,6 +163,21 @@ pub async fn close(host_id: &str) {
     sessions().lock().await.remove(host_id);
 }
 
+/// Every host currently holding a control socket, for [`super::hold`] to report.
+///
+/// The entry existing is not proof the server has kept its side — nothing here probes liveness (see
+/// [`session`]) — but it is exactly the case where disconnecting is worth offering: this process is
+/// holding a socket open either way.
+pub async fn open_hosts() -> Vec<String> {
+    sessions().lock().await.keys().cloned().collect()
+}
+
+/// Drops every host's control socket — the exit path's. See [`super::forward::close_all`] for why a
+/// `static` map needs an explicit drain at all.
+pub async fn close_all() {
+    sessions().lock().await.clear();
+}
+
 // ---------------------------------------------------------------------------
 // The seven verbs
 // ---------------------------------------------------------------------------

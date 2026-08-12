@@ -28,7 +28,13 @@ import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { useRemoteDragStore } from "../../state/remoteDragStore";
 import { CARD, HostDot, KindGlyph, OsGlyph, ToolbarButton } from "./remoteChrome";
 import { useHostMenu, useNewConnectionMenu, useOpenPrimary } from "./hostMenu";
-import { groupHosts, hostMatches, UNGROUPED, useRemoteStore } from "../../state/remoteStore";
+import {
+  groupHosts,
+  hostMatches,
+  UNGROUPED,
+  useHostLiveness,
+  useRemoteStore,
+} from "../../state/remoteStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
@@ -450,13 +456,9 @@ function HostRowBase({
   const renamingHostId = useRemoteStore((s) => s.renamingHostId);
   const selectHost = useRemoteStore((s) => s.selectHost);
   const selected = useRemoteStore((s) => s.selectedHostId === host.id);
-  // A shell that is running, or — for an account, which has no process — a credential that answered.
-  const hasSession = useRemoteStore(
-    (s) =>
-      s.tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited) ||
-      (s.cloudStatus[host.id]?.ok ?? false),
-  );
-  const hasForward = useRemoteStore((s) => s.forwards.some((f) => f.host_id === host.id));
+  // One rule for what this dot draws, shared with the tree and the other gallery layout — the three
+  // copies of it had already drifted from the menu's own idea of "live".
+  const { session, active, busy } = useHostLiveness(host.id);
   const hostMenu = useHostMenu();
   const t = useT();
 
@@ -559,7 +561,7 @@ function HostRowBase({
         isTarget ? "border-t border-[var(--cf-accent)]" : "border-t border-transparent"
       } ${selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"}`}
     >
-      <HostDot session={hasSession} active={hasForward} color={host.color} />
+      <HostDot session={session} active={active} busy={busy} color={host.color} />
       {/* Both glyphs, never one: the OS says what the machine is, the kind says what this app can
           do with it. A Linux box reachable only over FTP is a penguin *and* a globe, and dropping
           either loses whichever half the user was scanning for. */}

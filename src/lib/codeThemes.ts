@@ -637,6 +637,12 @@ export function tokenRulesFor(theme: CodeTheme): TokenRule[] {
   return [
     { token: "", foreground: theme.tokens.variable },
     { token: "comment", foreground: theme.tokens.comment, fontStyle: "italic" },
+    // `///` is a class's API documentation and `//` is usually code somebody switched off. In an
+    // ObjectScript class those are opposite things, and the doc blocks are long enough that telling
+    // them apart pays. `ui.textMuted` rather than a new palette role: it is brighter than `comment` in
+    // every dark scheme and darker in every light one, so a doc block reads as *more* present than
+    // dead code in both directions — without editing 21 palettes.
+    { token: "comment.doc", foreground: theme.ui.textMuted, fontStyle: "italic" },
     { token: "keyword", foreground: theme.tokens.keyword },
     { token: "keyword.json", foreground: theme.tokens.constant },
     { token: "string", foreground: theme.tokens.string },

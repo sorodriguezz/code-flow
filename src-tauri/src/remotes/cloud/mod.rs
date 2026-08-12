@@ -46,6 +46,15 @@ use std::time::Duration;
 /// the *response headers*, not the download.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long an idle TLS connection to a storage endpoint is kept.
+///
+/// Browsing an account is bursty: a listing walk is a dozen requests in a second and then nothing for
+/// minutes. Pooling inside the burst is the whole gain (see [`http`]); holding a socket open to Azure
+/// for the rest of the app's life is pure cost — and it is the one piece of cloud state no disconnect
+/// can reach, since it belongs to no host and there is nothing per-account to release. So it is
+/// bounded here instead of being offered as a button that would have nothing to press.
+const POOL_IDLE: Duration = Duration::from_secs(30);
+
 /// The HTTP client every cloud transport uses.
 ///
 /// One for the process, unlike the API client's per-request build: nothing here varies the
@@ -57,6 +66,7 @@ pub fn http() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(TIMEOUT)
+            .pool_idle_timeout(POOL_IDLE)
             .build()
             .expect("a client with no TLS overrides always builds")
     })

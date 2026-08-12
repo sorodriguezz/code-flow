@@ -80,6 +80,11 @@ export function RemoteView() {
   // change it, so polling behind a workspace the user isn't looking at buys nothing.
   useEffect(() => {
     if (activeView !== "remote") return;
+    // Once immediately, then on the interval. `setInterval` waits a full period for its first tick,
+    // and the moment this view comes back is exactly when the answer is oldest — the dots and the
+    // Disconnect entry are read from this data, so four seconds of stale dots is four seconds of a
+    // host offering a disconnect it no longer needs, or hiding one it does.
+    void pollForwards();
     const timer = window.setInterval(() => void pollForwards(), FORWARD_POLL_MS);
     return () => window.clearInterval(timer);
   }, [activeView, pollForwards]);

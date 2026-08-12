@@ -1,7 +1,8 @@
 /**
- * The icon catalogue behind the explorer's custom iconography: ~3,600 SVGs, loaded on demand.
+ * The icon catalogue behind the explorer's custom iconography: ~3,600 SVGs, loaded on demand — plus
+ * one bundled glyph of our own (`localSet.ts`), for the mark neither package ships.
  *
- * Two sets, because they answer different halves of the question. **vscode-icons** is a file-icon
+ * Two fetched sets, because they answer different halves of the question. **vscode-icons** is a file-icon
  * theme — 1,169 `file-type-*` and 398 `folder-type-*` glyphs, drawn to be legible at 13px and
  * already thinking in terms of "this is a TypeScript file" and "this is a source folder". **logos**
  * is the brand set: 2,091 marks for the services and tools a repository talks to but has no file
@@ -39,19 +40,22 @@
 
 import vscodeIconsUrl from "@iconify-json/vscode-icons/icons.json?url";
 import logosUrl from "@iconify-json/logos/icons.json?url";
+import { LOCAL_ICON_SET } from "./localSet";
 
 /** One glyph: the raw SVG children and the viewBox they were drawn in. */
 export interface CatalogIcon {
   id: string;
-  /** Inner SVG markup. Comes from the packages, which are the source of truth — it is never built
-   * from user input, which is what makes rendering it with `dangerouslySetInnerHTML` safe. */
+  /** Inner SVG markup. Comes from the icon packages or from this repo's own set (`localSet.ts`),
+   * which are the source of truth — it is never built from user input, which is what makes rendering
+   * it with `dangerouslySetInnerHTML` safe. */
   body: string;
   width: number;
   height: number;
 }
 
-/** An Iconify icon set as shipped in `@iconify-json/*` — the fields this file reads, no more. */
-interface IconifySet {
+/** An Iconify icon set as shipped in `@iconify-json/*`, or this repo's own (`localSet.ts`) — the
+ * fields this file reads, no more. */
+export interface IconifySet {
   prefix: string;
   width?: number;
   height?: number;
@@ -88,6 +92,16 @@ function ingest(set: IconifySet, into: Map<string, CatalogIcon>): void {
     });
   }
 }
+
+// This repo's own set, seeded at module evaluation rather than fetched. Two consequences that matter:
+// `iconEntry` answers for `cf:` on the very first render, so a `.cls` row never draws a fallback and
+// then swaps to the real glyph a tick later; and `iconCatalogReady` below can keep asking only about
+// the two fetched sets, because this one can never arrive late. `loadSet` merges into this map and
+// rebuilds `flat`, so both fetched sets land on top of the seed without disturbing it.
+catalog = new Map<string, CatalogIcon>();
+ingest(LOCAL_ICON_SET, catalog);
+flat = [...catalog.values()];
+loadedSets.add(LOCAL_ICON_SET.prefix);
 
 /**
  * Loads one set into the shared map, once. Safe to call from anywhere, including render — it hands
@@ -147,6 +161,8 @@ export function loadIconCatalog(): Promise<void> {
  * the picker asks, since its search ranks across both sets. A tree row asks a narrower one and
  * simply lets `iconEntry` answer `null` until its set arrives. */
 export function iconCatalogReady(): boolean {
+  // The bundled `cf` set is deliberately not in the predicate: it is seeded at module evaluation, so
+  // asking whether it has arrived could only ever answer yes.
   return loadedSets.has("vscode-icons") && loadedSets.has("logos");
 }
 

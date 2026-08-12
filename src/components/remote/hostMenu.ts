@@ -1,6 +1,7 @@
 import {
   Copy,
   FolderOpen,
+  Loader2,
   Monitor,
   MonitorSmartphone,
   Pencil,
@@ -13,7 +14,12 @@ import {
 } from "lucide-react";
 import type { MenuItem } from "../api/CollectionTree";
 import { AZURE_SERVICE_ICON, AZURE_SERVICE_LABEL, kindIcon } from "./remoteChrome";
-import { disconnectHost, useRemoteStore, type RemoteDetailsTab } from "../../state/remoteStore";
+import {
+  disconnectHost,
+  hostIsHolding,
+  useRemoteStore,
+  type RemoteDetailsTab,
+} from "../../state/remoteStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -59,7 +65,10 @@ export function useHostMenu() {
   const duplicateHost = useRemoteStore((s) => s.duplicateHost);
   const deleteHost = useRemoteStore((s) => s.deleteHost);
   const tabs = useRemoteStore((s) => s.tabs);
-  const forwards = useRemoteStore((s) => s.forwards);
+  // `holds` rather than `forwards`: it carries the forward count *and* the two things the old
+  // predicate could not see, so this is one subscription where there were two.
+  const holds = useRemoteStore((s) => s.holds);
+  const disconnecting = useRemoteStore((s) => s.disconnecting);
   const t = useT();
 
   return (host: RemoteHostRow, options: { onRename?: () => void } = {}): MenuItem[] => {
@@ -70,9 +79,13 @@ export function useHostMenu() {
     // refusal.
     const can = capabilities(spec);
     const incomplete = !hasAddress(spec);
-    const live =
-      tabs.some((tab) => tab.kind === "session" && tab.hostId === host.id && !tab.exited) ||
-      forwards.some((forward) => forward.host_id === host.id);
+    // What Disconnect would actually release, which is not what "live" used to mean. The two it
+    // missed are the expensive ones: a file session is an `ssh -s … sftp` child (or a logged-in FTP
+    // control socket) held per host until something closes it, and a screen's tunnel and bridge route
+    // outlive the viewer window. A session whose pty exited counts too — `exited` says the far side
+    // hung up, not that this machine let go of the pty.
+    const held = hostIsHolding(host.id, tabs, holds);
+    const busy = disconnecting.includes(host.id);
 
     // A host with no address can do none of it, and the useful response is not an error saying so —
     // it is the editor, open, on the field that is missing.
@@ -132,16 +145,32 @@ export function useHostMenu() {
         ? [{ label: t("remote.rename"), icon: Pencil, onClick: options.onRename }]
         : []),
       { label: t("remote.duplicate"), icon: Copy, onClick: () => void duplicateHost(host.id) },
-      ...(live
+      // Shown-but-disabled only while the release is in flight, never when nothing is held: removing
+      // the entry mid-flight would make the menu change length between two right-clicks, and leaving
+      // it live would let a second click re-run a teardown that is already running. A permanently
+      // greyed Disconnect on twenty idle hosts would be twenty dead entries, and unlike a database
+      // row there is no Connect to pair it with — "connect" here is already spelled Open shell /
+      // Files / Open screen, three entries up.
+      ...(busy
         ? [
             {
-              label: t("remote.disconnect"),
-              icon: Unplug,
-              onClick: () => void disconnectHost(host.id),
+              label: t("remote.disconnecting"),
+              icon: Loader2,
+              disabled: true,
+              onClick: () => {},
               separated: true,
             },
           ]
-        : []),
+        : held
+          ? [
+              {
+                label: t("remote.disconnect"),
+                icon: Unplug,
+                onClick: () => void disconnectHost(host.id),
+                separated: true,
+              },
+            ]
+          : []),
       {
         label: t("common.delete"),
         icon: Trash2,

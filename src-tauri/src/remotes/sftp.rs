@@ -117,6 +117,20 @@ pub async fn close(host_id: &str) {
     sessions().lock().await.remove(host_id);
 }
 
+/// Every host currently holding a session, for [`super::hold`] to report.
+///
+/// Keys rather than a count: the caller is building a per-host answer, and a total would tell it
+/// nothing about which row to light.
+pub async fn open_hosts() -> Vec<String> {
+    sessions().lock().await.keys().cloned().collect()
+}
+
+/// Drops every host's session — the exit path's. See [`super::forward::close_all`] for why a
+/// `static` map needs an explicit drain at all.
+pub async fn close_all() {
+    sessions().lock().await.clear();
+}
+
 /// Lists a directory. An empty `path` means the login directory, which is where a browser should
 /// open — `.` resolved by the server, not a guess at `/home/<user>`.
 pub async fn list(host_id: &str, spec: &RemoteHostSpec, path: &str) -> Result<RemoteListing, String> {

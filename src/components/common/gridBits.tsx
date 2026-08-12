@@ -14,6 +14,19 @@ import { useEffect, useRef } from "react";
 export const MIN_COLUMN_WIDTH = 64;
 
 /**
+ * `[from..to]`, inclusive. Written out because a selection's ends are both real rows.
+ *
+ * Here rather than beside the one panel that used to own it because it is the other half of
+ * `useRowSweep`: the sweep reports two indices and every caller then has to turn them into the rows
+ * between them. An exclusive `to` would put an off-by-one in each of those call sites, on the one
+ * operation — "delete these" — where an off-by-one is a row nobody meant to touch.
+ */
+export function range(from: number, to: number): number[] {
+  if (to < from) return [];
+  return Array.from({ length: to - from + 1 }, (_, at) => from + at);
+}
+
+/**
  * The seam between two column headers. Invisible until hovered — visible dividers in a 28px header
  * row read as a barred table and end up heavier than the labels they separate.
  *

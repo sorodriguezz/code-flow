@@ -596,6 +596,8 @@ pub fn run() {
             commands::remote_cmd::remote_list_forwards,
             commands::remote_cmd::remote_open_screen,
             commands::remote_cmd::remote_close_screen,
+            commands::remote_cmd::remote_host_holds,
+            commands::remote_cmd::remote_disconnect_host,
             commands::remote_cmd::remote_queues,
             commands::remote_cmd::remote_queue_depths,
             commands::remote_cmd::remote_queue_peek,
@@ -791,6 +793,12 @@ pub fn run() {
                 commands::terminal_cmd::flush_transcripts(_app_handle);
                 let registry = _app_handle.state::<DbRegistry>();
                 tauri::async_runtime::block_on(registry.close_all());
+                // The Remote workspace's own `static` maps, for the reason the comment above gives:
+                // `forward`'s registry and the two file-session maps hold children that
+                // `process::exit` walks straight past. Without this every quit leaves an `ssh -N`
+                // holding a forwarded port, and an `ssh -s … sftp` holding a channel on somebody
+                // else's machine, both reparented to init.
+                tauri::async_runtime::block_on(remotes::hold::release_all());
             }
         });
 }
