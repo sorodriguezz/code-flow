@@ -11,6 +11,7 @@ import { useRepoStore } from "./repoStore";
 const KEY = "auto_fetch_interval_seconds";
 const SECRET_SCAN_KEY = "secret_scan_enabled";
 const NOTIFICATION_SOUND_KEY = "notification_sound_enabled";
+const BLAME_ANNOTATION_KEY = "blame_annotation_enabled";
 export const MIN_AUTO_FETCH_SECONDS = 10;
 
 interface PreferencesState {
@@ -25,6 +26,18 @@ interface PreferencesState {
    * start playing chords at them.
    */
   notificationSoundEnabled: boolean;
+  /**
+   * Whether the editor annotates the caret's line with who last changed it. Defaults to **off**, for
+   * the same kind of reason the sound above does but a stronger one: nothing is at risk if this is
+   * absent, and turning it on puts a git revwalk behind the caret in every file you open. An editor
+   * that quietly starts doing extra work per keystroke is a thing to opt into, not out of — and "off"
+   * here means no blame call at all, not a hidden annotation, so the cost of leaving it alone is one
+   * boolean read per caret move.
+   *
+   * (VS Code ships GitLens' line blame on. VS Code also never had to answer for a 200 ms libgit2
+   * revwalk on a large-history repository, which is the number we do not yet have a bound on.)
+   */
+  blameAnnotationEnabled: boolean;
   /**
    * Branch-name patterns whose branches come locked in every repository, without anyone having
    * clicked a padlock on them — `main`, `master`, `develop` and `release/*` out of the box.
@@ -48,6 +61,7 @@ interface PreferencesState {
   setAutoFetchSeconds: (seconds: number) => Promise<void>;
   setSecretScanEnabled: (enabled: boolean) => Promise<void>;
   setNotificationSoundEnabled: (enabled: boolean) => Promise<void>;
+  setBlameAnnotationEnabled: (enabled: boolean) => Promise<void>;
   /** Saves the list and adopts the normalised version the backend stored. */
   setLockedBranchRules: (rules: string[]) => Promise<void>;
   /** Puts the shipped defaults back, asking the backend what they are so they're named once. */
@@ -65,16 +79,17 @@ export const usePreferencesStore = create<PreferencesState>((set) => ({
   autoFetchSeconds: 0,
   secretScanEnabled: true,
   notificationSoundEnabled: false,
+  blameAnnotationEnabled: false,
   lockedBranchRules: null,
 
   init: async () => {
-    // The three plain settings go in one `getSettings`: three `getSetting` calls inside a
+    // The plain settings go in one `getSettings`: separate `getSetting` calls inside a
     // `Promise.all` looked concurrent but weren't, since each one takes the database mutex on the
-    // Rust side. The rules stay a separate command — it is not a settings row, it re-seeds the
-    // cache the git guards read — so it keeps its own slot in the `Promise.all`, where it really
-    // does overlap with the batch.
+    // Rust side — which is also why a new flag joins this array rather than adding a call. The rules
+    // stay a separate command — it is not a settings row, it re-seeds the cache the git guards read —
+    // so it keeps its own slot in the `Promise.all`, where it really does overlap with the batch.
     const [stored, rules] = await Promise.all([
-      getSettings([KEY, SECRET_SCAN_KEY, NOTIFICATION_SOUND_KEY]).catch(
+      getSettings([KEY, SECRET_SCAN_KEY, NOTIFICATION_SOUND_KEY, BLAME_ANNOTATION_KEY]).catch(
         () => ({}) as Record<string, string>,
       ),
       // Deliberately no local fallback list: the defaults are named in Rust, and inventing them
@@ -94,6 +109,8 @@ export const usePreferencesStore = create<PreferencesState>((set) => ({
       // The sound is the other way round: unset means silent, so `=== "true"` covers both an
       // absent setting and an explicit "false" without a special case for either.
       notificationSoundEnabled: soundRaw === "true",
+      // Same one-liner, same reason: unset and explicit-false are both "don't blame anything".
+      blameAnnotationEnabled: stored[BLAME_ANNOTATION_KEY] === "true",
       lockedBranchRules: rules,
     });
   },
@@ -112,6 +129,15 @@ export const usePreferencesStore = create<PreferencesState>((set) => ({
   setNotificationSoundEnabled: async (enabled) => {
     set({ notificationSoundEnabled: enabled });
     await setSetting(NOTIFICATION_SOUND_KEY, String(enabled));
+  },
+
+  // Optimistic like the three above, and for the reason spelled out below `setLockedBranchRules`:
+  // there is nothing for the backend to normalise about a boolean, so the value that comes back can
+  // only ever be the one that went in — waiting for the write would put a SQLite round trip between
+  // the click and the checkbox moving.
+  setBlameAnnotationEnabled: async (enabled) => {
+    set({ blameAnnotationEnabled: enabled });
+    await setSetting(BLAME_ANNOTATION_KEY, String(enabled));
   },
 
   // Not optimistic, unlike the three above: the backend normalises the list on the way in, and

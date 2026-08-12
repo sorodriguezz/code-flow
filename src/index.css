@@ -849,13 +849,108 @@ body {
   }
 }
 
-.cf-editor-changed-gutter {
-  border-left: 3px solid var(--cf-success);
+/* The change bar in the lines-decorations lane, now in three colours plus a wedge.
+ *
+ * One bar became three states because a single `--cf-success` stripe answered the wrong question:
+ * it said "something here is new", which for a rewritten line is only half true and for a removed
+ * one is not sayable at all — the collector behind it kept `origin === "+"` lines only, so a pure
+ * deletion drew nothing. The palette is `lib/fileStatus.ts`'s (added→success, deleted→danger,
+ * modified→warning), reused as *colours* rather than by calling `fileStatusColor`, which keys on a
+ * file-status string rather than on a block kind. Taking it from there is what stops a line's bar and
+ * the file's status letter in the tree from ever disagreeing about which colour "modified" is.
+ *
+ * No light/dark fork and no new token: `--cf-success`/`--cf-danger`/`--cf-warning` are declared in
+ * all three `:root` blocks above and `applyThemeVars` (`lib/codeThemes.ts`) deliberately does not
+ * rewrite them, so they are already mode-correct under every code theme.
+ *
+ * 6%, not the 14% `lineClasses` in `lib/diffText.ts` uses for a read-only diff: this tint sits under
+ * code you are typing in, and the peek is where the change is meant to be *read*. */
+.cf-editor-gutter-added,
+.cf-editor-gutter-modified {
+  border-left: 3px solid;
   margin-left: 3px;
 }
 
-.cf-editor-changed-line {
+.cf-editor-gutter-added {
+  border-left-color: var(--cf-success);
+}
+
+.cf-editor-gutter-modified {
+  border-left-color: var(--cf-warning);
+}
+
+.cf-editor-changed-line-added {
   background: color-mix(in oklab, var(--cf-success) 6%, transparent);
+}
+
+.cf-editor-changed-line-modified {
+  background: color-mix(in oklab, var(--cf-warning) 6%, transparent);
+}
+
+/* A deletion has no line to sit on, so it gets the boundary instead: a wedge flush against the top
+ * edge of the line that *followed* what was removed. `position: absolute` inside the lane element
+ * works for the same reason `.cf-bookmark-mark::before` below does.
+ *
+ * No line background, deliberately — there is no changed line to tint, and tinting the survivor
+ * would blame it for a deletion it had nothing to do with. */
+.cf-editor-gutter-deleted::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 0;
+  height: 0;
+  border-top: 4px solid var(--cf-danger);
+  border-right: 4px solid transparent;
+}
+
+/* The hunk the change peek is currently open on.
+ *
+ * The panel sits above its hunk rather than around it, so without this there is nothing tying the two
+ * together: with the peek open on the third of eleven changes, the header says "3 of 11" and the code
+ * under it looks exactly like the code under any other panel. The accent — not one of the three change
+ * colours — because this says "the selection", which is what the accent means everywhere else in the
+ * app; using `--cf-warning` here would read as a fourth kind of change. Faint enough to layer over the
+ * 6% change tint that is already on those lines without the pair turning muddy. */
+.cf-editor-peek-hunk {
+  background: color-mix(in oklab, var(--cf-accent) 10%, transparent);
+}
+
+/* Line blame: the "who last touched this line" note injected after the caret's line.
+ *
+ * Three things worth knowing before touching this rule.
+ *
+ * `!important` for the same reason `.cf-anchor` below needs it: the text this colours is inside
+ * Monaco's own line DOM, already coloured by an `.mtk*` class from a stylesheet Monaco injects into
+ * the head at runtime — i.e. *after* this file — so specificity alone loses the tie.
+ *
+ * `color-mix` because the app has no third text tier, and this has to sit a step below
+ * `--cf-text-muted`: the annotation is something you read when you look for it and ignore when you
+ * don't, which is the whole point of drawing it inline rather than in a panel. Same device as the
+ * other "dimmer than muted" spots in this file.
+ *
+ * And there is deliberately **no light/dark fork**: `--cf-text-muted` is not a static token here but
+ * is rewritten at runtime to the *active code theme's* `ui.textMuted` (see `applyThemeVars` in
+ * `lib/codeThemes.ts`), so it is already tuned against whatever background the editor is painting in
+ * all of the shipped palettes. That is also why the decoration carries a class instead of a colour,
+ * and why its effect in `EditorPane` needs no `themeMode` dependency — unlike the git-marker
+ * decoration above, whose minimap/ruler entries take a hex and therefore have to re-read CSS.
+ *
+ * `user-select: none` is belt and braces. Injected text is a decoration, not model content, so it can
+ * never reach `getValue`/`getValueInRange` or the clipboard through Monaco's own copy — this only
+ * stops a drag that sweeps past the end of the line from *highlighting* it as though it could. */
+.cf-blame-annotation {
+  color: color-mix(in oklab, var(--cf-text-muted) 75%, transparent) !important;
+  font-style: italic !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: pointer;
+}
+
+/* The same note when there is no commit to open: an uncommitted line, or a file git has never seen.
+ * A pointer cursor over a label that does nothing is a promise the click can't keep. */
+.cf-blame-annotation-plain {
+  cursor: default;
 }
 
 /* While a tab or an explorer row is being dragged. `!important` and the `*` reach are on purpose:

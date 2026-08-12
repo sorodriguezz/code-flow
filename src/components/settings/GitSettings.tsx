@@ -13,6 +13,10 @@ export function GitSettings() {
   const setAutoFetchSeconds = usePreferencesStore((s) => s.setAutoFetchSeconds);
   const secretScanEnabled = usePreferencesStore((s) => s.secretScanEnabled);
   const setSecretScanEnabled = usePreferencesStore((s) => s.setSecretScanEnabled);
+  // Two selectors, never one object selector: a selector returning `{ enabled, set }` builds a fresh
+  // object on every store change and re-renders this screen for every unrelated preference.
+  const blameAnnotationEnabled = usePreferencesStore((s) => s.blameAnnotationEnabled);
+  const setBlameAnnotationEnabled = usePreferencesStore((s) => s.setBlameAnnotationEnabled);
   const [draft, setDraft] = useState(autoFetchSeconds || 30);
 
   const [name, setName] = useState("");
@@ -99,6 +103,19 @@ export function GitSettings() {
         {t("settings.secretScanLabel")}
       </label>
       <p className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.secretScanHint")}</p>
+
+      {/* Here rather than under Appearance, and it is not an obvious call: there is no editor settings
+          section at all, `ThemeSettings` has no checkbox in it, and the thing this switches on is a git
+          read — a blame walk — rather than a colour. The screen's own hint was widened to say so.
+          Same fixed triplet as the two toggles above it (description, label, hint), and the `<label>`
+          wrapper is what makes the text clickable, since `Checkbox` is a hidden real input under a
+          styled span. */}
+      <p className="mb-2 mt-4 text-[13px] text-[var(--cf-text-muted)]">{t("settings.blameDescription")}</p>
+      <label className="mb-1 flex items-center gap-2 text-[13px]">
+        <Checkbox checked={blameAnnotationEnabled} onChange={(checked) => setBlameAnnotationEnabled(checked)} />
+        {t("settings.blameLabel")}
+      </label>
+      <p className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.blameHint")}</p>
 
       <LockedBranchRules />
     </section>

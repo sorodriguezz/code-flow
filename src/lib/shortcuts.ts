@@ -54,6 +54,8 @@ export type ShortcutId =
   | "editor.bookmarkToggle"
   | "editor.splitRight"
   | "editor.codeSnap"
+  | "editor.nextChange"
+  | "editor.prevChange"
   | "editor.newFile"
   | "editor.newFolder"
   | "editor.renamePath"
@@ -436,6 +438,39 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "codesnap.action",
     defaultChord: "Mod+Shift+C",
     run: () => useEditorCommandStore.getState().send("codeSnap"),
+  },
+
+  /*
+   * Walk the open file's uncommitted hunks — ⌥F5 forward, ⇧⌥F5 back — opening the inline change peek
+   * at each stop, which is what VS Code binds Go to Next/Previous Change to. Matching it is the same
+   * argument `F2` above makes: the muscle memory is already there.
+   *
+   * A function key because the two places it has to work are the two hardest to bind for. Monaco ships
+   * `F7`/`F8`/`F12` and their shifted variants, and Monaco handles its own chord first and
+   * `preventDefault`s it — so a bare function key it claims is silently dead in the editor, which is
+   * the only place "next change" means anything. And a chord without ⌘/Ctrl is otherwise suppressed
+   * while the caret is in a text field, which `isTypingTarget` counts the code editor as; `Alt` plus a
+   * function key clears that twice over.
+   *
+   * ⌥F5 is free on both counts — the whole registry has exactly one function key today (`F2`), and
+   * Monaco's own table does not reach F5.
+   *
+   * `Alt+Shift+F5`, not `Shift+Alt+F5`: modifiers are stored in `eventToChord`'s order (Mod, Ctrl, Alt,
+   * Shift) and a chord written any other way is a string no keypress will ever produce.
+   */
+  {
+    id: "editor.nextChange",
+    group: "editor",
+    labelKey: "shortcuts.nextChange",
+    defaultChord: "Alt+F5",
+    run: () => useEditorCommandStore.getState().send("nextChange"),
+  },
+  {
+    id: "editor.prevChange",
+    group: "editor",
+    labelKey: "shortcuts.prevChange",
+    defaultChord: "Alt+Shift+F5",
+    run: () => useEditorCommandStore.getState().send("prevChange"),
   },
 
   /*

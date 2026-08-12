@@ -10,6 +10,7 @@ import type {
   CommitInfo,
   ConflictFile,
   FileDiffInfo,
+  HunkRef,
   RemoteInfo,
   RepoStatusInfo,
   StashInfo,
@@ -74,6 +75,19 @@ interface RepoState {
   unstageAll: () => Promise<void>;
   discardFile: (filePath: string) => Promise<void>;
   discardAll: () => Promise<void>;
+  /**
+   * The same three verbs at hunk scope, for the editor's inline change peek.
+   *
+   * They take the hunk the peek was *drawn from* rather than a line range, because the backend
+   * recomputes the diff and matches on that hunk's content — see `HunkRef`. `LIST_DIFF_CONTEXT_LINES`
+   * is supplied here rather than by the caller so there is exactly one place that decides it, which
+   * is the whole reason it is passed over the wire at all: a hunk's boundaries are a function of the
+   * context it was produced at, and a caller that passed a different number would get every action
+   * refused as stale with nothing to explain it.
+   */
+  stageHunk: (hunk: HunkRef) => Promise<void>;
+  unstageHunk: (hunk: HunkRef) => Promise<void>;
+  discardHunk: (hunk: HunkRef) => Promise<void>;
   commitChanges: (message: string) => Promise<void>;
 
   checkoutBranch: (name: string) => Promise<void>;
@@ -221,8 +235,15 @@ let silentFetchStartedAt: number | null = null;
  * file it is showing, at full context. That is the trade: whole-file context is still available
  * everywhere it was, it is just paid for one file at a time instead of for the whole changeset on
  * every watcher tick.
+ *
+ * Exported because it is no longer only a fetch parameter: the per-hunk commands (`stageHunk`,
+ * `unstageHunk`, `discardHunk`) take it back down again, since a hunk's boundaries are a function of
+ * the context it was produced at and the backend has to recompute the *same* hunks in order to
+ * recognise the one the user pointed at. Passing it rather than writing `3` in Rust as well is what
+ * keeps the two from drifting apart — the failure mode of drift here is not a wrong number on screen
+ * but every per-hunk action refusing itself as stale.
  */
-const LIST_DIFF_CONTEXT_LINES = 3;
+export const LIST_DIFF_CONTEXT_LINES = 3;
 
 /** Set by the Rust side on the one checkout failure that has a way out — see
  * `CHECKOUT_CONFLICT_PREFIX` in `src-tauri/src/git/branch.rs`. */
@@ -231,6 +252,21 @@ const CHECKOUT_CONFLICT_PREFIX = "CHECKOUT_CONFLICT: ";
 /** Set by the Rust side when a locked branch is what refused the operation — see
  * `BRANCH_LOCKED_PREFIX` in `src-tauri/src/git/branch.rs`. */
 const BRANCH_LOCKED_PREFIX = "BRANCH_LOCKED: ";
+
+/**
+ * The three refusals a per-hunk action can come back with — see `src-tauri/src/git/hunk.rs`.
+ *
+ * All three mean *nothing was written*, which is why they are worth naming separately from a plain
+ * error string: the sentence the user needs is "and your file is untouched", and each of the three
+ * gets there differently. `HUNK_STALE` is a race the user retries out of (the panel was drawn, the
+ * file moved, the fingerprint no longer matches). `HUNK_APPLY_FAILED` is libgit2 declining, which is
+ * not retryable and routes them to the whole-file buttons instead. `HUNK_UNSUPPORTED` carries a
+ * shape the peek is not supposed to offer a button for at all — an untracked or deleted file, a
+ * binary one — so it is deliberately *not* translated: reaching it is a bug in the gating, and the
+ * raw tail (`untracked`, `binary`, `3 deltas for one path`) is what makes that bug findable.
+ */
+const HUNK_STALE_PREFIX = "HUNK_STALE: ";
+const HUNK_APPLY_FAILED_PREFIX = "HUNK_APPLY_FAILED: ";
 
 /** Turns the tagged errors the git layer raises into something worth reading. Every store action
  * reports through here, so a lock refusal explains itself no matter which route hit it — the
@@ -241,6 +277,11 @@ function describeError(e: unknown): string {
   if (locked !== -1) {
     return translate("branch.lockedBlocked", { name: raw.slice(locked + BRANCH_LOCKED_PREFIX.length).trim() });
   }
+  // The tail of these two is a path or a libgit2 message, and neither adds anything to the sentence:
+  // the peek is already sitting on the file in question, and "corrupt patch at line 4" is a fact
+  // about a patch the user never saw. The replacement says what happened to their work instead.
+  if (raw.includes(HUNK_STALE_PREFIX)) return translate("peek.stale");
+  if (raw.includes(HUNK_APPLY_FAILED_PREFIX)) return translate("peek.applyFailed");
   return raw.replace(CHECKOUT_CONFLICT_PREFIX, "");
 }
 
@@ -568,6 +609,48 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     if (!repoPath) return;
     await guarded(set, async () => {
       await api.discardAllChanges(repoPath);
+      await get().refreshStatus();
+    });
+  },
+
+  /*
+   * The three per-hunk actions, shaped exactly like their whole-file neighbours above: `guarded` for
+   * the `busy` interlock and the error toast, then a `refreshStatus` that rebuilds `workingDiff` and
+   * `stagedDiff`.
+   *
+   * That last line is what makes the gutter, the peek and the Changes panel agree afterwards without
+   * any of them being told: all three read those two arrays, so one refresh re-colours the markers,
+   * re-derives the hunk list the open peek is indexed into, and re-lists the file in the panel. It is
+   * also why the peek does not have to raise its own event — the same rule every action in this store
+   * already follows.
+   *
+   * `busy` matters more here than anywhere else in this file, and it is the *only* shared interlock
+   * these have: `ChangesPanel`'s own `pending` is local component state, so a click in the editor's
+   * gutter bypasses it entirely and could otherwise land in the middle of a `stageAll`.
+   */
+  stageHunk: async (hunk) => {
+    const { repoPath } = get();
+    if (!repoPath) return;
+    await guarded(set, async () => {
+      await api.stageHunk(repoPath, hunk, LIST_DIFF_CONTEXT_LINES);
+      await get().refreshStatus();
+    });
+  },
+
+  unstageHunk: async (hunk) => {
+    const { repoPath } = get();
+    if (!repoPath) return;
+    await guarded(set, async () => {
+      await api.unstageHunk(repoPath, hunk, LIST_DIFF_CONTEXT_LINES);
+      await get().refreshStatus();
+    });
+  },
+
+  discardHunk: async (hunk) => {
+    const { repoPath } = get();
+    if (!repoPath) return;
+    await guarded(set, async () => {
+      await api.discardHunk(repoPath, hunk, LIST_DIFF_CONTEXT_LINES);
       await get().refreshStatus();
     });
   },

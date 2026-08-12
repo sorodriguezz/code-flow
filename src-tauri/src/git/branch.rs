@@ -99,6 +99,10 @@ pub struct BranchInfo {
     pub ahead: usize,
     pub behind: usize,
     pub target: Option<String>,
+    /// Tip commit time, Unix seconds UTC — what "newest branch" means, and what the sidebar orders on.
+    /// `None` only when the ref cannot be peeled to a commit (symbolic or broken); every ordinary
+    /// branch, local or remote, has one.
+    pub tip_time: Option<i64>,
     /// Locked to keep merges and pushes off it, by whichever of the two routes got there first:
     /// this branch's own padlock, or the app-wide rule list. Always false for remote-tracking
     /// branches — the lock is a local guard rail, not a server-side protected branch.
@@ -123,6 +127,10 @@ pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
 
         let is_remote = kind == BranchType::Remote;
         let target = branch.get().target().map(|oid| oid.to_string());
+        // One ODB read of the tip commit per ref — cheaper than what this loop already pays for
+        // `graph_ahead_behind` below, and it is what the sort at the end orders on. Remote-tracking
+        // refs peel identically, so they get it for free.
+        let tip_time = branch.get().peel_to_commit().ok().map(|c| c.time().seconds());
 
         let (mut ahead, mut behind) = (0, 0);
         let mut upstream = None;
@@ -154,8 +162,26 @@ pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
             ahead,
             behind,
             target,
+            tip_time,
         });
     }
+
+    // Newest first, so a capped list in the sidebar shows the branches actually in play rather than
+    // whichever ten libgit2's ref iterator happened to yield first.
+    //
+    // HEAD is pinned ahead of the date, and that is not cosmetic: it is the one row the sidebar draws
+    // in the accent colour, the answer to "which branch am I on", and a fifty-branch repository must
+    // not be able to hide it behind a "show more". A `None` tip time sorts last and then by name, so a
+    // ref that cannot be peeled at least has a fixed place instead of moving between calls.
+    //
+    // One global sort even though the vec interleaves locals and remotes: the callers that split them
+    // filter, which preserves relative order on both sides.
+    result.sort_by(|a, b| {
+        b.is_head
+            .cmp(&a.is_head)
+            .then(b.tip_time.cmp(&a.tip_time))
+            .then(a.name.cmp(&b.name))
+    });
 
     Ok(result)
 }

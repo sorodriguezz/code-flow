@@ -123,6 +123,9 @@ export interface BranchInfo {
   ahead: number;
   behind: number;
   target: string | null;
+  /** Tip commit time, Unix seconds UTC — the backend orders on this, HEAD pinned first. Null only for
+   *  a ref that can't be peeled. */
+  tip_time: number | null;
   /** Locked against merges onto it and pushes of it, by this branch's own padlock or by the
    * app-wide rule list. Always false when remote. */
   is_locked: boolean;
@@ -179,6 +182,81 @@ export interface FileDiffInfo {
   new_path: string | null;
   status: string;
   hunks: DiffHunkInfo[];
+}
+
+/**
+ * One hunk, sent back down to `stage_hunk` / `unstage_hunk` / `discard_hunk` so the backend can
+ * **find** that hunk — never so it can apply it.
+ *
+ * Nothing here is a patch, and that is the whole design. `src-tauri/src/git/hunk.rs` recomputes the
+ * diff itself and applies its *own* hunk, the one whose fingerprint matches this, or refuses and
+ * touches nothing. The alternative — building unified-diff text here and handing it to libgit2 —
+ * would make this file the author of bytes that land in the user's working tree, where a mistake in
+ * a `@@` count or a `\r` is a corrupted file with no reflog to recover from.
+ *
+ * So this is a copy of what the peek drew, verbatim: pass a `DiffHunkInfo` straight through from
+ * `workingDiff`/`stagedDiff` and add the path. Snake_case because there is no codegen between the
+ * two languages and serde reads these names literally — a rename on either side is a
+ * deserialization failure at the IPC boundary, which is what `hunk.rs`'s
+ * `the_wire_shape_matches_the_hand_written_typescript` exists to catch.
+ */
+export interface HunkRef {
+  /** Repo-relative, POSIX separators — the same form as `OpenTab.path`. */
+  file_path: string;
+  /** The `@@` header, exactly as `DiffHunkInfo.header` carries it. */
+  header: string;
+  /** Every line of the hunk, in order, exactly as `DiffHunkInfo.lines` carries them. */
+  lines: DiffLine[];
+}
+
+/**
+ * One run of consecutive lines that all came from the same commit — the unit a blame comes back in.
+ *
+ * Runs rather than lines, and that is what makes the annotation affordable: a 5,000-line file is
+ * tens-to-hundreds of these, where the per-line form would be 5,000 objects each carrying its own
+ * copy of the author's name and email across IPC. Finding the owner of a line is a binary search
+ * over `start_line`, which is why the backend guarantees the list is ascending and gap-free — see
+ * `git/blame.rs`.
+ */
+export interface BlameHunkInfo {
+  /** First line of the run, counting from 1. */
+  start_line: number;
+  line_count: number;
+  /** Empty when `uncommitted`. */
+  commit_id: string;
+  /** First 7 of `commit_id` — the same abbreviation the graph shows. */
+  short_id: string;
+  author_name: string;
+  author_email: string;
+  /** Unix seconds UTC, same unit as `CommitInfo.timestamp`. Zero when `uncommitted`. */
+  timestamp: number;
+  summary: string;
+  /** Only present in the unsaved buffer that was blamed: nobody has committed it. Everything above
+   *  is empty or zero in that case, deliberately — the UI renders a fixed string for these. */
+  uncommitted: boolean;
+  /** The author is whoever *this repository* commits as (a per-repo `user.email` wins over the
+   *  global one), which is what lets the annotation say "You" without mislabelling a namesake. */
+  is_me: boolean;
+}
+
+/**
+ * Why a file could not be blamed, or that it could.
+ *
+ * A union rather than a free string, following `RefKind`: an empty `hunks` cannot distinguish "git
+ * has never seen this file" from "this file is empty", and those two are worded differently on
+ * screen. Sent by the backend because only it knows — the answer comes from HEAD's tree, not from
+ * the working copy the frontend can see.
+ */
+export type BlameState = "ok" | "untracked" | "binary" | "nohead";
+
+export interface FileBlame {
+  state: BlameState;
+  /** Ascending by `start_line` and covering every line, so a lookup never has to handle a gap.
+   *  Empty for every `state` other than `"ok"`, and for an empty file. */
+  hunks: BlameHunkInfo[];
+  /** The commit these hunks were computed against. The cache keys on it, which is how a commit,
+   *  checkout, reset or rebase invalidates without an event: the key changes. Empty for `"nohead"`. */
+  head_oid: string;
 }
 
 /** A credential-looking match found in the staged diff by the pre-commit secret scanner. */

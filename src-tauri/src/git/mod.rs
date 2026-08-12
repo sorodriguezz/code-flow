@@ -1,7 +1,9 @@
+pub mod blame;
 pub mod branch;
 pub mod checkpoint;
 pub mod diff;
 pub mod graph;
+pub mod hunk;
 pub mod identity;
 pub mod lock_rules;
 pub mod merge;

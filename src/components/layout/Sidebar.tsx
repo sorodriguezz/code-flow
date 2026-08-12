@@ -78,6 +78,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { riseDelay } from "../../lib/rise";
+import { PAGE, pageDelay, useIncremental } from "../../lib/useIncremental";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 
@@ -88,6 +89,38 @@ import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
 // positioned over the whole row — see `ActivePill`.
 const ROW_ACTION_CLASS =
   "relative flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 transition-opacity hover:bg-black/[0.05] hover:text-[var(--cf-text)] group-hover:opacity-100 dark:hover:bg-white/[0.08]";
+
+/**
+ * The last row of a capped list: reveals the next page, and says how much list is left behind it.
+ *
+ * No chevron, deliberately — this column spends its chevrons on folds (`CollapsibleSection`, and the
+ * pull-request status groups), and a third chevron shape inside it would read as a fold that isn't one.
+ * Centred accent text against left-aligned uppercase muted headers is already unambiguous.
+ *
+ * The label counts the rows this click will actually add, so the last click says "show 3 more" rather
+ * than promising ten that do not exist. The remainder rides along muted, because the total in the
+ * header stops answering "how deep is this" the moment the list is truncated.
+ *
+ * Returning `null` at zero is what lets the five call sites be unconditional one-liners.
+ */
+function ShowMoreRow({ hidden, onClick }: { hidden: number; onClick: () => void }) {
+  const t = useT();
+  if (hidden <= 0) return null;
+  const next = Math.min(hidden, PAGE);
+  return (
+    <button
+      onClick={onClick}
+      className="w-full rounded-md px-2 py-1 text-center text-[11px] font-medium text-[var(--cf-accent)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+    >
+      {t("sidebar.showMore", { n: next })}
+      {hidden > next && (
+        <span className="ml-1 text-[var(--cf-text-muted)]">
+          · {t("sidebar.showMoreLeft", { n: hidden })}
+        </span>
+      )}
+    </button>
+  );
+}
 
 /** How the repository's tree unfolds. The same curve `cf-rise` uses, so a list arriving and a tree
  *  opening move alike; a touch slower, because this one travels a lot further. */
@@ -179,6 +212,11 @@ function StashesSection() {
   const [renamingIndex, setRenamingIndex] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const t = useT();
+  // Keyed on the repository, not on the array: `refreshStashes` allocates a new one on every
+  // filesystem-watcher tick, and resetting on that would fold the list back to ten while the user is
+  // reading it. See `useIncremental`.
+  const repoPath = useRepoStore((s) => s.repoPath);
+  const stashWindow = useIncremental(stashes.length, repoPath);
 
   const commitRename = async () => {
     if (renamingIndex === null) return;
@@ -190,7 +228,7 @@ function StashesSection() {
   return (
     <CollapsibleSection
       icon={Archive}
-      title={t("sidebar.stashes")}
+      title={`${t("sidebar.stashes")} (${stashes.length})`}
       action={({ open, expand }) => (
         <button
           // Same as the branch form: collapsed, the input isn't mounted, so "+" has to unfold
@@ -238,7 +276,7 @@ function StashesSection() {
       )}
 
       <div className="space-y-0.5">
-        {stashes.map((s, at) =>
+        {stashes.slice(0, stashWindow.shown).map((s, at) =>
           renamingIndex === s.index ? (
             <div key={s.index} className="flex items-center gap-1 px-1.5 py-0.5">
               <input
@@ -258,7 +296,7 @@ function StashesSection() {
             <div
               key={s.index}
               onClick={() => setViewingStash(s)}
-              style={riseDelay(at)}
+              style={pageDelay(at)}
               className="cf-rise group flex cursor-pointer items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[13px] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
             >
               <span className="flex-1 truncate text-[var(--cf-text-muted)]">{s.message}</span>
@@ -318,6 +356,7 @@ function StashesSection() {
             </div>
           ),
         )}
+        <ShowMoreRow hidden={stashWindow.hidden} onClick={stashWindow.more} />
         {stashes.length === 0 && !showInput && (
           <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noStashes")}</p>
         )}
@@ -333,17 +372,20 @@ function RemoteBranchesSection({ branches }: { branches: BranchInfo[] }) {
   const checkingOutBranch = useRepoStore((s) => s.checkingOutBranch);
   const remoteBranches = branches.filter((b) => b.is_remote);
   const t = useT();
+  const repoPath = useRepoStore((s) => s.repoPath);
+  // Above the early return: hook order has to be the same on every render.
+  const remoteWindow = useIncremental(remoteBranches.length, repoPath);
   if (remoteBranches.length === 0) return null;
 
   return (
-    <CollapsibleSection icon={Cloud} title={t("sidebar.remoteBranches")}>
+    <CollapsibleSection icon={Cloud} title={`${t("sidebar.remoteBranches")} (${remoteBranches.length})`}>
       <div className="space-y-0.5">
-        {remoteBranches.map((b, at) => {
+        {remoteBranches.slice(0, remoteWindow.shown).map((b, at) => {
           const isCheckingOut = checkingOutBranch === b.name;
           return (
             <div
               key={b.name}
-              style={riseDelay(at)}
+              style={pageDelay(at)}
               className="cf-rise group flex items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-[13px] text-[var(--cf-text-muted)]"
             >
               {isCheckingOut ? (
@@ -371,6 +413,7 @@ function RemoteBranchesSection({ branches }: { branches: BranchInfo[] }) {
             </div>
           );
         })}
+        <ShowMoreRow hidden={remoteWindow.hidden} onClick={remoteWindow.more} />
       </div>
     </CollapsibleSection>
   );
@@ -544,6 +587,18 @@ function PullRequestsSection({ project }: { project: Project }) {
   /** Takes what the group is *showing* rather than reading the record: a group that is open by
    * default has no entry to negate, so `!openGroups[key]` would re-open it on the first click. */
   const toggleGroup = (key: string, open: boolean) => setOpenGroups((g) => ({ ...g, [key]: !open }));
+  /** How many rows each status group has been asked to show. Alongside `openGroups` and for the same
+   *  reason: it is a decision the user made about a group, and folding the section around it should not
+   *  undo it. Absent means the first page.
+   *
+   *  Here rather than inside an extracted group component, so it also survives the whole section
+   *  folding — which unmounts all four groups but not this. It needs no repository key: this section is
+   *  mounted only while its project is active, so the counters die on a project switch for free. */
+  const [shownByGroup, setShownByGroup] = useState<Record<string, number>>({});
+  /** Takes what the group is *showing* rather than reading the record, exactly as `toggleGroup` does —
+   *  a group still on its first page has no entry to add to. */
+  const revealMore = (key: string, shown: number) =>
+    setShownByGroup((g) => ({ ...g, [key]: shown + PAGE }));
   /**
    * Whether this section has been unfolded yet — and therefore whether it is allowed to run.
    *
@@ -876,7 +931,15 @@ function PullRequestsSection({ project }: { project: Project }) {
       ) : (
         <div className="space-y-2">
           {PR_SECTIONS.map((section) => {
-            const items = prs.filter((pr) => pr.status === section.key);
+            // `filter` already returns a fresh array, so sorting it in place cannot touch the store's.
+            // `Date.parse`, not string comparison: the three hosts hand over different precisions of the
+            // same ISO-8601 instant — whole seconds, milliseconds, variable fractional digits — and `.`
+            // sorts before `Z`, so `…56.7Z` would order before `…56Z`. The id tiebreak is monotonic per
+            // repository on all three.
+            const items = prs
+              .filter((pr) => pr.status === section.key)
+              .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
+            const shown = Math.min(shownByGroup[section.key] ?? PAGE, items.length);
             const Icon = PR_STATUS_ICON[section.key] ?? GitPullRequest;
             const open = openGroups[section.key] ?? section.defaultOpen ?? false;
             return (
@@ -902,7 +965,7 @@ function PullRequestsSection({ project }: { project: Project }) {
                     would otherwise still build every row just to keep it off screen. */}
                 {open && (
                   <div className="space-y-0.5">
-                    {items.map((pr, at) => (
+                    {items.slice(0, shown).map((pr, at) => (
                       <button
                         key={pr.id}
                         onClick={() => {
@@ -910,7 +973,7 @@ function PullRequestsSection({ project }: { project: Project }) {
                           selectPr(pr);
                           openAiPanel();
                         }}
-                        style={riseDelay(at)}
+                        style={pageDelay(at)}
                         className={`cf-rise flex w-full items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[12px] ${
                           selectedPr?.id === pr.id
                             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
@@ -924,6 +987,10 @@ function PullRequestsSection({ project }: { project: Project }) {
                     {items.length === 0 && !loading && (
                       <p className="px-1.5 text-[11px] text-[var(--cf-text-muted)]">{t("sidebar.noPRsInSection")}</p>
                     )}
+                    <ShowMoreRow
+                      hidden={items.length - shown}
+                      onClick={() => revealMore(section.key, shown)}
+                    />
                   </div>
                 )}
               </div>
@@ -979,6 +1046,11 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
   const [showMoveModal, setShowMoveModal] = useState(false);
   const [revealing, setRevealing] = useState(false);
   const [openingVsCode, setOpeningVsCode] = useState(false);
+  // Keyed on the repository and not on `branches`: this component stays mounted for inactive projects,
+  // and the array is replaced on every filesystem-watcher tick. See `useIncremental`.
+  const repoPath = useRepoStore((s) => s.repoPath);
+  const localBranches = branches.filter((b) => !b.is_remote);
+  const localWindow = useIncremental(localBranches.length, repoPath);
 
   const reduceMotion = useReducedMotion();
 
@@ -1106,7 +1178,7 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
         <div className="ml-6 mt-1 space-y-3 border-l border-[var(--cf-border)] pl-3">
           <CollapsibleSection
             icon={GitBranch}
-            title={t("sidebar.localBranches")}
+            title={`${t("sidebar.localBranches")} (${localBranches.length})`}
             action={({ expand }) => (
               <button
                 // The form is a modal now, so "+" always means the same thing. The section is
@@ -1133,12 +1205,10 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
                   </span>
                 </div>
               )}
-              {branches
-                .filter((b) => !b.is_remote)
-                .map((b, at) => {
+              {localBranches.slice(0, localWindow.shown).map((b, at) => {
                   const isCheckingOut = checkingOutBranch === b.name;
                   return (
-                    <div key={b.name} style={riseDelay(at)} className="cf-rise group flex items-center">
+                    <div key={b.name} style={pageDelay(at)} className="cf-rise group flex items-center">
                       <button
                         onClick={() => checkoutBranch(b.name)}
                         disabled={checkingOutBranch !== null}
@@ -1224,7 +1294,8 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
                     </div>
                   );
                 })}
-              {branches.filter((b) => !b.is_remote).length === 0 && (
+              <ShowMoreRow hidden={localWindow.hidden} onClick={localWindow.more} />
+              {localBranches.length === 0 && (
                 <p className="px-1.5 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noBranches")}</p>
               )}
             </div>

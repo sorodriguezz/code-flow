@@ -102,6 +102,8 @@ export const translations = {
       "The full path as it appears in the URL, including every group — GitLab has no separate owner and repository.",
     "sidebar.openRepoInBrowser": "Open repository in browser",
     "sidebar.refreshPrs": "Refresh pull requests",
+    "sidebar.showMore": "Show {n} more",
+    "sidebar.showMoreLeft": "{n} left",
     "createPr.title": "Create pull request",
     "createPr.source": "Source branch",
     "createPr.target": "Target branch",
@@ -1464,12 +1466,18 @@ export const translations = {
     "settings.removeWorkspaceHasProjects": "Remove its projects first before removing this workspace",
 
     "settings.gitTitle": "Git behavior",
+    // Widened when line blame arrived: the screen now also holds a *display* toggle, which the
+    // previous wording ("identity, and what happens on pull/push/checkout") had no room for.
     "settings.gitHint":
-      "The identity your commits carry, and what CodeFlow does on its own when you pull, push or switch branches.",
+      "The identity your commits carry, what CodeFlow does on its own when you pull, push or switch branches, and what it shows you about the history of the file you are reading.",
     "settings.secretScanDescription": "Secret scanning before every commit.",
     "settings.secretScanLabel": "Detect credentials in staged changes before committing",
     "settings.secretScanHint":
       "Scans added lines for API keys, tokens and private keys. If it finds something, it asks for confirmation before committing.",
+    "settings.blameDescription": "Line authorship in the editor.",
+    "settings.blameLabel": "Show who last changed the line the caret is on",
+    "settings.blameHint":
+      "A dim note at the end of the current line, and the same in the status bar. Clicking it opens that commit's change to the file side by side. Off by default: it runs a blame over the whole open file.",
     "settings.gitIdentityHint": "Identity used for commits made through CodeFlow (writes to your global git config).",
     "settings.name": "Name",
     "settings.email": "Email",
@@ -2023,6 +2031,40 @@ export const translations = {
     "changes.quotaRetry": "Try again in {hint}.",
     "changes.quotaRetryLater": "Try again later.",
 
+    /*
+     * The editor's inline change peek — the panel a click on a gutter marker opens over the hunk.
+     *
+     * Its own namespace rather than more of `changes.*`, which is 27 keys about the Changes screen:
+     * this is editor chrome and never appears there. Same call `blame.*` and `diff.*` already make.
+     *
+     * `peek.counterOne` exists because `render` has no pluralisation and "1 of 1 changes" is the one
+     * case worth spelling out — the app's other answer is a literal "(s)", which reads acceptably in a
+     * dialog and badly in a header. There is no shared "N of M" key to reuse; the convention here is
+     * per-feature (`tour.stepOf`, `agents.stepN`, `api.runner.progress`, `db.rowsOfTotal`).
+     */
+    "peek.title": "Local changes (working tree)",
+    "peek.titleStaged": "Staged changes",
+    "peek.counter": "{n} of {total} changes",
+    "peek.counterOne": "1 change",
+    "peek.stageHunk": "Stage this change",
+    "peek.unstageHunk": "Unstage this change",
+    "peek.discardHunk": "Discard this change",
+    "peek.discardHunkConfirm":
+      'Discard this change to "{path}", lines {from}–{to}? Those lines go back to their last staged state. The rest of the file, and anything you have staged, are kept. This can\'t be undone.',
+    "peek.discardHunkConfirmOne":
+      'Discard this change to "{path}", line {line}? That line goes back to its last staged state. The rest of the file, and anything you have staged, are kept. This can\'t be undone.',
+    "peek.nextChange": "Next change",
+    "peek.prevChange": "Previous change",
+    "peek.close": "Close",
+    "peek.stale":
+      "That change moved — the file was edited while the panel was open. Nothing was modified; the panel has been refreshed.",
+    "peek.applyFailed":
+      "Git couldn't apply that change on its own. Nothing was modified — stage or discard the whole file instead.",
+    "peek.wholeFileNew": "This file is new, so it has one change: all of it.",
+    /* The tail of a hunk too long to draw — see `PEEK_MAX_ROWS`. It says what is not on screen, not
+       what will be acted on: the button still stages or discards the whole hunk. */
+    "peek.moreLines": "…and {n} more lines in this change",
+
     "graph.undoCommit": "Undo commit (keeps changes)",
     "graph.close": "Close",
     "graph.noCommits": "No commits yet",
@@ -2228,6 +2270,8 @@ export const translations = {
     "shortcuts.goToLine": "Go to line",
     "shortcuts.nextTab": "Next tab",
     "shortcuts.prevTab": "Previous tab",
+    "shortcuts.nextChange": "Go to next change",
+    "shortcuts.prevChange": "Go to previous change",
     "shortcuts.inlineEdit": "Rewrite selection with AI",
     "shortcuts.toggleComment": "Toggle comment",
     "shortcuts.selectNextOccurrence": "Select next occurrence",
@@ -2296,6 +2340,28 @@ export const translations = {
     "debug.evaluateDisabled": "Pause to evaluate expressions",
     "debug.breakpointCount": "{n} breakpoint(s) — click the gutter to add more",
     "debug.noBreakpoints": "Click a line's gutter to set a breakpoint",
+
+    // Line blame: the dim note at the end of the caret's line, the same text in the status bar, and
+    // the hover behind both. The `{ago}` wordings are their own bucket per unit rather than one
+    // `{n} {unit}` pair because `render` does plain substitution with no plural rules — see
+    // `lib/blameText.ts`, which picks the key and therefore owns the singular/plural thresholds.
+    "blame.you": "You",
+    "blame.uncommitted": "Uncommitted changes",
+    "blame.notCommitted": "Not committed yet",
+    "blame.justNow": "just now",
+    "blame.minuteAgo": "a minute ago",
+    "blame.minutesAgo": "{n} minutes ago",
+    "blame.hourAgo": "an hour ago",
+    "blame.hoursAgo": "{n} hours ago",
+    "blame.yesterday": "yesterday",
+    "blame.daysAgo": "{n} days ago",
+    "blame.weeksAgo": "{n} weeks ago",
+    "blame.monthsAgo": "{n} months ago",
+    "blame.yearAgo": "a year ago",
+    "blame.yearsAgo": "{n} years ago",
+    "blame.openDiff": "Click to open this commit's change side by side",
+    "blame.commitLine": "{short} · {date}",
+
     "anchors.title": "Anchors",
     "bookmarks.title": "Bookmarks",
     "bookmarks.section": "Bookmarks",
@@ -4841,6 +4907,8 @@ export const translations = {
       "La ruta completa tal como aparece en la URL, con todos sus grupos — en GitLab no hay propietario y repositorio por separado.",
     "sidebar.openRepoInBrowser": "Abrir repositorio en el navegador",
     "sidebar.refreshPrs": "Actualizar pull requests",
+    "sidebar.showMore": "Mostrar {n} más",
+    "sidebar.showMoreLeft": "quedan {n}",
     "createPr.title": "Crear pull request",
     "createPr.source": "Rama origen",
     "createPr.target": "Rama destino",
@@ -6206,11 +6274,15 @@ export const translations = {
 
     "settings.gitTitle": "Comportamiento Git",
     "settings.gitHint":
-      "La identidad con la que quedan tus commits, y qué hace CodeFlow por su cuenta al hacer pull, push o cambiar de rama.",
+      "La identidad con la que quedan tus commits, qué hace CodeFlow por su cuenta al hacer pull, push o cambiar de rama, y qué te muestra del historial del archivo que estás leyendo.",
     "settings.secretScanDescription": "Escaneo de secretos antes de cada commit.",
     "settings.secretScanLabel": "Detectar credenciales en los cambios preparados antes de commitear",
     "settings.secretScanHint":
       "Busca API keys, tokens y claves privadas en las líneas añadidas. Si encuentra algo, pide confirmación antes de commitear.",
+    "settings.blameDescription": "Autoría de línea en el editor.",
+    "settings.blameLabel": "Mostrar quién cambió por última vez la línea donde está el cursor",
+    "settings.blameHint":
+      "Una nota atenuada al final de la línea actual, y la misma en la barra de estado. Al hacer clic se abre en paralelo el cambio de ese commit en el archivo. Desactivado por defecto: ejecuta un blame sobre todo el archivo abierto.",
     "settings.gitIdentityHint": "Identidad usada para los commits hechos desde CodeFlow (escribe en tu git config global).",
     "settings.name": "Nombre",
     "settings.email": "Correo",
@@ -6763,6 +6835,30 @@ export const translations = {
     "changes.quotaRetry": "Intenta de nuevo en {hint}.",
     "changes.quotaRetryLater": "Intenta de nuevo más tarde.",
 
+    /* "Agregar"/"Quitar" rather than a second Spanish verb pair invented here: they are what
+       `changes.stage`/`changes.unstage` already say, and two words for one action in one app is how a
+       UI stops sounding like it was written by one person. */
+    "peek.title": "Cambios locales (árbol de trabajo)",
+    "peek.titleStaged": "Cambios en stage",
+    "peek.counter": "{n} de {total} cambios",
+    "peek.counterOne": "1 cambio",
+    "peek.stageHunk": "Agregar este cambio",
+    "peek.unstageHunk": "Quitar este cambio",
+    "peek.discardHunk": "Descartar este cambio",
+    "peek.discardHunkConfirm":
+      '¿Descartar este cambio en "{path}", líneas {from}–{to}? Esas líneas vuelven a su último estado en stage. El resto del archivo, y lo que tengas en stage, se conservan. Esto no se puede deshacer.',
+    "peek.discardHunkConfirmOne":
+      '¿Descartar este cambio en "{path}", línea {line}? Esa línea vuelve a su último estado en stage. El resto del archivo, y lo que tengas en stage, se conservan. Esto no se puede deshacer.',
+    "peek.nextChange": "Cambio siguiente",
+    "peek.prevChange": "Cambio anterior",
+    "peek.close": "Cerrar",
+    "peek.stale":
+      "Ese cambio se movió — el archivo se editó mientras el panel estaba abierto. No se modificó nada; el panel ya se actualizó.",
+    "peek.applyFailed":
+      "Git no pudo aplicar ese cambio por separado. No se modificó nada — agrega o descarta el archivo completo.",
+    "peek.wholeFileNew": "Este archivo es nuevo, así que tiene un solo cambio: todo el archivo.",
+    "peek.moreLines": "…y {n} líneas más en este cambio",
+
     "graph.undoCommit": "Deshacer commit (conserva los cambios)",
     "graph.close": "Cerrar",
     "graph.noCommits": "Aún no hay commits",
@@ -6968,6 +7064,8 @@ export const translations = {
     "shortcuts.goToLine": "Ir a la línea",
     "shortcuts.nextTab": "Pestaña siguiente",
     "shortcuts.prevTab": "Pestaña anterior",
+    "shortcuts.nextChange": "Ir al cambio siguiente",
+    "shortcuts.prevChange": "Ir al cambio anterior",
     "shortcuts.inlineEdit": "Reescribir la selección con IA",
     "shortcuts.toggleComment": "Comentar / descomentar",
     "shortcuts.selectNextOccurrence": "Seleccionar siguiente coincidencia",
@@ -7036,6 +7134,24 @@ export const translations = {
     "debug.evaluateDisabled": "Pausa la ejecución para evaluar",
     "debug.breakpointCount": "{n} breakpoint(s) — clic en el margen para añadir más",
     "debug.noBreakpoints": "Haz clic en el margen de una línea para poner un breakpoint",
+
+    "blame.you": "Tú",
+    "blame.uncommitted": "Cambios sin commitear",
+    "blame.notCommitted": "Aún sin commitear",
+    "blame.justNow": "recién",
+    "blame.minuteAgo": "hace un minuto",
+    "blame.minutesAgo": "hace {n} minutos",
+    "blame.hourAgo": "hace una hora",
+    "blame.hoursAgo": "hace {n} horas",
+    "blame.yesterday": "ayer",
+    "blame.daysAgo": "hace {n} días",
+    "blame.weeksAgo": "hace {n} semanas",
+    "blame.monthsAgo": "hace {n} meses",
+    "blame.yearAgo": "hace un año",
+    "blame.yearsAgo": "hace {n} años",
+    "blame.openDiff": "Clic para abrir en paralelo el cambio de este commit",
+    "blame.commitLine": "{short} · {date}",
+
     "anchors.title": "Anclas",
     "bookmarks.title": "Marcadores",
     "bookmarks.section": "Marcadores",

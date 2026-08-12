@@ -7,16 +7,10 @@ import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
 import { useThemeStore } from "../../state/themeStore";
 import { languageForPath } from "../../lib/monacoLanguage";
-import { reconstructSides } from "../../lib/diffText";
+import { lineClasses, reconstructSides } from "../../lib/diffText";
 import { fileStatusLabelKey, fileStatusColor as statusColor } from "../../lib/fileStatus";
 
 type ViewMode = "unified" | "split";
-
-function lineClasses(origin: string): string {
-  if (origin === "+") return "bg-[color-mix(in_oklab,var(--cf-success)_14%,transparent)] text-[var(--cf-text)]";
-  if (origin === "-") return "bg-[color-mix(in_oklab,var(--cf-danger)_14%,transparent)] text-[var(--cf-text)]";
-  return "text-[var(--cf-text-muted)]";
-}
 
 const MIN_SPLIT_HEIGHT = 120;
 const MAX_SPLIT_HEIGHT = 640;

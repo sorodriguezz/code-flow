@@ -426,6 +426,15 @@ export function ensureRemoteStoreLoaded(): Promise<void> {
   return useRemoteStore.getState().setWorkspace(workspaceId);
 }
 
+/** A copy of `map` without `hostId`. Written out because three call sites need it and a mutation in
+ *  place would be a store write nothing re-rendered against. */
+function withoutHost<T>(map: Record<string, T>, hostId: string): Record<string, T> {
+  if (!(hostId in map)) return map;
+  const next = { ...map };
+  delete next[hostId];
+  return next;
+}
+
 /** The host a tab belongs to, or `null` if it has been deleted underneath the tab. */
 export function hostOf(hosts: RemoteHostRow[], hostId: string): RemoteHostRow | null {
   return hosts.find((host) => host.id === hostId) ?? null;
@@ -695,18 +704,12 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     await disconnectHost(id);
     try {
       await remoteDeleteHost(id);
-      set((s) => {
-        const holds = { ...s.holds };
-        const cloudStatus = { ...s.cloudStatus };
-        delete holds[id];
-        delete cloudStatus[id];
-        return {
-          hosts: s.hosts.filter((host) => host.id !== id),
-          detailsHostId: s.detailsHostId === id ? null : s.detailsHostId,
-          holds,
-          cloudStatus,
-        };
-      });
+      set((s) => ({
+        hosts: s.hosts.filter((host) => host.id !== id),
+        detailsHostId: s.detailsHostId === id ? null : s.detailsHostId,
+        holds: withoutHost(s.holds, id),
+        cloudStatus: withoutHost(s.cloudStatus, id),
+      }));
       await get().pollForwards();
     } catch (error) {
       pushErrorToast(`${translate("remote.deleteFailed")}: ${String(error)}`);
@@ -1085,7 +1088,16 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       const tabs = s.tabs.filter((entry) => entry.id !== tabId);
       const activeTabId =
         s.activeTabId === tabId ? (tabs[tabs.length - 1]?.id ?? null) : s.activeTabId;
-      return { tabs, activeTabId };
+      // Closing the last tab a host owns retracts its cloud claim, so the row's dot goes hollow.
+      //
+      // A cloud account has no session to end — the dot is lit by `cloudStatus`, which records that
+      // the credential answered at some moment — and leaving that claim behind meant closing the
+      // account's tab left a row still drawn as connected, with nothing anywhere that could turn it
+      // off. The X is the gesture people reach for, so it is the one that has to mean it.
+      const cloudStatus = tabs.some((entry) => entry.hostId === tab.hostId)
+        ? s.cloudStatus
+        : withoutHost(s.cloudStatus, tab.hostId);
+      return { tabs, activeTabId, cloudStatus };
     });
     if (tab.kind === "screen") void get().pollForwards();
   },
@@ -1322,13 +1334,10 @@ export async function disconnectHost(hostId: string): Promise<void> {
     // `holds`, and four seconds of a host still drawn as connected after the click is the drift this
     // whole thing exists to remove. `cloudStatus` goes with it — a green dot meaning "this credential
     // answered at 14:02" must not survive a deliberate disconnect.
-    useRemoteStore.setState((s) => {
-      const holds = { ...s.holds };
-      const cloudStatus = { ...s.cloudStatus };
-      delete holds[hostId];
-      delete cloudStatus[hostId];
-      return { holds, cloudStatus };
-    });
+    useRemoteStore.setState((s) => ({
+      holds: withoutHost(s.holds, hostId),
+      cloudStatus: withoutHost(s.cloudStatus, hostId),
+    }));
     await store.pollForwards();
   } finally {
     // Cleared in `finally`, so a release that threw stops looking busy rather than spinning until the
@@ -1364,23 +1373,35 @@ export function useHostLiveness(hostId: string): { session: boolean; active: boo
       (hold?.forwards ?? 0) > 0 ||
       (hold?.files ?? false) ||
       (hold?.screen ?? false) ||
-      s.tabs.some((tab) => tab.kind === "session" && tab.hostId === hostId && tab.exited)
+      // Any tab of this host's, which for a file browser is true before the first listing has opened
+      // a session behind it — the panel is on screen, so the row should say so.
+      s.tabs.some((tab) => tab.hostId === hostId)
     );
   });
   const busy = useRemoteStore((s) => s.disconnecting.includes(hostId));
   return { session, active, busy };
 }
 
-/** Whether a host has anything at all that `disconnectHost` would release. The menu's test, and the
- *  one the old `live` got wrong by only ever looking at tabs and forwards. */
+/**
+ * Whether a host has anything at all that `disconnectHost` would release. The menu's test, and the
+ * one the old `live` got wrong by only ever looking at session tabs and forwards.
+ *
+ * **A tab of any kind counts, and so does a cloud account's claim.** Those are the two cases that made
+ * the menu contradict the row: a storage account holds no session, so it had no entry — but its dot is
+ * lit by `cloudStatus`, and a lit dot nothing can turn off is worse than a verb that is loose about
+ * what it closes. For an account, Disconnect closes its panel and retracts the claim; there was never
+ * a socket to drop, which is why the file-session release it also calls is a no-op there.
+ */
 export function hostIsHolding(
   hostId: string,
   tabs: RemoteTab[],
   holds: Record<string, HostHold>,
+  cloudStatus: Record<string, CloudStatus> = {},
 ): boolean {
   const hold = holds[hostId];
   return (
-    tabs.some((tab) => tab.kind === "session" && tab.hostId === hostId) ||
+    tabs.some((tab) => tab.hostId === hostId) ||
+    (cloudStatus[hostId]?.ok ?? false) ||
     (hold?.files ?? false) ||
     (hold?.forwards ?? 0) > 0 ||
     (hold?.screen ?? false)

@@ -34,7 +34,12 @@ export type EditorCommand =
   | "save"
   | "closeTab"
   | "nextTab"
-  | "prevTab";
+  | "prevTab"
+  // Walking the open file's uncommitted hunks, opening the change peek at each stop. Through this bus
+  // rather than as a Monaco action because standalone monaco has no dirty-diff navigation to bind —
+  // the hunks come from `repoStore`, and the panel that shows them is ours.
+  | "nextChange"
+  | "prevChange";
 
 /**
  * Commands worth switching to the Editor for.
@@ -56,6 +61,9 @@ const REVEALS_EDITOR = new Set<EditorCommand>([
   // would be a destructive action aimed at a row nobody is looking at.
   "newFile",
   "newFolder",
+  // `nextChange`/`prevChange` are deliberately absent, for exactly the reason above: they navigate the
+  // hunks of the file on screen, so firing one from the graph would either do nothing or move a caret
+  // in a file nobody is looking at — and open a panel offering to stage part of it.
 ]);
 
 interface EditorCommandState {

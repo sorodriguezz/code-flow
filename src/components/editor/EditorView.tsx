@@ -60,6 +60,7 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
+import type { FileDiffInfo } from "../../types/domain";
 
 const TREE_MIN = 200;
 const TREE_MAX = 480;
@@ -191,6 +192,9 @@ export function EditorView() {
   const captureRef = useRef<(() => void) | null>(null);
   /** Same idea for "bookmark the line the caret is on" — only the pane holding the caret can. */
   const bookmarkToggleRef = useRef<(() => void) | null>(null);
+  /** And for "go to the next/previous change": the hunks belong to the file, but the peek that shows
+   *  one belongs to a pane, and two splits on the same file can be parked on different hunks. */
+  const changeNavRef = useRef<((delta: number) => void) | null>(null);
 
   // Assigned during render, not in an effect: the callbacks below read them to decide what to do
   // *now*, and a ref that lagged a render would act on the previous tab or group.
@@ -234,12 +238,22 @@ export function EditorView() {
   );
   const debugStatus = useDebugStore((s) => s.status);
 
-  // Same "unstaged wins, else staged" priority as the file tree's own indicator, so the
-  // gutter/minimap markers always match whatever status letter that file is showing there.
+  /**
+   * Same "unstaged wins, else staged" priority as the file tree's own indicator, so the gutter/minimap
+   * markers always match whatever status letter that file is showing there.
+   *
+   * It now says *which* side it found the file on, because the change peek has to: the same panel means
+   * "stage this" over a working hunk and "unstage this" over a staged one, and offering to discard a
+   * staged hunk would be two operations behind one button with a scope nobody can predict. Returning
+   * the merged answer without saying where it came from is what made that unanswerable.
+   */
   const fileDiffFor = useCallback(
-    (path: string) =>
-      workingDiff.find((f) => (f.new_path ?? f.old_path) === path) ??
-      stagedDiff.find((f) => (f.new_path ?? f.old_path) === path),
+    (path: string): { file: FileDiffInfo; staged: boolean } | undefined => {
+      const working = workingDiff.find((f) => (f.new_path ?? f.old_path) === path);
+      if (working) return { file: working, staged: false };
+      const staged = stagedDiff.find((f) => (f.new_path ?? f.old_path) === path);
+      return staged ? { file: staged, staged: true } : undefined;
+    },
     [workingDiff, stagedDiff],
   );
 
@@ -264,7 +278,10 @@ export function EditorView() {
         // An evicted preview only leaves the registry if no other group was showing it too.
         const kept = outcome.evictedFully ? prev.filter((tab) => tab.path !== outcome.evicted) : prev;
         if (alreadyOpen) return pin ? kept.map((tab) => (tab.path === path ? { ...tab, preview: false } : tab)) : kept;
-        return [...kept, { path, content: "", originalContent: "", loading: true, viewMode: "code", preview: !pin }];
+        return [
+          ...kept,
+          { path, content: "", originalContent: "", loading: true, viewMode: "code", preview: !pin, compare: null },
+        ];
       });
       if (alreadyOpen) return;
 
@@ -545,11 +562,16 @@ export function EditorView() {
 
   /** Opens a changed file's before/after in the focused group. A real tab rather than a dialog:
    * it's the same file the code tab shows, in the other of the two ways of reading it, so the
-   * toolbar's diff toggle is the way back and the tab can be left open beside the others. */
+   * toolbar's diff toggle is the way back and the tab can be left open beside the others.
+   *
+   * `compare` picks *which* before/after: a commit's change to the file when a blame annotation was
+   * clicked, or `null` — the default, and what the Changes panel means — for the working change.
+   * Written explicitly rather than left alone, so opening the working diff of a file that is still
+   * pointed at a commit from an earlier click shows the working change and not that commit. */
   const openDiffTab = useCallback(
-    async (path: string) => {
+    async (path: string, compare: OpenTab["compare"] = null) => {
       await openFile(path, { pin: true });
-      patchTab(path, { viewMode: "diff" });
+      patchTab(path, { viewMode: "diff", compare });
     },
     [openFile, patchTab],
   );
@@ -640,6 +662,14 @@ export function EditorView() {
         break;
       case "bookmarkToggle":
         bookmarkToggleRef.current?.();
+        break;
+      // Handed to the focused pane for the same reason the two above are: the peek is per-pane, so
+      // only the pane the user is looking at can say which hunk "next" is next from.
+      case "nextChange":
+        changeNavRef.current?.(1);
+        break;
+      case "prevChange":
+        changeNavRef.current?.(-1);
         break;
       // Save is not gated on the Editor being visible: a file with unsaved edits is worth saving
       // from wherever you happen to be looking, which is what the old listener did too.
@@ -761,6 +791,10 @@ export function EditorView() {
     bookmarkToggleRef.current = toggle;
   }, []);
 
+  const registerChangeNav = useCallback((nav: (delta: number) => void) => {
+    changeNavRef.current = nav;
+  }, []);
+
   const setGroupActive = useCallback((groupId: string, path: string) => {
     setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, activePath: path } : g)));
     setActiveGroupId(groupId);
@@ -855,11 +889,22 @@ export function EditorView() {
       onDropTab={dropTab}
       // Typing in a preview tab promotes it to a permanent one, exactly like VS Code.
       onChange={(path, value) => patchTab(path, { content: value, preview: false })}
-      onViewMode={(path, mode: ViewMode) => patchTab(path, { viewMode: mode })}
+      // Leaving diff view forgets which commit was being compared. One rule in one place: without it,
+      // a tab that once showed a commit's change would keep showing *that* commit every time the diff
+      // toggle was pressed again, for the rest of the tab's life — and the toggle's promise is "the
+      // change this file has", not "the last thing you clicked on in it".
+      onViewMode={(path, mode: ViewMode) =>
+        patchTab(path, mode === "diff" ? { viewMode: mode } : { viewMode: mode, compare: null })
+      }
       onSave={() => group.activePath && void save(group.activePath)}
       onCodeSnap={setCodeSnap}
+      // Lands in the pane that was clicked without being told which: the pane's capture-phase
+      // `onMouseDown` made it the active group before Monaco's own mousedown ran, and `openDiffTab`
+      // opens into the active group.
+      onOpenCommitDiff={(path, compare) => void openDiffTab(path, compare)}
       registerCapture={registerCapture}
       registerBookmarkToggle={registerBookmarkToggle}
+      registerChangeNav={registerChangeNav}
       // Always available — VS Code lets you keep splitting, and each press splits *this* group
       // rather than whichever one happens to hold focus.
       onSplit={group.activePath ? () => splitGroup(group.id) : null}

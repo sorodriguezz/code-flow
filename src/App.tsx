@@ -39,6 +39,7 @@ import { useShortcutsStore } from "./state/shortcutsStore";
 import { useIconRulesStore } from "./state/iconRulesStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
+import { useBlameStore } from "./state/blameStore";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { backgroundFetch } from "./lib/backgroundFetch";
@@ -429,6 +430,11 @@ export default function App() {
     void startWatching(path);
     return () => {
       void stopWatching(path);
+      // The blame cache holds eight files at most, so a project left behind would otherwise sit in
+      // slots the project you switched to wants. Not a correctness fix — every key carries its own
+      // repository path, so a stale entry can never be served to the wrong repo — which is why it
+      // rides along with the watcher teardown instead of being wired up on its own.
+      useBlameStore.getState().clear();
     };
   }, [project?.local_path]);
 

@@ -69,6 +69,9 @@ export function useHostMenu() {
   // predicate could not see, so this is one subscription where there were two.
   const holds = useRemoteStore((s) => s.holds);
   const disconnecting = useRemoteStore((s) => s.disconnecting);
+  // A cloud account holds nothing on the wire, but its dot is lit from here — so this is what lets its
+  // row offer a way to turn that off.
+  const cloudStatus = useRemoteStore((s) => s.cloudStatus);
   const t = useT();
 
   return (host: RemoteHostRow, options: { onRename?: () => void } = {}): MenuItem[] => {
@@ -84,7 +87,7 @@ export function useHostMenu() {
     // control socket) held per host until something closes it, and a screen's tunnel and bridge route
     // outlive the viewer window. A session whose pty exited counts too — `exited` says the far side
     // hung up, not that this machine let go of the pty.
-    const held = hostIsHolding(host.id, tabs, holds);
+    const held = hostIsHolding(host.id, tabs, holds, cloudStatus);
     const busy = disconnecting.includes(host.id);
 
     // A host with no address can do none of it, and the useful response is not an error saying so —

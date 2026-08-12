@@ -28,7 +28,10 @@ pub struct FileDiffInfo {
     pub hunks: Vec<DiffHunkInfo>,
 }
 
-fn diff_status_label(status: Delta) -> &'static str {
+/// `pub(super)` rather than private because `git::hunk` names the status it refuses in its
+/// `HUNK_UNSUPPORTED` message, and it must be the *same* word the file lists already show for that
+/// delta — two spellings of "typechange" would read as two different problems.
+pub(super) fn diff_status_label(status: Delta) -> &'static str {
     match status {
         Delta::Added => "added",
         Delta::Deleted => "deleted",
@@ -202,6 +205,63 @@ pub fn get_commit_diff(path: &str, oid: &str) -> Result<Vec<FileDiffInfo>, Strin
         .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None)
         .map_err(|e| e.message().to_string())?;
     collect_diff(&diff)
+}
+
+/// One file's change *in one commit*, against that commit's first parent, at full file context —
+/// what clicking a blame annotation opens.
+///
+/// [`get_commit_diff`] cannot serve that view, for two separate reasons that are both fatal rather
+/// than merely wasteful. It has no pathspec, so it walks and returns every file the commit touched
+/// in order to show one; and it passes `None` for `DiffOptions`, which means libgit2's default three
+/// lines of context — and anything rendered side by side must be produced at
+/// [`FULL_FILE_CONTEXT_LINES`] or `src/lib/diffText.ts`'s `reconstructSides` rebuilds the left-hand
+/// side out of context lines it never received and shows almost the whole file as deleted.
+///
+/// The commit's first parent, like [`get_commit_diff`] and like `git show`: a merge commit is
+/// therefore reported as what it changed relative to the branch it was merged *into*. For a root
+/// commit `parent(0)` fails, `parent_tree` is `None`, and `diff_tree_to_tree` reports the whole file
+/// as added — which is the correct reading of "this file was created here", so there is no special
+/// case for it.
+///
+/// `Ok(None)` means that commit didn't touch this path — the same contract as [`get_file_diff`], but
+/// unlike there it is not a race and is barely reachable at all from the one caller: blame attributes a
+/// line to a commit that changed the file *at this path* (no `track_copies_*`, no rename following), so
+/// a commit named by a blame annotation has a delta here by construction, root commits and merges
+/// included. What it is **not** is a case the editor has a rendering for: `EditorPane` keeps `viewMode`
+/// at `diff` while `OpenTab.compare` is set, so a `None` leaves the pane on its loading state until the
+/// user presses the diff toggle. Anything that widens the ways a caller can reach this — following
+/// renames in the blame, or a second call site that passes a commit it did not get from one — has to
+/// give that pane an empty state first.
+pub fn get_commit_file_diff(
+    path: &str,
+    oid: &str,
+    file_path: &str,
+) -> Result<Option<FileDiffInfo>, String> {
+    let repo = open(path)?;
+    let commit_oid = git2::Oid::from_str(oid).map_err(|e| e.message().to_string())?;
+    let commit = repo.find_commit(commit_oid).map_err(|e| e.message().to_string())?;
+    let tree = commit.tree().map_err(|e| e.message().to_string())?;
+    let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+
+    let mut opts = DiffOptions::new();
+    opts.context_lines(FULL_FILE_CONTEXT_LINES);
+    opts.pathspec(file_path);
+
+    let diff = repo
+        .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(&mut opts))
+        .map_err(|e| e.message().to_string())?;
+
+    // Same rename-aware pick as `get_file_diff`: a pathspec can match both sides of a rename, so
+    // choose the delta that actually names the path and fall back to the first one for a rename that
+    // carries neither name verbatim. On an empty result `nth(0)` is `None`.
+    let files = collect_diff(&diff)?;
+    let wanted = files
+        .iter()
+        .position(|f| {
+            f.new_path.as_deref() == Some(file_path) || f.old_path.as_deref() == Some(file_path)
+        })
+        .unwrap_or(0);
+    Ok(files.into_iter().nth(wanted))
 }
 
 /// Resolves a PR's base/head to a commit. Since those are branch names as they exist on the
@@ -547,6 +607,75 @@ mod tests {
         assert_eq!(original.len(), 30, "the original side must be the whole file");
         assert_eq!(original[0], "line 1");
         assert_eq!(original[14], "line 15");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The same whole-file invariant as above, on the commit-vs-parent path — which is the reason
+    /// `get_commit_file_diff` exists rather than the caller filtering `get_commit_diff`'s result:
+    /// that one is produced at libgit2's default three lines of context, so the side-by-side view
+    /// would render the rest of the file as deleted.
+    #[test]
+    fn one_file_in_one_commit_comes_back_whole_and_against_its_parent() {
+        let (dir, repo) = fixture();
+        let path = dir.to_str().unwrap();
+        let sig = Signature::now("Test", "test@example.com").unwrap();
+
+        let lines: Vec<String> = (1..=30).map(|n| format!("line {n}")).collect();
+        let commit_all = |message: &str| {
+            let mut index = repo.index().unwrap();
+            index.add_all(["*"].iter(), IndexAddOption::DEFAULT, None).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let parent = repo.head().unwrap().peel_to_commit().unwrap();
+            repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&parent]).unwrap()
+        };
+
+        fs::write(dir.join("wide.txt"), format!("{}\n", lines.join("\n"))).unwrap();
+        // A second file in the same commit: the pathspec is what keeps it out of the answer.
+        fs::write(dir.join("other.txt"), "unrelated\n").unwrap();
+        commit_all("add wide and other");
+
+        let mut edited = lines.clone();
+        edited[14] = "line 15 edited".to_string();
+        fs::write(dir.join("wide.txt"), format!("{}\n", edited.join("\n"))).unwrap();
+        let second = commit_all("edit the middle of wide");
+
+        let file = get_commit_file_diff(path, &second.to_string(), "wide.txt")
+            .unwrap()
+            .expect("wide.txt changed in that commit");
+        assert_eq!(file.new_path.as_deref(), Some("wide.txt"));
+        // Exactly what `reconstructSides` does for the left-hand side: the parent's whole file.
+        let original: Vec<&str> = file
+            .hunks
+            .iter()
+            .flat_map(|h| h.lines.iter())
+            .filter(|l| l.origin != "+")
+            .map(|l| l.content.as_str())
+            .collect();
+        assert_eq!(original.len(), 30, "the parent side must be the whole file");
+        assert_eq!(original[14], "line 15");
+
+        // A path the commit didn't touch is `None`, not an error and not the wrong file.
+        assert!(get_commit_file_diff(path, &second.to_string(), "other.txt").unwrap().is_none());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A root commit has no parent to diff against, and the honest answer is "created here" — the
+    /// whole file as added. No special case in the code, so this pins that `parent_tree: None` keeps
+    /// behaving that way.
+    #[test]
+    fn a_file_created_in_the_first_commit_is_all_additions() {
+        let (dir, repo) = fixture();
+        let path = dir.to_str().unwrap();
+        let root = repo.head().unwrap().peel_to_commit().unwrap().id().to_string();
+
+        let file = get_commit_file_diff(path, &root, "tracked.txt").unwrap().expect("added there");
+        assert_eq!(file.status, "added");
+        let lines: Vec<&str> = file.hunks.iter().flat_map(|h| h.lines.iter()).map(|l| l.origin.as_str()).collect();
+        assert!(!lines.is_empty());
+        assert!(lines.iter().all(|origin| *origin == "+"), "every line is an addition");
 
         fs::remove_dir_all(&dir).ok();
     }

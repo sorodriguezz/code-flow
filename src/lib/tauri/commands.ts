@@ -22,9 +22,11 @@ import type {
   ChatConversationSummary,
   CommitInfo,
   ConflictFile,
+  FileBlame,
   FileDiffInfo,
   FileEntry,
   GitIdentity,
+  HunkRef,
   DiscardOutcome,
   FpSuppression,
   JobHistoryEntry,
@@ -237,6 +239,26 @@ export const getFileDiff = (repoPath: string, path: string, staged: boolean) =>
 export const getCommitDiff = (repoPath: string, oid: string) =>
   invoke<FileDiffInfo[]>("get_commit_diff", { repoPath, oid });
 
+/** One file's change in one commit, against that commit's first parent, at full context — what
+ * clicking through from a blame annotation opens side by side.
+ *
+ * Not `getCommitDiff(...).find(...)`: that one returns every file the commit touched, and returns
+ * them at three lines of context, which is not enough for `reconstructSides` to rebuild the two file
+ * texts. Resolves to `null` when the commit didn't touch that path. */
+export const getCommitFileDiff = (repoPath: string, oid: string, path: string) =>
+  invoke<FileDiffInfo | null>("get_commit_file_diff", { repoPath, oid, path });
+
+/** Who last changed each line of a file, as runs of lines.
+ *
+ * Pass `contents` — the editor's unsaved buffer — and lines the user has just typed come back with
+ * `uncommitted: true` instead of inheriting the attribution of whatever used to sit at that line
+ * number; it is `git blame --contents -`. Omit it to blame the file as committed, which is the only
+ * form worth caching (see `state/blameStore.ts`), since a buffer blame is invalidated by every
+ * keystroke. `contents ?? null` for the same reason as `createBranch`'s `startPoint`: tauri wants an
+ * explicit null for a missing `Option`, not an absent key. */
+export const getFileBlame = (repoPath: string, path: string, contents?: string) =>
+  invoke<FileBlame>("get_file_blame", { repoPath, path, contents: contents ?? null });
+
 // ---------- git: branches ----------
 
 export const createBranch = (repoPath: string, name: string, startPoint?: string) =>
@@ -293,6 +315,33 @@ export const discardFileChanges = (repoPath: string, filePath: string) =>
 
 /** Reverts every unstaged change and deletes every untracked file. Staged content survives. */
 export const discardAllChanges = (repoPath: string) => invoke<void>("discard_all_changes", { repoPath });
+
+// ---------- git: one hunk at a time (the editor's inline change peek) ----------
+//
+// `contextLines` must be the context the hunk was *read* at — hunk boundaries are a function of it,
+// so passing a different number makes the backend's fingerprint match nothing and every call refuse
+// as stale. Pass `LIST_DIFF_CONTEXT_LINES` from `../../state/repoStore`, which is what
+// `workingDiff`/`stagedDiff` were fetched with; it crosses the wire rather than being a constant on
+// each side so there is exactly one number to change.
+//
+// None of these three builds a patch. `hunk` is the hunk the peek drew, handed back so
+// `src-tauri/src/git/hunk.rs` can recognise it in a diff it recomputes for itself — see `HunkRef`.
+// A hunk that has moved since the panel was drawn comes back rejected with a `HUNK_STALE: ` prefix
+// and nothing on disk has changed, so the caller can just refresh and let the user look again.
+
+/** Adds one hunk to the index. The working tree is not touched — this is `git add -p`. */
+export const stageHunk = (repoPath: string, hunk: HunkRef, contextLines: number) =>
+  invoke<void>("stage_hunk", { repoPath, hunk, contextLines });
+
+/** Removes one hunk from the index. The working tree is not touched — this is `git reset -p`. */
+export const unstageHunk = (repoPath: string, hunk: HunkRef, contextLines: number) =>
+  invoke<void>("unstage_hunk", { repoPath, hunk, contextLines });
+
+/** Throws one hunk of working-tree change away, restoring that region from the **index** — the same
+ * contract as `discardFileChanges`, so a file that is staged and then edited keeps its staged part.
+ * Nothing here is recoverable: no reflog, no stash, no restore point. Confirm before calling. */
+export const discardHunk = (repoPath: string, hunk: HunkRef, contextLines: number) =>
+  invoke<void>("discard_hunk", { repoPath, hunk, contextLines });
 
 export const commitChanges = (
   repoPath: string,

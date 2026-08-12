@@ -1,6 +1,6 @@
 use tauri::AppHandle;
 
-use crate::git::{branch, diff, graph, identity, merge, remotes, repo, stash};
+use crate::git::{blame, branch, diff, graph, hunk, identity, merge, remotes, repo, stash};
 use crate::remote;
 
 // ---------- why the read commands carry `(async)` and the write ones don't ----------
@@ -144,6 +144,39 @@ pub fn get_commit_diff(repo_path: String, oid: String) -> Result<Vec<diff::FileD
     diff::get_commit_diff(&repo_path, &oid)
 }
 
+/// One file's change in one commit, against that commit's first parent, at full file context — the
+/// side-by-side counterpart to [`get_commit_diff`]'s whole-changeset list. `null` when that commit
+/// didn't touch the path.
+///
+/// `(async)` where the neighbouring [`get_commit_diff`] doesn't have it: this one sits on a click
+/// path in the editor, and full-file context over a large file is exactly the kind of work that
+/// stops the window painting if it runs in the IPC handler. (That `get_commit_diff` lacks it is an
+/// existing inconsistency, left alone here.)
+#[tauri::command(async)]
+pub fn get_commit_file_diff(
+    repo_path: String,
+    oid: String,
+    path: String,
+) -> Result<Option<diff::FileDiffInfo>, String> {
+    diff::get_commit_file_diff(&repo_path, &oid, &path)
+}
+
+/// Who last changed each line of one file, as runs of lines rather than one object per line — see
+/// `git::blame::BlameHunkInfo` for why that shape is the load-bearing part.
+///
+/// `contents` is `git blame`'s `--contents -`: pass the editor's unsaved buffer and lines the user
+/// has just typed come back marked uncommitted instead of inheriting the attribution of whatever was
+/// at that line number. Pass `null` to blame the file as committed, which is the cacheable case —
+/// and the result carries the `head_oid` it was computed against so the caller can key on it.
+#[tauri::command(async)]
+pub fn get_file_blame(
+    repo_path: String,
+    path: String,
+    contents: Option<String>,
+) -> Result<blame::FileBlame, String> {
+    blame::blame_file(&repo_path, &path, contents.as_deref())
+}
+
 #[tauri::command]
 pub fn stage_file(repo_path: String, file_path: String) -> Result<(), String> {
     diff::stage_file(&repo_path, &file_path)
@@ -172,6 +205,43 @@ pub fn discard_file_changes(repo_path: String, file_path: String) -> Result<(), 
 #[tauri::command]
 pub fn discard_all_changes(repo_path: String) -> Result<(), String> {
     diff::discard_all_changes(&repo_path)
+}
+
+// ---------- one hunk at a time — the editor's inline change peek ----------
+//
+// Three commands rather than one carrying an `op` string, for two reasons. It mirrors the
+// `stage_file`/`unstage_file`/`discard_file_changes` triple above, so the whole-file and per-hunk
+// verbs read the same way from TypeScript; and a destructive operation should be named destructively
+// at its call site, where a reviewer sees it, rather than hidden behind a variable.
+//
+// Sync, no `(async)`, deliberately — see the header comment at the top of this file. All three take
+// the index lock (`git_indexwriter_init`, `apply.c:860-864`), and the UI thread being an implicit
+// global lock over the index is the only thing currently keeping them from interleaving with each
+// other, with the whole-file variants, and with the watcher's `refreshStatus`.
+//
+// `context_lines` must be the context the caller *read the hunk at* — hunk boundaries are a function
+// of it, so a mismatch makes every fingerprint fail. It crosses the wire instead of being a constant
+// duplicated here so there is exactly one number to change: `LIST_DIFF_CONTEXT_LINES` in
+// `src/state/repoStore.ts`.
+
+/// Adds one hunk to the index and leaves the working tree alone — `git add -p`.
+#[tauri::command]
+pub fn stage_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) -> Result<(), String> {
+    hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Stage, context_lines)
+}
+
+/// Removes one hunk from the index and leaves the working tree alone — `git reset -p`.
+#[tauri::command]
+pub fn unstage_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) -> Result<(), String> {
+    hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Unstage, context_lines)
+}
+
+/// Throws one hunk of working-tree change away, restoring that region from the **index** — the same
+/// contract as [`discard_file_changes`], so a file that is staged and then edited keeps its staged
+/// part. Nothing here is recoverable: no reflog, no stash, no restore point. The caller confirms.
+#[tauri::command]
+pub fn discard_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) -> Result<(), String> {
+    hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Discard, context_lines)
 }
 
 #[tauri::command]
