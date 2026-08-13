@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { aiQuotaStatus } from "../lib/tauri/commands";
+import { aiQuotaStatus, type QuotaTrigger } from "../lib/tauri/commands";
 import { onTurnSettled } from "./agentEvents";
 import type { ProviderQuota, QuotaLimit } from "../types/domain";
 
@@ -28,10 +28,11 @@ interface QuotaState {
    * line counts from, and the only durable evidence a refresh happened at all: when every number
    * comes back identical, the timestamp moving is the answer. */
   lastReadAt: number;
-  /** `force` skips the backend's per-provider cache. The Refresh button passes it; the poll does
-   * not. Without it the button re-reads a cache that is at most a minute old and hands back the
-   * same numbers, which looks like a broken button and is in fact a working cache. */
-  refresh: (force?: boolean) => Promise<void>;
+  /** `trigger` says who asked. `"refresh"` skips the backend's per-provider cache — without that
+   * the button re-reads a cache at most a minute old and hands back the same numbers, which looks
+   * like a broken button and is in fact a working cache. `"poll"` additionally forbids starting a
+   * provider's CLI, so the background timer never flashes a console window on Windows. */
+  refresh: (trigger?: QuotaTrigger) => Promise<void>;
   /** Starts the poll and returns the stop. Reference-counted; only polls once something has
    * already been fetched, so mounting the status bar alone never reaches the network. */
   watch: () => () => void;
@@ -55,12 +56,12 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
   fetched: false,
   lastReadAt: 0,
 
-  refresh: async (force = false) => {
+  refresh: async (trigger: QuotaTrigger = "poll") => {
     // Coalesced: the panel and the settings screen can both be open, and both ask on mount. A
     // forced read is *not* folded into a poll already in flight — that would return the cached
     // answer the button exists to bypass — so it waits for the poll to finish and then goes.
     if (inFlight) {
-      if (!force) return inFlight;
+      if (trigger !== "refresh") return inFlight;
       await inFlight.catch(() => {});
     }
     set({ loading: true });
@@ -72,7 +73,7 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
       }
     };
 
-    inFlight = aiQuotaStatus(force)
+    inFlight = aiQuotaStatus(trigger)
       .then(async (providers) => {
         await settle();
         set({ providers, loading: false, fetched: true, lastReadAt: Date.now() });

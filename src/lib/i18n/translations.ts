@@ -1313,6 +1313,7 @@ export const translations = {
     "quota.hint":
       "How much of each provider's plan you have got through, as the provider itself reports it. An engine that publishes no limit — Ollama, or an endpoint billed per token — is absent rather than shown at zero.",
     "quota.loading": "Reading limits…",
+    "quota.reading": "Reading…",
     "quota.used": "{percent} used",
     "quota.spendMovedHint": "Tokens and cost are under AI assistant → Usage.",
     "quota.resetsIn": "Resets in {time}",
@@ -6142,6 +6143,7 @@ export const translations = {
     "quota.hint":
       "Cuánto llevas ocupado del plan de cada proveedor, tal como lo reporta el proveedor. Un motor que no publica límite — Ollama, o un endpoint que se cobra por token — no aparece, en vez de salir en cero.",
     "quota.loading": "Leyendo los límites…",
+    "quota.reading": "Leyendo…",
     "quota.used": "{percent} usado",
     "quota.spendMovedHint": "Los tokens y el costo están en Asistente de IA → Uso.",
     "quota.resetsIn": "Se reinicia en {time}",

@@ -54,7 +54,12 @@ export function QuotaLimits({ compact = false }: { compact?: boolean }) {
     return <p className="text-[11px] text-[var(--cf-text-muted)]">{t("quota.loading")}</p>;
   }
 
-  const shown = providers.filter((p) => p.limits.length > 0 || p.error);
+  // A provider still being read is shown *saying so*, not omitted. The ones that answer by running
+  // their CLI (Gemini, Grok) take seconds and are fetched behind the answer, so on the first open
+  // they have nothing yet — and leaving them out made a working engine look like a missing one for
+  // a minute. Omitting is still right for a provider with genuinely nothing to report; it is only
+  // wrong while an answer is on its way.
+  const shown = providers.filter((p) => p.limits.length > 0 || p.error || isPending(p));
   if (shown.length === 0) {
     return <p className="text-[11px] text-[var(--cf-text-muted)]">{t("quota.none")}</p>;
   }
@@ -97,11 +102,11 @@ function ProviderBlock({ quota, compact }: { quota: ProviderQuota; compact: bool
       </div>
 
       {quota.limits.length === 0 ? (
-        // The error is the row. A provider that answered "you are signed out" has told the user
-        // something actionable, and swallowing it would leave an engine silently missing from a
-        // panel that claims to cover everything connected.
+        // The error — or the wait — is the row. A provider that answered "you are signed out" has
+        // told the user something actionable, and one that has not answered yet has to say *that*
+        // rather than vanish, or a five-second read looks like a broken engine.
         <p className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
-          {errorMessage(quota.error, t)}
+          {isPending(quota) ? t("quota.reading") : errorMessage(quota.error, t)}
         </p>
       ) : (
         <div className={compact ? "space-y-1.5" : "space-y-2"}>
@@ -178,6 +183,15 @@ function limitLabel(limit: QuotaLimit, narrowed: Set<string>, t: Translate): str
   if (!base) return limit.scope;
   if (limit.scope) return `${base} · ${limit.scope}`;
   return narrowed.has(limit.kind) ? `${base} · ${t("quota.allModels")}` : base;
+}
+
+/** Whether this provider has not answered yet, as opposed to having answered with nothing.
+ *
+ * The backend marks it by leaving `fetched_at` empty — no limits, no error and no read time is a
+ * provider whose request is still out, which only happens for the ones that answer by running their
+ * CLI. Everything else carries the instant it was read, even when what it read was "nothing". */
+function isPending(quota: ProviderQuota): boolean {
+  return quota.limits.length === 0 && !quota.error && !quota.fetched_at;
 }
 
 /** The reason a provider has no numbers, said in a way that names the way out. The keys are the

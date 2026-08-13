@@ -48,7 +48,7 @@ export function UsageMeter() {
   // simply when the numbers are wanted. Re-read on every open rather than once: the backend caches
   // for a minute, so reopening twice in a row costs one request between them.
   useEffect(() => {
-    if (open) void refreshQuota();
+    if (open) void refreshQuota("open");
   }, [open, refreshQuota]);
 
   const reposition = useCallback(() => {
@@ -141,11 +141,11 @@ export function UsageMeter() {
             <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-2">
               <Gauge size={13} className="shrink-0 text-[var(--cf-accent)]" />
               <span className="min-w-0 flex-1 truncate text-[12px] font-semibold">{t("quota.title")}</span>
-              {/* `true` — the button bypasses the backend cache. Without it a press inside the
-                  cache window returns the same numbers instantly, which reads as a dead button. */}
+              {/* `"refresh"` — bypasses the backend cache. Without it a press inside the cache
+                  window returns the same numbers instantly, which reads as a dead button. */}
               <button
                 type="button"
-                onClick={() => void refreshQuota(true)}
+                onClick={() => void refreshQuota("refresh")}
                 disabled={quotaLoading}
                 title={t("quota.refresh")}
                 aria-label={t("quota.refresh")}

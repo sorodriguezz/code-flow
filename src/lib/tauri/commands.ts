@@ -528,8 +528,14 @@ export const aiUsageStats = (windowHours: number) =>
  *
  * Never rejects as a whole: each provider carries its own error, because one engine being signed
  * out is no reason to stop showing another's remaining week. */
-export const aiQuotaStatus = (force = false) =>
-  invoke<ProviderQuota[]>("ai_quota_status", { force });
+/** Who is asking. `"poll"` is the background timer and is the only one that may not start a
+ * provider's CLI — on Windows that flashes a console window, and a timer doing it unprompted is the
+ * app interrupting whatever the user was doing. `"open"` is the panel being shown, `"refresh"` the
+ * button (which also bypasses the backend cache). */
+export type QuotaTrigger = "poll" | "open" | "refresh";
+
+export const aiQuotaStatus = (trigger: QuotaTrigger = "poll") =>
+  invoke<ProviderQuota[]>("ai_quota_status", { trigger });
 
 export interface ProviderStatus {
   available: boolean;

@@ -113,6 +113,24 @@ pub struct QuotaEngine {
     pub binary: std::path::PathBuf,
 }
 
+/// Who asked for a reading, which governs two decisions the caller cannot make for itself.
+///
+/// The distinction that matters is **may this start a process**. Reading Claude's or Codex's quota
+/// is one HTTPS call and can happen on a timer without anyone noticing; reading Gemini's or Grok's
+/// runs their CLI, which on Windows flashes a console window as it starts. A timer doing that every
+/// few minutes is the app interrupting the user to answer a question nobody asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    /// The background poll. Serves cache, and never starts a CLI.
+    Poll,
+    /// The panel was opened, or the settings screen shown. The user is looking, so a CLI may run.
+    Open,
+    /// The Refresh button. Same as [`Trigger::Open`] but bypasses the cache — without that, the
+    /// button re-reads a cache and hands back identical numbers, which is not a slow refresh but no
+    /// refresh, presented as one.
+    Refresh,
+}
+
 /// Where each CLI keeps its state.
 ///
 /// **Not derived from where the binary is installed, because it cannot be.** Moving `claude.exe` to
@@ -228,14 +246,12 @@ fn failed(provider: &str, error: &str) -> ProviderQuota {
 /// one should not set the latency of the panel. Each provider's failure is its own — one signed-out
 /// engine must not take the other's numbers off the screen, which is why nothing here returns
 /// `Result`.
-/// `force` is the Refresh button, and it has to exist. Without it that button re-reads a cache and
-/// hands back the identical numbers, which is not a slow refresh — it is no refresh, presented as
-/// one. The polls that keep the panel warm leave it `false`.
-pub async fn fetch_all(engines: Vec<QuotaEngine>, force: bool) -> Vec<ProviderQuota> {
+/// `trigger` says who asked, which decides two different things — see [`Trigger`].
+pub async fn fetch_all(engines: Vec<QuotaEngine>, trigger: Trigger) -> Vec<ProviderQuota> {
     let names: Vec<String> = engines.iter().map(|e| e.provider.clone()).collect();
     let mut running = Vec::with_capacity(engines.len());
     for engine in engines {
-        running.push(tokio::spawn(fetch(engine, force)));
+        running.push(tokio::spawn(fetch(engine, trigger)));
     }
     let mut out = Vec::with_capacity(running.len());
     for (provider, handle) in names.iter().zip(running) {
@@ -247,14 +263,26 @@ pub async fn fetch_all(engines: Vec<QuotaEngine>, force: bool) -> Vec<ProviderQu
 }
 
 /// One provider, through the cache.
-pub async fn fetch(engine: QuotaEngine, force: bool) -> ProviderQuota {
+pub async fn fetch(engine: QuotaEngine, trigger: Trigger) -> ProviderQuota {
     let provider = engine.provider.as_str();
-    if !force {
+    if trigger != Trigger::Refresh {
         if let Some((at, hit)) = cached(provider) {
             if at.elapsed() < fresh_for(provider) {
                 return hit;
             }
         }
+    }
+
+    // Nothing that costs a process is started by a timer. The CLI-driven providers launch a real
+    // executable, and on Windows a console-mode child flashes a window on screen as it starts —
+    // once every five minutes, unprompted, at whatever the user was actually doing. Attaching that
+    // to the panel being open makes it something the user caused and is watching for, and cuts the
+    // spawns to the moments the answer is on screen. The background poll keeps serving the cache,
+    // so an already-read number stays visible and merely ages.
+    if trigger == Trigger::Poll && fresh_for(provider) > FRESH_FOR {
+        return cached(provider)
+            .map(|(_, previous)| previous)
+            .unwrap_or_else(|| pending(provider));
     }
 
     // The slow one never makes the caller wait. Grok's reading costs a whole TUI booting in a pty,
@@ -268,7 +296,7 @@ pub async fn fetch(engine: QuotaEngine, force: bool) -> ProviderQuota {
     // than updating a second later — but it does drop the cached copy first, so the detached read
     // that follows genuinely re-runs instead of finding its own answer still fresh.
     if fresh_for(provider) > FRESH_FOR {
-        if force {
+        if trigger == Trigger::Refresh {
             forget(provider);
         }
         refresh_detached(engine.clone());
@@ -280,9 +308,16 @@ pub async fn fetch(engine: QuotaEngine, force: bool) -> ProviderQuota {
     read_now(&engine).await
 }
 
-/// A provider that has not answered yet. No limits and no error, so the UI leaves it out entirely
-/// rather than showing a row that is about to change — the alternative, a spinner per provider,
-/// would be a moving part in a panel that is read at a glance.
+/// A provider whose request is still out.
+///
+/// **The empty `fetched_at` is the signal, and it is load-bearing.** No limits, no error and no read
+/// time is the one combination that means "not answered yet"; everything else carries the instant it
+/// was read, even when what it read was nothing at all. The UI draws it as a "reading…" row.
+///
+/// It used to be drawn as nothing, on the reasoning that a row about to change is a moving part in
+/// a panel read at a glance. That was wrong in the only way that matters: on the first open the
+/// CLI-driven providers take seconds, and a working engine that is merely *absent* for a minute is
+/// indistinguishable from one that is broken. Reported from a second machine as exactly that.
 fn pending(provider: &str) -> ProviderQuota {
     ProviderQuota {
         provider: provider.to_string(),
@@ -423,12 +458,13 @@ mod live {
 
         // Forced, so a cache left warm by an earlier read cannot pass off a stale answer as a live
         // one — which is the whole point of this test.
-        let first = super::fetch_all(engines.clone(), true).await;
+        let first = super::fetch_all(engines.clone(), super::Trigger::Refresh).await;
 
         // The CLI-driven providers answer *behind* that call, so the forced pass only started them.
-        // Waiting and asking again unforced is what a second poll does, and is the only way this
-        // test sees their numbers at all — without it Gemini and Grok always print as pending and
-        // a broken subprocess path would look exactly like a working one.
+        // Waiting and asking again is the only way this test sees their numbers at all — without
+        // it Gemini and Grok always print as pending and a broken subprocess path would look
+        // exactly like a working one. `Open` and not `Poll`: a poll deliberately never starts a CLI
+        // read, so polling here would wait for something nobody asked for.
         let slow: Vec<&str> = first
             .iter()
             .filter(|quota| quota.fetched_at.is_empty())
@@ -439,7 +475,7 @@ mod live {
         } else {
             println!("waiting on: {slow:?}");
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-            super::fetch_all(engines, false).await
+            super::fetch_all(engines, super::Trigger::Open).await
         };
 
         for quota in report {

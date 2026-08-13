@@ -57,7 +57,7 @@ export function QuotaSection() {
 
   useEffect(() => watch(), [watch]);
   useEffect(() => {
-    void refresh();
+    void refresh("open");
   }, [refresh]);
 
   return (
@@ -66,7 +66,7 @@ export function QuotaSection() {
         <QuotaFreshness lastReadAt={lastReadAt} loading={loading} />
         <button
           type="button"
-          onClick={() => void refresh(true)}
+          onClick={() => void refresh("refresh")}
           disabled={loading}
           className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2 py-1 text-[11.5px] font-medium text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:cursor-default disabled:opacity-60 disabled:hover:border-[var(--cf-border)] disabled:hover:text-[var(--cf-text-muted)]"
         >

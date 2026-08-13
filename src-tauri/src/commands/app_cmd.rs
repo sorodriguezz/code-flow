@@ -46,8 +46,10 @@ pub fn ai_usage_stats(db: State<Db>, window_hours: i64) -> Result<crate::ai_usag
 ///
 /// Never fails as a whole. Each provider carries its own error, because "Gemini is signed out" is
 /// not a reason to stop showing how much of the Claude week is left.
-/// `force` comes from the Refresh button: it bypasses the per-provider cache so the button
-/// actually re-reads. The background poll leaves it unset and takes the cached answer.
+/// `trigger` is `"poll"`, `"open"` or `"refresh"` — who asked. It decides both whether the cache is
+/// bypassed and whether a provider that reads its quota by *running its CLI* may start one, which a
+/// background timer must never do: on Windows that flashes a console window at whatever the user
+/// was doing. Anything unrecognised is treated as a poll, the most conservative of the three.
 ///
 /// **Only engines that are actually installed are asked.** The binary is resolved exactly as a run
 /// would resolve it — the user's `{provider}_binary_path` first, the engine's default second — and
@@ -58,8 +60,15 @@ pub fn ai_usage_stats(db: State<Db>, window_hours: i64) -> Result<crate::ai_usag
 #[tauri::command]
 pub async fn ai_quota_status(
     db: State<'_, Db>,
-    force: Option<bool>,
+    trigger: Option<String>,
 ) -> Result<Vec<crate::ai_quota::ProviderQuota>, String> {
+    use crate::ai_quota::Trigger;
+    let trigger = match trigger.as_deref() {
+        Some("refresh") => Trigger::Refresh,
+        Some("open") => Trigger::Open,
+        _ => Trigger::Poll,
+    };
+
     let engines = {
         // Scoped so the lock is released before the awaits below — the reads are a few settings
         // rows, and holding the global mutex across a network call would stall every other command.
@@ -81,7 +90,7 @@ pub async fn ai_quota_status(
             .collect::<Vec<_>>()
     };
 
-    Ok(crate::ai_quota::fetch_all(engines, force.unwrap_or(false)).await)
+    Ok(crate::ai_quota::fetch_all(engines, trigger).await)
 }
 
 /// What the app cannot do without, checked on the first launch after installing.
