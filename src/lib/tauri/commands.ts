@@ -17,7 +17,7 @@ import type {
   NewChainStep,
   NewStoryWorkItem,
   UsageStats,
-  UsageSummary,
+  ProviderQuota,
   BranchInfo,
   ChatConversationSummary,
   CommitInfo,
@@ -519,16 +519,16 @@ export const deleteAiApiKey = (provider: string) => invoke<void>("delete_ai_api_
  * error message. Non-http schemes are rejected backend-side. */
 export const openExternalUrl = (url: string) => invoke<void>("open_external_url", { url });
 
-/** What every engine has spent, over the two windows the status bar draws.
- *
- * Polled, not pushed: the rows are written from inside the run plumbing, which has no business
- * knowing a window is open, and a meter a few seconds behind is a meter that is right. */
-export const aiUsageSummary = () => invoke<UsageSummary>("ai_usage_summary");
-
-/** The statistics screen's whole payload for one window, in hours. A window rather than a fixed
- * pair: the status bar answers "what is happening", this answers "what has been happening". */
+/** The statistics screen's whole payload for one window, in hours — and the only thing that reads
+ * the recorded-spend table, now that the status bar draws quota alone. */
 export const aiUsageStats = (windowHours: number) =>
   invoke<UsageStats>("ai_usage_stats", { windowHours });
+
+/** How much of each provider's plan is left, read from the providers themselves.
+ *
+ * Never rejects as a whole: each provider carries its own error, because one engine being signed
+ * out is no reason to stop showing another's remaining week. */
+export const aiQuotaStatus = () => invoke<ProviderQuota[]>("ai_quota_status");
 
 export interface ProviderStatus {
   available: boolean;

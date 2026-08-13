@@ -1,13 +1,17 @@
-//! What the engines have actually spent, and the rolling windows the status bar reads it back as.
+//! What the engines have actually spent, and the breakdown the statistics screen reads it back as.
 //!
 //! **Measured, not predicted.** Every row here is one finished run's own report of its tokens and,
-//! where the CLI said so, its cost. Nothing is estimated from a price table and nothing is a
-//! provider quota: none of the CLIs this app dispatches to publishes "how much of your plan is
-//! left" in a form a program can read, so the honest thing to show is what has been used, over a
-//! window, by engine — and to say plainly when an engine reports nothing at all.
+//! where the CLI said so, its cost. Nothing is estimated from a price table, and none of it is a
+//! provider quota — that is [`crate::ai_quota`], which asks the providers themselves. The two are
+//! deliberately never mixed: a "% of plan used" computed from these rows would be a guess wearing a
+//! limit's clothes.
 //!
-//! Recording is fire-and-forget by design. A meter is not worth failing a turn over: if the write
-//! fails, the run still succeeded and the bar is merely a little behind.
+//! **One reader.** This is the Settings → AI screen's material and nothing else's. The status bar
+//! used to draw a spend meter from it as well, and no longer does — spend is a screen's worth of
+//! history, and the bar answers the one question that can run out.
+//!
+//! Recording is fire-and-forget by design. A statistic is not worth failing a turn over: if the
+//! write fails, the run still succeeded and the screen is merely missing a row.
 
 use std::sync::OnceLock;
 
@@ -45,41 +49,9 @@ pub fn record(provider: &str, model: &str, task: &str, usage: &AiUsage) {
     let _ = queries::record_ai_usage(&conn, provider, model, task, usage);
 }
 
-/// One engine's consumption over one window.
-#[derive(Debug, Clone, Serialize)]
-pub struct UsageWindow {
-    pub provider: String,
-    /// Runs that reported anything in this window. `0` is the honest empty state and is what lets
-    /// the bar distinguish "this engine has been idle" from "this engine reports nothing".
-    pub runs: i64,
-    pub input_tokens: i64,
-    pub output_tokens: i64,
-    pub cache_read_tokens: i64,
-    pub cache_write_tokens: i64,
-    /// Summed only over the runs that reported a cost. An engine that never reports one totals
-    /// `0.0` here with `costed_runs` at `0`, which the UI shows as "not reported" rather than free.
-    pub cost_usd: f64,
-    pub costed_runs: i64,
-}
-
-/// Both windows at once, plus when the oldest row still kept was written.
-#[derive(Debug, Clone, Serialize)]
-pub struct UsageSummary {
-    /// The last five hours — the shape of a working session, and the same span the CLIs' own
-    /// short-term limits are usually cut on.
-    pub session: Vec<UsageWindow>,
-    /// The last seven days.
-    pub week: Vec<UsageWindow>,
-    /// RFC 3339, or empty when nothing has ever been recorded.
-    pub since: String,
-}
-
-/// How long a session window is, in hours.
-pub const SESSION_HOURS: i64 = 5;
-/// How long the long window is, in days.
-pub const WEEK_DAYS: i64 = 7;
-/// Rows older than this are swept on every read: a meter that only ever shows two windows has no
-/// use for a year of history, and this table is written to on every single AI turn.
+/// Rows older than this are swept when the statistics screen reads: a screen that only ever looks
+/// back over a chosen window has no use for a year of history, and this table is written to on
+/// every single AI turn.
 pub const KEEP_DAYS: i64 = 30;
 
 // ---------- the statistics view ----------

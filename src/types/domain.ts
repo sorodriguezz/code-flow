@@ -1439,31 +1439,6 @@ export interface WorkItemReviewRow {
   updated_at: string;
 }
 
-/** One engine's measured consumption over one window. Reported by the CLIs themselves — nothing
- * here is estimated from a price table, and none of it is a provider *quota*. */
-export interface UsageWindow {
-  provider: string;
-  /** Runs that reported anything. `0` distinguishes "idle" from "reports nothing". */
-  runs: number;
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_write_tokens: number;
-  /** Summed over the runs that reported a cost only. */
-  cost_usd: number;
-  /** How many those were — `0` with a non-zero `runs` means this engine never prices its turns. */
-  costed_runs: number;
-}
-
-export interface UsageSummary {
-  /** The last five hours. */
-  session: UsageWindow[];
-  /** The last seven days. */
-  week: UsageWindow[];
-  /** RFC 3339 of the oldest row still kept, or `""` when nothing has been recorded. */
-  since: string;
-}
-
 /** One engine's slice of a statistics window. */
 export interface ProviderStat {
   provider: string;
@@ -1522,4 +1497,38 @@ export interface UsageStats {
   /** The busiest single bucket, as tokens — the chart's scale. */
   peak_tokens: number;
   since: string;
+}
+
+/**
+ * One window of a provider's plan, as the provider itself reported it.
+ *
+ * The counterpart to `ProviderStat`: that one is what this app measured, this one is what the
+ * provider published. Nothing here is derived from the other — a percentage computed from spend
+ * would be a guess wearing a limit's clothes.
+ */
+export interface QuotaLimit {
+  /** `"session"`, `"weekly"`, or `"model"` for a per-model bucket. Translated in the UI. */
+  kind: string;
+  /** The provider's own name for the bucket — a model id or scope label — when `kind` alone does
+   * not identify it. Empty when it does. */
+  scope: string;
+  /** How much of the limit has been **consumed**, 0–100. Normalised in the backend so every
+   * surface that draws it agrees on the direction. */
+  used_percent: number;
+  /** RFC 3339 of when the window rolls over, or `""` when the provider did not say. */
+  resets_at: string;
+}
+
+/** Every limit one provider published, or why there are none. */
+export interface ProviderQuota {
+  provider: string;
+  /** Tightest first — the limit about to run out is the one worth reading. */
+  limits: QuotaLimit[];
+  /** The plan the limits belong to, when the provider names it. */
+  plan: string;
+  /** `"signed_out"`, `"stale"`, or a transport error. Empty when the read succeeded. */
+  error: string;
+  /** RFC 3339 of when the numbers were read from the provider — a cached answer keeps its own, so
+   * the UI can tell how old it is. */
+  fetched_at: string;
 }

@@ -1,29 +1,37 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { ChartColumn, Cpu, FileText, Server, type LucideIcon } from "lucide-react";
+import { ChartColumn, Cpu, FileText, Gauge, Server, type LucideIcon } from "lucide-react";
 import { motion } from "framer-motion";
 import { ActivePill } from "../common/ActivePill";
 import { useT } from "../../state/languageStore";
 import { PromptTemplates } from "./PromptTemplates";
 import { ProvidersSection } from "./ProvidersSection";
+import { QuotaSection } from "./QuotaSection";
 import { TaskRouting } from "./TaskRouting";
 import { UsageStatsSection } from "./UsageStatsSection";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { Panel, SettingsHeader } from "../api/settingsChrome";
 
-type AiTab = "providers" | "routing" | "templates" | "usage";
+type AiTab = "providers" | "routing" | "templates" | "limits" | "usage";
 
 /**
  * The groups, in the order you'd actually set them up:
  *   1. **Providers** — which engines exist, whether they're installed, how each is configured.
  *   2. **Model per task** — which of those engines (and model) handles each action.
  *   3. **Prompt templates** — shared instructions, independent of who runs them.
- *   4. **Usage** — what all of that has actually spent. Last because it is the only one that
- *      configures nothing: it reads back the consequences of the three above.
+ *   4. **Limits** — how far through each provider's plan you are, as the provider reports it.
+ *   5. **Usage** — what all of that has actually spent, as this app measured it.
+ *
+ * The last two configure nothing; they read back the consequences of the three above. They are two
+ * tabs and not one because they are two different claims: a limit is the provider's statement about
+ * a window still running, spend is this app's record of windows already over. Stacked on one screen
+ * they read as one table with two halves, and the usage screen's 5h/30d picker appeared to govern
+ * bars it has no say over.
  */
 const TABS: { id: AiTab; labelKey: TranslationKey; hintKey: TranslationKey; icon: LucideIcon }[] = [
   { id: "providers", labelKey: "settings.providersTitle", hintKey: "settings.providersHint", icon: Server },
   { id: "routing", labelKey: "settings.taskRoutingTitle", hintKey: "settings.taskRoutingHint", icon: Cpu },
   { id: "templates", labelKey: "settings.templatesTitle", hintKey: "settings.templatesSharedHint", icon: FileText },
+  { id: "limits", labelKey: "quota.title", hintKey: "quota.hint", icon: Gauge },
   { id: "usage", labelKey: "usage.statsTitle", hintKey: "usage.statsHint", icon: ChartColumn },
 ];
 
@@ -118,6 +126,7 @@ export function ClaudeSettings() {
             {tab === "providers" && <ProvidersSection />}
             {tab === "routing" && <TaskRouting />}
             {tab === "templates" && <PromptTemplates />}
+            {tab === "limits" && <QuotaSection />}
             {tab === "usage" && <UsageStatsSection />}
           </Panel>
         </div>

@@ -31,25 +31,24 @@ pub fn reset_app_data(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// What every engine has spent, over the two windows the status bar draws.
-///
-/// Polled rather than pushed: the rows are written from inside `ai::run`, which has no business
-/// knowing a window is open, and a meter that is a few seconds behind is a meter that is right.
-#[tauri::command]
-pub fn ai_usage_summary(db: State<Db>) -> Result<crate::ai_usage::UsageSummary, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    crate::db::queries::ai_usage_summary(&conn).map_err(|e| e.to_string())
-}
-
 /// The statistics screen's whole payload for one window, in hours.
 ///
-/// A window and not a fixed pair, unlike [`ai_usage_summary`]: the status bar answers "what is
-/// happening", this answers "what has been happening", and those are different questions with
-/// different spans.
+/// The only reader of what this app recorded, now that the status bar draws provider quota alone —
+/// which is also why the retention sweep rides on this call (see `queries::ai_usage_stats`).
 #[tauri::command]
 pub fn ai_usage_stats(db: State<Db>, window_hours: i64) -> Result<crate::ai_usage::UsageStats, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     crate::db::queries::ai_usage_stats(&conn, window_hours).map_err(|e| e.to_string())
+}
+
+/// How much of each provider's plan is left — the counterpart to [`ai_usage_stats`], read from
+/// the providers themselves rather than from this app's own records.
+///
+/// Never fails as a whole. Each provider carries its own error, because "Gemini is signed out" is
+/// not a reason to stop showing how much of the Claude week is left.
+#[tauri::command]
+pub async fn ai_quota_status() -> Vec<crate::ai_quota::ProviderQuota> {
+    crate::ai_quota::fetch_all().await
 }
 
 /// What the app cannot do without, checked on the first launch after installing.

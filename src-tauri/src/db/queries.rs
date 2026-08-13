@@ -4925,56 +4925,17 @@ pub fn record_ai_usage(
     Ok(())
 }
 
-/// Everything recorded since `cutoff`, one row per provider.
+/// Everything the statistics screen draws, for one window — and a sweep of anything older than the
+/// retention window.
 ///
-/// `cost_usd` sums only the runs that actually reported a cost, and `costed_runs` says how many
-/// those were — an engine that never reports one must read as "not reported" and not as free.
-fn usage_since(conn: &Connection, cutoff: &str) -> rusqlite::Result<Vec<crate::ai_usage::UsageWindow>> {
-    let mut stmt = conn.prepare(
-        "SELECT provider, COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
-                COALESCE(SUM(CASE WHEN has_cost THEN cost_usd ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN has_cost THEN 1 ELSE 0 END), 0)
-         FROM ai_usage WHERE created_at >= ?1
-         GROUP BY provider ORDER BY provider",
-    )?;
-    let rows = stmt.query_map(params![cutoff], |row| {
-        Ok(crate::ai_usage::UsageWindow {
-            provider: row.get(0)?,
-            runs: row.get(1)?,
-            input_tokens: row.get(2)?,
-            output_tokens: row.get(3)?,
-            cache_read_tokens: row.get(4)?,
-            cache_write_tokens: row.get(5)?,
-            cost_usd: row.get(6)?,
-            costed_runs: row.get(7)?,
-        })
-    })?;
-    rows.collect()
-}
+/// The sweep rides on the read rather than on a timer, because a `DELETE` bounded by an index is
+/// cheaper than the machinery a scheduled job would need. It used to ride on the status bar's
+/// summary read, which ran every few seconds; that read is gone with the spend meter, so this — the
+/// only remaining reader of the table — inherited it. The table is therefore now pruned when
+/// someone opens Settings → AI rather than continuously, which is later but still bounded: nothing
+/// else reads these rows, so the only cost of a late sweep is disk.
+///
 
-/// The two windows the status bar draws, and a sweep of anything too old to be in either.
-///
-/// The sweep rides on the read rather than on a timer: this table is written to on every AI turn,
-/// the bar reads it every few seconds while the app is open, and a `DELETE` bounded by an index is
-/// cheaper than the machinery a scheduled job would need.
-pub fn ai_usage_summary(conn: &Connection) -> rusqlite::Result<crate::ai_usage::UsageSummary> {
-    let stamp = |ago: chrono::Duration| (Utc::now() - ago).trunc_subsecs(6).to_rfc3339();
-    conn.execute(
-        "DELETE FROM ai_usage WHERE created_at < ?1",
-        params![stamp(chrono::Duration::days(crate::ai_usage::KEEP_DAYS))],
-    )?;
-    let session = usage_since(conn, &stamp(chrono::Duration::hours(crate::ai_usage::SESSION_HOURS)))?;
-    let week = usage_since(conn, &stamp(chrono::Duration::days(crate::ai_usage::WEEK_DAYS)))?;
-    let since: Option<String> = conn
-        .query_row("SELECT MIN(created_at) FROM ai_usage", [], |row| row.get(0))
-        .optional()?
-        .flatten();
-    Ok(crate::ai_usage::UsageSummary { session, week, since: since.unwrap_or_default() })
-}
-
-/// Everything the statistics screen draws, for one window.
-///
 /// Bucketing is done in SQL, on the timestamp string. That works because `now()` writes RFC 3339 in
 /// UTC with a fixed shape, so `strftime` reads it and the buckets are real instants rather than
 /// row-order approximations — and because a month of turns is thousands of rows the frontend has no
@@ -4985,6 +4946,13 @@ pub fn ai_usage_summary(conn: &Connection) -> rusqlite::Result<crate::ai_usage::
 /// steady work where there was a burst and four idle days.
 pub fn ai_usage_stats(conn: &Connection, window_hours: i64) -> rusqlite::Result<crate::ai_usage::UsageStats> {
     let hours = window_hours.clamp(1, 24 * 90);
+    // Before anything is read, so `since` below reports the oldest row that actually survived.
+    conn.execute(
+        "DELETE FROM ai_usage WHERE created_at < ?1",
+        params![(Utc::now() - chrono::Duration::days(crate::ai_usage::KEEP_DAYS))
+            .trunc_subsecs(6)
+            .to_rfc3339()],
+    )?;
     let bucket_minutes = crate::ai_usage::bucket_minutes_for(hours);
     let bucket_seconds = bucket_minutes * 60;
     let now = Utc::now().trunc_subsecs(6);

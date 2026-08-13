@@ -799,7 +799,11 @@ fn resolve_binary(binary: &str, dirs: &[std::path::PathBuf]) -> String {
 /// Locates `binary` the same way [`run`] will: an explicit path is checked as-is, a bare name is
 /// looked up across the install dirs and `PATH` (trying Windows' executable extensions, since the
 /// npm-installed CLIs land as `.cmd` shims). `None` means launching it would fail.
-fn find_on_path(binary: &str) -> Option<std::path::PathBuf> {
+///
+/// `pub(crate)` for [`crate::ai_quota`], which has to launch a CLI of its own and must find it in
+/// exactly the places a run would — the augmented `PATH` included, or a CLI installed somewhere a
+/// login shell knows about would report "not installed" from a panel and work fine everywhere else.
+pub(crate) fn find_on_path(binary: &str) -> Option<std::path::PathBuf> {
     let path = std::path::Path::new(binary);
     if path.is_absolute() || binary.contains('/') || binary.contains('\\') {
         return path.is_file().then(|| path.to_path_buf());

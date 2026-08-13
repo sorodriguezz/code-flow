@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Coins, Gauge, Layers, Loader2, Zap } from "lucide-react";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { aiUsageStats } from "../../lib/tauri/commands";
-import { compactTokens, formatCost } from "../../state/usageStore";
+import { compactTokens, formatCost } from "../../lib/usageFormat";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import type { ModelStat, ProviderStat, TaskStat, UsageStats } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
