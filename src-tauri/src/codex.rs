@@ -6,15 +6,23 @@
 //! shells out to the CLI the user logged into with `codex login` — the same arrangement Claude Code
 //! and Antigravity have, where the flat-fee plan you already pay for does the work.
 //!
-//! Headless contract (`codex exec`): runs one task to completion, streams progress to **stderr**
-//! and writes only the final agent message to **stdout**, with no approval prompts. Piped stdin is
+//! Headless contract (`codex exec --json`): runs one task to completion, streams progress to
+//! **stderr** and a JSONL event stream to **stdout**, with no approval prompts. Piped stdin is
 //! taken as additional context alongside the prompt argument, which maps exactly onto this app's
 //! "ask as argument, data on stdin" split.
 //!
+//! **Why `--json`, having gone out of its way not to need it.** Plain `codex exec` puts the final
+//! message on stdout and nothing else — simple, and schema-proof. But it also reports *no token
+//! counts anywhere*, so every Codex run was recorded with nothing to count and the engine was
+//! simply missing from the usage screen. `turn.completed` is the one place the CLI states what a
+//! turn spent. [`parse_events`] therefore reads the stream, and falls back to treating stdout as a
+//! plain final message when it parses as no events at all — so a build that drops the flag loses
+//! the token counts and keeps answering.
+//!
 //! **Sessions.** `codex exec` opens its run with a preamble on stderr — version, workdir, model,
 //! sandbox, and a `session id: <uuid>` line — and `codex exec resume <id>` continues that rollout.
-//! So the id is scraped from stderr rather than from `--json`: stdout keeps carrying nothing but
-//! the final agent message, so the reply extraction below is unaffected by Codex's event schema.
+//! The id is still scraped from that preamble rather than from the event stream, which keeps
+//! resuming working even if the stream's shape changes under it.
 //! Before this, the engine reported a fixed sentinel and never passed a resume argument at all,
 //! which was the worst of both — no continuity *and* the app believing a session existed, so
 //! [`crate::ai::chat_with_repo`] stopped re-sending the project context from turn two onward.
@@ -30,7 +38,7 @@
 
 use tokio::process::Command;
 
-use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, QUOTA_MARKER};
+use crate::ai::{quota_signal, refusal_reply, AiEngine, AiInvocation, AiRun, AiUsage, QUOTA_MARKER};
 
 const DEFAULT_BINARY: &str = "codex";
 
@@ -109,6 +117,12 @@ impl AiEngine for CodexEngine {
         // forever. Set through `-c` rather than `--ask-for-approval`, which `codex exec` dropped
         // (it errors with "unexpected argument" on 0.145+); the config key works on every version.
         cmd.arg("-c").arg("approval_policy=\"never\"");
+        // Events as JSONL on stdout — the only place `codex exec` states what a turn spent. Without
+        // it the run is unaccountable and Codex is simply missing from the usage screen, which is
+        // what it was until this flag went in. [`interpret_output`] falls back to reading stdout as
+        // the plain final message when nothing parses, so a build that drops or renames the flag
+        // loses the token counts and keeps working.
+        cmd.arg("--json");
         if let Some(dir) = inv.cwd {
             // `--cd` sets the workspace root the sandbox is scoped to, so it must be set even
             // though `current_dir` below already points there.
@@ -128,7 +142,7 @@ impl AiEngine for CodexEngine {
 }
 
 /// Codex's state directory: `$CODEX_HOME` when set (the CLI's own override), else `~/.codex`.
-fn codex_home() -> Option<std::path::PathBuf> {
+pub(crate) fn codex_home() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("CODEX_HOME") {
         return Some(std::path::PathBuf::from(dir));
     }
@@ -214,7 +228,15 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
         return Err(format!("codex exited with an error ({status_label}): {detail}"));
     }
 
-    let text = stdout.trim();
+    // `--json` turns stdout into an event stream, so the reply is assembled from it. A stdout that
+    // parses as no events at all is taken verbatim, which is both the pre-`--json` behaviour and
+    // the safety net if the flag ever stops being accepted.
+    let events = parse_events(stdout);
+    let text = match &events {
+        Some(events) => events.message.trim().to_string(),
+        None => stdout.trim().to_string(),
+    };
+
     if text.is_empty() {
         let err = stderr.trim();
         return Err(if err.is_empty() {
@@ -223,24 +245,159 @@ fn interpret_output(success: bool, status_label: &str, stdout: &str, stderr: &st
             err.to_string()
         });
     }
-    if refusal_reply(text) {
+    if refusal_reply(&text) {
         return Err(format!("{QUOTA_MARKER}{text}"));
     }
     Ok(AiRun {
-        text: text.to_string(),
+        text,
         session_id: session_id_from_preamble(stderr),
         model: model_from_preamble(stderr),
-        // Plain-text `codex exec` reports no token counts anywhere — not on stdout, not in the
-        // banner — and there is no `export`-style subcommand to ask afterwards the way opencode
-        // has. So codex runs are recorded by *this engine and model* with nothing to count, which
-        // the meter shows as a provider that reports nothing rather than as a free one.
-        usage: None,
+        // Tokens, never a price: a ChatGPT plan is a flat fee, so the run genuinely has no dollar
+        // figure to report and the meter shows it as "no price" rather than as free.
+        usage: events.and_then(|events| events.usage),
     })
+}
+
+/// What one `codex exec --json` run said: the agent's reply, and what it spent.
+struct CodexEvents {
+    message: String,
+    usage: Option<AiUsage>,
+}
+
+/// Reads the JSONL event stream.
+///
+/// `None` means stdout held no events at all — not that it held none of interest — so the caller
+/// can tell "this is an old-style plain-text reply" apart from "this run said nothing".
+///
+/// Only two event types are read, and unknown ones are skipped rather than treated as an error:
+/// `item.completed` carrying an `agent_message` (the reply, joined when a turn produces several)
+/// and `turn.completed` (the tokens). Everything else Codex emits — thread and turn starts, tool
+/// calls, reasoning — is progress, not output.
+fn parse_events(stdout: &str) -> Option<CodexEvents> {
+    let mut saw_event = false;
+    let mut message = String::new();
+    let mut usage = None;
+
+    for line in stdout.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Some(kind) = event.get("type").and_then(|t| t.as_str()) else { continue };
+        saw_event = true;
+
+        match kind {
+            "item.completed" => {
+                let item = event.get("item");
+                let is_message =
+                    item.and_then(|i| i.get("type")).and_then(|t| t.as_str()) == Some("agent_message");
+                if let (true, Some(text)) =
+                    (is_message, item.and_then(|i| i.get("text")).and_then(|t| t.as_str()))
+                {
+                    if !message.is_empty() {
+                        message.push_str("\n\n");
+                    }
+                    message.push_str(text);
+                }
+            }
+            // Last one wins: a resumed rollout can report more than one turn, and the reply being
+            // returned belongs to the final one.
+            "turn.completed" => {
+                if let Some(reported) = event.get("usage") {
+                    usage = parse_usage(reported);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    saw_event.then_some(CodexEvents { message, usage })
+}
+
+/// One `turn.completed` usage object in this app's terms.
+///
+/// The subtraction is the part that matters: Codex reports `input_tokens` **inclusive** of
+/// `cached_input_tokens` (a second run of the same prompt came back as 12,975 input of which 12,672
+/// cached — not 12,975 *plus* 12,672), so recording both as given would count the cached prompt
+/// twice and make a cheap warm run look like the most expensive of the day. `reasoning_output_tokens`
+/// is likewise already part of `output_tokens` and is deliberately not added.
+fn parse_usage(reported: &serde_json::Value) -> Option<AiUsage> {
+    let field = |name: &str| reported.get(name).and_then(|v| v.as_i64()).unwrap_or(0);
+
+    let cached = field("cached_input_tokens");
+    let usage = AiUsage {
+        input_tokens: (field("input_tokens") - cached).max(0),
+        output_tokens: field("output_tokens"),
+        cache_read_tokens: cached,
+        cache_write_tokens: field("cache_write_input_tokens"),
+        cost_usd: None,
+    };
+    (!usage.is_empty()).then_some(usage)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Captured verbatim from `codex exec --json` on 0.147.0.
+    const EVENTS: &str = concat!(
+        r#"{"type":"thread.started","thread_id":"th_1"}"#,
+        "\n",
+        r#"{"type":"turn.started"}"#,
+        "\n",
+        r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"PONG"}}"#,
+        "\n",
+        r#"{"type":"turn.completed","usage":{"input_tokens":12975,"cached_input_tokens":12672,"#,
+        r#""cache_write_input_tokens":0,"output_tokens":30,"reasoning_output_tokens":22}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn reads_the_reply_and_the_tokens_from_the_event_stream() {
+        let run = interpret_output(true, "exit status: 0", EVENTS, "").unwrap();
+        assert_eq!(run.text, "PONG");
+
+        let usage = run.usage.expect("codex now reports usage");
+        // The cached prompt is counted once, not twice: 12975 reported input includes the 12672
+        // served from cache, so only 303 of it was new.
+        assert_eq!(usage.input_tokens, 303);
+        assert_eq!(usage.cache_read_tokens, 12672);
+        assert_eq!(usage.cache_write_tokens, 0);
+        // `reasoning_output_tokens` is already inside `output_tokens` and is not added on top.
+        assert_eq!(usage.output_tokens, 30);
+        // A ChatGPT plan is a flat fee — no per-run price exists to report.
+        assert!(usage.cost_usd.is_none());
+    }
+
+    /// The safety net: stdout that parses as no events is the old plain-text reply, and still works.
+    #[test]
+    fn plain_stdout_is_still_a_reply() {
+        let run = interpret_output(true, "exit status: 0", "just the answer\n", "").unwrap();
+        assert_eq!(run.text, "just the answer");
+        assert!(run.usage.is_none());
+    }
+
+    /// A turn that emits events but no `agent_message` has produced no reply — that is an error,
+    /// not an empty success, or the caller would file a blank answer as a good one.
+    #[test]
+    fn events_without_a_message_are_an_error() {
+        let only_progress = concat!(r#"{"type":"turn.started"}"#, "\n", r#"{"type":"turn.completed"}"#, "\n");
+        assert!(interpret_output(true, "exit status: 0", only_progress, "").is_err());
+    }
+
+    /// Several agent messages in one turn are joined rather than the last one silently winning.
+    #[test]
+    fn multiple_agent_messages_are_joined() {
+        let two = concat!(
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"first"}}"#,
+            "\n",
+            r#"{"type":"item.completed","item":{"type":"agent_message","text":"second"}}"#,
+            "\n",
+        );
+        let run = interpret_output(true, "exit status: 0", two, "").unwrap();
+        assert_eq!(run.text, "first\n\nsecond");
+    }
 
     /// The real `codex exec` stderr preamble — the only place the rollout id is reported when
     /// stdout is left as plain text.

@@ -528,7 +528,8 @@ export const aiUsageStats = (windowHours: number) =>
  *
  * Never rejects as a whole: each provider carries its own error, because one engine being signed
  * out is no reason to stop showing another's remaining week. */
-export const aiQuotaStatus = () => invoke<ProviderQuota[]>("ai_quota_status");
+export const aiQuotaStatus = (force = false) =>
+  invoke<ProviderQuota[]>("ai_quota_status", { force });
 
 export interface ProviderStatus {
   available: boolean;

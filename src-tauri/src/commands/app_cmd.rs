@@ -46,9 +46,42 @@ pub fn ai_usage_stats(db: State<Db>, window_hours: i64) -> Result<crate::ai_usag
 ///
 /// Never fails as a whole. Each provider carries its own error, because "Gemini is signed out" is
 /// not a reason to stop showing how much of the Claude week is left.
+/// `force` comes from the Refresh button: it bypasses the per-provider cache so the button
+/// actually re-reads. The background poll leaves it unset and takes the cached answer.
+///
+/// **Only engines that are actually installed are asked.** The binary is resolved exactly as a run
+/// would resolve it — the user's `{provider}_binary_path` first, the engine's default second — and
+/// a provider whose CLI is nowhere on the machine is dropped before any credential is read. That
+/// is what stops the panel giving impossible advice: a leftover `auth.json` from an uninstalled CLI
+/// still answers "your token expired", and the row then told the user to run an engine they do not
+/// have. It also means nothing is spent probing engines this install does not use.
 #[tauri::command]
-pub async fn ai_quota_status() -> Vec<crate::ai_quota::ProviderQuota> {
-    crate::ai_quota::fetch_all().await
+pub async fn ai_quota_status(
+    db: State<'_, Db>,
+    force: Option<bool>,
+) -> Result<Vec<crate::ai_quota::ProviderQuota>, String> {
+    let engines = {
+        // Scoped so the lock is released before the awaits below — the reads are a few settings
+        // rows, and holding the global mutex across a network call would stall every other command.
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::ai_quota::QUOTA_PROVIDERS
+            .iter()
+            .filter_map(|provider| {
+                let configured = crate::db::queries::get_setting(&conn, &format!("{provider}_binary_path"))
+                    .ok()
+                    .flatten()
+                    .filter(|path| !path.trim().is_empty());
+                let binary = configured
+                    .unwrap_or_else(|| crate::ai::engine_for(provider).default_binary().to_string());
+                crate::ai::find_on_path(&binary).map(|binary| crate::ai_quota::QuotaEngine {
+                    provider: provider.to_string(),
+                    binary,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    Ok(crate::ai_quota::fetch_all(engines, force.unwrap_or(false)).await)
 }
 
 /// What the app cannot do without, checked on the first launch after installing.

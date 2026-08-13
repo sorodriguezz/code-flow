@@ -97,6 +97,45 @@ pub mod reason {
 /// from the panel entirely rather than shown empty — see the module docs.
 pub const QUOTA_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "grok", "opencode"];
 
+/// One engine to ask, as the caller resolved it.
+///
+/// The caller decides *who* gets asked, and the rule is that an engine whose CLI is not installed
+/// is not asked at all. That is not tidiness — it is what keeps the panel's advice followable. A
+/// leftover `auth.json` from an uninstalled CLI (the desktop app leaves one; so does an install
+/// that has since been removed) still answers "your token expired", and the panel then told the
+/// user to *run that engine once to renew it* for an engine that is not on the machine.
+#[derive(Debug, Clone)]
+pub struct QuotaEngine {
+    pub provider: String,
+    /// The resolved, existing path to the CLI — already found, so a module that has to launch one
+    /// does not go looking again and cannot end up running a different binary than the rest of the
+    /// app would.
+    pub binary: std::path::PathBuf,
+}
+
+/// Where each CLI keeps its state.
+///
+/// **Not derived from where the binary is installed, because it cannot be.** Moving `claude.exe` to
+/// `D:\tools\` does not move `~/.claude`; these CLIs keep their credentials in a *home directory*
+/// that is independent of the executable and is relocated with an environment variable, not by
+/// installing elsewhere. So the honest way to follow a user who has moved things is to read the
+/// same variable the CLI reads — `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME` — and fall back
+/// to the same default it falls back to. Gemini's CLI exposes no such override, so `~/.gemini` is
+/// its own answer rather than an assumption of ours.
+///
+/// **One limit worth knowing.** [`crate::shell_env`] imports the login shell's `PATH` and nothing
+/// else, so a variable exported from `.zshrc` rather than set for the desktop session is invisible
+/// here — the app would look in the default location while the CLI uses the moved one. Widening
+/// that import is the fix, and it is a change to how the app starts, not to this module.
+mod homes {
+    /// A directory named by an environment variable, when it is set to something non-blank.
+    pub fn from_env(name: &str) -> Option<std::path::PathBuf> {
+        let value = std::env::var_os(name)?;
+        let path = std::path::PathBuf::from(value);
+        (!path.as_os_str().is_empty()).then_some(path)
+    }
+}
+
 /// How long a successful read stays good, for the providers answered by one HTTP request.
 ///
 /// These back ends are rate-limited and none of the numbers moves quickly: a five-hour window
@@ -130,6 +169,15 @@ static CACHE: Mutex<Option<HashMap<String, (Instant, ProviderQuota)>>> = Mutex::
 fn cached(provider: &str) -> Option<(Instant, ProviderQuota)> {
     let guard = CACHE.lock().ok()?;
     guard.as_ref()?.get(provider).cloned()
+}
+
+/// Drops one provider's cached answer, so the next read has to go and ask.
+fn forget(provider: &str) {
+    if let Ok(mut guard) = CACHE.lock() {
+        if let Some(all) = guard.as_mut() {
+            all.remove(provider);
+        }
+    }
 }
 
 fn remember(provider: &str, quota: ProviderQuota) {
@@ -179,13 +227,17 @@ fn failed(provider: &str, error: &str) -> ProviderQuota {
 /// one should not set the latency of the panel. Each provider's failure is its own — one signed-out
 /// engine must not take the other's numbers off the screen, which is why nothing here returns
 /// `Result`.
-pub async fn fetch_all() -> Vec<ProviderQuota> {
-    let mut running = Vec::with_capacity(QUOTA_PROVIDERS.len());
-    for provider in QUOTA_PROVIDERS {
-        running.push(tokio::spawn(fetch(provider)));
+/// `force` is the Refresh button, and it has to exist. Without it that button re-reads a cache and
+/// hands back the identical numbers, which is not a slow refresh — it is no refresh, presented as
+/// one. The polls that keep the panel warm leave it `false`.
+pub async fn fetch_all(engines: Vec<QuotaEngine>, force: bool) -> Vec<ProviderQuota> {
+    let names: Vec<String> = engines.iter().map(|e| e.provider.clone()).collect();
+    let mut running = Vec::with_capacity(engines.len());
+    for engine in engines {
+        running.push(tokio::spawn(fetch(engine, force)));
     }
     let mut out = Vec::with_capacity(running.len());
-    for (provider, handle) in QUOTA_PROVIDERS.iter().zip(running) {
+    for (provider, handle) in names.iter().zip(running) {
         // A panicked task is reported as a failed provider rather than propagated: the panel is
         // still owed the other engine's numbers.
         out.push(handle.await.unwrap_or_else(|e| failed(provider, &e.to_string())));
@@ -194,10 +246,13 @@ pub async fn fetch_all() -> Vec<ProviderQuota> {
 }
 
 /// One provider, through the cache.
-pub async fn fetch(provider: &str) -> ProviderQuota {
-    if let Some((at, hit)) = cached(provider) {
-        if at.elapsed() < fresh_for(provider) {
-            return hit;
+pub async fn fetch(engine: QuotaEngine, force: bool) -> ProviderQuota {
+    let provider = engine.provider.as_str();
+    if !force {
+        if let Some((at, hit)) = cached(provider) {
+            if at.elapsed() < fresh_for(provider) {
+                return hit;
+            }
         }
     }
 
@@ -207,14 +262,21 @@ pub async fn fetch(provider: &str) -> ProviderQuota {
     // the panel still said "reading". So it refreshes *behind* the answer: this call returns what
     // is already known (usually nothing, the first time) and the next poll finds the fresh value
     // waiting in the cache. Eventually consistent, which a five-minute window can well afford.
+    //
+    // A forced refresh does not change that — waiting fifteen seconds on a button press is worse
+    // than updating a second later — but it does drop the cached copy first, so the detached read
+    // that follows genuinely re-runs instead of finding its own answer still fresh.
     if fresh_for(provider) > FRESH_FOR {
-        refresh_detached(provider);
+        if force {
+            forget(provider);
+        }
+        refresh_detached(engine.clone());
         return cached(provider)
             .map(|(_, previous)| previous)
             .unwrap_or_else(|| pending(provider));
     }
 
-    read_now(provider).await
+    read_now(&engine).await
 }
 
 /// A provider that has not answered yet. No limits and no error, so the UI leaves it out entirely
@@ -234,35 +296,37 @@ fn pending(provider: &str) -> ProviderQuota {
 ///
 /// The guard is the point: without it every poll while a twenty-second read is in flight would
 /// start another, and a panel left open would have a queue of Grok processes behind it.
-fn refresh_detached(provider: &str) {
+fn refresh_detached(engine: QuotaEngine) {
     static IN_FLIGHT: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
 
     {
         let Ok(mut guard) = IN_FLIGHT.lock() else { return };
         let running = guard.get_or_insert_with(std::collections::HashSet::new);
-        if !running.insert(provider.to_string()) {
+        if !running.insert(engine.provider.clone()) {
             return;
         }
     }
 
-    let provider = provider.to_string();
     tokio::spawn(async move {
-        read_now(&provider).await;
+        let _ = read_now(&engine).await;
         if let Ok(mut guard) = IN_FLIGHT.lock() {
             if let Some(running) = guard.as_mut() {
-                running.remove(&provider);
+                running.remove(&engine.provider);
             }
         }
     });
 }
 
 /// Reads one provider for real and files the result.
-async fn read_now(provider: &str) -> ProviderQuota {
+async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
+    let provider = engine.provider.as_str();
     let fresh = match provider {
         "claude" => claude::quota().await,
         "codex" => codex::quota().await,
         "gemini" => gemini::quota().await,
-        "grok" => grok::quota().await,
+        // The only one handed the binary: it is the only provider whose quota is read by launching
+        // the CLI rather than by asking a back end.
+        "grok" => grok::quota(&engine.binary).await,
         "opencode" => opencode::quota().await,
         other => failed(other, "unsupported"),
     };
@@ -342,7 +406,23 @@ mod live {
     #[tokio::test]
     #[ignore = "hits the providers' live endpoints"]
     async fn what_the_providers_actually_say() {
-        for quota in super::fetch_all().await {
+        // Resolved the same way the command does, so this exercises the real thing: an engine that
+        // is not installed on this machine is not asked, and simply does not appear below.
+        let engines: Vec<super::QuotaEngine> = super::QUOTA_PROVIDERS
+            .iter()
+            .filter_map(|provider| {
+                let binary = crate::ai::engine_for(provider).default_binary().to_string();
+                crate::ai::find_on_path(&binary).map(|binary| super::QuotaEngine {
+                    provider: provider.to_string(),
+                    binary,
+                })
+            })
+            .collect();
+        println!("asking: {:?}", engines.iter().map(|e| &e.provider).collect::<Vec<_>>());
+
+        // Forced, so a cache left warm by an earlier test cannot pass off a stale answer as a
+        // live one — which is the whole point of this test.
+        for quota in super::fetch_all(engines, true).await {
             println!("\n{} (read {})", quota.provider, quota.fetched_at);
             if !quota.error.is_empty() {
                 println!("  no limits: {}", quota.error);
@@ -449,9 +529,16 @@ mod claude {
             }
         }
 
-        let path = dirs::home_dir()?.join(".claude").join(".credentials.json");
-        let raw = std::fs::read_to_string(path).ok()?;
+        let raw = std::fs::read_to_string(config_dir()?.join(".credentials.json")).ok()?;
         serde_json::from_str(&raw).ok()
+    }
+
+    /// Claude Code's state directory: `$CLAUDE_CONFIG_DIR` when the user has moved it, else
+    /// `~/.claude`. The CLI's own resolution, in its own order — see [`super::homes`] for why this
+    /// is asked of an environment variable rather than derived from where the binary happens to
+    /// live.
+    fn config_dir() -> Option<std::path::PathBuf> {
+        super::homes::from_env("CLAUDE_CONFIG_DIR").or_else(|| Some(dirs::home_dir()?.join(".claude")))
     }
 
     /// Reads the plan limits.
@@ -962,6 +1049,15 @@ mod gemini {
             Ok(response) => response,
             Err(e) => return failed("gemini", &e.to_string()),
         };
+
+        // 403 here is `SUBSCRIPTION_REQUIRED` — "you do not have a valid license of this product",
+        // which is an account without an Antigravity entitlement (a lapsed trial, most often), not
+        // a failed read. Structurally the same answer as opencode's `EntitlementError`, and it gets
+        // the same treatment: no windows to report, so no rows and no explanation. Reporting it as
+        // "could not read its limits" would send the user looking for a fault that is not there.
+        if response.status() == reqwest::StatusCode::FORBIDDEN {
+            return silent();
+        }
         if !response.status().is_success() {
             return failed("gemini", &format!("HTTP {}", response.status().as_u16()));
         }
@@ -976,7 +1072,20 @@ mod gemini {
         // comes back as a provider with no limits and no error, which the UI omits entirely.
         ProviderQuota {
             provider: "gemini".to_string(),
+            // (see `silent` below for the same shape, reached when the account has no entitlement)
             limits: tighten(map_buckets(parsed)),
+            plan: String::new(),
+            error: String::new(),
+            fetched_at: now_rfc3339(),
+        }
+    }
+
+    /// A provider with nothing to say and nothing wrong — the account simply has no Antigravity
+    /// entitlement. An empty `error` is what tells the UI to omit the block rather than explain it.
+    fn silent() -> ProviderQuota {
+        ProviderQuota {
+            provider: "gemini".to_string(),
+            limits: Vec::new(),
             plan: String::new(),
             error: String::new(),
             fetched_at: now_rfc3339(),
@@ -1347,8 +1456,11 @@ mod codex {
         reset_after_seconds: Option<i64>,
     }
 
+    /// `$CODEX_HOME`, else `~/.codex` — borrowed from [`crate::codex::codex_home`] rather than
+    /// spelled out again, so the directory the quota reads can never drift from the one the engine
+    /// reads its model catalogue out of.
     fn auth_path() -> Option<std::path::PathBuf> {
-        Some(dirs::home_dir()?.join(".codex").join("auth.json"))
+        Some(crate::codex::codex_home()?.join("auth.json"))
     }
 
     fn tokens() -> Option<Tokens> {
@@ -1526,11 +1638,11 @@ mod grok {
     /// bytes and drops the oldest — the last frame is the one that has the numbers.
     const MAX_OUTPUT: usize = 96_000;
 
-    pub async fn quota() -> ProviderQuota {
-        let Some(binary) = crate::ai::find_on_path("grok") else {
-            return silent();
-        };
-
+    /// `binary` is the CLI the rest of the app would run — resolved from the user's configured
+    /// path, not re-derived from a bare name here, so a Grok installed somewhere unusual is the
+    /// same Grok in the panel as in a chat turn.
+    pub async fn quota(binary: &std::path::Path) -> ProviderQuota {
+        let binary = binary.to_path_buf();
         // A pty, a whole TUI and a blocking read loop have no business on an async worker.
         let output = match tokio::task::spawn_blocking(move || capture(&binary)).await {
             Ok(Ok(output)) => output,
