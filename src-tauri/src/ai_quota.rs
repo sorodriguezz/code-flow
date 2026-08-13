@@ -143,17 +143,18 @@ mod homes {
 /// a settings screen and a status pill into one request between them.
 const FRESH_FOR: Duration = Duration::from_secs(60);
 
-/// How long Grok's reading stays good, which is much longer and has to be.
+/// How long a CLI-driven reading stays good, which is much longer and has to be.
 ///
 /// Every other provider costs one HTTPS call. Grok costs a **terminal user interface**: a pty, the
 /// whole TUI booting inside it, a wait for it to paint, and a Ctrl+C to end it — seconds of work
 /// and a real process, for a weekly number that moves by fractions of a percent an hour. Polling
 /// that on the minute would spawn Grok sixty times an hour to watch a bar not move.
-const GROK_FRESH_FOR: Duration = Duration::from_secs(300);
+const CLI_FRESH_FOR: Duration = Duration::from_secs(300);
 
 fn fresh_for(provider: &str) -> Duration {
     match provider {
-        "grok" => GROK_FRESH_FOR,
+        // The two that read their quota by *running the CLI* rather than by asking a back end.
+        "grok" | "gemini" => CLI_FRESH_FOR,
         _ => FRESH_FOR,
     }
 }
@@ -323,7 +324,7 @@ async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
     let fresh = match provider {
         "claude" => claude::quota().await,
         "codex" => codex::quota().await,
-        "gemini" => gemini::quota().await,
+        "gemini" => gemini::quota(&engine.binary).await,
         // The only one handed the binary: it is the only provider whose quota is read by launching
         // the CLI rather than by asking a back end.
         "grok" => grok::quota(&engine.binary).await,
@@ -420,9 +421,28 @@ mod live {
             .collect();
         println!("asking: {:?}", engines.iter().map(|e| &e.provider).collect::<Vec<_>>());
 
-        // Forced, so a cache left warm by an earlier test cannot pass off a stale answer as a
-        // live one — which is the whole point of this test.
-        for quota in super::fetch_all(engines, true).await {
+        // Forced, so a cache left warm by an earlier read cannot pass off a stale answer as a live
+        // one — which is the whole point of this test.
+        let first = super::fetch_all(engines.clone(), true).await;
+
+        // The CLI-driven providers answer *behind* that call, so the forced pass only started them.
+        // Waiting and asking again unforced is what a second poll does, and is the only way this
+        // test sees their numbers at all — without it Gemini and Grok always print as pending and
+        // a broken subprocess path would look exactly like a working one.
+        let slow: Vec<&str> = first
+            .iter()
+            .filter(|quota| quota.fetched_at.is_empty())
+            .map(|quota| quota.provider.as_str())
+            .collect();
+        let report = if slow.is_empty() {
+            first
+        } else {
+            println!("waiting on: {slow:?}");
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            super::fetch_all(engines, false).await
+        };
+
+        for quota in report {
             println!("\n{} (read {})", quota.provider, quota.fetched_at);
             if !quota.error.is_empty() {
                 println!("  no limits: {}", quota.error);
@@ -686,402 +706,116 @@ mod claude {
 // ---------------------------------------------------------------------------------------------
 
 mod gemini {
+    //! Read by **asking the CLI**, not its back end.
+    //!
+    //! This module used to call Google's Code Assist RPC directly
+    //! (`v1internal:retrieveUserQuota`) with a token lifted from agy's own credential file. That
+    //! worked, and then stopped: on 2026-08-13 `loadCodeAssist` began answering `currentTier: null`
+    //! with `free-tier → UNSUPPORTED_CLIENT` ("this client is no longer supported for Gemini Code
+    //! Assist for individuals"), so the RPC returned 403 `SUBSCRIPTION_REQUIRED` — while `agy`
+    //! itself went on reporting a perfectly good quota in its `/usage` panel. The back end had not
+    //! gone away; the *client* had been retired underneath us.
+    //!
+    //! `agy -p "/usage" --output-format json` is the answer, and is better than the RPC ever was:
+    //! it needs no OAuth client, no borrowed refresh token and no assumption about which tier the
+    //! account is on, because the CLI resolves all of that itself. It also returns the numbers agy
+    //! actually shows — weekly limits **grouped** ("Gemini Models", "Claude and GPT models") —
+    //! rather than the per-model Code Assist buckets, which were a different and staler picture.
+    //!
+    //! It costs a subprocess (~5s) and **spends nothing**: the run reports `num_turns: 0` and zero
+    //! tokens, because a slash command never reaches a model. That is why it is polled like Grok —
+    //! behind the answer, on a long window — rather than on every panel open.
+
     use super::*;
 
-    /// Google's Code Assist back end, the one `agy` itself calls — its `quota_manager` refreshes
-    /// against this RPC.
-    const QUOTA_URL: &str = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota";
-    const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+    /// Long enough for a cold CLI to start and reach the back end, short enough that a hung one
+    /// does not sit in the process table. The CLI takes the same value, so it gives up on itself
+    /// first and the outer guard is only for a CLI that ignores it.
+    const PRINT_TIMEOUT: &str = "45s";
+    const DEADLINE: Duration = Duration::from_secs(60);
 
-    /// The shapes that make an OAuth client findable inside a binary. Format, not credential:
-    /// every Google client id ends with the one, every installed-app secret begins with the other.
-    const CLIENT_ID_SUFFIX: &[u8] = b".apps.googleusercontent.com";
-    const CLIENT_SECRET_PREFIX: &[u8] = b"GOCSPX-";
-    /// Google issues an installed-app secret as its prefix plus exactly this many characters. That
-    /// fixed length is the *only* right-hand boundary available — see [`scan`] for why there is no
-    /// other one to find.
-    const CLIENT_SECRET_BODY: usize = 28;
-    /// How far back the walk for a client id will go. Real ones run to about forty-six characters;
-    /// this is loose enough never to clip one and tight enough that a long run of alphanumerics in
-    /// a neighbouring literal cannot become a candidate hundreds of bytes long.
-    const MAX_CLIENT_ID_HEAD: usize = 128;
-    /// The longest a Google project number is in practice, and the shortest — the bounds within
-    /// which [`harvest`] offers trimmed readings of a digit run it cannot cut unambiguously.
-    const PLAUSIBLE_PROJECT_DIGITS: usize = 13;
-    const MIN_PROJECT_DIGITS: usize = 11;
-    /// A ceiling on how many client/secret combinations are put to Google before giving up. Two
-    /// clients and two secrets is four; the rest of the allowance covers a build that ships another
-    /// pair or a run that had to be offered trimmed, and it exists so that a scan which somehow
-    /// harvested junk cannot turn one refresh into a burst of requests.
-    const MAX_ATTEMPTS: usize = 12;
-
+    /// The closing envelope of a print-mode run. Only `command` matters: a slash command puts its
+    /// structured result there, while `response` carries the same thing rendered as tab-separated
+    /// text — parsing the text would work today and break the first time a column moves.
     #[derive(Deserialize)]
-    struct TokenFile {
-        token: Option<Token>,
+    struct Envelope {
+        command: Option<Command>,
     }
 
     #[derive(Deserialize)]
-    struct Token {
-        access_token: Option<String>,
-        refresh_token: Option<String>,
-        /// RFC 3339 with an offset, as the Go CLI writes it.
-        expiry: Option<String>,
+    struct Command {
+        #[serde(default)]
+        name: String,
+        data: Option<Data>,
     }
 
     #[derive(Deserialize)]
-    struct RefreshResponse {
-        access_token: Option<String>,
+    struct Data {
+        #[serde(default)]
+        groups: Vec<Group>,
     }
 
+    /// A family of models that share one allowance — which is the unit agy bills in, so it is the
+    /// unit reported here. `"Gemini Models"`, `"Claude and GPT models"`.
     #[derive(Deserialize)]
-    struct QuotaResponse {
+    struct Group {
+        #[serde(default)]
+        name: String,
         #[serde(default)]
         buckets: Vec<Bucket>,
     }
 
     #[derive(Deserialize)]
     struct Bucket {
-        #[serde(rename = "modelId", default)]
-        model_id: String,
-        /// How much of this model's allowance is **left**, 0–1 — the opposite direction from the
-        /// one this module reports in, so it is inverted on the way through.
-        #[serde(rename = "remainingFraction", default)]
+        /// `weekly`, and whatever else a paid tier reports. Mapped rather than trusted verbatim so
+        /// an unknown window still draws with a sensible label.
+        #[serde(default)]
+        window: String,
+        /// How much is **left**, 0–1 — the opposite direction this module reports in.
+        #[serde(default)]
         remaining_fraction: f64,
-        #[serde(rename = "resetTime", default)]
+        #[serde(default)]
         reset_time: Option<String>,
     }
 
-    fn token_path() -> Option<std::path::PathBuf> {
-        Some(
-            dirs::home_dir()?
-                .join(".gemini")
-                .join("antigravity-cli")
-                .join("antigravity-oauth-token"),
-        )
-    }
+    pub async fn quota(binary: &std::path::Path) -> ProviderQuota {
+        let mut command = crate::proc::command(binary);
+        command
+            .arg("-p")
+            .arg("/usage")
+            .arg("--output-format")
+            .arg("json")
+            .arg("--print-timeout")
+            .arg(PRINT_TIMEOUT)
+            .stdin(std::process::Stdio::null());
 
-    fn stored() -> Option<Token> {
-        let raw = std::fs::read_to_string(token_path()?).ok()?;
-        serde_json::from_str::<TokenFile>(&raw).ok()?.token
-    }
-
-    /// Every OAuth client id and secret `agy` ships, with no claim about which goes with which.
-    #[derive(Clone, Default)]
-    struct Candidates {
-        ids: Vec<String>,
-        secrets: Vec<String>,
-    }
-
-    /// The scan's result, kept for the life of the process — it is a linear pass over a hundred and
-    /// seventy megabytes of CLI, and nothing it reads changes underneath a running app.
-    ///
-    /// Only success is cached. A failure is usually "Antigravity is not installed", which can stop
-    /// being true while this app is open, and re-checking that costs a path lookup.
-    static CANDIDATES: Mutex<Option<Candidates>> = Mutex::new(None);
-
-    /// The pair that last worked, so the resolution below happens once rather than every refresh.
-    static RESOLVED: Mutex<Option<(String, String)>> = Mutex::new(None);
-
-    /// Antigravity's own installed-app OAuth client, read out of the copy of `agy` on this machine.
-    ///
-    /// A refresh token is only redeemable by the client it was issued to. The token on disk belongs
-    /// to Antigravity, so refreshing it means presenting Antigravity's client — and an "installed
-    /// application" client secret is not a secret in the sense that word usually carries: it is
-    /// published inside every copy of the CLI, and Google's flow rests on the user's consent, not
-    /// on the client's confidentiality, to authorise the call.
-    ///
-    /// It is *read* rather than written down here. Copying another project's credential into this
-    /// repository would republish it from somewhere with no standing to do so and no way to retract
-    /// it when Antigravity rotates. Read from the binary it is always exactly as current as the CLI
-    /// the user actually runs, and this repository carries none of it.
-    async fn candidates() -> Result<Candidates, String> {
-        if let Some(known) = CANDIDATES.lock().ok().and_then(|guard| guard.clone()) {
-            return Ok(known);
-        }
-
-        let binary = crate::ai::find_on_path("agy").ok_or_else(|| reason::SIGNED_OUT.to_string())?;
-        // A linear read of a 170 MB file has no business on an async worker.
-        let found = tokio::task::spawn_blocking(move || scan(&binary))
-            .await
-            .map_err(|e| e.to_string())??;
-
-        if found.ids.is_empty() || found.secrets.is_empty() {
-            // A build that stores its client somewhere this cannot see. Nothing is invented from
-            // that: the provider goes quiet, exactly as it would if the CLI were signed out.
-            return Err(reason::SIGNED_OUT.to_string());
-        }
-        if let Ok(mut guard) = CANDIDATES.lock() {
-            *guard = Some(found.clone());
-        }
-        Ok(found)
-    }
-
-    /// Harvests the OAuth clients embedded in `binary`.
-    ///
-    /// `agy` is a Go program, and a Go binary keeps its string literals in one unseparated blob
-    /// addressed by (pointer, length) pairs. There are no terminators to scan for — the two secrets
-    /// it ships sit immediately against each other, as one run of characters — and nothing in the
-    /// blob ties a secret to the id it belongs with. So each is found by its own fixed shape, and
-    /// the two are deliberately *not* paired here: the CLI carries a client for consumer accounts
-    /// and one for enterprise, and they cannot be told apart by position. [`access_token`] settles
-    /// it by asking Google, the only party that can actually answer.
-    fn scan(binary: &std::path::Path) -> Result<Candidates, String> {
-        use std::io::Read as _;
-
-        // The binary goes past in windows rather than into memory whole, each overlapping the last
-        // by more than the longest thing being looked for so no match can fall down the gap.
-        const CHUNK: usize = 4 << 20;
-        let overlap = MAX_CLIENT_ID_HEAD + CLIENT_ID_SUFFIX.len();
-
-        let mut file = std::fs::File::open(binary).map_err(|e| e.to_string())?;
-        let mut buffer = vec![0u8; CHUNK];
-        let mut window: Vec<u8> = Vec::with_capacity(CHUNK + overlap);
-        let mut found = Candidates::default();
-
-        loop {
-            let read = file.read(&mut buffer).map_err(|e| e.to_string())?;
-            if read == 0 {
-                break;
-            }
-            window.extend_from_slice(&buffer[..read]);
-            harvest(&window, &mut found);
-            let consumed = window.len().saturating_sub(overlap);
-            window.drain(..consumed);
-        }
-
-        // Overlapping windows see the same match twice, which is the price of not missing one.
-        // Deduped in place rather than by sorting, because the order is a preference: the reading
-        // [`harvest`] is most confident in is the one it pushed first.
-        for list in [&mut found.ids, &mut found.secrets] {
-            let mut seen = std::collections::HashSet::new();
-            list.retain(|candidate| seen.insert(candidate.clone()));
-        }
-        Ok(found)
-    }
-
-    fn harvest(window: &[u8], found: &mut Candidates) {
-        for at in occurrences(window, CLIENT_ID_SUFFIX) {
-            // There is no left-hand delimiter, so walking back to the first character that cannot
-            // belong to a client id runs straight into whatever literal precedes it — in a real
-            // `agy` the id sits against the tail of an unrelated sentence. What bounds it instead
-            // is the id's own shape, `<project number>-<random>`: find the separator, then take
-            // only the digits in front of it.
-            let floor = at.saturating_sub(MAX_CLIENT_ID_HEAD);
-            let mut run = at;
-            while run > floor && is_client_char(window[run - 1]) {
-                run -= 1;
-            }
-            // The random half is alphanumeric, so the last dash in the run is the separator.
-            let Some(dash) = window[run..at].iter().rposition(|byte| *byte == b'-').map(|at| run + at)
-            else {
-                continue;
-            };
-            let mut start = dash;
-            while start > run && window[start - 1].is_ascii_digit() {
-                start -= 1;
-            }
-            // Both halves have to be there: a dash with no project number in front of it, or none
-            // with nothing behind it, is some other string come to rest against the suffix.
-            if start == dash || dash + 1 == at {
-                continue;
-            }
-            let Ok(text) = std::str::from_utf8(&window[start..at + CLIENT_ID_SUFFIX.len()]) else {
-                continue;
-            };
-            found.ids.push(text.to_string());
-
-            // The one ambiguity this cannot read its way out of: when the literal in front happens
-            // to *end* in digits, they are indistinguishable from the project number and come along
-            // with it. A run too long to be a project number is therefore also offered trimmed —
-            // one of the variants is the real client, and Google says which.
-            let digits = dash - start;
-            if digits > PLAUSIBLE_PROJECT_DIGITS {
-                for length in (MIN_PROJECT_DIGITS..=PLAUSIBLE_PROJECT_DIGITS).rev() {
-                    if let Ok(text) = std::str::from_utf8(&window[dash - length..at + CLIENT_ID_SUFFIX.len()]) {
-                        found.ids.push(text.to_string());
-                    }
-                }
-            }
-        }
-
-        for at in occurrences(window, CLIENT_SECRET_PREFIX) {
-            let from = at + CLIENT_SECRET_PREFIX.len();
-            let Some(body) = window.get(from..from + CLIENT_SECRET_BODY) else {
-                continue;
-            };
-            if !body.iter().copied().all(is_client_char) {
-                continue;
-            }
-            if let Ok(text) = std::str::from_utf8(&window[at..from + CLIENT_SECRET_BODY]) {
-                found.secrets.push(text.to_string());
-            }
-        }
-    }
-
-    fn occurrences(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
-        if haystack.len() < needle.len() {
-            return Vec::new();
-        }
-        haystack
-            .windows(needle.len())
-            .enumerate()
-            .filter(|(_, candidate)| *candidate == needle)
-            .map(|(at, _)| at)
-            .collect()
-    }
-
-    fn is_client_char(byte: u8) -> bool {
-        byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
-    }
-
-    /// A usable access token, refreshing when the stored one has aged out.
-    ///
-    /// Refreshing here is safe in a way it is not for Claude Code: Google's installed-app flow
-    /// hands back a new access token and leaves the refresh token alone, so nothing the CLI holds
-    /// is invalidated by asking. It has to happen almost every time regardless — `agy`'s access
-    /// tokens last an hour, which is shorter than the gap between two sessions of anything.
-    ///
-    /// The refreshed token is kept **in memory only**. Writing it back into the CLI's file would
-    /// mean this app owning a credential it merely borrowed, and the cache above already keeps the
-    /// request rate low enough that re-refreshing costs nothing worth saving.
-    async fn access_token() -> Result<String, String> {
-        let token = stored().ok_or_else(|| reason::SIGNED_OUT.to_string())?;
-
-        let still_valid = token
-            .expiry
-            .as_deref()
-            .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
-            .is_some_and(|at| at > chrono::Utc::now());
-        if still_valid {
-            if let Some(access) = token.access_token.filter(|t| !t.is_empty()) {
-                return Ok(access);
-            }
-        }
-
-        let refresh = token
-            .refresh_token
-            .filter(|t| !t.is_empty())
-            .ok_or_else(|| reason::SIGNED_OUT.to_string())?;
-
-        // The pair that worked last time first, after which this costs one request like every other
-        // provider here. It is retried from scratch if it stops working, because the CLI can be
-        // updated — and its client changed — under a running app.
-        if let Some((id, secret)) = RESOLVED.lock().ok().and_then(|guard| guard.clone()) {
-            if let Some(access) = refresh_with(&id, &secret, &refresh).await? {
-                return Ok(access);
-            }
-            if let Ok(mut guard) = RESOLVED.lock() {
-                *guard = None;
-            }
-        }
-
-        let candidates = candidates().await?;
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        for id in &candidates.ids {
-            for secret in &candidates.secrets {
-                pairs.push((id.clone(), secret.clone()));
-            }
-        }
-        pairs.truncate(MAX_ATTEMPTS);
-
-        for (id, secret) in pairs {
-            let Some(access) = refresh_with(&id, &secret, &refresh).await? else {
-                continue;
-            };
-            if let Ok(mut guard) = RESOLVED.lock() {
-                *guard = Some((id, secret));
-            }
-            return Ok(access);
-        }
-
-        // Every client the CLI ships was refused. Either this refresh token was issued by none of
-        // them or the CLI's own session is gone — and both end the same way, with `agy` having to
-        // sign in again.
-        Err(reason::SIGNED_OUT.to_string())
-    }
-
-    /// One refresh attempt as one client. `Ok(None)` is Google declining this client — the next
-    /// pair gets a turn; `Err` is the request never landing, which no other pair would survive
-    /// either and so ends the search.
-    async fn refresh_with(
-        client_id: &str,
-        client_secret: &str,
-        refresh: &str,
-    ) -> Result<Option<String>, String> {
-        let response = client()
-            .post(TOKEN_URL)
-            .form(&[
-                ("client_id", client_id),
-                ("client_secret", client_secret),
-                ("refresh_token", refresh),
-                ("grant_type", "refresh_token"),
-            ])
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        if !response.status().is_success() {
-            return Ok(None);
-        }
-
-        Ok(response
-            .json::<RefreshResponse>()
-            .await
-            .map_err(|e| e.to_string())?
-            .access_token
-            .filter(|t| !t.is_empty()))
-    }
-
-    pub async fn quota() -> ProviderQuota {
-        let token = match access_token().await {
-            Ok(token) => token,
-            Err(e) => return failed("gemini", &e),
+        let run = tokio::time::timeout(DEADLINE, command.output()).await;
+        let output = match run {
+            Ok(Ok(output)) => output,
+            // A CLI that will not start is not a signed-out account, and saying so would send the
+            // user to re-authenticate something that is working.
+            Ok(Err(e)) => return failed("gemini", &e.to_string()),
+            Err(_) => return failed("gemini", "timeout"),
         };
 
-        let response = client()
-            .post(QUOTA_URL)
-            .bearer_auth(&token)
-            .json(&serde_json::json!({}))
-            .send()
-            .await;
-
-        let response = match response {
-            Ok(response) => response,
-            Err(e) => return failed("gemini", &e.to_string()),
-        };
-
-        // 403 here is `SUBSCRIPTION_REQUIRED` — "you do not have a valid license of this product",
-        // which is an account without an Antigravity entitlement (a lapsed trial, most often), not
-        // a failed read. Structurally the same answer as opencode's `EntitlementError`, and it gets
-        // the same treatment: no windows to report, so no rows and no explanation. Reporting it as
-        // "could not read its limits" would send the user looking for a fault that is not there.
-        if response.status() == reqwest::StatusCode::FORBIDDEN {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let Some(limits) = parse(&stdout) else {
+            // The CLI answered with something this does not recognise — an older build without the
+            // `/usage` command, or a sign-in prompt. Nothing to draw and nothing to claim.
             return silent();
-        }
-        if !response.status().is_success() {
-            return failed("gemini", &format!("HTTP {}", response.status().as_u16()));
-        }
-
-        let parsed: QuotaResponse = match response.json().await {
-            Ok(parsed) => parsed,
-            Err(e) => return failed("gemini", &e.to_string()),
         };
 
-        // An empty `buckets` is not an error and not a zero: it is this account having no
-        // per-model allowance to report. Saying so as [`reason::STALE`] would be wrong, so it
-        // comes back as a provider with no limits and no error, which the UI omits entirely.
         ProviderQuota {
             provider: "gemini".to_string(),
-            // (see `silent` below for the same shape, reached when the account has no entitlement)
-            limits: tighten(map_buckets(parsed)),
+            limits: tighten(limits),
             plan: String::new(),
             error: String::new(),
             fetched_at: now_rfc3339(),
         }
     }
 
-    /// A provider with nothing to say and nothing wrong — the account simply has no Antigravity
-    /// entitlement. An empty `error` is what tells the UI to omit the block rather than explain it.
+    /// A provider with nothing to say and nothing wrong. An empty `error` is what tells the UI to
+    /// omit the block rather than explain it.
     fn silent() -> ProviderQuota {
         ProviderQuota {
             provider: "gemini".to_string(),
@@ -1092,137 +826,114 @@ mod gemini {
         }
     }
 
-    /// Google's `buckets[]` in this module's terms: a remaining fraction becomes a used percentage.
-    fn map_buckets(parsed: QuotaResponse) -> Vec<QuotaLimit> {
-        parsed
-            .buckets
+    /// The `/usage` envelope in this module's terms.
+    ///
+    /// `None` means no usage payload was found at all, which is different from finding one that is
+    /// empty: the first is "this CLI cannot tell us", the second is "this account has no windows".
+    /// Only the first deserves to be indistinguishable from a provider that was never asked.
+    fn parse(stdout: &str) -> Option<Vec<QuotaLimit>> {
+        // Two shapes, because print mode has both: one JSON object for the whole run (what it
+        // actually emits today, on a single very long line), or that object preceded by progress
+        // lines. Whole-input first so a pretty-printed payload parses at all — a line scan would
+        // reject every line of it — then a line scan for the prefixed case.
+        if let Some(limits) = usage_payload(stdout.trim()) {
+            return Some(limits);
+        }
+        let mut found = None;
+        for line in stdout.lines().map(str::trim).filter(|line| line.starts_with('{')) {
+            if let Some(limits) = usage_payload(line) {
+                // The last one wins: the closing envelope is the one carrying the final answer.
+                found = Some(limits);
+            }
+        }
+        found
+    }
+
+    /// One candidate JSON blob, if it is a `/usage` result.
+    fn usage_payload(candidate: &str) -> Option<Vec<QuotaLimit>> {
+        let command = serde_json::from_str::<Envelope>(candidate).ok()?.command?;
+        (command.name == "usage")
+            .then(|| map_groups(command.data.map(|data| data.groups).unwrap_or_default()))
+    }
+
+    fn map_groups(groups: Vec<Group>) -> Vec<QuotaLimit> {
+        groups
             .into_iter()
-            // A bucket with no model is a row with nothing to label it — the model id *is* its
-            // name, since these windows have no other identity.
-            .filter(|bucket| !bucket.model_id.is_empty())
-            .map(|bucket| QuotaLimit {
-                kind: "model".to_string(),
-                scope: bucket.model_id,
-                used_percent: (1.0 - bucket.remaining_fraction) * 100.0,
-                resets_at: bucket.reset_time.unwrap_or_default(),
+            .flat_map(|group| {
+                let name = group.name;
+                group.buckets.into_iter().map(move |bucket| QuotaLimit {
+                    kind: kind_for(&bucket.window).to_string(),
+                    // The group is the scope: two weekly windows that differ only by which models
+                    // they cover have to say which, or they read as the same week listed twice.
+                    scope: name.clone(),
+                    used_percent: (1.0 - bucket.remaining_fraction) * 100.0,
+                    resets_at: bucket.reset_time.unwrap_or_default(),
+                })
             })
             .collect()
+    }
+
+    /// agy's own word for the window, in this module's vocabulary. An unrecognised one falls back
+    /// to `model`, which the UI labels by its scope alone — wrong-ish, but never a *wrong window*.
+    fn kind_for(window: &str) -> &'static str {
+        match window.to_ascii_lowercase().as_str() {
+            "weekly" | "week" => "weekly",
+            "monthly" | "month" => "monthly",
+            "session" | "rolling" | "five_hour" | "5h" => "session",
+            _ => "model",
+        }
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
 
-        /// A real `v1internal:retrieveUserQuota` answer, with one bucket edited to a partial
-        /// fraction — a full account reports every bucket at 1.0 and would not exercise the maths.
-        const REAL: &str = r#"{
-          "buckets": [
-            {"resetTime":"2026-08-14T02:41:25Z","tokenType":"REQUESTS",
-             "modelId":"gemini-2.5-flash","remainingFraction":1},
-            {"resetTime":"2026-08-14T02:41:25Z","tokenType":"REQUESTS",
-             "modelId":"gemini-2.5-pro","remainingFraction":0.125},
-            {"resetTime":"2026-08-14T02:41:25Z","tokenType":"REQUESTS","remainingFraction":0.5}
-          ]
-        }"#;
+        /// Captured verbatim from `agy -p "/usage" --output-format json` on 1.1.12.
+        const REAL: &str = r#"{"conversation_id":"","status":"SUCCESS",
+          "response":"Gemini Models\tWeekly Limit Remaining\t95%\t2026-08-17T16:17:01Z\n",
+          "duration_seconds":0,"num_turns":0,
+          "usage":{"input_tokens":0,"output_tokens":0,"thinking_tokens":0,"cache_read_tokens":0,"total_tokens":0},
+          "command":{"name":"usage","data":{"description":"Within each group, models share a weekly limit.",
+            "groups":[
+              {"name":"Gemini Models","description":"Models within this group: Gemini Flash, Gemini Pro",
+               "buckets":[{"id":"gemini-weekly","name":"Weekly Limit Remaining","description":"…",
+                           "window":"weekly","remaining_fraction":0.9543591737747192,
+                           "reset_time":"2026-08-17T16:17:01Z"}]},
+              {"name":"Claude and GPT models","description":"Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+               "buckets":[{"id":"3p-weekly","name":"Weekly Limit Remaining","description":"…",
+                           "window":"weekly","remaining_fraction":0.9323989748954773,
+                           "reset_time":"2026-08-14T00:50:48Z"}]}
+            ]}}}"#;
 
         #[test]
-        fn a_remaining_fraction_becomes_a_percentage_used() {
-            let limits = tighten(map_buckets(serde_json::from_str(REAL).unwrap()));
-            // The unnamed bucket is dropped, so two survive — fullest first.
+        fn each_group_becomes_a_named_weekly_window() {
+            let limits = tighten(parse(REAL).expect("a usage payload"));
             assert_eq!(limits.len(), 2);
-            assert_eq!(limits[0].scope, "gemini-2.5-pro");
-            assert_eq!(limits[0].kind, "model");
-            assert_eq!(limits[0].used_percent, 87.5);
-            assert_eq!(limits[1].scope, "gemini-2.5-flash");
-            assert_eq!(limits[1].used_percent, 0.0);
+
+            // Fullest first, and the fraction is inverted: 0.9324 left is 6.76% used.
+            assert_eq!(limits[0].scope, "Claude and GPT models");
+            assert_eq!(limits[0].kind, "weekly");
+            assert!((limits[0].used_percent - 6.76).abs() < 0.01);
+            assert_eq!(limits[0].resets_at, "2026-08-14T00:50:48Z");
+
+            assert_eq!(limits[1].scope, "Gemini Models");
+            assert!((limits[1].used_percent - 4.56).abs() < 0.01);
         }
 
-        /// Fixtures are built from the constants under test rather than pasted in. That keeps the
-        /// shapes and the assertions from drifting apart — and means this file holds no string
-        /// that looks like somebody's credential.
-        fn fake_secret(body: &str) -> String {
-            assert_eq!(body.len(), CLIENT_SECRET_BODY);
-            format!("{}{body}", String::from_utf8_lossy(CLIENT_SECRET_PREFIX))
-        }
-
-        fn fake_id(project: &str, random: &str) -> String {
-            format!("{project}-{random}{}", String::from_utf8_lossy(CLIENT_ID_SUFFIX))
-        }
-
-        /// A Go binary's string blob: literals packed end to end with nothing between them.
-        fn blob(parts: &[&str]) -> Vec<u8> {
-            parts.concat().into_bytes()
-        }
-
+        /// Output with no usage command at all — an older CLI, or a sign-in prompt. It must be
+        /// "cannot tell", not "no windows", so the caller can stay silent rather than assert.
         #[test]
-        fn finds_both_clients_in_an_unseparated_blob() {
-            let first = fake_id("1071006060591", "tmhssin2h21lcre235vtolojh4g403ep");
-            let second = fake_id("884354919052", "36trc1jjb3tguiac32ov6cod268c5blh");
-            let raw = blob(&[
-                "runtime.Goexit called in a thread",
-                &first,
-                "[AuthProvider] SetUserTier called with",
-                &second,
-                "Warning: Shell profile target %s exists",
-            ]);
-
-            let mut found = Candidates::default();
-            harvest(&raw, &mut found);
-
-            assert_eq!(found.ids, vec![first, second]);
+        fn output_without_a_usage_command_is_unknown() {
+            assert!(parse(r#"{"status":"SUCCESS","response":"hi","command":null}"#).is_none());
+            assert!(parse("not json at all").is_none());
         }
 
-        /// The reason the secret's length is a constant: `agy` stores its two secrets against each
-        /// other, so the end of the first is only findable by counting.
+        /// A usage command that carries no groups is an account with no windows — a real answer,
+        /// and a different one from not having asked.
         #[test]
-        fn splits_two_secrets_stored_back_to_back() {
-            let first = fake_secret("K00XXX000XxXX0xXX0xXX0x0XXXX");
-            let second = fake_secret("0XXXxX0XXXX0000XXxj-XxXXxX0Z");
-            let raw = blob(&["https://auth.cloud.google/authorize", &first, &second, "https://x"]);
-
-            let mut found = Candidates::default();
-            harvest(&raw, &mut found);
-
-            assert_eq!(found.secrets, vec![first, second]);
-        }
-
-        #[test]
-        fn a_suffix_without_a_client_id_in_front_of_it_is_not_one() {
-            // A bare mention of the domain, then one carrying a head with no leading project
-            // number — neither is a client id.
-            let suffix = String::from_utf8_lossy(CLIENT_ID_SUFFIX).into_owned();
-            let raw = blob(&["see ", &suffix, " for details, or not-a-project", &suffix]);
-
-            let mut found = Candidates::default();
-            harvest(&raw, &mut found);
-
-            assert!(found.ids.is_empty());
-        }
-
-        /// The neighbouring literal ends in digits, so the project number cannot be cut with
-        /// certainty — every plausible reading is offered, the real one among them.
-        #[test]
-        fn a_digit_run_too_long_to_be_a_project_number_is_also_offered_trimmed() {
-            let real = fake_id("1071006060591", "tmhssin2h21lcre235vtolojh4g403ep");
-            let raw = blob(&["heap arena is 4096", &real]);
-
-            let mut found = Candidates::default();
-            harvest(&raw, &mut found);
-
-            assert_eq!(found.ids[0], format!("4096{real}"));
-            assert!(found.ids.contains(&real), "the real client id is among the readings");
-        }
-
-        #[test]
-        fn a_truncated_secret_at_the_end_of_a_window_is_not_harvested() {
-            let whole = fake_secret("K00XXX000XxXX0xXX0xXX0x0XXXX");
-            let clipped = &whole[..whole.len() - 1];
-
-            let mut found = Candidates::default();
-            harvest(clipped.as_bytes(), &mut found);
-
-            // It is the overlap between windows that gets it, on the next pass, whole.
-            assert!(found.secrets.is_empty());
+        fn a_usage_command_with_no_groups_is_an_empty_answer() {
+            let empty = r#"{"command":{"name":"usage","data":{"groups":[]}}}"#;
+            assert_eq!(parse(empty).map(|l| l.len()), Some(0));
         }
     }
 }

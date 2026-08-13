@@ -134,8 +134,16 @@ impl AiEngine for GeminiEngine {
         // app streams stdout into the run log, and plain `json` would leave it empty until the
         // process exits. The closing `result` event is what `interpret_output` reads.
         cmd.arg("--output-format").arg("stream-json");
-        if !inv.model.trim().is_empty() {
-            cmd.arg("--model").arg(inv.model);
+        // Sanitised on the way out, not merely on the way in. [`parse_model_list`] stops the label
+        // being *stored* from now on, but a setting written before that — or by an older build on
+        // another machine — is already `<id>\t<label>` in the database, and nothing rewrites it. It
+        // would then be handed to `--model` verbatim on every single turn, and the CLI refuses the
+        // whole run: "model gemini-3.6-flash-high\tGemini 3.6 Flash (High) is not recognized". So
+        // the id is taken here too, which repairs those installs without a migration and without
+        // the user having to re-pick a model that looks correct in the dropdown.
+        let model = model_id(inv.model);
+        if !model.is_empty() {
+            cmd.arg("--model").arg(model);
         }
         // Skip permission prompts when the flow may write (chat / fix) or when agy has to read the
         // temp brief file headlessly. A small read-only prompt needs neither.
@@ -174,7 +182,17 @@ impl AiEngine for GeminiEngine {
 /// An id never contains whitespace, so the first token of the line is always it, tab-separated
 /// or not.
 fn parse_model_list(stdout: &str) -> Vec<String> {
-    stdout.lines().filter_map(|line| line.split_whitespace().next()).map(str::to_string).collect()
+    stdout.lines().map(model_id).filter(|id| !id.is_empty()).map(str::to_string).collect()
+}
+
+/// The id part of whatever a model setting holds.
+///
+/// One rule, used at both ends — where the list is read *and* where `--model` is built — because
+/// the two ends are what disagreed: the parser started stripping the label, but every setting
+/// stored before that still holds the whole `<id>\t<label>` line, and only the second end can save
+/// those. An id never contains whitespace, so the first token is always it.
+fn model_id(raw: &str) -> &str {
+    raw.split_whitespace().next().unwrap_or("")
 }
 
 /// Returns `Some((tempdir, file))` when `content` is too big, or has an embedded newline, to pass
@@ -386,5 +404,20 @@ mod tests {
             "gemini-3.6-flash-high",
             "gemini-3.6-flash"
         ]);
+    }
+
+    /// The half the listing fix could not reach: a setting written *before* it, which is still
+    /// `<id>\t<label>` in the database and is read straight out of it on every turn. Sanitising the
+    /// listing alone left those installs failing every single run with "invalid model selection",
+    /// and no amount of re-picking in the dropdown fixed it, because the dropdown looked right.
+    #[test]
+    fn an_already_stored_label_never_reaches_the_model_flag() {
+        assert_eq!(model_id("gemini-3.6-flash-high\tGemini 3.6 Flash (High)"), "gemini-3.6-flash-high");
+        assert_eq!(model_id("gemini-3.6-flash-medium\tGemini 3.6 Flash (Medium)"), "gemini-3.6-flash-medium");
+        // A clean id is left exactly as it is, and a blank stays blank so the caller omits the flag
+        // and lets the CLI pick for itself.
+        assert_eq!(model_id("gemini-3.1-pro-high"), "gemini-3.1-pro-high");
+        assert_eq!(model_id("   "), "");
+        assert_eq!(model_id(""), "");
     }
 }
