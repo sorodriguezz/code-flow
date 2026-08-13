@@ -1328,3 +1328,105 @@ body.cf-dragging * {
     animation: none;
   }
 }
+
+/* The battery meter's four states, in the order you meet them.
+
+   Transform and opacity only, and CSS rather than framer-motion, for the same reason the bell's
+   resting pulse is: three of these four *loop*, and a laptop sitting at 15% is a resting state that
+   can hold for hours. A JS animation loop that never stops keeps the renderer non-quiescent — on
+   Windows WebView2 never lowers its memory-usage target while frames are being produced — so a
+   battery warning would quietly cost more than the battery it is warning about. Colour is not
+   animated either; it is a static class on the icon, so nothing here re-rasterizes.
+
+   Nothing loops faster than about 1 Hz. Three flashes a second is the photosensitivity threshold,
+   and a status bar is the last place to go near it. */
+
+/* Charging: the bolt filling and settling, over and over. Calm on purpose — this is the good state,
+   and an urgent animation for "everything is fine" is how people learn to ignore the widget. */
+@keyframes cf-battery-charge {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: translateY(0.5px);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-0.5px);
+  }
+}
+
+/* 20% down to 10%: the house breathing tempo, the same 2.2s as the unread bell, so the two marks in
+   the same footer read as one app breathing rather than two things blinking at each other. */
+@keyframes cf-battery-breath {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.14);
+  }
+}
+
+/* Under 10%: twice the tempo and a real dip, so it reads as a different thing from the amber
+   breath rather than the same thing hurrying. Still only 1.1s — quick enough to catch the eye
+   sideways, slow enough to be nowhere near a strobe. */
+@keyframes cf-battery-alarm {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  45% {
+    opacity: 0.45;
+    transform: scale(1.2);
+  }
+}
+
+/* The charger coming out. One shot, ~0.7s: a tug to the right, a rebound, and a dim that recovers —
+   the shape of the cable leaving rather than an alarm. It fires on the transition only, never on
+   the first reading, so opening the app on battery does not animate a disconnection that happened
+   before it was running. */
+@keyframes cf-battery-unplug {
+  0% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  30% {
+    opacity: 0.4;
+    transform: translateX(3px);
+  }
+  55% {
+    transform: translateX(-1.5px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.cf-battery-charge {
+  animation: cf-battery-charge 1.8s ease-in-out infinite;
+}
+
+.cf-battery-breath {
+  animation: cf-battery-breath 2.2s ease-in-out infinite;
+}
+
+.cf-battery-alarm {
+  animation: cf-battery-alarm 1.1s ease-in-out infinite;
+}
+
+.cf-battery-unplug {
+  animation: cf-battery-unplug 0.7s ease-out;
+}
+
+/* The colours stay; only the motion goes. A red icon at 6% still says what it needs to say without
+   moving, and this is precisely the user who cannot afford the movement. */
+@media (prefers-reduced-motion: reduce) {
+  .cf-battery-charge,
+  .cf-battery-breath,
+  .cf-battery-alarm,
+  .cf-battery-unplug {
+    animation: none;
+  }
+}

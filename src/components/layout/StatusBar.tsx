@@ -1,5 +1,6 @@
 import { ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, Lock, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
 import { NotificationBell } from "./NotificationBell";
+import { BatteryMeter } from "./BatteryMeter";
 import { UsageMeter } from "./UsageMeter";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -175,6 +176,7 @@ export function StatusBar() {
         {/* Also here, with no project open: agent runs, generations and API work are scoped to the
             workspace, not to a repository, so they can finish while this bar is in its empty state. */}
         <div className="ml-auto flex items-center gap-1">
+          <BatteryMeter />
           <UsageMeter />
           <NotificationBell />
         </div>
@@ -338,6 +340,7 @@ export function StatusBar() {
       {/* Beside the bell, and for the same reason it is here rather than in a settings screen:
           both report on work the app did while you were looking somewhere else. */}
       <div className="ml-auto flex shrink-0 items-center gap-1">
+        <BatteryMeter />
         <UsageMeter />
         <NotificationBell />
       </div>

@@ -18,6 +18,7 @@ import type {
   NewStoryWorkItem,
   UsageStats,
   ProviderQuota,
+  PowerStatus,
   BranchInfo,
   ChatConversationSummary,
   CommitInfo,
@@ -536,6 +537,11 @@ export type QuotaTrigger = "poll" | "open" | "refresh";
 
 export const aiQuotaStatus = (trigger: QuotaTrigger = "poll") =>
   invoke<ProviderQuota[]>("ai_quota_status", { trigger });
+
+/** Battery level and whether the machine is on mains. `null` on a machine with no battery — a
+ * desktop — which the UI draws nothing for. A native read: no subprocess, so unlike the AI quota
+ * this one is safe to poll on a timer. */
+export const powerStatus = () => invoke<PowerStatus | null>("power_status");
 
 export interface ProviderStatus {
   available: boolean;

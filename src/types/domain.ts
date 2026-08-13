@@ -1532,3 +1532,22 @@ export interface ProviderQuota {
    * the UI can tell how old it is. */
   fetched_at: string;
 }
+
+/**
+ * The machine's power situation, when it has one.
+ *
+ * The command returns `null` for a machine with no battery — a desktop — and the UI draws nothing
+ * for it. A permanently full icon is a pixel that never changes and stops being read.
+ */
+export interface PowerStatus {
+  /** 0–100, across every battery the machine has. */
+  percent: number;
+  /** Whether mains power is connected. */
+  plugged_in: boolean;
+  /** Whether it is actively taking charge — distinct from `plugged_in`, since a laptop sitting at
+   * 100% on the mains is plugged in and charging nothing. */
+  charging: boolean;
+  /** Runway at the current rate: to empty while discharging, to full while charging. `null` when
+   * the OS will not estimate it, which it routinely refuses to do just after a cable is moved. */
+  minutes_left: number | null;
+}

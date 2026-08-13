@@ -1257,13 +1257,27 @@ fn record_usage(
 /// reusing [`run`]'s binary resolution + `PATH` augmentation. No stdin plumbing — this isn't for
 /// model invocations, just for asking the CLI about itself.
 async fn capture(binary: &str, args: &[String]) -> Result<std::process::Output, String> {
+    let mut cmd = aux_command(binary);
+    cmd.args(args);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.output().await.map_err(|e| format!("failed to launch '{binary}': {e}"))
+}
+
+/// Builds a command for a read-only auxiliary CLI call, prepared exactly as a real run prepares one.
+///
+/// Three things have to be true of *every* child this app starts, and each was once got wrong by a
+/// spawn site that assembled its own `Command`: the binary is resolved with its extension (Windows
+/// will not launch an npm `.cmd` shim otherwise), the child inherits the widened `PATH` (or a CLI
+/// that shells out to its own helpers fails only for us), and no console window flashes on Windows.
+///
+/// `pub(crate)` for [`crate::ai_quota`], which runs a CLI of its own to read a plan limit and must
+/// do it the same way — it is the same binary, started for a smaller reason.
+pub(crate) fn aux_command(binary: &str) -> tokio::process::Command {
     let dirs = search_dirs();
     let program = resolve_binary(binary, &dirs);
     let mut cmd = crate::proc::command(&program);
-    cmd.args(args);
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     apply_path(&mut cmd, &dirs);
-    cmd.output().await.map_err(|e| format!("failed to launch '{binary}': {e}"))
+    cmd
 }
 
 /// Lists the models the engine's CLI reports as available (one id per line). Returns an empty list

@@ -93,6 +93,17 @@ pub async fn ai_quota_status(
     Ok(crate::ai_quota::fetch_all(engines, trigger).await)
 }
 
+/// Battery level and whether the machine is on mains, or `None` on a machine with no battery.
+///
+/// `None` is the desktop answer and the UI draws nothing for it — a permanently full icon is a
+/// pixel that never changes and stops being read. Cheap enough to poll: a native read, no
+/// subprocess, so unlike the quota providers this one can run on a timer without putting a console
+/// window on screen.
+#[tauri::command]
+pub fn power_status() -> Option<crate::power::PowerStatus> {
+    crate::power::status()
+}
+
 /// What the app cannot do without, checked on the first launch after installing.
 ///
 /// Called at most once per installation — the frontend remembers the answer in `app_settings`,

@@ -29,6 +29,7 @@ mod onedrive;
 mod openai;
 mod opencode;
 mod paths;
+mod power;
 mod pr_link;
 mod proc;
 mod remote;
@@ -376,6 +377,7 @@ pub fn run() {
             commands::agents_cmd::create_story_chain,
             commands::app_cmd::ai_usage_stats,
             commands::app_cmd::ai_quota_status,
+            commands::app_cmd::power_status,
             commands::agents_cmd::set_chain_step_input,
             commands::agents_cmd::set_chain_step_skipped,
             commands::agents_cmd::claim_next_chain_step,

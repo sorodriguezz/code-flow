@@ -61,6 +61,10 @@ serde_json = "1"
 git2 = "0.19"
 rusqlite = { version = "0.32", features = ["bundled"] }
 keyring = "3"
+# Battery level for the status bar. Pure Rust across macOS/Windows/Linux (IOKit / Win32 /
+# `/sys/class/power_supply`), so reading it costs no subprocess — which matters on Windows, where
+# every console-mode child flashes a window (see `proc.rs`).
+starship-battery = "0.11"
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }

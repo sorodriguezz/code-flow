@@ -163,11 +163,12 @@ const FRESH_FOR: Duration = Duration::from_secs(60);
 
 /// How long a CLI-driven reading stays good, which is much longer and has to be.
 ///
-/// Every other provider costs one HTTPS call. Grok costs a **terminal user interface**: a pty, the
-/// whole TUI booting inside it, a wait for it to paint, and a Ctrl+C to end it — seconds of work
-/// and a real process, for a weekly number that moves by fractions of a percent an hour. Polling
-/// that on the minute would spawn Grok sixty times an hour to watch a bar not move.
-const CLI_FRESH_FOR: Duration = Duration::from_secs(300);
+/// Every other provider costs one HTTPS call. These cost a **process**: Grok a whole terminal user
+/// interface inside a pty, Gemini its CLI booting and reaching the back end — seconds of work each,
+/// for a weekly number that moves by fractions of a percent an hour. Half an hour, and only when
+/// the panel is open (see [`Trigger`]), is what keeps a Windows user from being shown a console
+/// window flashing over their work to re-read a bar that has not moved.
+const CLI_FRESH_FOR: Duration = Duration::from_secs(1800);
 
 fn fresh_for(provider: &str) -> Duration {
     match provider {
@@ -815,7 +816,10 @@ mod gemini {
     }
 
     pub async fn quota(binary: &std::path::Path) -> ProviderQuota {
-        let mut command = crate::proc::command(binary);
+        // Built the way a real run builds one: resolved extension, widened `PATH`, and no console
+        // window on Windows. Assembling it here instead is exactly how a spawn site drifts — this
+        // one already lacked the `PATH` the CLI needs to find its own helpers.
+        let mut command = crate::ai::aux_command(&binary.to_string_lossy());
         command
             .arg("-p")
             .arg("/usage")
