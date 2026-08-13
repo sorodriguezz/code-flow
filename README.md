@@ -11,7 +11,7 @@ let AI write your commits, find bugs and resolve conflicts — all in a fast, na
 And when you're done, test the endpoint you just changed and query the database behind it
 without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-1.14.16-6C5CE7)
+![version](https://img.shields.io/badge/version-1.14.17-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
