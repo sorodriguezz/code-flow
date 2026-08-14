@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Editor from "@monaco-editor/react";
+// The only panel in `components/api` that renders an editor without also importing
+// `OVERFLOW_SAFE_OPTIONS`, so it is the only one that has to ask for Monaco's setup by hand. See
+// the note in `monacoSetup` — since `main.tsx` stopped importing it, a module that shows an editor
+// and stays silent gets an unconfigured loader reaching for a CDN.
+import "../../lib/monacoSetup";
 import {
   AlertTriangle,
   ArrowDown,

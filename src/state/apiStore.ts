@@ -30,9 +30,10 @@ import {
   apiUpsertCookie,
 } from "../lib/tauri/apiCommands";
 import { getSetting, setSetting } from "../lib/tauri/commands";
-// Free, bundle-wise: `main.tsx` imports `lib/monacoSetup` for its side effects, so monaco-editor
-// is already a static dependency of the entry chunk (see the note at the top of `App.tsx`).
-import { monaco } from "../lib/monacoSetup";
+// Deliberately NOT a static import of `lib/monacoSetup`. This store is reached from `App.tsx`, so
+// anything it imports is in the entry chunk — and monaco-editor is 4 MB of it. The one place that
+// needs the namespace is `disposeTabModels`, which resolves it with a dynamic `import()`; see the
+// note there for why that costs nothing.
 import { translations, type TranslationKey } from "../lib/i18n/translations";
 import { pushErrorToast } from "./toastStore";
 import { useLanguageStore } from "./languageStore";
@@ -715,7 +716,27 @@ export const useApiStore = create<ApiState>((set, get) => ({
   addHistory: async (entry) => {
     await guarded(async () => {
       await apiAddHistory(entry);
-      set((s) => ({ history: [entry, ...s.history].slice(0, s.settings.historyLimit) }));
+      // Only the newest three rows keep their snapshot in memory; older ones are stripped down to
+      // the metadata the list actually draws (name, method, url, status, duration, size).
+      //
+      // A snapshot is `JSON.stringify({ request, response })` with the response body clipped at
+      // `HISTORY_BODY_LIMIT` — up to ~200 KB of text, ~400 KB of V8 heap, plus every saved example
+      // of the request it was sent from. `historyLimit` defaults to 500, so a session spent
+      // hammering a chatty endpoint accumulated up to a hundred megabytes of response text that
+      // nothing on screen renders. `apiListHistoryMeta` was written specifically to avoid loading
+      // these, and this put them straight back for every send made this session.
+      //
+      // Three rather than none because `HistoryList.restore` documents a real property: reopening
+      // a send you just made costs no round trip. Nothing is lost past the third — the blob was
+      // written to disk by `apiAddHistory` on the line above, and `restore` already falls back to
+      // `apiGetHistorySnapshot` for any row whose in-memory copy is empty, which is how every row
+      // from a previous session is reopened today.
+      set((s) => ({
+        history: [
+          entry,
+          ...s.history.map((h, i) => (i < 2 || h.snapshot === "" ? h : { ...h, snapshot: "" })),
+        ].slice(0, s.settings.historyLimit),
+      }));
     });
   },
 
@@ -1233,15 +1254,22 @@ const TAB_MODEL_SCHEMES = new Set(["cf-api", "cf-api-auth", "cf-api-script", "in
  */
 function disposeTabModels(tabId: string) {
   setTimeout(() => {
-    const attached = new Set(
-      monaco.editor.getEditors().map((editor) => editor.getModel()?.uri.toString() ?? ""),
-    );
-    for (const model of monaco.editor.getModels()) {
-      if (!TAB_MODEL_SCHEMES.has(model.uri.scheme)) continue;
-      if (!pathOwnedBy(model.uri.path, tabId)) continue;
-      if (attached.has(model.uri.toString())) continue;
-      model.dispose();
-    }
+    // Resolved here rather than imported at the top of the file, which is what keeps monaco-editor
+    // out of the entry chunk (see the note where that import used to be). It costs nothing at
+    // runtime: reaching this line means an API tab existed, which means `ApiView`'s chunk — and
+    // monaco with it — is already resolved, so this is a module-cache hit. The `await` adds one
+    // microtask to a callback that is already a turn late by design.
+    void import("../lib/monacoSetup").then(({ monaco }) => {
+      const attached = new Set(
+        monaco.editor.getEditors().map((editor) => editor.getModel()?.uri.toString() ?? ""),
+      );
+      for (const model of monaco.editor.getModels()) {
+        if (!TAB_MODEL_SCHEMES.has(model.uri.scheme)) continue;
+        if (!pathOwnedBy(model.uri.path, tabId)) continue;
+        if (attached.has(model.uri.toString())) continue;
+        model.dispose();
+      }
+    });
   }, 0);
 }
 

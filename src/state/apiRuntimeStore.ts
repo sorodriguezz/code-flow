@@ -77,6 +77,9 @@ interface ApiRuntimeState {
   graphqlSchemas: Record<string, GraphqlSchema>;
   consoleLines: ConsoleLine[];
   runnerRunning: boolean;
+  /** The last run's report **without its captures** — see where it is written in `RunnerModal`.
+   * A capture is up to 8 MB of response text, and this copy outlives the modal, so anything that
+   * later wants the bodies has to read them from the modal's own state or re-run. */
   runnerReport: RunnerReport | null;
 
   /** Subscribes to the two stream events. Idempotent — safe to call from every mount. */

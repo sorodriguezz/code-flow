@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
 import { DEFAULT_ICON_RULES, type IconRule } from "../lib/icons/rules";
+import { declareIconIds } from "../lib/icons/catalog";
 import {
   BUILT_IN_PROFILES,
   DEFAULT_PROFILE_ID,
@@ -187,6 +188,14 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
    */
   const applied = (profiles: IconProfile[], activeId: string) => {
     const active = profileById(profiles, activeId);
+    // Every id in *every* profile, not just the active one. The catalogue keeps only the glyphs
+    // something can ask for (see `lib/icons/catalog.ts`), and switching profiles — or switching
+    // repository, which switches profile — must not be the moment an icon discovers it was pruned.
+    // Cheap enough to do on each call: it is a set membership test per id, and it re-reads a set
+    // only when an id is genuinely absent.
+    declareIconIds(
+      profiles.flatMap((profile) => [profile.defaultFolderIcon, ...profile.rules.map((r) => r.icon)]),
+    );
     return {
       profiles,
       activeId,

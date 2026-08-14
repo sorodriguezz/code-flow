@@ -2,6 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import Editor, { DiffEditor, type Monaco, type OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS, IRange } from "monaco-editor";
+// This is the one editor in the app that does not spread `OVERFLOW_SAFE_OPTIONS` (see the note at
+// the `fixedOverflowWidgets` line far below), so it is also the one that would otherwise never
+// reach `monacoSetup` — which since `main.tsx` stopped importing it is what points the loader at
+// the bundled editor, wires the language workers and defines the themes.
+import "../../lib/monacoSetup";
 import {
   Camera,
   ChevronRight,
@@ -83,8 +88,44 @@ let dbmlParser: ((source: string) => DbmlSchema) | null = null;
  * are the same payload for the same viewer; what differs is only how the key is built, and a commit's
  * diff is immutable so its key needs no signature.
  */
-const fullDiffCache = new Map<string, FileDiffInfo>();
+const fullDiffCache = new Map<string, { file: FileDiffInfo; lines: number }>();
 const FULL_DIFF_CACHE_LIMIT = 8;
+
+/**
+ * The other bound, and the one the count alone could not give: eight entries is eight *files*,
+ * regardless of what a file weighs.
+ *
+ * An entry is one `DiffLine` object plus one `content` string per line of the file, so eight
+ * ordinary source files is around 16,000 lines and nothing worth thinking about — while eight
+ * generated lockfiles is several hundred thousand, tens of megabytes, held at module scope for the
+ * life of the process because this cache outlives every pane, every group and every project switch.
+ * Opening the diff tab on a lockfile eight times is not an exotic thing to do.
+ *
+ * 200,000 lines is roughly 30–40 MB and is deliberately far above anything the count limit can
+ * reach with normal files, so the eight-entry behaviour this cache was tuned for is untouched; it
+ * only binds on the case that had no bound at all.
+ */
+const FULL_DIFF_LINE_BUDGET = 200_000;
+
+/** Lines currently held across every entry. Maintained on insert and eviction rather than summed
+ * on lookup — recomputing it per read would trade a memory problem for a CPU one. */
+let cachedLines = 0;
+
+function diffLineCount(file: FileDiffInfo): number {
+  let lines = 0;
+  for (const hunk of file.hunks) lines += hunk.lines.length;
+  return lines;
+}
+
+/**
+ * Drops everything. Called when the project changes, for the reason `App` clears the blame cache on
+ * watcher teardown: the keys are per repository, so entries for a repo nobody is looking at can
+ * never be hit again and are pure residency.
+ */
+export function clearFullDiffCache(): void {
+  fullDiffCache.clear();
+  cachedLines = 0;
+}
 
 /**
  * One file's diff at whole-file context, which is the only thing `reconstructSides` can rebuild two
@@ -110,16 +151,26 @@ async function loadFullFileDiff(
   compareOid?: string,
 ): Promise<FileDiffInfo | null> {
   const cached = fullDiffCache.get(key);
-  if (cached) return cached;
+  if (cached) return cached.file;
   const file = compareOid
     ? await getCommitFileDiff(repoPath, compareOid, path)
     : ((await getFileDiff(repoPath, path, false)) ?? (await getFileDiff(repoPath, path, true)));
   if (file) {
-    fullDiffCache.set(key, file);
-    // Map iteration is insertion-ordered, so the first key is the oldest.
-    if (fullDiffCache.size > FULL_DIFF_CACHE_LIMIT) {
+    const lines = diffLineCount(file);
+    fullDiffCache.set(key, { file, lines });
+    cachedLines += lines;
+    // Map iteration is insertion-ordered, so the first key is the oldest. Evicts on either bound:
+    // too many entries, or too many lines across them. The `size > 1` guard is what keeps the entry
+    // that was just inserted — a single file bigger than the whole budget is still cached, so the
+    // feature never fails for the one case that most wants it.
+    while (
+      fullDiffCache.size > FULL_DIFF_CACHE_LIMIT ||
+      (cachedLines > FULL_DIFF_LINE_BUDGET && fullDiffCache.size > 1)
+    ) {
       const oldest = fullDiffCache.keys().next().value;
-      if (oldest !== undefined) fullDiffCache.delete(oldest);
+      if (oldest === undefined) break;
+      cachedLines -= fullDiffCache.get(oldest)?.lines ?? 0;
+      fullDiffCache.delete(oldest);
     }
   }
   return file;
@@ -606,7 +657,7 @@ export function EditorPane({
     if (!activeDiffKey || !activePath) return;
     const cached = fullDiffCache.get(activeDiffKey);
     if (cached) {
-      setFullDiff({ path: activePath, key: activeDiffKey, file: cached });
+      setFullDiff({ path: activePath, key: activeDiffKey, file: cached.file });
       return;
     }
     let cancelled = false;

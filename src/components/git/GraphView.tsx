@@ -10,6 +10,7 @@ import { Cloud, GitBranch, History, RotateCcw, Tag, X, type LucideIcon } from "l
 import { useT } from "../../state/languageStore";
 import { SkeletonRows } from "../common/Skeleton";
 import type { CommitRef, RefKind } from "../../types/domain";
+import { useFrameThrottle } from "../../lib/frameThrottle";
 
 const ROW_HEIGHT = 30;
 const LANE_WIDTH = 16;
@@ -203,6 +204,7 @@ const CommitTable = memo(function CommitTable() {
    * the entire point of the overscan.
    */
   const [scrollTop, setScrollTop] = useState(0);
+  const onScrollTop = useFrameThrottle(setScrollTop);
   const [viewportHeight, setViewportHeight] = useState(600);
   // Re-runs on `hasRows` and not on `[]`: the empty and loading states return before the scroll
   // container exists, so on the first pass there is no element for the ref to have caught and an
@@ -285,7 +287,10 @@ const CommitTable = memo(function CommitTable() {
     <div
       ref={scrollRef}
       className="flex-1 overflow-auto"
-      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      // One state write per painted frame rather than one per scroll event. `scrollTop` drives the
+      // row windowing below, so an unthrottled fling asked React for two or three renders per frame
+      // and threw all but the last away before anything reached the screen.
+      onScroll={(e) => onScrollTop(e.currentTarget.scrollTop)}
     >
       <div
         className="sticky top-0 z-10 flex h-6 min-w-full items-center gap-2 border-b border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 text-[10px]"

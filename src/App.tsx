@@ -55,11 +55,15 @@ import { onAppForeground, onRepoFsChanged } from "./lib/tauri/events";
  * components were parsed and evaluated before the first frame of the graph could paint, on every
  * launch, whether or not the user ever opened them.
  *
- * Monaco is the one that this does *not* fix, and it is worth knowing why before someone measures
- * the entry chunk and wonders: `main.tsx` imports `lib/monacoSetup` for its side effects, and that
- * module imports `monaco-editor` at the top level, so the editor is a static dependency of the
- * entry no matter how lazily `EditorView` is mounted. Making that setup lazy is a change to
- * `main.tsx`, not to this file.
+ * Monaco used to be the one this did *not* fix — `main.tsx` imported `lib/monacoSetup` for its side
+ * effects and that module imports `monaco-editor` at the top level, so the editor was a static
+ * dependency of the entry however lazily `EditorView` was mounted. That is fixed now, and it took
+ * four cuts rather than one: `main.tsx`, `apiStore` (which is reached from this file), the split
+ * pane of `DiffView` (extracted to `SplitFileDiff`, because `DiffView` itself is static here and
+ * unified mode needs no editor) and `ConflictResolveModal` (lazy from `ConflictsBanner`). Any one
+ * of them left in place holds the whole 4 MB chunk on the boot path, so if you find yourself
+ * adding a static `@monaco-editor/react` import to something reachable from this file, that is the
+ * invariant you are breaking — check `dist/index.html` for a `monaco-*.js` modulepreload.
  *
  * `React.lazy` moves that cost to the moment the thing is actually asked for. Two rules go with
  * it and neither is optional:

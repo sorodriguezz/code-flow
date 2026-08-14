@@ -135,37 +135,6 @@ export function TerminalPane({
     fitRef.current = fitAddon;
     clipboardKeys(term, sessionId);
 
-    /**
-     * GPU rendering, with the DOM renderer as the safety net.
-     *
-     * xterm's default renderer builds a `<div>` per visible row and a `<span>` per style run and
-     * re-lays that text out on every output frame. In a webview that text is not GPU-accelerated,
-     * so a chatty command (a build log, `npm install`) turned into a layout storm that stuttered
-     * the whole window, not just this pane. WebGL draws the same glyphs off a texture atlas.
-     *
-     * It is visually identical *here* specifically because the themes above are opaque hex with
-     * no alpha and `allowTransparency` is off — WebGL's known divergences are transparency and
-     * custom glyph rendering, and this pane uses neither.
-     *
-     * `onContextLoss` is not paranoia: a browser only keeps a handful of live WebGL contexts, and
-     * every terminal ever opened stays mounted, so opening enough of them will have the webview
-     * drop the oldest contexts. Disposing the addon hands that pane back to the DOM renderer —
-     * exactly what it used to be — rather than leaving it blank.
-     */
-    let renderer: WebglAddon | null = null;
-    try {
-      const webgl = new WebglAddon();
-      webgl.onContextLoss(() => {
-        renderer = null;
-        webgl.dispose();
-      });
-      term.loadAddon(webgl);
-      renderer = webgl;
-    } catch {
-      // No WebGL in this webview. Nothing to do: not loading the addon *is* the DOM renderer.
-      renderer = null;
-    }
-
     // Before `onData` is wired and before the output listener is attached, so the replay can never
     // interleave with what the live shell is saying — the whole of the past, then the present.
     // Verbatim: the separator marking where an earlier process ended is already inside the
@@ -210,7 +179,6 @@ export function TerminalPane({
       cancelAnimationFrame(fitFrame);
       dataDisposable.dispose();
       unregister();
-      renderer?.dispose();
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -236,6 +204,58 @@ export function TerminalPane({
   useEffect(() => {
     if (termRef.current) termRef.current.options.cursorBlink = visible;
   }, [visible]);
+
+  /**
+   * GPU rendering, with the DOM renderer as the safety net — and only for the pane on screen.
+   *
+   * xterm's default renderer builds a `<div>` per visible row and a `<span>` per style run and
+   * re-lays that text out on every output frame. In a webview that text is not GPU-accelerated,
+   * so a chatty command (a build log, `npm install`) turned into a layout storm that stuttered
+   * the whole window, not just this pane. WebGL draws the same glyphs off a texture atlas.
+   *
+   * It is visually identical *here* specifically because the themes above are opaque hex with
+   * no alpha and `allowTransparency` is off — WebGL's known divergences are transparency and
+   * custom glyph rendering, and this pane uses neither.
+   *
+   * **Keyed on `visible`, not on `sessionId`.** The addon used to be built beside the terminal and
+   * disposed with it, which is to say never: no pane is ever unmounted, so every terminal the user
+   * had ever opened held a live WebGL context, a 1024×1024-per-page glyph atlas and a canvas
+   * backing store of its own — the last of which is the pane's CSS size × devicePixelRatio² × 4
+   * bytes, so on a Retina panel a single hidden pane was megabytes of pixels nothing could draw.
+   * The dock mounts a pane per tab of *every* project, so those multiply. The terminal itself,
+   * its buffer and its scrollback are untouched by this and stay exactly as they were; only the
+   * renderer comes and goes, and a pane brought back gets a new one before its first frame.
+   *
+   * Building it only while visible has a second benefit the old placement could not have: the
+   * container is guaranteed to have a real box, where a pane constructed behind a `hidden` class
+   * built its GL canvas at 0×0.
+   *
+   * `onContextLoss` is not paranoia: a browser only keeps a handful of live WebGL contexts, and
+   * disposing the addon hands that pane back to the DOM renderer — exactly what it used to be —
+   * rather than leaving it blank.
+   *
+   * Declared after the construction effect (so `termRef.current` is set — effects in one commit run
+   * in declaration order) and before the refit below (so `fitAndReport` runs with the renderer
+   * already in place).
+   */
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || !visible) return;
+    let webgl: WebglAddon | null = null;
+    try {
+      const addon = new WebglAddon();
+      addon.onContextLoss(() => addon.dispose());
+      term.loadAddon(addon);
+      webgl = addon;
+    } catch {
+      // No WebGL in this webview, or `loadAddon` refused it. Nothing to do: not having the addon
+      // *is* the DOM renderer. Disposed rather than dropped, in case it was `loadAddon` that threw
+      // after the addon had already taken a context.
+      webgl?.dispose();
+      return;
+    }
+    return () => webgl?.dispose();
+  }, [visible, sessionId]);
 
   /**
    * Fits xterm to its box and tells the PTY — but only once the box has one.

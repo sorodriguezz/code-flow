@@ -22,6 +22,7 @@ import {
   iconCatalogReady,
   loadIconCatalog,
   onIconCatalogReady,
+  releaseIconCatalog,
   searchIcons,
 } from "../../lib/icons/catalog";
 import {
@@ -72,6 +73,13 @@ function IconPicker({
     void loadIconCatalog();
     return onIconCatalogReady(() => setReady(true));
   }, [ready]);
+
+  // The picker is the only thing in the app that wants all ~3,600 glyphs; everything else draws
+  // from the sixty-odd the rules name. Handing the rest back on close is what stops opening this
+  // dialog once from costing ~10 MB of SVG markup for the rest of the session. Safe to call
+  // unconditionally — `releaseIconCatalog` keeps every declared id, and anything it gets wrong is
+  // recovered by `iconEntry` on the next render.
+  useEffect(() => releaseIconCatalog, []);
 
   const results = useMemo(() => (ready ? searchIcons(query) : []), [query, ready]);
 

@@ -27,19 +27,39 @@ interface SystemLoadState {
   /** Starts polling and returns the stop. Reference-counted, like `powerStore` beside it: the
    * status bar renders from two branches and must not end up with two timers. */
   watch: () => () => void;
+  /**
+   * Says that this app's own CPU/memory share is on screen, and refreshes at once so it is current
+   * rather than up to one poll old. Returns the stop, like `watch`.
+   *
+   * Reference-counted for the same reason `watch` is. The backend only walks the process table —
+   * by far the most expensive thing this poll does, and the only part that costs more than two
+   * system calls — when somebody is holding one of these, which in practice is the fraction of a
+   * session where the pointer is resting on the status bar pills.
+   */
+  watchDetail: () => () => void;
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let watchers = 0;
+/** How many callers currently need the app's own share. See `watchDetail`. */
+let detailWatchers = 0;
 
 export const useSystemLoadStore = create<SystemLoadState>((set) => ({
   load: null,
 
   refresh: async () => {
-    const load = await systemLoad().catch(() => null);
+    const load = await systemLoad(detailWatchers > 0).catch(() => null);
     // Never cleared back to `null` on a failed read. A widget that blinks out and back because one
     // refresh lost a race is worse than a widget showing a figure two seconds old.
     if (load) set({ load });
+  },
+
+  watchDetail: () => {
+    detailWatchers += 1;
+    if (detailWatchers === 1) void useSystemLoadStore.getState().refresh();
+    return () => {
+      detailWatchers -= 1;
+    };
   },
 
   watch: () => {

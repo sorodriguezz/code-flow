@@ -6,6 +6,15 @@ on:
     paths: [package.json]
   workflow_dispatch:
 
+# Two runs of this workflow must never overlap. They no longer *race* — every write to the release
+# object happens in a single job now (see `create-release` and `updater-json`) — but two dispatches
+# of the same version would still be two builds uploading to one draft, and queueing them is free.
+# `cancel-in-progress: false`: a half-cancelled release leaves a draft with one platform's bundles
+# in it, which is exactly the state this restructure exists to make impossible.
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
 jobs:
   check-version:
     runs-on: ubuntu-latest
@@ -50,21 +59,77 @@ jobs:
             echo "CF_RELEASE_NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
 
-  release:
+  # The single writer of the release object, so that the two builds below can run at the same time.
+  #
+  # This job exists because the matrix used to be `max-parallel: 1`, and the reason it was is worth
+  # keeping: run `tauri-action` on two runners at once and both look up the tag, both find it
+  # missing, and both try to create it — the loser dies with "Validation Failed:
+  # tag_name already_exists". Serializing fixed that at the cost of the whole point of a matrix:
+  # wall clock became the *sum* of a Windows build and a macOS one.
+  #
+  # Both races are opt-out in the pinned action. `tauri-action`'s `src/index.ts` guards release
+  # creation with `if (tagName && !releaseId)`, so a job handed a `releaseId` never touches the tag;
+  # and it guards the `latest.json` read-modify-write with `if (includeUpdaterJson)`, which the
+  # builds below turn off. The `.sig` files are collected by `src/build.ts` unconditionally and
+  # uploaded as ordinary assets either way, which is what lets `updater-json` rebuild that file
+  # once, at the end, from both platforms at once.
+  #
+  # Draft, and deliberately: a draft carries no git tag, so a run that dies half-way leaves nothing
+  # for `check-version` to trip over on the retry, and `releases/latest/download/latest.json` goes
+  # on resolving to the *previous* release for as long as this one is incomplete — rather than to a
+  # release that only has one platform in it. `updater-json` is what publishes.
+  #
+  # Idempotent by tag: a re-run finds the existing draft and reuses its id instead of opening a
+  # second release.
+  create-release:
     needs: check-version
     if: needs.check-version.outputs.should-release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      release-id: ${{ steps.mk.outputs.release-id }}
+    steps:
+      - id: mk
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: v${{ needs.check-version.outputs.version }}
+          RELEASE_NAME: CodeFlow v${{ needs.check-version.outputs.version }}
+          NOTES: ${{ needs.check-version.outputs.notes }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # `gh api` rather than `gh release view`: a draft has no tag, so it is only findable by
+          # its `tag_name` field through the API.
+          #
+          # `awk 'NR==1'` and not `head -n1`, here and everywhere below. `head` closes the pipe
+          # after one line, `gh` takes SIGPIPE and exits 141, and `pipefail` turns that into a
+          # failed step — but only once the output is large enough to fill the pipe buffer, which
+          # is to say only once this repository has accumulated enough releases. `awk` drains it.
+          id=$(gh api --paginate "/repos/$REPO/releases" \
+                 --jq ".[] | select(.tag_name==\"$TAG\") | .id" | awk 'NR==1')
+          if [ -z "$id" ]; then
+            jq -n --arg t "$TAG" --arg n "$RELEASE_NAME" --arg b "$NOTES" --arg s "$SHA" \
+              '{tag_name:$t,name:$n,body:$b,target_commitish:$s,draft:true,prerelease:false}' \
+              > payload.json
+            id=$(gh api -X POST "/repos/$REPO/releases" --input payload.json --jq .id)
+            echo "Created draft release $id for $TAG"
+          else
+            echo "Reusing existing release $id for $TAG"
+          fi
+          echo "release-id=$id" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: [check-version, create-release]
     permissions:
       contents: write
     strategy:
       fail-fast: false
-      # Serialized on purpose: `tauri-action` creates the release in whichever job finishes
-      # first and uploads to the existing one afterwards. Run in parallel, both jobs look up
-      # the tag at the same time, both see it missing, and both try to create it — the loser
-      # dies with "Validation Failed: tag_name already_exists". The same applies to
-      # `latest.json`: merging the platform entries is a non-atomic read-modify-write, so in
-      # parallel one platform can clobber the other and leave half the users without updates.
-      # The cost is wall-clock (~the sum of both builds), which isn't worth optimizing here.
-      max-parallel: 1
+      # No `max-parallel`. Neither of the two races that forced it is reachable any more: the tag
+      # is created once, by `create-release` above, and `latest.json` is written once, by
+      # `updater-json` below. See the long note on `create-release` for the mechanism. This is
+      # where the release stops taking as long as both builds put together.
       matrix:
         include:
           - platform: windows-latest
@@ -111,6 +176,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          # Pinned rather than derived. With neither `shared-key` nor `key`, rust-cache appends
+          # `GITHUB_JOB` to its prefix (`add-job-id-key` defaults to true), so the key is literally
+          # `v0-rust-release-<os>-<arch>-<env hash>-<lockfile hash>` — and renaming or splitting
+          # this job silently invalidates both platforms' caches, sending the next release into a
+          # cold 769-crate build that nothing in the diff explains. "release" is the name the job
+          # has today, so writing it down costs nothing now and stops costing 26 minutes later.
+          shared-key: release
+          # A leg that fails at minute 20 has still compiled ~700 dependencies, and the default
+          # (`post-if: success()`) throws every one of them away — so the retry starts from zero,
+          # which is the most expensive thing that can happen to this pipeline. The entries are
+          # keyed by lockfile and compiler, so saving them after a failure in *this app's* code
+          # cannot poison anything.
+          cache-on-failure: true
 
       - run: pnpm install --frozen-lockfile
 
@@ -142,6 +220,18 @@ jobs:
       # this step fails on its own line instead of somewhere inside a ten-minute Rust build.
       - run: pnpm iris:runtime
 
+      # tauri downloads the WiX and NSIS toolchains into the user cache directory the first time it
+      # packages, and a hosted runner is new every time — so without this, every Windows release
+      # re-fetches both before it can start bundling. Keyed on the lockfile because that is what
+      # pins the tauri CLI, which is what decides which toolchain build it wants. A stale entry
+      # costs only the download it was meant to save.
+      - if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\tauri
+          key: tauri-bundler-tools-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: tauri-bundler-tools-${{ runner.os }}-
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -163,13 +253,18 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
-          tagName: v${{ needs.check-version.outputs.version }}
-          releaseName: CodeFlow v${{ needs.check-version.outputs.version }}
-          releaseBody: ${{ needs.check-version.outputs.notes }}
-          # Published (not draft) so the updater's `releases/latest/download/latest.json`
-          # endpoint can resolve — draft releases aren't served there.
-          releaseDraft: false
-          prerelease: false
+          # `tagName` / `releaseName` / `releaseBody` / `releaseDraft` / `prerelease` are absent on
+          # purpose rather than by omission: `src/index.ts` ignores every one of them once
+          # `releaseId` is set, and leaving them here would read as if they still governed
+          # something. `create-release` above owns all of it.
+          releaseId: ${{ needs.create-release.outputs.release-id }}
+          # The other half of what makes this matrix parallel. With this on, each leg would
+          # download `latest.json`, merge its own platform into it and re-upload — a read-modify-
+          # write with two writers, where the loser's platform silently vanishes and half the users
+          # stop receiving updates. The `.sig` files are uploaded as ordinary assets regardless
+          # (`src/build.ts` collects them unconditionally), and `updater-json` below assembles that
+          # file once, from both.
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
 
       # The one thing no unit test can check: that the Java runtime actually made it *inside* what
@@ -190,6 +285,107 @@ jobs:
           echo "Bundled runtime: $found"
           du -sh "$(dirname "$(dirname "$found")")"
 
+  # The single writer of `latest.json`, and the only thing in this workflow that publishes.
+  #
+  # It replaces what `tauri-action` used to do per platform — download the file, merge one platform
+  # into it, upload it again — which is a read-modify-write and therefore the second reason the
+  # matrix had to be serialized. Rebuilt here from the `.sig` assets both legs uploaded, so there is
+  # no previous content to merge with and nothing that can be lost.
+  #
+  # `needs: release` with no `always()`, deliberately: if either platform failed, this does not run,
+  # the release stays a draft, no tag is created, and `releases/latest/download/latest.json` goes on
+  # serving the previous release. A user sees nothing at all, which is the correct outcome — the
+  # alternative, and what the old design risked, is an update manifest that names one platform.
+  updater-json:
+    needs: [check-version, create-release, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Assemble latest.json and publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+          TAG: v${{ needs.check-version.outputs.version }}
+          VERSION: ${{ needs.check-version.outputs.version }}
+          NOTES: ${{ needs.check-version.outputs.notes }}
+        run: |
+          set -euo pipefail
+
+          gh api --paginate "/repos/$REPO/releases/$RELEASE_ID/assets" \
+            --jq '.[] | [.id, .name] | @tsv' > assets.tsv
+          mkdir -p sigs
+          while IFS=$'\t' read -r id name; do
+            case "$name" in
+              *.sig) gh api -H "Accept: application/octet-stream" \
+                       "/repos/$REPO/releases/assets/$id" > "sigs/$name" ;;
+            esac
+          done < assets.tsv
+          ls -la sigs || true
+
+          # Reproduces `tauri-action`'s own mapping (src/upload-version-json.ts) for the two targets
+          # this repo builds, and nothing else. Three details are load-bearing:
+          #
+          #  · It emits both the bare `<os>-<arch>` key and the `<os>-<arch>-<bundle>` one, because
+          #    that is what the action emits and what an installed updater is already looking for.
+          #  · `prio` stands in for the action's `signaturePriority`. With `updaterJsonPreferNsis`
+          #    unset its order puts `.msi.sig` ahead of `.exe.sig`, so the bare `windows-x86_64` key
+          #    resolves to the MSI. Flip that and every Windows user's next auto-update silently
+          #    changes installer format. The numbers are ours; the ordering is the action's.
+          #  · The URL is built from the tag rather than from `browser_download_url`, because a
+          #    draft's asset URLs carry an `untagged-…` segment. The action rewrites it the same way.
+          echo '{}' > platforms.json
+          for sig in sigs/*.sig; do
+            [ -e "$sig" ] || { echo "::error::no updater signatures on the release"; exit 1; }
+            target=$(basename "$sig" .sig)
+            case "$target" in
+              *.app.tar.gz) key=darwin-aarch64;  bundle=app;  prio=0   ;;
+              *.msi)        key=windows-x86_64;  bundle=msi;  prio=100 ;;
+              *-setup.exe)  key=windows-x86_64;  bundle=nsis; prio=99  ;;
+              # Anything else is warned about rather than guessed at. The v1-era `.msi.zip.sig` /
+              # `.nsis.zip.sig` wrappers land here, and pointing a v2 updater at a .zip would break
+              # updates far more quietly than skipping it does — the gate below then fails the job.
+              *) echo "::warning::unmapped signature $target.sig"; continue ;;
+            esac
+            url="https://github.com/$REPO/releases/download/$TAG/$target"
+            # `--rawfile`, not `$(cat)`: the action does `readFileSync(...).toString()`, and a
+            # signature that differs by one byte of trailing whitespace is one that fails to verify.
+            jq --arg k "$key" --arg b "$bundle" --arg u "$url" --argjson p "$prio" --rawfile s "$sig" \
+               '.[$k + "-" + $b] = {signature:$s, url:$u}
+                | if ((.[$k].prio // -1) < $p) then .[$k] = {signature:$s, url:$u, prio:$p} else . end' \
+               platforms.json > platforms.next && mv platforms.next platforms.json
+          done
+          jq 'with_entries(.value |= del(.prio))' platforms.json > platforms.clean
+
+          jq -n --arg v "$VERSION" --arg n "$NOTES" \
+                --arg d "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" \
+                --slurpfile p platforms.clean \
+                '{version:$v, notes:$n, pub_date:$d, platforms:$p[0]}' > latest.json
+
+          # The gate the serialized design never had, and the reason this is worth doing at all:
+          # half a latest.json is worse than none, because the missing platform stops receiving
+          # updates and nothing anywhere goes red.
+          for key in darwin-aarch64 windows-x86_64; do
+            jq -e --arg k "$key" '.platforms[$k].signature | length > 0' latest.json >/dev/null \
+              || { echo "::error::latest.json is missing $key"; jq 'del(.platforms[].signature)' latest.json; exit 1; }
+          done
+          jq 'del(.platforms[].signature)' latest.json
+
+          # Replace, never merge — there is exactly one writer, so there is nothing to merge with.
+          old=$(gh api --paginate "/repos/$REPO/releases/$RELEASE_ID/assets" \
+                  --jq '.[] | select(.name=="latest.json") | .id' | awk 'NR==1')
+          [ -z "$old" ] || gh api -X DELETE "/repos/$REPO/releases/assets/$old"
+          gh api --method POST -H "Content-Type: application/json" \
+            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=latest.json" \
+            --input latest.json
+
+          # Only now does the release exist for users, and it exists complete: every bundle, both
+          # signatures, and a manifest already proven to name both platforms. This is where the old
+          # `releaseDraft: false` comment's requirement is met — `releases/latest/download` does not
+          # serve drafts, so nothing may stay one, and nothing does past this line.
+          gh api -X PATCH "/repos/$REPO/releases/$RELEASE_ID" -F draft=false -f make_latest=true
+
   # Keeps the repository under GitHub's 10 GB Actions cache quota.
   #
   # `rust-cache` writes a new entry whenever its key changes and never removes the old one, so the
@@ -203,9 +399,11 @@ jobs:
   # just written and the old one became dead — a weekly sweep would leave the repo over quota for
   # most of the week.
   prune-caches:
-    needs: [check-version, release]
-    # `always()`: a matrix leg that failed may still have saved a cache on its way out, and this is
-    # housekeeping — it should run whether or not the release itself went through.
+    needs: [check-version, release, updater-json]
+    # `always()`: with `cache-on-failure: true` on the matrix, a leg that failed *did* save a cache
+    # on its way out — and this is housekeeping, so it should run whether or not the release itself
+    # went through. `updater-json` is in `needs` only for ordering; `always()` means its own failure
+    # does not skip the sweep.
     if: always() && needs.check-version.outputs.should-release == 'true'
     runs-on: ubuntu-latest
     # Never the reason a release run goes red. Nothing downstream depends on this having worked.

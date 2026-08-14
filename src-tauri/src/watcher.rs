@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// One native watcher per currently-open repo. Dropping the `RecommendedWatcher` value
 /// stops it, which is what removing it from the map on `stop_watching` achieves.
@@ -161,8 +161,40 @@ pub fn start_watching(app: AppHandle, registry: &WatcherRegistry, repo_path: Str
         // silently ignored — we don't know what changed, so the safe move is to refresh.
         let mut last_emit = Instant::now() - Duration::from_secs(10);
         let mut pending = false;
+
+        /// Whether there is anyone to emit to.
+        ///
+        /// Both conditions, matching `window_state`: on Windows a minimised window still answers
+        /// `is_visible() == true`. Defaulting to "seen" when the window cannot be queried at all
+        /// keeps the old behaviour on any path where there is no main window.
+        fn window_seen(app: &AppHandle) -> bool {
+            app.get_webview_window("main")
+                .map(|w| !(!w.is_visible().unwrap_or(true) || w.is_minimized().unwrap_or(false)))
+                .unwrap_or(true)
+        }
+
         loop {
-            match rx.recv_timeout(Duration::from_millis(200)) {
+            // Read here only to choose how long to wait. The emit below re-reads it, because this
+            // answer can be minutes old by the time a blocking `recv` returns — the window may well
+            // have been hidden or restored while the thread sat in it.
+            let seen = window_seen(&app);
+
+            // The timeout exists only to flush a *pending* change once its burst goes quiet, so
+            // with nothing pending there is nothing a tick could do and the thread blocks on the
+            // channel instead — rather than waking five times a second, per watched repository, for
+            // as long as the app is open. A real event wakes it immediately either way; that is
+            // what a channel is for.
+            //
+            // The third case is a change held back because the window is hidden (see below). That
+            // one is waiting on a person, not on a burst, so it waits a second at a time: the emit
+            // still lands on the first iteration after the window returns, and a second of latency
+            // on a repository the user is only now looking at is not perceptible.
+            let received = match (pending, seen) {
+                (false, _) => rx.recv().map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+                (true, true) => rx.recv_timeout(Duration::from_millis(200)),
+                (true, false) => rx.recv_timeout(Duration::from_secs(1)),
+            };
+            match received {
                 Ok(Ok(event)) => {
                     if !is_noise(&root, &event) {
                         pending = true;
@@ -172,7 +204,16 @@ pub fn start_watching(app: AppHandle, registry: &WatcherRegistry, repo_path: Str
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            if pending && last_emit.elapsed() >= Duration::from_millis(400) {
+            // Nothing is emitted into a window nobody can see. The webview's handler for this
+            // event refreshes the repository — a git status walk and the panels that redraw from
+            // it — and while the app is parked in the tray, or minimised, there is no reader for
+            // any of it. A branch switch or a long build can produce hundreds of these.
+            //
+            // `pending` is deliberately left standing rather than cleared, and `last_emit` is not
+            // touched: an arbitrary number of hidden bursts therefore collapse into exactly one
+            // change, which fires on the first loop iteration after the window comes back — so
+            // restoring the window lands on a fully refreshed repository rather than a stale one.
+            if pending && window_seen(&app) && last_emit.elapsed() >= Duration::from_millis(400) {
                 pending = false;
                 last_emit = Instant::now();
                 let _ = app.emit("repo:fs-changed", RepoChangedEvent { repo_path: repo_path.clone() });

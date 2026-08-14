@@ -1,14 +1,21 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { DiffEditor } from "@monaco-editor/react";
-import type { editor as MonacoEditorNS } from "monaco-editor";
+import { lazy, memo, Suspense, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Columns2, FileDiff, Rows3, X } from "lucide-react";
 import type { FileDiffInfo } from "../../types/domain";
 import { EmptyState } from "../common/EmptyState";
 import { useT } from "../../state/languageStore";
-import { useThemeStore } from "../../state/themeStore";
-import { languageForPath } from "../../lib/monacoLanguage";
-import { lineClasses, reconstructSides } from "../../lib/diffText";
+import { lineClasses } from "../../lib/diffText";
 import { fileStatusLabelKey, fileStatusColor as statusColor } from "../../lib/fileStatus";
+
+/**
+ * The split view's editor pane, and the only part of this file that needs Monaco.
+ *
+ * Lazy on purpose, and it is what keeps the 4 MB editor off the boot path. This component is
+ * imported statically by the commit list, the Changes panel and the stash viewer — all of which are
+ * on the first frame — so anything it reaches is in the entry chunk. Unified is the default mode
+ * and renders plain DOM, so the overwhelmingly common path through a diff never needs an editor at
+ * all; pressing the split toggle is what asks for one.
+ */
+const SplitFileDiff = lazy(() => import("./SplitFileDiff").then((m) => ({ default: m.SplitFileDiff })));
 
 type ViewMode = "unified" | "split";
 
@@ -34,20 +41,6 @@ function unifiedHunkHeight(lineCount: number): number {
   return UNIFIED_HUNK_HEADER_HEIGHT + lineCount * UNIFIED_LINE_HEIGHT;
 }
 
-/**
- * How far outside the viewport a file's editor is kept alive — both the lead time before it scrolls
- * in and the slack before it is let go on the way out.
- *
- * Three viewports either way, as a percentage of the root so it scales with the window rather than
- * meaning "half a screen" on a laptop and "a sixth" on a monitor. It is deliberately far wider than
- * the 800px of lead time this used to be, because it is now doing a second job: an editor that
- * leaves this band is torn down, and the reason it was never torn down before was the fear of
- * ping-pong — rebuilding on every wobble of the scroll wheel. Three viewports is well past any
- * gesture a wheel or trackpad produces, so leaving the band means the user really has gone
- * somewhere else in the diff.
- */
-const LIVE_MARGIN = "300% 0px";
-
 /** The height a file's pane will take, computed from the hunks alone — no strings built, no editor
  * mounted. This is what lets the list reserve its full scroll height before any of it has loaded,
  * so the scrollbar doesn't grow under the pointer and the change map's marks stay where they are. */
@@ -66,104 +59,6 @@ function splitHeightOf(file: FileDiffInfo): number {
   }
   const lines = Math.max(original, modified);
   return Math.min(MAX_SPLIT_HEIGHT, Math.max(MIN_SPLIT_HEIGHT, lines * SPLIT_LINE_HEIGHT + 24));
-}
-
-/**
- * One file's side-by-side pane, mounted only once it is near the viewport.
- *
- * Every file used to get its own `DiffEditor` the moment split mode opened, all of them at once.
- * Each one is two Monaco models, a diff computed in a worker, a tokenizer pass over the whole file
- * and — with `automaticLayout` — its own resize observer. On a commit that touches a lockfile that
- * is tens of thousands of lines through a JSON tokenizer *before the first frame*, which is why the
- * view arrived already stuck: the work was not slow to scroll, it was all being done up front for
- * panes that were nowhere near the screen.
- *
- * Reconstructing the two sides is deferred with it. That is where the big strings get built, and
- * building them for a file nobody has scrolled to is the same waste one step earlier.
- *
- * **And it is given back again.** This used to be one-way — "once up it stays up", on the reasoning
- * that rebuilding an editor on the way back trades a one-off cost for a repeating one. The
- * reasoning holds; what it missed is the other end of it. Scrolling once through a 60-file
- * changeset left 60 live editors — 120 Monaco models, 60 diff worker jobs, two reconstructed file
- * texts each — alive for as long as the window was, tens of megabytes for panes the user had passed
- * ten minutes ago. So they are released, but only past `LIVE_MARGIN`, which is wide enough that
- * "back and forth" never crosses it.
- *
- * What survives the round trip is the *view*: the editor's scroll position, its folds and its
- * collapsed unchanged regions are saved the moment before it goes and restored when it comes back,
- * so returning to a file lands where you left it rather than at the top. The pane's own height is
- * fixed by `splitHeightOf` and is the same whether the editor is up or not, so the outer scroll
- * position never moves underneath any of this.
- */
-function SplitFileDiff({ file, height }: { file: FileDiffInfo; height: number }) {
-  const monacoTheme = useThemeStore((s) => s.monacoTheme);
-  const holderRef = useRef<HTMLDivElement>(null);
-  const [live, setLive] = useState(false);
-  const path = file.new_path ?? file.old_path ?? "";
-  /** The live editor, while there is one — only so its view state can be taken before it is let go. */
-  const editorRef = useRef<MonacoEditorNS.IStandaloneDiffEditor | null>(null);
-  /** Where this file was left: scroll, folds, collapsed regions. Outlives the editor on purpose. */
-  const viewStateRef = useRef<MonacoEditorNS.IDiffEditorViewState | null>(null);
-
-  useEffect(() => {
-    const el = holderRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        const visible = entries.some((e) => e.isIntersecting);
-        // Saved here rather than in an unmount cleanup because here is the last moment the editor
-        // is still mounted and still owns its models — by the time React has torn the subtree down
-        // there is nothing left to ask.
-        if (!visible && editorRef.current) {
-          viewStateRef.current = editorRef.current.saveViewState() ?? viewStateRef.current;
-          editorRef.current = null;
-        }
-        setLive(visible);
-      },
-      { rootMargin: LIVE_MARGIN },
-    );
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, []);
-
-  const sides = useMemo(() => (live ? reconstructSides(file) : null), [live, file]);
-
-  return (
-    <div ref={holderRef} style={{ height }}>
-      {sides ? (
-        <DiffEditor
-          height="100%"
-          language={languageForPath(path)}
-          original={sides.original}
-          modified={sides.modified}
-          theme={monacoTheme}
-          onMount={(editor) => {
-            editorRef.current = editor;
-            // Only ever set by a previous life of this same pane, so there is no chance of restoring
-            // one file's position into another's.
-            if (viewStateRef.current) editor.restoreViewState(viewStateRef.current);
-          }}
-          options={{
-            readOnly: true,
-            fontSize: 13,
-            renderSideBySide: true,
-            // Monaco silently collapses side-by-side into a unified-looking layout below ~900px
-            // wide (e.g. inside a modal) unless told not to — the whole point of this toggle is
-            // an actual two-pane view, so never let it fall back on its own.
-            useInlineViewWhenSpaceIsLimited: false,
-            automaticLayout: true,
-            // A generated lockfile can take Monaco's differ arbitrarily long. Past this it falls
-            // back to a coarser result, which for a file you are scrolling past is the right
-            // trade — an approximate diff beats a frozen pane.
-            maxComputationTime: 2000,
-            scrollBeyondLastLine: false,
-          }}
-        />
-      ) : (
-        <div className="h-full bg-[var(--cf-bg)]" />
-      )}
-    </div>
-  );
 }
 
 /** One tick's height in the change map, and so the strip's own resolution: two ticks closer
@@ -383,7 +278,12 @@ function DiffViewImpl({
                       </span>
                       <span className="truncate font-mono text-[var(--cf-text)]">{file.new_path ?? file.old_path}</span>
                     </div>
-                    <SplitFileDiff file={file} height={splitHeightOf(file)} />
+                    {/* The fallback is the very element `SplitFileDiff` itself renders until it
+                        intersects the viewport (and most panes in a long diff are showing exactly
+                        that at any moment), so the chunk arriving changes nothing on screen. */}
+                    <Suspense fallback={<div style={{ height: splitHeightOf(file) }} className="bg-[var(--cf-bg)]" />}>
+                      <SplitFileDiff file={file} height={splitHeightOf(file)} />
+                    </Suspense>
                   </div>
                 );
               })}

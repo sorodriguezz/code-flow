@@ -1,5 +1,10 @@
 import { useEffect, useState } from "react";
 import Editor, { DiffEditor } from "@monaco-editor/react";
+// Monaco's one-time wiring: the bundled copy (no CDN fetch, so this works offline), the language
+// workers and the theme definitions. `main.tsx` no longer does this at startup — every module that
+// puts an editor on screen states its own dependency, which is what keeps the 4 MB editor out of
+// the entry chunk. Idempotent and module-cached, so saying it here costs nothing.
+import "../../lib/monacoSetup";
 import { AlertTriangle, Check, Columns2, Loader2, Sparkles, X } from "lucide-react";
 import { readFileText, writeFileText, resolveConflictWithAi } from "../../lib/tauri/commands";
 import { useRepoStore } from "../../state/repoStore";

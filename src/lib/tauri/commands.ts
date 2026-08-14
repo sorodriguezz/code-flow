@@ -547,7 +547,10 @@ export const powerStatus = () => invoke<PowerStatus | null>("power_status");
 /** CPU, memory and disk for the machine, plus this app's own share of the first two. One refresh
  * behind both halves, so the bar and its panel always describe the same instant. Runs off the main
  * thread on the Rust side — it walks the process table, which is milliseconds, not microseconds. */
-export const systemLoad = () => invoke<SystemLoad>("system_load");
+/** `detail` asks the backend for this app's own CPU/memory share, which is what makes it walk the
+ *  whole process table. Only the hover panel draws those three figures, so only it asks — see
+ *  `systemLoadStore`. The machine's own figures are in the answer either way. */
+export const systemLoad = (detail: boolean) => invoke<SystemLoad>("system_load", { detail });
 
 export interface ProviderStatus {
   available: boolean;
@@ -1460,8 +1463,19 @@ export const renameChatConversation = (projectId: string, sessionId: string, tit
  * paging existed — every PR review and analysis the project has ever run, each carrying its full
  * result text, in one IPC response. Callers that render a list should page; the store's
  * "load more" path is what keeps the older entries reachable. */
-export const listJobHistory = (projectId: string, limit?: number, offset?: number) =>
-  invoke<JobHistoryEntry[]>("list_job_history", { projectId, limit, offset });
+export const listJobHistory = (
+  projectId: string,
+  limit?: number,
+  offset?: number,
+  withResult?: boolean,
+) => invoke<JobHistoryEntry[]>("list_job_history", { projectId, limit, offset, withResult });
+
+/** One run's output text, by Activity row id, from whichever of the two tables holds it.
+ *
+ * The counterpart to `listJobHistory(..., withResult: false)`: a page that travels without its
+ * result text is a page of rows the Activity list can draw and a body it can fetch when one is
+ * opened. Same shape, and for the same reason, as `getTurnTrace` for conversation traces. */
+export const getJobResult = (id: string) => invoke<string | null>("get_job_result", { id });
 
 
 export const renameJobHistoryEntry = (id: string, label: string) => invoke<void>("rename_job_history_entry", { id, label });
@@ -1474,8 +1488,12 @@ export const deleteJobHistoryEntry = (id: string) => invoke<void>("delete_job_hi
  * design: these runs have no project, so they follow the workspace instead.
  *
  * Paged the same way as `listJobHistory`, and for the same reason. */
-export const listWorkspaceActivity = (workspaceId: string, limit?: number, offset?: number) =>
-  invoke<WorkspaceActivityEntry[]>("list_workspace_activity", { workspaceId, limit, offset });
+export const listWorkspaceActivity = (
+  workspaceId: string,
+  limit?: number,
+  offset?: number,
+  withResult?: boolean,
+) => invoke<WorkspaceActivityEntry[]>("list_workspace_activity", { workspaceId, limit, offset, withResult });
 
 export const renameWorkspaceActivityEntry = (id: string, label: string) =>
   invoke<void>("rename_workspace_activity_entry", { id, label });

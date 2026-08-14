@@ -79,10 +79,12 @@ export function HistoryList() {
   const restore = async (entry: ApiHistoryEntry) => {
     // The list is loaded without snapshots — `apiListHistoryMeta` leaves them empty so that opening
     // the workspace doesn't parse every past send's request and response at once — so the blob for
-    // *this* row is fetched on the click that needs it. A row that already carries one is a send
-    // made this session, which `addHistory` puts on the front of the list with its snapshot intact;
-    // reopening that costs no round-trip. A fetch that fails leaves `raw` empty, and the tab opens
-    // as a blank scratch request rather than not opening at all.
+    // *this* row is fetched on the click that needs it. A row that already carries one is one of the
+    // last three sends of this session: `addHistory` keeps the snapshot on those and strips it from
+    // everything behind them, so reopening what you just sent costs no round-trip while a session's
+    // worth of history does not accumulate megabytes of response text nothing draws. A fetch that
+    // fails leaves `raw` empty, and the tab opens as a blank scratch request rather than not opening
+    // at all.
     const raw = entry.snapshot || (await apiGetHistorySnapshot(entry.id).catch(() => null)) || "";
     const snapshot = parseSnapshot(raw);
     const state = useApiStore.getState();

@@ -167,6 +167,26 @@ const inFlight = new Set<string>();
 /** Poll timers for steps adopted after a reload, keyed by step id. */
 const harvesting = new Map<string, ReturnType<typeof setInterval>>();
 
+/**
+ * Stops harvesting the given steps, or all of them.
+ *
+ * Harvesting is pure recovery bookkeeping — it exists to collect the result of a run that outlived
+ * a webview reload — and it only ever cleared itself from inside its own callback, when the run it
+ * was watching finished. A step the user aborts or deletes never reaches that branch, so its timer
+ * kept firing every four seconds for the rest of the session, holding its closure and spending an
+ * IPC round trip and a database read each time on a chain that no longer exists. Nothing is lost by
+ * stopping: there is no result left to collect, and `adoptRunningSteps` re-adopts cleanly if the
+ * chain is resumed, since its guard is `harvesting.has(step.id)`.
+ */
+function stopHarvesting(stepIds?: Iterable<string>): void {
+  for (const id of stepIds ?? [...harvesting.keys()]) {
+    const timer = harvesting.get(id);
+    if (timer === undefined) continue;
+    clearInterval(timer);
+    harvesting.delete(id);
+  }
+}
+
 export const useChainStore = create<ChainState>((set, get) => ({
   workspaceId: null,
   chains: [],
@@ -180,6 +200,9 @@ export const useChainStore = create<ChainState>((set, get) => ({
 
   setWorkspace: async (id) => {
     if (get().workspaceId === id) return;
+    // All of them: `stepsByChain` is being thrown away on the next line, so every timer still
+    // running is watching a step this store can no longer even name.
+    stopHarvesting();
     set({
       workspaceId: id,
       chains: [],
@@ -393,6 +416,9 @@ export const useChainStore = create<ChainState>((set, get) => ({
   },
 
   abort: async (chainId) => {
+    // Every timer this chain owns, before anything else: an aborted step has no result to harvest,
+    // and a poller left behind here is one that never stops (see `stopHarvesting`).
+    stopHarvesting((get().stepsByChain[chainId] ?? []).map((s) => s.id));
     // Stop the live step first, or the engine keeps editing a working copy for a plan that no
     // longer exists — the same reason `agentsStore.remove` cancels before deleting.
     const step = (get().stepsByChain[chainId] ?? []).find((s) => s.status === "running");

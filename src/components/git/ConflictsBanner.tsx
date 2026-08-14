@@ -1,10 +1,22 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { AlertTriangle, Check, Code2, GitMerge, Sparkles, X } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
-import { ConflictResolveModal } from "./ConflictResolveModal";
+
+/**
+ * Lazy, and this banner is the reason it has to be.
+ *
+ * The banner itself is rendered by the Changes panel, which is on the first frame — so a static
+ * import from here would put the modal's two Monaco editors in the entry chunk and make every
+ * launch pay 4 MB to draw a merge dialog that most sessions never open. The modal is already
+ * behind `aiFile &&`, i.e. behind a click on "resolve with AI", so the chunk is fetched at exactly
+ * the moment the user has asked for it.
+ */
+const ConflictResolveModal = lazy(() =>
+  import("./ConflictResolveModal").then((m) => ({ default: m.ConflictResolveModal })),
+);
 
 export function ConflictsBanner() {
   const conflicts = useRepoStore((s) => s.conflicts);
@@ -102,7 +114,13 @@ export function ConflictsBanner() {
           {t("conflicts.abortMerge")}
         </button>
       </div>
-      {aiFile && <ConflictResolveModal filePath={aiFile} onClose={() => setAiFile(null)} />}
+      {aiFile && (
+        // No fallback: the modal opens over the banner, and a skeleton flashing where a dialog is
+        // about to be is worse than the dialog simply appearing a frame later.
+        <Suspense fallback={null}>
+          <ConflictResolveModal filePath={aiFile} onClose={() => setAiFile(null)} />
+        </Suspense>
+      )}
     </div>
   );
 }

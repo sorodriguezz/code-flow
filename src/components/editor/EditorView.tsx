@@ -1,5 +1,9 @@
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as monaco from "monaco-editor";
+// Stated here as well as in `EditorPane`, because this view reaches Monaco directly (model lookups
+// for the code snapshot, below) and does so from module scope's point of view *before* any pane has
+// mounted. Idempotent — see the note in `monacoSetup`.
+import "../../lib/monacoSetup";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { AnimatePresence, motion } from "framer-motion";
 import type { UnlistenFn } from "@tauri-apps/api/event";
@@ -25,7 +29,7 @@ import { BookmarksPanel } from "./BookmarksPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
 import { IconRulesPanel } from "./IconRulesPanel";
-import { EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
+import { clearFullDiffCache, EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
 import { ChangesPanel } from "../git/ChangesPanel";
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
 import { setDefinitionContext } from "../../lib/goToDefinition";
@@ -458,6 +462,12 @@ export function EditorView() {
     setGroups([fresh]);
     setActiveGroupId(fresh.id);
   }
+
+  // The diff cache is per repository by key, so once the project has changed nothing in it can be
+  // hit again — it is pure residency, and an entry is a whole file's worth of `DiffLine` objects.
+  // In an effect rather than in the render branch above: that branch runs during a render React may
+  // discard, and twice under StrictMode.
+  useEffect(() => clearFullDiffCache, [project?.local_path]);
 
   // Models outlive the editor (see `keepCurrentModel`), so a file leaving the registry has to
   // dispose its model explicitly or everything ever opened stays in memory. Keyed on *which*

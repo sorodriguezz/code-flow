@@ -41,6 +41,9 @@ pub fn show_main_window(app: &AppHandle) {
         {
             let webview: &tauri::Webview<_> = window.as_ref();
             let _ = webview.show();
+            // Lets WebView2 cache normally again after `hide_to_background` told it to travel
+            // light. Not part of the ordering constraint above — see the note on the helper.
+            crate::set_webview_memory_target(&window, false);
         }
         let _ = window.show();
         let _ = window.unminimize();

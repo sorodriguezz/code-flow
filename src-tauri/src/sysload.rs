@@ -34,7 +34,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use serde::Serialize;
-use sysinfo::{Disks, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+use sysinfo::{DiskRefreshKind, Disks, Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 /// What the status bar draws, and what its panel says when you hover it.
 ///
@@ -72,25 +72,64 @@ pub struct SystemLoad {
     pub app_processes: usize,
 }
 
-/// The live `System`, kept between calls because it is what makes a CPU reading possible at all.
+/// Everything that has to survive between polls.
 ///
-/// CPU usage is a *delta*: sysinfo computes it from the difference between two refreshes, so a
-/// fresh `System` per call would report 0% for ever. Holding one costs a few hundred kilobytes and
-/// is the only shape that answers the question.
-static STATE: Mutex<Option<System>> = Mutex::new(None);
+/// The `System` is here because CPU usage is a *delta*: sysinfo computes it from the difference
+/// between two refreshes, so a fresh one per call would report 0% for ever. Holding it costs a few
+/// hundred kilobytes and is the only shape that answers the question.
+///
+/// The rest is here because a poll every 2.5 seconds is a thing that runs for as long as the window
+/// is open, and each field is work it no longer repeats — see [`read`].
+struct State {
+    system: System,
+    /// Kept and refreshed in place rather than rebuilt. `Disks::new_with_refreshed_list()` per tick
+    /// re-enumerated every mount point and re-probed each one's kind, filesystem and I/O counters
+    /// to read two numbers off one volume.
+    disks: Disks,
+    /// Polls since start, so the disk can be re-read on a slower cadence than the CPU.
+    ticks: u64,
+    /// The last real answer from [`app_share`], reused on the polls that skip the process walk.
+    /// See [`read`] — this is what lets the panel open on a figure rather than on a zero.
+    app: (f32, u64, usize),
+}
 
-/// Reads the machine, and us.
+static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+/// How many polls apart the disk is re-read. Free space does not move in two and a half seconds,
+/// and the mount list moves even less; ten seconds is still far quicker than anyone notices a
+/// volume filling up.
+const DISK_EVERY: u64 = 4;
+
+/// Reads the machine, and — when asked — us.
+///
+/// **`detail` is what decides whether the process table is walked.** The machine's own figures come
+/// from `refresh_cpu_usage` and `refresh_memory`, which are two cheap system calls; everything that
+/// costs is [`app_share`], which needs every process on the box and is the most expensive thing
+/// this app does on a timer. Those figures are drawn in exactly one place — the panel behind the
+/// status bar pills, which is open only while the pointer is resting on them (see `SystemMeter`) —
+/// so walking the table on every poll spent milliseconds several hundred times an hour to compute
+/// numbers that were on screen for none of it.
+///
+/// When `detail` is false the last real answer is reused, clamped so it can never exceed the
+/// machine figures it is being drawn against. That matters: the panel opens on a *value*, two and a
+/// half seconds old at worst, and is corrected by the refresh the act of opening triggers — rather
+/// than opening on three zeroes and filling in.
 ///
 /// Never fails: a status bar has nothing useful to do with an error about a detail nobody asked to
 /// be told, so anything unreadable comes back as zero — the same way [`crate::power`] answers
 /// `None` for a machine with no battery rather than inventing a level.
-pub fn read() -> SystemLoad {
+pub fn read(detail: bool) -> SystemLoad {
     // `into_inner` rather than a propagated panic: a poisoned lock here means a previous read
     // panicked, and refusing every future reading because of it would turn one bad refresh into a
     // permanently dead widget.
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let first = guard.is_none();
-    let system = guard.get_or_insert_with(System::new);
+    let state = guard.get_or_insert_with(|| State {
+        system: System::new(),
+        disks: Disks::new_with_refreshed_list(),
+        ticks: 0,
+        app: (0.0, 0, 0),
+    });
 
     // Only what is drawn. The default refresh also walks components (thermals), users and network
     // interfaces, none of which anything here reads.
@@ -102,9 +141,17 @@ pub fn read() -> SystemLoad {
         .with_memory()
         .with_exe(UpdateKind::OnlyIfNotSet);
 
-    system.refresh_cpu_usage();
-    system.refresh_memory();
-    system.refresh_processes_specifics(ProcessesToUpdate::All, true, processes);
+    // The first poll is always detailed, whatever the caller asked for: it is what seeds `app` so a
+    // panel opened before any detailed poll has a figure to draw.
+    let walk = detail || first;
+
+    state.system.refresh_cpu_usage();
+    state.system.refresh_memory();
+    if walk {
+        state
+            .system
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, processes);
+    }
 
     // The very first reading has no previous one to subtract, so every CPU figure would be 0. One
     // short sleep and a second refresh buys a real number on the first frame instead of a widget
@@ -112,19 +159,39 @@ pub fn read() -> SystemLoad {
     // be read as "this is broken". Only ever paid once per process, on a blocking command thread.
     if first {
         std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
-        system.refresh_cpu_usage();
-        system.refresh_processes_specifics(ProcessesToUpdate::All, true, processes);
+        state.system.refresh_cpu_usage();
+        state
+            .system
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, processes);
     }
 
-    let cores = system.cpus().len().max(1);
-    let mem_total = system.total_memory();
-    let mem_used = system.used_memory();
+    let cores = state.system.cpus().len().max(1);
+    let mem_total = state.system.total_memory();
+    let mem_used = state.system.used_memory();
 
-    let (app_cpu_raw, app_mem, app_processes) = app_share(system);
-    let (disk_mount, disk_total, disk_used) = disk();
+    if walk {
+        state.app = app_share(&state.system);
+    }
+    // Clamped against *this* poll's machine figures rather than the ones it was measured with. The
+    // panel's whole job is the comparison "the box is at 71%, and 4 of that is us", and a reading
+    // that claims the app uses more than the machine reads as broken however defensible its
+    // provenance.
+    let (app_cpu_raw, app_mem_raw, app_processes) = state.app;
+    let app_mem = app_mem_raw.min(mem_used);
+
+    if state.ticks % DISK_EVERY == 0 {
+        // `remove_not_listed_disks: true` so a volume that was unmounted since the last refresh
+        // stops being listed, and `.with_storage()` because total/available space is all `disk()`
+        // reads — not the kind, the filesystem or the I/O counters a full refresh also collects.
+        state
+            .disks
+            .refresh_specifics(true, DiskRefreshKind::nothing().with_storage());
+    }
+    state.ticks = state.ticks.wrapping_add(1);
+    let (disk_mount, disk_total, disk_used) = disk(&state.disks);
 
     SystemLoad {
-        cpu_percent: clamp(system.global_cpu_usage()),
+        cpu_percent: clamp(state.system.global_cpu_usage()),
         cpu_cores: cores,
         mem_percent: percent(mem_used, mem_total),
         mem_used,
@@ -288,8 +355,7 @@ fn responsible_for(_pid: u32) -> Option<u32> {
 /// Not `/` by name and not the biggest — the question behind "disk 92%" is "can I still clone
 /// this repository", and repositories live under home. Falls back to the largest volume when home
 /// matches nothing, which is the sane answer for a container or an unusual mount layout.
-fn disk() -> (String, u64, u64) {
-    let disks = Disks::new_with_refreshed_list();
+fn disk(disks: &Disks) -> (String, u64, u64) {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
 
     let mut best: Option<(&sysinfo::Disk, usize)> = None;
@@ -351,7 +417,7 @@ mod tests {
     /// busy would be a test everyone learns to re-run.
     #[test]
     fn reads_this_machine_and_this_app() {
-        let load = read();
+        let load = read(true);
 
         for value in [
             load.cpu_percent,
@@ -378,8 +444,8 @@ mod tests {
     /// stored `System` is the only reason it can.
     #[test]
     fn survives_a_second_reading() {
-        let _ = read();
-        let load = read();
+        let _ = read(true);
+        let load = read(true);
         assert!(load.mem_total > 0);
         assert!((0.0..=100.0).contains(&load.cpu_percent));
     }

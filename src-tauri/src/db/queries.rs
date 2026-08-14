@@ -3204,11 +3204,17 @@ pub fn add_job_history(
 /// still does when the caller sends no limit; SQLite reads a negative `LIMIT` as "no limit", so
 /// that arm needs no second SQL string.
 ///
-/// `result` is deliberately **still** in the projection. Dropping it is the bigger win, but the
-/// Activity list feeds `AiPanel` and `AnalyzeSection` straight from these rows — both read
-/// `job.result` synchronously off the selected row — so a list without it would show an empty
-/// review until a second fetch landed. Bounding the page is the half that can be done without
-/// touching those readers.
+/// `with_result` is the bigger half of the same win, and the one that needed the readers to move
+/// first. `result` is the entire markdown of a PR review or a changes analysis — tens of kilobytes
+/// a row — and `jobsStore` drains every page in the background, so a mature install ended up
+/// holding every review it had ever run, per project bucket, for the whole session. With this
+/// false the column comes back `NULL` and the row carries only what the list draws; `AiPanel` and
+/// `AnalyzeSection` fetch the text for the row the user actually selected, through
+/// [`get_job_result`]. Exactly the bargain [`get_conversation_messages_lite`] and
+/// [`get_turn_trace`] already struck for conversation traces.
+///
+/// `NULL` and not `''`: the readers treat "no text yet" and "a run that produced none" as different
+/// states, and only the first should cost a fetch.
 ///
 /// The `id` tiebreak matters only because of `OFFSET`: two runs that finished in the same
 /// millisecond have equal `created_at`, and without a total order a page boundary could land
@@ -3219,12 +3225,17 @@ pub fn list_job_history(
     project_id: &str,
     limit: Option<i64>,
     offset: i64,
+    with_result: bool,
 ) -> rusqlite::Result<Vec<JobHistoryEntry>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(if with_result {
         "SELECT id, project_id, kind, label, custom_label, status, result, error, meta, created_at
          FROM job_history WHERE project_id = ?1 ORDER BY created_at DESC, id DESC
-         LIMIT ?2 OFFSET ?3",
-    )?;
+         LIMIT ?2 OFFSET ?3"
+    } else {
+        "SELECT id, project_id, kind, label, custom_label, status, NULL, error, meta, created_at
+         FROM job_history WHERE project_id = ?1 ORDER BY created_at DESC, id DESC
+         LIMIT ?2 OFFSET ?3"
+    })?;
     let rows = stmt.query_map(params![project_id, limit.unwrap_or(-1), offset], |row| {
         Ok(JobHistoryEntry {
             id: row.get(0)?,
@@ -3310,12 +3321,17 @@ pub fn list_workspace_activity(
     workspace_id: &str,
     limit: Option<i64>,
     offset: i64,
+    with_result: bool,
 ) -> rusqlite::Result<Vec<WorkspaceActivityEntry>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(if with_result {
         "SELECT id, workspace_id, kind, label, custom_label, status, result, error, meta, created_at
          FROM workspace_activity WHERE workspace_id = ?1 ORDER BY created_at DESC, id DESC
-         LIMIT ?2 OFFSET ?3",
-    )?;
+         LIMIT ?2 OFFSET ?3"
+    } else {
+        "SELECT id, workspace_id, kind, label, custom_label, status, NULL, error, meta, created_at
+         FROM workspace_activity WHERE workspace_id = ?1 ORDER BY created_at DESC, id DESC
+         LIMIT ?2 OFFSET ?3"
+    })?;
     let rows = stmt.query_map(params![workspace_id, limit.unwrap_or(-1), offset], |row| {
         Ok(WorkspaceActivityEntry {
             id: row.get(0)?,
@@ -3331,6 +3347,36 @@ pub fn list_workspace_activity(
         })
     })?;
     rows.collect()
+}
+
+/// One run's output text, by row id, from whichever of the two Activity tables holds it.
+///
+/// The other half of `with_result: false` above, and the twin of [`get_turn_trace`]: it is what
+/// keeps every run's review reachable once the list stops carrying them all. Both tables are tried
+/// because one Activity list mixes rows from both and the caller has only an id — ids are uuids, so
+/// there is no chance of one matching the wrong table.
+///
+/// `None` covers three cases the caller treats alike: no such row, a run that produced no text, and
+/// a row recorded before the column existed.
+pub fn get_job_result(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
+    let from_jobs = conn
+        .query_row(
+            "SELECT result FROM job_history WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(Option::flatten)?;
+    if from_jobs.is_some() {
+        return Ok(from_jobs);
+    }
+    conn.query_row(
+        "SELECT result FROM workspace_activity WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map(Option::flatten)
 }
 
 pub fn rename_workspace_activity(conn: &Connection, id: &str, label: &str) -> rusqlite::Result<()> {
@@ -4355,10 +4401,10 @@ mod tests {
         )
         .unwrap();
 
-        let rows = list_workspace_activity(&conn, &mine.id, None, 0).unwrap();
+        let rows = list_workspace_activity(&conn, &mine.id, None, 0, true).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].label, "#42 acme/widgets · Fix login");
-        assert!(list_workspace_activity(&conn, &other.id, None, 0).unwrap().is_empty());
+        assert!(list_workspace_activity(&conn, &other.id, None, 0, true).unwrap().is_empty());
     }
 
     /// Renaming and deleting have to reach these rows too — they show in the same list, with the
@@ -4373,12 +4419,12 @@ mod tests {
 
         rename_workspace_activity(&conn, "job-1", "Revisión del viernes").unwrap();
         assert_eq!(
-            list_workspace_activity(&conn, &ws.id, None, 0).unwrap()[0].custom_label.as_deref(),
+            list_workspace_activity(&conn, &ws.id, None, 0, true).unwrap()[0].custom_label.as_deref(),
             Some("Revisión del viernes")
         );
 
         delete_workspace_activity(&conn, "job-1").unwrap();
-        assert!(list_workspace_activity(&conn, &ws.id, None, 0).unwrap().is_empty());
+        assert!(list_workspace_activity(&conn, &ws.id, None, 0, true).unwrap().is_empty());
     }
 
     fn story_fixture() -> (Connection, StoryBatch) {

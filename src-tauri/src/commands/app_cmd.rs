@@ -106,16 +106,22 @@ pub fn power_status() -> Option<crate::power::PowerStatus> {
 
 /// CPU, memory and disk for the whole machine, plus this app's own share of the first two.
 ///
-/// `(async)` — off the main thread — because unlike the battery this one walks the process table,
-/// which is milliseconds rather than microseconds, and the very first call deliberately sleeps for
-/// sysinfo's minimum sampling interval so the first reading carries a real CPU figure instead of a
-/// zero (see [`crate::sysload::read`]). Neither belongs on the thread drawing the window.
+/// `(async)` — off the main thread — because unlike the battery this one can walk the process
+/// table, which is milliseconds rather than microseconds, and the very first call deliberately
+/// sleeps for sysinfo's minimum sampling interval so the first reading carries a real CPU figure
+/// instead of a zero (see [`crate::sysload::read`]). Neither belongs on the thread drawing the
+/// window.
+///
+/// `detail` asks for the app's own share, which is the part that needs that process walk. The
+/// status bar passes false and the hover panel passes true, so the expensive half is paid while
+/// someone is looking at it rather than every 2.5 seconds for the life of the window. The figures
+/// come back either way — stale by one poll at worst when it is false.
 ///
 /// Infallible by design: a status bar has nothing to do with an error about a detail nobody asked
 /// to be told about, so anything unreadable comes back as zero.
 #[tauri::command(async)]
-pub fn system_load() -> crate::sysload::SystemLoad {
-    crate::sysload::read()
+pub fn system_load(detail: bool) -> crate::sysload::SystemLoad {
+    crate::sysload::read(detail)
 }
 
 /// What the app cannot do without, checked on the first launch after installing.

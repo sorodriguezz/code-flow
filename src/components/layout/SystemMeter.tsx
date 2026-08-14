@@ -35,6 +35,7 @@ export function SystemMeter() {
   const t = useT();
   const load = useSystemLoadStore((s) => s.load);
   const watch = useSystemLoadStore((s) => s.watch);
+  const watchDetail = useSystemLoadStore((s) => s.watchDetail);
 
   const groupRef = useRef<HTMLDivElement>(null);
   const timer = useRef<number | null>(null);
@@ -42,6 +43,13 @@ export function SystemMeter() {
   const [pos, setPos] = useState<{ bottom: number; right: number } | null>(null);
 
   useEffect(() => watch(), [watch]);
+
+  // The "this app" half of the panel is the only thing in the app that reads `app_cpu_percent`,
+  // `app_mem` and `app_processes`, and computing them means walking every process on the machine.
+  // Asking only while the panel is actually open is the difference between paying that every 2.5
+  // seconds for as long as the window is up, and paying it while someone is reading it. The
+  // refresh this triggers on open is what makes the figures current rather than one poll old.
+  useEffect(() => (open ? watchDetail() : undefined), [open, watchDetail]);
 
   const reposition = useCallback(() => {
     const rect = groupRef.current?.getBoundingClientRect();

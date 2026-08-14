@@ -65,7 +65,18 @@ export function AnalyzeSection({ projectId }: { projectId: string }) {
   }, [projectId, selectedJobId]);
 
   const [logExpanded, setLogExpanded] = useState(false);
-  const loading = job?.status === "running" || !job;
+
+  // Rows past the first page of Activity arrive without their analysis text — see
+  // `jobsStore.fetchActivityPage` — so the one on screen fetches its own. No-op for a row that
+  // already carries it, which is every run made this session and the whole first page.
+  const hydrateResult = useJobsStore((s) => s.hydrateResult);
+  useEffect(() => {
+    if (job?.status === "done" && job.result === null) void hydrateResult(job.projectId, job.id);
+  }, [job?.id, job?.status, job?.result, job?.projectId, hydrateResult]);
+
+  // A finished run whose text has not arrived yet reads as still loading, rather than as an
+  // analysis that found nothing.
+  const loading = job?.status === "running" || !job || (job.status === "done" && job.result === null);
   const cancelled = job?.status === "cancelled";
   const error = job?.status === "error" ? job.error : null;
   const parsed = useMemo(() => (job?.status === "done" && job.result ? parseAnalysis(job.result) : null), [job]);

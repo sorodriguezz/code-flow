@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
-import { translations, type Language, type TranslationKey } from "../lib/i18n/translations";
+import { loadLanguage, translations, type Language, type TranslationKey } from "../lib/i18n/translations";
 
 const KEY = "app_language";
 
@@ -16,10 +16,16 @@ export const useLanguageStore = create<LanguageState>((set) => ({
 
   init: async () => {
     const stored = await getSetting(KEY).catch(() => null);
-    if (stored === "en" || stored === "es") set({ language: stored });
+    if (stored !== "en" && stored !== "es") return;
+    // Before the flip, never after. Only English is compiled in (see `translations.ts`); flipping
+    // first would let `useT`'s memoised closure be rebuilt against a dictionary that is still
+    // empty, and every label in the app would render in English and then swap a tick later.
+    await loadLanguage(stored);
+    set({ language: stored });
   },
 
   setLanguage: async (language) => {
+    await loadLanguage(language);
     set({ language });
     await setSetting(KEY, language);
   },

@@ -705,7 +705,12 @@ export function RunnerModal({
     }
     setReport(finished);
     setProgress(null);
-    runtime.setRunnerReport(finished);
+    // Without the captures, which are up to `CAPTURE_TOTAL_BUDGET` — 8 MB — of response text. The
+    // results pane and its body viewer render from `report` above, which is local state and goes
+    // when the modal does; the store's copy is a cross-mount handle nothing reads the bodies from,
+    // and holding them there pinned that 8 MB for the rest of the session. Same projection
+    // `exportReport` builds below, and for a version of the same reason.
+    runtime.setRunnerReport({ ...finished, items: finished.items.map((item) => ({ ...item, capture: null })) });
     runtime.setRunnerRunning(false);
   };
 

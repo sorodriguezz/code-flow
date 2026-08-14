@@ -10,6 +10,7 @@ import {
 import { useDbModalStore } from "../../state/dbModalStore";
 import { fieldFacts, recordModel } from "../../lib/db/engineModel";
 import { useT } from "../../state/languageStore";
+import { useFrameThrottle } from "../../lib/frameThrottle";
 
 /**
  * The same result, read down the page instead of across it.
@@ -59,6 +60,7 @@ export function RecordGrid({
   const model = recordModel(engine);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [scrollLeft, setScrollLeft] = useState(0);
+  const onScrollLeft = useFrameThrottle(setScrollLeft);
   const [viewportWidth, setViewportWidth] = useState(800);
   const [fieldWidth, setFieldWidth] = useState(DEFAULT_FIELD_WIDTH);
   const [recordWidth, setRecordWidth] = useState(DEFAULT_RECORD_WIDTH);
@@ -124,7 +126,9 @@ export function RecordGrid({
     <div
       ref={scrollRef}
       className="isolate h-full min-h-0 overflow-auto"
-      onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
+      // Coalesced to one write per painted frame — `scrollLeft` decides which record columns are
+      // rendered, so a horizontal fling was costing several discarded renders per frame.
+      onScroll={(e) => onScrollLeft(e.currentTarget.scrollLeft)}
       onPointerMove={sweep.move}
       onPointerUp={sweep.end}
       onPointerCancel={sweep.end}

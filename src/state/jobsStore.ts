@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { parseClaudeError, type ClaudeErrorInfo } from "../lib/claudeError";
 import {
+  getJobResult,
   listJobHistory,
   listWorkspaceActivity,
   renameJobHistoryEntry,
@@ -67,6 +68,9 @@ const pagingBuckets = new Set<string>();
 /** Buckets whose background read-through has already been started, so it happens once per
  * session no matter how many times a view remounts and calls `load`. */
 const drainedBuckets = new Set<string>();
+/** Rows whose result text is being fetched, so selecting a row twice in quick succession — or two
+ * readers rendering the same selection — costs one round trip. See `hydrateResult`. */
+const hydrating = new Set<string>();
 
 /** Runs `fn` when the main thread has nothing better to do, with a ceiling so it still happens on
  * a busy app. The fallback matters for nothing in production (the webview has
@@ -139,6 +143,16 @@ interface JobsState {
   /** Reads the next page of a bucket's history and **appends** it, so nothing already on screen
    * moves or is replaced. A no-op while `hasMore[projectId]` is false. */
   loadMore: (projectId: string) => Promise<void>;
+  /**
+   * Fetches one finished run's output text and files it into the row, for the pages that were read
+   * without it (see `fetchActivityPage`).
+   *
+   * Idempotent and cheap to over-call: a row that already has its `result` is returned untouched,
+   * and a run that produced none records `""` rather than staying `null`, so a second open does not
+   * re-ask. Only rows whose `status` is `done` are worth asking about — a failed run's text is in
+   * `error`, which the list always carries.
+   */
+  hydrateResult: (projectId: string, jobId: string) => Promise<void>;
   rename: (projectId: string, jobId: string, label: string) => Promise<void>;
   /** Best-effort against the persisted row — a job still `running` has no `job_history` row
    * yet, so there's nothing there to delete, but it's removed from the in-memory list either
@@ -274,9 +288,15 @@ function notifyJobSettled(job: Job, ok: boolean): void {
  */
 async function fetchActivityPage(projectId: string, offset: number): Promise<ActivityRow[]> {
   const workspaceId = workspaceIdFromBucket(projectId);
+  // Only the first page carries `result`, which is the whole markdown of a review or an analysis —
+  // tens of kilobytes a row. The pages behind it exist so the list can draw them and so
+  // `notificationStore` can scan them, and neither needs the text; `drainHistory` below walks
+  // *every* page in the background, so carrying it meant a mature install held every review it had
+  // ever run, per bucket, for the session. A row selected later fetches its own body — see
+  // `hydrateResult` and its two callers.
   return await (workspaceId === null
-    ? listJobHistory(projectId, PAGE_SIZE, offset)
-    : listWorkspaceActivity(workspaceId, PAGE_SIZE, offset)
+    ? listJobHistory(projectId, PAGE_SIZE, offset, offset === 0)
+    : listWorkspaceActivity(workspaceId, PAGE_SIZE, offset, offset === 0)
   ).catch(() => []);
 }
 
@@ -416,6 +436,27 @@ export const useJobsStore = create<JobsState>((set, get) => ({
       });
     } finally {
       pagingBuckets.delete(projectId);
+    }
+  },
+
+  hydrateResult: async (projectId, jobId) => {
+    const job = (get().byProject[projectId] ?? []).find((j) => j.id === jobId);
+    if (!job || job.status !== "done" || job.result !== null) return;
+    if (hydrating.has(jobId)) return;
+    hydrating.add(jobId);
+    try {
+      // `?? ""` rather than leaving it null: a run that genuinely produced no text must be
+      // distinguishable from one that has not been asked yet, or every render of that row asks
+      // again. Empty renders as an empty review, which is what it is.
+      const result = (await getJobResult(jobId).catch(() => null)) ?? "";
+      set((s) => ({
+        byProject: {
+          ...s.byProject,
+          [projectId]: (s.byProject[projectId] ?? []).map((j) => (j.id === jobId ? { ...j, result } : j)),
+        },
+      }));
+    } finally {
+      hydrating.delete(jobId);
     }
   },
 

@@ -531,7 +531,18 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
   );
 
   const [logExpanded, setLogExpanded] = useState(false);
-  const loading = job?.status === "running";
+
+  // Rows past the first page of Activity arrive without their review text — see
+  // `jobsStore.fetchActivityPage` for why — so the one being shown asks for its own. A no-op for a
+  // row that already has it, which is every run made this session and the whole first page.
+  const hydrateResult = useJobsStore((s) => s.hydrateResult);
+  useEffect(() => {
+    if (job?.status === "done" && job.result === null) void hydrateResult(job.projectId, job.id);
+  }, [job?.id, job?.status, job?.result, job?.projectId, hydrateResult]);
+
+  // `running` covers the fetch too: a finished run whose text has not landed yet is a review being
+  // read, and drawing "no findings" for a frame would be a claim rather than a wait.
+  const loading = job?.status === "running" || (job?.status === "done" && job.result === null);
   const error = job?.status === "error" ? job.error : null;
   const rawReviewText = job?.status === "done" ? job.result : null;
   // A review the plan stopped to ask about — a draft, a merged PR. It comes back as a *successful*

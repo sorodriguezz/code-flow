@@ -71,15 +71,32 @@ pub fn rename_chat_conversation(db: State<'_, Db>, project_id: String, session_i
 /// `limit`/`offset` are optional so the shape that existed before paging — no limit, everything in
 /// one response — is still exactly what an argument-less call gets. The frontend passes a page size
 /// and appends, so nothing older becomes unreachable; see `jobsStore.loadMore`.
+///
+/// `with_result` defaults to true, so an argument-less call is likewise unchanged. The frontend
+/// sends it false for every page after the first — see the query's doc comment and
+/// [`get_job_result`], which is how a row selected later gets its text.
 #[tauri::command]
 pub fn list_job_history(
     db: State<'_, Db>,
     project_id: String,
     limit: Option<i64>,
     offset: Option<i64>,
+    with_result: Option<bool>,
 ) -> Result<Vec<JobHistoryEntry>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::list_job_history(&conn, &project_id, limit, offset.unwrap_or(0)).map_err(|e| e.to_string())
+    queries::list_job_history(&conn, &project_id, limit, offset.unwrap_or(0), with_result.unwrap_or(true))
+        .map_err(|e| e.to_string())
+}
+
+/// One run's output text, by Activity row id. `null` for a row that produced none.
+///
+/// The counterpart to `with_result: false` above, and the exact shape [`get_turn_trace`] already
+/// has for conversation traces: the list travels light, and the one row the user opens pays for
+/// its own body.
+#[tauri::command]
+pub fn get_job_result(db: State<'_, Db>, id: String) -> Result<Option<String>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::get_job_result(&conn, &id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -106,10 +123,17 @@ pub fn list_workspace_activity(
     workspace_id: String,
     limit: Option<i64>,
     offset: Option<i64>,
+    with_result: Option<bool>,
 ) -> Result<Vec<WorkspaceActivityEntry>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::list_workspace_activity(&conn, &workspace_id, limit, offset.unwrap_or(0))
-        .map_err(|e| e.to_string())
+    queries::list_workspace_activity(
+        &conn,
+        &workspace_id,
+        limit,
+        offset.unwrap_or(0),
+        with_result.unwrap_or(true),
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

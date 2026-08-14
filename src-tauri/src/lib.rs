@@ -120,8 +120,54 @@ fn hide_to_background(window: &tauri::Window) {
         // and only the inner `Webview` carries the controller-level one.
         let webview: &tauri::Webview<_> = webview_window.as_ref();
         let _ = webview.hide();
+        set_webview_memory_target(&webview_window, true);
     }
     let _ = window.hide();
+}
+
+/// Tells WebView2 how hard to hold on to its caches. Windows only; the enum has no counterpart on
+/// the other platforms and none of them need one.
+///
+/// `put_IsVisible(false)` above stops the compositing, which is the expensive *rendering* half.
+/// What it does not touch is everything the renderer is holding: the V8 heap, the decoded-image
+/// cache, the font and glyph caches, the GPU-side resource caches and the browser process's own —
+/// all still sized for an app in the foreground, for a window that may now sit in the tray for
+/// hours. `MemoryUsageTargetLevel` is WebView2's first-class answer to exactly that state, and its
+/// documented meaning is "the app is inactive, release what you are only caching".
+///
+/// **It is not a suspend, and deliberately not.** `ICoreWebView2_3::TrySuspend` is the API that
+/// stops execution; this one does not. JavaScript, timers, IPC and every running agent chain go on
+/// exactly as they do today — which is the whole reason this app hides instead of exiting.
+///
+/// `with_webview` posts to the main-thread event loop, so the level change lands shortly *after*
+/// the `hide()`/`show()` beside it rather than before. That is fine in both directions: LOW
+/// arriving a few milliseconds late costs nothing, and NORMAL only re-permits caching, which
+/// refills on demand. It is emphatically not the ordering constraint `tray::show_main_window`
+/// documents — `webview.show()` before `window.show()`, or the app comes back blank — and must not
+/// be confused with it.
+///
+/// Silently does nothing on a WebView2 Runtime older than 1.0.1722.45: the `ICoreWebView2_19`
+/// query fails and behaviour is identical to before this existed.
+#[cfg(windows)]
+pub(crate) fn set_webview_memory_target(webview_window: &tauri::WebviewWindow, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+    };
+    use windows_core::Interface as _;
+
+    let level = if low {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+    } else {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+    };
+    let _ = webview_window.with_webview(move |platform| unsafe {
+        if let Ok(core) = platform.controller().CoreWebView2() {
+            if let Ok(v19) = core.cast::<ICoreWebView2_19>() {
+                let _ = v19.SetMemoryUsageTargetLevel(level);
+            }
+        }
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -562,6 +608,7 @@ pub fn run() {
             commands::activity_cmd::list_chat_conversations,
             commands::activity_cmd::get_chat_conversation,
             commands::activity_cmd::get_turn_trace,
+            commands::activity_cmd::get_job_result,
             commands::activity_cmd::delete_chat_conversation,
             commands::activity_cmd::rename_chat_conversation,
             commands::activity_cmd::list_job_history,

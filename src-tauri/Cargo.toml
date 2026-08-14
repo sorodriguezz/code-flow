@@ -12,7 +12,22 @@ edition = "2021"
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
 name = "codeflow_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# `rlib` only — not the `["staticlib", "cdylib", "rlib"]` the tauri template starts with.
+#
+# `staticlib` is what an iOS build links and `cdylib` is what an Android build loads. There is no
+# `gen/apple` and no `gen/android` in this repo, and the only mobile reference in 92,000 lines of
+# Rust is an inert `#[cfg_attr(mobile, …)]` in `lib.rs`, so both were being produced for nobody.
+#
+# They are not free extras. The 769 dependencies are built once as rlibs and shared either way —
+# that part is unchanged — but each additional crate type is another *link product*, so each adds
+# its own link, and under `lto = "thin"` below its own LTO pass, on top of the one `main.rs`
+# actually needs. The staticlib is the expensive one by far: a ~1 GB archive written out and read
+# back on every build. The cdylib exports nothing, so the linker discards almost all of it.
+#
+# `main.rs` is `fn main() { codeflow_lib::run() }` and links the rlib, so the shipped binary comes
+# out of exactly the same path as before. Put the other two back the day someone runs
+# `tauri android init` / `tauri ios init` — with them, not before.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -239,6 +254,13 @@ hickory-resolver = "0.26"
 # non-persistent stub (writes "succeed", reads come back empty).
 [target.'cfg(windows)'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
+# `ICoreWebView2_19::SetMemoryUsageTargetLevel`, so that closing the window to the tray tells
+# WebView2 to release the caches it is holding for a window nobody can see (see
+# `set_webview_memory_target` in `lib.rs`). Both crates are already in the tree — wry depends on
+# webview2-com, which depends on windows-core — so naming them here only makes them ours to call
+# and compiles nothing new.
+webview2-com = "0.38"
+windows-core = "0.61"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
