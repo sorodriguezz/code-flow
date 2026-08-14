@@ -93,21 +93,7 @@ export function NoteGallery() {
 
   if (notes.length === 0 && books.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4">
-        <EmptyState
-          icon={NotebookPen}
-          title={t("notes.emptyTitle")}
-          subtitle={t("notes.emptySubtitle")}
-        />
-        <button
-          type="button"
-          onClick={() => void createNote(null)}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90"
-        >
-          <FilePlus2 size={13} />
-          {t("notes.newNote")}
-        </button>
-      </div>
+      <EmptyState icon={NotebookPen} title={t("notes.emptyTitle")} subtitle={t("notes.emptySubtitle")} />
     );
   }
 

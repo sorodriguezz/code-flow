@@ -95,15 +95,6 @@ export interface Note extends Omit<NoteMetaRow, "tags"> {
 
 export interface NoteTemplate extends Omit<NoteTemplateRow, "tags"> {
   tags: string[];
-  /**
-   * Set on the templates that ship with the app rather than living in the database.
-   *
-   * They are read through `translate`, so their name and body follow the user's language — which
-   * a row could not do. The flag is what stops the UI offering to rename or delete one: there is
-   * no row behind it to change. "Duplicate to my templates" is the way to edit one, and it makes
-   * a real row.
-   */
-  builtIn?: boolean;
 }
 
 /** How the editor splits its space. Persisted per workspace. */

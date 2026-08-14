@@ -274,7 +274,7 @@ export function NoteEditor() {
             aria-pressed={outlineOpen}
             title={t("notes.outline")}
             aria-label={t("notes.outline")}
-            className={`${ICON_BUTTON} ${outlineOpen ? "text-[var(--cf-accent)]" : ""}`}
+            className={`${ICON_BUTTON} ${outlineOpen ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : ""}`}
           >
             <ListTree size={13} />
           </button>

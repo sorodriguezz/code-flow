@@ -1,5 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
+  ChevronDown,
+  ChevronRight,
   Copy,
   FilePlus2,
   BookPlus,
@@ -87,6 +89,10 @@ export function NoteExplorer() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   /** Which row holds the tree's single tab stop. See `NoteTreeRow`'s roving-tabindex comment. */
   const [focusedId, setFocusedId] = useState<string | null>(null);
+  /** The tag cloud folded shut. Local rather than persisted: unlike an open book, this isn't an
+   *  arrangement anyone builds up — it's "get this out of my way for a moment" in a workspace whose
+   *  tag list grew past what a glance can take in. */
+  const [tagsCollapsed, setTagsCollapsed] = useState(false);
   const treeRef = useRef<HTMLDivElement>(null);
   const searchField = useRef<HTMLInputElement>(null);
 
@@ -117,7 +123,15 @@ export function NoteExplorer() {
     () => flattenTree(tree, visible, expandedSet),
     [tree, visible, expandedSet],
   );
-  const tags = useMemo(() => tagCounts(notes), [notes]);
+  // Alphabetical here, not `tagCounts`'s own most-used-first order — that order is right for
+  // `NoteTagBar`'s autocomplete, where the point is surfacing the *likely* tag first, but wrong for
+  // a list a person scans to find one by name. Ties (which is most of them, in a young workspace
+  // where every tag has been used once) are what made the frequency order look unsorted to begin
+  // with: it fell back to alphabetical anyway, just after a count nobody could see at a glance.
+  const tags = useMemo(
+    () => [...tagCounts(notes)].sort((a, b) => a.tag.localeCompare(b.tag)),
+    [notes],
+  );
 
   /** The books a drop may not land in: the dragged book and everything under it. */
   const forbidden = useMemo(
@@ -717,25 +731,35 @@ export function NoteExplorer() {
       </div>
 
       {tags.length > 0 && (
-        <div
-          data-tour="notes-tags"
-          className="max-h-40 shrink-0 overflow-y-auto border-t border-[var(--cf-border)] p-2"
-        >
-          <div className="mb-1.5 flex items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
-            <Tags size={11} />
-            {t("notes.tags")}
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {tags.map(({ tag, count }) => (
-              <TagPill
-                key={tag}
-                tag={tag}
-                count={count}
-                active={tagFilter.includes(tag)}
-                onClick={() => toggleTag(tag)}
-              />
-            ))}
-          </div>
+        <div data-tour="notes-tags" className="shrink-0 border-t border-[var(--cf-border)] p-2">
+          <button
+            type="button"
+            onClick={() => setTagsCollapsed((c) => !c)}
+            aria-expanded={!tagsCollapsed}
+            className={`flex w-full items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] ${
+              tagsCollapsed ? "" : "mb-1.5"
+            }`}
+          >
+            {tagsCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+            <Tags size={11} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate text-left">{t("notes.tags")}</span>
+            <span className="tabular-nums normal-case font-normal">{tags.length}</span>
+          </button>
+          {!tagsCollapsed && (
+            <div className="max-h-40 overflow-y-auto">
+              <div className="flex flex-wrap gap-1">
+                {tags.map(({ tag, count }) => (
+                  <TagPill
+                    key={tag}
+                    tag={tag}
+                    count={count}
+                    active={tagFilter.includes(tag)}
+                    onClick={() => toggleTag(tag)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

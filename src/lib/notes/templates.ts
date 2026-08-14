@@ -6,11 +6,16 @@ import { parseTags } from "./tags";
 /**
  * The templates that ship with the app.
  *
- * A constant rather than seeded rows, and the reason is translation: a `note_templates` row holds
- * one language, and a user who switches CodeFlow to English would keep finding a Spanish
- * "Reunión" in the picker. Read through `translate`, these follow the user. The cost is that they
- * cannot be edited in place — which is honest, since there is no row to edit — so the picker
- * offers "duplicate to my templates" instead, and that makes a real one.
+ * A constant here, but not what the picker shows. `notesStore.setWorkspace` writes these into
+ * `note_templates` as ordinary rows the first time a workspace is opened — once, tracked by a
+ * settings flag rather than by "the table happens to be empty" — so from the picker's point of
+ * view a shipped template and one the user wrote are the same kind of thing: editable, deletable,
+ * indistinguishable. The trade this makes is the one "duplicate to my templates" already made for
+ * anyone who used it: a seeded row stops following the app's language, because a row holds one
+ * language and there is no other way to give someone an editable copy.
+ *
+ * This constant is still what the six *are* — the picker no longer reads it directly, but the seed
+ * step does, once, in whatever language the workspace is opened in first.
  *
  * They are also *why* the picker exists at all. A notes app whose "new" button makes an empty file
  * teaches nothing about what to write; six openings that are already the right shape is most of
@@ -34,16 +39,12 @@ const BUILT_INS = [
 ] as const satisfies readonly { id: string; icon: string; tags: readonly string[] }[];
 
 /**
- * The shipped templates in the user's language.
- *
- * Called on render, so it is deliberately cheap — six `translate` lookups, which are map reads. It
- * is *not* memoised on purpose: the language can change while the picker is open, and a cache
- * keyed on nothing would keep serving the old one.
+ * The six shipped templates, translated — the shape `notesStore`'s one-time seed writes into the
+ * database. Not memoised: it runs once per workspace, ever, so there is nothing to gain by caching
+ * it and a cache keyed on nothing would risk seeding a stale language if that ever changed.
  */
 export function builtInTemplates(): NoteTemplate[] {
   return BUILT_INS.map(({ id, icon, tags }) => ({
-    // Prefixed so a built-in can never collide with a database uuid, and so `isBuiltIn` is a
-    // string test rather than a lookup.
     id: `builtin:${id}`,
     workspace_id: "",
     name: translate(`notes.tpl.${id}.name` satisfies TranslationKey),
@@ -54,12 +55,7 @@ export function builtInTemplates(): NoteTemplate[] {
     sort_order: -1,
     created_at: "",
     updated_at: "",
-    builtIn: true,
   }));
-}
-
-export function isBuiltIn(templateId: string): boolean {
-  return templateId.startsWith("builtin:");
 }
 
 /** A stored row as the UI holds it. */

@@ -21,7 +21,7 @@ import {
   notesUpdateTemplate,
 } from "../lib/tauri/notesCommands";
 import { serializeTags, parseTags } from "../lib/notes/tags";
-import { toTemplate } from "../lib/notes/templates";
+import { builtInTemplates, toTemplate } from "../lib/notes/templates";
 import { descendantIds } from "../lib/notes/tree";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
@@ -133,6 +133,10 @@ const expandedKey = (workspaceId: string) => `notes_expanded_books:${workspaceId
 const viewKey = (workspaceId: string) => `notes_view_mode:${workspaceId}`;
 const sortKey = (workspaceId: string) => `notes_sort:${workspaceId}`;
 const galleryViewKey = (workspaceId: string) => `notes_gallery_view:${workspaceId}`;
+/** Whether the six shipped templates have been written into this workspace yet. Not "whether
+ *  `templates` is empty" — a workspace someone has deleted every template from must stay empty,
+ *  not have the starters reappear on the next launch. */
+const templatesSeededKey = (workspaceId: string) => `notes_templates_seeded:${workspaceId}`;
 
 async function loadPref(key: string): Promise<string | null> {
   const { getSetting } = await import("../lib/tauri/commands");
@@ -369,15 +373,16 @@ export const useNotesStore = create<NotesState>((set, get) => ({
         sort: "manual",
       });
       try {
-        // In parallel with the tree rather than before it: four settings reads and one tree read
-        // are independent, and serialising them would put three extra round trips in front of the
+        // In parallel with the tree rather than before it: five settings reads and one tree read
+        // are independent, and serialising them would put four extra round trips in front of the
         // first paint.
-        const [tree, expanded, viewMode, galleryView, sort] = await Promise.all([
+        const [tree, expanded, viewMode, galleryView, sort, templatesSeeded] = await Promise.all([
           notesLoadTree(workspaceId),
           loadPref(expandedKey(workspaceId)),
           loadPref(viewKey(workspaceId)),
           loadPref(galleryViewKey(workspaceId)),
           loadPref(sortKey(workspaceId)),
+          loadPref(templatesSeededKey(workspaceId)),
         ]);
         // The user may have switched again while all that was in flight.
         if (get().workspaceId !== workspaceId) return;
@@ -390,6 +395,43 @@ export const useNotesStore = create<NotesState>((set, get) => ({
           galleryView: galleryView === "list" ? "list" : "grid",
           sort: (sort as NoteSort | null) ?? "manual",
         });
+
+        /**
+         * The six shipped templates, written in as ordinary rows the first time this workspace is
+         * ever opened — once, tracked by the flag above rather than by "the list is empty", so
+         * deleting all six stays deleted instead of them reappearing on the next launch. From here
+         * on a seeded template is a row like any other: `updateTemplate` and `deleteTemplate` work
+         * on it exactly as they do on one the user wrote.
+         *
+         * Sequential rather than `Promise.all`: six calls, once, ever, isn't worth the concurrency,
+         * and it keeps `sort_order` (assigned by the backend in insertion order) in the curated
+         * order `BUILT_INS` lists rather than whatever order six racing writes happened to land in.
+         */
+        if (templatesSeeded !== "1") {
+          const seeded: NoteTemplateRow[] = [];
+          for (const template of builtInTemplates()) {
+            try {
+              seeded.push(
+                await notesCreateTemplate(
+                  workspaceId,
+                  template.name,
+                  template.description,
+                  template.icon,
+                  template.content,
+                  serializeTags(template.tags),
+                ),
+              );
+            } catch {
+              // Silent, like the rest of this block's writes: a workspace that ends up with five
+              // starters instead of six isn't worth a toast about, and the one failure mode here —
+              // a broken database — is one every other action in this load is already reporting.
+            }
+          }
+          await savePref(templatesSeededKey(workspaceId), "1");
+          if (seeded.length > 0 && get().workspaceId === workspaceId) {
+            set((state) => ({ templates: [...state.templates, ...seeded.map(toTemplate)] }));
+          }
+        }
       } catch (error) {
         pushErrorToast(String(error));
       } finally {
