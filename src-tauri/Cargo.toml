@@ -261,6 +261,16 @@ keyring = { version = "3", features = ["windows-native"] }
 # and compiles nothing new.
 webview2-com = "0.38"
 windows-core = "0.61"
+# `GetProcessMemoryInfo` with `PROCESS_MEMORY_COUNTERS_EX2`, so the panel behind the status bar bills
+# this app for the same private working set Task Manager shows in its own rows — see
+# `sysload::footprint` for why the resident size sysinfo hands out cannot be reconciled with it. Also
+# already in the tree (tauri, sysinfo and keyring all reach for it), so this names three modules and
+# compiles nothing that was not being compiled.
+windows-sys = { version = "0.60", features = [
+  "Win32_Foundation",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

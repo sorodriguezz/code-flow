@@ -97,6 +97,28 @@ pub(crate) enum AiTask {
 }
 
 impl AiTask {
+    /// Every task, so a caller can ask about the routing as a whole rather than one job at a time.
+    ///
+    /// The compiler holds this to the enum: the array is typed to its exact length, so adding a
+    /// variant without adding it here fails the build. That matters because the one reader —
+    /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
+    /// silently make its engine invisible to the quota panel rather than produce an obvious error.
+    pub(crate) const ALL: [AiTask; 13] = [
+        AiTask::Commit,
+        AiTask::Analyze,
+        AiTask::Review,
+        AiTask::PrDescription,
+        AiTask::Chat,
+        AiTask::Fix,
+        AiTask::Conflict,
+        AiTask::Inline,
+        AiTask::Stories,
+        AiTask::StoryVerify,
+        AiTask::WorkItemReview,
+        AiTask::Wiki,
+        AiTask::DbQuery,
+    ];
+
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
     /// The four original values (`commit`/`analyze`/`review`/`pr_description`) are unchanged, so
     /// model overrides saved before per-task routing existed keep working.
@@ -129,6 +151,38 @@ fn provider_for(conn: &Connection, task: AiTask) -> Result<String, String> {
         Some(p) => Ok(p),
         None => active_provider(conn),
     }
+}
+
+/// Every provider this install actually sends work to — the global `ai_provider` plus every
+/// per-task override that names a different one.
+///
+/// **This is "which engines do I use", not "which engines are installed".** The distinction is the
+/// whole point. A machine routinely carries CLIs it does not route anything to: one installed to
+/// try, one left behind by an uninstall, one that came with another tool. Asking those for a plan
+/// limit spends a keychain read, an HTTPS call or a subprocess on an engine whose numbers nobody is
+/// going to act on — and then puts them on screen, where they compete with the numbers that *do*
+/// matter and can drive the status pill from a plan the user never touches.
+///
+/// The global default is always in the set, including when the setting is unset: [`active_provider`]
+/// falls back to Claude, and a fresh install genuinely does route everything there.
+///
+/// Note this is a *superset* of the active provider by design. Routing PR review to Codex and
+/// everything else to Claude means Codex running out is a real event for this install, so it stays
+/// in the set even though it is not the global default.
+pub(crate) fn routed_providers(conn: &Connection) -> Result<std::collections::HashSet<String>, String> {
+    let mut providers = std::collections::HashSet::new();
+    providers.insert(active_provider(conn)?);
+    for task in AiTask::ALL {
+        let routed = queries::get_setting(conn, &format!("ai_provider_{}", task.key()))
+            .map_err(|e| e.to_string())?
+            .filter(|p| !p.trim().is_empty());
+        // Blank counts as unset here for the same reason it does in `provider_for`: clearing a row
+        // in the UI means "inherit", and the inherited value is already in the set.
+        if let Some(provider) = routed {
+            providers.insert(provider);
+        }
+    }
+    Ok(providers)
 }
 
 /// The active engine plus its resolved per-provider binary/model/tools. Binary/model/tools are
@@ -763,4 +817,66 @@ pub async fn inline_edit_with_ai(
         .await
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn install() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn
+    }
+
+    /// A fresh install routes everything to Claude without any setting being written, so the panel
+    /// has something to show on first run. Nothing else is asked — an untouched machine with five
+    /// CLIs installed must not spend five reads (and, on macOS, a keychain prompt) on four engines
+    /// it has never sent a turn to.
+    #[test]
+    fn an_untouched_install_routes_to_claude_alone() {
+        let routed = routed_providers(&install()).unwrap();
+        assert_eq!(routed, ["claude".to_string()].into_iter().collect());
+    }
+
+    /// The set is the global default *plus* every per-task override — not just the default. An
+    /// engine handling only PR review still has a plan that can run out, and that is exactly the
+    /// event the panel exists to show.
+    #[test]
+    fn per_task_overrides_join_the_global_default() {
+        let conn = install();
+        queries::set_setting(&conn, "ai_provider", "claude").unwrap();
+        queries::set_setting(&conn, "ai_provider_review", "codex").unwrap();
+        queries::set_setting(&conn, "ai_provider_commit", "ollama").unwrap();
+
+        let routed = routed_providers(&conn).unwrap();
+        assert_eq!(
+            routed,
+            ["claude", "codex", "ollama"].map(String::from).into_iter().collect()
+        );
+    }
+
+    /// Blank is unset, matching `provider_for`: clearing a row in the UI means "inherit", and the
+    /// inherited value is the global default that is already in the set. Reading it literally would
+    /// put an empty provider id in the set, which matches no engine and is asked for nothing — a
+    /// silent no-op that is only ever confusing.
+    #[test]
+    fn a_blank_override_inherits_rather_than_adding_nothing() {
+        let conn = install();
+        queries::set_setting(&conn, "ai_provider", "gemini").unwrap();
+        queries::set_setting(&conn, "ai_provider_chat", "   ").unwrap();
+
+        let routed = routed_providers(&conn).unwrap();
+        assert_eq!(routed, ["gemini".to_string()].into_iter().collect());
+    }
+
+    /// A cleared global falls back to Claude rather than emptying the set — the quota panel going
+    /// blank because a settings row was reset would read as "you have no limits", which is the one
+    /// thing it must never say wrongly.
+    #[test]
+    fn a_cleared_global_still_routes_somewhere() {
+        let conn = install();
+        queries::set_setting(&conn, "ai_provider", "").unwrap();
+        assert!(routed_providers(&conn).unwrap().contains("claude"));
+    }
 }

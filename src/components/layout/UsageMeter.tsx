@@ -20,7 +20,11 @@ const PANEL_WIDTH = 300;
  * a limit's clothes.
  *
  * **The pill shows the fullest limit.** One number in a status bar can only honestly be the worst
- * one; the panel is where "each limit" fits.
+ * one; the panel is where "each limit" fits. Two things are excluded from that comparison and both
+ * are about it being *one* number: providers this install does not route work to are never asked in
+ * the first place (backend, `ai_quota_status`), and a window that is a slice of another window
+ * already in the list does not compete with its own total (`wholeWindows`) — otherwise one model's
+ * share of a week outranks the week, and the pill reports a plan the user is not spending.
  *
  * **Quota is read on open, not on mount.** On macOS, reading Claude Code's token means reading
  * another application's keychain item, and that asks the user for permission the first time. That

@@ -135,12 +135,38 @@ export function allLimits(providers: ProviderQuota[]): { provider: string; limit
     .sort((a, b) => b.limit.used_percent - a.limit.used_percent);
 }
 
+/** One provider's limits with the *slices* dropped — every window that is not already part of
+ * another window in the same list.
+ *
+ * A provider can report one window at two grains. Anthropic publishes the whole week **and** one
+ * model's slice of that same week, and the slice is by definition a part of the total sitting next
+ * to it. For the panel that is the point; for a single number it is double-counting, and it fails
+ * in a specific way: the pill shows the fullest limit, so a model you never touch at 95% of its
+ * slice outranks the 40% of the week that is the figure you would actually act on.
+ *
+ * **The test is "is there a total?", not "is this scoped?"** — those come apart at Gemini, whose
+ * every bucket carries its group name as a scope ("Gemini Models", "Claude and GPT models") and
+ * which publishes no unscoped weekly row at all. Those groups *are* the whole allowance rather than
+ * slices of one, so dropping every scoped row would take Gemini out of the pill entirely. A scoped
+ * row is therefore only dropped when the same provider also reports that same `kind` unscoped.
+ *
+ * Session windows are unaffected: a session is reported unscoped, so it is a total and stays. */
+export function wholeWindows(quota: ProviderQuota): QuotaLimit[] {
+  const totalled = new Set(quota.limits.filter((limit) => !limit.scope).map((limit) => limit.kind));
+  return quota.limits.filter((limit) => !limit.scope || !totalled.has(limit.kind));
+}
+
 /** The limit closest to running out — what the status pill shows, because a single number in a
- * status bar can only honestly be the worst one. */
+ * status bar can only honestly be the worst one.
+ *
+ * Which providers are in `providers` at all is decided in the backend: only the ones this install
+ * routes work to are asked (see `ai_quota_status`). So the pill cannot be driven by a plan the user
+ * does not use, and it stays in agreement with the panel — both draw from the same list, and a pill
+ * that filtered providers on its own would eventually disagree with the rows underneath it. */
 export function tightestLimit(
   providers: ProviderQuota[],
 ): { provider: string; limit: QuotaLimit } | null {
-  return allLimits(providers)[0] ?? null;
+  return allLimits(providers.map((quota) => ({ ...quota, limits: wholeWindows(quota) })))[0] ?? null;
 }
 
 /** `95%`, `4%`, `0%`. Rounded **up** on purpose, mirroring how it used to round down when it

@@ -51,12 +51,23 @@ pub fn ai_usage_stats(db: State<Db>, window_hours: i64) -> Result<crate::ai_usag
 /// background timer must never do: on Windows that flashes a console window at whatever the user
 /// was doing. Anything unrecognised is treated as a poll, the most conservative of the three.
 ///
-/// **Only engines that are actually installed are asked.** The binary is resolved exactly as a run
-/// would resolve it — the user's `{provider}_binary_path` first, the engine's default second — and
-/// a provider whose CLI is nowhere on the machine is dropped before any credential is read. That
-/// is what stops the panel giving impossible advice: a leftover `auth.json` from an uninstalled CLI
-/// still answers "your token expired", and the row then told the user to run an engine they do not
-/// have. It also means nothing is spent probing engines this install does not use.
+/// **Two filters decide who is asked, and both are subtractive.**
+///
+/// *Routed.* Only providers this install actually sends work to — the global `ai_provider` plus
+/// every per-task override (see [`crate::commands::claude_cmd::routed_providers`]). An engine you
+/// do not route anything to has no bearing on whether you are about to run out of anything, so
+/// asking it spends a keychain prompt, an HTTPS call or a subprocess on a number nobody will act
+/// on, and then puts that number on screen where it competes with — and, in the status pill, can
+/// outrank — the plans you are actually using.
+///
+/// *Installed.* The binary is resolved exactly as a run would resolve it — the user's
+/// `{provider}_binary_path` first, the engine's default second — and a provider whose CLI is
+/// nowhere on the machine is dropped before any credential is read. That is what stops the panel
+/// giving impossible advice: a leftover `auth.json` from an uninstalled CLI still answers "your
+/// token expired", and the row then told the user to run an engine they do not have.
+///
+/// Order matters only for cost: routing is a few settings reads and installation is a filesystem
+/// walk per provider, so the cheap question goes first.
 #[tauri::command]
 pub async fn ai_quota_status(
     db: State<'_, Db>,
@@ -73,8 +84,10 @@ pub async fn ai_quota_status(
         // Scoped so the lock is released before the awaits below — the reads are a few settings
         // rows, and holding the global mutex across a network call would stall every other command.
         let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let routed = crate::commands::claude_cmd::routed_providers(&conn)?;
         crate::ai_quota::QUOTA_PROVIDERS
             .iter()
+            .filter(|provider| routed.contains(**provider))
             .filter_map(|provider| {
                 let configured = crate::db::queries::get_setting(&conn, &format!("{provider}_binary_path"))
                     .ok()

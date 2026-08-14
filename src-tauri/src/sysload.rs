@@ -20,11 +20,24 @@
 //! app a TCC prompt names and which app Activity Monitor files a helper under. See [`ours`] for the
 //! two rules that come out of it and [`responsible_for`] for the call behind them.
 //!
-//! **The memory figure is a sum of resident sizes, so it reads a little high.** Pages shared between
-//! processes — the frameworks all four of ours map — are counted once per process, where Activity
-//! Monitor's own column uses a footprint that excludes them. The alternative is per-process Mach
-//! calls for `phys_footprint`, which is a lot of machinery for a status bar; over-reporting the app
-//! slightly is the safer direction for a number whose job is to answer "is it us?".
+//! **The memory figure is what the OS itself bills each process for**, because that is the only
+//! definition anyone can check. On macOS it is `ri_phys_footprint`, the column Activity Monitor
+//! labels "Memory"; on Windows it is the private working set, the column Task Manager labels the
+//! same. Add up the rows either tool shows for the processes found below and the total is the number
+//! this panel draws.
+//!
+//! The obvious alternative — sysinfo's `memory()`, the resident size — is not wrong by a rounding
+//! error but by a factor: pages a process shares with its siblings are counted once *per process*,
+//! and a webview is six processes mapping the same runtime. Measured on Windows it answered 505 MB
+//! where Task Manager's own rows for those same seven processes summed to 211 MB, and a panel that
+//! cannot be reconciled with the tool the user already has open is a panel that is simply not
+//! believed. It stays on as the fallback in [`footprint`], for a process the native read cannot
+//! answer for and for the platforms with no implementation of it.
+//!
+//! What error is left runs the other way and is much smaller: a page shared between two of *our own*
+//! processes is private to neither, so Windows attributes it to nobody and the figure reads a little
+//! low. That is the same page Task Manager declines to bill anyone for, and agreeing with the OS is
+//! worth more here than a truer number that matches nothing on screen.
 //!
 //! Read natively, like [`crate::power`] beside it: no `top`, no `wmic`, no subprocess to flash a
 //! console window over the user's work on Windows.
@@ -233,7 +246,9 @@ fn app_share(system: &System) -> (f32, u64, usize) {
     for pid in &mine {
         if let Some(process) = system.process(*pid) {
             cpu += process.cpu_usage();
-            memory += process.memory();
+            // Resident size only when the OS declines to answer — see [`footprint`] and the module
+            // note above for why that is the fallback and not the reading.
+            memory += footprint(*pid).unwrap_or_else(|| process.memory());
             count += 1;
         }
     }
@@ -350,6 +365,116 @@ fn responsible_for(_pid: u32) -> Option<u32> {
     None
 }
 
+/// What the OS bills `pid` for, in bytes — the figure its own process monitor prints in that
+/// process's row. See the module note for why this and not the resident size beside it.
+///
+/// `None` means "ask sysinfo instead", and covers all three ways this can decline: a process that
+/// exited between the snapshot and this call, one this app is not allowed to open, and a platform
+/// with no implementation below. A hole in the sum would be a worse answer than a resident size.
+///
+/// Only ever called over the pid set in [`app_share`] — ours, so a handful — and only on polls that
+/// walk it at all, which are the ones with the panel open. That is what makes a per-process syscall
+/// affordable here when doing it for every process on the machine would not be.
+#[cfg(target_os = "macos")]
+fn footprint(pid: Pid) -> Option<u64> {
+    /// `struct rusage_info_v0` from `<sys/resource.h>`, field for field. Only the footprint is read;
+    /// the rest is here to put it at the offset the kernel writes it to.
+    #[repr(C)]
+    #[derive(Default)]
+    // Every field but one is here for its offset alone, which is not a thing the lint can see.
+    #[allow(dead_code)]
+    struct RusageInfoV0 {
+        ri_uuid: [u8; 16],
+        ri_user_time: u64,
+        ri_system_time: u64,
+        ri_pkg_idle_wkups: u64,
+        ri_interrupt_wkups: u64,
+        ri_pageins: u64,
+        ri_wired_size: u64,
+        ri_resident_size: u64,
+        ri_phys_footprint: u64,
+        ri_proc_start_abstime: u64,
+        ri_proc_exit_abstime: u64,
+    }
+
+    /// `RUSAGE_INFO_V0`. Asked for rather than the newest flavour because the footprint is already
+    /// in v0 and every later version only appends to it: the smallest structure that answers the
+    /// question is the one with the least surface to disagree with a future SDK over.
+    const RUSAGE_INFO_V0: i32 = 0;
+
+    // Public API since 10.9, and permitted for any process of the same user — which every process
+    // in our set is, the adopted XPC services included.
+    extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut std::ffi::c_void) -> i32;
+    }
+
+    let mut info = RusageInfoV0::default();
+    // Safe: the buffer is exactly the flavour being asked for, and it outlives the call. A pid that
+    // has exited answers non-zero rather than writing anywhere.
+    let ok = unsafe {
+        proc_pid_rusage(pid.as_u32() as i32, RUSAGE_INFO_V0, (&mut info as *mut RusageInfoV0).cast())
+    };
+    (ok == 0 && info.ri_phys_footprint > 0).then_some(info.ri_phys_footprint)
+}
+
+/// Windows: `PrivateWorkingSetSize` — the memory that is both resident and private to the process,
+/// which is what Task Manager's "Memory" column has shown since Windows 10.
+///
+/// **The zero is the version check.** `PROCESS_MEMORY_COUNTERS_EX2` is newer than the call that
+/// fills it, and `GetProcessMemoryInfo` writes only as far as the `cb` it is handed describes, so an
+/// older Windows fills the `EX` prefix it knows and leaves this field at the zero it was initialised
+/// to. Reading that as "no answer" costs nothing and needs no `GetVersionEx` and no manifest — and
+/// it can never discard a real reading, since a running process always has private pages.
+///
+/// `PROCESS_QUERY_LIMITED_INFORMATION` rather than `PROCESS_QUERY_INFORMATION`: it is all this call
+/// needs, and it is the one that still opens a process running at a different integrity level.
+#[cfg(windows)]
+fn footprint(pid: Pid) -> Option<u64> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    };
+
+    // Safe: a pid in, a handle or null out. Null for a process that has exited since the snapshot,
+    // or one this app may not open.
+    let process =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid.as_u32()) };
+    if process.is_null() {
+        return None;
+    }
+
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX2 {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32,
+        ..Default::default()
+    };
+    // Safe: the cast to the base structure is the one the API is documented to take — `cb` is how
+    // it is told which one it was really given — and the handle is live until it is closed below.
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            process,
+            (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX2).cast::<PROCESS_MEMORY_COUNTERS>(),
+            counters.cb,
+        )
+    };
+    // Closed on the failing path too: one leaked handle per process per poll, on a timer that runs
+    // for as long as the window is open, is a leak that outlives anything it was measuring.
+    unsafe { CloseHandle(process) };
+
+    (ok != 0 && counters.PrivateWorkingSetSize > 0).then_some(counters.PrivateWorkingSetSize as u64)
+}
+
+/// Everywhere else the resident sum stands, with the sibling double-count the module note describes.
+/// Linux can answer this exactly and cheaply — `Pss` in `/proc/<pid>/smaps_rollup` divides each
+/// shared page among the processes mapping it, so summing it over a tree counts every page once —
+/// and that is where this goes next.
+#[cfg(not(any(target_os = "macos", windows)))]
+fn footprint(_pid: Pid) -> Option<u64> {
+    None
+}
+
 /// The volume worth reporting: the one the user's home directory is on.
 ///
 /// Not `/` by name and not the biggest — the question behind "disk 92%" is "can I still clone
@@ -438,6 +563,86 @@ mod tests {
         // The test binary is itself the process tree's root, so this can never legitimately be 0.
         assert!(load.app_processes >= 1);
         assert!(load.app_mem > 0);
+    }
+
+    /// The native read has to actually answer, on the platform the test is running on.
+    ///
+    /// [`footprint`] falling back is silent by design — that is what makes it a fallback — so a
+    /// broken call, a revoked permission or a struct that drifted out of step with the SDK would put
+    /// the panel back on resident sizes and over-report the app by a factor without anything here
+    /// failing. This is the assertion that notices.
+    #[test]
+    #[cfg(any(target_os = "macos", windows))]
+    fn the_os_bills_this_process() {
+        let me = sysinfo::get_current_pid().expect("a running process has a pid");
+        let bytes = footprint(me).expect("the OS attributes memory to this test binary");
+
+        // A ceiling as well as a floor, because the failure worth catching here is a field read at
+        // the wrong offset, and that does not answer a wrong number — it answers a wild one. A test
+        // binary is megabytes: never kilobytes, and never sixteen gigabytes.
+        assert!(
+            ((1 << 20)..(1 << 34)).contains(&bytes),
+            "implausible footprint for this process: {bytes} bytes"
+        );
+    }
+
+    /// Prints the breakdown behind the panel's one figure, process by process, so it can be held up
+    /// against Activity Monitor or Task Manager *row for row*. An assertion can tell that
+    /// [`footprint`] answered; only this can tell that it answered the same thing the OS tells
+    /// everybody else, which is the entire claim the panel makes.
+    ///
+    /// Aimed at the test binary by default — a tree of one — so point it at a running app to see
+    /// the rules in [`ours`] collect a webview:
+    ///
+    /// ```text
+    /// SYSLOAD_PID=$(pgrep -x CodeFlow) \
+    ///   cargo test --lib sysload::tests::what_this_app_is_billed_for -- --ignored --nocapture
+    /// ```
+    ///
+    /// ```text
+    /// $env:SYSLOAD_PID = (Get-Process CodeFlow).Id
+    /// cargo test --lib sysload::tests::what_this_app_is_billed_for -- --ignored --nocapture
+    /// ```
+    ///
+    /// The rows to check it against are in Task Manager's *Details* tab, which needs the column
+    /// added by hand: right-click the header, *Select columns*, "Memory (private working set)". The
+    /// Processes tab shows the same figure, and its group total is a plain sum of these rows.
+    #[test]
+    #[ignore = "a report to read beside the OS's own tool, not an assertion"]
+    fn what_this_app_is_billed_for() {
+        let root = match std::env::var("SYSLOAD_PID") {
+            Ok(pid) => Pid::from_u32(pid.trim().parse().expect("SYSLOAD_PID is a pid")),
+            Err(_) => sysinfo::get_current_pid().expect("a running process has a pid"),
+        };
+
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_memory().with_exe(UpdateKind::OnlyIfNotSet),
+        );
+
+        let mb = |bytes: u64| format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0);
+        println!("{:>8}  {:>12}  {:>12}   process", "pid", "OS-billed", "resident");
+
+        let (mut billed_total, mut resident_total) = (0_u64, 0_u64);
+        for pid in ours(&system, root) {
+            let Some(process) = system.process(pid) else {
+                continue;
+            };
+            let billed = footprint(pid);
+            billed_total += billed.unwrap_or_else(|| process.memory());
+            resident_total += process.memory();
+            println!(
+                "{:>8}  {:>12}  {:>12}   {}",
+                pid.as_u32(),
+                billed.map_or_else(|| "(fallback)".to_string(), mb),
+                mb(process.memory()),
+                process.name().to_string_lossy(),
+            );
+        }
+        println!("{:>8}  {:>12}  {:>12}", "total", mb(billed_total), mb(resident_total));
+        println!("\nthe left column is the panel's figure; the right one is what it used to report");
     }
 
     /// The second read is the one that matters: it is the first that can carry a CPU delta, and the
