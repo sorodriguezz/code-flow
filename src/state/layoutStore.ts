@@ -33,7 +33,9 @@ export type LayoutKey =
   | "huReviewDraftCriteriaWidth"
   | "remoteSidebarWidth"
   | "remoteDetailsWidth"
-  | "remoteSftpLocalWidth";
+  | "remoteSftpLocalWidth"
+  | "notesSidebarWidth"
+  | "notesOutlineWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -68,6 +70,8 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   remoteSidebarWidth: "layout_remote_sidebar_width",
   remoteDetailsWidth: "layout_remote_details_width",
   remoteSftpLocalWidth: "layout_remote_sftp_local_width",
+  notesSidebarWidth: "layout_notes_sidebar_width",
+  notesOutlineWidth: "layout_notes_outline_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -120,6 +124,14 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // Only the *local* half is stored; the remote one takes what is left, for the reason the review
   // board's middle column does — two stored widths would have to keep adding up to the window.
   remoteSftpLocalWidth: 420,
+  // Wider than the host tree, and for the opposite reason: this one nests. A note four folders
+  // deep starts 64px in before its title does, so the width that leaves a readable title at depth
+  // four is the width that has to be the default.
+  notesSidebarWidth: 288,
+  // Narrow on purpose. The outline is headings, and a heading long enough to need more than this
+  // is one the note should have shortened — widening the rail to fit it would take the room from
+  // the prose, which is the thing being read.
+  notesOutlineWidth: 220,
 };
 
 /**

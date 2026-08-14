@@ -792,6 +792,9 @@ const en = {
   "backup.include.authored": "Documents and backlog",
   "backup.include.authoredHint":
     "What you wrote rather than what the app recorded: generated documents, story batches and drafts, and work item reviews.",
+  "backup.include.notes": "Notes",
+  "backup.include.notesHint":
+    "Markdown notes, their books and your saved templates. Separate from the documents above because a notebook is the most personal thing here \u2014 you may reasonably carry your specs and not your journal.",
   "backup.include.requestHistory": "Request and query history",
   "backup.include.requestHistoryHint":
     "Every request sent from the API client and every statement run in a SQL console. Useful to carry, and usually the first thing worth leaving out — on a busy install it is the largest part of the file and it changes constantly, which makes the scheduled backup re-upload everything far more often.",
@@ -2756,6 +2759,153 @@ const en = {
   "tabbar.remote": "Remote",
   "tabbar.remoteDescription": "SSH hosts, their shells, tunnels and screens — one inventory for the machines this workspace deploys to",
 
+  "tabbar.notes": "Notes",
+  "tabbar.notesDescription": "Markdown notes, books, tags and templates — the writing that surrounds this workspace's code",
+
+  "notes.title": "Notes",
+  "notes.untitled": "Untitled",
+  "notes.root": "Unfiled",
+  "notes.location": "Location",
+  "notes.noteTitle": "Note title",
+  "notes.newNote": "New note",
+  "notes.newNoteHere": "New note here",
+  "notes.newBook": "New book",
+  "notes.newSubbook": "New book inside",
+  "notes.newBookPrompt": "Book name",
+  "notes.renameBookPrompt": "New book name",
+  "notes.bookColor": "Colour",
+  "notes.noColor": "No colour",
+  "notes.rename": "Rename",
+  "notes.create": "Create",
+  "notes.save": "Save",
+  "notes.cancel": "Cancel",
+  "notes.close": "Close",
+  "notes.delete": "Delete",
+  "notes.duplicate": "Duplicate",
+  "notes.copyOf": "Copy of {name}",
+  "notes.pin": "Pin",
+  "notes.unpin": "Unpin",
+  "notes.moreActions": "More actions",
+  "notes.exportMarkdown": "Export as .md…",
+  "notes.deleteNoteConfirm": "Delete \u201c{name}\u201d? This cannot be undone.",
+  "notes.deleteBook": "Delete book",
+  "notes.deleteBookConfirm": "Delete the book \u201c{name}\u201d?",
+  "notes.deleteBookWithNotes":
+    "Delete the book \u201c{name}\u201d and the books inside it? The {count} note(s) it holds are kept \u2014 they move to the shelf root, where you can refile them.",
+
+  "notes.searchPlaceholder": "Search notes and their contents",
+  "notes.clearSearch": "Clear search",
+  "notes.clearFilters": "Clear",
+  "notes.tags": "Tags",
+  "notes.addTag": "Add tag",
+  "notes.removeTag": "Remove the tag {tag}",
+  "notes.removeTagFilter": "Stop filtering by {tag}",
+  "notes.noMatches": "Nothing matches",
+  "notes.noMatchesHint": "Try fewer words, or clear the tag filters.",
+  "notes.treeEmpty": "No notes yet.",
+  "notes.noteCount": "{n} note(s)",
+  "notes.matchCount": "{n} match(es)",
+  "notes.sortBy": "Sort by",
+  "notes.sortUpdated": "Last edited",
+  "notes.sortCreated": "Created",
+  "notes.sortTitle": "Title",
+  "notes.sortWords": "Length",
+
+  "notes.emptyTitle": "Nothing written yet",
+  "notes.emptySubtitle": "Notes live with the workspace, not with a repository \u2014 decisions, runbooks, meetings, whatever is worth keeping.",
+  "notes.noWorkspaceTitle": "No workspace selected",
+  "notes.noWorkspaceSubtitle": "Notes belong to a workspace. Pick one to start writing.",
+  "notes.previewEmpty": "The preview appears here as you write.",
+  "notes.outline": "Outline",
+  "notes.outlineEmpty": "Add a heading and it will show up here.",
+  "notes.formatting": "Formatting",
+  "notes.modeEditor": "Editor",
+  "notes.modeSplit": "Split",
+  "notes.modePreview": "Preview",
+  "notes.wordCount": "{n} word(s)",
+  "notes.charCount": "{n} character(s)",
+  "notes.readingTime": "{n} min read",
+  "notes.saving": "Saving\u2026",
+  "notes.unsaved": "Unsaved",
+  "notes.savedAt": "Saved {when}",
+
+  "notes.ai.titleWrite": "Write with AI",
+  "notes.ai.titleReplace": "Rewrite with AI",
+  "notes.ai.runKind": "Writing a note",
+  "notes.ai.willReplace": "This will be replaced",
+  "notes.ai.instruction": "What should it write?",
+  "notes.ai.instructionPlaceholder": "A section explaining how the retry budget works, with an example",
+  "notes.ai.engine": "Engine",
+  "notes.ai.provider": "Provider",
+  "notes.ai.model": "Model",
+  "notes.ai.defaultEngine": "App default",
+  "notes.ai.defaultModel": "Default version",
+  "notes.ai.write": "Write",
+  "notes.ai.writing": "Writing\u2026",
+  "notes.ai.stop": "Stop",
+  "notes.ai.undoHint":
+    "What comes back is inserted at the caret \u2014 or over the selection \u2014 as a single edit, so one undo takes it back out. Nothing is saved over.",
+  "notes.ai.action": "Write with AI",
+
+  "notes.linkMissing": "No note with this title",
+  "notes.linkHint": "Type [[ to reference another note",
+  "notes.copyCode": "Copy code",
+  "notes.codeCopied": "Code copied",
+  "notes.copyFailed": "Could not copy to the clipboard",
+
+  "notes.tool.strike": "Strikethrough",
+  "notes.tool.h1": "Heading 1",
+  "notes.tool.h2": "Heading 2",
+  "notes.tool.h3": "Heading 3",
+  "notes.tool.task": "Task list",
+  "notes.tool.image": "Image (URL)",
+  "notes.imageUrlsOnly":
+    "Notes link images by URL — paste an https:// address instead. A picture stored on this computer would not travel with your backups.",
+  "notes.tool.table": "Table",
+  "notes.tool.codeBlock": "Code block",
+  "notes.tool.rule": "Divider",
+
+  "notes.templates": "Templates",
+  "notes.builtInTemplates": "Included",
+  "notes.myTemplates": "Mine",
+  "notes.noTemplates": "No templates yet.",
+  "notes.useTemplate": "Use template",
+  "notes.duplicateToMine": "Duplicate to mine",
+  "notes.saveAsTemplate": "Save as template",
+  "notes.templateName": "Name",
+  "notes.templateNamePlaceholder": "Weekly one-to-one",
+  "notes.templateDescription": "Description",
+  "notes.templateDescriptionPlaceholder": "What this template is for",
+  "notes.templateIcon": "Icon",
+  "notes.templateVariablesHint":
+    "The body is saved as it is. {{date}}, {{time}}, {{datetime}} and {{title}} are filled in each time a note is made from it.",
+  "notes.deleteTemplateConfirm": "Delete the template \u201c{name}\u201d?",
+
+  "notes.tpl.meeting.name": "Meeting",
+  "notes.tpl.meeting.desc": "Attendees, agenda, decisions and who does what next.",
+  "notes.tpl.meeting.body":
+    "# Meeting \u2014 {{date}}\n\n**When:** {{datetime}}\n**Attendees:** \n\n## Agenda\n\n- \n\n## Notes\n\n\n## Decisions\n\n- \n\n## Next steps\n\n- [ ] \n",
+  "notes.tpl.daily.name": "Daily note",
+  "notes.tpl.daily.desc": "What today is for, what happened, what is left over.",
+  "notes.tpl.daily.body":
+    "# {{date}}\n\n## Today\n\n- [ ] \n\n## Notes\n\n\n## Carried over\n\n- \n",
+  "notes.tpl.decision.name": "Technical decision",
+  "notes.tpl.decision.desc": "An ADR: the context, the options weighed, what was chosen and what it costs.",
+  "notes.tpl.decision.body":
+    "# {{title}}\n\n**Date:** {{date}}\n**Status:** proposed\n\n## Context\n\nWhat forced a decision here, and what constraints are real.\n\n## Options\n\n### A. \n\n- Pros: \n- Cons: \n\n### B. \n\n- Pros: \n- Cons: \n\n## Decision\n\n\n## Consequences\n\nWhat this makes easy, and what it makes expensive later.\n",
+  "notes.tpl.runbook.name": "Runbook",
+  "notes.tpl.runbook.desc": "Symptoms, checks and the steps to take when this breaks at 3am.",
+  "notes.tpl.runbook.body":
+    "# Runbook \u2014 {{title}}\n\n## Symptoms\n\nHow you know this is the problem you have.\n\n## First checks\n\n1. \n\n## Fix\n\n```sh\n\n```\n\n## If that did not work\n\n\n## Who to wake\n\n",
+  "notes.tpl.spec.name": "Feature brief",
+  "notes.tpl.spec.desc": "The problem, who has it, what done looks like.",
+  "notes.tpl.spec.body":
+    "# {{title}}\n\n## Problem\n\nWho has this problem, and what they do today instead.\n\n## Proposal\n\n\n## Out of scope\n\n- \n\n## Done when\n\n- [ ] \n\n## Open questions\n\n- \n",
+  "notes.tpl.retro.name": "Retrospective",
+  "notes.tpl.retro.desc": "What worked, what did not, and the one thing to change.",
+  "notes.tpl.retro.body":
+    "# Retrospective \u2014 {{date}}\n\n## Went well\n\n- \n\n## Did not\n\n- \n\n## Puzzles\n\n- \n\n## One change for next time\n\n- [ ] \n",
+
   "remote.hosts": "Hosts",
   "remote.newHostName": "New host",
   "remote.newConnection": "New connection",
@@ -4641,6 +4791,7 @@ const en = {
   "tour.chapter.agents": "Agents",
   "tour.chapter.stories": "Specs",
   "tour.chapter.remote": "Remote",
+  "tour.chapter.notes": "Notes",
 
   // ── The main window ──────────────────────────────────────────────────────────────────────
   "tour.welcome.title": "Welcome to CodeFlow",
@@ -4679,9 +4830,9 @@ const en = {
   "tour.terminal.body":
     "A real shell, docked under the view and opened from this button. It starts in the folder of the selected repository, keeps its own set of tabs per repository, and survives switching views — a build left running keeps running while you read a diff. Drag its top edge to make it taller.",
 
-  "tour.workspaceApps.title": "The five apps, and a tour for each",
+  "tour.workspaceApps.title": "The six apps, and a tour for each",
   "tour.workspaceApps.body":
-    "Everything in this menu belongs to the workspace rather than to one repository — which is exactly why it is not a tab beside the other three: switching repository does not change what is in here. Five apps live in it. The API client sends HTTP; Databases connects to your databases; Agents runs AI tasks on their own; Specs turns documentation into a backlog and back again; Remote holds the machines you deploy to. Each is a screen in its own right, and that is what the graduation cap beside the menu is for: it opens a detailed tour of whichever of the five is on screen — its panels, what each one does, and where in Settings it is configured. Open a different app and the cap follows. That is where the rest of this walk-through lives: one app at a time, when you need it, instead of all five now.",
+    "Everything in this menu belongs to the workspace rather than to one repository — which is exactly why it is not a tab beside the other three: switching repository does not change what is in here. Six apps live in it. The API client sends HTTP; Databases connects to your databases; Agents runs AI tasks on their own; Specs turns documentation into a backlog and back again; Remote holds the machines you deploy to; Notes is the Markdown notebook — books, tags and templates for the decisions, runbooks and meetings that surround the code. Each is a screen in its own right, and that is what the graduation cap beside the menu is for: it opens a detailed tour of whichever of them is on screen — its panels, what each one does, and where in Settings it is configured. Open a different app and the cap follows. That is where the rest of this walk-through lives: one app at a time, when you need it, instead of all six now.",
 
   "tour.settingsAi.title": "Settings, and the AI models",
   "tour.settingsAi.body":
@@ -4888,6 +5039,28 @@ const en = {
   "tour.remote.done.title": "That is Remote",
   "tour.remote.done.body":
     "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening the API client or Specs from the menu beside it gives you that one's tour instead.",
+
+  "tour.notes.intro.title": "Everything you write that isn't code",
+  "tour.notes.intro.body":
+    "A Markdown notebook that belongs to the workspace, not to a repository — the decision you argued out in March, the runbook for the 3am page, last Tuesday's meeting. It saves as you type; there is no save button and nothing to lose. The list on the left is what you have written, the pane on the right is where you write it, and the two things worth knowing about are the search box and the templates — both a few steps away.",
+  "tour.notes.tree.title": "Books, and what deleting one does",
+  "tour.notes.tree.body":
+    "A book is a shelf of notes, and books nest as deep as you like. Drag a note onto a book to file it, drag a book onto another to move it with everything inside, and drop onto the empty strip under the tree to pull something back out to the shelf root. The part worth reading twice: **deleting a book never deletes the notes in it.** The book and the books inside it go; the writing surfaces at the root, where you can see it and refile it. Throwing away a note stays a separate, explicit act.",
+  "tour.notes.search.title": "It reads the notes, not just their titles",
+  "tour.notes.search.body":
+    "Titles and tags filter as you type, with no delay at all — that list is already in memory. Bodies are searched in the database a moment later, and a note that matched on its *contents* shows you the sentence that matched instead of its opening line. So \"what was that thing about the retry budget\" is a question you can actually ask, without remembering which note you put it in.",
+  "tour.notes.tags.title": "Tags cut across the books",
+  "tour.notes.tags.body":
+    "A book is one place; a tag is every place. Add them under the title of any note — the field completes against the tags you already use, which is the whole point: it is what stops `deploy`, `deploys` and `deployment` becoming three tags for one idea. Every tag in the workspace is listed at the foot of this sidebar with its count. Click to filter, click more than one to narrow further.",
+  "tour.notes.editor.title": "Write, split, or read",
+  "tour.notes.editor.body":
+    "Three modes in the header: the editor alone, the editor beside a live preview, or the preview alone for reading. The toolbar's marks toggle — press Bold on bold text and it comes off — and the table, code-block and rule buttons drop in the shapes nobody remembers the syntax of. The outline button opens a rail of the note's headings, which is how you move around something long. Along the bottom: words, characters, reading time, and whether the last keystroke is saved yet.",
+  "tour.notes.templates.title": "Start from a shape, not a blank page",
+  "tour.notes.templates.body":
+    "Six templates ship with the app — meeting, daily note, technical decision, runbook, feature brief, retrospective — and they fill in `{{date}}` and `{{title}}` as they open. Any note you write can become one of your own from its ⋯ menu, placeholders included. That is most of what makes a notebook get used: the second time you write a meeting note, you shouldn't have to remember how you laid out the first.",
+  "tour.notes.done.title": "That's Notes",
+  "tour.notes.done.body":
+    "Anything you write is saved as you go and travels with your backups. A note can be exported as a plain `.md` from its ⋯ menu, so nothing here is locked in. This tour is always in the cap beside the app rail if you want it again.",
 } as const;
 
 export type Language = "en" | "es";

@@ -785,6 +785,9 @@ export const es = {
   "backup.include.authored": "Documentos y backlog",
   "backup.include.authoredHint":
     "Lo que escribiste, no lo que la app registró: documentos generados, lotes y borradores de historias, y revisiones de work items.",
+  "backup.include.notes": "Notas",
+  "backup.include.notesHint":
+    "Notas en Markdown, sus libros y tus plantillas guardadas. Aparte de los documentos de arriba porque un cuaderno es lo m\u00e1s personal que hay aqu\u00ed \u2014 puedes querer llevarte tus especificaciones y no tu diario.",
   "backup.include.requestHistory": "Historial de peticiones y consultas",
   "backup.include.requestHistoryHint":
     "Cada petición enviada desde el cliente de API y cada sentencia ejecutada en una consola SQL. Útil de llevar, y normalmente lo primero que conviene dejar fuera — en una instalación con uso intenso es la parte más grande del archivo y cambia constantemente, lo que hace que el respaldo programado vuelva a subir todo mucho más seguido.",
@@ -2727,6 +2730,153 @@ export const es = {
   "tabbar.remote": "Remoto",
   "tabbar.remoteDescription": "Hosts SSH, sus shells, túneles y pantallas — un solo inventario de las máquinas donde despliega este espacio de trabajo",
 
+  "tabbar.notes": "Notas",
+  "tabbar.notesDescription": "Notas en Markdown, libros, etiquetas y plantillas \u2014 lo que se escribe alrededor del c\u00f3digo de este espacio de trabajo",
+
+  "notes.title": "Notas",
+  "notes.untitled": "Sin t\u00edtulo",
+  "notes.root": "Sin libro",
+  "notes.location": "Ubicaci\u00f3n",
+  "notes.noteTitle": "T\u00edtulo de la nota",
+  "notes.newNote": "Nueva nota",
+  "notes.newNoteHere": "Nueva nota aqu\u00ed",
+  "notes.newBook": "Nuevo libro",
+  "notes.newSubbook": "Nuevo libro dentro",
+  "notes.newBookPrompt": "Nombre del libro",
+  "notes.renameBookPrompt": "Nuevo nombre del libro",
+  "notes.bookColor": "Color",
+  "notes.noColor": "Sin color",
+  "notes.rename": "Renombrar",
+  "notes.create": "Crear",
+  "notes.save": "Guardar",
+  "notes.cancel": "Cancelar",
+  "notes.close": "Cerrar",
+  "notes.delete": "Eliminar",
+  "notes.duplicate": "Duplicar",
+  "notes.copyOf": "Copia de {name}",
+  "notes.pin": "Fijar",
+  "notes.unpin": "Dejar de fijar",
+  "notes.moreActions": "M\u00e1s acciones",
+  "notes.exportMarkdown": "Exportar como .md\u2026",
+  "notes.deleteNoteConfirm": "\u00bfEliminar \u201c{name}\u201d? No se puede deshacer.",
+  "notes.deleteBook": "Eliminar libro",
+  "notes.deleteBookConfirm": "\u00bfEliminar el libro \u201c{name}\u201d?",
+  "notes.deleteBookWithNotes":
+    "\u00bfEliminar el libro \u201c{name}\u201d y los libros que contiene? Las {count} nota(s) que guarda se conservan \u2014 pasan a la ra\u00edz de la estanter\u00eda, donde puedes volver a archivarlas.",
+
+  "notes.searchPlaceholder": "Buscar notas y su contenido",
+  "notes.clearSearch": "Limpiar b\u00fasqueda",
+  "notes.clearFilters": "Limpiar",
+  "notes.tags": "Etiquetas",
+  "notes.addTag": "A\u00f1adir etiqueta",
+  "notes.removeTag": "Quitar la etiqueta {tag}",
+  "notes.removeTagFilter": "Dejar de filtrar por {tag}",
+  "notes.noMatches": "Nada coincide",
+  "notes.noMatchesHint": "Prueba con menos palabras, o quita los filtros de etiqueta.",
+  "notes.treeEmpty": "A\u00fan no hay notas.",
+  "notes.noteCount": "{n} nota(s)",
+  "notes.matchCount": "{n} coincidencia(s)",
+  "notes.sortBy": "Ordenar por",
+  "notes.sortUpdated": "\u00daltima edici\u00f3n",
+  "notes.sortCreated": "Creaci\u00f3n",
+  "notes.sortTitle": "T\u00edtulo",
+  "notes.sortWords": "Extensi\u00f3n",
+
+  "notes.emptyTitle": "A\u00fan no has escrito nada",
+  "notes.emptySubtitle": "Las notas viven con el espacio de trabajo, no con un repositorio \u2014 decisiones, runbooks, reuniones, lo que valga la pena guardar.",
+  "notes.noWorkspaceTitle": "Ning\u00fan espacio de trabajo seleccionado",
+  "notes.noWorkspaceSubtitle": "Las notas pertenecen a un espacio de trabajo. Elige uno para empezar a escribir.",
+  "notes.previewEmpty": "La vista previa aparece aqu\u00ed mientras escribes.",
+  "notes.outline": "Esquema",
+  "notes.outlineEmpty": "A\u00f1ade un encabezado y aparecer\u00e1 aqu\u00ed.",
+  "notes.formatting": "Formato",
+  "notes.modeEditor": "Editor",
+  "notes.modeSplit": "Dividido",
+  "notes.modePreview": "Vista previa",
+  "notes.wordCount": "{n} palabra(s)",
+  "notes.charCount": "{n} car\u00e1cter(es)",
+  "notes.readingTime": "{n} min de lectura",
+  "notes.saving": "Guardando\u2026",
+  "notes.unsaved": "Sin guardar",
+  "notes.savedAt": "Guardado {when}",
+
+  "notes.ai.titleWrite": "Escribir con IA",
+  "notes.ai.titleReplace": "Reescribir con IA",
+  "notes.ai.runKind": "Escribiendo una nota",
+  "notes.ai.willReplace": "Esto se va a sustituir",
+  "notes.ai.instruction": "\u00bfQu\u00e9 quieres que escriba?",
+  "notes.ai.instructionPlaceholder": "Una secci\u00f3n que explique c\u00f3mo funciona el presupuesto de reintentos, con un ejemplo",
+  "notes.ai.engine": "Motor",
+  "notes.ai.provider": "Proveedor",
+  "notes.ai.model": "Modelo",
+  "notes.ai.defaultEngine": "El de la app",
+  "notes.ai.defaultModel": "Versi\u00f3n por defecto",
+  "notes.ai.write": "Escribir",
+  "notes.ai.writing": "Escribiendo\u2026",
+  "notes.ai.stop": "Detener",
+  "notes.ai.undoHint":
+    "Lo que llegue se inserta en el cursor \u2014 o sobre la selecci\u00f3n \u2014 como una sola edici\u00f3n, as\u00ed que un deshacer lo quita. No se sobrescribe nada.",
+  "notes.ai.action": "Escribir con IA",
+
+  "notes.linkMissing": "No hay ninguna nota con ese t\u00edtulo",
+  "notes.linkHint": "Escribe [[ para referenciar otra nota",
+  "notes.copyCode": "Copiar c\u00f3digo",
+  "notes.codeCopied": "C\u00f3digo copiado",
+  "notes.copyFailed": "No se pudo copiar al portapapeles",
+
+  "notes.tool.strike": "Tachado",
+  "notes.tool.h1": "Encabezado 1",
+  "notes.tool.h2": "Encabezado 2",
+  "notes.tool.h3": "Encabezado 3",
+  "notes.tool.task": "Lista de tareas",
+  "notes.tool.image": "Imagen (URL)",
+  "notes.imageUrlsOnly":
+    "Las notas enlazan imágenes por URL — pega una dirección https:// en su lugar. Una imagen guardada en este computador no viajaría con tus respaldos.",
+  "notes.tool.table": "Tabla",
+  "notes.tool.codeBlock": "Bloque de c\u00f3digo",
+  "notes.tool.rule": "Separador",
+
+  "notes.templates": "Plantillas",
+  "notes.builtInTemplates": "Incluidas",
+  "notes.myTemplates": "M\u00edas",
+  "notes.noTemplates": "A\u00fan no hay plantillas.",
+  "notes.useTemplate": "Usar plantilla",
+  "notes.duplicateToMine": "Duplicar en las m\u00edas",
+  "notes.saveAsTemplate": "Guardar como plantilla",
+  "notes.templateName": "Nombre",
+  "notes.templateNamePlaceholder": "Uno a uno semanal",
+  "notes.templateDescription": "Descripci\u00f3n",
+  "notes.templateDescriptionPlaceholder": "Para qu\u00e9 sirve esta plantilla",
+  "notes.templateIcon": "Icono",
+  "notes.templateVariablesHint":
+    "El cuerpo se guarda tal cual. {{date}}, {{time}}, {{datetime}} y {{title}} se rellenan cada vez que creas una nota a partir de ella.",
+  "notes.deleteTemplateConfirm": "\u00bfEliminar la plantilla \u201c{name}\u201d?",
+
+  "notes.tpl.meeting.name": "Reuni\u00f3n",
+  "notes.tpl.meeting.desc": "Asistentes, agenda, decisiones y qui\u00e9n hace qu\u00e9 despu\u00e9s.",
+  "notes.tpl.meeting.body":
+    "# Reuni\u00f3n \u2014 {{date}}\n\n**Cu\u00e1ndo:** {{datetime}}\n**Asistentes:** \n\n## Agenda\n\n- \n\n## Notas\n\n\n## Decisiones\n\n- \n\n## Pr\u00f3ximos pasos\n\n- [ ] \n",
+  "notes.tpl.daily.name": "Nota diaria",
+  "notes.tpl.daily.desc": "Para qu\u00e9 es hoy, qu\u00e9 pas\u00f3, qu\u00e9 queda pendiente.",
+  "notes.tpl.daily.body":
+    "# {{date}}\n\n## Hoy\n\n- [ ] \n\n## Notas\n\n\n## Viene de ayer\n\n- \n",
+  "notes.tpl.decision.name": "Decisi\u00f3n t\u00e9cnica",
+  "notes.tpl.decision.desc": "Un ADR: el contexto, las opciones evaluadas, qu\u00e9 se eligi\u00f3 y qu\u00e9 cuesta.",
+  "notes.tpl.decision.body":
+    "# {{title}}\n\n**Fecha:** {{date}}\n**Estado:** propuesta\n\n## Contexto\n\nQu\u00e9 oblig\u00f3 a decidir aqu\u00ed, y qu\u00e9 restricciones son reales.\n\n## Opciones\n\n### A. \n\n- A favor: \n- En contra: \n\n### B. \n\n- A favor: \n- En contra: \n\n## Decisi\u00f3n\n\n\n## Consecuencias\n\nQu\u00e9 vuelve f\u00e1cil, y qu\u00e9 encarece m\u00e1s adelante.\n",
+  "notes.tpl.runbook.name": "Runbook",
+  "notes.tpl.runbook.desc": "S\u00edntomas, comprobaciones y pasos para cuando esto se rompe a las 3 de la ma\u00f1ana.",
+  "notes.tpl.runbook.body":
+    "# Runbook \u2014 {{title}}\n\n## S\u00edntomas\n\nC\u00f3mo sabes que este es el problema que tienes.\n\n## Primeras comprobaciones\n\n1. \n\n## Soluci\u00f3n\n\n```sh\n\n```\n\n## Si eso no funcion\u00f3\n\n\n## A qui\u00e9n despertar\n\n",
+  "notes.tpl.spec.name": "Resumen de funcionalidad",
+  "notes.tpl.spec.desc": "El problema, qui\u00e9n lo tiene, y c\u00f3mo se ve terminado.",
+  "notes.tpl.spec.body":
+    "# {{title}}\n\n## Problema\n\nQui\u00e9n tiene este problema, y qu\u00e9 hace hoy en su lugar.\n\n## Propuesta\n\n\n## Fuera de alcance\n\n- \n\n## Terminado cuando\n\n- [ ] \n\n## Preguntas abiertas\n\n- \n",
+  "notes.tpl.retro.name": "Retrospectiva",
+  "notes.tpl.retro.desc": "Qu\u00e9 funcion\u00f3, qu\u00e9 no, y la \u00fanica cosa que cambiar.",
+  "notes.tpl.retro.body":
+    "# Retrospectiva \u2014 {{date}}\n\n## Fue bien\n\n- \n\n## No fue bien\n\n- \n\n## Dudas\n\n- \n\n## Un cambio para la pr\u00f3xima\n\n- [ ] \n",
+
   "remote.hosts": "Hosts",
   "remote.newHostName": "Nuevo host",
   "remote.newConnection": "Nueva conexión",
@@ -4612,6 +4762,7 @@ export const es = {
   "tour.chapter.agents": "Agentes",
   "tour.chapter.stories": "Especificaciones",
   "tour.chapter.remote": "Remoto",
+  "tour.chapter.notes": "Notas",
 
   // ── La ventana principal ─────────────────────────────────────────────────────────────────
   "tour.welcome.title": "Te damos la bienvenida a CodeFlow",
@@ -4650,9 +4801,9 @@ export const es = {
   "tour.terminal.body":
     "Una shell de verdad, acoplada bajo la vista y que se abre desde este botón. Arranca en la carpeta del repositorio seleccionado, mantiene sus propias pestañas por repositorio y sobrevive a los cambios de vista: una compilación que dejaste corriendo sigue corriendo mientras lees un diff. Arrastra su borde superior para hacerla más alta.",
 
-  "tour.workspaceApps.title": "Las cinco apps, y un tour para cada una",
+  "tour.workspaceApps.title": "Las seis apps, y un tour para cada una",
   "tour.workspaceApps.body":
-    "Todo lo que hay en este menú pertenece al workspace y no a un repositorio en particular, y por eso no es una pestaña junto a las otras tres: cambiar de repositorio no cambia lo que hay aquí dentro. Viven cinco apps. El cliente de API envía HTTP; Bases de datos se conecta a tus bases; Agentes ejecuta tareas de IA por su cuenta; Especificaciones convierte documentación en backlog y de vuelta; Remoto guarda las máquinas a las que despliegas. Cada una es una pantalla completa, y para eso está el birrete que ves junto al menú: abre un tour detallado de la que tengas en pantalla — sus paneles, qué hace cada uno y dónde se configura en Ajustes. Abre otra app y el birrete la sigue. Ahí está el resto de este recorrido: de a una app y cuando lo necesites, en vez de las cinco ahora.",
+    "Todo lo que hay en este menú pertenece al workspace y no a un repositorio en particular, y por eso no es una pestaña junto a las otras tres: cambiar de repositorio no cambia lo que hay aquí dentro. Viven seis apps. El cliente de API envía HTTP; Bases de datos se conecta a tus bases; Agentes ejecuta tareas de IA por su cuenta; Especificaciones convierte documentación en backlog y de vuelta; Remoto guarda las máquinas a las que despliegas; Notas es el cuaderno en Markdown — libros, etiquetas y plantillas para las decisiones, los runbooks y las reuniones que rodean al código. Cada una es una pantalla completa, y para eso está el birrete que ves junto al menú: abre un tour detallado de la que tengas en pantalla — sus paneles, qué hace cada uno y dónde se configura en Ajustes. Abre otra app y el birrete la sigue. Ahí está el resto de este recorrido: de a una app y cuando lo necesites, en vez de las seis ahora.",
 
   "tour.settingsAi.title": "Configuración, y los modelos de IA",
   "tour.settingsAi.body":
@@ -4859,4 +5010,26 @@ export const es = {
   "tour.remote.done.title": "Eso es Remoto",
   "tour.remote.done.body":
     "Pulsa este botón de nuevo cuando quieras repetir el recorrido. Sigue a la app que tengas en pantalla, así que si abres el cliente de API o Especificaciones desde el menú de al lado te da el tour de esa.",
+
+  "tour.notes.intro.title": "Todo lo que escribes que no es código",
+  "tour.notes.intro.body":
+    "Un cuaderno en Markdown que pertenece al espacio de trabajo, no a un repositorio — la decisión que discutiste en marzo, el runbook de la llamada de las 3 de la mañana, la reunión del martes pasado. Se guarda mientras escribes; no hay botón de guardar ni nada que perder. La lista de la izquierda es lo que has escrito, el panel de la derecha es donde lo escribes, y las dos cosas que vale la pena conocer son el buscador y las plantillas — ambas a unos pasos de aquí.",
+  "tour.notes.tree.title": "Libros, y qué pasa al eliminar uno",
+  "tour.notes.tree.body":
+    "Un libro es un estante de notas, y los libros se anidan tanto como quieras. Arrastra una nota sobre un libro para archivarla, arrastra un libro sobre otro para moverlo con todo lo que contiene, y suelta en la franja vacía bajo el árbol para sacar algo de vuelta a la raíz de la estantería. La parte que conviene leer dos veces: **eliminar un libro nunca elimina las notas que hay dentro.** El libro y los libros que contiene se van; lo escrito aparece en la raíz, donde puedes verlo y volver a archivarlo. Tirar una nota sigue siendo un acto aparte y explícito.",
+  "tour.notes.search.title": "Lee las notas, no solo sus títulos",
+  "tour.notes.search.body":
+    "Los títulos y las etiquetas se filtran mientras escribes, sin ninguna espera — esa lista ya está en memoria. Los cuerpos se buscan en la base de datos un instante después, y una nota que coincidió por su *contenido* te muestra la frase que coincidió en lugar de su primera línea. Así que \"qué era aquello del presupuesto de reintentos\" es una pregunta que puedes hacer de verdad, sin recordar en qué nota lo pusiste.",
+  "tour.notes.tags.title": "Las etiquetas cruzan los libros",
+  "tour.notes.tags.body":
+    "Un libro es un lugar; una etiqueta son todos. Añádelas bajo el título de cualquier nota — el campo autocompleta con las que ya usas, que es justamente el punto: es lo que evita que `deploy`, `deploys` y `deployment` acaben siendo tres etiquetas para una sola idea. Todas las etiquetas del espacio de trabajo están al pie de esta barra lateral con su recuento. Haz clic para filtrar, y en más de una para acotar.",
+  "tour.notes.editor.title": "Escribir, dividir o leer",
+  "tour.notes.editor.body":
+    "Tres modos en la cabecera: solo el editor, el editor junto a una vista previa en vivo, o solo la vista previa para leer. Las marcas de la barra alternan — pulsa Negrita sobre texto en negrita y se quita — y los botones de tabla, bloque de código y separador insertan las formas cuya sintaxis nadie recuerda. El botón de esquema abre una columna con los encabezados de la nota, que es como te mueves por algo largo. Abajo del todo: palabras, caracteres, tiempo de lectura y si la última tecla ya está guardada.",
+  "tour.notes.templates.title": "Empieza desde una forma, no desde una página en blanco",
+  "tour.notes.templates.body":
+    "La app trae seis plantillas — reunión, nota diaria, decisión técnica, runbook, resumen de funcionalidad y retrospectiva — y rellenan `{{date}}` y `{{title}}` al abrirse. Cualquier nota que escribas puede convertirse en una plantilla tuya desde su menú ⋯, con placeholders incluidos. Eso es buena parte de lo que hace que un cuaderno se use: la segunda vez que escribes un acta de reunión no deberías tener que recordar cómo montaste la primera.",
+  "tour.notes.done.title": "Eso es Notas",
+  "tour.notes.done.body":
+    "Todo lo que escribas se guarda sobre la marcha y viaja con tus copias de seguridad. Una nota se puede exportar como `.md` normal desde su menú ⋯, así que aquí nada queda encerrado. Este tour está siempre en el birrete junto a la barra de apps si lo quieres otra vez.",
 } satisfies Record<TranslationKey, string>;

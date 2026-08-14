@@ -4,6 +4,7 @@ pub mod api_sync;
 pub mod datasource_queries;
 pub mod migrations;
 pub mod models;
+pub mod note_queries;
 pub mod queries;
 pub mod remote_queries;
 

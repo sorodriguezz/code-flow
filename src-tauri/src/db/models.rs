@@ -1009,3 +1009,99 @@ pub struct RemoteWorkspaceTree {
     pub groups: Vec<RemoteGroupRow>,
     pub snippets: Vec<RemoteSnippet>,
 }
+
+// ---------------------------------------------------------------------------
+// Notes workspace
+// ---------------------------------------------------------------------------
+
+/// A book in the note tree — a shelf, nestable. `parent_id` is `None` at the top level.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteBookRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub parent_id: Option<String>,
+    pub name: String,
+    pub color: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A note **without its body** — every column of `notes` except `content`.
+///
+/// This is what the tree, the gallery and the tag counts are built from, and it is a separate type
+/// from [`NoteRow`] rather than one with an optional field so that "the list does not carry
+/// bodies" is enforced by the compiler instead of by remembering. See the `notes` table comment.
+///
+/// `excerpt` and `word_count` are here precisely because of that: they are the two things a list
+/// wants from a body it is not allowed to have.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteMeta {
+    pub id: String,
+    pub workspace_id: String,
+    pub book_id: Option<String>,
+    pub title: String,
+    pub excerpt: String,
+    /// JSON array of strings, verbatim as stored.
+    pub tags: String,
+    pub pinned: bool,
+    pub word_count: i64,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One note, body included. Fetched one at a time by [`super::note_queries::get_note`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub book_id: Option<String>,
+    pub title: String,
+    pub content: String,
+    pub excerpt: String,
+    pub tags: String,
+    pub pinned: bool,
+    pub word_count: i64,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A note skeleton the user saved to start from again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteTemplateRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub description: String,
+    /// A lucide icon name.
+    pub icon: String,
+    pub content: String,
+    pub tags: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Everything the Notes workspace needs on load, in one round trip — and no note bodies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotesWorkspaceTree {
+    pub notes: Vec<NoteMeta>,
+    pub books: Vec<NoteBookRow>,
+    pub templates: Vec<NoteTemplateRow>,
+}
+
+/// A note whose *body* matched a search, with the matching stretch of it.
+///
+/// Only bodies produce these. A title or tag match needs no round trip — the frontend already
+/// holds every [`NoteMeta`] and filters them as the user types; see `note_queries::search_notes`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteSearchHit {
+    pub id: String,
+    /// A window of the body around the first match, with the surrounding words for context.
+    pub snippet: String,
+    /// Offset of the match *within `snippet`*, so the frontend can mark it without searching again.
+    pub match_start: i64,
+    pub match_len: i64,
+}

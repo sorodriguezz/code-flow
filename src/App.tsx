@@ -27,6 +27,7 @@ import { useRepoStore } from "./state/repoStore";
 import { useApiStore } from "./state/apiStore";
 import { useDbStore } from "./state/dbStore";
 import { useRemoteStore } from "./state/remoteStore";
+import { useNotesStore } from "./state/notesStore";
 import { usePreferencesStore } from "./state/preferencesStore";
 import { useAiProviderStore } from "./state/aiProviderStore";
 import { useLanguageStore } from "./state/languageStore";
@@ -80,6 +81,7 @@ const ApiView = lazy(() => import("./components/api/ApiView").then((m) => ({ def
 const AgentsView = lazy(() => import("./components/agents/AgentsView").then((m) => ({ default: m.AgentsView })));
 const StoriesView = lazy(() => import("./components/stories/StoriesView").then((m) => ({ default: m.StoriesView })));
 const RemoteView = lazy(() => import("./components/remote/RemoteView").then((m) => ({ default: m.RemoteView })));
+const NotesView = lazy(() => import("./components/notes/NotesView").then((m) => ({ default: m.NotesView })));
 
 const loadTerminalDock = () =>
   import("./components/terminal/TerminalDock").then((m) => ({ default: m.TerminalDock }));
@@ -188,12 +190,14 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
  * anything for an agent to work on. The user-stories workspace is the clearest case of all: a
  * requirement is written *before* the code that satisfies it, and often before the repo exists.
  * The Remote workspace owns the machines a workspace deploys to, which likewise don't change when
- * you click a different repository. */
+ * you click a different repository. And Notes is the clearest case after the stories: the decision
+ * you wrote down last March is about the system, not about a checkout. */
 const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "api", render: () => <ApiView /> },
   { id: "agents", render: () => <AgentsView /> },
   { id: "stories", render: () => <StoriesView /> },
   { id: "remote", render: () => <RemoteView /> },
+  { id: "notes", render: () => <NotesView /> },
 ];
 
 function MainContent() {
@@ -394,6 +398,9 @@ export default function App() {
     }
     if (useRemoteStore.getState().workspaceId !== null || useRemoteStore.getState().loading) {
       void useRemoteStore.getState().setWorkspace(workspaceId);
+    }
+    if (useNotesStore.getState().workspaceId !== null || useNotesStore.getState().loading) {
+      void useNotesStore.getState().setWorkspace(workspaceId);
     }
   }, [workspaceId]);
 

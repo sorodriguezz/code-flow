@@ -1342,6 +1342,135 @@ body.cf-dragging * {
   user-select: text;
 }
 
+/* A `[[reference]]` to another note, in the preview.
+ *
+ * Not an `<a>`: there is no URL for a note, and a real anchor would let a click escape into the
+ * webview's own navigation. It is a `role="link"` span the delegated handler in `NotePreview`
+ * turns into an `openNote`, which is also why it carries `tabindex` — a link you cannot reach with
+ * Tab is not a link.
+ *
+ * The unresolved variant is the important one: a reference whose note is missing is drawn struck
+ * through and muted rather than dropped, because prose that quietly reads as if nothing were
+ * missing is worse than a visibly broken link. */
+.cf-note-link {
+  color: var(--cf-accent);
+  border-bottom: 1px solid color-mix(in oklab, var(--cf-accent) 40%, transparent);
+  cursor: pointer;
+  border-radius: 2px;
+}
+.cf-note-link:hover {
+  background: var(--cf-accent-soft);
+}
+.cf-note-link:focus-visible {
+  outline: 1px solid var(--cf-accent);
+  outline-offset: 2px;
+}
+.cf-note-link-missing {
+  color: var(--cf-text-muted);
+  border-bottom-style: dashed;
+  border-bottom-color: var(--cf-warning);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in oklab, var(--cf-warning) 60%, transparent);
+  cursor: help;
+}
+.cf-note-link-missing:hover {
+  background: none;
+}
+
+/* A fenced code block in a note's preview, and its copy button.
+ *
+ * The block is a positioned wrapper around the `<pre>` so the button can sit in its corner without
+ * being in the text flow — a button inside the `<pre>` would be selected along with the code the
+ * moment anyone dragged across it, which is the one gesture this element exists to make
+ * unnecessary. It appears on hover *and* on keyboard focus: hover-only would put it out of reach
+ * of anyone not using a mouse.
+ *
+ * Token colours are inline on the spans (see `lib/notes/richMarkdown`) because they come from the
+ * user's chosen code theme, which is a runtime value — there is no class to key them on. */
+.cf-code-block {
+  position: relative;
+}
+.cf-code-block > pre {
+  /* Room for the button, so a long first line does not run under it. */
+  padding-right: 3rem;
+}
+.cf-code-block[data-lang]:not([data-lang=""])::after {
+  content: attr(data-lang);
+  position: absolute;
+  top: 0.45em;
+  right: 2.6rem;
+  font-family: ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--cf-text-muted);
+  opacity: 0.6;
+  pointer-events: none;
+}
+.cf-code-copy {
+  position: absolute;
+  top: 0.4em;
+  right: 0.5em;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  color: var(--cf-text-muted);
+  background: var(--cf-surface);
+  border: 1px solid var(--cf-border);
+  /* Invisible until wanted, but never `display: none` — it has to stay focusable so Tab reaches
+   * it, and a hidden element is not in the tab order. */
+  opacity: 0;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+  cursor: pointer;
+}
+.cf-code-block:hover .cf-code-copy,
+.cf-code-copy:focus-visible {
+  opacity: 1;
+}
+.cf-code-copy:hover {
+  color: var(--cf-text);
+  border-color: var(--cf-accent);
+}
+.cf-code-copy svg {
+  width: 13px;
+  height: 13px;
+}
+/* Held for a moment after a successful copy, so the confirmation is under the pointer as well as
+ * in the toast. */
+.cf-code-copy.cf-code-copied {
+  opacity: 1;
+  color: var(--cf-success);
+  border-color: var(--cf-success);
+}
+
+/* A note's tag chip.
+ *
+ * The two inks are handed in as custom properties by `notesChrome`'s `TagPill`, which derives them
+ * from the tag's own name — so a tag is the same colour everywhere it appears without anyone having
+ * chosen one. Picking between them here, in a media query, rather than in React against
+ * `themeStore`: the component would otherwise re-render every chip on screen when the theme flips,
+ * and a gallery holds a few hundred of them.
+ *
+ * The dark ink is lighter and less saturated because the same hue that reads as a considered accent
+ * on white reads as a highlighter pen on near-black. */
+.cf-tag-pill {
+  color: var(--cf-tag-ink);
+}
+/* The same two-rule shape the palette above uses: the media query covers the frame before
+ * `themeStore` has stamped `data-theme` on the root, and the attribute rule is what actually
+ * decides once it has. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .cf-tag-pill {
+    color: var(--cf-tag-ink-dark);
+  }
+}
+:root[data-theme="dark"] .cf-tag-pill {
+  color: var(--cf-tag-ink-dark);
+}
+
 .cf-markdown-preview {
   color: var(--cf-text);
   font-size: 13.5px;

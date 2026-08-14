@@ -5,6 +5,11 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     // batch below recreates them in their current shape, and `migrate_api_tables_finish` then
     // copies the old rows across. See that pair's doc comments.
     migrate_api_tables_begin(conn)?;
+    // Also before the batch, and for a related reason: the batch's `CREATE TABLE IF NOT EXISTS
+    // notes` is a no-op on a database that already has the table under its old column names, so
+    // the `book_id` index a few lines later fails on a column that was never renamed. See the
+    // function.
+    migrate_note_folders_to_books(conn)?;
 
     conn.execute_batch(
         r#"
@@ -1140,6 +1145,102 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
             created_at   TEXT NOT NULL,
             updated_at   TEXT NOT NULL
         );
+
+        -- A book in the Notes workspace: one shelf of notes.
+        --
+        -- Nested, unlike `remote_groups` — and the difference is not taste. A host list is an
+        -- inventory of a few dozen machines that reads better flat; notes are written over years
+        -- and the thing that keeps them findable is the shape the author gave them, which is a
+        -- hierarchy. `parent_id` is a real foreign key onto this same table (Remote's
+        -- `group_name` is free text on purpose; see that table) because a book here is
+        -- addressed by identity: it can be renamed and moved without every note inside it having
+        -- to be rewritten.
+        --
+        -- ON DELETE CASCADE onto itself removes the subtree. What it does *not* remove is the
+        -- notes — see `notes.book_id`.
+        CREATE TABLE IF NOT EXISTS note_books (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- Null is the root of the tree, which is a real place: an unfiled note is the normal
+            -- state of a note that was just written, not an error to be corrected.
+            parent_id    TEXT REFERENCES note_books(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            -- Tints the book's glyph, the same affordance `remote_hosts.color` gives a host:
+            -- "which of these is work and which is the runbook" answered without reading.
+            color        TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_note_books_tree
+            ON note_books (workspace_id, parent_id, sort_order);
+
+        -- A Markdown note.
+        --
+        -- Three of these columns are derived from `content` and stored anyway — `excerpt`,
+        -- `word_count`, and the `tags` array. That is deliberate, and it is the single decision
+        -- this table exists to make: **the note list must never carry note bodies.** A workspace
+        -- with four hundred notes is a few megabytes of Markdown, and the sidebar renders titles.
+        -- `list_notes` therefore projects every column *except* `content`, and the card in the
+        -- gallery gets its two lines of preview from `excerpt` rather than from slicing a body
+        -- nobody loaded. The bodies arrive one at a time through `get_note`.
+        --
+        -- The cost of that is an invariant: whatever writes `content` must rewrite the derived
+        -- columns in the same statement. `note_queries::save_note` is the only writer, and it
+        -- computes all three — which is why the derivation lives in Rust rather than being
+        -- passed in by the caller.
+        CREATE TABLE IF NOT EXISTS notes (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- SET NULL, not CASCADE: deleting a book must not delete what was written in it.
+            -- The notes surface at the root, where they are visible and can be refiled — the
+            -- recoverable outcome. Deleting the *notes* stays a separate, explicit act.
+            book_id    TEXT REFERENCES note_books(id) ON DELETE SET NULL,
+            title        TEXT NOT NULL DEFAULT '',
+            content      TEXT NOT NULL DEFAULT '',
+            -- First prose of the body, marks stripped, capped. Derived; see above.
+            excerpt      TEXT NOT NULL DEFAULT '',
+            -- JSON array of strings. A join table would count tags in SQL, but the whole note
+            -- list is already in memory for the sidebar, so counting there is a pass over a few
+            -- hundred rows — against which a second table costs a join on every read and a
+            -- transaction on every save.
+            tags         TEXT NOT NULL DEFAULT '[]',
+            pinned       INTEGER NOT NULL DEFAULT 0,
+            -- Derived; see above. Stored so the gallery can sort and label by length without
+            -- reading a single body.
+            word_count   INTEGER NOT NULL DEFAULT 0,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        -- The gallery's default order, and the sidebar's: most recently touched first.
+        CREATE INDEX IF NOT EXISTS idx_notes_recent ON notes (workspace_id, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_notes_book ON notes (book_id, sort_order);
+
+        -- A note skeleton the user starts from.
+        --
+        -- Only the user's own. The templates that ship with the app are a TypeScript constant
+        -- (`lib/notes/builtinTemplates.ts`) and not seeded rows, for two reasons: seeded rows
+        -- would need a migration every time one is improved, and — the deciding one — they have
+        -- to be translated. A row holds one language; a constant is read through `translate` and
+        -- follows the user's.
+        CREATE TABLE IF NOT EXISTS note_templates (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            -- A lucide icon name, so a template is recognisable in the picker before it is read.
+            icon         TEXT NOT NULL DEFAULT 'file-text',
+            content      TEXT NOT NULL DEFAULT '',
+            -- Applied to every note made from it, so a template carries its filing as well as its
+            -- shape. JSON array, same as `notes.tags`.
+            tags         TEXT NOT NULL DEFAULT '[]',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_note_templates_workspace
+            ON note_templates (workspace_id, sort_order);
         "#,
     )?;
 
@@ -1926,6 +2027,57 @@ fn migrate_api_tables_finish(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Renames the Notes workspace's *folders* to *books*, in place.
+///
+/// The vocabulary changed after the tables existed but before the feature shipped, so the only
+/// databases this ever finds are the ones that ran a development build in between. It still has to
+/// exist: the schema batch is all `CREATE … IF NOT EXISTS`, which silently does nothing to a
+/// `notes` table that is already there under the old column name — and then
+/// `CREATE INDEX … ON notes (book_id, …)` fails on a column nobody renamed, taking the whole
+/// launch down with it. That is not a state a user can get out of on their own.
+///
+/// The awkward case it has to survive is exactly the one that produced the crash: `execute_batch`
+/// commits statement by statement, so a launch that died on the index has *already* created an
+/// empty `note_books` beside the populated `note_folders`. Dropping the empty one is safe and is
+/// what makes a second launch recover rather than repeat the failure.
+///
+/// Two SQLite behaviours are load-bearing here, and both are the modern defaults:
+/// `ALTER TABLE … RENAME TO` rewrites the foreign key in `notes` that points at it, and
+/// `RENAME COLUMN` rewrites the indexes that mention it. Neither needs doing by hand.
+fn migrate_note_folders_to_books(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "note_folders")? {
+        // The empty shell a half-finished launch left behind.
+        if table_exists(conn, "note_books")? {
+            let rows: i64 =
+                conn.query_row("SELECT COUNT(*) FROM note_books", [], |row| row.get(0))?;
+            if rows == 0 {
+                conn.execute_batch("DROP TABLE note_books;")?;
+            }
+        }
+        // If both hold rows this is not a shape we produced, and guessing how to merge them would
+        // be worse than leaving them alone: the batch below will keep using `note_books`.
+        if !table_exists(conn, "note_books")? {
+            conn.execute_batch(
+                "DROP INDEX IF EXISTS idx_note_folders_tree;
+                 ALTER TABLE note_folders RENAME TO note_books;",
+            )?;
+        }
+    }
+
+    // Independent of the table above: a database could in principle have one renamed and not the
+    // other, and each half is separately safe to finish.
+    if table_exists(conn, "notes")?
+        && has_column(conn, "notes", "folder_id")?
+        && !has_column(conn, "notes", "book_id")?
+    {
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_notes_folder;
+             ALTER TABLE notes RENAME COLUMN folder_id TO book_id;",
+        )?;
+    }
+    Ok(())
+}
+
 fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
     Ok(conn
         .query_row(
@@ -2282,6 +2434,72 @@ mod tests {
         run(&conn).unwrap();
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_collections WHERE workspace_id = 'w1'"), 1);
         assert!(!table_exists(&conn, "api_collections_legacy").unwrap());
+    }
+
+
+    /// The crash a development database actually hit: `notes` already existed with `folder_id`, so
+    /// the batch's `IF NOT EXISTS` skipped it and the `book_id` index took the launch down.
+    #[test]
+    fn a_folder_named_notes_database_is_renamed_rather_than_crashing() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        conn.execute_batch(
+            r#"
+            DELETE FROM workspaces;
+            INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                VALUES ('w1', 'Flow', 'folder', '#111', 0, '2026-01-01T00:00:00+00:00');
+            DROP TABLE notes;
+            DROP TABLE note_books;
+            CREATE TABLE note_folders (
+                id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                parent_id TEXT REFERENCES note_folders(id) ON DELETE CASCADE, name TEXT NOT NULL,
+                color TEXT NOT NULL DEFAULT '', sort_order INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_note_folders_tree ON note_folders (workspace_id, parent_id, sort_order);
+            CREATE TABLE notes (
+                id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                folder_id TEXT REFERENCES note_folders(id) ON DELETE SET NULL,
+                title TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '',
+                excerpt TEXT NOT NULL DEFAULT '', tags TEXT NOT NULL DEFAULT '[]',
+                pinned INTEGER NOT NULL DEFAULT 0, word_count INTEGER NOT NULL DEFAULT 0,
+                sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_notes_folder ON notes (folder_id, sort_order);
+            INSERT INTO note_folders (id, workspace_id, parent_id, name, sort_order, created_at, updated_at)
+                VALUES ('f1', 'w1', NULL, 'Runbooks', 0, 't', 't');
+            INSERT INTO notes (id, workspace_id, folder_id, title, content, created_at, updated_at)
+                VALUES ('n1', 'w1', 'f1', 'Despliegue', 'cuerpo', 't', 't');
+            "#,
+        )
+        .unwrap();
+
+        // The state a crashed launch leaves behind: the new table created, empty, beside the old.
+        conn.execute_batch(
+            "CREATE TABLE note_books (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL,
+             parent_id TEXT, name TEXT NOT NULL, color TEXT NOT NULL DEFAULT '',
+             sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        assert!(!table_exists(&conn, "note_folders").unwrap(), "the old table is gone");
+        assert!(has_column(&conn, "notes", "book_id").unwrap());
+        assert!(!has_column(&conn, "notes", "folder_id").unwrap());
+        // And the writing survived the rename, which is the entire point.
+        let (book, title): (String, String) = conn
+            .query_row("SELECT book_id, title FROM notes WHERE id = 'n1'", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(book, "f1");
+        assert_eq!(title, "Despliegue");
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM note_books"), 1);
+
+        // Idempotent: the next launch must not undo or repeat any of it.
+        run(&conn).unwrap();
+        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM note_books"), 1);
     }
 
     /// The spelling in `projects.ado_org` has to be the one the organisation was connected under,

@@ -2009,6 +2009,112 @@ pub async fn inline_edit(
 }
 
 // ---------------------------------------------------------------------------
+// Writing inside a note
+// ---------------------------------------------------------------------------
+
+/// The note body sent as context. Generous — a note is prose and the model's whole job is to match
+/// the one it is writing into — but bounded, because a note can be a year of meeting minutes.
+pub const MAX_NOTE_CONTEXT_CHARS: usize = 24_000;
+
+pub const DEFAULT_NOTE_WRITER_PROMPT: &str =
+    "Escribes dentro de la nota Markdown de otra persona. Por stdin recibes el título de la nota, \
+     su contenido actual como contexto, opcionalmente un FRAGMENTO SELECCIONADO, y la INSTRUCCIÓN \
+     del usuario.\n\n\
+     Devuelves EXCLUSIVAMENTE el Markdown que hay que insertar o con el que hay que sustituir el \
+     fragmento. Nada más: ni saludo, ni explicación de lo que hiciste, ni «aquí tienes». Lo que \
+     escribas se pega tal cual en la nota, así que cualquier frase de acompañamiento acaba dentro \
+     del documento del usuario.\n\n\
+     Reglas:\n\
+     - NO envuelvas la respuesta entera en un bloque de código. Sí usa ```lenguaje para los \
+     fragmentos de código que formen parte del contenido.\n\
+     - Escribe en el MISMO IDIOMA que la nota. Si la nota está vacía, en el idioma de la \
+     instrucción.\n\
+     - Respeta el nivel de encabezado del sitio donde se inserta: si la nota usa `##` para sus \
+     secciones, no empieces con `#`.\n\
+     - Continúa la voz y el formato de la nota. Si es una lista de tareas, escribe tareas; si es \
+     prosa, escribe prosa.\n\
+     - Si hay FRAGMENTO SELECCIONADO, tu respuesta lo SUSTITUYE por completo — no lo repitas antes \
+     de tu añadido salvo que la instrucción sea ampliarlo.\n\
+     - Si la instrucción pide algo que no puedes saber (datos internos, cifras reales), deja un \
+     marcador claro como `TODO: …` en vez de inventarlo.";
+
+/// Writes Markdown to drop into a note.
+///
+/// Deliberately close to [`inline_edit`] — same shape, same one-shot text-only invocation — but a
+/// separate function because the two want opposite things from the model. `inline_edit` rewrites a
+/// fragment of *code* and its output is fenced by nature, so it strips an outer fence
+/// unconditionally. Here the output *is* Markdown, and a note that legitimately answers with a
+/// single code block would be gutted by that same strip. See [`strip_wrapper_fence`].
+///
+/// `selection` may be empty: with nothing selected this is "write something here", and with a
+/// selection it is "replace this".
+pub async fn write_note(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    title: &str,
+    content: &str,
+    selection: &str,
+    instruction: &str,
+) -> Result<String, String> {
+    if instruction.trim().is_empty() {
+        return Err("Escribe qué quieres que redacte".to_string());
+    }
+    let context: String = content.chars().take(MAX_NOTE_CONTEXT_CHARS).collect();
+    let selected = if selection.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\n=== FRAGMENTO SELECCIONADO (sustitúyelo) ===\n{selection}")
+    };
+    let stdin_payload = format!(
+        "TÍTULO DE LA NOTA: {title}\n\n\
+         === CONTENIDO ACTUAL (contexto) ===\n{context}{selected}\n\n\
+         === INSTRUCCIÓN ===\n{instruction}"
+    );
+
+    let mut inv = AiInvocation::new(
+        "Escribe el Markdown pedido para insertarlo en la nota.",
+        &stdin_payload,
+    );
+    inv.system_prompt = Some(DEFAULT_NOTE_WRITER_PROMPT);
+    inv.model = model;
+    inv.task = task::INLINE;
+    let run = run(engine, binary, inv).await?;
+    Ok(strip_wrapper_fence(&run.text))
+}
+
+/// Unwraps a reply that put the *whole* answer in one fence, and leaves every other reply alone.
+///
+/// Models asked for Markdown often answer with ```markdown … ``` around the lot. Stripping that is
+/// right. Stripping the fence off an answer that *is* a shell snippet is not — and
+/// [`strip_code_fence`] cannot tell the two apart because for its own callers the distinction does
+/// not exist. So this only unwraps when the fence is unlabelled or labelled as Markdown, and only
+/// when a single fence encloses everything.
+fn strip_wrapper_fence(text: &str) -> String {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed.to_string();
+    };
+    let Some(newline) = rest.find('\n') else {
+        return trimmed.to_string();
+    };
+    let label = rest[..newline].trim().to_ascii_lowercase();
+    if !matches!(label.as_str(), "" | "markdown" | "md") {
+        return trimmed.to_string();
+    }
+    let body = &rest[newline + 1..];
+    let Some(body) = body.trim_end().strip_suffix("```") else {
+        return trimmed.to_string();
+    };
+    // A second opening fence inside means the outer one was not a wrapper: the reply is a document
+    // that happens to start with a code block.
+    if body.contains("```") && body.matches("```").count() % 2 != 0 {
+        return trimmed.to_string();
+    }
+    body.trim_end().to_string()
+}
+
+// ---------------------------------------------------------------------------
 // Database console assistant
 // ---------------------------------------------------------------------------
 

@@ -64,6 +64,9 @@ export interface BackupInclude {
   /** SSH hosts and snippets. Their passwords ride with `credentials`, not with this. */
   remote: boolean;
   authored: boolean;
+  /** Markdown notes, their folders and their templates. Separate from `authored` — see the group's
+   *  comment in `snapshot.rs` for why the notebook gets its own switch. */
+  notes: boolean;
   requestHistory: boolean;
   conversations: boolean;
   reviews: boolean;
@@ -78,6 +81,7 @@ export const INCLUDE_KEYS: readonly (keyof BackupInclude)[] = [
   "databases",
   "remote",
   "authored",
+  "notes",
   "requestHistory",
   "conversations",
   "reviews",

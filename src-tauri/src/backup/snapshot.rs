@@ -61,6 +61,11 @@ pub const TABLES: &[&str] = &[
     "story_drafts",
     "doc_pages",
     "work_item_reviews",
+    // The Notes workspace, which is authored content too but gets a switch of its own — see the
+    // `notes` group below. Folders before notes: a note points at the folder it is filed in.
+    "note_books",
+    "notes",
+    "note_templates",
     // The API client, its sync bookkeeping and its jar. The three sync tables travel so the
     // restored machine resumes the shared collection exactly where this one left it, rather than
     // re-deriving a base by pulling — see the note in [`apply`] about merging.
@@ -186,6 +191,17 @@ pub const GROUPS: &[Group] = &[
         key: "authored",
         tables: &["story_batches", "story_drafts", "doc_pages", "work_item_reviews"],
     },
+    Group {
+        // Its own switch rather than riding with `authored`, though notes are authored content by
+        // any reading. Two reasons, and both are about what the switch is *for*: a notes corpus is
+        // the most personal thing in the database — a journal, a one-to-one, a half-written
+        // resignation — and someone who keeps backups on a shared drive may reasonably carry their
+        // specs and not their notebook. It is also the group most likely to be the large one, and
+        // a user trimming a backup wants that choice to be available separately from "everything I
+        // ever wrote".
+        key: "notes",
+        tables: &["note_books", "notes", "note_templates"],
+    },
     Group { key: "requestHistory", tables: &["api_history", "db_query_history"] },
     Group {
         // `ai_usage` rides here rather than in a switch of its own: it is the token account of
@@ -222,6 +238,7 @@ pub struct Selection {
     pub databases: bool,
     pub remote: bool,
     pub authored: bool,
+    pub notes: bool,
     pub request_history: bool,
     pub conversations: bool,
     pub reviews: bool,
@@ -237,6 +254,7 @@ impl Default for Selection {
             databases: true,
             remote: true,
             authored: true,
+            notes: true,
             request_history: true,
             conversations: true,
             reviews: true,
@@ -253,6 +271,7 @@ impl Selection {
             "databases" => self.databases,
             "remote" => self.remote,
             "authored" => self.authored,
+            "notes" => self.notes,
             "requestHistory" => self.request_history,
             "conversations" => self.conversations,
             "reviews" => self.reviews,

@@ -3,6 +3,7 @@ import {
   Bot,
   Briefcase,
   ClipboardList,
+  NotebookPen,
   Cloud,
   Cog,
   Download,
@@ -50,6 +51,7 @@ const VIEW_ITEMS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBran
   { id: "api", labelKey: "api.title", icon: Zap },
   { id: "agents", labelKey: "tabbar.agents", icon: Bot },
   { id: "stories", labelKey: "tabbar.stories", icon: ClipboardList },
+  { id: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
 ];
 
 const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [

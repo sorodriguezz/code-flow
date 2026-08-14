@@ -1,4 +1,12 @@
-import { Bot, ClipboardList, Database, MonitorSmartphone, Send, type LucideIcon } from "lucide-react";
+import {
+  Bot,
+  ClipboardList,
+  Database,
+  MonitorSmartphone,
+  NotebookPen,
+  Send,
+  type LucideIcon,
+} from "lucide-react";
 import type { TranslationKey } from "../i18n/translations";
 import type { Chord } from "../keys";
 import type { ApiWorkspace, MainView } from "../../state/uiStore";
@@ -60,7 +68,7 @@ export interface TourStep {
  * everything inside an app is behind that app's own launcher, taken when and if that app is the one
  * you are about to use.
  */
-export type TourId = "main" | "api" | "db" | "agents" | "stories" | "remote";
+export type TourId = "main" | "api" | "db" | "agents" | "stories" | "remote" | "notes";
 
 /**
  * The one-screen tour of the main window.
@@ -70,7 +78,7 @@ export type TourId = "main" | "api" | "db" | "agents" | "stories" | "remote";
  * only at the end the settings — because settings is where you go once you know what you are
  * configuring, and a tour that opens with a preferences dialog has taught nothing yet.
  *
- * What is deliberately *not* here: anything that lives inside one of the five workspace apps. Those
+ * What is deliberately *not* here: anything that lives inside one of the six workspace apps. Those
  * are one step each at most, naming the app and saying it has a tour of its own.
  */
 const MAIN_TOUR: TourStep[] = [
@@ -684,6 +692,78 @@ const REMOTE_TOUR: TourStep[] = [
   ),
 ];
 
+const NOTES_STAGE: TourStage = { view: "notes" };
+
+/**
+ * The Notes tour.
+ *
+ * Shorter than the others on purpose. A notes app has almost no concepts to explain — you type and
+ * it saves — so the tour's job is the three things that are *not* obvious from looking at it: that
+ * filing is drag-and-drop and deleting a folder keeps what is in it, that the search box reads
+ * bodies and not just titles, and that templates exist at all.
+ */
+const NOTES_TOUR: TourStep[] = [
+  {
+    id: "notes.intro",
+    chapterKey: "tour.chapter.notes",
+    titleKey: "tour.notes.intro.title",
+    bodyKey: "tour.notes.intro.body",
+    anchors: ['[data-tour="notes-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: NOTES_STAGE,
+  },
+  {
+    id: "notes.tree",
+    chapterKey: "tour.chapter.notes",
+    titleKey: "tour.notes.tree.title",
+    bodyKey: "tour.notes.tree.body",
+    anchors: ['[data-tour="notes-tree"]', '[data-tour="notes-view"]'],
+    stage: NOTES_STAGE,
+  },
+  {
+    id: "notes.search",
+    chapterKey: "tour.chapter.notes",
+    titleKey: "tour.notes.search.title",
+    bodyKey: "tour.notes.search.body",
+    anchors: ['[data-tour="notes-search"]', '[data-tour="notes-view"]'],
+    padding: 6,
+    stage: NOTES_STAGE,
+  },
+  {
+    id: "notes.tags",
+    chapterKey: "tour.chapter.notes",
+    titleKey: "tour.notes.tags.title",
+    bodyKey: "tour.notes.tags.body",
+    anchors: ['[data-tour="notes-tags"]', '[data-tour="notes-view"]'],
+    stage: NOTES_STAGE,
+  },
+  {
+    id: "notes.editor",
+    chapterKey: "tour.chapter.notes",
+    titleKey: "tour.notes.editor.title",
+    bodyKey: "tour.notes.editor.body",
+    anchors: ['[data-tour="notes-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: NOTES_STAGE,
+  },
+  {
+    id: "notes.templates",
+    chapterKey: "tour.chapter.notes",
+    titleKey: "tour.notes.templates.title",
+    bodyKey: "tour.notes.templates.body",
+    anchors: ['[data-tour="notes-templates"]', '[data-tour="notes-view"]'],
+    padding: 6,
+    stage: NOTES_STAGE,
+  },
+  closingStep(
+    "notes",
+    "tour.chapter.notes",
+    "tour.notes.done.title",
+    "tour.notes.done.body",
+    NOTES_STAGE,
+  ),
+];
+
 export const TOURS: Record<TourId, TourStep[]> = {
   main: MAIN_TOUR,
   api: API_TOUR,
@@ -691,6 +771,7 @@ export const TOURS: Record<TourId, TourStep[]> = {
   agents: AGENTS_TOUR,
   stories: STORIES_TOUR,
   remote: REMOTE_TOUR,
+  notes: NOTES_TOUR,
 };
 
 /**
@@ -723,6 +804,7 @@ export const APP_TOURS: AppTour[] = [
   { tour: "agents", view: "agents", labelKey: "tabbar.agents", icon: Bot },
   { tour: "stories", view: "stories", labelKey: "tabbar.stories", icon: ClipboardList },
   { tour: "remote", view: "remote", labelKey: "tabbar.remote", icon: MonitorSmartphone },
+  { tour: "notes", view: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
 ];
 
 /** The app tour for the current view, or `null` on the three repository views — which are what the

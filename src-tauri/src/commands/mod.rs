@@ -12,6 +12,7 @@ pub mod fs_cmd;
 pub mod git_ops;
 pub mod github_cmd;
 pub mod gitlab_cmd;
+pub mod notes_cmd;
 pub mod remote_cmd;
 pub mod repos;
 pub mod review_pipeline;

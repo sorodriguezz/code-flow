@@ -4,6 +4,7 @@ import {
   Database,
   Layers,
   MonitorSmartphone,
+  NotebookPen,
   Send,
   type LucideIcon,
 } from "lucide-react";
@@ -81,6 +82,16 @@ const APPS: WorkspaceApp[] = [
     labelKey: "tabbar.remote",
     descriptionKey: "tabbar.remoteDescription",
   },
+  // Under the machines, and the least repository-bound of the six: a note is the writing *around*
+  // the work — the decision, the runbook, the meeting — and none of it changes meaning when you
+  // click a different repo. It sits last because it is the one you come back to rather than the one
+  // you pass through.
+  {
+    id: "notes",
+    icon: NotebookPen,
+    labelKey: "tabbar.notes",
+    descriptionKey: "tabbar.notesDescription",
+  },
 ];
 
 /** Buttons are keyed by view *and* workspace, since two of them share a view. */
@@ -102,7 +113,7 @@ function ink(color: string): string {
 }
 
 /**
- * The workspace's five apps, as a rail down the right edge of the window.
+ * The workspace's six apps, as a rail down the right edge of the window.
  *
  * They used to be rows in a dropdown at the end of the tab bar, which cost two clicks to reach any
  * of them and left the set invisible until you opened it. A rail costs one click and is always
@@ -111,14 +122,14 @@ function ink(color: string): string {
  * repository happens to be selected, so it doesn't move or reload when you click a different repo.
  *
  * The workspace tile caps it for the same reason the tab bar keeps a repository marker at its own
- * end: five unlabelled glyphs need something saying whose they are. It still isn't the way to
+ * end: six unlabelled glyphs need something saying whose they are. It still isn't the way to
  * *change* workspace — that stays the projects panel's job — but it is no longer inert: clicking it
  * goes back to the repository graph.
  *
- * Which is the way out of these five apps, and it was missing. Every app here is workspace-scoped,
+ * Which is the way out of these six apps, and it was missing. Every app here is workspace-scoped,
  * so opening one leaves the repository views with nothing on screen pointing back at them: the tab
  * bar above is about the selected repository and reads as somewhere you already are. The tile is
- * the one thing on the rail that isn't one of the five, it is directly above them, and "back to
+ * the one thing on the rail that isn't one of the six, it is directly above them, and "back to
  * where I started" is the plainest thing a cap like that can mean.
  */
 export function AppRail() {
@@ -230,7 +241,7 @@ export function AppRail() {
 
       </div>
 
-      {/* Pinned to the foot of the rail rather than trailing the apps: the five above are a list
+      {/* Pinned to the foot of the rail rather than trailing the apps: the six above are a list
           you pick from and this is not one of them, so a fixed corner tells them apart better than
           a rule does. It also stops the cap moving up and down as apps are added.
 
