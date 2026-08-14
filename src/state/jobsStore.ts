@@ -314,7 +314,19 @@ export const useJobsStore = create<JobsState>((set, get) => ({
 
     // The job id is also the run id the backend streams under — that's what lets this row show
     // the CLI's live output and stop it.
-    useAiRunStore.getState().start(id);
+    //
+    // The same landing this job's *finished* notification will offer (see `notifyJobSettled`),
+    // including its one subtlety: a pull request reviewed from a link belongs to no repository
+    // here, and naming its bucket as a project would focus one that does not exist.
+    useAiRunStore.getState().start(id, {
+      kindKey: kind === "pr-review" ? "agents.liveKindReview" : "agents.liveKindAnalyze",
+      detail: label,
+      target: {
+        openAiPanel: true,
+        projectId: isWorkspaceBucket(projectId) ? undefined : projectId,
+        select: { kind: "job", id },
+      },
+    });
 
     void task(id)
       .then((result) => {

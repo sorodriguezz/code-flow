@@ -276,7 +276,11 @@ export const useDocsStore = create<DocsState>((set, get) => ({
     }
 
     const runId = newRunId("docs");
-    useAiRunStore.getState().start(runId);
+    useAiRunStore.getState().start(runId, {
+      kindKey: "agents.liveKindDocs",
+      detail: page.title,
+      target: { view: "stories", storiesMode: "wiki", select: { kind: "docPage", id: page.id } },
+    });
     // The run replaces the body outright — the user was warned and said yes — so an unsaved draft
     // of the text being replaced goes with it rather than reappearing over the new document.
     set({ runId, draft: null });

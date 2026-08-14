@@ -14,8 +14,9 @@ import {
   TriangleAlert,
   Undo2,
   Wand2,
+  X,
 } from "lucide-react";
-import { chainStatusOf, reasonText, stepColor } from "./chainStatus";
+import { chainStatusOf, reasonText } from "./chainStatus";
 import { StoryPlanGate } from "./StoryPlanGate";
 import { AiRunLog } from "../ai/AiRunLog";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -28,7 +29,7 @@ import { confirmAction } from "../../state/confirmStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import type { AgentChainStep, ChainRepo } from "../../types/domain";
+import type { AgentChainStep, ChainRepo, ChainStepStatus } from "../../types/domain";
 
 /**
  * One chain, open: the plan, where it has got to, and the one decision it is waiting on.
@@ -51,6 +52,10 @@ export function ChainDetail({ chainId }: { chainId: string }) {
 
   /** The gate's message, editable. Seeded once per gate so typing is never overwritten. */
   const [draft, setDraft] = useState<string | null>(null);
+  /** The note for a whole-plan re-run, or `null` while the box is closed. `""` is a real value —
+   * "run it again exactly as it was" is the common case, and the box opening at all is what makes
+   * the second click the confirmation this needs. */
+  const [rerunAll, setRerunAll] = useState<string | null>(null);
   const gated = chain?.status === "gated";
   const waiting = steps.find((step) => step.status === "pending");
   /** Whether this gate is the story review — the one decision the plain "here is the message"
@@ -64,15 +69,18 @@ export function ChainDetail({ chainId }: { chainId: string }) {
   }, [gated, waiting?.id, waiting?.pending_input]);
 
   if (!chain) return null;
-  // Resolved, not finished-well: a skipped step is one the plan is past. `step_count` is the
-  // denominator the plan was authored with, so a chain whose steps have not loaded yet reads 0%
-  // rather than 0/0.
+  // Resolved, not finished-well: a skipped step is one the plan is past.
   const resolved = steps.filter((step) => step.status === "done" || step.status === "skipped").length;
+  // `step_count` is the denominator the plan was authored with, so a chain whose steps have not
+  // loaded yet draws its shape rather than an empty strip.
   const stepTotal = Math.max(steps.length, chain.step_count);
-  const progressPct = stepTotal > 0 ? Math.round((resolved / stepTotal) * 100) : 0;
   const { icon: StatusIcon, color, labelKey } = chainStatusOf(chain);
   const reason = reasonText(chain.last_reason, t);
   const store = useChainStore.getState();
+  /** Whether the plan is standing still. Re-running anything while a turn is mid-flight would be
+   * asking two agents for the same working copy — which is also the only state the backend's own
+   * `rerun_chain_from` refuses outright. */
+  const idle = chain.status !== "running" && chain.status !== "queued";
 
   /** The repository whose diff the user is actually asking for: the one the plan is at, not the
    * chain's first — on a multi-repo chain those are routinely different, and sending someone to a
@@ -125,9 +133,13 @@ export function ChainDetail({ chainId }: { chainId: string }) {
           {t("agents.stepN", { n: chain.current_step + 1, total: chain.step_count })}
         </span>
         {/* One repository reads as its name; several read as a count, because the names would not
-            fit and the number is the thing that changes how you read the plan below. */}
+            fit — they are on the badge's tooltip instead, which is where you go when the question
+            is "which working copies can this plan write to". */}
         {chain.repo_count > 1 ? (
-          <span className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)]">
+          <span
+            className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)]"
+            title={repos.map((repo) => repo.name || t("chain.projectGone")).join(" · ")}
+          >
             <FolderGit2 size={11} />
             {t("agents.chainRepos", { n: chain.repo_count })}
           </span>
@@ -138,30 +150,41 @@ export function ChainDetail({ chainId }: { chainId: string }) {
             </span>
           )
         )}
+        {/* Closes the pane, not the plan. Deselecting is a view change and nothing else — the
+            scheduler advances the chain from the store, so a running step keeps running, its turn
+            still lands, and the row in the tree keeps counting. Sitting on the open plan to keep it
+            alive is exactly the thing an autonomous run should not ask of anyone. */}
+        <button
+          type="button"
+          onClick={() => void useChainStore.getState().select(null)}
+          title={t("agents.closeChain")}
+          aria-label={t("agents.closeChain")}
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+        >
+          <X size={13} />
+        </button>
       </div>
 
-      {/* The plan's own progress, hairline-thin and directly under its title. A chain is the one
-          thing in this app that genuinely knows how far along it is — steps are countable, unlike
-          the inside of a single run — so this is determinate where `AiRunLog`'s bar cannot be. It
-          counts skipped steps as passed: they are resolved, and a bar that stalled on them would
-          say the plan was stuck when it is moving. */}
-      <div className="h-[2px] shrink-0 bg-black/[0.06] dark:bg-white/[0.08]">
-        <div className="cf-chain-progress h-full" style={{ width: `${progressPct}%` }} />
+      {/* The plan's own progress, directly under its title — one cell per step, in plan order. A
+          chain is the one thing in this app that genuinely knows how far along it is (steps are
+          countable, the inside of a single run is not), so this is determinate where `AiRunLog`'s
+          bar cannot be, and *which* step it is at is as much of the answer as how many are left.
+          Skipped counts as resolved: a strip that stalled on them would say the plan was stuck
+          when it is moving — it just wears the muted colour rather than the green. */}
+      <div
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={stepTotal}
+        aria-valuenow={resolved}
+        aria-label={t("agents.chainProgress", { done: resolved, total: stepTotal })}
+        className="flex h-[3px] shrink-0 items-stretch gap-[2px]"
+      >
+        {Array.from({ length: stepTotal }, (_, at) => (
+          <span key={at} className={`cf-chain-seg ${SEG_CLASS[steps[at]?.status ?? "pending"]}`}>
+            <span className="cf-chain-seg-fill" />
+          </span>
+        ))}
       </div>
-
-      <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-black/[0.02] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-warning)] dark:bg-white/[0.03]">
-        <TriangleAlert size={11} className="mt-[2px] shrink-0" />
-        <span>
-          {t("agents.writesWorkingTree")}
-          {/* Every repository the chain can write to, named. A warning that names one working copy
-              while the plan can edit five is worse than no warning. */}
-          {repos.length > 0
-            ? ` — ${repos.map((repo) => repo.name || t("chain.projectGone")).join(" · ")}`
-            : projectName
-              ? ` — ${projectName}`
-              : ""}
-        </span>
-      </p>
 
       {reason && (
         <p className="shrink-0 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
@@ -180,7 +203,14 @@ export function ChainDetail({ chainId }: { chainId: string }) {
         {steps.map((step, at) => {
           const next = steps[at + 1];
           return (
-            <div key={step.id}>
+            // Assembled top-down, one row after the next, in the order the chain runs in — the
+            // shape of the thing the pane is describing. Capped at a dozen because past that the
+            // stagger stops reading as a sequence and starts reading as a slow list.
+            <div
+              key={step.id}
+              className="cf-step-in"
+              style={{ animationDelay: `${Math.min(at, 12) * 45}ms` }}
+            >
               {/* The two halves of a story run, named. 2N rows in one flat list is honest about what
                   runs but says nothing about the shape, and the shape — read everything, stop, then
                   write some of it — is the whole point of the feature. */}
@@ -193,7 +223,7 @@ export function ChainDetail({ chainId }: { chainId: string }) {
                 step={step}
                 isGate={gated && step.id === waiting?.id}
                 showRepo={chain.repo_count > 1}
-                idle={chain.status !== "running" && chain.status !== "queued"}
+                idle={idle}
               />
               {next && (
                 <StepRail
@@ -220,6 +250,42 @@ export function ChainDetail({ chainId }: { chainId: string }) {
             />
           </div>
         )
+      )}
+
+      {/* The whole plan again, with an optional word about what to do differently.
+
+          A box rather than a confirmation dialog, and the same box the per-step ↺ opens: re-running
+          a plan is not a yes/no question — the useful version of it is "again, but keep the API
+          stable" — and a modal that only asked "are you sure?" would send anyone who wanted to say
+          that back to the step rows. Opening it is also what makes the second click the
+          confirmation, which N engine sessions against a real working copy deserve. */}
+      {rerunAll !== null && (
+        <div className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] px-3 py-2">
+          <input
+            autoFocus
+            value={rerunAll}
+            onChange={(e) => setRerunAll(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setRerunAll(null);
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              void store.rerunFrom(chainId, 0, rerunAll);
+              setRerunAll(null);
+            }}
+            placeholder={t("agents.rerunChainPlaceholder")}
+            className="min-w-0 flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2 py-1 text-[11px] outline-none focus:border-[var(--cf-accent)]"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              void store.rerunFrom(chainId, 0, rerunAll);
+              setRerunAll(null);
+            }}
+            className="shrink-0 rounded-md bg-[var(--cf-accent)] px-2 py-1 text-[11px] font-medium text-white hover:brightness-110"
+          >
+            {t("agents.rerunChainGo", { n: stepTotal })}
+          </button>
+        </div>
       )}
 
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-[var(--cf-border)] px-3 py-2">
@@ -254,6 +320,17 @@ export function ChainDetail({ chainId }: { chainId: string }) {
         {(chain.status === "done" || chain.status === "aborted") && (
           <Action icon={GitCompare} label={t("agents.openChanges")} onClick={openChanges} />
         )}
+        {/* Offered from every state the plan is not moving in, finished included — which is the
+            state it is most often asked for from. The per-step ↺ can already do this from step one;
+            what it cannot do is say so, and "run the whole thing again" is a decision about the
+            plan, not about its first row. */}
+        {idle && (
+          <Action
+            icon={RotateCcw}
+            label={t("agents.rerunChain")}
+            onClick={() => setRerunAll((current) => (current === null ? "" : null))}
+          />
+        )}
         <span className="ml-auto flex items-center gap-1.5">
           {!["done", "aborted"].includes(chain.status) && (
             <Action icon={Square} label={t("agents.abortChain")} onClick={() => void store.abort(chainId)} />
@@ -267,6 +344,17 @@ export function ChainDetail({ chainId }: { chainId: string }) {
 
 const EMPTY_STEPS: AgentChainStep[] = [];
 const EMPTY_REPOS: ChainRepo[] = [];
+
+/** How each step paints its cell in the progress strip. `pending` is the bare track, so it has no
+ * class of its own — an empty cell is the absence of an answer, not a state to colour. */
+const SEG_CLASS: Record<ChainStepStatus, string> = {
+  pending: "",
+  running: "cf-chain-seg-run",
+  done: "cf-chain-seg-done",
+  error: "cf-chain-seg-error",
+  interrupted: "cf-chain-seg-warn",
+  skipped: "cf-chain-seg-skipped",
+};
 
 /** Mirrors `queries::MAX_STEP_ATTEMPTS`. Only ever displayed — the backend is what counts. */
 const MAX_STEP_ATTEMPTS = 3;
@@ -285,7 +373,10 @@ function StepRail({ carried, flowing }: { carried: boolean; flowing: boolean }) 
     <div className="flex" aria-hidden="true">
       {/* 20px, so the 2px rail straddles 20–22 and its centre lands on the badge's: 1px border +
           10px of `px-2.5` + half of the 20px number circle. */}
-      <div className={`cf-chain-rail ml-[20px] h-3 ${carried ? "cf-chain-rail-done" : ""}`}>
+      <div className="cf-chain-rail ml-[20px] h-3">
+        {/* The green grows downward when the handoff happens rather than appearing whole, so the
+            segment says which way the plan runs and not merely that it passed. */}
+        <span className={`cf-chain-rail-fill ${carried ? "cf-chain-rail-fill-on" : ""}`} />
         {flowing && <span className="cf-chain-beam" />}
       </div>
     </div>
@@ -323,6 +414,47 @@ function Action({
   );
 }
 
+/**
+ * The step's number, and what became of it — one mark rather than the number plus the status dot
+ * that used to sit beside it. The two always described the same step, and the dot spent a column
+ * saying what the badge can say by being that colour.
+ *
+ * The number survives every state it can: it is the step's name in the plan, in the rail, and in
+ * the "loops back to 2" note, so swapping it for a glyph would cost the reader their place. It
+ * gives way only where the glyph *is* the answer — a tick, a fault, a step stepped over.
+ *
+ * Running is the one state that moves: a ring turns around the number, which is the pane's answer
+ * to "where is it right now" from across the room.
+ */
+function StepBadge({ status, index }: { status: ChainStepStatus; index: number }) {
+  const tone =
+    status === "done"
+      ? "bg-[color-mix(in_oklab,var(--cf-success)_18%,transparent)] text-[var(--cf-success)]"
+      : status === "error"
+        ? "bg-[color-mix(in_oklab,var(--cf-danger)_18%,transparent)] text-[var(--cf-danger)]"
+        : status === "interrupted"
+          ? "bg-[color-mix(in_oklab,var(--cf-warning)_18%,transparent)] text-[var(--cf-warning)]"
+          : status === "running"
+            ? "cf-step-ring bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+            : "bg-black/[0.06] text-[var(--cf-text-muted)] dark:bg-white/[0.1]";
+
+  return (
+    <span
+      className={`relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold tabular-nums transition-colors ${tone}`}
+    >
+      {status === "done" ? (
+        <Check size={11} strokeWidth={3} className="cf-step-pop" />
+      ) : status === "error" ? (
+        <TriangleAlert size={10} />
+      ) : status === "skipped" ? (
+        <SkipForward size={10} />
+      ) : (
+        index + 1
+      )}
+    </span>
+  );
+}
+
 function StepRow({
   step,
   isGate,
@@ -350,22 +482,31 @@ function StepRow({
   // one whose engine outlived a webview reload — the work is coming back, but there is no log to
   // show for it, and saying so beats a spinner that never moves.
   const live = useAiRunStore((s) => (step.run_id ? (s.active[step.run_id] ?? false) : false));
+  const running = step.status === "running";
 
   return (
     <div
-      className={`rounded-lg border px-2.5 py-2 ${
-        isGate ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)]"
+      className={`relative rounded-lg border px-2.5 py-2 transition-colors ${
+        running
+          ? "cf-step-live border-[var(--cf-accent)]"
+          : isGate
+            ? "border-[var(--cf-accent)]"
+            : "border-[var(--cf-border)]"
       }`}
     >
-      <div className="flex items-center gap-2">
-        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-black/[0.06] text-[10px] font-semibold tabular-nums dark:bg-white/[0.1]">
-          {step.step_index + 1}
+      {/* Only ever on one row — a chain runs one step — so the pane has exactly one thing moving in
+          it at a time, and that thing is where the work is. */}
+      {running && (
+        <span className="cf-step-scan" aria-hidden="true">
+          <span className="cf-step-scan-beam" />
         </span>
-        {step.status === "running" ? (
-          <ThinkingOrb size="sm" />
-        ) : (
-          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${stepColor(step.status).replace("text-", "bg-")}`} />
-        )}
+      )}
+      <div className="flex items-center gap-2">
+        <StepBadge status={step.status} index={step.step_index} />
+        {/* The orb is kept for the engine, not for the step: the badge already says which step the
+            plan is on, and this says an engine is burning context for it right now. A `running` step
+            without one is the reload case the `stepRecovered` note explains. */}
+        {running && live && <ThinkingOrb size="sm" />}
         <button
           type="button"
           onClick={() => {
@@ -395,7 +536,7 @@ function StepRow({
             {t("agents.gateBefore")}
           </span>
         )}
-        {step.status === "running" && !live && (
+        {running && !live && (
           <span className="shrink-0 text-[10px] text-[var(--cf-warning)]">{t("agents.stepRecovered")}</span>
         )}
         {/* A step back in the queue after a failed turn. Without this it is a `pending` row with a
@@ -456,7 +597,7 @@ function StepRow({
         </div>
       )}
 
-      {step.status === "running" && step.run_id && live && (
+      {running && step.run_id && live && (
         <div className="mt-1.5">
           <AiRunLog runId={step.run_id} running expanded={logOpen} onToggle={() => setLogOpen((v) => !v)} />
         </div>

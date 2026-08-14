@@ -324,8 +324,26 @@ async function showJobInAiPanel(jobId: string): Promise<void> {
 export async function followNotification(notification: AppNotification): Promise<void> {
   const { target } = notification;
   if (!target) return;
+  await followTarget(notification.workspaceId, target);
+}
 
-  await enterWorkspace(notification.workspaceId, target);
+/**
+ * The same landing, addressed directly rather than through a notification.
+ *
+ * Split out because "go to where this is" is not only something a *finished* run asks for: the
+ * status bar's live-agent list wants it for work that is still running, and building a fake
+ * notification to reach it would mean pushing a row into the notification centre as a side effect
+ * of clicking one.
+ *
+ * `workspaceId` is where the work belongs, and may be `null` for something that was started before
+ * a workspace was chosen — a target naming a `projectId` recovers it either way, since a project
+ * knows which workspace it is in.
+ */
+export async function followTarget(
+  workspaceId: string | null,
+  target: NotificationTarget,
+): Promise<void> {
+  await enterWorkspace(workspaceId, target);
 
   const ui = useUiStore.getState();
   // No view is a destination in itself for the assistant's own work — see `NotificationTarget.view`.

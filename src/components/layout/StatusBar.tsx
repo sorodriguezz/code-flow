@@ -1,6 +1,8 @@
 import { ChevronDown, CloudUpload, Download, Folder, GitBranch, Loader2, Lock, RefreshCw, Settings, Sparkles, TerminalSquare, Upload } from "lucide-react";
 import { NotificationBell } from "./NotificationBell";
+import { AgentActivity } from "./AgentActivity";
 import { BatteryMeter } from "./BatteryMeter";
+import { SystemMeter } from "./SystemMeter";
 import { UsageMeter } from "./UsageMeter";
 import { useRepoStore } from "../../state/repoStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -175,7 +177,9 @@ export function StatusBar() {
         <span>{t("statusbar.openProject")}</span>
         {/* Also here, with no project open: agent runs, generations and API work are scoped to the
             workspace, not to a repository, so they can finish while this bar is in its empty state. */}
-        <div className="ml-auto flex items-center gap-1">
+        <div className="cf-bar-group ml-auto flex items-center">
+          <AgentActivity />
+          <SystemMeter />
           <BatteryMeter />
           <UsageMeter />
           <NotificationBell />
@@ -338,8 +342,19 @@ export function StatusBar() {
           and API work, which are the workspace's business rather than this repository's — and it is
           the only control here that speaks while you are looking somewhere else. */}
       {/* Beside the bell, and for the same reason it is here rather than in a settings screen:
-          both report on work the app did while you were looking somewhere else. */}
-      <div className="ml-auto flex shrink-0 items-center gap-1">
+          both report on work the app did while you were looking somewhere else.
+
+          The order is what each one asks of the reader. The agent pill comes first because it is
+          the only one that is ever *about to be clicked* — it is a way back to work in flight, and
+          it is only there while there is any. Then the three machine readings, then the battery,
+          then the limits, then the bell: from "something of mine is happening" through "this box is
+          busy" to "here is what already finished".
+
+          `cf-bar-group` draws the hairline between each of them — and only between the ones that
+          are actually on screen, which is why it is a sibling rule and not six separators. */}
+      <div className="cf-bar-group ml-auto flex shrink-0 items-center">
+        <AgentActivity />
+        <SystemMeter />
         <BatteryMeter />
         <UsageMeter />
         <NotificationBell />

@@ -19,6 +19,7 @@ import type {
   UsageStats,
   ProviderQuota,
   PowerStatus,
+  SystemLoad,
   BranchInfo,
   ChatConversationSummary,
   CommitInfo,
@@ -542,6 +543,11 @@ export const aiQuotaStatus = (trigger: QuotaTrigger = "poll") =>
  * desktop — which the UI draws nothing for. A native read: no subprocess, so unlike the AI quota
  * this one is safe to poll on a timer. */
 export const powerStatus = () => invoke<PowerStatus | null>("power_status");
+
+/** CPU, memory and disk for the machine, plus this app's own share of the first two. One refresh
+ * behind both halves, so the bar and its panel always describe the same instant. Runs off the main
+ * thread on the Rust side — it walks the process table, which is milliseconds, not microseconds. */
+export const systemLoad = () => invoke<SystemLoad>("system_load");
 
 export interface ProviderStatus {
   available: boolean;

@@ -744,8 +744,20 @@ body {
   background: color-mix(in oklab, var(--cf-text-muted) 25%, transparent);
 }
 
-.cf-chain-rail-done {
-  background: color-mix(in oklab, var(--cf-success) 45%, transparent);
+/* The handoff, grown rather than switched on: the green runs *down* the rail, from the step that
+   answered towards the one its answer opens, so the segment states which way the plan flows
+   instead of just being a colour. Scaled, not sized, so it stays a compositor transform. */
+.cf-chain-rail-fill {
+  position: absolute;
+  inset: 0;
+  transform: scaleY(0);
+  transform-origin: top center;
+  background: color-mix(in oklab, var(--cf-success) 55%, transparent);
+  transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.cf-chain-rail-fill-on {
+  transform: scaleY(1);
 }
 
 .cf-chain-beam {
@@ -761,12 +773,191 @@ body {
   animation: cf-chain-beam 1.5s ease-in-out infinite;
 }
 
-/* The plan's own progress, under the chain header. Determinate — unlike a single run, a chain
-   genuinely knows how many steps it has — so the width is the number and only the sheen moves. */
-.cf-chain-progress {
-  height: 2px;
-  background: color-mix(in oklab, var(--cf-accent) 85%, transparent);
-  transition: width 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+/* ------------------------------------------------------------------
+ * The plan's own progress, under the chain header.
+ *
+ * One cell per step rather than one bar across all of them. A chain *is* its
+ * steps — the denominator is small, known and meaningful — and a continuous bar
+ * sitting at 60% says nothing about which step that is or what happened to the
+ * ones behind it. Every state a step can end in gets its own cell, so the strip
+ * reads as the plan itself: what passed, what was skipped, what broke, and
+ * which one is moving right now.
+ * ------------------------------------------------------------------ */
+@keyframes cf-chain-sweep {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+
+.cf-chain-seg {
+  position: relative;
+  flex: 1 1 0;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--cf-text-muted) 20%, transparent);
+}
+
+.cf-chain-seg-fill {
+  position: absolute;
+  inset: 0;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: var(--cf-accent);
+  transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Every resolved state fills its cell; only the colour says which one it was. */
+.cf-chain-seg-done .cf-chain-seg-fill,
+.cf-chain-seg-skipped .cf-chain-seg-fill,
+.cf-chain-seg-error .cf-chain-seg-fill,
+.cf-chain-seg-warn .cf-chain-seg-fill,
+.cf-chain-seg-run .cf-chain-seg-fill {
+  transform: scaleX(1);
+}
+
+.cf-chain-seg-done .cf-chain-seg-fill {
+  background: color-mix(in oklab, var(--cf-success) 85%, transparent);
+}
+
+.cf-chain-seg-skipped .cf-chain-seg-fill {
+  background: color-mix(in oklab, var(--cf-text-muted) 50%, transparent);
+}
+
+.cf-chain-seg-error .cf-chain-seg-fill {
+  background: var(--cf-danger);
+}
+
+.cf-chain-seg-warn .cf-chain-seg-fill {
+  background: var(--cf-warning);
+}
+
+/* The one cell that is neither full nor empty. It holds the accent at a fraction and lets a light
+   run across it — the same "still moving, no percentage to give you" claim `cf-run-beam` makes one
+   panel over, made here about a single step. */
+.cf-chain-seg-run .cf-chain-seg-fill {
+  background: color-mix(in oklab, var(--cf-accent) 30%, transparent);
+}
+
+.cf-chain-seg-run .cf-chain-seg-fill::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  width: 45%;
+  background: linear-gradient(90deg, transparent, var(--cf-accent), transparent);
+  animation: cf-chain-sweep 1.3s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------
+ * A step row, and the three things it has to answer at a glance: which number
+ * it is, what happened to it, and whether it is the one running *now*.
+ *
+ * The last of those is the only one that moves. A running row wears a halo that
+ * breathes and a light along its top edge; everything else is a static colour,
+ * so the eye lands on the live step without reading a word.
+ * ------------------------------------------------------------------ */
+@keyframes cf-step-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Staggered by the caller, one row at a time down the plan — the list assembles in the order the
+   chain runs in, which is the shape of the thing being described. */
+.cf-step-in {
+  animation: cf-step-in 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Paint-only (box-shadow, no layout), on at most one row at a time: a chain runs one step. */
+@keyframes cf-step-halo {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--cf-accent) 30%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 5px color-mix(in oklab, var(--cf-accent) 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--cf-accent) 0%, transparent);
+  }
+}
+
+.cf-step-live {
+  background: color-mix(in oklab, var(--cf-accent) 5%, transparent);
+  animation: cf-step-halo 2.1s ease-out infinite;
+}
+
+/* The light crossing the live row. Its own clipping box laid over the card rather than a rule along
+   an edge: the running card already wears an accent border, and a beam drawn on that border is a
+   line moving along a line of the same colour — which is to say invisible. `pointer-events: none`
+   because the thing underneath it is the row's own button. Reuses `cf-run-beam`'s keyframes: same
+   statement, wider brush. */
+.cf-step-scan {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+.cf-step-scan-beam {
+  position: absolute;
+  inset-block: 0;
+  width: 45%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--cf-accent) 18%, transparent),
+    transparent
+  );
+  animation: cf-run-beam 2.2s ease-in-out infinite;
+}
+
+@keyframes cf-step-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* The badge of the running step: a ring turning around the number. The number stays — it is the
+   step's identity, and swapping it for a spinner would cost the reader their place in the plan. */
+.cf-step-ring::after {
+  content: "";
+  position: absolute;
+  inset: -2.5px;
+  border-radius: 999px;
+  border: 1.5px solid transparent;
+  border-top-color: var(--cf-accent);
+  border-right-color: color-mix(in oklab, var(--cf-accent) 45%, transparent);
+  animation: cf-step-spin 0.9s linear infinite;
+}
+
+@keyframes cf-step-pop {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Plays the moment a step turns green — the class arrives with the state — and once more on open,
+   which is what makes a finished plan read as a sequence rather than a wall of ticks. */
+.cf-step-pop {
+  animation: cf-step-pop 0.38s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -775,9 +966,73 @@ body {
     height: 100%;
     opacity: 0.45;
   }
-  .cf-chain-progress {
+  .cf-chain-rail-fill,
+  .cf-chain-seg-fill {
     transition: none;
   }
+  .cf-step-in,
+  .cf-step-pop,
+  .cf-step-live,
+  .cf-step-ring::after,
+  .cf-step-scan-beam,
+  .cf-chain-seg-run .cf-chain-seg-fill::after {
+    animation: none;
+  }
+  /* Without the travelling light the segment's cell would read as empty, so it becomes solid. The
+     row's own sweep is dropped instead of frozen: held still it is a tint over the text and says
+     nothing the accent border does not already say. */
+  .cf-chain-seg-run .cf-chain-seg-fill::after {
+    width: 100%;
+    opacity: 0.5;
+  }
+  .cf-step-scan {
+    display: none;
+  }
+  /* The ring cannot turn, so it becomes a plain one — still the mark of "this step, now". */
+  .cf-step-ring::after {
+    border-color: color-mix(in oklab, var(--cf-accent) 55%, transparent);
+  }
+}
+
+/* ==================================================================
+ * Hairlines between the status bar's right-hand readings
+ * (src/components/layout/StatusBar.tsx)
+ *
+ * Six numbers and glyphs in a row, four pixels apart, read as one run-on
+ * string: `8% 69% 75% 86%` is four separate facts about four different
+ * things, and nothing on screen said where one ended.
+ *
+ * Drawn from a sibling selector rather than from `<Divider/>` elements
+ * between the components, because half of these draw nothing at all much of
+ * the time — the agent pill only exists while something is running, the
+ * battery only on a machine that has one, the meters only once their first
+ * reading lands. Explicit separators would leave a rule hanging at the edge
+ * of the group every time a neighbour rendered `null`. `* + *` is about what
+ * is actually in the DOM, so it can only ever fall *between* two things.
+ *
+ * A pseudo-element in the margin, never a `border-left` on the item: these
+ * are buttons with their own hover fill, and a border would be inside that
+ * fill — the rule would light up along with the control it separates.
+ * ================================================================== */
+.cf-bar-group > * + * {
+  position: relative;
+  margin-left: 11px;
+}
+
+.cf-bar-group > * + *::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 50%;
+  width: 1px;
+  height: 12px;
+  transform: translateY(-50%);
+  /* `--cf-border` at full strength, matching the rule this same bar already draws between the
+     repository and the branch — one bar should not have two weights of hairline. Softening it was
+     tried first and disappeared at 1×: at 1px and 12px tall the shape is subtle enough on its own,
+     and a separator nobody can see is a separator that is not there. */
+  background: var(--cf-border);
+  pointer-events: none;
 }
 
 /* Tailwind v4's preflight gives buttons `cursor: default`, which left most of the app's icon

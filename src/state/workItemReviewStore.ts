@@ -1545,7 +1545,12 @@ async function runFor(session: RunSession, stage: WorkItemReviewStage, storyText
   const store = () => useWorkItemReviewStore.getState();
   const runId = newRunId("hu-review");
   // Before the invoke, or the first lines the engine prints have nowhere to land.
-  useAiRunStore.getState().start(runId);
+  useAiRunStore.getState().start(runId, {
+    kindKey: "agents.liveKindReview",
+    detail: session.title,
+    workspaceId: session.workspaceId,
+    target: { view: "stories", storiesMode: "review", select: { kind: "reviewSession", id: session.id } },
+  });
   useWorkItemReviewStore.setState((s) => ({
     runsBySession: {
       ...s.runsBySession,

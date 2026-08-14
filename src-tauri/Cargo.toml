@@ -65,6 +65,12 @@ keyring = "3"
 # `/sys/class/power_supply`), so reading it costs no subprocess — which matters on Windows, where
 # every console-mode child flashes a window (see `proc.rs`).
 starship-battery = "0.11"
+# CPU / memory / disk for the status bar, and this app's own share of them. Same bargain as the
+# battery above: native readings (host_statistics + libproc on macOS, the PDH/NT APIs on Windows,
+# /proc on Linux), so a poll every few seconds costs no subprocess. Only the two facets that are
+# drawn — `network`, `component` (thermals) and `user` are default features this never reads, and
+# each one is work every refresh would otherwise do.
+sysinfo = { version = "0.39", default-features = false, features = ["system", "disk"] }
 tokio = { version = "1", features = ["full"] }
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }

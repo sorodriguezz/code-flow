@@ -19,7 +19,7 @@ import {
   REPO_BUSY_MARKER,
 } from "../lib/tauri/commands";
 import { notifyTurnSettled } from "./agentEvents";
-import { isCancellation, newRunId, snapshotTrace, useAiRunStore } from "./aiRunStore";
+import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunAbout } from "./aiRunStore";
 import { parseTrace, type ChatMessage } from "./chatStore";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
@@ -187,7 +187,13 @@ interface AgentsState {
   runTurn: (
     taskId: string,
     message: string,
-    opts?: { runId?: string; onSettle?: (outcome: TurnOutcome) => void },
+    opts?: {
+      runId?: string;
+      /** What the status bar should call this run. Defaults to the task; a chain passes its own,
+       * so a ten-step plan reads as one thing rather than as whichever step is mid-turn. */
+      about?: AiRunAbout;
+      onSettle?: (outcome: TurnOutcome) => void;
+    },
   ) => Promise<void>;
   stop: (taskId: string) => Promise<void>;
   setModel: (taskId: string, model: string) => Promise<void>;
@@ -442,7 +448,19 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     // recency — a chain step's task included, which is never `select`ed at all.
     touchTask(taskId);
     // Before the invoke, or the first lines the engine prints have nowhere to land.
-    useAiRunStore.getState().start(runId);
+    //
+    // The description is the caller's when it has one and the task's otherwise: a chain step *is* a
+    // task turn, but the status bar should offer the plan rather than the one step of it that
+    // happens to be mid-flight — see `chainStore.pump`.
+    useAiRunStore.getState().start(
+      runId,
+      opts?.about ?? {
+        kindKey: "agents.liveKindAgent",
+        detail: task.title || task.goal,
+        workspaceId: task.workspace_id,
+        target: { view: "agents", projectId: task.project_id, select: { kind: "agentTask", id: taskId } },
+      },
+    );
     const startedAt = Date.now();
 
     set((s) => ({

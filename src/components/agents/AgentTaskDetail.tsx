@@ -12,7 +12,6 @@ import {
   Send,
   Square,
   Trash2,
-  TriangleAlert,
 } from "lucide-react";
 import { AGENT_STATUS } from "./agentStatus";
 import { AgentModelMenu } from "./AgentModelMenu";
@@ -42,7 +41,7 @@ import type { ChatMessage } from "../../state/chatStore";
  * The header carries the two facts that decide what a turn will actually do — the agent and the
  * repository — because both are fixed the moment the task has run and it should be obvious *before*
  * that, not discovered afterwards. The repository especially: an agent edits that working copy
- * directly, which is what the warning line under the header says once and does not repeat.
+ * directly, and the picker naming it is what says so.
  */
 export function AgentTaskDetail({ taskId }: { taskId: string }) {
   const t = useT();
@@ -76,7 +75,6 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
 
   const status = sending ? "running" : task.status;
   const { icon: StatusIcon, color, labelKey } = AGENT_STATUS[status];
-  const project = projects.find((p) => p.id === task.project_id) ?? null;
   // Once a turn has run, the engine session and the files it touched both belong to this repo.
   const locked = task.turns > 0;
 
@@ -195,17 +193,6 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
       </div>
 
       <ChainStrip taskId={taskId} />
-
-      {/* Said once, under the header, and never repeated per message: an agent turn edits this
-          working copy for real. `warning` is the tone the app reserves for "this can lose your
-          work", which this is. */}
-      <p className="flex shrink-0 items-start gap-1.5 border-b border-[var(--cf-border)] bg-black/[0.02] px-3 py-1.5 text-[11px] leading-snug text-[var(--cf-warning)] dark:bg-white/[0.03]">
-        <TriangleAlert size={11} className="mt-[2px] shrink-0" />
-        <span>
-          {t("agents.writesWorkingTree")}
-          {project ? ` — ${project.name}` : ""}
-        </span>
-      </p>
 
       <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-3">
         {messages.length === 0 && !sending && (

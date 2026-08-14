@@ -1414,7 +1414,10 @@ export const useDbStore = create<DbState>((set, get) => ({
     if (!tab || !question || tab.ai?.running) return;
 
     const runId = newAiRunId("db-assist");
-    useAiRunStore.getState().start(runId);
+    // No target: the console this answers into is a tab of the API workspace, and there is no
+    // vocabulary in the notification centre for "that tab, in that window". Listing it unclickable
+    // is still the point — a model is running, and the status bar should say so.
+    useAiRunStore.getState().start(runId, { kindKey: "agents.liveKindDb", detail: question });
     patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
       current.ai
         ? { ...current, ai: { ...current.ai, running: true, runId, error: null } }

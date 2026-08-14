@@ -46,6 +46,7 @@ mod shell_profiles;
 /// AWS request signing, shared by the API client and the Remote workspace's S3 transport.
 mod sigv4;
 mod supabase;
+mod sysload;
 mod terminal;
 mod tray;
 mod watcher;
@@ -378,6 +379,7 @@ pub fn run() {
             commands::app_cmd::ai_usage_stats,
             commands::app_cmd::ai_quota_status,
             commands::app_cmd::power_status,
+            commands::app_cmd::system_load,
             commands::agents_cmd::set_chain_step_input,
             commands::agents_cmd::set_chain_step_skipped,
             commands::agents_cmd::claim_next_chain_step,

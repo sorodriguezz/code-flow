@@ -104,6 +104,20 @@ pub fn power_status() -> Option<crate::power::PowerStatus> {
     crate::power::status()
 }
 
+/// CPU, memory and disk for the whole machine, plus this app's own share of the first two.
+///
+/// `(async)` — off the main thread — because unlike the battery this one walks the process table,
+/// which is milliseconds rather than microseconds, and the very first call deliberately sleeps for
+/// sysinfo's minimum sampling interval so the first reading carries a real CPU figure instead of a
+/// zero (see [`crate::sysload::read`]). Neither belongs on the thread drawing the window.
+///
+/// Infallible by design: a status bar has nothing to do with an error about a detail nobody asked
+/// to be told about, so anything unreadable comes back as zero.
+#[tauri::command(async)]
+pub fn system_load() -> crate::sysload::SystemLoad {
+    crate::sysload::read()
+}
+
 /// What the app cannot do without, checked on the first launch after installing.
 ///
 /// Called at most once per installation — the frontend remembers the answer in `app_settings`,

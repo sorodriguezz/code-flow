@@ -2,6 +2,10 @@ import { create } from "zustand";
 import { cancelAiRun } from "../lib/tauri/commands";
 import { onAiEngine, onAiOutputBatch, type AiEngineEvent, type AiOutputBatchEvent } from "../lib/tauri/events";
 import { formatAgentLogLine } from "../lib/agentLog";
+// Types only, so neither of these is a module this one depends on at runtime — `notificationStore`
+// in particular reaches back into half the app, and importing it for real here would close a cycle.
+import type { TranslationKey } from "../lib/i18n/translations";
+import type { NotificationTarget } from "./notificationStore";
 
 /** Only the tail is kept: a long agent run emits thousands of lines and nobody scrolls back
  * through them live — the full transcript is whatever the CLI itself writes to its own logs. */
@@ -40,6 +44,34 @@ export interface AiRunEngine {
   model: string;
 }
 
+/**
+ * What a run *is*, for anything that lists runs rather than renders one.
+ *
+ * Every model execution in this app goes through [`AiRunState.start`] — a turn, a review, a wiki
+ * page, an inline edit — so that call is the one place where "an engine is running" can be known
+ * without each feature reporting itself separately. This is what it reports.
+ *
+ * The kind is a **key**, not a sentence: a run started before a language switch would otherwise
+ * still be labelled in the old one for as long as it lasts, and the longest runs here are minutes.
+ */
+export interface AiRunAbout {
+  kindKey: TranslationKey;
+  /** What it is acting on — a task's title, a pull request, a file name. User data, so it is the
+   * one part that is never translated. */
+  detail: string;
+  /**
+   * Where to go to watch it, in the notification centre's own vocabulary — which is what makes
+   * following a *running* run and following a finished one the same landing.
+   *
+   * Absent for a run whose place is already on screen. An inline edit in the editor has nowhere to
+   * send anybody: they are looking at it.
+   */
+  target?: NotificationTarget;
+  /** The workspace it belongs to, so a target can cross back into it. Stamped from wherever the
+   * run started, since it may well outlive the user's presence there. */
+  workspaceId?: string | null;
+}
+
 interface AiRunState {
   /** Live output per run id. Entries survive the run ending so a finished job can still show
    * what it printed; the oldest *settled* ones are dropped once more than `MAX_RUNS` have
@@ -52,6 +84,9 @@ interface AiRunState {
    * would quietly blank a chip that is still on screen. Two short strings per run is a few hundred
    * bytes — the buffers next door are four hundred lines each, and they are the actual leak. */
   engineByRun: Record<string, AiRunEngine>;
+  /** What each run is, for the status bar's list of everything in flight. Written by `start` and
+   * evicted with the buffers; a run with no entry still counts as running, it is just unnamed. */
+  aboutByRun: Record<string, AiRunAbout>;
   /** Runs the UI believes are in flight — set on start, cleared on finish. */
   active: Record<string, boolean>;
   /** Ids the user asked to stop, so the UI can show "stopping…" until the process actually dies
@@ -59,7 +94,10 @@ interface AiRunState {
   cancelling: Record<string, boolean>;
   /** Subscribes to the backend's output events. Idempotent — safe to call from an effect. */
   init: () => void;
-  start: (runId: string) => void;
+  /** `about` is optional so a run can never fail to register for want of a description — an
+   * unnamed row in the status bar is a worse answer than a named one and a much better answer than
+   * a model running with nothing on screen to say so. */
+  start: (runId: string, about?: AiRunAbout) => void;
   finish: (runId: string) => void;
   cancel: (runId: string) => Promise<void>;
   clear: (runId: string) => void;
@@ -88,6 +126,7 @@ function without<T>(map: Record<string, T>, gone: Set<string>): Record<string, T
 export const useAiRunStore = create<AiRunState>((set, get) => ({
   linesByRun: {},
   engineByRun: {},
+  aboutByRun: {},
   active: {},
   cancelling: {},
 
@@ -139,7 +178,7 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
     });
   },
 
-  start: (runId) => {
+  start: (runId, about) => {
     // Subscribing here (rather than leaving it to whatever renders the log) guarantees the
     // listener is attached before the process can print its first line.
     get().init();
@@ -168,9 +207,13 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
       // The engine is dropped along with the lines: routing can have changed since, and a stale
       // name on a fresh run is worse than no name at all. The backend re-announces immediately.
       const { [runId]: _previousEngine, ...engineByRun } = s.engineByRun;
+      // Written before the process exists, so the status bar names the run from the frame it
+      // starts rather than from whenever the engine gets round to announcing itself.
+      const aboutByRun = without(s.aboutByRun, gone);
       return {
         linesByRun: { ...without(s.linesByRun, gone), [runId]: [] },
         engineByRun,
+        aboutByRun: about ? { ...aboutByRun, [runId]: about } : aboutByRun,
         active: { ...without(s.active, gone), [runId]: true },
         cancelling: { ...without(s.cancelling, gone), [runId]: false },
       };

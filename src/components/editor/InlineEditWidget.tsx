@@ -50,7 +50,8 @@ export function InlineEditWidget({
     const runId = newRunId("inline");
     runIdRef.current = runId;
     setRunId(runId);
-    useAiRunStore.getState().start(runId);
+    // No target: this rewrites the selection in the editor the user is typing into.
+    useAiRunStore.getState().start(runId, { kindKey: "agents.liveKindInline", detail: filePath });
     setRunning(true);
     try {
       const replacement = await inlineEditWithAi(filePath, fileContent, selection, text, runId);

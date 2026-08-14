@@ -141,7 +141,9 @@ export function useResolveWithAi(
     // A fix writes to the working tree, so it's the run that most needs to be watchable and
     // stoppable — the id ties both to this particular fix.
     const id = newRunId("fix");
-    useAiRunStore.getState().start(id);
+    // The same one line the finished notification is titled with — see `label`. No target: the
+    // proposal lands on this finding, in the panel the user is already looking at.
+    useAiRunStore.getState().start(id, { kindKey: "agents.liveKindFix", detail: label ?? "" });
     markRunning({ runId: id, startedAt: Date.now() });
     try {
       const result = await resolveFindingWithAi(projectId, promptText, id);

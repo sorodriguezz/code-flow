@@ -4713,6 +4713,37 @@ mod tests {
         assert_eq!(steps[0].status, "done", "the step before it was left alone");
     }
 
+    /// The whole plan again, which is the same move from index 0 — and the reason the status bar's
+    /// "re-run chain" needs nothing of its own in this file.
+    ///
+    /// What it pins down is the two halves of "again": every step goes back to `pending` with its
+    /// gate re-armed and its answer no longer standing, and the *first* one is the one the plan
+    /// hands back to the scheduler. A re-run that left step 0 `done` would silently be a re-run
+    /// from step 1.
+    #[test]
+    fn rerunning_from_the_top_puts_the_whole_plan_back() {
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 3).chain.id;
+        for at in 1..=3 {
+            let step = claim_next_chain_step(&conn, &chain_id, &format!("run-{at}")).unwrap().step.unwrap();
+            complete_chain_step(&conn, &step.id, "done", "primera pasada", "").unwrap();
+        }
+        assert_eq!(chain_row(&conn, &chain_id).unwrap().unwrap().status, "done");
+
+        let chain = rerun_chain_from(&conn, &chain_id, 0, "").unwrap().unwrap();
+        assert_eq!(chain.status, "queued");
+
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert!(steps.iter().all(|step| step.status == "pending"), "every step, not just the tail");
+        assert!(steps.iter().all(|step| step.attempts == 0), "the count starts over for all of them");
+        // The answers survive on purpose: the second lap opens knowing what the first learned, and
+        // the pane can still show what each step said last time until it says something new.
+        assert!(steps.iter().all(|step| !step.output_text.is_empty()));
+
+        let claim = claim_next_chain_step(&conn, &chain_id, "run-4").unwrap();
+        assert_eq!(claim.step.unwrap().step_index, 0, "from the top");
+    }
+
     /// The loop. A later step rejects the work and the plan goes **back**, which is the thing a
     /// chain could not express at all before `on_fail` existed.
     ///

@@ -289,7 +289,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
     touchConversation(conversationId);
     const base = existing ?? newSession(projectId, conversationId);
     const runId = newRunId("chat");
-    useAiRunStore.getState().start(runId);
+    // The question, not the conversation: a chat run is identified by what was just asked, and a
+    // brand-new conversation has no title yet to name it by. No view — the assistant is a rail over
+    // whichever one the user is on, and an answer is not a reason to move them off it.
+    useAiRunStore.getState().start(runId, {
+      kindKey: "agents.liveKindChat",
+      detail: trimmed,
+      target: {
+        openAiPanel: true,
+        projectId,
+        select: { kind: "chatConversation", id: conversationId },
+      },
+    });
 
     const now = Date.now();
     set((s) => ({

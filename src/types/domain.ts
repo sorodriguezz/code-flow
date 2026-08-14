@@ -1551,3 +1551,39 @@ export interface PowerStatus {
    * the OS will not estimate it, which it routinely refuses to do just after a cable is moved. */
   minutes_left: number | null;
 }
+
+/**
+ * What the machine is doing right now, and how much of it is us.
+ *
+ * Both halves come from one refresh on the Rust side (`sysload.rs`), which is the point: the bar
+ * shows the machine and the panel behind it shows this app's share, and two numbers read a second
+ * apart would be describing two different moments.
+ *
+ * Every percentage is 0–100 against the *whole machine*, `app_cpu_percent` included — sysinfo
+ * reports a process per-core (400% on four busy cores) and the backend divides that down, so the
+ * app's figure can never exceed the machine's figure it sits under.
+ */
+export interface SystemLoad {
+  cpu_percent: number;
+  /** What `cpu_percent` is a percentage of, and what the app's per-core figure was divided by. Sent
+   * rather than read from `navigator.hardwareConcurrency`, which browsers may round down. */
+  cpu_cores: number;
+  mem_percent: number;
+  /** Bytes. Formatted at render time so the unit follows the reader, not the wire. */
+  mem_used: number;
+  mem_total: number;
+  disk_percent: number;
+  disk_used: number;
+  disk_total: number;
+  /** The volume the percentage is about — the one home is on. Named, because a machine has several
+   * and a bare disk percentage is a number about nothing. */
+  disk_mount: string;
+  /** This app **and everything it launched**: the webview process, agent CLI turns, terminals.
+   * Reporting the main process alone would answer 0.3% while a run has three cores busy. */
+  app_cpu_percent: number;
+  app_mem: number;
+  /** `app_mem` as a share of `mem_total` — us against everything else on the machine. */
+  app_mem_percent: number;
+  /** How many processes that tree came to — the line that explains the two figures above it. */
+  app_processes: number;
+}

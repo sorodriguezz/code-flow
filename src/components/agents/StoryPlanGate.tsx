@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, CircleSlash, FolderGit2, TriangleAlert } from "lucide-react";
+import { Check, CircleSlash, FolderGit2 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { useChainStore } from "../../state/chainStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -205,10 +205,6 @@ export function StoryPlanGate({
             ? t("agents.storyApproveN", { n: chosen.length })
             : t("agents.storyApproveNone")}
         </button>
-        <span className="flex items-center gap-1.5 text-[11px] text-[var(--cf-warning)]">
-          <TriangleAlert size={11} />
-          {t("agents.writesWorkingTree")}
-        </span>
       </div>
     </div>
   );

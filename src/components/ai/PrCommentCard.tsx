@@ -119,7 +119,11 @@ export function PrCommentCard({
    * to edit, never something posted straight to the pull request. */
   const draftReply = async () => {
     const id = newRunId("draft");
-    useAiRunStore.getState().start(id);
+    // No target: the draft lands in this thread's reply box, in the panel that is open.
+    useAiRunStore.getState().start(id, {
+      kindKey: "agents.liveKindDraft",
+      detail: locationLabel(thread) ?? "",
+    });
     setDrafting(true);
     try {
       const text = await draftPrCommentReply(threadAsText(thread), replyBody.trim() || null, id);

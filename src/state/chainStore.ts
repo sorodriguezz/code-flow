@@ -327,6 +327,21 @@ export const useChainStore = create<ChainState>((set, get) => ({
 
       await useAgentsStore.getState().runTurn(claim.task.id, claim.message, {
         runId,
+        // The plan, not the step. Both are true of this run, and the plan is the one worth
+        // offering: it is where the whole sequence is readable, and the step's own task is one
+        // click further in from there.
+        about: {
+          kindKey: "agents.liveKindChain",
+          detail: claim.chain.title || claim.chain.goal,
+          // A chain carries no workspace of its own — every one of its queries reaches the
+          // workspace through the project. The task the step runs as does, and it is the same one.
+          workspaceId: claim.task.workspace_id,
+          target: {
+            view: "agents",
+            projectId: claim.step.project_id,
+            select: { kind: "chain", id: chainId },
+          },
+        },
         onSettle: (outcome) => {
           void settleStep(claim.step!.id, chainId, outcome, get, set);
         },

@@ -385,7 +385,11 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
     if (get().runByBatch[batchId]) return;
     const runId = newRunId("stories");
     // Before the invoke, or the first lines the engine prints have nowhere to land.
-    useAiRunStore.getState().start(runId);
+    useAiRunStore.getState().start(runId, {
+      kindKey: "agents.liveKindStories",
+      detail: get().batches.find((b) => b.id === batchId)?.title ?? "",
+      target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
+    });
     set((s) => ({
       runByBatch: { ...s.runByBatch, [batchId]: runId },
       runStartedAt: { ...s.runStartedAt, [runId]: Date.now() },
@@ -500,13 +504,16 @@ export const useStoriesStore = create<StoriesState>((set, get) => ({
   verify: async (batchId, storyIds = []) => {
     if (get().verifyRunByBatch[batchId]) return;
     const runId = newRunId("story-verify");
-    useAiRunStore.getState().start(runId);
+    const where = get().batches.find((b) => b.id === batchId)?.title ?? "";
+    useAiRunStore.getState().start(runId, {
+      kindKey: "agents.liveKindVerify",
+      detail: where,
+      target: { view: "stories", storiesMode: "batches", select: { kind: "batch", id: batchId } },
+    });
     set((s) => ({
       verifyRunByBatch: { ...s.verifyRunByBatch, [batchId]: runId },
       runStartedAt: { ...s.runStartedAt, [runId]: Date.now() },
     }));
-
-    const where = get().batches.find((b) => b.id === batchId)?.title ?? "";
 
     try {
       const detail = await verifyStories(batchId, runId, storyIds);
