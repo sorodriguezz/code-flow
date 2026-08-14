@@ -7,6 +7,7 @@ import type { editor as MonacoEditorNS } from "monaco-editor";
 // Notes work as the only view a user ever opens.
 import "../../lib/monacoSetup";
 import { applyTool, type MarkdownTool } from "../../lib/notes/markdownTools";
+import { findNoteLinks } from "../../lib/notes/noteLinks";
 import { suggestNoteLinks, useNotesStore } from "../../state/notesStore";
 import { useThemeStore } from "../../state/themeStore";
 
@@ -356,6 +357,29 @@ export function NoteMonaco({
     // `editorReady` rather than `[]`: `monacoRef` is null until `onMount` runs, so an effect with
     // no dependency on that would register nothing at all.
   }, [editorReady, noteId]);
+
+  /**
+   * Recolours `[[Title]]` so it reads as a reference rather than as broken punctuation.
+   *
+   * Monaco's stock Markdown grammar has no notion of this syntax — it reads the pair as an
+   * unterminated CommonMark link and gives the trailing `]]` whatever colour that theme reserves
+   * for invalid syntax, which on most of the shipped palettes is a red that has nothing to do with
+   * an error. A decoration is the fix rather than a custom tokenizer, because it wins the argument
+   * with the grammar instead of trying to rewrite it — see `.cf-note-link-token` in `index.css` for
+   * why it needs `!important` to do that.
+   */
+  const noteLinks = useMemo(() => findNoteLinks(value), [value]);
+  const linkDecorationsRef = useRef<string[]>([]);
+  useEffect(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco || !editor.getModel()) return;
+    const decorations: MonacoEditorNS.IModelDeltaDecoration[] = noteLinks.map((link) => ({
+      range: new monaco.Range(link.line, link.startColumn, link.line, link.endColumn),
+      options: { inlineClassName: "cf-note-link-token" },
+    }));
+    linkDecorationsRef.current = editor.deltaDecorations(linkDecorationsRef.current, decorations);
+  }, [noteLinks, noteId, editorReady]);
 
   const handleMount: OnMount = (editor, monaco) => {
     editorRef.current = editor;

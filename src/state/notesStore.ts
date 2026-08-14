@@ -12,6 +12,8 @@ import {
   notesMoveBook,
   notesMoveNote,
   notesRenameBook,
+  notesReorderBooks,
+  notesReorderNotes,
   notesSaveNote,
   notesSearch,
   notesSetBookColor,
@@ -20,6 +22,7 @@ import {
 } from "../lib/tauri/notesCommands";
 import { serializeTags, parseTags } from "../lib/notes/tags";
 import { toTemplate } from "../lib/notes/templates";
+import { descendantIds } from "../lib/notes/tree";
 import { translate } from "./languageStore";
 import { pushErrorToast } from "./toastStore";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -27,6 +30,7 @@ import type {
   Note,
   NoteDraft,
   NoteBookRow,
+  NoteGalleryView,
   NoteMetaRow,
   NoteSearchHit,
   NoteSort,
@@ -63,6 +67,13 @@ import type {
  * 4. **Filing and writing are different acts.** Moving a note between books deliberately does
  *    not touch `updated_at` (see `note_queries::move_note`), so an afternoon of tidying doesn't
  *    read as an afternoon of writing in the "recent" ordering.
+ *
+ * 5. **The list's order is the user's, not the clock's.** `sort` defaults to `"manual"`, which is
+ *    the `sort_order` column and is written by exactly one thing: a drag. The four other orderings
+ *    are still there to switch to, but none of them can be the default, because the most obvious
+ *    candidate — last edited — reorders itself *while you are typing*: every autosave lifts the
+ *    open note over the others and the sidebar you were reading rearranges under the cursor. See
+ *    `dropNote`.
  */
 
 /** How long after the last keystroke the draft is written. Long enough that a sentence is one
@@ -100,16 +111,28 @@ const MAX_FLUSH_PASSES = 4;
  * was the first thing this reached for and was wrong for two reasons. `remoteStore` sets the
  * precedent (see `loadCollapsed` there), and following it is not merely tidiness: `app_settings` is
  * in `snapshot::CORE_TABLES`, so these travel with a backup and land on the restored machine.
- * A collapsed-book arrangement built up over months is exactly the kind of small thing whose loss
+ * An open-book arrangement built up over months is exactly the kind of small thing whose loss
  * on a reinstall is annoying out of proportion to its size.
  *
  * The writes are fire-and-forget. A preference that fails to persist is worth no toast — the
  * setting is already applied on screen, and the cost of the failure is re-making it next launch.
  */
-const collapsedKey = (workspaceId: string) => `notes_collapsed_books:${workspaceId}`;
+/**
+ * The books the user has opened — **not** the ones they closed, which is what this used to store.
+ *
+ * The inversion is the whole point: a tree whose default is "closed" cannot be expressed as a list
+ * of exceptions to "open". A workspace of thirty books that all unfold on first launch is a wall of
+ * note titles with the books lost inside it; closed, it is a shelf, and opening one is the gesture
+ * that says which one you are working in.
+ *
+ * A different settings key from the old `notes_collapsed_books:*`, deliberately: the stored value
+ * means the opposite now, and reading the old one under the new meaning would open exactly the
+ * books the user had shut.
+ */
+const expandedKey = (workspaceId: string) => `notes_expanded_books:${workspaceId}`;
 const viewKey = (workspaceId: string) => `notes_view_mode:${workspaceId}`;
 const sortKey = (workspaceId: string) => `notes_sort:${workspaceId}`;
-const engineKey = (workspaceId: string) => `notes_ai_engine:${workspaceId}`;
+const galleryViewKey = (workspaceId: string) => `notes_gallery_view:${workspaceId}`;
 
 async function loadPref(key: string): Promise<string | null> {
   const { getSetting } = await import("../lib/tauri/commands");
@@ -128,25 +151,6 @@ async function savePref(key: string, value: string): Promise<void> {
 /** A stored row as the UI holds it — the one place `tags` stops being JSON. */
 function toNote(row: NoteMetaRow): Note {
   return { ...row, tags: parseTags(row.tags) };
-}
-
-/** The stored engine choice. Never throws: a hand-edited setting must not stop the workspace
- *  loading, and falling back to "whatever the app routes to" is a working default. */
-function parseEngine(raw: string | null): { provider: string; model: string } {
-  if (!raw) return { provider: "", model: "" };
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") {
-      const record = parsed as Record<string, unknown>;
-      return {
-        provider: typeof record.provider === "string" ? record.provider : "",
-        model: typeof record.model === "string" ? record.model : "",
-      };
-    }
-  } catch {
-    // falls through
-  }
-  return { provider: "", model: "" };
 }
 
 function parseList(raw: string | null): string[] {
@@ -190,29 +194,18 @@ interface NotesState {
   /** Tags a note must carry to show, ANDed. AND rather than OR because picking two tags is
    *  narrowing; the search box is already the "either" tool. */
   tagFilter: string[];
-  /** The book whose contents the gallery shows. `null` is the whole workspace. */
+  /** The book the gallery is showing the inside of. `null` is the shelf — the books themselves. */
   bookFilter: string | null;
   sort: NoteSort;
 
-  /** Book ids the user has collapsed. Persisted: how much room a subtree deserves is a
-   *  decision, and re-making it every launch is what `layoutStore` exists to avoid. */
-  collapsed: string[];
+  /** Book ids the user has opened. Persisted, and closed is the default — see `expandedKey`. */
+  expanded: string[];
   /** How the editor splits its space. Persisted for the same reason. */
   viewMode: NoteViewMode;
+  /** Cards or rows, in the gallery. Persisted for the same reason. */
+  galleryView: NoteGalleryView;
   /** The outline panel's visibility. */
   outlineOpen: boolean;
-
-  /**
-   * Which engine writes when the AI dialog is used, empty for "whatever the app routes to".
-   *
-   * Held per workspace rather than globally, and deliberately *not* in the app's task routing: the
-   * routing is what the app picks for jobs it decides to run, while this is a person's standing
-   * preference for the notebook they are writing in. One workspace's notes may be drafted with a
-   * local model and another's with a large one.
-   */
-  aiProvider: string;
-  aiModel: string;
-  setAiEngine: (provider: string, model: string) => void;
 
   setWorkspace: (workspaceId: string) => Promise<void>;
   refresh: () => Promise<void>;
@@ -223,8 +216,9 @@ interface NotesState {
   setBookFilter: (bookId: string | null) => void;
   setSort: (sort: NoteSort) => void;
   setViewMode: (mode: NoteViewMode) => void;
+  setGalleryView: (view: NoteGalleryView) => void;
   toggleOutline: () => void;
-  toggleCollapsed: (bookId: string) => void;
+  toggleBook: (bookId: string) => void;
   expandBook: (bookId: string) => void;
 
   openNote: (id: string) => Promise<void>;
@@ -234,16 +228,44 @@ interface NotesState {
   /** Writes the draft now, if it is dirty. Called on close, on switch, and on the debounce. */
   flush: () => Promise<void>;
 
+  /**
+   * Writes a new note into `bookId`.
+   *
+   * `null` means "wherever is sensible", not "nowhere": `resolveBook` picks the book the gallery is
+   * showing, else the first one, and makes one if the workspace has none. Every note has a book —
+   * see `db/note_queries.rs::create_note` — so the alternative to choosing one here would be a
+   * dialog in front of the fastest action in the app.
+   */
   createNote: (bookId: string | null, template?: NoteTemplate) => Promise<string | null>;
   deleteNote: (id: string) => Promise<void>;
   duplicateNote: (id: string) => Promise<string | null>;
   togglePinned: (id: string) => Promise<void>;
-  moveNote: (id: string, bookId: string | null) => Promise<void>;
+  moveNote: (id: string, bookId: string) => Promise<void>;
+  /**
+   * What a drop on a note does: file it into `bookId`, and place it next to `anchor` in that book.
+   *
+   * One action rather than a move followed by a reorder from the UI, because the two writes have to
+   * agree — a note that changed book and was then ordered against the *old* book's list would land
+   * somewhere nobody dropped it. `anchor` of `null` is "no particular place": appended, which is
+   * what a drop across the middle of a book row means and what filing has always done.
+   */
+  dropNote: (
+    id: string,
+    bookId: string,
+    anchor: { id: string; after: boolean } | null,
+  ) => Promise<void>;
 
   createBook: (parentId: string | null, name: string) => Promise<string | null>;
   renameBook: (id: string, name: string) => Promise<void>;
   setBookColor: (id: string, color: string) => Promise<void>;
   moveBook: (id: string, parentId: string | null) => Promise<void>;
+  /** The books' half of `dropNote`. Refuses, silently, to put a book inside its own subtree. */
+  dropBook: (
+    id: string,
+    parentId: string | null,
+    anchor: { id: string; after: boolean } | null,
+  ) => Promise<void>;
+  /** Deletes the book, its subbooks **and every note inside them**. Confirm before calling. */
   deleteBook: (id: string) => Promise<void>;
 
   /** Saves a template from explicit content, so both callers — "save this note as a template" and
@@ -300,12 +322,11 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   bodyHits: {},
   tagFilter: [],
   bookFilter: null,
-  sort: "updated",
-  collapsed: [],
+  sort: "manual",
+  expanded: [],
   viewMode: "split",
+  galleryView: "grid",
   outlineOpen: false,
-  aiProvider: "",
-  aiModel: "",
 
   setWorkspace: async (workspaceId) => {
     if (pendingLoad?.workspaceId === workspaceId) return pendingLoad.promise;
@@ -342,35 +363,32 @@ export const useNotesStore = create<NotesState>((set, get) => ({
         bookFilter: null,
         // Reset to the defaults first; the stored values arrive with the tree below. Without this
         // the incoming workspace briefly wears the outgoing one's view mode.
-        collapsed: [],
+        expanded: [],
         viewMode: "split",
-        sort: "updated",
-        aiProvider: "",
-        aiModel: "",
+        galleryView: "grid",
+        sort: "manual",
       });
       try {
-        // In parallel with the tree rather than before it: three settings reads and one tree read
-        // are independent, and serialising them would put two extra round trips in front of the
+        // In parallel with the tree rather than before it: four settings reads and one tree read
+        // are independent, and serialising them would put three extra round trips in front of the
         // first paint.
-        const [tree, collapsed, viewMode, sort, engine] = await Promise.all([
+        const [tree, expanded, viewMode, galleryView, sort] = await Promise.all([
           notesLoadTree(workspaceId),
-          loadPref(collapsedKey(workspaceId)),
+          loadPref(expandedKey(workspaceId)),
           loadPref(viewKey(workspaceId)),
+          loadPref(galleryViewKey(workspaceId)),
           loadPref(sortKey(workspaceId)),
-          loadPref(engineKey(workspaceId)),
         ]);
-        const picked = parseEngine(engine);
         // The user may have switched again while all that was in flight.
         if (get().workspaceId !== workspaceId) return;
         set({
           notes: tree.notes.map(toNote),
           books: tree.books,
           templates: tree.templates.map(toTemplate),
-          collapsed: parseList(collapsed),
+          expanded: parseList(expanded),
           viewMode: (viewMode as NoteViewMode | null) ?? "split",
-          sort: (sort as NoteSort | null) ?? "updated",
-          aiProvider: picked.provider,
-          aiModel: picked.model,
+          galleryView: galleryView === "list" ? "list" : "grid",
+          sort: (sort as NoteSort | null) ?? "manual",
         });
       } catch (error) {
         pushErrorToast(String(error));
@@ -452,29 +470,29 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     set({ viewMode: mode });
   },
 
-  toggleOutline: () => set((state) => ({ outlineOpen: !state.outlineOpen })),
-
-  setAiEngine: (provider, model) => {
+  setGalleryView: (view) => {
     const { workspaceId } = get();
-    if (workspaceId) void savePref(engineKey(workspaceId), JSON.stringify({ provider, model }));
-    set({ aiProvider: provider, aiModel: model });
+    if (workspaceId) void savePref(galleryViewKey(workspaceId), view);
+    set({ galleryView: view });
   },
 
-  toggleCollapsed: (bookId) => {
-    const { workspaceId, collapsed } = get();
-    const next = collapsed.includes(bookId)
-      ? collapsed.filter((id) => id !== bookId)
-      : [...collapsed, bookId];
-    if (workspaceId) void savePref(collapsedKey(workspaceId), JSON.stringify(next));
-    set({ collapsed: next });
+  toggleOutline: () => set((state) => ({ outlineOpen: !state.outlineOpen })),
+
+  toggleBook: (bookId) => {
+    const { workspaceId, expanded } = get();
+    const next = expanded.includes(bookId)
+      ? expanded.filter((id) => id !== bookId)
+      : [...expanded, bookId];
+    if (workspaceId) void savePref(expandedKey(workspaceId), JSON.stringify(next));
+    set({ expanded: next });
   },
 
   expandBook: (bookId) => {
-    const { workspaceId, collapsed } = get();
-    if (!collapsed.includes(bookId)) return;
-    const next = collapsed.filter((id) => id !== bookId);
-    if (workspaceId) void savePref(collapsedKey(workspaceId), JSON.stringify(next));
-    set({ collapsed: next });
+    const { workspaceId, expanded } = get();
+    if (expanded.includes(bookId)) return;
+    const next = [...expanded, bookId];
+    if (workspaceId) void savePref(expandedKey(workspaceId), JSON.stringify(next));
+    set({ expanded: next });
   },
 
   // ---------- the open note ----------
@@ -632,13 +650,9 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     const content = template?.content ?? "";
     const tags = template?.tags ?? [];
     try {
-      const row = await notesCreateNote(
-        workspaceId,
-        bookId,
-        title,
-        content,
-        serializeTags(tags),
-      );
+      const book = bookId ?? (await resolveBook(get, translate("notes.defaultBook")));
+      if (!book) return null;
+      const row = await notesCreateNote(workspaceId, book, title, content, serializeTags(tags));
       const note = toNote(row);
       set((state) => ({
         notes: [note, ...state.notes],
@@ -647,9 +661,10 @@ export const useNotesStore = create<NotesState>((set, get) => ({
         savedAt: note.updated_at,
         ...cacheBody(state, note.id, content),
       }));
-      // A note created into a collapsed book must be visible, or the button appears to do
-      // nothing at all.
-      if (bookId) get().expandBook(bookId);
+      // A note created into a closed book must be visible, or the button appears to do nothing
+      // at all — which, with books closed by default, is now the ordinary case rather than a
+      // corner of it.
+      get().expandBook(book);
       return note.id;
     } catch (error) {
       pushErrorToast(String(error));
@@ -691,6 +706,13 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       if (!row) return null;
       const note = toNote(row);
       set((state) => ({ notes: [note, ...state.notes] }));
+      // **Placed next to the original, not at the end of the book.** `duplicate_note` appends,
+      // which under the hand-made order puts the copy at the bottom of a list that may be long and
+      // a book that may be shut — so the one action whose whole point is "another one of these"
+      // was the one action with nothing to show for it. Best-effort and silent: a copy that exists
+      // but sits in the wrong place is not worth a toast, and the row is there either way.
+      void placeAfter(get, set, note, source);
+      if (note.book_id) get().expandBook(note.book_id);
       return note.id;
     } catch (error) {
       pushErrorToast(String(error));
@@ -726,9 +748,105 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       }
       const note = toNote(row);
       set((state) => ({ notes: state.notes.map((n) => (n.id === id ? note : n)) }));
-      if (bookId) get().expandBook(bookId);
+      get().expandBook(bookId);
     } catch (error) {
       pushErrorToast(String(error));
+    }
+  },
+
+  dropNote: async (id, bookId, anchor) => {
+    const state = get();
+    const moving = state.notes.find((n) => n.id === id);
+    // Dropped on its own edge: the gesture has an obvious meaning and it is "nothing". Guarded
+    // here rather than in the caller so no drop path can miss it — the note is about to be pulled
+    // out of `siblings`, and an anchor that went with it would silently become "append".
+    if (!moving || anchor?.id === id) return;
+    const changedBook = moving.book_id !== bookId;
+
+    /**
+     * **A drop with no anchor is a move, and must not renumber anything.**
+     *
+     * This is the difference between "put it in that book" and "put it there", and conflating them
+     * loses data. The renumbering below writes the destination's whole list from the order that is
+     * *on screen* — which is only the user's arrangement while the sort is `manual`. Run it for a
+     * filing drop made while sorting by title, and the book's hand-made order is overwritten with
+     * an alphabetical one, silently, with the view still showing titles so nothing appears to
+     * happen at all. `move_note` already appends the arriving note correctly and touches no
+     * sibling, so filing has nothing to gain from the reorder and everything to lose.
+     *
+     * And a filing drop onto the book a note is already in is simply nothing — the old
+     * `fromBookId === target` guard, restored where no drop path can miss it.
+     */
+    if (!anchor) {
+      if (changedBook) await get().moveNote(id, bookId);
+      return;
+    }
+
+    /**
+     * The destination book's whole list, **unfiltered and in the order it is shown right now**.
+     *
+     * Unfiltered because a search hides rows without moving them: reordering the four notes a
+     * query left on screen must not renumber the book as if the other thirty had gone away. In
+     * today's order rather than in `sort_order`, because the user may be looking at the list by
+     * title or by length — and what they mean by dropping here is "put it there, in *this* list".
+     * Writing the positions from what they saw is what makes the switch to `manual` below keep the
+     * arrangement they were looking at, with the one note moved. That is only defensible because
+     * an anchored drop is an explicit request for a position; see the guard above for why the
+     * unanchored one is not.
+     */
+    const current = filterNotes(state.notes, {
+      query: "",
+      bodyHits: {},
+      tagFilter: [],
+      bookId,
+      sort: state.sort,
+    });
+    const siblings = current.filter((n) => n.id !== id);
+
+    const at = siblings.findIndex((n) => n.id === anchor.id);
+    const insertAt = at < 0 ? siblings.length : anchor.after ? at + 1 : at;
+    const next = [...siblings.slice(0, insertAt), moving, ...siblings.slice(insertAt)];
+    const positions = new Map(next.map((note, index) => [note.id, index]));
+
+    // Nothing to write: dropped back where it already was. Compared against the *result* rather
+    // than against the target, because "before the note below me" and "after the note above me"
+    // are both ways of spelling the place a note is already in.
+    if (!changedBook && next.every((note, index) => current[index]?.id === note.id)) return;
+
+    // Optimistic and in one `set`, so the row never blinks through an intermediate list — the
+    // reason `remoteStore.dropHost` does the same. Only `sort_order` and `book_id` are touched, so
+    // a save in flight for any of these notes still folds its own five columns back in afterwards.
+    set({
+      notes: state.notes.map((note) => {
+        const position = positions.get(note.id);
+        if (position === undefined) return note;
+        if (note.id === id) return { ...note, book_id: bookId, sort_order: position };
+        return note.sort_order === position ? note : { ...note, sort_order: position };
+      }),
+    });
+    // An arrangement that isn't the ordering on screen is an arrangement nobody can see. Reached
+    // only from the anchored path, because filing a note into a book is not a request to stop
+    // sorting by title.
+    if (state.sort !== "manual") get().setSort("manual");
+    get().expandBook(bookId);
+
+    try {
+      // The move first: `notes_reorder_notes` writes positions, and the other order would leave a
+      // window in which the note is numbered against a book it has not joined yet.
+      if (changedBook) {
+        const row = await notesMoveNote(id, bookId);
+        if (!row) {
+          // Deleted from another window while it was being dragged.
+          set((current) => ({ notes: current.notes.filter((n) => n.id !== id) }));
+          return;
+        }
+      }
+      await notesReorderNotes(next.map((note) => note.id));
+    } catch (error) {
+      pushErrorToast(String(error));
+      // The optimistic list is now a guess about a write that failed. Re-read rather than unwound:
+      // the drop touched every sibling's position, and the database is the shorter way back.
+      void get().refresh();
     }
   },
 
@@ -787,14 +905,84 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     }
   },
 
+  dropBook: async (id, parentId, anchor) => {
+    const state = get();
+    const moving = state.books.find((f) => f.id === id);
+    if (!moving || anchor?.id === id) return;
+    // A book inside its own subtree is a ring of rows that is unreachable from the root — the
+    // backend refuses it too (`move_book` returns false), but refusing here means the drop simply
+    // doesn't land instead of landing and being taken back.
+    if (parentId && descendantIds(state.books, id).has(parentId)) return;
+    const changedParent = moving.parent_id !== parentId;
+
+    // A drop with no anchor is a move — and onto the parent it already has, it is nothing. Same
+    // reasoning as `dropNote`'s: `move_book` appends the arriving book and touches no sibling, so
+    // renumbering the destination would be a rewrite nobody asked for.
+    if (!anchor) {
+      if (changedParent) await get().moveBook(id, parentId);
+      return;
+    }
+
+    // The destination's children in the order the tree draws them — `buildBookTree`'s ordering,
+    // which is the only one books have.
+    const current = state.books
+      .filter((f) => f.parent_id === parentId)
+      .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name));
+    const siblings = current.filter((f) => f.id !== id);
+
+    const at = siblings.findIndex((f) => f.id === anchor.id);
+    const insertAt = at < 0 ? siblings.length : anchor.after ? at + 1 : at;
+    const next = [...siblings.slice(0, insertAt), moving, ...siblings.slice(insertAt)];
+    const positions = new Map(next.map((book, index) => [book.id, index]));
+
+    if (!changedParent && next.every((book, index) => current[index]?.id === book.id)) return;
+
+    set({
+      books: state.books.map((book) => {
+        const position = positions.get(book.id);
+        if (position === undefined) return book;
+        if (book.id === id) return { ...book, parent_id: parentId, sort_order: position };
+        return book.sort_order === position ? book : { ...book, sort_order: position };
+      }),
+    });
+    if (parentId) get().expandBook(parentId);
+
+    try {
+      if (changedParent) {
+        // `false` is the backend refusing the same cycle the guard above catches. Reaching it means
+        // this window's `books` disagreed with the database, so re-read rather than argue.
+        if (!(await notesMoveBook(id, parentId))) {
+          void get().refresh();
+          return;
+        }
+      }
+      await notesReorderBooks(next.map((book) => book.id));
+    } catch (error) {
+      pushErrorToast(String(error));
+      void get().refresh();
+    }
+  },
+
   deleteBook: async (id) => {
+    // Read before the delete: afterwards the rows are gone and there is no way to ask which books
+    // were under this one.
+    const doomed = descendantIds(get().books, id);
     try {
       await notesDeleteBook(id);
-      // The notes inside are not deleted — they surface at the root (see the table's
-      // `ON DELETE SET NULL`). Re-read rather than patched locally, because working out which
-      // notes were in which descendant book is exactly what the query just did.
+      // Everything written inside goes with it — there is nowhere for a note to survive to. Re-read
+      // rather than patched locally, because working out which notes were in which descendant book
+      // is exactly what the query just did.
       await get().refresh();
-      if (get().bookFilter === id) set({ bookFilter: null });
+      set((state) => ({
+        // The gallery may have been standing inside the book that just went, or inside one of its
+        // subbooks. Either way it is now looking at a shelf that no longer has that book on it.
+        bookFilter: state.bookFilter && doomed.has(state.bookFilter) ? null : state.bookFilter,
+        // And the editor may have had one of the deleted notes open. `refresh` has already dropped
+        // it from `notes`; this drops the draft that would otherwise be written back on the next
+        // debounce and re-create a note the user deleted.
+        activeId: state.notes.some((note) => note.id === state.activeId) ? state.activeId : null,
+        draft: state.notes.some((note) => note.id === state.draft?.id) ? state.draft : null,
+      }));
     } catch (error) {
       pushErrorToast(String(error));
     }
@@ -844,6 +1032,67 @@ export const useNotesStore = create<NotesState>((set, get) => ({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The book a new note goes into when the caller didn't name one — the "+" in the sidebar header,
+ * the empty state's button, a template picked from the strip.
+ *
+ * Every note has a book, so this cannot answer "none"; the question is only which. It reads down
+ * from the most specific thing the user is looking at: the book the gallery is showing, then the
+ * book the open note is in, then the first book on the shelf. A workspace with no books at all gets
+ * one, because the alternative is a dialog in front of the fastest action in the app — and "make me
+ * a book to put this in" is what pressing new-note in an empty workspace means anyway.
+ *
+ * `null` comes back only when even that failed, which is a backend error the caller has been told
+ * about; there is nothing sensible to write into.
+ */
+async function resolveBook(get: () => NotesState, defaultName: string): Promise<string | null> {
+  const state = get();
+  if (state.bookFilter && state.books.some((book) => book.id === state.bookFilter)) {
+    return state.bookFilter;
+  }
+  const active = state.notes.find((note) => note.id === state.activeId);
+  if (active?.book_id) return active.book_id;
+  const first = state.books
+    .filter((book) => !book.parent_id)
+    .sort((a, b) => a.sort_order - b.sort_order || a.name.localeCompare(b.name))[0];
+  if (first) return first.id;
+  return state.createBook(null, defaultName);
+}
+
+/**
+ * Moves `note` to sit immediately after `after` in their book's stored order.
+ *
+ * Written against `sort_order` rather than against whatever the view is sorted by — unlike a drag,
+ * which is a statement about the list on screen, this is a statement about the copy belonging next
+ * to its original, and it is true in every ordering. It therefore never switches the sort mode
+ * either: duplicating a note is not a request to stop sorting by title.
+ */
+async function placeAfter(
+  get: () => NotesState,
+  set: (partial: Partial<NotesState>) => void,
+  note: Note,
+  after: Note,
+): Promise<void> {
+  const state = get();
+  const siblings = state.notes
+    .filter((n) => n.book_id === note.book_id && n.id !== note.id)
+    .sort((a, b) => a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at));
+  const at = siblings.findIndex((n) => n.id === after.id);
+  if (at < 0) return;
+  const next = [...siblings.slice(0, at + 1), note, ...siblings.slice(at + 1)];
+  const positions = new Map(next.map((n, index) => [n.id, index]));
+  set({
+    notes: state.notes.map((n) => {
+      const position = positions.get(n.id);
+      if (position === undefined || n.sort_order === position) return n;
+      return { ...n, sort_order: position };
+    }),
+  });
+  // Silent: the copy exists and is on screen either way, and the cost of the failure is that it
+  // sits at the bottom of the book rather than under its original.
+  await notesReorderNotes(next.map((n) => n.id)).catch(() => {});
+}
 
 function draftFor(notes: Note[], id: string, content: string): NoteDraft | null {
   const note = notes.find((n) => n.id === id);
@@ -917,11 +1166,18 @@ export function filterNotes(
     );
   });
 
-  // Pinned first in every ordering. A pin is a statement about importance, and an ordering that
-  // buries a pinned note under a freshly-typed one ignores it.
+  // Pinned first in every ordering, `manual` included. A pin is a statement about importance, and
+  // an ordering that buries a pinned note under a freshly-typed one ignores it — while under a
+  // hand-made order it stays predictable, because a note dragged above the pinned block simply
+  // lands at the top of the unpinned one, which is as close as it can get.
   return filtered.sort((a, b) => {
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
     switch (options.sort) {
+      case "manual":
+        // Ties are real: a note whose book was deleted keeps the position it held inside it (see
+        // the table's `ON DELETE SET NULL`), so two notes can arrive at the root sharing a number.
+        // Creation order breaks them, which is the order they were appended in to begin with.
+        return a.sort_order - b.sort_order || a.created_at.localeCompare(b.created_at);
       case "created":
         return b.created_at.localeCompare(a.created_at);
       case "title":

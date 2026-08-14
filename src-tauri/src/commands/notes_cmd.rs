@@ -12,7 +12,7 @@
 
 use tauri::{AppHandle, State};
 
-use super::claude_cmd::{load_ai_config, load_ai_config_for, AiTask};
+use super::claude_cmd::{load_ai_config, AiTask};
 use crate::ai;
 use crate::ai_runs;
 use crate::db::models::{
@@ -41,25 +41,19 @@ pub fn notes_get_note(db: State<Db>, id: String) -> Result<Option<NoteRow>, Stri
 
 // ---------- notes ----------
 
+/// `book_id` is required: every note lives in a book. See [`note_queries::create_note`].
 #[tauri::command]
 pub fn notes_create_note(
     db: State<Db>,
     workspace_id: String,
-    book_id: Option<String>,
+    book_id: String,
     title: String,
     content: String,
     tags: String,
 ) -> Result<NoteMeta, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    note_queries::create_note(
-        &conn,
-        &workspace_id,
-        book_id.as_deref(),
-        &title,
-        &content,
-        &tags,
-    )
-    .map_err(|e| e.to_string())
+    note_queries::create_note(&conn, &workspace_id, &book_id, &title, &content, &tags)
+        .map_err(|e| e.to_string())
 }
 
 /// The autosave path. `None` means the note was deleted while it was being edited — the frontend
@@ -76,14 +70,27 @@ pub fn notes_save_note(
     note_queries::save_note(&conn, &id, &title, &content, &tags).map_err(|e| e.to_string())
 }
 
+/// Refiles a note into another book. There is no "out of every book" — see [`notes_create_note`].
 #[tauri::command]
 pub fn notes_move_note(
     db: State<Db>,
     id: String,
-    book_id: Option<String>,
+    book_id: String,
 ) -> Result<Option<NoteMeta>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    note_queries::move_note(&conn, &id, book_id.as_deref()).map_err(|e| e.to_string())
+    note_queries::move_note(&conn, &id, &book_id).map_err(|e| e.to_string())
+}
+
+/// Writes one book's note order. `ids` is that book's whole list, in the order the user arranged it.
+///
+/// Separate from [`notes_move_note`] rather than folded into it, because a drop can be either or
+/// both: dragging within a book only reorders, dragging across books moves *and* reorders, and the
+/// frontend issues the move first so the positions are written against the list the note has already
+/// joined. See `notesStore.dropNote`.
+#[tauri::command]
+pub fn notes_reorder_notes(db: State<Db>, ids: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::reorder_notes(&conn, &ids).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -149,8 +156,18 @@ pub fn notes_move_book(
     note_queries::move_book(&conn, &id, parent_id.as_deref()).map_err(|e| e.to_string())
 }
 
-/// Removes the book and its subbooks. The notes inside surface at the root — see the table
-/// comment in `migrations` for why that, and not a cascade, is the deliberate outcome.
+/// The books' half of [`notes_reorder_notes`]: one parent's children, in their new order.
+#[tauri::command]
+pub fn notes_reorder_books(db: State<Db>, ids: Vec<String>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    note_queries::reorder_books(&conn, &ids).map_err(|e| e.to_string())
+}
+
+/// Removes the book, its subbooks **and every note inside them**.
+///
+/// Destructive, unlike every other call in this file, and deliberately so: a note has to belong to
+/// a book, so there is nowhere for the contents to survive. The count in the confirmation the UI
+/// shows first is what makes that an informed choice rather than a surprise.
 #[tauri::command]
 pub fn notes_delete_book(db: State<Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -213,12 +230,13 @@ pub fn notes_search(
 
 /// Writes Markdown to drop into the open note.
 ///
-/// **The provider and model are the caller's choice, not the task router's.** Every other AI call
-/// in the app routes through `AiTask`, which is right for a job the app decides to run — a commit
-/// message, a review. This one is a person asking for prose in a document they are writing, and
-/// which engine writes it is part of the asking: a local model for a rough outline, a large one
-/// for something that has to be right. `AiTask::Inline` is the fallback for a first run that has
-/// picked nothing, because it is the routing for the app's other write-into-the-buffer feature.
+/// **Routed like every other AI action in the app**, through `AiTask::Notes`. The dialog used to
+/// carry its own provider/model pickers and remember the choice per workspace, which made this the
+/// one feature whose engine was set somewhere other than Settings → AI → model per task — two
+/// places to set the same thing, and the one people looked in first was the wrong one. It is its
+/// own task rather than borrowing `AiTask::Inline` precisely so the choice is still available:
+/// writing prose into a note and rewriting a fragment of code are jobs a person routinely wants on
+/// different engines.
 ///
 /// `selection` may be empty — that is "write something here" rather than "replace this".
 #[tauri::command]
@@ -229,18 +247,11 @@ pub async fn notes_write_with_ai(
     content: String,
     selection: String,
     instruction: String,
-    provider: Option<String>,
-    model: Option<String>,
     run_id: Option<String>,
 ) -> Result<String, String> {
     let config = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        match (provider.as_deref(), model.as_deref()) {
-            (Some(p), Some(m)) if !p.trim().is_empty() && !m.trim().is_empty() => {
-                load_ai_config_for(&conn, p, m)?
-            }
-            _ => load_ai_config(&conn, AiTask::Inline)?,
-        }
+        load_ai_config(&conn, AiTask::Notes)?
     };
     // `scoped` is what puts the run in the AI run log and makes it cancellable, the same way every
     // other long call in the app is.

@@ -17,11 +17,11 @@ import {
   LayoutTemplate,
   ListTree,
   MoreHorizontal,
-  Sparkles,
   PenLine,
   Pin,
   PinOff,
   Trash2,
+  X,
 } from "lucide-react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
@@ -31,9 +31,10 @@ import { NoteToolbar } from "./NoteToolbar";
 import { NoteOutline } from "./NoteOutline";
 import { NoteTagBar } from "./NoteTagBar";
 import { SaveTemplateModal } from "./SaveTemplateModal";
-import { NoteAiModal } from "./NoteAiModal";
+import { NoteAiPanel } from "./NoteAiPanel";
 import { ICON_BUTTON, readingMinutes, relativeTime } from "./notesChrome";
 import type { NoteMonacoHandle } from "./NoteMonaco";
+import type { MarkdownTool } from "../../lib/notes/markdownTools";
 import { outlineOf } from "../../lib/notes/outline";
 import { bookPath } from "../../lib/notes/tree";
 import { writeFileBytes } from "../../lib/tauri/commands";
@@ -82,6 +83,7 @@ export function NoteEditor() {
   const duplicateNote = useNotesStore((s) => s.duplicateNote);
   const deleteNote = useNotesStore((s) => s.deleteNote);
   const openNote = useNotesStore((s) => s.openNote);
+  const closeNote = useNotesStore((s) => s.closeNote);
 
   const outlineWidth = useLayoutStore((s) => s.sizes.notesOutlineWidth);
   const setSize = useLayoutStore((s) => s.setSize);
@@ -93,8 +95,9 @@ export function NoteEditor() {
   const previewPane = useRef<HTMLDivElement>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [templating, setTemplating] = useState(false);
-  /** The selection captured when the AI dialog opened. Taken then rather than read on submit,
-   *  because focus moves into the dialog and Monaco's selection is gone by the time it is used. */
+  /** The selection captured when the AI window opened, `null` when it is closed. Taken then rather
+   *  than read on submit, because focus moves into the window and Monaco's selection is gone by the
+   *  time it is used. */
   const [aiSelection, setAiSelection] = useState<string | null>(null);
   const [caretHeadingLine, setCaretHeadingLine] = useState(0);
 
@@ -138,6 +141,22 @@ export function NoteEditor() {
     useToastStore.getState().pushToast(t("notes.imageUrlsOnly"), "info");
   }, [t]);
 
+  // Stable identities, because `NoteToolbar` is memoised and this component re-renders on every
+  // keystroke — an inline arrow would re-render seventeen buttons per character typed.
+  const applyTool = useCallback((tool: MarkdownTool) => monaco.current?.apply(tool), []);
+  // A toggle, not an open: the button stays pressed while the window is up, and pressing it again
+  // is the same gesture as closing it. Re-reading the selection on that second press would replace
+  // the captured one with "" — focus is in the window by then, not in Monaco.
+  const toggleAi = useCallback(
+    () => setAiSelection((current) => (current === null ? (monaco.current?.selectedText() ?? "") : null)),
+    [],
+  );
+  const closeAi = useCallback(() => setAiSelection(null), []);
+  const insertAi = useCallback(
+    (markdown: string) => monaco.current?.replaceSelection(markdown),
+    [],
+  );
+
   // Scrolling the editor scrolls the preview, one way only. Two-way sync is a feedback loop that
   // needs a suppression flag and still stutters where the two panes' heights disagree — and the
   // question a split view answers is "what does what I am writing look like", which is the editor
@@ -156,7 +175,17 @@ export function NoteEditor() {
   useEffect(() => {
     if (previewPane.current) previewPane.current.scrollTop = 0;
     setCaretHeadingLine(0);
+    // The AI window holds the selection it was opened over. That selection belongs to the note that
+    // was on screen, so it goes with it rather than being carried into the next one.
+    setAiSelection(null);
   }, [draft?.id]);
+
+  // Preview-only has no editor for the AI window to float over — and nothing for it to write into.
+  // Closing it there rather than hiding it means coming back doesn't restore a window whose typed
+  // instruction went with the unmounted component anyway.
+  useEffect(() => {
+    if (viewMode === "preview") setAiSelection(null);
+  }, [viewMode]);
 
   // Ctrl/Cmd-S writes now rather than waiting out the debounce. The note is already being saved
   // continuously, so this is not what makes the data safe — it is what lets someone who has typed
@@ -241,18 +270,6 @@ export function NoteEditor() {
 
           <button
             type="button"
-            onClick={() => setAiSelection(monaco.current?.selectedText() ?? "")}
-            disabled={!showEditor}
-            title={t("notes.ai.action")}
-            aria-label={t("notes.ai.action")}
-            data-tour="notes-ai"
-            className={`${ICON_BUTTON} text-[var(--cf-accent)]`}
-          >
-            <Sparkles size={13} />
-          </button>
-
-          <button
-            type="button"
             onClick={toggleOutline}
             aria-pressed={outlineOpen}
             title={t("notes.outline")}
@@ -324,6 +341,21 @@ export function NoteEditor() {
           >
             <MoreHorizontal size={13} />
           </button>
+
+          <span className="mx-0.5 h-4 w-px shrink-0 bg-[var(--cf-border)]" aria-hidden />
+
+          {/* Leaving the note, not deleting it. `closeNote` flushes the draft before it drops it,
+              so whatever was typed a second ago is written even if the autosave debounce had not
+              fired yet — which is what makes this safe to press mid-sentence. */}
+          <button
+            type="button"
+            onClick={() => void closeNote()}
+            title={t("notes.closeNoteHint")}
+            aria-label={t("notes.closeNote")}
+            className={ICON_BUTTON}
+          >
+            <X size={14} />
+          </button>
         </div>
 
         <input
@@ -343,7 +375,12 @@ export function NoteEditor() {
       </div>
 
       {showEditor && (
-        <NoteToolbar onApply={(tool) => monaco.current?.apply(tool)} disabled={!showEditor} />
+        <NoteToolbar
+          onApply={applyTool}
+          onAi={toggleAi}
+          aiOpen={aiSelection !== null}
+          disabled={!showEditor}
+        />
       )}
 
       {/* ---------- surfaces ---------- */}
@@ -356,7 +393,9 @@ export function NoteEditor() {
           `<div className="flex h-full">` for exactly this reason. */}
       <div className="flex h-full min-h-0 flex-1">
         {showEditor && (
-          <div className={`h-full min-w-0 ${showPreview ? "flex-1" : "w-full"}`}>
+          // `relative`: the AI window is positioned against this column, so it floats over the
+          // Markdown it is writing into and travels with the pane when the split is dragged.
+          <div className={`relative h-full min-w-0 ${showPreview ? "flex-1" : "w-full"}`}>
             <Suspense fallback={<div className="h-full w-full bg-[var(--cf-surface)]" />}>
               <NoteMonaco
                 handle={monaco}
@@ -368,6 +407,10 @@ export function NoteEditor() {
                 onImageRejected={onImageRejected}
               />
             </Suspense>
+
+            {aiSelection !== null && (
+              <NoteAiPanel selection={aiSelection} onInsert={insertAi} onClose={closeAi} />
+            )}
           </div>
         )}
 
@@ -459,13 +502,6 @@ export function NoteEditor() {
         <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
       )}
       {templating && <SaveTemplateModal onClose={() => setTemplating(false)} />}
-      {aiSelection !== null && (
-        <NoteAiModal
-          selection={aiSelection}
-          onInsert={(markdown) => monaco.current?.replaceSelection(markdown)}
-          onClose={() => setAiSelection(null)}
-        />
-      )}
     </div>
   );
 }

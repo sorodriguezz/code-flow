@@ -1377,6 +1377,15 @@ body.cf-dragging * {
   background: none;
 }
 
+/* The same `[[Title]]`, in the Monaco editor rather than the preview — see the decoration built in
+ * `NoteMonaco`. Monaco's own Markdown grammar has no notion of this syntax and reads the trailing
+ * `]]` as an unterminated link, so without this it gets whatever colour that theme reserves for
+ * invalid syntax. `!important` for the same reason `.cf-blame-annotation` above needs it: Monaco's
+ * token classes land in a `<style>` tag injected after this file, so specificity alone loses. */
+.cf-note-link-token {
+  color: var(--cf-accent) !important;
+}
+
 /* A fenced code block in a note's preview, and its copy button.
  *
  * The block is a positioned wrapper around the `<pre>` so the button can sit in its corner without

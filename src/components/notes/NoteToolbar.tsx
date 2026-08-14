@@ -1,6 +1,7 @@
 import { memo, useMemo } from "react";
 import {
   Bold,
+  BookMarked,
   Code,
   Code2,
   Heading1,
@@ -14,13 +15,14 @@ import {
   ListOrdered,
   Minus,
   Quote,
+  Sparkles,
   Strikethrough,
   Table,
   type LucideIcon,
 } from "lucide-react";
 import type { MarkdownTool } from "../../lib/notes/markdownTools";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import { ICON_BUTTON } from "./notesChrome";
+import { ICON_BUTTON, ICON_BUTTON_ACCENT } from "./notesChrome";
 import { chordLabel } from "../../lib/keys";
 import { useT } from "../../state/languageStore";
 
@@ -45,6 +47,8 @@ interface Tool {
   chord?: string;
   /** Draws a hairline before this button. */
   separated?: boolean;
+  /** What the tour spotlights, for the one button it has a step about. */
+  dataTour?: string;
 }
 
 const TOOLS: Tool[] = [
@@ -67,6 +71,12 @@ const TOOLS: Tool[] = [
   { icon: Quote, labelKey: "md.quote", tool: { kind: "line", prefix: "> " } },
 
   { icon: Link2, labelKey: "md.link", tool: { kind: "link" }, chord: "Mod+K", separated: true },
+  {
+    icon: BookMarked,
+    labelKey: "notes.tool.reference",
+    tool: { kind: "noteLink" },
+    dataTour: "notes-link",
+  },
   { icon: Image, labelKey: "notes.tool.image", tool: { kind: "image" } },
   {
     icon: Table,
@@ -92,9 +102,17 @@ const TOOLS: Tool[] = [
 
 export const NoteToolbar = memo(function NoteToolbar({
   onApply,
+  onAi,
+  aiOpen,
   disabled,
 }: {
   onApply: (tool: MarkdownTool) => void;
+  /** Opens the AI window over the editor. It lives here, at the end of the marks, rather than up in
+   *  the note's header: "write this bit for me" is a thing you do *to the text* while writing, like
+   *  bolding a word — not a property of the note like pinning it or exporting it. */
+  onAi: () => void;
+  /** The window is up: the button reads as pressed, and pressing it again closes it. */
+  aiOpen?: boolean;
   /** On in preview mode: the marks have nothing to act on when the source isn't showing. */
   disabled?: boolean;
 }) {
@@ -115,7 +133,7 @@ export const NoteToolbar = memo(function NoteToolbar({
       role="toolbar"
       aria-label={t("notes.formatting")}
     >
-      {TOOLS.map(({ icon: Icon, tool, separated }, index) => (
+      {TOOLS.map(({ icon: Icon, tool, separated, dataTour }, index) => (
         <span key={labels[index]} className="flex items-center">
           {separated && <span className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" aria-hidden />}
           <button
@@ -127,12 +145,30 @@ export const NoteToolbar = memo(function NoteToolbar({
             disabled={disabled}
             title={labels[index]}
             aria-label={labels[index]}
+            data-tour={dataTour}
             className={ICON_BUTTON}
           >
             <Icon size={13} />
           </button>
         </span>
       ))}
+
+      <span className="mx-1 h-4 w-px shrink-0 bg-[var(--cf-border)]" aria-hidden />
+      <button
+        type="button"
+        // Same reason as the marks: the selection the AI window is about to be told to replace is
+        // captured on click, and it is gone if the press moves focus out of Monaco first.
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={onAi}
+        disabled={disabled}
+        aria-pressed={aiOpen}
+        title={t("notes.ai.action")}
+        aria-label={t("notes.ai.action")}
+        data-tour="notes-ai"
+        className={`${ICON_BUTTON_ACCENT} ${aiOpen ? "bg-[var(--cf-accent-soft)]" : ""}`}
+      >
+        <Sparkles size={13} />
+      </button>
     </div>
   );
 });

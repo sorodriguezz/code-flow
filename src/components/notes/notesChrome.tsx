@@ -21,9 +21,17 @@ export const ROW_IDLE = "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:
 
 export const ROW_ACTIVE = "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]";
 
+/** The shape of an icon button — size, hit area, hover wash — with no colour of its own, so a
+ *  button that carries one doesn't have to out-specify the muted default in the cascade. */
+const ICON_BUTTON_SHELL =
+  "flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors hover:bg-black/[0.05] disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-white/[0.07]";
+
 /** An icon button in a header or toolbar. */
-export const ICON_BUTTON =
-  "flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.05] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-white/[0.07]";
+export const ICON_BUTTON = `${ICON_BUTTON_SHELL} text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]`;
+
+/** The same button for an action that is *not* neutral — the AI one, which sits among sixteen
+ *  formatting marks and is the only one in the row that spends money. */
+export const ICON_BUTTON_ACCENT = `${ICON_BUTTON_SHELL} text-[var(--cf-accent)]`;
 
 /**
  * A tag, drawn.

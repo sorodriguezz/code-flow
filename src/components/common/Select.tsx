@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
 } from "react";
@@ -89,6 +90,7 @@ export function Select({
   placeholder,
   size = "md",
   className = "",
+  style,
   ariaLabel,
 }: {
   value: string;
@@ -98,6 +100,7 @@ export function Select({
   placeholder?: string;
   size?: keyof typeof SIZE;
   className?: string;
+  style?: CSSProperties;
   ariaLabel?: string;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -323,6 +326,7 @@ export function Select({
         title={label}
         onClick={() => (open ? setOpen(false) : openMenu())}
         onKeyDown={onKeyDown}
+        style={style}
         className={`flex w-full items-center justify-between gap-2 rounded-md border bg-[var(--cf-surface)] text-left outline-none disabled:cursor-not-allowed disabled:opacity-50 ${
           SIZE[size]
         } ${open ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)] focus:border-[var(--cf-accent)]"} ${className}`}

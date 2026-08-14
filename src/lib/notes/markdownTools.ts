@@ -31,7 +31,9 @@ export type MarkdownTool =
   | { kind: "block"; text: string; select?: string }
   /** `[selection](url)` — or `[](url)` with the caret in the label when nothing is selected. */
   | { kind: "link" }
-  | { kind: "image" };
+  | { kind: "image" }
+  /** The opening half of a `[[note]]` reference, selection included as the title typed so far. */
+  | { kind: "noteLink" };
 
 /** Applies `tool` to whatever is selected, then puts the caret back somewhere useful. */
 export function applyTool(
@@ -59,6 +61,9 @@ export function applyTool(
     case "link":
     case "image":
       applyLink(editor, monaco, model, selection, tool.kind === "image");
+      break;
+    case "noteLink":
+      applyNoteLink(editor, model, selection);
       break;
   }
   editor.focus();
@@ -268,6 +273,37 @@ function applyLink(
   // Otherwise the placeholder is selected, so typing replaces it. `selected` may span lines — see
   // `selectAfter`.
   selectAfter(editor, monaco, selection, `${bang}[${selected}](`, placeholder);
+}
+
+/**
+ * Opens a `[[reference]]` to another note and hands off to the same picker a hand-typed `[[`
+ * opens — `NoteMonaco`'s completion provider, triggered directly rather than left for the user to
+ * find on their own.
+ *
+ * **Deliberately left unclosed.** The provider replaces everything between the `[[` and the caret
+ * with `Title]]` when a suggestion is accepted (see its `insertText`), so writing the closing
+ * bracket here as well would double it the moment a suggestion lands — `[[Title]]]]`. A selection
+ * becomes the filter the picker opens with, which also means it becomes the title typed so far, not
+ * wrapped text sitting next to a search box.
+ */
+function applyNoteLink(
+  editor: MonacoEditorNS.IStandaloneCodeEditor,
+  model: MonacoEditorNS.ITextModel,
+  selection: Selection,
+): void {
+  const selected = model.getValueInRange(selection);
+  editor.executeEdits("md-tool", [{ range: selection, text: `[[${selected}` }]);
+
+  // Single-line by construction — a note title is not a thing anyone is typing across a line
+  // break — so the caret is just past `[[` plus whatever was selected.
+  const lastBreak = selected.lastIndexOf("\n");
+  editor.setPosition({
+    lineNumber: selection.startLineNumber + countLines(selected),
+    column:
+      lastBreak === -1 ? selection.startColumn + 2 + selected.length : selected.length - lastBreak + 2,
+  });
+
+  editor.trigger("md-tool", "editor.action.triggerSuggest", {});
 }
 
 // ---------------------------------------------------------------------------

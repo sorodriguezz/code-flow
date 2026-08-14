@@ -24,6 +24,11 @@ export const AI_TASKS: AiTaskDef[] = [
   // Text-only for the same reason `inline` is: the schema is read by CodeFlow's own driver and put
   // on stdin, so the engine never reaches the database and any provider can answer.
   { key: "db_query", labelKey: "task.dbQuery", hintKey: "task.dbQueryHint" },
+  // Text-only too: the note goes to the engine on stdin, nothing is read from disk. Its own row
+  // rather than riding on `inline` because the two are different jobs — prose in a document versus
+  // a rewrite of a code fragment — and which engine writes your notes is a matter of taste in a way
+  // that inline edit is not.
+  { key: "notes", labelKey: "task.notes", hintKey: "task.notesHint" },
   { key: "stories", labelKey: "task.stories", hintKey: "task.storiesHint" },
   // Reads the repository to answer, so it needs an engine with tools — a text-only local model
   // would answer from the criteria alone, which is the confident-and-wrong verdict this whole

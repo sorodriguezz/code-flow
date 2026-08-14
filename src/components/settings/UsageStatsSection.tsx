@@ -362,6 +362,7 @@ function TaskTable({ tasks }: { tasks: TaskStat[] }) {
 const TASK_LABELS: Record<string, TranslationKey> = {
   chat: "usage.task.chat",
   inline: "usage.task.inline",
+  "note-write": "usage.task.noteWrite",
   commit: "usage.task.commit",
   analyze: "usage.task.analyze",
   "review-pr": "usage.task.reviewPr",

@@ -22,7 +22,12 @@ import type { NoteTreeRow as NoteTreeRowData } from "../../types/notes";
 import { tagCounts } from "../../lib/notes/tags";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { filterNotes, useNotesStore } from "../../state/notesStore";
-import { useNotesDragStore } from "../../state/notesDragStore";
+import {
+  edgeAt,
+  useNotesDragStore,
+  type NotesDrag,
+  type NotesDropPlan,
+} from "../../state/notesDragStore";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useT } from "../../state/languageStore";
@@ -39,6 +44,10 @@ import { useT } from "../../state/languageStore";
  * **The drag is pointer-driven**, because Tauri's webview swallows HTML5 `dragstart` — see
  * `notesDragStore`. A press becomes a drag after `DRAG_THRESHOLD` pixels, which is what keeps a
  * click on a note from being interpreted as a one-pixel drag onto itself.
+ *
+ * **A drop either files or orders**, decided by where in the row it lands and resolved by
+ * `planDrop` below. That is the half of the hand-made ordering the user can see: `sort_order` is
+ * only ever written by a drag, so this component is the only way the list's order is ever set.
  */
 export function NoteExplorer() {
   const notes = useNotesStore((s) => s.notes);
@@ -46,14 +55,15 @@ export function NoteExplorer() {
   const query = useNotesStore((s) => s.query);
   const bodyHits = useNotesStore((s) => s.bodyHits);
   const tagFilter = useNotesStore((s) => s.tagFilter);
-  const collapsed = useNotesStore((s) => s.collapsed);
+  const expanded = useNotesStore((s) => s.expanded);
   const activeId = useNotesStore((s) => s.activeId);
   const sort = useNotesStore((s) => s.sort);
 
   const setQuery = useNotesStore((s) => s.setQuery);
   const toggleTag = useNotesStore((s) => s.toggleTag);
   const clearTags = useNotesStore((s) => s.clearTags);
-  const toggleCollapsed = useNotesStore((s) => s.toggleCollapsed);
+  const toggleBook = useNotesStore((s) => s.toggleBook);
+  const setBookFilter = useNotesStore((s) => s.setBookFilter);
   const openNote = useNotesStore((s) => s.openNote);
   const createNote = useNotesStore((s) => s.createNote);
   const createBook = useNotesStore((s) => s.createBook);
@@ -63,11 +73,11 @@ export function NoteExplorer() {
   const deleteNote = useNotesStore((s) => s.deleteNote);
   const duplicateNote = useNotesStore((s) => s.duplicateNote);
   const togglePinned = useNotesStore((s) => s.togglePinned);
-  const moveNote = useNotesStore((s) => s.moveNote);
-  const moveBook = useNotesStore((s) => s.moveBook);
+  const dropNote = useNotesStore((s) => s.dropNote);
+  const dropBook = useNotesStore((s) => s.dropBook);
 
   const drag = useNotesDragStore((s) => s.drag);
-  const overBookId = useNotesDragStore((s) => s.overBookId);
+  const over = useNotesDragStore((s) => s.over);
   const press = useNotesDragStore((s) => s.press);
   const beginDrag = useNotesDragStore((s) => s.begin);
   const hoverDrag = useNotesDragStore((s) => s.hover);
@@ -90,10 +100,22 @@ export function NoteExplorer() {
   );
 
   const tree = useMemo(() => buildBookTree(books), [books]);
-  const collapsedSet = useMemo(() => new Set(collapsed), [collapsed]);
+  const filtering = query.trim().length > 0 || tagFilter.length > 0;
+  /**
+   * The books drawn open.
+   *
+   * **A filtered tree ignores which books are shut**, the way `HostExplorer` does: a match hidden
+   * inside a closed book is a search that lies about what it found — and with books closed by
+   * default, that would be every match. The user's own set comes back the moment the box is
+   * cleared, because it was never changed.
+   */
+  const expandedSet = useMemo(
+    () => (filtering ? new Set(books.map((book) => book.id)) : new Set(expanded)),
+    [filtering, books, expanded],
+  );
   const rows = useMemo(
-    () => flattenTree(tree, visible, collapsedSet),
-    [tree, visible, collapsedSet],
+    () => flattenTree(tree, visible, expandedSet),
+    [tree, visible, expandedSet],
   );
   const tags = useMemo(() => tagCounts(notes), [notes]);
 
@@ -152,13 +174,26 @@ export function NoteExplorer() {
     endDrag();
   }, [endDrag]);
 
-  // One listener on the container rather than one per row: the pointer leaves the pressed row
-  // almost immediately, so a per-row `onPointerMove` would stop firing exactly when the drag is
-  // deciding whether it has started.
+  /**
+   * One listener on the container rather than one per row: the pointer leaves the pressed row
+   * almost immediately, so a per-row `onPointerMove` would stop firing exactly when the drag is
+   * deciding whether it has started.
+   *
+   * **Bound on the capture phase**, and that is load-bearing rather than tidy. The rows resolve
+   * where a drop would land by measuring themselves (`zoneAt`), and this handler *scrolls the list
+   * underneath them*. On the bubble phase it would run second, so every move inside the autoscroll
+   * band would leave the insertion line drawn against the layout as it was before the scroll — an
+   * aim you cannot correct, because correcting it scrolls again. Scrolling first makes the rects
+   * the rows read the ones the user is looking at.
+   */
   const onPointerMove = useCallback(
     (event: React.PointerEvent) => {
       const { origin, drag: live } = useNotesDragStore.getState();
-      if (live || !origin) return;
+      if (live) {
+        autoScroll(treeRef.current, event.clientY);
+        return;
+      }
+      if (!origin) return;
       // No button held means this is a plain hover, not a drag. Without the check a press whose
       // release we never saw — the pointer left the window, the OS took the gesture — leaves
       // `origin` armed, and the next time the pointer crosses the sidebar it travels far enough to
@@ -175,19 +210,115 @@ export function NoteExplorer() {
     [beginDrag, finishDrag],
   );
 
+  /**
+   * What a release over `row`, in zone `edge`, would actually write — or `null` for "nothing".
+   *
+   * The one rule worth stating outright: **an ordering edge only means something between rows of
+   * the same kind.** A note has no place in the sequence of books and a book has none in the
+   * sequence of notes — `flattenTree` draws the two as separate runs — so a note over a book's top
+   * edge, or a book over a note, collapses to filing. That is both the only coherent reading and
+   * the forgiving one: the fallback of an imprecise drop is the thing the tree has always done.
+   *
+   * The second rule is the books-first one: **a note's destination is never the root.** Every note
+   * belongs to a book, so a plan that would leave one outside every book is no plan at all and the
+   * row refuses to light up.
+   *
+   * Used for the highlight *and* for the write, so what lights up under the pointer is by
+   * construction what a release performs.
+   */
+  const planDrop = useCallback(
+    (
+      live: NotesDrag,
+      row: NoteTreeRowData,
+      edge: "into" | "before" | "after",
+    ): NotesDropPlan | null => {
+      // A row is never its own destination — neither inside itself nor next to itself.
+      if (live.id === row.id) return null;
+      const ordering = edge !== "into" && live.kind === row.kind;
+
+      if (row.kind === "book") {
+        /**
+         * An **open book has no usable bottom edge**, and this is the one place the geometry and
+         * the meaning come apart. `flattenTree` draws an expanded book's contents immediately
+         * below its header, so a line along that header's underside sits above the book's own
+         * first child — while the drop it stands for places the item after the *whole subtree*,
+         * several rows further down. Rather than draw a line that points at the wrong gap, the
+         * band falls back to filing, which is what the middle of the row already means. Ordering
+         * that book downwards is still one gesture away: the top edge of the next sibling.
+         */
+        const drawnOpen =
+          expandedSet.has(row.id) &&
+          (row.noteCount > 0 || books.some((book) => book.parent_id === row.id));
+        if (!ordering || (edge === "after" && drawnOpen)) {
+          // A book into its own subtree is refused by the backend too (`move_book` returns false),
+          // but catching it here means the row never lights up as a target in the first place.
+          if (live.kind === "book" && forbidden?.has(row.id)) return null;
+          return { mode: "into", bookId: row.book.id };
+        }
+        // Next to a book is *among its siblings*, so the destination is its parent — which may
+        // itself be inside the subtree being dragged, and which is the root for a top-level book.
+        // Only a book can be ordered here, so a null destination is a book at the root: allowed.
+        const parentId = row.book.parent_id;
+        if (forbidden?.has(parentId ?? "")) return null;
+        return { mode: "order", anchorId: row.id, after: edge === "after", bookId: parentId };
+      }
+
+      const bookId = row.note.book_id;
+      // A note row with no book is a row from before the books-first rule (see `flattenTree`).
+      // Nothing may be dropped relative to it: there is no list for the drop to join.
+      if (bookId === null) return null;
+      if (!ordering) {
+        if (live.kind === "book" && forbidden?.has(bookId)) return null;
+        return { mode: "into", bookId };
+      }
+      return { mode: "order", anchorId: row.id, after: edge === "after", bookId };
+    },
+    [forbidden, expandedSet, books],
+  );
+
+  /** The zone of `row` the pointer is in — measured here, not in the row, so that an ordinary
+   *  mouse-over of the tree costs no layout. See `NoteTreeRow`'s `onHover`. */
+  const zoneAt = (event: React.PointerEvent, row: NoteTreeRowData) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return edgeAt(row.kind, event.clientY - rect.top, rect.height);
+  };
+
+  const onHoverRow = useCallback(
+    (event: React.PointerEvent, row: NoteTreeRowData) => {
+      const { drag: live } = useNotesDragStore.getState();
+      // Guarded before anything is measured: this fires for every pixel of every ordinary pass of
+      // the pointer across the tree, and nothing below it is free.
+      if (!live) return;
+      hoverDrag(planDrop(live, row, zoneAt(event, row)));
+    },
+    [hoverDrag, planDrop],
+  );
+
+  const commit = useCallback(
+    (plan: NotesDropPlan | null) => {
+      const { drag: live } = useNotesDragStore.getState();
+      if (!live || !plan) return;
+      const anchor = plan.mode === "order" ? { id: plan.anchorId, after: plan.after } : null;
+      if (live.kind === "book") {
+        void dropBook(live.id, plan.bookId, anchor);
+        return;
+      }
+      // `planDrop` never hands a note a null book; this is the type system being told so.
+      if (plan.bookId !== null) void dropNote(live.id, plan.bookId, anchor);
+    },
+    [dropNote, dropBook],
+  );
+
   const commitDrop = useCallback(
-    (target: string | null) => {
+    (event: React.PointerEvent, row: NoteTreeRowData) => {
       const { drag: live } = useNotesDragStore.getState();
       if (!live) return;
-      // Same book: nothing to write. Checked here rather than in the store so a drop that means
-      // nothing costs nothing — no round trip, no re-render.
-      if (live.fromBookId === target) return;
-      if (live.kind === "note") void moveNote(live.id, target);
-      // A book into its own subtree is refused by the backend too (`move_book` returns false),
-      // but catching it here means the row never lights up as a target in the first place.
-      else if (!forbidden?.has(target ?? "")) void moveBook(live.id, target);
+      // Re-resolved from the release point rather than read off the store's `over`, so a drop is
+      // decided by where the pointer actually let go — the two agree, because it is the same
+      // function over the same inputs.
+      commit(planDrop(live, row, zoneAt(event, row)));
     },
-    [moveNote, moveBook, forbidden],
+    [commit, planDrop],
   );
 
   const onSelectRow = useCallback(
@@ -203,9 +334,17 @@ export function NoteExplorer() {
     (row: NoteTreeRowData) => {
       if (swallowClick.current) return;
       setFocusedId(row.id);
-      toggleCollapsed(row.id);
+      // Not while filtering. Every book is drawn open then, whatever the stored set says, so a
+      // toggle would write the opposite of what the chevron shows and the row would not move —
+      // a click that appears to do nothing and quietly rearranges the tree once the box is
+      // cleared. Navigating to the book still works, which is the half that has any meaning here.
+      if (!filtering) toggleBook(row.id);
+      // And the main pane goes to that book, so clicking a book in the sidebar means the same
+      // thing as clicking its card on the shelf. It takes effect behind an open note rather than
+      // closing it: a click on a book is navigation, not a request to put the writing away.
+      setBookFilter(row.id);
     },
-    [toggleCollapsed],
+    [toggleBook, setBookFilter, filtering],
   );
 
   /**
@@ -250,11 +389,11 @@ export function NoteExplorer() {
           focus(rows.length - 1);
           break;
         case "ArrowRight":
-          if (row.kind === "book" && collapsedSet.has(row.id)) toggleCollapsed(row.id);
+          if (row.kind === "book" && !expandedSet.has(row.id)) toggleBook(row.id);
           else focus(index + 1);
           break;
         case "ArrowLeft":
-          if (row.kind === "book" && !collapsedSet.has(row.id)) toggleCollapsed(row.id);
+          if (row.kind === "book" && expandedSet.has(row.id)) toggleBook(row.id);
           else {
             // Out to the parent: the nearest row above at a shallower depth.
             for (let at = index - 1; at >= 0; at--) {
@@ -266,11 +405,11 @@ export function NoteExplorer() {
           }
           break;
         default:
-          if (row.kind === "book") toggleCollapsed(row.id);
+          if (row.kind === "book") toggleBook(row.id);
           else void openNote(row.id);
       }
     },
-    [rows, focusedId, collapsedSet, toggleCollapsed, openNote],
+    [rows, focusedId, expandedSet, toggleBook, openNote],
   );
 
   // ---------- menus ----------
@@ -338,8 +477,10 @@ export function NoteExplorer() {
               (note) => note.book_id && descendantIds(books, bookId).has(note.book_id),
             ).length;
             void confirmAction(
-              // The message says where the notes go, because "delete book" reads as "delete what
-              // is in it" and here it emphatically is not.
+              // The message says the count, because this deletes the writing too and the number is
+              // the whole difference between an ordinary confirmation and one worth reading. Taken
+              // from `notes` rather than from the filtered list: what a search happens to be hiding
+              // is still going to be deleted.
               inside > 0
                 ? t("notes.deleteBookWithNotes", { name, count: inside })
                 : t("notes.deleteBookConfirm", { name }),
@@ -401,10 +542,35 @@ export function NoteExplorer() {
 
   // ---------- render ----------
 
+  /** Where the live drop plan would land *in this row*, for the highlight. See `NoteTreeRow`.
+   *
+   *  An `into` plan lights up every row of the destination book, not just the one under the
+   *  pointer: what is about to happen is "this goes in there", and the book is the there. An
+   *  `order` plan lights up exactly its anchor, because what is about to happen is a position. */
+  const dropEdgeFor = (row: NoteTreeRowData): "into" | "before" | "after" | null => {
+    if (!drag || !over) return null;
+    if (over.mode === "order") {
+      return over.anchorId === row.id ? (over.after ? "after" : "before") : null;
+    }
+    // The row being dragged shows as lifted rather than as its own destination.
+    if (drag.id === row.id) return null;
+    return over.bookId === (row.kind === "book" ? row.book.id : row.note.book_id) ? "into" : null;
+  };
+
+  /**
+   * The root strip's plan: **books only**, and only one that isn't already at the root.
+   *
+   * A note can no longer be dropped here at all, because "outside every book" is not a place a note
+   * can be — so what used to be the way to unfile one is now the way to promote a subbook to the
+   * top level, and nothing else.
+   */
+  const rootPlan: NotesDropPlan | null =
+    drag?.kind === "book" && drag.fromBookId !== null ? { mode: "into", bookId: null } : null;
+
   return (
     <div
       className="flex h-full min-h-0 flex-col"
-      onPointerMove={onPointerMove}
+      onPointerMoveCapture={onPointerMove}
       // On the container, so releasing over a gap between rows ends the drag rather than leaving it
       // live and armed for the next click anywhere in the app.
       onPointerUp={finishDrag}
@@ -519,21 +685,14 @@ export function NoteExplorer() {
               key={row.id}
               row={row}
               active={row.kind === "note" && row.id === activeId}
-              collapsed={row.kind === "book" && collapsedSet.has(row.id)}
-              dropTarget={
-                drag !== null &&
-                overBookId === (row.kind === "book" ? row.book.id : row.note.book_id) &&
-                // The row being dragged never lights up as its own destination, and neither does a
-                // book inside the dragged book.
-                drag.id !== row.id &&
-                !(row.kind === "book" && forbidden?.has(row.id))
-              }
+              collapsed={row.kind === "book" && !expandedSet.has(row.id)}
+              dropEdge={dropEdgeFor(row)}
               dragging={drag?.id === row.id}
               focused={row.id === (focusedId ?? rows[0]?.id)}
               untitledLabel={untitled}
               onSelect={onSelectRow}
               onToggle={onToggleRow}
-              onHover={hoverDrag}
+              onHover={onHoverRow}
               onDrop={commitDrop}
               onPressDown={onPressDown}
               onMenu={onRowMenu}
@@ -547,12 +706,12 @@ export function NoteExplorer() {
             growing spacer would push the scrollbar around as rows are filtered. */}
         <div
           className={`mt-1 min-h-8 rounded-md transition-colors ${
-            drag && overBookId === null && drag.fromBookId !== null
+            over?.mode === "into" && over.bookId === null
               ? "bg-[var(--cf-accent-soft)] ring-1 ring-[var(--cf-accent)]"
               : ""
           }`}
-          onPointerEnter={() => hoverDrag(null)}
-          onPointerUp={() => commitDrop(null)}
+          onPointerEnter={() => hoverDrag(rootPlan)}
+          onPointerUp={() => commit(rootPlan)}
           aria-hidden
         />
       </div>
@@ -587,6 +746,29 @@ export function NoteExplorer() {
       )}
     </div>
   );
+}
+
+/** How close to the list's edge the pointer has to be before the list follows it. */
+const AUTOSCROLL_EDGE = 28;
+/** How far one move-event's worth of scrolling travels. */
+const AUTOSCROLL_STEP = 14;
+
+/**
+ * Scrolls the tree when a drag reaches its top or bottom edge.
+ *
+ * Without it the reachable drop targets are the ones already on screen, which in a workspace of a
+ * few hundred notes means a note can only ever be moved as far as one screenful — and the pointer
+ * is held down, so the wheel and the scrollbar are both out of reach.
+ *
+ * Driven by the pointer's own move events rather than by a timer: it scrolls while the user keeps
+ * moving and stops the instant they stop, which is both the behaviour a hand expects and one with
+ * no interval to leak if the drag ends somewhere this component never hears about.
+ */
+function autoScroll(list: HTMLElement | null, clientY: number) {
+  if (!list) return;
+  const rect = list.getBoundingClientRect();
+  if (clientY < rect.top + AUTOSCROLL_EDGE) list.scrollTop -= AUTOSCROLL_STEP;
+  else if (clientY > rect.bottom - AUTOSCROLL_EDGE) list.scrollTop += AUTOSCROLL_STEP;
 }
 
 /**

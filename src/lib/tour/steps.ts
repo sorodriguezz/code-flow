@@ -698,9 +698,11 @@ const NOTES_STAGE: TourStage = { view: "notes" };
  * The Notes tour.
  *
  * Shorter than the others on purpose. A notes app has almost no concepts to explain — you type and
- * it saves — so the tour's job is the three things that are *not* obvious from looking at it: that
- * filing is drag-and-drop and deleting a folder keeps what is in it, that the search box reads
- * bodies and not just titles, and that templates exist at all.
+ * it saves — so the tour's job is what is *not* obvious from looking at it: that filing is
+ * drag-and-drop and deleting a folder keeps what is in it, that the search box reads bodies and not
+ * just titles, that templates exist at all, and that the two icons at the end of the toolbar — the
+ * sparkle and the reference — are how you get an engine to write a paragraph and how you link one
+ * note to another, neither of which has an obvious keyboard shortcut to stumble onto.
  */
 const NOTES_TOUR: TourStep[] = [
   {
@@ -744,6 +746,26 @@ const NOTES_TOUR: TourStep[] = [
     bodyKey: "tour.notes.editor.body",
     anchors: ['[data-tour="notes-view"]', '[data-tour="main-content"]'],
     placement: "inside",
+    stage: NOTES_STAGE,
+  },
+  {
+    id: "notes.ai",
+    chapterKey: "tour.chapter.notes",
+    titleKey: "tour.notes.ai.title",
+    bodyKey: "tour.notes.ai.body",
+    // Only on screen with a note open; a step taken from the gallery falls back to the view
+    // itself, same as `notes.editor` above.
+    anchors: ['[data-tour="notes-ai"]', '[data-tour="notes-view"]', '[data-tour="main-content"]'],
+    padding: 6,
+    stage: NOTES_STAGE,
+  },
+  {
+    id: "notes.reference",
+    chapterKey: "tour.chapter.notes",
+    titleKey: "tour.notes.reference.title",
+    bodyKey: "tour.notes.reference.body",
+    anchors: ['[data-tour="notes-link"]', '[data-tour="notes-view"]', '[data-tour="main-content"]'],
+    padding: 6,
     stage: NOTES_STAGE,
   },
   {

@@ -109,8 +109,18 @@ export interface NoteTemplate extends Omit<NoteTemplateRow, "tags"> {
 /** How the editor splits its space. Persisted per workspace. */
 export type NoteViewMode = "editor" | "split" | "preview";
 
-/** How the gallery orders its cards. Persisted per workspace. */
-export type NoteSort = "updated" | "created" | "title" | "words";
+/** How the gallery draws its books and notes — cards or rows. Persisted per workspace. */
+export type NoteGalleryView = "grid" | "list";
+
+/**
+ * How the list orders its notes. Persisted per workspace.
+ *
+ * **`manual` is the default, and the other four are the views onto it.** A note list is a thing
+ * people arrange — and an ordering by `updated_at` rearranges itself every time one of them is
+ * *typed into*, so the row you are working on climbs over the others while you write and the
+ * sidebar you were reading is gone. `manual` is `sort_order`, which only a drag ever writes.
+ */
+export type NoteSort = "manual" | "updated" | "created" | "title" | "words";
 
 /**
  * The note being edited, before it is saved.

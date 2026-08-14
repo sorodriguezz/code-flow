@@ -11,6 +11,9 @@ import {
 import type { NoteTreeRow as Row } from "../../types/notes";
 import { bookInk, ROW, ROW_ACTIVE, ROW_IDLE } from "./notesChrome";
 
+/** Which part of a row a drop would land in. `null` is "not this row". */
+type DropEdge = "into" | "before" | "after" | null;
+
 /**
  * One row of the explorer tree — a book or a note.
  *
@@ -46,7 +49,7 @@ export const NoteTreeRow = memo(function NoteTreeRow({
   row,
   active,
   collapsed,
-  dropTarget,
+  dropEdge,
   dragging,
   focused,
   untitledLabel,
@@ -60,8 +63,14 @@ export const NoteTreeRow = memo(function NoteTreeRow({
   row: Row;
   active: boolean;
   collapsed: boolean;
-  /** This row is where the in-flight drag would land. */
-  dropTarget: boolean;
+  /**
+   * Where in this row the in-flight drag would land, or `null` for "not here".
+   *
+   * `into` washes the whole row — it is being filed into this book. `before`/`after` draw a line
+   * along the edge the item would be inserted at, which is the only honest way to show a *position*:
+   * a highlighted row would say "in here" when what is about to happen is "next to here".
+   */
+  dropEdge: DropEdge;
   /** This row owns the tree's single tab stop. */
   focused: boolean;
   /** *This* row is the one being dragged, so it dims rather than highlighting under the pointer. */
@@ -78,15 +87,20 @@ export const NoteTreeRow = memo(function NoteTreeRow({
   onToggle: (row: Row) => void;
   onMenu: (event: React.MouseEvent, row: Row) => void;
   onPressDown: (event: React.PointerEvent, row: Row) => void;
-  /** The book a drop over this row would target — `null` for the root. */
-  onHover: (bookId: string | null) => void;
-  onDrop: (bookId: string | null) => void;
+  /**
+   * Called on every pointer move over this row — which is most of them, so it takes the raw event
+   * and the parent decides.
+   *
+   * *Which part* of the row the pointer is in is what a drop needs, and answering it means
+   * measuring the row: a `getBoundingClientRect` on every mouse move over every row is a forced
+   * layout the tree does not need when nothing is being dragged. The parent knows whether a drag
+   * is live, so it is the one that reads `event.currentTarget` — synchronously, in the handler,
+   * the same way `onPressDown` already does.
+   */
+  onHover: (event: React.PointerEvent, row: Row) => void;
+  onDrop: (event: React.PointerEvent, row: Row) => void;
 }) {
   const isBook = row.kind === "book";
-  // A book is its own drop target; a note targets the book it is filed in. Dropping "next to
-  // that note" is how anyone would express "into the book that note is in", and making a note
-  // row inert would mean aiming at a book header that may be scrolled off screen.
-  const target = row.kind === "book" ? row.book.id : row.note.book_id;
 
   // The indent is inline rather than a Tailwind class because depth is unbounded — a class per
   // level would be a map of arbitrary size, and the arbitrary bit is exactly what a style handles.
@@ -110,11 +124,13 @@ export const NoteTreeRow = memo(function NoteTreeRow({
       onClick={() => (isBook ? onToggle(row) : onSelect(row))}
       onContextMenu={(event) => onMenu(event, row)}
       onPointerDown={(event) => onPressDown(event, row)}
-      onPointerEnter={() => onHover(target)}
-      onPointerUp={() => onDrop(target)}
+      // `pointermove` rather than `pointerenter`: the answer changes as the pointer travels
+      // *within* a row, which is precisely what the gesture "a little higher than that" is made of.
+      onPointerMove={(event) => onHover(event, row)}
+      onPointerUp={(event) => onDrop(event, row)}
       style={{ paddingLeft: indent }}
-      className={`${ROW} cursor-default outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
-        dropTarget
+      className={`${ROW} relative cursor-default outline-none focus-visible:ring-1 focus-visible:ring-[var(--cf-accent)] ${
+        dropEdge === "into"
           ? "bg-[var(--cf-accent-soft)] ring-1 ring-[var(--cf-accent)]"
           : dragging
             ? "opacity-40"
@@ -123,6 +139,19 @@ export const NoteTreeRow = memo(function NoteTreeRow({
               : ROW_IDLE
       }`}
     >
+      {/* The insertion line. Absolutely positioned and `pointer-events-none` so it can straddle the
+          row's edge without ever being what the pointer is over — a target that moves out from
+          under the cursor as it appears is a target you cannot aim at. */}
+      {(dropEdge === "before" || dropEdge === "after") && (
+        <span
+          aria-hidden
+          className={`pointer-events-none absolute inset-x-0 h-0.5 rounded-full bg-[var(--cf-accent)] ${
+            dropEdge === "before" ? "-top-px" : "-bottom-px"
+          }`}
+          style={{ left: indent }}
+        />
+      )}
+
       {isBook ? (
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
@@ -165,7 +194,7 @@ export const NoteTreeRow = memo(function NoteTreeRow({
   sameRow(previous.row, next.row) &&
   previous.active === next.active &&
   previous.collapsed === next.collapsed &&
-  previous.dropTarget === next.dropTarget &&
+  previous.dropEdge === next.dropEdge &&
   previous.dragging === next.dragging &&
   previous.focused === next.focused &&
   previous.untitledLabel === next.untitledLabel &&

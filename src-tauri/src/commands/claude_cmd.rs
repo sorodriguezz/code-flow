@@ -94,6 +94,11 @@ pub(crate) enum AiTask {
     /// what lets this one be routed to a fast or local model. It is also the task most likely to be
     /// run twenty times in an afternoon, so being able to point it somewhere cheap is the point.
     DbQuery,
+    /// Writing Markdown into the open note. Text-only — the engine never sees the repository, it
+    /// is handed the note on stdin — so it routes anywhere, and a note is exactly the kind of
+    /// prose someone wants on a different engine than their code: a local model for a rough
+    /// outline, a large one for something that has to read well.
+    Notes,
 }
 
 impl AiTask {
@@ -103,7 +108,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 13] = [
+    pub(crate) const ALL: [AiTask; 14] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -117,6 +122,7 @@ impl AiTask {
         AiTask::WorkItemReview,
         AiTask::Wiki,
         AiTask::DbQuery,
+        AiTask::Notes,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -137,6 +143,7 @@ impl AiTask {
             AiTask::WorkItemReview => "work_item_review",
             AiTask::Wiki => "wiki",
             AiTask::DbQuery => "db_query",
+            AiTask::Notes => "notes",
         }
     }
 }

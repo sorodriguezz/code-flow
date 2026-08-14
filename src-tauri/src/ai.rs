@@ -500,6 +500,10 @@ pub mod task {
     /// The SQL/Mongo console's assistant — writing a query against the connected schema, or
     /// explaining why one behaves the way it does.
     pub const DB_ASSIST: &str = "db-assist";
+    /// Writing Markdown into a note. Its own label rather than [`INLINE`]'s, which it used to
+    /// borrow: the two are routed separately now, so counting them together would hide whichever
+    /// of the two engines is actually being paid for.
+    pub const NOTE_WRITE: &str = "note-write";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -2078,7 +2082,7 @@ pub async fn write_note(
     );
     inv.system_prompt = Some(DEFAULT_NOTE_WRITER_PROMPT);
     inv.model = model;
-    inv.task = task::INLINE;
+    inv.task = task::NOTE_WRITE;
     let run = run(engine, binary, inv).await?;
     Ok(strip_wrapper_fence(&run.text))
 }

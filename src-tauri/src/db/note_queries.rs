@@ -334,10 +334,16 @@ fn meta_of(conn: &Connection, id: &str) -> rusqlite::Result<Option<NoteMeta>> {
 // Notes
 // ---------------------------------------------------------------------------
 
+/// Writes a new note **into a book**, which every note has.
+///
+/// `book_id` is not optional and that is the invariant the Notes workspace now rests on: the main
+/// view browses books and shows what is inside them, so a note belonging to none would be a note
+/// with no surface it could be reached from. `migrations::file_loose_notes_into_a_book` brought the
+/// rows written under the old rule inside; this signature is what stops new ones being made.
 pub fn create_note(
     conn: &Connection,
     workspace_id: &str,
-    book_id: Option<&str>,
+    book_id: &str,
     title: &str,
     content: &str,
     tags: &str,
@@ -349,7 +355,7 @@ pub fn create_note(
     // user has arranged by hand must not be rearranged by adding to it.
     let sort_order: i64 = conn.query_row(
         "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM notes \
-         WHERE workspace_id = ?1 AND book_id IS ?2",
+         WHERE workspace_id = ?1 AND book_id = ?2",
         params![workspace_id, book_id],
         |row| row.get(0),
     )?;
@@ -374,7 +380,7 @@ pub fn create_note(
     Ok(NoteMeta {
         id,
         workspace_id: workspace_id.to_string(),
-        book_id: book_id.map(str::to_string),
+        book_id: Some(book_id.to_string()),
         title: title.to_string(),
         excerpt,
         tags: tags.to_string(),
@@ -411,15 +417,17 @@ pub fn save_note(
     meta_of(conn, id)
 }
 
-/// Refiles a note. Appended to the destination for the same reason a new note is.
+/// Refiles a note into another book. Appended to the destination for the same reason a new note is.
+///
+/// There is no "out of every book" — see [`create_note`].
 pub fn move_note(
     conn: &Connection,
     id: &str,
-    book_id: Option<&str>,
+    book_id: &str,
 ) -> rusqlite::Result<Option<NoteMeta>> {
     let sort_order: i64 = conn.query_row(
         "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM notes \
-         WHERE workspace_id = (SELECT workspace_id FROM notes WHERE id = ?1) AND book_id IS ?2",
+         WHERE workspace_id = (SELECT workspace_id FROM notes WHERE id = ?1) AND book_id = ?2",
         params![id, book_id],
         |row| row.get(0),
     )?;
@@ -433,6 +441,31 @@ pub fn move_note(
         return Ok(None);
     }
     meta_of(conn, id)
+}
+
+/// Writes the positions the caller gave: each id's `sort_order` becomes its index in `ids`.
+///
+/// The caller sends **one book's whole note list**, in the order the user arranged it. Positions are
+/// only ever compared within a book (see the `idx_notes_book` index), so a list from one book never
+/// disturbs another's — and a gap left behind in the *source* book by a note that moved out is
+/// harmless, because nothing reads these numbers except the ordering.
+///
+/// `updated_at` is deliberately untouched, for the reason [`move_note`] gives and then some.
+/// Arranging a list is filing, not writing; and since the hand-made order is what the sidebar shows
+/// by default, stamping it here would also make every drag look like an edit in the "last edited"
+/// ordering the user can switch back to.
+/// In one transaction, because a list is a single fact: a failure part-way through would leave the
+/// book holding half of one arrangement and half of another, which is an order nobody chose and
+/// which the next drag would then be written on top of.
+pub fn reorder_notes(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (index, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE notes SET sort_order = ?2 WHERE id = ?1",
+            params![id, index as i64],
+        )?;
+    }
+    tx.commit()
 }
 
 pub fn set_note_pinned(conn: &Connection, id: &str, pinned: bool) -> rusqlite::Result<()> {
@@ -458,10 +491,16 @@ pub fn duplicate_note(
     let Some(source) = get_note(conn, id)? else {
         return Ok(None);
     };
+    let Some(book_id) = source.book_id.as_deref() else {
+        // Only reachable on a row the migration could not reach — a note written by a version that
+        // allowed no book, in a database restored after this one ran. Copying it would make a
+        // second unreachable note rather than a copy the user can open.
+        return Ok(None);
+    };
     create_note(
         conn,
         &source.workspace_id,
-        source.book_id.as_deref(),
+        book_id,
         title,
         &source.content,
         &source.tags,
@@ -579,11 +618,46 @@ pub fn move_book(
     Ok(true)
 }
 
-/// Deletes a book and its subbooks. The notes inside survive at the root — see the table's
-/// `ON DELETE SET NULL`, and the comment there for why that is the deliberate outcome.
+/// The books' half of [`reorder_notes`]: one parent's children, in the order the user arranged them.
+///
+/// `updated_at` is left alone here too. Nothing orders books by it, but a reorder that bumped it
+/// would make "when did I last touch this book" mean "when did I last drag something past it".
+pub fn reorder_books(conn: &Connection, ids: &[String]) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for (index, id) in ids.iter().enumerate() {
+        tx.execute(
+            "UPDATE note_books SET sort_order = ?2 WHERE id = ?1",
+            params![id, index as i64],
+        )?;
+    }
+    tx.commit()
+}
+
+/// Deletes a book, its subbooks, **and every note in any of them**.
+///
+/// This used to leave the notes behind at the root, which was the recoverable outcome while "no
+/// book" was a place a note could be. It no longer is (see [`create_note`]), so there is nowhere to
+/// leave them: a surviving note would be a row no view can reach. Deleting a book is therefore a
+/// destructive act, and the confirmation the UI puts in front of it says how many notes are about
+/// to go — see `notes.deleteBookWithNotes`.
+///
+/// The notes go first and in the same transaction as the books. The other order would rely on the
+/// table's `ON DELETE SET NULL` not firing in between, which is exactly the state — notes with no
+/// book — this function exists to avoid producing.
 pub fn delete_book(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM note_books WHERE id = ?1", params![id])?;
-    Ok(())
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "WITH RECURSIVE subtree(id) AS ( \
+             SELECT ?1 \
+             UNION ALL \
+             SELECT book.id FROM note_books book JOIN subtree ON book.parent_id = subtree.id \
+         ) \
+         DELETE FROM notes WHERE book_id IN (SELECT id FROM subtree)",
+        params![id],
+    )?;
+    // The subbooks go with it through `note_books.parent_id`'s own `ON DELETE CASCADE`.
+    tx.execute("DELETE FROM note_books WHERE id = ?1", params![id])?;
+    tx.commit()
 }
 
 // ---------------------------------------------------------------------------
@@ -774,13 +848,19 @@ fn lower_one(c: char) -> char {
 mod tests {
     use super::*;
 
+    /// A workspace with one book in it, `b1` — because a note without a book is no longer a state
+    /// this module can produce. See [`create_note`].
     fn workspace() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         super::super::migrations::run(&conn).unwrap();
         conn.execute_batch(
             "DELETE FROM workspaces;
              INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
-                 VALUES ('w1', 'Flow', 'book', '#111', 0, '2026-01-01T00:00:00+00:00');",
+                 VALUES ('w1', 'Flow', 'book', '#111', 0, '2026-01-01T00:00:00+00:00');
+             INSERT INTO note_books (id, workspace_id, parent_id, name, color, sort_order,
+                                     created_at, updated_at)
+                 VALUES ('b1', 'w1', NULL, 'Cuaderno', '', 0,
+                         '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');",
         )
         .unwrap();
         conn
@@ -809,7 +889,7 @@ mod tests {
     #[test]
     fn saving_rewrites_what_is_derived_from_the_body() {
         let conn = workspace();
-        let note = create_note(&conn, "w1", None, "T", "uno dos", "[]").unwrap();
+        let note = create_note(&conn, "w1", "b1", "T", "uno dos", "[]").unwrap();
         assert_eq!(note.word_count, 2);
 
         let saved = save_note(&conn, &note.id, "T", "uno dos tres cuatro", "[]")
@@ -824,20 +904,131 @@ mod tests {
         assert_eq!(listed.word_count, 4);
     }
 
+    /// The bug the hand-made order exists to fix: with the sidebar ordered by `updated_at`, every
+    /// autosave threw the note being written to the top and rearranged the list under the cursor.
     #[test]
-    fn deleting_a_book_keeps_its_notes_and_removes_its_subbooks() {
+    fn saving_a_note_leaves_its_place_in_the_hand_made_order() {
+        let conn = workspace();
+        let first = create_note(&conn, "w1", "b1", "Uno", "", "[]").unwrap();
+        let second = create_note(&conn, "w1", "b1", "Dos", "", "[]").unwrap();
+        assert_eq!((first.sort_order, second.sort_order), (0, 1), "appended, not prepended");
+
+        let saved = save_note(&conn, &first.id, "Uno", "un cuerpo nuevo", "[]").unwrap().unwrap();
+        assert_eq!(saved.sort_order, 0, "writing a note is not rearranging the list");
+    }
+
+    #[test]
+    fn reordering_writes_the_positions_the_caller_gave_and_nothing_else() {
+        let conn = workspace();
+        let book = create_book(&conn, "w1", None, "Libro", "").unwrap();
+        let a = create_note(&conn, "w1", &book.id, "A", "", "[]").unwrap();
+        let b = create_note(&conn, "w1", &book.id, "B", "", "[]").unwrap();
+        let c = create_note(&conn, "w1", &book.id, "C", "", "[]").unwrap();
+
+        reorder_notes(&conn, &[c.id.clone(), a.id.clone(), b.id.clone()]).unwrap();
+
+        let tree = load_tree(&conn, "w1").unwrap();
+        let order_of = |id: &str| tree.notes.iter().find(|n| n.id == id).unwrap().sort_order;
+        assert_eq!((order_of(&c.id), order_of(&a.id), order_of(&b.id)), (0, 1, 2));
+
+        let touched = tree.notes.iter().find(|n| n.id == a.id).unwrap();
+        assert_eq!(touched.updated_at, a.updated_at, "arranging a list is filing, not writing");
+    }
+
+    #[test]
+    fn reordering_one_book_does_not_disturb_another() {
+        let conn = workspace();
+        let left = create_book(&conn, "w1", None, "Izquierda", "").unwrap();
+        let right = create_book(&conn, "w1", None, "Derecha", "").unwrap();
+        let a = create_note(&conn, "w1", &left.id, "A", "", "[]").unwrap();
+        let b = create_note(&conn, "w1", &left.id, "B", "", "[]").unwrap();
+        let x = create_note(&conn, "w1", &right.id, "X", "", "[]").unwrap();
+        let y = create_note(&conn, "w1", &right.id, "Y", "", "[]").unwrap();
+
+        reorder_notes(&conn, &[b.id.clone(), a.id.clone()]).unwrap();
+
+        let tree = load_tree(&conn, "w1").unwrap();
+        let order_of = |id: &str| tree.notes.iter().find(|n| n.id == id).unwrap().sort_order;
+        assert_eq!((order_of(&b.id), order_of(&a.id)), (0, 1));
+        assert_eq!((order_of(&x.id), order_of(&y.id)), (0, 1), "the other book is untouched");
+    }
+
+    #[test]
+    fn books_are_reordered_the_same_way_and_load_in_that_order() {
+        let conn = workspace();
+        let a = create_book(&conn, "w1", None, "A", "").unwrap();
+        let b = create_book(&conn, "w1", None, "B", "").unwrap();
+        let c = create_book(&conn, "w1", None, "C", "").unwrap();
+
+        // The whole sibling list, `b1` included — which is what the UI sends, and the reason it
+        // does: positions are indexes into one list, so leaving a sibling out of it leaves that
+        // sibling's number to collide with somebody else's.
+        reorder_books(
+            &conn,
+            &[c.id.clone(), b.id.clone(), a.id.clone(), "b1".to_string()],
+        )
+        .unwrap();
+
+        let books = load_tree(&conn, "w1").unwrap().books;
+        assert_eq!(
+            books.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec!["C", "B", "A", "Cuaderno"],
+            "load_tree already orders by sort_order — the drag decides the list"
+        );
+    }
+
+    /// The rule "every note has a book" leaves nowhere to put a deleted book's notes, so the delete
+    /// takes them — the whole subtree's, not just the top book's.
+    #[test]
+    fn deleting_a_book_takes_its_subbooks_and_every_note_inside_them() {
         let conn = workspace();
         let parent = create_book(&conn, "w1", None, "Padre", "").unwrap();
         let child = create_book(&conn, "w1", Some(&parent.id), "Hijo", "").unwrap();
-        let note = create_note(&conn, "w1", Some(&child.id), "N", "cuerpo", "[]").unwrap();
+        create_note(&conn, "w1", &parent.id, "Arriba", "cuerpo", "[]").unwrap();
+        create_note(&conn, "w1", &child.id, "Abajo", "cuerpo", "[]").unwrap();
+        let elsewhere = create_note(&conn, "w1", "b1", "Otro", "cuerpo", "[]").unwrap();
 
         delete_book(&conn, &parent.id).unwrap();
 
         let tree = load_tree(&conn, "w1").unwrap();
-        assert!(tree.books.is_empty(), "the subtree goes with the book");
-        assert_eq!(tree.notes.len(), 1, "the writing does not");
-        assert_eq!(tree.notes[0].id, note.id);
-        assert_eq!(tree.notes[0].book_id, None, "it surfaces at the root, where it is visible");
+        assert_eq!(
+            tree.books.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["b1"],
+            "the subtree goes with the book",
+        );
+        assert_eq!(
+            tree.notes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+            vec![elsewhere.id.as_str()],
+            "and so does everything written in it — but nothing outside it",
+        );
+        assert!(
+            tree.notes.iter().all(|n| n.book_id.is_some()),
+            "no note is ever left without a book",
+        );
+    }
+
+    /// The upgrade path. A note written when "no book" was an ordinary place has to be brought
+    /// inside one, or the books-first view has nowhere to show it from and it is simply gone.
+    #[test]
+    fn the_migration_files_notes_that_had_no_book() {
+        let conn = workspace();
+        conn.execute(
+            "INSERT INTO notes (id, workspace_id, book_id, title, content, excerpt, tags, pinned, \
+                                word_count, sort_order, created_at, updated_at) \
+             VALUES ('n1', 'w1', NULL, 'Suelta', 'cuerpo', 'cuerpo', '[]', 0, 1, 0, ?1, ?1)",
+            params!["2026-01-01T00:00:00+00:00"],
+        )
+        .unwrap();
+
+        super::super::migrations::run(&conn).unwrap();
+
+        let filed = get_note(&conn, "n1").unwrap().unwrap();
+        assert_eq!(
+            filed.book_id.as_deref(),
+            Some("b1"),
+            "into the workspace's first book rather than into one invented next to it",
+        );
+        assert_eq!(filed.updated_at, "2026-01-01T00:00:00+00:00", "filing is not writing");
     }
 
     #[test]
@@ -862,9 +1053,9 @@ mod tests {
     #[test]
     fn search_looks_inside_bodies_and_says_where_it_landed() {
         let conn = workspace();
-        create_note(&conn, "w1", None, "Uno", "el despliegue usa Kubernetes en producción", "[]")
+        create_note(&conn, "w1", "b1", "Uno", "el despliegue usa Kubernetes en producción", "[]")
             .unwrap();
-        create_note(&conn, "w1", None, "Dos", "nada que ver", "[]").unwrap();
+        create_note(&conn, "w1", "b1", "Dos", "nada que ver", "[]").unwrap();
 
         let hits = search_notes(&conn, "w1", "KUBERNETES", 20).unwrap();
         assert_eq!(hits.len(), 1, "case-insensitive, and only the body that matched");
@@ -882,8 +1073,8 @@ mod tests {
     #[test]
     fn search_treats_wildcards_as_characters() {
         let conn = workspace();
-        create_note(&conn, "w1", None, "Uno", "cobertura del 100% del módulo", "[]").unwrap();
-        create_note(&conn, "w1", None, "Dos", "sin cifras", "[]").unwrap();
+        create_note(&conn, "w1", "b1", "Uno", "cobertura del 100% del módulo", "[]").unwrap();
+        create_note(&conn, "w1", "b1", "Dos", "sin cifras", "[]").unwrap();
 
         assert_eq!(search_notes(&conn, "w1", "100%", 20).unwrap().len(), 1);
         // Bare `%` would match every row if it reached LIKE unescaped.
@@ -895,7 +1086,7 @@ mod tests {
     #[test]
     fn search_folds_case_on_accented_letters() {
         let conn = workspace();
-        create_note(&conn, "w1", None, "Uno", "la acción del módulo de envío", "[]").unwrap();
+        create_note(&conn, "w1", "b1", "Uno", "la acción del módulo de envío", "[]").unwrap();
 
         for query in ["ACCIÓN", "acción", "Módulo", "MÓDULO", "EnVíO"] {
             assert_eq!(
@@ -916,7 +1107,7 @@ mod tests {
         create_note(
             &conn,
             "w1",
-            None,
+            "b1",
             "Uno",
             "áéíóú ñandú çedilla — la configuración del servidor",
             "[]",

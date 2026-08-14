@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 
 pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     // Must run *before* the schema batch: it moves the pre-workspace `api_*` tables aside so the
@@ -1192,9 +1192,17 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS notes (
             id           TEXT PRIMARY KEY,
             workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-            -- SET NULL, not CASCADE: deleting a book must not delete what was written in it.
-            -- The notes surface at the root, where they are visible and can be refiled — the
-            -- recoverable outcome. Deleting the *notes* stays a separate, explicit act.
+            -- Every note belongs to a book: the Notes view browses books and shows what is inside
+            -- them, so a note outside every book is a note with no surface to be reached from.
+            -- `file_loose_notes_into_a_book` brought the rows written under the old rule inside,
+            -- and `note_queries::create_note` takes a non-optional book id.
+            --
+            -- The column stays nullable and the action stays SET NULL, because neither is what
+            -- enforces the rule and changing them would mean rebuilding the table on every
+            -- existing database. `note_queries::delete_book` deletes the subtree's notes itself,
+            -- in the same transaction and *before* the books, so this clause never fires — it is
+            -- the backstop that would leave a visible orphan rather than a dangling reference if
+            -- some future path forgets.
             book_id    TEXT REFERENCES note_books(id) ON DELETE SET NULL,
             title        TEXT NOT NULL DEFAULT '',
             content      TEXT NOT NULL DEFAULT '',
@@ -1282,6 +1290,80 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_group_name_to_db_connections(conn)?;
     add_tab_to_workspace_terminals(conn)?;
     align_project_ado_org_with_connections(conn)?;
+    file_loose_notes_into_a_book(conn)?;
+    Ok(())
+}
+
+/// Gives every note a book, which is now an invariant rather than a preference.
+///
+/// The Notes workspace used to treat "no book" as an ordinary place — the root of the tree, where a
+/// note just written sat until it was filed. It no longer is: the main view browses *books*, and a
+/// note outside every book would be a note with nowhere to be shown from. Rows written under the
+/// old rule have to be brought inside before that view can be trusted, and this is the one moment
+/// that can be done for them.
+///
+/// The destination is the workspace's first book if it has one — a person with a single book meant
+/// that book — and otherwise a new one. Notes keep their relative order: they are appended in
+/// `sort_order` order after whatever the destination already held, so a list arranged by hand is
+/// not shuffled by being moved indoors.
+///
+/// A no-op the second time it runs, and on every database that never had a loose note.
+fn file_loose_notes_into_a_book(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "notes")? || !table_exists(conn, "note_books")? {
+        return Ok(());
+    }
+    let workspaces: Vec<String> = conn
+        .prepare("SELECT DISTINCT workspace_id FROM notes WHERE book_id IS NULL")?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    for workspace_id in workspaces {
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT id FROM note_books WHERE workspace_id = ?1 AND parent_id IS NULL \
+                 ORDER BY sort_order, name LIMIT 1",
+                params![&workspace_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        let book_id = match existing {
+            Some(id) => id,
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                let timestamp = super::queries::now();
+                conn.execute(
+                    "INSERT INTO note_books \
+                     (id, workspace_id, parent_id, name, color, sort_order, created_at, updated_at) \
+                     VALUES (?1, ?2, NULL, 'General', '', 0, ?3, ?3)",
+                    params![&id, &workspace_id, &timestamp],
+                )?;
+                id
+            }
+        };
+
+        // Appended after the destination's own notes, in the order they were in at the root.
+        let base: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM notes WHERE book_id = ?1",
+            params![&book_id],
+            |row| row.get(0),
+        )?;
+        let loose: Vec<String> = conn
+            .prepare(
+                "SELECT id FROM notes WHERE workspace_id = ?1 AND book_id IS NULL \
+                 ORDER BY sort_order, created_at",
+            )?
+            .query_map(params![&workspace_id], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (offset, note_id) in loose.iter().enumerate() {
+            // `updated_at` untouched: this is filing, and a migration must not make every note in
+            // the workspace look as though it was edited the day the user upgraded.
+            conn.execute(
+                "UPDATE notes SET book_id = ?2, sort_order = ?3 WHERE id = ?1",
+                params![note_id, &book_id, base + offset as i64],
+            )?;
+        }
+    }
     Ok(())
 }
 

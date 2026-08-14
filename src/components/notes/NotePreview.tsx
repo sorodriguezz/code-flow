@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { renderMarkdown } from "../../lib/markdown";
 import { findTheme } from "../../lib/codeThemes";
 import type { renderRichMarkdown } from "../../lib/notes/richMarkdown";
@@ -83,8 +84,23 @@ export function NotePreview({ source, className }: { source: string; className?:
     (event: React.MouseEvent<HTMLDivElement>) => {
       const target = event.target as HTMLElement;
 
-      // A reference to another note. Checked first: a link inside a code block's caption would
-      // otherwise be swallowed by the copy branch below.
+      // An ordinary Markdown link — `[text](url)` — as opposed to a `[[note]]` reference, which
+      // renders as a `<span>` and never reaches this branch. `marked` doesn't add
+      // `target="_blank"`, so left alone this would navigate the app's own webview to wherever the
+      // link points and leave the reader stranded on a website where CodeFlow used to be, with no
+      // way back — the same bug `UpdateNotesModal`'s `openLinkExternally` exists to avoid, and the
+      // same fix. Only http(s) is sent out; anything else (a `javascript:` URL slipped past
+      // sanitizing, say) is simply swallowed.
+      const anchor = target.closest?.("a");
+      if (anchor) {
+        event.preventDefault();
+        const href = anchor.getAttribute("href") ?? "";
+        if (/^https?:\/\//i.test(href)) void openUrl(href).catch(() => {});
+        return;
+      }
+
+      // A reference to another note. Checked before the copy branch below: a link inside a code
+      // block's caption would otherwise be swallowed by it.
       const link = target.closest?.("[data-cf-note]");
       if (link) {
         const id = link.getAttribute("data-cf-note");

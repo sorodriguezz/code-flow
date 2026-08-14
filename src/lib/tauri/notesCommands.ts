@@ -38,9 +38,10 @@ export const notesGetNote = (id: string) => invoke<NoteRow | null>("notes_get_no
 
 // ---------- notes ----------
 
+/** `bookId` is required: every note lives in a book. See `db/note_queries.rs::create_note`. */
 export const notesCreateNote = (
   workspaceId: string,
-  bookId: string | null,
+  bookId: string,
   title: string,
   content: string,
   tags: string,
@@ -50,9 +51,19 @@ export const notesCreateNote = (
 export const notesSaveNote = (id: string, title: string, content: string, tags: string) =>
   invoke<NoteMetaRow | null>("notes_save_note", { id, title, content, tags });
 
-/** Refiles a note. `bookId` of `null` is the root. */
-export const notesMoveNote = (id: string, bookId: string | null) =>
+/** Refiles a note into another book. There is no "out of every book" — see `notesCreateNote`. */
+export const notesMoveNote = (id: string, bookId: string) =>
   invoke<NoteMetaRow | null>("notes_move_note", { id, bookId });
+
+/**
+ * Writes one book's note order — `ids` is that book's whole list, in the order the user arranged it.
+ *
+ * Positions are per book, so this is always called with the notes of a single book (or of the root).
+ * A drag that crossed books calls `notesMoveNote` first: the positions have to be written against
+ * the list the note has already joined. See `notesStore.dropNote`.
+ */
+export const notesReorderNotes = (ids: string[]) =>
+  invoke<void>("notes_reorder_notes", { ids });
 
 export const notesSetPinned = (id: string, pinned: boolean) =>
   invoke<void>("notes_set_pinned", { id, pinned });
@@ -82,7 +93,11 @@ export const notesSetBookColor = (id: string, color: string) =>
 export const notesMoveBook = (id: string, parentId: string | null) =>
   invoke<boolean>("notes_move_book", { id, parentId });
 
-/** Removes the book and its subbooks. The notes inside surface at the root. */
+/** The books' half of `notesReorderNotes`: one parent's children, in their new order. */
+export const notesReorderBooks = (ids: string[]) =>
+  invoke<void>("notes_reorder_books", { ids });
+
+/** Removes the book, its subbooks **and every note in them**. Confirm before calling. */
 export const notesDeleteBook = (id: string) => invoke<void>("notes_delete_book", { id });
 
 // ---------- templates ----------
@@ -125,19 +140,18 @@ export const notesSearch = (workspaceId: string, query: string) =>
 // ---------- writing with AI ----------
 
 /**
- * Markdown to drop into the open note, written by the engine the caller names.
+ * Markdown to drop into the open note.
  *
- * `provider`/`model` are optional: omitted, the backend falls back to whatever the app's inline-edit
- * task is routed to. `selection` may be empty — that is "write something here" rather than
- * "replace this". `runId` puts it in the AI run log and makes it cancellable.
+ * No engine argument: this runs on whatever Settings → AI → model per task routes the `notes` task
+ * to, the same as every other AI action in the app. `selection` may be empty — that is "write
+ * something here" rather than "replace this". `runId` puts it in the AI run log and makes it
+ * cancellable.
  */
 export const notesWriteWithAi = (args: {
   title: string;
   content: string;
   selection: string;
   instruction: string;
-  provider?: string;
-  model?: string;
   runId?: string;
 }) =>
   invoke<string>("notes_write_with_ai", {
@@ -145,7 +159,5 @@ export const notesWriteWithAi = (args: {
     content: args.content,
     selection: args.selection,
     instruction: args.instruction,
-    provider: args.provider ?? null,
-    model: args.model ?? null,
     runId: args.runId ?? null,
   });
