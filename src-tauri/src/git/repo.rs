@@ -24,6 +24,23 @@ pub fn open(path: &str) -> Result<Repository, String> {
     Repository::open(path).map_err(|e| e.message().to_string())
 }
 
+/// The branch HEAD points at when HEAD cannot be resolved — i.e. before the first commit.
+///
+/// Until something is committed the branch is a line in `.git/HEAD` and nothing else: no
+/// `refs/heads/<name>` exists yet, which is both why `repo.head()` fails and why `repo.branches()`
+/// has nothing to yield for it. The symbolic target carries the name regardless, and it is the same
+/// one `git status` reports as "On branch <name>".
+///
+/// `None` for a detached HEAD, which has no symbolic target, and for a HEAD pointing somewhere
+/// other than `refs/heads/`. Callers should only reach for this once `repo.head()` has failed —
+/// on a normal repository it answers the same thing the head reference already would, more slowly.
+pub fn unborn_head_branch(repo: &Repository) -> Option<String> {
+    repo.find_reference("HEAD")
+        .ok()
+        .and_then(|head| head.symbolic_target().map(|target| target.to_string()))
+        .and_then(|target| target.strip_prefix("refs/heads/").map(|name| name.to_string()))
+}
+
 fn status_label(status: git2::Status) -> Option<(&'static str, &'static str)> {
     // returns (bucket, label) where bucket is one of staged/unstaged/untracked/conflicted
     if status.is_conflicted() {
@@ -101,6 +118,19 @@ pub fn get_status(path: &str) -> Result<RepoStatusInfo, String> {
             info.current_branch = head.shorthand().map(|s| s.to_string());
         }
         info.head_oid = head.peel_to_commit().ok().map(|c| c.id().to_string());
+    } else {
+        // An unborn HEAD: `git init` has run and the first commit hasn't. `repo.head()` can't
+        // resolve it because `refs/heads/<name>` doesn't exist yet — until something is committed
+        // the branch lives only as a line in `.git/HEAD`, which is also why `list_branches` has
+        // nothing to return for it and why `git branch` prints it nowhere.
+        //
+        // Reading HEAD's symbolic target recovers the name anyway, and it is the same one
+        // `git status` reports as "On branch <name>". Worth recovering rather than leaving the
+        // status bar on a dash: a repository with no commits is exactly when someone checks that
+        // bar to see whether the first commit is about to land on `main` or on `master`.
+        //
+        // `head_oid` stays `None`, correctly — there is no commit to point at yet.
+        info.current_branch = unborn_head_branch(&repo);
     }
 
     Ok(info)
@@ -122,4 +152,35 @@ pub fn reset_to_commit(path: &str, target_oid: &str, mode: &str) -> Result<(), S
 
     repo.reset(&object, reset_type, None).map_err(|e| e.message().to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A repository whose first commit hasn't happened yet still knows which branch it is on.
+    ///
+    /// `repo.head()` cannot resolve an unborn HEAD, and reading that as "no branch" left the status
+    /// bar showing a dash for the whole of a new project's life — right up until the first commit,
+    /// which is the stretch where "am I on `main` or `master`?" is worth answering.
+    #[test]
+    fn a_repository_with_no_commits_still_names_its_branch() {
+        let dir = std::env::temp_dir().join(format!("cf-repo-unborn-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let repo = git2::Repository::init(&dir).unwrap();
+        // Whatever `init.defaultBranch` this machine has, pin the one the assertion names.
+        repo.set_head("refs/heads/master").unwrap();
+        fs::write(dir.join("a.txt"), "one\n").unwrap();
+
+        let status = get_status(dir.to_str().unwrap()).unwrap();
+        assert_eq!(status.current_branch.as_deref(), Some("master"));
+        // No commit to point at, and not detached — HEAD is symbolic, it just points at nothing.
+        assert_eq!(status.head_oid, None);
+        assert!(!status.is_detached);
+        // The file is still seen, which is what says the rest of the status survived the branch.
+        assert_eq!(status.untracked.len(), 1);
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

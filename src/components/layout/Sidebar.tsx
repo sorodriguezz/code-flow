@@ -31,6 +31,12 @@ import {
   Undo2,
   Unlink,
 } from "lucide-react";
+import {
+  HoldProgress,
+  slotShift,
+  useHoldReorder,
+  type HoldReorder,
+} from "../../lib/holdReorder";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
@@ -152,40 +158,82 @@ const PR_SECTIONS: { key: string; labelKey: TranslationKey; defaultOpen?: boolea
 function CollapsedProjects({ projects, onAdd }: { projects: Project[]; onAdd: () => void }) {
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const reorderProject = useWorkspaceStore((s) => s.reorderProject);
   const t = useT();
 
+  // The same hold as the unfolded rows, writing the same `sort_order` — folding the panel changes
+  // how the repositories are drawn, not what can be done to them. Folded they *are* equal squares,
+  // so this one previews the way the app rail does, by sliding the chips it passes out of the way.
+  const reorder = useHoldReorder((from, to) => {
+    const moved = projects[from];
+    if (!moved || !activeWorkspaceId) return;
+    void reorderProject(activeWorkspaceId, moved.id, from < to ? to + 1 : to);
+  });
+  const drag = reorder.drag;
+
   return (
-    <div className="flex flex-col items-center gap-1.5">
+    <div ref={reorder.listRef} className="flex flex-col items-center gap-1.5">
       {/* The chip's own colour, repeated in the tooltip. Folded down to 24px squares the projects
           are told apart by colour alone, so the label that names one should be carrying the same
           colour the eye followed to ask. */}
-      {projects.map((project, at) => (
-        <Tooltip
-          key={project.id}
-          side="right"
-          label={project.name}
-          leading={
-            <span
-              className="h-2 w-2 shrink-0 rounded-full"
-              style={{ background: project.color }}
-            />
-          }
-        >
-          <button
-            onClick={() => setActiveProject(project.id)}
-            aria-label={project.name}
-            aria-current={project.id === activeProjectId ? "true" : undefined}
-            style={{ ...riseDelay(at), background: project.color }}
-            className={`cf-rise flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white transition-[box-shadow,opacity] ${
-              project.id === activeProjectId
-                ? "ring-2 ring-[var(--cf-accent)] ring-offset-2 ring-offset-[var(--cf-surface)]"
-                : "opacity-70 hover:opacity-100"
-            }`}
+      {projects.map((project, at) => {
+        const held = drag?.key === project.id;
+        const offset = drag ? (held ? drag.dy : slotShift(at, drag)) : 0;
+        return (
+          <Tooltip
+            key={project.id}
+            side="right"
+            label={project.name}
+            description={t("sidebar.reorderHint")}
+            // A label naming the chip under the pointer is a label about the wrong thing while
+            // that chip is being moved, and it would sit across the rail being rearranged.
+            disabled={drag !== null}
+            leading={
+              <span
+                className="h-2 w-2 shrink-0 rounded-full"
+                style={{ background: project.color }}
+              />
+            }
           >
-            <Folder size={12} />
-          </button>
-        </Tooltip>
-      ))}
+            <button
+              data-reorder={project.id}
+              onPointerDown={(e) => reorder.beginHold(e, at, project.id)}
+              onClick={() => {
+                if (reorder.swallowsClick()) return;
+                setActiveProject(project.id);
+              }}
+              aria-label={project.name}
+              aria-current={project.id === activeProjectId ? "true" : undefined}
+              style={{
+                ...riseDelay(at),
+                background: project.color,
+                ...(drag && {
+                  transform: `translateY(${offset}px)${held ? " scale(1.12)" : ""}`,
+                }),
+              }}
+              className={`cf-rise relative flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white ${
+                // The held chip is pinned to the pointer and must not ease anywhere; the ones
+                // sliding aside must. See the same split in `AppRail`.
+                held
+                  ? "z-10 cursor-grabbing shadow-lg ring-2 ring-[var(--cf-accent)]"
+                  : drag
+                    ? "transition-transform duration-150 ease-out"
+                    : "transition-[box-shadow,opacity]"
+              } ${
+                project.id === activeProjectId && !held
+                  ? "ring-2 ring-[var(--cf-accent)] ring-offset-2 ring-offset-[var(--cf-surface)]"
+                  : held
+                    ? ""
+                    : "opacity-70 hover:opacity-100"
+              }`}
+            >
+              <Folder size={12} />
+              {reorder.arming === project.id && <HoldProgress shape="ring" />}
+            </button>
+          </Tooltip>
+        );
+      })}
       <Tooltip side="right" label={t("sidebar.addProject")}>
         <button
           onClick={onAdd}
@@ -1012,7 +1060,15 @@ function PullRequestsSection({ project }: { project: Project }) {
   );
 }
 
-function ProjectRow({ project, at }: { project: Project; at: number }) {
+function ProjectRow({
+  project,
+  at,
+  reorder,
+}: {
+  project: Project;
+  at: number;
+  reorder: HoldReorder;
+}) {
   const activeProjectId = useWorkspaceStore((s) => s.activeProjectId);
   const setActiveProject = useWorkspaceStore((s) => s.setActiveProject);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
@@ -1058,6 +1114,14 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
 
   const otherWorkspaces = workspaces.filter((w) => w.id !== project.workspace_id);
 
+  const drag = reorder.drag;
+  const held = drag?.key === project.id;
+  /** Which of this row's edges the held repository would land against, if either. Drawn on the
+   *  neighbouring row rather than inserted between the rows, so showing where the drop goes doesn't
+   *  push the list around while it is being aimed at. */
+  const dropEdge =
+    drag && drag.to === at && drag.from !== at ? (drag.from < drag.to ? "bottom" : "top") : null;
+
   return (
     <div>
       {/* The click target is the whole row, not just its label. The row is a strip of controls, so
@@ -1065,9 +1129,16 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
           the padding around the text, and the gaps between the chips, hovering as if clickable and
           doing nothing. Every control inside stops propagation, so each still means only itself. */}
       <div
-        onClick={select}
+        data-reorder={project.id}
+        onPointerDown={(e) => reorder.beginHold(e, at, project.id)}
+        onClick={() => {
+          if (reorder.swallowsClick()) return;
+          select();
+        }}
         style={riseDelay(at)}
-        className={`cf-rise group relative flex w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors ${
+        className={`cf-rise group relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors ${
+          held ? "cursor-grabbing opacity-40" : "cursor-pointer"
+        } ${
           isActive
             ? "text-[var(--cf-text)]"
             : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
@@ -1078,8 +1149,22 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
             spring, so the two selections in the app move at one speed. The rows stay mounted while
             it travels, which is the condition the tween needs (see `ActivePill`). */}
         {isActive && <ActivePill layoutId="cf-project-pill" radius="rounded-lg" />}
+        {/* After the pill, so the hold reads on the open repository too — which is the one most
+            likely to be dragged, and the one whose selection fill would otherwise cover it. */}
+        {reorder.arming === project.id && <HoldProgress shape="bar" />}
+        {dropEdge && (
+          <span
+            aria-hidden
+            className={`pointer-events-none absolute inset-x-1 h-0.5 rounded-full bg-[var(--cf-accent)] ${
+              dropEdge === "top" ? "-top-px" : "-bottom-px"
+            }`}
+          />
+        )}
         <button
           title={t("sidebar.revealInFileManager")}
+          // A press on a control that does its own thing is not a press on the row: without this,
+          // resting on the folder chip long enough picks the repository up instead.
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={async (e) => {
             e.stopPropagation();
             setRevealing(true);
@@ -1107,9 +1192,14 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
         {/* Kept as a button so the row is still reachable and activatable from the keyboard — the
             container's handler covers the pointer, this covers focus. `stopPropagation` so a click
             landing on the name selects once rather than twice. */}
+        {/* No `onPointerDown` guard here, unlike the chips either side of it: the name is most of
+            the row's width and the natural place to grab it, so the hold has to reach through. The
+            click it swallows afterwards is this button's own — it stops propagation, so the row's
+            handler never runs and exactly one of the two consumes the flag. */}
         <button
           onClick={(e) => {
             e.stopPropagation();
+            if (reorder.swallowsClick()) return;
             select();
           }}
           className="relative flex min-w-0 flex-1 items-center gap-2 self-stretch text-left"
@@ -1122,6 +1212,7 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
             nothing at all under the pointer. */}
         <button
           title={t("sidebar.openInVsCode")}
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={async (e) => {
             e.stopPropagation();
             setOpeningVsCode(true);
@@ -1140,6 +1231,7 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
         {otherWorkspaces.length > 0 && (
           <button
             title={t("sidebar.moveToWorkspace")}
+            onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
               setShowMoveModal(true);
@@ -1207,12 +1299,24 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
               )}
               {localBranches.slice(0, localWindow.shown).map((b, at) => {
                   const isCheckingOut = checkingOutBranch === b.name;
+                  // A branch with no commit behind it: the one HEAD points at in a repository whose
+                  // first commit hasn't happened. It is listed because the status bar names it and a
+                  // branch list without it reads as wrong — but there is nothing to check out, and
+                  // nothing to detach at, so the two controls that would try are taken away rather
+                  // than left to fail. Merge and delete are already gone with `is_head`.
+                  const unborn = b.target === null;
                   return (
                     <div key={b.name} style={pageDelay(at)} className="cf-rise group flex items-center">
                       <button
                         onClick={() => checkoutBranch(b.name)}
-                        disabled={checkingOutBranch !== null}
-                        className={`flex flex-1 min-w-0 items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[13px] disabled:cursor-wait ${
+                        disabled={checkingOutBranch !== null || unborn}
+                        title={unborn ? t("branch.unbornHint") : undefined}
+                        // `disabled:cursor-wait` is about the checkout in flight, so an unborn row —
+                        // disabled for a reason that will never resolve by waiting — takes the
+                        // default cursor back.
+                        className={`flex flex-1 min-w-0 items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[13px] ${
+                          unborn ? "disabled:cursor-default" : "disabled:cursor-wait"
+                        } ${
                           b.is_head
                             ? "font-semibold text-[var(--cf-accent)]"
                             : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
@@ -1238,31 +1342,41 @@ function ProjectRow({ project, at }: { project: Project; at: number }) {
                           A lock that came from the app-wide rule list says so in its tooltip:
                           the click still unlocks this one branch, and a padlock that appeared on
                           its own is worth explaining where it came from. */}
-                      <button
-                        title={
-                          b.locked_by_rule
-                            ? t("branch.lockedByRuleToggle")
-                            : b.is_locked
-                              ? t("branch.lockedToggle")
-                              : t("branch.lock")
-                        }
-                        onClick={() => setBranchLocked(b.name, !b.is_locked)}
-                        className={`ml-1 shrink-0 hover:text-[var(--cf-warning)] ${
-                          b.is_locked
-                            ? "block text-[var(--cf-warning)]"
-                            : "hidden text-[var(--cf-text-muted)] group-hover:block"
-                        }`}
-                      >
-                        {b.is_locked ? <Lock size={12} /> : <LockOpen size={12} />}
-                      </button>
-                      <button
-                        title={t("sidebar.checkoutDetached")}
-                        disabled={checkingOutBranch !== null}
-                        onClick={() => checkoutDetached(b.name)}
-                        className="ml-1 hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
-                      >
-                        <Unlink size={12} />
-                      </button>
+                      {/* The padlock goes with the rest on an unborn branch, and for the same
+                          reason rather than for tidiness: `set_branch_locked` resolves the ref
+                          before writing, so there is nothing here for it to find. A lock would
+                          also be guarding nothing — what it holds back is merging and pushing,
+                          neither of which a branch with no commits can do. It comes back with the
+                          first commit, along with the ref. */}
+                      {!unborn && (
+                        <button
+                          title={
+                            b.locked_by_rule
+                              ? t("branch.lockedByRuleToggle")
+                              : b.is_locked
+                                ? t("branch.lockedToggle")
+                                : t("branch.lock")
+                          }
+                          onClick={() => setBranchLocked(b.name, !b.is_locked)}
+                          className={`ml-1 shrink-0 hover:text-[var(--cf-warning)] ${
+                            b.is_locked
+                              ? "block text-[var(--cf-warning)]"
+                              : "hidden text-[var(--cf-text-muted)] group-hover:block"
+                          }`}
+                        >
+                          {b.is_locked ? <Lock size={12} /> : <LockOpen size={12} />}
+                        </button>
+                      )}
+                      {!unborn && (
+                        <button
+                          title={t("sidebar.checkoutDetached")}
+                          disabled={checkingOutBranch !== null}
+                          onClick={() => checkoutDetached(b.name)}
+                          className="ml-1 hidden shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)] group-hover:block"
+                        >
+                          <Unlink size={12} />
+                        </button>
+                      )}
                       {!b.is_head && (
                         <button
                           title={
@@ -1334,6 +1448,7 @@ export function Sidebar() {
   const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
   const loadWorkspaces = useWorkspaceStore((s) => s.loadWorkspaces);
   const addProject = useWorkspaceStore((s) => s.addProject);
+  const reorderProject = useWorkspaceStore((s) => s.reorderProject);
   const sidebarWidth = useLayoutStore((s) => s.sizes.sidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
@@ -1376,6 +1491,27 @@ export function Sidebar() {
   const fold = resizing ? { duration: 0 } : { duration: 0.18, ease: "easeOut" as const };
 
   const projects = activeWorkspaceId ? projectsByWorkspace[activeWorkspaceId] ?? [] : [];
+
+  /**
+   * Hold a repository down and it can be dragged into a new position.
+   *
+   * The order it writes is the *same* order Settings' project list drags around — `sort_order` on
+   * the row, through the one `reorderProject` both call — so the two screens can never disagree
+   * about what order the repositories are in. Settings keeps its drag handle and its few-pixel
+   * threshold: there the rows are a list you rearrange, here they are repositories you open.
+   *
+   * The preview is a line at the drop point rather than the rail's sliding neighbours, because
+   * these rows are not the same height — the open one is unfolded to its branches, stashes and
+   * pull requests — and sliding a block that size around says far less than a line does.
+   */
+  const reorder = useHoldReorder((from, to) => {
+    const moved = projects[from];
+    if (!moved || !activeWorkspaceId) return;
+    // `reorderProject` takes a gap in the list *as it stands*, with the dragged row still in it;
+    // the hold gesture reports a final position. Dragging down, the gap that lands the row after
+    // its target is the one past it — see the note in `workspaceStore.reorderProject`.
+    void reorderProject(activeWorkspaceId, moved.id, from < to ? to + 1 : to);
+  });
 
   /** Registers one repository. The path is always a verified repository root by the time it gets
    *  here — see `handleAddProject`.
@@ -1592,7 +1728,17 @@ export function Sidebar() {
           ) : (
             <div data-tour="projects-panel" className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
               <div data-tour="projects-header" className="mb-1 flex items-center justify-between px-1">
-                <span className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
+                {/* The list heading carries the hint, because the rows themselves cannot: a native
+                    `title` surfaces after about a second and a half of hover, which lands squarely
+                    inside the gesture it would be describing — on the way to the hold while it is
+                    still counting, or on top of the row a moment after it has been picked up,
+                    depending on where `HOLD_MS` sits. Either way it arrives at the one moment it is
+                    in the way, and unlike this app's own `Tooltip` a native one has no `pointerdown`
+                    to dismiss it. Hovering a heading is part of no gesture. */}
+                <span
+                  title={t("sidebar.reorderHint")}
+                  className="text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]"
+                >
                   {t("sidebar.projects")}
                 </span>
                 <div data-tour="projects-actions" className="flex items-center gap-0.5">
@@ -1626,9 +1772,9 @@ export function Sidebar() {
                 </div>
               </div>
 
-              <div className="space-y-0.5">
+              <div ref={reorder.listRef} className="space-y-0.5">
                 {projects.map((project, at) => (
-                  <ProjectRow key={project.id} project={project} at={at} />
+                  <ProjectRow key={project.id} project={project} at={at} reorder={reorder} />
                 ))}
                 {projects.length === 0 && (
                   <p className="px-1.5 py-1 text-[12px] text-[var(--cf-text-muted)]">{t("sidebar.noProjects")}</p>
@@ -1712,11 +1858,16 @@ export function Sidebar() {
           animate={{ left: railWidth - 10 }}
           transition={fold}
           style={{ translateY: "-50%" }}
-          // The seam-hover class only while folded — unfolded, the live handle is its own
-          // affordance and the button keeps the plain hover it always had.
-          className={`absolute top-1/2 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)] ${
-            collapsed ? "cf-fold-toggle" : ""
-          }`}
+          // `cf-fold-toggle` in both states, not just folded. It used to be conditional on the
+          // theory that an unfolded seam has a live `ResizeHandle` to speak for itself — but that
+          // reasoning only ever applied to the half of the class driven by the *seam*, and it left
+          // the button with no colour of its own under the pointer, which is the half that is about
+          // the button. Nothing needs gating to fix that: `cf-fold-zone` is only in the DOM while
+          // folded, so the sibling half of the rule cannot match here anyway.
+          //
+          // No `hover:text-…` any more — the class covers direct hover in both states now, so the
+          // Tailwind one was shadowed and only survived on source order.
+          className="cf-fold-toggle absolute top-1/2 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors"
         >
           {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
         </motion.button>

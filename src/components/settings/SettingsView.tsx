@@ -269,9 +269,10 @@ export function SettingsView() {
               aria-label={collapsed ? t("settings.expandNav") : t("settings.collapseNav")}
               aria-expanded={!collapsed}
               style={{ left: railWidth - 10 }}
-              className={`absolute top-6 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors hover:text-[var(--cf-text)] ${
-                collapsed ? "cf-fold-toggle" : ""
-              }`}
+              // Unconditional, and for the reason the sidebar's twin gives in full: the seam half
+              // of `cf-fold-toggle` self-gates on `cf-fold-zone` being in the DOM, so all this adds
+              // when unfolded is the button's own hover colour — which it was missing.
+              className="cf-fold-toggle absolute top-6 z-20 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] shadow-sm transition-colors"
             >
               {collapsed ? <ChevronsRight size={12} /> : <ChevronsLeft size={12} />}
             </button>

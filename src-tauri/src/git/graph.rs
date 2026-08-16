@@ -145,7 +145,14 @@ pub fn list_commits(path: &str, all_refs: bool, limit: usize) -> Result<Vec<Comm
 /// send. Empty if the current branch has no upstream configured (nothing to compare against).
 pub fn list_unpushed_commits(path: &str) -> Result<Vec<CommitInfo>, String> {
     let repo = open(path)?;
-    let head = repo.head().map_err(|e| e.message().to_string())?;
+    // A repository whose first commit hasn't happened yet has no HEAD to resolve — and nothing to
+    // push either, so the answer is "none" rather than a failure. `blame`, `branch`, `checkpoint`
+    // and `repo` all already read an unborn HEAD as a state; this was the one place on the refresh
+    // path that read it as an error, and one error there was enough to strand the sidebar's
+    // loading skeleton for the rest of the session. See `setRepoPath` for the other half.
+    let Ok(head) = repo.head() else {
+        return Ok(vec![]);
+    };
     if !head.is_branch() {
         return Ok(vec![]);
     }
@@ -176,3 +183,34 @@ pub fn list_unpushed_commits(path: &str) -> Result<Vec<CommitInfo>, String> {
 
     Ok(commits)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// A repository whose first commit hasn't happened yet — `git init` and nothing else, which is
+    /// what importing a freshly scaffolded project looks like.
+    ///
+    /// `repo.head()` fails there. Reading that as an error made this call reject, and because it
+    /// runs inside the `Promise.all` behind `setRepoPath`, one rejection left the sidebar's whole
+    /// section for that repository on loading placeholders until the app was restarted.
+    #[test]
+    fn a_repository_with_no_commits_has_nothing_unpushed_rather_than_an_error() {
+        let dir = std::env::temp_dir().join(format!("cf-graph-empty-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        Repository::init(&dir).unwrap();
+        fs::write(dir.join("a.txt"), "one\n").unwrap();
+
+        let unpushed = list_unpushed_commits(dir.to_str().unwrap()).unwrap();
+        assert!(unpushed.is_empty());
+
+        // And the graph itself is empty rather than broken — it walks the refs, of which there are
+        // none yet, so it never had the same problem and must not acquire one.
+        let commits = list_commits(dir.to_str().unwrap(), true, 500).unwrap();
+        assert!(commits.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+}
+

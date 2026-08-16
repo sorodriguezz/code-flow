@@ -8,6 +8,8 @@ import {
   Send,
   type LucideIcon,
 } from "lucide-react";
+import { HoldProgress, slotShift, useHoldReorder } from "../../lib/holdReorder";
+import { useLayoutStore } from "../../state/layoutStore";
 import { useUiStore, type ApiWorkspace, type MainView } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
@@ -39,7 +41,11 @@ interface WorkspaceApp {
 }
 
 /** Everything that belongs to the workspace rather than to the selected repository. Adding the
- * next one is a single entry here — the rail and its order follow. */
+ * next one is a single entry here — the rail follows.
+ *
+ * This is the order the rail *starts* in, and the comments below are the argument for it. It is no
+ * longer the order it necessarily stays in: an icon held down can be moved, and [`ordered`] lays
+ * this list out against what the user chose. It remains the source of truth for which apps exist. */
 const APPS: WorkspaceApp[] = [
   {
     id: "api",
@@ -94,9 +100,42 @@ const APPS: WorkspaceApp[] = [
   },
 ];
 
-/** Buttons are keyed by view *and* workspace, since two of them share a view. */
+/** Buttons are keyed by view *and* workspace, since two of them share a view. This key is also what
+ * the stored order is written in, so it has to stay stable across releases — renaming one silently
+ * drops that app to the bottom of a rail somebody had already arranged. */
 function appKey(app: WorkspaceApp): string {
   return app.workspace ? `${app.id}:${app.workspace}` : app.id;
+}
+
+/** `items` with the entry at `from` lifted out and put back in at `to`. */
+function move<T>(items: T[], from: number, to: number): T[] {
+  const next = items.slice();
+  const [lifted] = next.splice(from, 1);
+  next.splice(to, 0, lifted);
+  return next;
+}
+
+/**
+ * `APPS` in the user's order.
+ *
+ * The stored order is advisory, and never the source of truth for *which* apps exist — `APPS` is.
+ * A key the stored order doesn't mention (the next app to ship, arriving into a rail somebody
+ * arranged two releases ago) sorts after the ones it does, keeping its declared position among its
+ * fellow newcomers; a key naming an app that no longer exists ranks nothing and is ignored. So
+ * neither adding nor removing an app can leave the rail an icon short or an icon over.
+ */
+function ordered(order: string[]): WorkspaceApp[] {
+  // A copy on both branches. Handing out `APPS` itself was safe only by luck — the one caller,
+  // `move`, happens to `slice()` before splicing — and the next one to sort or splice in place
+  // would corrupt the app registry for the rest of the process, silently, with no way back short
+  // of a relaunch. Six elements is not a copy worth economising on.
+  if (order.length === 0) return APPS.slice();
+  const rank = new Map(order.map((key, index) => [key, index]));
+  // `order.length` rather than `Infinity`: every real rank is below it, so unmentioned apps land at
+  // the end — and, being equal to each other, they keep their declared order through a sort that
+  // has been stable since ES2019. Subtracting two infinities would have produced `NaN` instead.
+  const rankOf = (app: WorkspaceApp) => rank.get(appKey(app)) ?? order.length;
+  return APPS.slice().sort((a, b) => rankOf(a) - rankOf(b));
 }
 
 /** A translucent wash of the workspace's own colour. Built as a string rather than a Tailwind
@@ -131,6 +170,16 @@ function ink(color: string): string {
  * bar above is about the selected repository and reads as somewhere you already are. The tile is
  * the one thing on the rail that isn't one of the six, it is directly above them, and "back to
  * where I started" is the plainest thing a cap like that can mean.
+ *
+ * The six can be rearranged: hold one down and it lifts, and where it is dropped is remembered (`railOrder` in `layoutStore`, which is a row in `app_settings` and therefore travels
+ * with the backup). Purely visual — the order decides nothing but which icon is where, and no
+ * other screen reads it.
+ *
+ * Which is also the argument for putting the gesture behind a hold rather than behind a drag
+ * threshold, the way the editor's tabs do it. A tab strip is rearranged often and every tab is
+ * interchangeable; this rail is arranged once, and each icon is a door someone is trying to open
+ * on a single click. A few pixels of travel is a slip, and a slip that quietly moves the app
+ * you meant to open is worse than a gesture that has to be asked for.
  */
 export function AppRail() {
   const activeView = useUiStore((s) => s.activeView);
@@ -139,7 +188,17 @@ export function AppRail() {
   const openApiWorkspace = useUiStore((s) => s.openApiWorkspace);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const railOrder = useLayoutStore((s) => s.railOrder);
+  const setRailOrder = useLayoutStore((s) => s.setRailOrder);
   const t = useT();
+
+  const apps = ordered(railOrder);
+  // The gesture is shared with the sidebar's repositories; the preview below is not. This rail is
+  // six identical squares, so it can afford to slide its neighbours out of the way to show where
+  // the held one is going — which the sidebar, whose open repository is unfolded to a list of
+  // branches, cannot.
+  const reorder = useHoldReorder((from, to) => setRailOrder(move(apps, from, to).map(appKey)));
+  const drag = reorder.drag;
 
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
   // No workspace yet (first launch, or one was just deleted): fall back to the accent so the
@@ -163,7 +222,7 @@ export function AppRail() {
     >
       {/* The tour anchors this cluster rather than the whole rail: the rail is as tall as the
           window, and a spotlight that size says "look everywhere". */}
-      <div data-tour="workspace-tools" className="flex flex-col items-center gap-1">
+      <div ref={reorder.listRef} data-tour="workspace-tools" className="flex flex-col items-center gap-1">
         <Tooltip side="left" label={scopeHint} description={t("tabbar.scopeWorkspaceReset")}>
           <button
             type="button"
@@ -179,19 +238,39 @@ export function AppRail() {
 
         <span className="my-1 h-px w-5 bg-[var(--cf-border)]" />
 
-        {APPS.map((app) => {
+        {apps.map((app, index) => {
           const Icon = app.icon;
+          const key = appKey(app);
           const isActive = app.id === activeView && (app.workspace ?? apiWorkspace) === apiWorkspace;
+          const lifted = drag?.key === key;
           const name = t(app.labelKey);
+          // The lifted icon follows the pointer; the ones it has passed step aside by a slot. Both
+          // are the same property, so both are written here rather than one of them in a class.
+          const offset = drag
+            ? lifted
+              ? drag.dy
+              : slotShift(index, drag)
+            : 0;
           return (
             // Name and description as two lines rather than the `{name} — {description}` sentence
             // the `title` attribute forced them into: what the app *is* and what it holds are two
             // different questions, and a rail of glyphs is read by scanning the first.
             <Tooltip
-              key={appKey(app)}
+              key={key}
               side="left"
               label={name}
-              description={t(app.descriptionKey)}
+              // A label about the button under the pointer is a label about the wrong thing while
+              // that button is being moved — and it would sit on top of the rail being rearranged.
+              disabled={drag !== null}
+              description={
+                <>
+                  {t(app.descriptionKey)}
+                  {/* The only announcement the hold gets. Quieter than the description
+                      above it: it is about the rail rather than about this app, and it is read
+                      once. */}
+                  <span className="mt-1 block opacity-70">{t("tabbar.reorderHint")}</span>
+                </>
+              }
               trailing={
                 app.beta ? (
                   <span className="shrink-0 rounded-[4px] bg-[color-mix(in_oklab,var(--cf-warning)_18%,transparent)] px-1 py-px text-[9px] font-bold uppercase leading-none tracking-[0.06em] text-[var(--cf-warning)]">
@@ -202,13 +281,39 @@ export function AppRail() {
             >
             <button
               type="button"
-              onClick={() => open(app)}
+              data-reorder={key}
+              onPointerDown={(e) => reorder.beginHold(e, index, key)}
+              onClick={() => {
+                if (reorder.swallowsClick()) return;
+                open(app);
+              }}
               aria-current={isActive ? "page" : undefined}
               aria-label={name}
-              className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors ${
+              // Only while a drag is on: an idle rail is six buttons with no transform at all,
+              // rather than six `translateY(0)`s each generating a containing block for nothing.
+              style={
+                drag
+                  ? { transform: `translateY(${offset}px)${lifted ? " scale(1.12)" : ""}` }
+                  : undefined
+              }
+              className={`relative flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-md ${
+                // The lifted icon is pinned to the pointer, so it must not ease anywhere; its
+                // neighbours are the ones sliding out of the way, so they must. Idle, the only
+                // thing that moves is colour — and dropping the transform transition on the way out
+                // is what keeps the icons still in the frame where the preview becomes the order.
+                lifted
+                  ? "z-10 cursor-grabbing shadow-lg ring-1 ring-[var(--cf-accent)]"
+                  : drag
+                    ? "transition-transform duration-150 ease-out"
+                    : "transition-colors"
+              } ${
                 isActive
                   ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+                  : `text-[var(--cf-text-muted)] ${
+                      lifted
+                        ? "bg-[var(--cf-surface-raised)] text-[var(--cf-text)]"
+                        : "hover:bg-black/[0.03] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.04]"
+                    }`
               }`}
             >
               {/* Pushed out of the button and onto the rail's own left edge, so the mark points at
@@ -217,6 +322,7 @@ export function AppRail() {
                 <span className="absolute inset-y-1.5 -left-1.5 w-[2.5px] rounded-r-full bg-[var(--cf-accent)]" />
               )}
               <Icon size={15} />
+              {reorder.arming === key && <HoldProgress shape="ring" />}
               {/* The word, not a dot. A coloured dot in the corner of a control already means
                   "something new is waiting for you" everywhere else in this app — the title bar's
                   tour button, the notification bell — and it read as an alert here rather than as a

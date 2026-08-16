@@ -301,6 +301,37 @@ async function checkoutGuarded(
 ) {
   const { repoPath } = get();
   if (!repoPath) return;
+
+  // Leaving a branch that has no commits yet destroys it, and git says nothing on the way past.
+  //
+  // An unborn branch exists only as the line in `.git/HEAD` — no `refs/heads/<name>` is written
+  // until the first commit. A checkout overwrites that line, and there is nothing left behind to
+  // return to: `git checkout <name>` afterwards fails with "pathspec did not match", and the reflog
+  // has no entry either, because a ref that never existed was never updated. It is the one branch
+  // in the list that a switch can silently spend.
+  //
+  // Asked here rather than at the three call sites, for the reason the merge and stash
+  // confirmations give: one funnel, so no caller can skip the question. The target side of the
+  // diagram is the branch being left, because the side at risk is the one being left — the only
+  // confirmation in this app where that is true, and precisely what makes it worth drawing.
+  const status = get().status;
+  const leaving =
+    status && !status.is_detached && status.head_oid === null ? status.current_branch : null;
+  if (leaving && leaving !== target) {
+    const confirmed = await confirmFlow({
+      flow: {
+        kind: "checkout",
+        source: target,
+        target: leaving,
+        note: translate("confirm.leaveUnbornNote", { name: leaving }),
+      },
+      message: translate("confirm.leaveUnbornTitle", { name: leaving }),
+      confirmLabel: translate("confirm.leaveUnbornConfirm"),
+      danger: true,
+    });
+    if (!confirmed) return;
+  }
+
   set({ checkingOutBranch: target, busy: true, error: null });
   try {
     try {
@@ -392,10 +423,27 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       conflicts: [],
     });
     if (path) {
-      await get().refreshAll();
-      // Guards against a stale resolution: if the user already switched to another repo
-      // while this fetch was in flight, don't clear the new repo's loading state.
-      if (get().repoPath === path) set({ projectLoading: false });
+      try {
+        await get().refreshAll();
+      } catch (e) {
+        // A listing that throws must not leave the panel showing skeletons forever — the same rule
+        // `refreshCommits` states for its own table, which this half of the load was missing.
+        //
+        // `refreshAll` is seven calls in a `Promise.all`, so any one of them rejecting used to skip
+        // the line below and leave `projectLoading` stuck at `true`: the repository's whole section
+        // of the sidebar sat on placeholder bars until the app was restarted. Silently, too — the
+        // only caller discards the promise (`void setRepoPath(...)` in `App`), so the rejection went
+        // nowhere. A repository that genuinely can't be read now says which part failed and stops
+        // pretending to load.
+        //
+        // The other six still ran and still wrote what they fetched: `Promise.all` doesn't cancel
+        // its siblings. So this is a partial load reported as one, not a load abandoned.
+        pushErrorToast(describeError(e));
+      } finally {
+        // Guards against a stale resolution: if the user already switched to another repo
+        // while this fetch was in flight, don't clear the new repo's loading state.
+        if (get().repoPath === path) set({ projectLoading: false });
+      }
     }
   },
 

@@ -198,6 +198,14 @@ interface NotesState {
   /** Tags a note must carry to show, ANDed. AND rather than OR because picking two tags is
    *  narrowing; the search box is already the "either" tool. */
   tagFilter: string[];
+  /** Show only the notes carrying no tags at all.
+   *
+   * Its own flag rather than a reserved entry in `tagFilter`, because it is not a tag: no string
+   * could stand for it without colliding with a tag someone is free to create, and it ANDs with
+   * nothing — see `toggleTag`, where the two clear each other. It earns a place beside the tags
+   * because it answers the question the tag list provokes: a list of everything filed tells you
+   * nothing about what is still loose. */
+  untaggedOnly: boolean;
   /** The book the gallery is showing the inside of. `null` is the shelf — the books themselves. */
   bookFilter: string | null;
   sort: NoteSort;
@@ -216,6 +224,7 @@ interface NotesState {
 
   setQuery: (query: string) => void;
   toggleTag: (tag: string) => void;
+  toggleUntagged: () => void;
   clearTags: () => void;
   setBookFilter: (bookId: string | null) => void;
   setSort: (sort: NoteSort) => void;
@@ -325,6 +334,7 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   query: "",
   bodyHits: {},
   tagFilter: [],
+  untaggedOnly: false,
   bookFilter: null,
   sort: "manual",
   expanded: [],
@@ -490,14 +500,20 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     }, SEARCH_DEBOUNCE_MS);
   },
 
+  // Picking a tag drops "untagged", and vice versa below: the two are contradictory by definition,
+  // and a filter pair that can be set to match nothing is a filter pair that will be.
   toggleTag: (tag) =>
     set((state) => ({
+      untaggedOnly: false,
       tagFilter: state.tagFilter.includes(tag)
         ? state.tagFilter.filter((t) => t !== tag)
         : [...state.tagFilter, tag],
     })),
 
-  clearTags: () => set({ tagFilter: [] }),
+  toggleUntagged: () =>
+    set((state) => ({ untaggedOnly: !state.untaggedOnly, tagFilter: [] })),
+
+  clearTags: () => set({ tagFilter: [], untaggedOnly: false }),
   setBookFilter: (bookId) => set({ bookFilter: bookId }),
 
   setSort: (sort) => {
@@ -1190,6 +1206,8 @@ export function filterNotes(
     query: string;
     bodyHits: Record<string, NoteSearchHit>;
     tagFilter: string[];
+    /** Optional so the callers that never offer the filter don't have to pass `false`. */
+    untaggedOnly?: boolean;
     bookId?: string | null;
     sort: NoteSort;
   },
@@ -1197,6 +1215,7 @@ export function filterNotes(
   const needle = options.query.trim().toLowerCase();
   const filtered = notes.filter((note) => {
     if (options.bookId !== undefined && note.book_id !== options.bookId) return false;
+    if (options.untaggedOnly && note.tags.length > 0) return false;
     // AND across tags — see `tagFilter`'s comment.
     if (options.tagFilter.some((tag) => !note.tags.includes(tag))) return false;
     if (!needle) return true;

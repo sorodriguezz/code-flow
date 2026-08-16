@@ -33,6 +33,7 @@ const en = {
 
   "sidebar.workspaces": "Workspaces",
   "sidebar.projects": "Projects",
+  "sidebar.reorderHint": "Hold a repository to drag it into a new position",
   "sidebar.collapseProjects": "Collapse to project icons",
   "sidebar.expandProjects": "Show project names",
   "import.title": "Import repositories",
@@ -2688,6 +2689,7 @@ const en = {
   "checkout.detachedAt": "Detached HEAD at {sha}",
 
   "branch.lock": "Unlocked — click to lock and block merging into it and pushing it",
+  "branch.unbornHint": "You are on this branch — it starts existing with the first commit",
   "branch.lockedToggle": "Locked: no merges onto it, no pushes — click to unlock",
   "branch.createModalTitle": "New local branch",
   "branch.createStartPoint": "Starting from",
@@ -2724,6 +2726,9 @@ const en = {
   "confirm.createBranchNote": "Created at the same commit as {source}. You stay on your current branch.",
   "confirm.deleteBranchTitle": 'Delete local branch "{name}"?',
   "confirm.deleteBranchNote": "Only the branch pointer goes — its commits survive as long as another branch or tag reaches them.",
+  "confirm.leaveUnbornTitle": "Leave \"{name}\" before its first commit?",
+  "confirm.leaveUnbornNote": "\"{name}\" has no commits, so it only exists as the branch you are on. Switching away discards it for good — it cannot be checked out again or recovered from the reflog. Commit something first to keep it.",
+  "confirm.leaveUnbornConfirm": "Switch and discard",
   "confirm.deleteBranchConfirm": "Delete",
   "confirm.deleteBranchTarget": "Deleted",
 
@@ -2764,6 +2769,7 @@ const en = {
 
   "tabbar.notes": "Notes",
   "tabbar.notesDescription": "Markdown notes, books, tags and templates — the writing that surrounds this workspace's code",
+  "tabbar.reorderHint": "Hold to drag it into a new position",
 
   "notes.title": "Notes",
   "notes.untitled": "Untitled",
@@ -2802,6 +2808,11 @@ const en = {
   "notes.clearSearch": "Clear search",
   "notes.clearFilters": "Clear",
   "notes.tags": "Tags",
+  "notes.searchTag": "Search tag",
+  "notes.noTagMatches": "No tag matches",
+  "notes.untagged": "Untagged",
+  "notes.tagSortByName": "Sorted by name — click to sort by how often each is used",
+  "notes.tagSortByCount": "Sorted by use — click to sort by name",
   "notes.addTag": "Add tag",
   "notes.removeTag": "Remove the tag {tag}",
   "notes.removeTagFilter": "Stop filtering by {tag}",

@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
+  ArrowUpDown,
   ChevronDown,
   ChevronRight,
   Copy,
@@ -21,8 +22,9 @@ import { TemplatePickerModal } from "./TemplatePickerModal";
 import { BOOK_COLORS, ICON_BUTTON, TagPill } from "./notesChrome";
 import { buildBookTree, descendantIds, flattenTree } from "../../lib/notes/tree";
 import type { NoteTreeRow as NoteTreeRowData } from "../../types/notes";
-import { tagCounts } from "../../lib/notes/tags";
+import { tagCounts, tagHue } from "../../lib/notes/tags";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
+import { useLayoutStore } from "../../state/layoutStore";
 import { filterNotes, useNotesStore } from "../../state/notesStore";
 import {
   edgeAt,
@@ -57,12 +59,14 @@ export function NoteExplorer() {
   const query = useNotesStore((s) => s.query);
   const bodyHits = useNotesStore((s) => s.bodyHits);
   const tagFilter = useNotesStore((s) => s.tagFilter);
+  const untaggedOnly = useNotesStore((s) => s.untaggedOnly);
   const expanded = useNotesStore((s) => s.expanded);
   const activeId = useNotesStore((s) => s.activeId);
   const sort = useNotesStore((s) => s.sort);
 
   const setQuery = useNotesStore((s) => s.setQuery);
   const toggleTag = useNotesStore((s) => s.toggleTag);
+  const toggleUntagged = useNotesStore((s) => s.toggleUntagged);
   const clearTags = useNotesStore((s) => s.clearTags);
   const toggleBook = useNotesStore((s) => s.toggleBook);
   const setBookFilter = useNotesStore((s) => s.setBookFilter);
@@ -93,6 +97,11 @@ export function NoteExplorer() {
    *  arrangement anyone builds up — it's "get this out of my way for a moment" in a workspace whose
    *  tag list grew past what a glance can take in. */
   const [tagsCollapsed, setTagsCollapsed] = useState(false);
+  /** Narrows the tag list itself. Local like the fold above it, and for the same reason: it is a
+   *  "find this one now", not an arrangement. */
+  const [tagQuery, setTagQuery] = useState("");
+  const tagsByCount = useLayoutStore((s) => s.flags.notesTagsByCount);
+  const toggleLayoutFlag = useLayoutStore((s) => s.toggleFlag);
   const treeRef = useRef<HTMLDivElement>(null);
   const searchField = useRef<HTMLInputElement>(null);
 
@@ -101,12 +110,12 @@ export function NoteExplorer() {
   // `bookId` is omitted, so this is the whole workspace's surviving notes — the tree places each
   // under its own book rather than showing one book's worth.
   const visible = useMemo(
-    () => filterNotes(notes, { query, bodyHits, tagFilter, sort }),
-    [notes, query, bodyHits, tagFilter, sort],
+    () => filterNotes(notes, { query, bodyHits, tagFilter, untaggedOnly, sort }),
+    [notes, query, bodyHits, tagFilter, untaggedOnly, sort],
   );
 
   const tree = useMemo(() => buildBookTree(books), [books]);
-  const filtering = query.trim().length > 0 || tagFilter.length > 0;
+  const filtering = query.trim().length > 0 || tagFilter.length > 0 || untaggedOnly;
   /**
    * The books drawn open.
    *
@@ -123,15 +132,41 @@ export function NoteExplorer() {
     () => flattenTree(tree, visible, expandedSet),
     [tree, visible, expandedSet],
   );
-  // Alphabetical here, not `tagCounts`'s own most-used-first order — that order is right for
+  // Alphabetical by default, not `tagCounts`'s own most-used-first order — that order is right for
   // `NoteTagBar`'s autocomplete, where the point is surfacing the *likely* tag first, but wrong for
   // a list a person scans to find one by name. Ties (which is most of them, in a young workspace
   // where every tag has been used once) are what made the frequency order look unsorted to begin
   // with: it fell back to alphabetical anyway, just after a count nobody could see at a glance.
-  const tags = useMemo(
-    () => [...tagCounts(notes)].sort((a, b) => a.tag.localeCompare(b.tag)),
+  //
+  // Now that the count is a badge on the row rather than a digit inside a chip, frequency is worth
+  // offering — a workspace with hundreds of notes has a real "which of these do I actually use"
+  // question. So it is a toggle, and a persisted one: an ordering is decided once, not per visit.
+  const tags = useMemo(() => {
+    // Sorted in place: `tagCounts` ends in `.map().sort()`, so what comes back is freshly built and
+    // held by nobody else. The spread that used to be here copied it for no one.
+    const counted = tagCounts(notes);
+    return tagsByCount
+      ? counted.sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag))
+      : counted.sort((a, b) => a.tag.localeCompare(b.tag));
+  }, [notes, tagsByCount]);
+
+  /** Notes carrying no tags at all — the question a list of everything filed provokes.
+   *
+   *  Counted rather than filtered-then-measured: `filter().length` materialises an array of every
+   *  untagged note only to read its size and drop it, and this recomputes on every change to
+   *  `notes` — which is every create, rename, tag edit and delete. */
+  const untaggedCount = useMemo(
+    () => notes.reduce((total, note) => total + (note.tags.length === 0 ? 1 : 0), 0),
     [notes],
   );
+
+  /** The tag list's own search, which is not the note search above it: this one narrows the list of
+   *  names, that one narrows the notes. Substring rather than prefix — tags here are compound
+   *  (`oracle`, `oracle-12c`), and the half people remember is not reliably the front. */
+  const shownTags = useMemo(() => {
+    const needle = tagQuery.trim().toLowerCase();
+    return needle ? tags.filter(({ tag }) => tag.includes(needle)) : tags;
+  }, [tags, tagQuery]);
 
   /** The books a drop may not land in: the dragged book and everything under it. */
   const forbidden = useMemo(
@@ -730,35 +765,93 @@ export function NoteExplorer() {
         />
       </div>
 
-      {tags.length > 0 && (
+      {(tags.length > 0 || untaggedCount > 0) && (
         <div data-tour="notes-tags" className="shrink-0 border-t border-[var(--cf-border)] p-2">
-          <button
-            type="button"
-            onClick={() => setTagsCollapsed((c) => !c)}
-            aria-expanded={!tagsCollapsed}
-            className={`flex w-full items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] ${
-              tagsCollapsed ? "" : "mb-1.5"
-            }`}
-          >
-            {tagsCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
-            <Tags size={11} className="shrink-0" />
-            <span className="min-w-0 flex-1 truncate text-left">{t("notes.tags")}</span>
-            <span className="tabular-nums normal-case font-normal">{tags.length}</span>
-          </button>
+          {/* A row of controls, so the fold is its own button rather than the whole strip: the
+              sort toggle sits beside it and a header that folded on any click would swallow it. */}
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setTagsCollapsed((c) => !c)}
+              aria-expanded={!tagsCollapsed}
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-[10.5px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+            >
+              {tagsCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
+              <Tags size={11} className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate text-left">{t("notes.tags")}</span>
+              <span className="tabular-nums font-normal normal-case">{tags.length}</span>
+            </button>
+            {!tagsCollapsed && (
+              <button
+                type="button"
+                onClick={() => toggleLayoutFlag("notesTagsByCount")}
+                aria-pressed={tagsByCount}
+                title={tagsByCount ? t("notes.tagSortByCount") : t("notes.tagSortByName")}
+                aria-label={tagsByCount ? t("notes.tagSortByCount") : t("notes.tagSortByName")}
+                className={`shrink-0 rounded p-0.5 hover:bg-black/[0.04] dark:hover:bg-white/[0.06] ${
+                  tagsByCount ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
+                }`}
+              >
+                <ArrowUpDown size={11} />
+              </button>
+            )}
+          </div>
+
           {!tagsCollapsed && (
-            <div className="max-h-40 overflow-y-auto">
-              <div className="flex flex-wrap gap-1">
-                {tags.map(({ tag, count }) => (
-                  <TagPill
+            <>
+              {/* Always, not only once the list is long enough to need it. It was gated on a
+                  count at first, on the theory that a box over six tags saves nothing — but a
+                  control that comes and goes as notes are tagged is one you cannot learn is there,
+                  and its absence reads as missing rather than as unnecessary. A row of height is
+                  the cheaper half of that trade. */}
+              <div className="relative mt-1.5">
+                <Search
+                  size={11}
+                  className="pointer-events-none absolute left-1.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
+                />
+                <input
+                  value={tagQuery}
+                  onChange={(event) => setTagQuery(event.target.value)}
+                  onKeyDown={(event) => event.key === "Escape" && setTagQuery("")}
+                  placeholder={t("notes.searchTag")}
+                  aria-label={t("notes.searchTag")}
+                  spellCheck={false}
+                  className="w-full rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] py-0.5 pl-5 pr-1.5 text-[11px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-muted)] focus:border-[var(--cf-accent)]"
+                />
+              </div>
+
+              {/* One tag per row rather than a wrapped cloud of chips.
+                  A cloud is compact and it is what this was, but it makes the two things the list
+                  is for hard: the counts sat inside the chips at different x positions on every
+                  line, so they could not be compared by eye, and finding one name meant reading a
+                  ragged block instead of running down a column. Rows put the names on one edge and
+                  the counts on the other, which is what makes both scannable. */}
+              <div className="mt-1 max-h-64 overflow-y-auto">
+                {untaggedCount > 0 && !tagQuery.trim() && (
+                  <TagRow
+                    label={t("notes.untagged")}
+                    count={untaggedCount}
+                    active={untaggedOnly}
+                    onClick={toggleUntagged}
+                  />
+                )}
+                {shownTags.map(({ tag, count }) => (
+                  <TagRow
                     key={tag}
-                    tag={tag}
+                    label={tag}
+                    hue={tagHue(tag)}
                     count={count}
                     active={tagFilter.includes(tag)}
                     onClick={() => toggleTag(tag)}
                   />
                 ))}
+                {shownTags.length === 0 && tagQuery.trim() && (
+                  <p className="px-1.5 py-2 text-center text-[11px] text-[var(--cf-text-muted)]">
+                    {t("notes.noTagMatches")}
+                  </p>
+                )}
               </div>
-            </div>
+            </>
           )}
         </div>
       )}
@@ -769,6 +862,64 @@ export function NoteExplorer() {
         <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
       )}
     </div>
+  );
+}
+
+/**
+ * One tag in the list: a colour dot, the name, and how many notes carry it.
+ *
+ * The dot rather than the full chip `TagPill` draws elsewhere. A chip is right where a tag appears
+ * *among prose or cards* and has to be picked out of it; in a column where every row is a tag, the
+ * chip's background says nothing the position doesn't, and forty washed pills stacked up read as a
+ * paint chart. The hue is the same one `tagHue` gives the chip, so a tag is still recognisably
+ * itself between this list and the notes it labels.
+ *
+ * The count sits in its own pill on the right edge — the one place it can be compared down the
+ * column, which is the question a count answers.
+ */
+function TagRow({
+  label,
+  hue,
+  count,
+  active,
+  onClick,
+}: {
+  label: string;
+  /** Absent for "Untagged", which is not a tag and gets a hollow ring instead of a colour. */
+  hue?: number;
+  count: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={active}
+      className={`flex w-full items-center gap-1.5 rounded-md px-1.5 py-[3px] text-left text-[11.5px] ${
+        active
+          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+          : "text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
+      }`}
+    >
+      <span
+        aria-hidden
+        className={`h-2 w-2 shrink-0 rounded-full ${hue === undefined ? "border border-[var(--cf-text-muted)]" : ""}`}
+        style={hue === undefined ? undefined : { background: `oklch(65% 0.13 ${hue})` }}
+      />
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {/* `tabular-nums` so a column of counts lines up on its digits rather than shuffling as they
+          change width — the whole reason for putting them on one edge. */}
+      <span
+        className={`shrink-0 rounded-full px-1.5 py-px text-[10px] tabular-nums ${
+          active
+            ? "bg-[var(--cf-accent)]/20 text-[var(--cf-accent)]"
+            : "bg-black/[0.06] text-[var(--cf-text-muted)] dark:bg-white/[0.08]"
+        }`}
+      >
+        {count}
+      </span>
+    </button>
   );
 }
 

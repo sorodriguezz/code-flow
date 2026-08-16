@@ -25,6 +25,7 @@ export const es = {
 
   "sidebar.workspaces": "Workspaces",
   "sidebar.projects": "Proyectos",
+  "sidebar.reorderHint": "Mantén presionado un repositorio para arrastrarlo a otra posición",
   "sidebar.collapseProjects": "Contraer a iconos de proyecto",
   "sidebar.expandProjects": "Mostrar nombres de proyecto",
   "import.title": "Importar repositorios",
@@ -2659,6 +2660,7 @@ export const es = {
   "checkout.detachedAt": "HEAD separado en {sha}",
 
   "branch.lock": "Desbloqueada — clic para bloquear e impedir fusiones y push",
+  "branch.unbornHint": "Estás en esta rama — empieza a existir con el primer commit",
   "branch.lockedToggle": "Bloqueada: no admite fusiones ni push — clic para desbloquear",
   "branch.createModalTitle": "Nueva rama local",
   "branch.createStartPoint": "Partiendo de",
@@ -2695,6 +2697,9 @@ export const es = {
   "confirm.createBranchNote": "Se crea en el mismo commit que {source}. Sigues en tu rama actual.",
   "confirm.deleteBranchTitle": '¿Eliminar la rama local "{name}"?',
   "confirm.deleteBranchNote": "Solo se va el puntero de la rama — sus commits sobreviven mientras otra rama o etiqueta llegue a ellos.",
+  "confirm.leaveUnbornTitle": "¿Salir de «{name}» antes de su primer commit?",
+  "confirm.leaveUnbornNote": "«{name}» no tiene commits, así que existe solo como la rama en la que estás. Cambiarte la descarta para siempre — no se puede volver a ella ni recuperarla del reflog. Haz un commit primero si quieres conservarla.",
+  "confirm.leaveUnbornConfirm": "Cambiar y descartar",
   "confirm.deleteBranchConfirm": "Eliminar",
   "confirm.deleteBranchTarget": "Eliminada",
 
@@ -2735,6 +2740,7 @@ export const es = {
 
   "tabbar.notes": "Notas",
   "tabbar.notesDescription": "Notas en Markdown, libros, etiquetas y plantillas \u2014 lo que se escribe alrededor del c\u00f3digo de este espacio de trabajo",
+  "tabbar.reorderHint": "Mant\u00e9n presionado para arrastrarlo a otra posici\u00f3n",
 
   "notes.title": "Notas",
   "notes.untitled": "Sin t\u00edtulo",
@@ -2773,6 +2779,11 @@ export const es = {
   "notes.clearSearch": "Limpiar b\u00fasqueda",
   "notes.clearFilters": "Limpiar",
   "notes.tags": "Etiquetas",
+  "notes.searchTag": "Buscar etiqueta",
+  "notes.noTagMatches": "Ninguna etiqueta coincide",
+  "notes.untagged": "Sin etiquetas",
+  "notes.tagSortByName": "Ordenadas por nombre — clic para ordenar por uso",
+  "notes.tagSortByCount": "Ordenadas por uso — clic para ordenar por nombre",
   "notes.addTag": "A\u00f1adir etiqueta",
   "notes.removeTag": "Quitar la etiqueta {tag}",
   "notes.removeTagFilter": "Dejar de filtrar por {tag}",

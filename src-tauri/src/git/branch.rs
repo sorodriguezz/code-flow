@@ -2,7 +2,7 @@ use git2::{BranchType, ConfigLevel, ErrorCode, ObjectType, Repository};
 use serde::{Deserialize, Serialize};
 
 use super::lock_rules;
-use super::repo::open;
+use super::repo::{open, unborn_head_branch};
 
 /// Marks the one checkout failure the UI can offer a way out of: uncommitted work that the
 /// switch would clobber. The frontend keys off this prefix to propose stashing instead of
@@ -164,6 +164,39 @@ pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
             target,
             tip_time,
         });
+    }
+
+    // The branch HEAD is on before the first commit exists.
+    //
+    // The loop above cannot produce it: `repo.branches()` iterates `refs/heads/`, and until
+    // something is committed there is no ref there to iterate — which is why `git branch` prints
+    // nothing in a fresh repository either.
+    //
+    // Listed anyway, because this sidebar is not `git branch`. It sits under a status bar that
+    // names that branch, and a list that omits the one branch you are on — and are about to make
+    // the first commit to — reads as a bug rather than as fidelity to the CLI. The asymmetry the
+    // CLI lives with is one a GUI has no reason to inherit.
+    //
+    // Nothing downstream needs a special case: merge and delete are already hidden on the head row,
+    // and `target: None` is the existing marker for "this ref has no commit to act on".
+    if repo.head().is_err() {
+        if let Some(name) = unborn_head_branch(&repo) {
+            let (is_locked, locked_by_rule) = resolve_lock(&config, &name);
+            result.push(BranchInfo {
+                is_locked,
+                locked_by_rule,
+                name,
+                is_head: true,
+                is_remote: false,
+                // No commit, so: nothing to track, nothing to be ahead or behind of, and no tip to
+                // date the row by. `tip_time: None` sorts last, but `is_head` sorts first and wins.
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                target: None,
+                tip_time: None,
+            });
+        }
     }
 
     // Newest first, so a capped list in the sidebar shows the branches actually in play rather than
@@ -557,6 +590,41 @@ mod tests {
 
         assert_eq!(fs::read_to_string(dir.join("a.txt")).unwrap(), "feature\n");
         assert_eq!(super::super::stash::list_stashes(path).unwrap().len(), 1);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The branch a fresh repository is on, before anything has been committed.
+    ///
+    /// `repo.branches()` cannot yield it — there is no `refs/heads/` entry until the first commit —
+    /// so without the explicit pass in `list_branches` the sidebar showed an empty branch list, or
+    /// one holding only somebody else's leftover branch, while the status bar named a branch that
+    /// appeared nowhere in it.
+    #[test]
+    fn the_unborn_branch_is_listed_and_is_head() {
+        let dir = std::env::temp_dir().join(format!("cf-branch-unborn-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let repo = git2::Repository::init(&dir).unwrap();
+        // Whatever `init.defaultBranch` this machine has, pin the one the assertion names.
+        repo.set_head("refs/heads/master").unwrap();
+        drop(repo);
+        let path = dir.to_str().unwrap();
+
+        let listed = list_branches(path).unwrap();
+        assert_eq!(listed.len(), 1);
+        let head = &listed[0];
+        assert_eq!(head.name, "master");
+        assert!(head.is_head);
+        assert!(!head.is_remote);
+        // No commit: nothing to peel to, nothing to compare against.
+        assert_eq!(head.target, None);
+        assert_eq!(head.tip_time, None);
+        assert_eq!(head.upstream, None);
+        assert_eq!((head.ahead, head.behind), (0, 0));
+
+        // And it agrees with what the status bar is told, which is the whole point.
+        let status = super::super::repo::get_status(path).unwrap();
+        assert_eq!(status.current_branch.as_deref(), Some("master"));
 
         fs::remove_dir_all(&dir).ok();
     }

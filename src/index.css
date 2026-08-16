@@ -312,6 +312,53 @@ body {
   }
 }
 
+/* The hold that unlocks a reorder, drawn — see `HoldProgress` in `lib/holdReorder.tsx`, which owns
+   both of these and supplies the duration inline (from `HOLD_MS`, the one place it is written down)
+   so the wait and the indicator cannot drift apart. Without one of them the hold is a control that
+   appears not to have registered the click.
+
+   Two shapes, because they sit on two shapes. The ring traces a square control's own edge and
+   leaves its glyph alone; `pathLength="100"` on the circle is what lets these keyframes count in
+   whole percent without knowing the radius. The bar is for a wide row, where that same circle
+   would be a small disc marooned in the middle — it sweeps on `scaleX` rather than `width` so it
+   stays on the compositor, and inherits the host's corner radius so it doesn't square off a
+   rounded row.
+
+   Deliberately not switched off under `prefers-reduced-motion`, unlike everything above: these are
+   determinate progress indicators rather than decoration, and they are the only thing on screen
+   saying the press is being counted. Removing them would leave a reduced-motion user with exactly
+   the dead control they exist to prevent. */
+@keyframes cf-hold-ring {
+  from {
+    stroke-dashoffset: 100;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.cf-hold-ring {
+  stroke-dasharray: 100;
+  animation-name: cf-hold-ring;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
+@keyframes cf-hold-bar {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.cf-hold-bar {
+  animation-name: cf-hold-bar;
+  animation-timing-function: linear;
+  animation-fill-mode: forwards;
+}
+
 /* The seam of a *folded* panel, and the fold button riding it.
    Used by the projects sidebar and by Settings' section nav — the same control on two seams.
 
@@ -356,6 +403,13 @@ body {
    The last one is not redundant. Without it, walking the final pixels off the rail and onto the
    button would *drop* the highlight the rail just promised — the control going quiet exactly as you
    arrive at it, which reads as having missed.
+
+   It is also the only one that applies in both states, and the button carries this class in both
+   because of it. The two `cf-fold-zone` selectors describe a folded panel — the rail *is* the
+   button's hover target there — and they need no condition on the markup side to stay that way:
+   nothing has that class while a panel is unfolded, so they simply never match. What is left when
+   unfolded is `:hover` on the button itself, which is the plain "this control answers to the
+   pointer" the fold buttons were missing while open.
 
    Two sibling selectors per trigger because the button may or may not be wrapped: `Tooltip` renders
    a `display: contents` span around its child, which changes nothing about layout and everything

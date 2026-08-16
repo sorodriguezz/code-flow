@@ -146,21 +146,57 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
  * started collapsing to a rail of project chips, the way the settings nav collapses to its icons —
  * same control, same question, so the same answer about remembering it.
  */
-export type LayoutFlag = "settingsNavCollapsed" | "sidebarCollapsed";
+export type LayoutFlag = "settingsNavCollapsed" | "sidebarCollapsed" | "notesTagsByCount";
 
 const FLAG_STORAGE_KEYS: Record<LayoutFlag, string> = {
   settingsNavCollapsed: "layout_settings_nav_collapsed",
   sidebarCollapsed: "layout_sidebar_collapsed",
+  notesTagsByCount: "layout_notes_tags_by_count",
 };
 
 const FLAG_DEFAULTS: Record<LayoutFlag, boolean> = {
   settingsNavCollapsed: false,
   sidebarCollapsed: false,
+  // Alphabetical by default. Frequency reads as unsorted in a young workspace, where most tags have
+  // been used once and the order is really "whatever the tie-break said" — a name is always
+  // findable. The toggle is there for the workspace that has outgrown that.
+  notesTagsByCount: false,
 };
+
+/**
+ * The order the app rail's icons are in, as a JSON array of that rail's own keys.
+ *
+ * Here rather than in a store of its own for the reason the flags are here: it is persisted layout,
+ * decided once and expected to survive a relaunch, and this store already makes exactly one
+ * round-trip for every such value. A second store would be a second `getSettings` on the launch
+ * path to carry one row.
+ *
+ * A single row rather than a column-per-app, because what is stored is a *sequence* — the rail's
+ * own reading of it (`ordered` in `AppRail`) is what turns it back into positions, and it treats an
+ * app the list has never heard of, or one it names that no longer exists, as an ordinary case.
+ * Being in `app_settings` is also what puts it in the backup: that table travels whole.
+ */
+const RAIL_ORDER_KEY = "layout_app_rail_order";
+
+/** Tolerant on purpose: a corrupt or hand-edited row means "no preference", not a rail that fails
+ *  to render. Non-strings are dropped rather than trusted onward as keys. */
+function parseRailOrder(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((key): key is string => typeof key === "string");
+  } catch {
+    return [];
+  }
+}
 
 interface LayoutState {
   sizes: Record<LayoutKey, number>;
   flags: Record<LayoutFlag, boolean>;
+  /** Empty means "nobody has rearranged the rail", which is not the same as "no apps" — the rail
+   *  falls back to its declared order rather than to nothing. */
+  railOrder: string[];
   init: () => Promise<void>;
   /** Live update while dragging — cheap, no disk write. */
   setSize: (key: LayoutKey, value: number) => void;
@@ -168,11 +204,15 @@ interface LayoutState {
   commitSize: (key: LayoutKey, value: number) => void;
   /** Flips a flag and persists it in the same breath — there is no drag to wait for. */
   toggleFlag: (key: LayoutFlag) => void;
+  /** Called once when an icon is dropped, for the same reason `commitSize` is: the rail previews
+   *  the new order locally while the pointer is down, so this is one write per gesture. */
+  setRailOrder: (order: string[]) => void;
 }
 
 export const useLayoutStore = create<LayoutState>((set) => ({
   sizes: { ...LAYOUT_DEFAULTS },
   flags: { ...FLAG_DEFAULTS },
+  railOrder: [],
 
   // Every stored size and flag in ONE round-trip. This used to be 33 `getSetting` calls plus 2 more
   // for the flags, wrapped in `Promise.all` — which bought nothing: `get_setting` takes the database
@@ -192,6 +232,7 @@ export const useLayoutStore = create<LayoutState>((set) => ({
     const stored = await getSettings([
       ...sizeKeys.map((key) => STORAGE_KEYS[key]),
       ...flagKeys.map((key) => FLAG_STORAGE_KEYS[key]),
+      RAIL_ORDER_KEY,
     ]).catch(() => ({}) as Record<string, string>);
 
     const sizes = {} as Record<LayoutKey, number>;
@@ -205,7 +246,7 @@ export const useLayoutStore = create<LayoutState>((set) => ({
       const raw = stored[FLAG_STORAGE_KEYS[key]] ?? null;
       flags[key] = raw === null ? FLAG_DEFAULTS[key] : raw === "1";
     }
-    set({ sizes, flags });
+    set({ sizes, flags, railOrder: parseRailOrder(stored[RAIL_ORDER_KEY] ?? null) });
   },
 
   setSize: (key, value) => set((s) => ({ sizes: { ...s.sizes, [key]: value } })),
@@ -220,4 +261,9 @@ export const useLayoutStore = create<LayoutState>((set) => ({
       void setSetting(FLAG_STORAGE_KEYS[key], next ? "1" : "0");
       return { flags: { ...s.flags, [key]: next } };
     }),
+
+  setRailOrder: (order) => {
+    void setSetting(RAIL_ORDER_KEY, JSON.stringify(order));
+    set({ railOrder: order });
+  },
 }));
