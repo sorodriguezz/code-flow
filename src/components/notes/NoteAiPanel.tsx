@@ -6,6 +6,7 @@ import { notesWriteWithAi } from "../../lib/tauri/notesCommands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useNotesStore } from "../../state/notesStore";
+import { notify } from "../../state/notificationStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 
@@ -94,6 +95,10 @@ export function NoteAiPanel({
   const onDragStart = (event: React.PointerEvent<HTMLDivElement>) => {
     const element = panel.current;
     if (!element || event.button !== 0) return;
+    // Never from a control inside the header. `setPointerCapture` retargets the rest of the gesture
+    // to the element that took it — the `click` included — so a header that captures on every
+    // pointerdown swallows its own close button's click and the ✕ does nothing at all.
+    if ((event.target as Element).closest("button")) return;
     // From the live box, not from `pos`: the first drag starts wherever the default corner put it,
     // and reading it here is what makes that first grab not jump.
     drag.current = { dx: event.clientX - element.offsetLeft, dy: event.clientY - element.offsetTop };
@@ -123,24 +128,54 @@ export function NoteAiPanel({
   const submit = async () => {
     if (!instruction.trim() || busy || !draft) return;
     const id = newRunId("note-ai");
+    // Captured before the await: the panel closes on its own way out, and a run that outlives the
+    // screen it was started from has to be able to name — and go back to — the note it wrote into.
+    const note = { id: draft.id, title: draft.title };
+    const workspaceId = useNotesStore.getState().workspaceId;
     setRunId(id);
     setBusy(true);
-    // No `target`: the user is already looking at the note this is writing into, so there is
-    // nowhere for the notification centre to send them.
-    useAiRunStore.getState().start(id, { kindKey: "notes.ai.runKind", detail: draft.title });
+    // No `target` on the *run*: while it is working the user is looking at the note it is writing
+    // into, so the status bar has nowhere to send them. The notification it files when it lands is
+    // the other case — by then the panel has closed, and the note may not even be on screen.
+    useAiRunStore.getState().start(id, { kindKey: "notes.ai.runKind", detail: note.title });
     try {
       const markdown = await notesWriteWithAi({
-        title: draft.title,
+        title: note.title,
         content: draft.content,
         selection,
         instruction: instruction.trim(),
         runId: id,
       });
-      if (markdown.trim()) onInsert(markdown);
+      const written = markdown.trim().length > 0;
+      if (written) onInsert(markdown);
       onClose();
+      // The panel is gone by the time this lands and the note itself is a document with no "new"
+      // marker on it, so without this a generation the user walked away from arrives with nothing
+      // anywhere to say it did. Only when there was something to insert: an empty answer changed
+      // no note, and "note written" for it would be a row that lies.
+      if (written) {
+        notify({
+          source: "notes",
+          titleKey: "notifications.noteWritten",
+          target: { view: "notes", select: { kind: "note", id: note.id } },
+          status: "success",
+          detail: note.title,
+          workspaceId,
+        });
+      }
     } catch (error) {
       // Stopping it yourself is not a failure worth a red toast.
-      if (!isCancellation(error)) pushErrorToast(String(error));
+      if (!isCancellation(error)) {
+        pushErrorToast(String(error));
+        notify({
+          source: "notes",
+          titleKey: "notifications.noteWriteFailed",
+          target: { view: "notes", select: { kind: "note", id: note.id } },
+          status: "error",
+          detail: note.title,
+          workspaceId,
+        });
+      }
     } finally {
       useAiRunStore.getState().finish(id);
       setBusy(false);

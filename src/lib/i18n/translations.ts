@@ -1421,6 +1421,8 @@ const en = {
   "notifications.draftFailed": "The comment could not be drafted",
   "notifications.inlineEditDone": "Inline edit finished",
   "notifications.inlineEditFailed": "The inline edit failed",
+  "notifications.noteWritten": "Written into the note",
+  "notifications.noteWriteFailed": "The note could not be written",
 
   "settings.appearance": "Appearance",
   "settings.projects": "Workspaces & projects",
@@ -2860,7 +2862,7 @@ const en = {
   "notes.ai.runKind": "Writing a note",
   "notes.ai.willReplace": "This will be replaced",
   "notes.ai.instruction": "What should it write?",
-  "notes.ai.instructionPlaceholder": "A section explaining how the retry budget works, with an example",
+  "notes.ai.instructionPlaceholder": "Say what to write: it lands at the caret, or replaces the selection",
   "notes.ai.defaultModel": "default model",
   "notes.ai.engineHint":
     "This will run on {provider}, model {model}. Change it in Settings → AI → model per task, row “Write in a note”.",

@@ -19,7 +19,8 @@ export type NotificationSource =
   | "changes"
   | "docs"
   | "chat"
-  | "editor";
+  | "editor"
+  | "notes";
 
 /**
  * The menu each source is called in the rest of the app.
@@ -36,6 +37,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   docs: "stories.wiki",
   chat: "notifications.sourceChat",
   editor: "tabbar.editor",
+  notes: "tabbar.notes",
 };
 
 /**
@@ -71,7 +73,15 @@ export interface NotificationTarget {
    */
   projectId?: string;
   select?: {
-    kind: "batch" | "agentTask" | "chain" | "docPage" | "reviewSession" | "chatConversation" | "job";
+    kind:
+      | "batch"
+      | "agentTask"
+      | "chain"
+      | "docPage"
+      | "note"
+      | "reviewSession"
+      | "chatConversation"
+      | "job";
     id: string;
   };
 }
@@ -242,6 +252,11 @@ async function enterWorkspace(stampedWorkspaceId: string | null, target: Notific
         await useDocsStore.getState().setWorkspace(workspaceId);
         break;
       }
+      case "note": {
+        const { useNotesStore } = await import("./notesStore");
+        await useNotesStore.getState().setWorkspace(workspaceId);
+        break;
+      }
       // `reviewSession` is absent on purpose. Every case above belongs to a store with a
       // `setWorkspace` that can be pre-loaded, which is what the note above is about. The review
       // store has none — it follows the workspace through a subscription, and its `loadHistory`
@@ -365,6 +380,19 @@ export async function followTarget(
   } else if (kind === "docPage") {
     const { useDocsStore } = await import("./docsStore");
     useDocsStore.getState().select(id);
+  } else if (kind === "note") {
+    // The load is awaited first even though `openNote` fetches its own body, and that is not
+    // belt-and-braces: `NotesView`'s mount effect runs the same load, and a first load clears
+    // `activeId` before it fills the tree (see `setWorkspace`) — so opening the note before that
+    // finished would have it blanked a beat later by the view arriving. It is the same in-flight
+    // promise either way, so awaiting it here costs nothing and lands after the reset instead of
+    // under it.
+    const { ensureNotesStoreLoaded, useNotesStore } = await import("./notesStore");
+    await ensureNotesStoreLoaded();
+    // `openNote` rather than a plain id write: the tree holds metadata only, so the body has to be
+    // fetched before the editor has anything to show. Deleted since the run finished is its own
+    // case there — it drops the row and lands on the gallery instead of on an empty editor.
+    await useNotesStore.getState().openNote(id);
   } else if (kind === "reviewSession") {
     const { useWorkItemReviewStore } = await import("./workItemReviewStore");
     await useWorkItemReviewStore.getState().openById(id);

@@ -1415,6 +1415,8 @@ export const es = {
   "notifications.draftFailed": "No se pudo redactar el comentario",
   "notifications.inlineEditDone": "Edición en línea terminada",
   "notifications.inlineEditFailed": "La edición en línea falló",
+  "notifications.noteWritten": "Escrito en la nota",
+  "notifications.noteWriteFailed": "No se pudo escribir la nota",
 
   "settings.appearance": "Apariencia",
   "settings.projects": "Workspaces y proyectos",
@@ -2831,7 +2833,7 @@ export const es = {
   "notes.ai.runKind": "Escribiendo una nota",
   "notes.ai.willReplace": "Esto se va a sustituir",
   "notes.ai.instruction": "\u00bfQu\u00e9 quieres que escriba?",
-  "notes.ai.instructionPlaceholder": "Una secci\u00f3n que explique c\u00f3mo funciona el presupuesto de reintentos, con un ejemplo",
+  "notes.ai.instructionPlaceholder": "Di qué escribir: se inserta en el cursor o sustituye lo seleccionado",
   "notes.ai.defaultModel": "modelo por defecto",
   "notes.ai.engineHint":
     "Esto se ejecutar\u00e1 con {provider}, modelo {model}. C\u00e1mbialo en Ajustes \u2192 IA \u2192 modelo por tarea, fila \u00abEscribir en una nota\u00bb.",

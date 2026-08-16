@@ -93,10 +93,15 @@ export function NoteExplorer() {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   /** Which row holds the tree's single tab stop. See `NoteTreeRow`'s roving-tabindex comment. */
   const [focusedId, setFocusedId] = useState<string | null>(null);
-  /** The tag cloud folded shut. Local rather than persisted: unlike an open book, this isn't an
-   *  arrangement anyone builds up — it's "get this out of my way for a moment" in a workspace whose
-   *  tag list grew past what a glance can take in. */
-  const [tagsCollapsed, setTagsCollapsed] = useState(false);
+  /** The tag cloud folded shut, which is how it starts.
+   *
+   *  Closed by default because the tree above it is what this panel is for, and a workspace with
+   *  forty tags spent a third of the sidebar's height on a list nobody had asked to see — the tags
+   *  are a way *into* the notes, reached when you want them, not a permanent header over them.
+   *
+   *  Local rather than persisted: unlike an open book, this isn't an arrangement anyone builds up
+   *  — it's "show me the tags for a moment", and it starts closed again next time. */
+  const [tagsCollapsed, setTagsCollapsed] = useState(true);
   /** Narrows the tag list itself. Local like the fold above it, and for the same reason: it is a
    *  "find this one now", not an arrangement. */
   const [tagQuery, setTagQuery] = useState("");
@@ -779,6 +784,16 @@ export function NoteExplorer() {
               {tagsCollapsed ? <ChevronRight size={11} /> : <ChevronDown size={11} />}
               <Tags size={11} className="shrink-0" />
               <span className="min-w-0 flex-1 truncate text-left">{t("notes.tags")}</span>
+              {/* The one filter this section owns that nothing else on screen repeats: an active
+                  tag shows as a chip under the search box whether this is folded or not, but
+                  "untagged" is a row in the list below and nowhere else. Folded is the default
+                  now, so without this the tree could sit filtered with nothing anywhere saying
+                  why. */}
+              {tagsCollapsed && untaggedOnly && (
+                <span className="shrink-0 rounded-full bg-[var(--cf-accent-soft)] px-1.5 font-medium normal-case text-[var(--cf-accent)]">
+                  {t("notes.untagged")}
+                </span>
+              )}
               <span className="tabular-nums font-normal normal-case">{tags.length}</span>
             </button>
             {!tagsCollapsed && (
