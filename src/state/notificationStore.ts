@@ -20,7 +20,8 @@ export type NotificationSource =
   | "docs"
   | "chat"
   | "editor"
-  | "notes";
+  | "notes"
+  | "diagrams";
 
 /**
  * The menu each source is called in the rest of the app.
@@ -38,6 +39,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   chat: "notifications.sourceChat",
   editor: "tabbar.editor",
   notes: "tabbar.notes",
+  diagrams: "tabbar.diagrams",
 };
 
 /**
@@ -79,6 +81,7 @@ export interface NotificationTarget {
       | "chain"
       | "docPage"
       | "note"
+      | "diagram"
       | "reviewSession"
       | "chatConversation"
       | "job";

@@ -35,7 +35,8 @@ export type LayoutKey =
   | "remoteDetailsWidth"
   | "remoteSftpLocalWidth"
   | "notesSidebarWidth"
-  | "notesOutlineWidth";
+  | "notesOutlineWidth"
+  | "diagramsSidebarWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -72,6 +73,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   remoteSftpLocalWidth: "layout_remote_sftp_local_width",
   notesSidebarWidth: "layout_notes_sidebar_width",
   notesOutlineWidth: "layout_notes_outline_width",
+  diagramsSidebarWidth: "layout_diagrams_sidebar_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -132,6 +134,10 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // is one the note should have shortened — widening the rail to fit it would take the room from
   // the prose, which is the thing being read.
   notesOutlineWidth: 220,
+  // The notes sidebar's width, and deliberately the same number: it is the same tree of the same
+  // shape at the same indent, and two workspaces whose sidebars start eight pixels apart look
+  // misaligned rather than distinct.
+  diagramsSidebarWidth: 288,
 };
 
 /**

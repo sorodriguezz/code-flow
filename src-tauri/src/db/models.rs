@@ -1105,3 +1105,107 @@ pub struct NoteSearchHit {
     pub match_start: i64,
     pub match_len: i64,
 }
+
+/// A folder in the Diagrams tree. The same shape as [`NoteBookRow`], and deliberately so — the two
+/// trees are the same gesture over different documents, and a reader who knows one knows the other.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagramFolderRow {
+    pub id: String,
+    pub workspace_id: String,
+    /// `None` is the root, which is a real place: a diagram made from the gallery lands there.
+    pub parent_id: Option<String>,
+    pub name: String,
+    /// Empty for "no colour", which draws the folder in the muted default.
+    pub color: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A diagram **without its document** — every column of `diagrams` except `doc`.
+///
+/// Separate from [`DiagramRow`] for exactly the reason [`NoteMeta`] is separate from [`NoteRow`]:
+/// so that "the tree does not carry documents" is enforced by the compiler rather than by
+/// remembering. A workspace of two hundred diagrams is tens of megabytes of XML, and the sidebar
+/// draws titles.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagramMeta {
+    pub id: String,
+    pub workspace_id: String,
+    /// `None` is the root of the tree — unlike a note, a diagram is not forced into a folder.
+    pub folder_id: Option<String>,
+    pub title: String,
+    /// Which dialect `doc` is written in. See the `diagrams` table comment; this is the column that
+    /// keeps the choice of editor from being baked into every row.
+    pub format: String,
+    /// JSON array of strings, verbatim as stored.
+    pub tags: String,
+    pub pinned: bool,
+    /// Vertices plus edges, derived from `doc` on every write. What a list wants from a document
+    /// it is not allowed to have.
+    pub shape_count: i64,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One diagram, document included. The only shape that carries `doc`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagramRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub folder_id: Option<String>,
+    pub title: String,
+    pub doc: String,
+    pub format: String,
+    pub thumbnail: String,
+    pub tags: String,
+    pub pinned: bool,
+    pub shape_count: i64,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// A diagram skeleton the user starts from.
+///
+/// Carries its own `doc`, unlike [`DiagramMeta`] — a template *is* its document, and there are a
+/// handful of them rather than hundreds, so the rule that keeps documents out of the tree has
+/// nothing to say here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagramTemplateRow {
+    pub id: String,
+    pub workspace_id: String,
+    pub name: String,
+    pub description: String,
+    /// A lucide icon name.
+    pub icon: String,
+    pub doc: String,
+    pub format: String,
+    pub tags: String,
+    pub sort_order: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Everything the Diagrams workspace needs on load, in one round trip — and no documents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagramsWorkspaceTree {
+    pub diagrams: Vec<DiagramMeta>,
+    pub folders: Vec<DiagramFolderRow>,
+    pub templates: Vec<DiagramTemplateRow>,
+}
+
+/// One diagram's picture, fetched separately from its metadata.
+///
+/// **Deliberately not a field of [`DiagramMeta`].** A thumbnail is a rendered PNG — tens of
+/// kilobytes each — and the workspace holds every diagram's metadata at once. Carrying pictures in
+/// that load would undo the same rule the `doc` split exists for, just an order of magnitude
+/// further down: a hundred diagrams would be megabytes of image fetched to draw a sidebar of
+/// titles. The gallery asks for the ones it is about to draw and no more.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagramThumbnail {
+    pub id: String,
+    /// A `data:` URI, exactly as the editor exported it. Empty for a diagram never saved.
+    pub thumbnail: String,
+}

@@ -89,6 +89,11 @@ pub(crate) enum AiTask {
     /// own route rather than the verification's: this is the longest single run in the app, and
     /// which engine writes documentation is a decision a team makes on its own terms.
     Wiki,
+    /// Drawing a diagram from a description. Text-only — the engine answers with a small JSON
+    /// description of nodes and edges and CodeFlow lays it out itself (see `ai::draw_diagram`), so
+    /// this routes anywhere, a local model included. Deliberately *not* sharing `Notes`' route:
+    /// the two produce different things and a team routinely wants a cheaper engine for one.
+    Diagram,
     /// The database console's assistant. Text-only like [`AiTask::Inline`] — the schema is read by
     /// CodeFlow's own driver and put on stdin, so the engine never touches the database — which is
     /// what lets this one be routed to a fast or local model. It is also the task most likely to be
@@ -108,7 +113,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 14] = [
+    pub(crate) const ALL: [AiTask; 15] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -123,6 +128,7 @@ impl AiTask {
         AiTask::Wiki,
         AiTask::DbQuery,
         AiTask::Notes,
+        AiTask::Diagram,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -144,6 +150,7 @@ impl AiTask {
             AiTask::Wiki => "wiki",
             AiTask::DbQuery => "db_query",
             AiTask::Notes => "notes",
+            AiTask::Diagram => "diagram",
         }
     }
 }

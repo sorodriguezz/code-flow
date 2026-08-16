@@ -6,6 +6,7 @@ import {
   MonitorSmartphone,
   NotebookPen,
   Send,
+  Workflow,
   type LucideIcon,
 } from "lucide-react";
 import { HoldProgress, slotShift, useHoldReorder } from "../../lib/holdReorder";
@@ -88,15 +89,25 @@ const APPS: WorkspaceApp[] = [
     labelKey: "tabbar.remote",
     descriptionKey: "tabbar.remoteDescription",
   },
-  // Under the machines, and the least repository-bound of the six: a note is the writing *around*
+  // Under the machines, and among the least repository-bound of them: a note is the writing *around*
   // the work — the decision, the runbook, the meeting — and none of it changes meaning when you
-  // click a different repo. It sits last because it is the one you come back to rather than the one
+  // click a different repo. It sits down here because it is one you come back to rather than one
   // you pass through.
   {
     id: "notes",
     icon: NotebookPen,
     labelKey: "tabbar.notes",
     descriptionKey: "tabbar.notesDescription",
+  },
+  // After the notes, because it is the same kind of thing one step further out: a diagram is the
+  // drawing *around* the work the way a note is the writing around it, and neither changes meaning
+  // when you click a different repo. Last because it is the newest, and because the rail's declared
+  // order is only where it starts — see `ordered`.
+  {
+    id: "diagrams",
+    icon: Workflow,
+    labelKey: "tabbar.diagrams",
+    descriptionKey: "tabbar.diagramsDescription",
   },
 ];
 
@@ -128,7 +139,7 @@ function ordered(order: string[]): WorkspaceApp[] {
   // A copy on both branches. Handing out `APPS` itself was safe only by luck — the one caller,
   // `move`, happens to `slice()` before splicing — and the next one to sort or splice in place
   // would corrupt the app registry for the rest of the process, silently, with no way back short
-  // of a relaunch. Six elements is not a copy worth economising on.
+  // of a relaunch. A handful of elements is not a copy worth economising on.
   if (order.length === 0) return APPS.slice();
   const rank = new Map(order.map((key, index) => [key, index]));
   // `order.length` rather than `Infinity`: every real rank is below it, so unmentioned apps land at
@@ -152,7 +163,7 @@ function ink(color: string): string {
 }
 
 /**
- * The workspace's six apps, as a rail down the right edge of the window.
+ * The workspace's apps, as a rail down the right edge of the window.
  *
  * They used to be rows in a dropdown at the end of the tab bar, which cost two clicks to reach any
  * of them and left the set invisible until you opened it. A rail costs one click and is always
@@ -165,10 +176,10 @@ function ink(color: string): string {
  * *change* workspace — that stays the projects panel's job — but it is no longer inert: clicking it
  * goes back to the repository graph.
  *
- * Which is the way out of these six apps, and it was missing. Every app here is workspace-scoped,
+ * Which is the way out of these apps, and it was missing. Every app here is workspace-scoped,
  * so opening one leaves the repository views with nothing on screen pointing back at them: the tab
  * bar above is about the selected repository and reads as somewhere you already are. The tile is
- * the one thing on the rail that isn't one of the six, it is directly above them, and "back to
+ * the one thing on the rail that isn't one of them, it is directly above them, and "back to
  * where I started" is the plainest thing a cap like that can mean.
  *
  * The six can be rearranged: hold one down and it lifts, and where it is dropped is remembered (`railOrder` in `layoutStore`, which is a row in `app_settings` and therefore travels
@@ -347,7 +358,7 @@ export function AppRail() {
 
       </div>
 
-      {/* Pinned to the foot of the rail rather than trailing the apps: the six above are a list
+      {/* Pinned to the foot of the rail rather than trailing the apps: the apps above are a list
           you pick from and this is not one of them, so a fixed corner tells them apart better than
           a rule does. It also stops the cap moving up and down as apps are added.
 

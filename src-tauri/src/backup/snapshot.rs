@@ -66,6 +66,12 @@ pub const TABLES: &[&str] = &[
     "note_books",
     "notes",
     "note_templates",
+    // The Diagrams workspace, with its own switch for the same reasons the Notes one has. Folders
+    // before diagrams: a diagram points at the folder it is filed in. Templates last — they point
+    // only at the workspace.
+    "diagram_folders",
+    "diagrams",
+    "diagram_templates",
     // The API client, its sync bookkeeping and its jar. The three sync tables travel so the
     // restored machine resumes the shared collection exactly where this one left it, rather than
     // re-deriving a base by pulling — see the note in [`apply`] about merging.
@@ -202,6 +208,14 @@ pub const GROUPS: &[Group] = &[
         key: "notes",
         tables: &["note_books", "notes", "note_templates"],
     },
+    Group {
+        // Its own switch beside `notes` rather than inside it. The argument is the size one: a
+        // diagram carries a rendered PNG thumbnail per row on top of its document, so this is the
+        // group most able to dominate a backup — and somebody trimming a file to fit a shared
+        // drive should be able to drop the drawings without dropping the writing.
+        key: "diagrams",
+        tables: &["diagram_folders", "diagrams", "diagram_templates"],
+    },
     Group { key: "requestHistory", tables: &["api_history", "db_query_history"] },
     Group {
         // `ai_usage` rides here rather than in a switch of its own: it is the token account of
@@ -239,6 +253,7 @@ pub struct Selection {
     pub remote: bool,
     pub authored: bool,
     pub notes: bool,
+    pub diagrams: bool,
     pub request_history: bool,
     pub conversations: bool,
     pub reviews: bool,
@@ -255,6 +270,7 @@ impl Default for Selection {
             remote: true,
             authored: true,
             notes: true,
+            diagrams: true,
             request_history: true,
             conversations: true,
             reviews: true,
@@ -272,6 +288,7 @@ impl Selection {
             "remote" => self.remote,
             "authored" => self.authored,
             "notes" => self.notes,
+            "diagrams" => self.diagrams,
             "requestHistory" => self.request_history,
             "conversations" => self.conversations,
             "reviews" => self.reviews,

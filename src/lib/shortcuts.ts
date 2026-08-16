@@ -38,6 +38,7 @@ export type ShortcutId =
   | "view.agents"
   | "view.stories"
   | "view.notes"
+  | "view.diagrams"
   | "db.newConsole"
   | "db.connections"
   | "db.refresh"
@@ -140,9 +141,10 @@ const VIEW_ORDER: { view: MainView; workspace?: ApiWorkspace }[] = [
   { view: "agents" },
   { view: "stories" },
   // `remote` is deliberately absent and has been since it shipped — it holds live sessions, and
-  // cycling into it with a keystroke meant for a document view is not obviously wanted. Notes is
-  // here because it is a document view like the six above it.
+  // cycling into it with a keystroke meant for a document view is not obviously wanted. Notes and
+  // Diagrams are here because they are document views like the six above them.
   { view: "notes" },
+  { view: "diagrams" },
 ];
 
 /** Goes to a destination, using whichever setter can express it. */
@@ -358,6 +360,13 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     // Mod+1 through Mod+7 are taken by the views above; 8 is the next free one.
     defaultChord: "Mod+8",
     run: () => useUiStore.getState().setActiveView("notes"),
+  },
+  {
+    id: "view.diagrams",
+    group: "views",
+    labelKey: "tabbar.diagrams",
+    defaultChord: "Mod+9",
+    run: () => useUiStore.getState().setActiveView("diagrams"),
   },
   {
     id: "view.next",

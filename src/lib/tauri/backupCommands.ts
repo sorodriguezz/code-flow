@@ -67,6 +67,10 @@ export interface BackupInclude {
   /** Markdown notes, their folders and their templates. Separate from `authored` — see the group's
    *  comment in `snapshot.rs` for why the notebook gets its own switch. */
   notes: boolean;
+  /** Diagrams, their folders and their templates. Its own switch beside `notes` because a diagram
+   *  carries a rendered thumbnail per row, which makes this the group most able to dominate a
+   *  backup's size. */
+  diagrams: boolean;
   requestHistory: boolean;
   conversations: boolean;
   reviews: boolean;
@@ -82,6 +86,7 @@ export const INCLUDE_KEYS: readonly (keyof BackupInclude)[] = [
   "remote",
   "authored",
   "notes",
+  "diagrams",
   "requestHistory",
   "conversations",
   "reviews",

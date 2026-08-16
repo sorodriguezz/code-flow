@@ -1249,6 +1249,94 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_note_templates_workspace
             ON note_templates (workspace_id, sort_order);
+
+        -- A folder in the Diagrams tree.
+        --
+        -- Column for column the same as `note_books`, and that is the point rather than an
+        -- accident: the two trees are one gesture over two kinds of document, so the queries, the
+        -- drag rules and the recursive delete are all the same shape. Anyone reading one has read
+        -- the other.
+        CREATE TABLE IF NOT EXISTS diagram_folders (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            -- Null is the root, which is a real place — see `diagrams.folder_id`.
+            parent_id    TEXT REFERENCES diagram_folders(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            color        TEXT NOT NULL DEFAULT '',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_diagram_folders_tree
+            ON diagram_folders (workspace_id, parent_id, sort_order);
+
+        -- A diagram.
+        --
+        -- Workspace-scoped like a note, and for the same reason: an architecture diagram describes
+        -- the system, not a checkout, and it must not change when you click a different repository.
+        --
+        -- **`folder_id` is nullable and null means the root**, which is where a diagram created
+        -- from the gallery lands. This is the one place the Diagrams tree deliberately parts from
+        -- `notes`, which forces every note into a book: filing is a decision worth postponing until
+        -- after the thing exists, and the explorer draws the root as a real destination.
+        --
+        -- **`doc` is opaque to this layer and `format` says what it is.** Today an embedded draw.io
+        -- writes mxGraph XML (`format = 'mxgraph'`); the column exists so that a second editor, or
+        -- a change of mind about the first, is a new value here rather than a rewrite of every row
+        -- and every query. Nothing in Rust parses `doc` except `shape_count`, which switches on
+        -- this column and falls back to zero for a dialect it does not know.
+        CREATE TABLE IF NOT EXISTS diagrams (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            folder_id    TEXT REFERENCES diagram_folders(id) ON DELETE SET NULL,
+            title        TEXT NOT NULL DEFAULT '',
+            doc          TEXT NOT NULL DEFAULT '',
+            format       TEXT NOT NULL DEFAULT 'mxgraph',
+            -- A standalone SVG the gallery can draw without mounting an editor. Derived by
+            -- whatever edits the diagram, not here.
+            thumbnail    TEXT NOT NULL DEFAULT '',
+            -- JSON array, same as `notes.tags`.
+            tags         TEXT NOT NULL DEFAULT '[]',
+            pinned       INTEGER NOT NULL DEFAULT 0,
+            -- Vertices plus edges. Derived on every write of `doc`; see `diagram_queries::derive`.
+            shape_count  INTEGER NOT NULL DEFAULT 0,
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_diagrams_workspace
+            ON diagrams (workspace_id, sort_order);
+        CREATE INDEX IF NOT EXISTS idx_diagrams_folder ON diagrams (folder_id, sort_order);
+
+        -- A diagram skeleton the user starts from.
+        --
+        -- The same design as `note_templates`, including the part that matters most: the templates
+        -- that ship with the app are seeded into a workspace as **ordinary rows**, once, the first
+        -- time it is opened. From then on a shipped template is a row like any other — it can be
+        -- renamed, edited or deleted, and deleting it makes it stay deleted. The alternative, a
+        -- read-only built-in list drawn above the user's own, gives you two kinds of template that
+        -- behave differently in a picker where they sit side by side.
+        --
+        -- `doc` and `format` mirror `diagrams`, so applying a template is a copy rather than a
+        -- conversion — and so a template written by an older editor keeps working.
+        CREATE TABLE IF NOT EXISTS diagram_templates (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            -- A lucide icon name, so a template is recognisable in the picker before it is read.
+            icon         TEXT NOT NULL DEFAULT 'workflow',
+            doc          TEXT NOT NULL DEFAULT '',
+            format       TEXT NOT NULL DEFAULT 'mxgraph',
+            -- Applied to every diagram made from it, so a template carries its filing as well as
+            -- its shape. JSON array, same as `diagrams.tags`.
+            tags         TEXT NOT NULL DEFAULT '[]',
+            sort_order   INTEGER NOT NULL DEFAULT 0,
+            created_at   TEXT NOT NULL,
+            updated_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_diagram_templates_workspace
+            ON diagram_templates (workspace_id, sort_order);
         "#,
     )?;
 

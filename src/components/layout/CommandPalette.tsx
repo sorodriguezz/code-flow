@@ -15,6 +15,7 @@ import {
   MessageCircle,
   Plus,
   TerminalSquare,
+  Workflow,
   Zap,
 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -52,6 +53,7 @@ const VIEW_ITEMS: { id: MainView; labelKey: TranslationKey; icon: typeof GitBran
   { id: "agents", labelKey: "tabbar.agents", icon: Bot },
   { id: "stories", labelKey: "tabbar.stories", icon: ClipboardList },
   { id: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
+  { id: "diagrams", labelKey: "tabbar.diagrams", icon: Workflow },
 ];
 
 const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [

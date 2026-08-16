@@ -504,6 +504,10 @@ pub mod task {
     /// borrow: the two are routed separately now, so counting them together would hide whichever
     /// of the two engines is actually being paid for.
     pub const NOTE_WRITE: &str = "note-write";
+    /// Describing a diagram for CodeFlow to lay out. Its own label rather than [`NOTE_WRITE`]'s:
+    /// they are routed separately, so counting them together would hide which engine is being paid
+    /// for.
+    pub const DIAGRAM_DRAW: &str = "diagram-draw";
 }
 
 impl<'a> AiInvocation<'a> {
@@ -2085,6 +2089,73 @@ pub async fn write_note(
     inv.task = task::NOTE_WRITE;
     let run = run(engine, binary, inv).await?;
     Ok(strip_wrapper_fence(&run.text))
+}
+
+/// How much of the diagram's own document goes to the engine as context.
+///
+/// Smaller than [`MAX_NOTE_CONTEXT_CHARS`] on purpose: mxGraph XML is mostly geometry and style,
+/// which tells a model nothing it can use and costs tokens by the thousand. What is worth sending
+/// is the labels, and `diagram_outline` extracts those before this cap ever applies.
+pub const MAX_DIAGRAM_CONTEXT_CHARS: usize = 8_000;
+
+pub const DEFAULT_DIAGRAM_PROMPT: &str =
+    "Describes un diagrama para que otro programa lo dibuje. NO dibujas tú: no devuelves XML, ni \
+     SVG, ni coordenadas, ni posiciones. La colocación la calcula quien te llama.\n\n\
+     Devuelves EXCLUSIVAMENTE un objeto JSON con esta forma:\n\
+     {\"nodes\":[{\"id\":\"a\",\"label\":\"Texto\",\"kind\":\"process\"}],\
+     \"edges\":[{\"from\":\"a\",\"to\":\"b\",\"label\":\"opcional\"}]}\n\n\
+     Reglas:\n\
+     - Nada fuera del JSON: ni saludo, ni explicación, ni ```json alrededor.\n\
+     - `kind` es uno de: start, end, process, decision, data, store, actor, external.\n\
+     - `id` es corto, único y sin espacios. Cada `from`/`to` debe existir en `nodes`.\n\
+     - Etiquetas breves, de 1 a 5 palabras, en el MISMO IDIOMA que la instrucción.\n\
+     - Entre 3 y 25 nodos. Si la instrucción pide más, quédate con lo esencial.\n\
+     - Una arista que sale de un `decision` lleva etiqueta (`sí`/`no`, o la condición).\n\
+     - Si te dan un diagrama existente como contexto y la instrucción es ampliarlo, devuelve \
+     SÓLO lo que hay que añadir, reutilizando los ids que ya existan como extremos.";
+
+/// Asks an engine to describe a diagram, as JSON for the frontend to lay out.
+///
+/// **The engine never places anything.** Models are poor at coordinates and worse at being
+/// consistent about them, and a diagram whose boxes overlap is one nobody keeps. So the answer is
+/// a graph — nodes and edges — and `lib/diagrams/aiLayout.ts` turns it into mxGraph. That split is
+/// also what makes the feature deterministic: the same description always produces the same
+/// picture, which matters the second time somebody presses the button.
+///
+/// `outline` is the labels of the diagram as it stands, or empty. Not the document: see
+/// [`MAX_DIAGRAM_CONTEXT_CHARS`].
+pub async fn draw_diagram(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    title: &str,
+    outline: &str,
+    instruction: &str,
+) -> Result<String, String> {
+    if instruction.trim().is_empty() {
+        return Err("Escribe qué diagrama quieres".to_string());
+    }
+    let context: String = outline.chars().take(MAX_DIAGRAM_CONTEXT_CHARS).collect();
+    let existing = if context.trim().is_empty() {
+        "\n\n(El lienzo está vacío.)".to_string()
+    } else {
+        format!("\n\n=== DIAGRAMA ACTUAL (contexto) ===\n{context}")
+    };
+    let stdin_payload =
+        format!("TÍTULO DEL DIAGRAMA: {title}{existing}\n\n=== INSTRUCCIÓN ===\n{instruction}");
+
+    let mut inv = AiInvocation::new(
+        "Describe el diagrama pedido como JSON de nodos y aristas.",
+        &stdin_payload,
+    );
+    inv.system_prompt = Some(DEFAULT_DIAGRAM_PROMPT);
+    inv.model = model;
+    inv.task = task::DIAGRAM_DRAW;
+    let run = run(engine, binary, inv).await?;
+    // Fences are stripped here rather than in the frontend so that every engine's habit of wrapping
+    // JSON in ```json lands in one place. What comes back is still only *probably* JSON — the
+    // frontend validates it against the schema before anything is drawn.
+    Ok(strip_code_fence(&run.text).trim().to_string())
 }
 
 /// Unwraps a reply that put the *whole* answer in one fence, and leaves every other reply alone.

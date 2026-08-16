@@ -32,3 +32,9 @@ dist-ssr
 # directory itself would break `cargo check` on every fresh clone.
 src-tauri/resources/iris/*
 !src-tauri/resources/iris/README.md
+
+# Built by scripts/build-drawio-webapp.mjs: the draw.io webapp the Diagrams workspace embeds
+# (~98 MB, Apache-2.0, pinned by version and hash in that script). A build output like the IRIS
+# runtime above — vendored third-party code has no business in the history, and `pnpm drawio:webapp`
+# reproduces it byte for byte.
+public/drawio/

@@ -127,19 +127,6 @@ export function bookInk(color: string): string {
   return `color-mix(in oklab, ${color} 62%, var(--cf-text))`;
 }
 
-/** The colours a book can be given. Deliberately few: this is a marker, not a palette, and a
- *  picker with thirty swatches makes choosing one a task. */
-export const BOOK_COLORS = [
-  "",
-  "#ef4444",
-  "#f97316",
-  "#eab308",
-  "#22c55e",
-  "#06b6d4",
-  "#6366f1",
-  "#a855f7",
-  "#ec4899",
-] as const;
 
 /**
  * "3 minutes", from a word count.

@@ -19,7 +19,8 @@ import {
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { NoteTreeRow } from "./NoteTreeRow";
 import { TemplatePickerModal } from "./TemplatePickerModal";
-import { BOOK_COLORS, ICON_BUTTON, TagPill } from "./notesChrome";
+import { ICON_BUTTON, TagPill } from "./notesChrome";
+import { TREE_COLORS } from "../../lib/swatchColors";
 import { buildBookTree, descendantIds, flattenTree } from "../../lib/notes/tree";
 import type { NoteTreeRow as NoteTreeRowData } from "../../types/notes";
 import { tagCounts, tagHue } from "../../lib/notes/tags";
@@ -508,15 +509,15 @@ export function NoteExplorer() {
             setMenu({
               x: event.clientX,
               y: event.clientY,
-              items: BOOK_COLORS.map((color) => ({
-                label: color ? "" : t("notes.noColor"),
+              items: TREE_COLORS.map((swatch) => ({
+                label: t(swatch.labelKey),
                 leading: (
                   <span
                     className="h-3 w-3 rounded-full border border-[var(--cf-border)]"
-                    style={{ background: color || "transparent" }}
+                    style={{ background: swatch.value || "transparent" }}
                   />
                 ),
-                onClick: () => void setBookColor(bookId, color),
+                onClick: () => void setBookColor(bookId, swatch.value),
               })),
             });
           },

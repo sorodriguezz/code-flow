@@ -29,6 +29,11 @@ export const AI_TASKS: AiTaskDef[] = [
   // a rewrite of a code fragment — and which engine writes your notes is a matter of taste in a way
   // that inline edit is not.
   { key: "notes", labelKey: "task.notes", hintKey: "task.notesHint" },
+  // Text-only, like `notes` above it: the engine is asked to *describe* a diagram as nodes and
+  // edges and never places anything, so nothing is read from disk and any provider can answer.
+  // Its own row rather than sharing the notes one, because the two produce different things and a
+  // team routinely wants the cheaper engine for one of them.
+  { key: "diagram", labelKey: "task.diagram", hintKey: "task.diagramHint" },
   { key: "stories", labelKey: "task.stories", hintKey: "task.storiesHint" },
   // Reads the repository to answer, so it needs an engine with tools — a text-only local model
   // would answer from the criteria alone, which is the confident-and-wrong verdict this whole

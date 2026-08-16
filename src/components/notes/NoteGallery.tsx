@@ -1,6 +1,8 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import {
+  ArrowUpDown,
   Book,
+  Check,
   ChevronRight,
   FilePlus2,
   LayoutGrid,
@@ -10,11 +12,21 @@ import {
   Search,
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
-import { Select } from "../common/Select";
-import { TagPill, bookInk, readingMinutes, relativeTime } from "./notesChrome";
+import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ICON_BUTTON, TagPill, bookInk, readingMinutes, relativeTime } from "./notesChrome";
 import type { Note, NoteBookRow, NoteSort } from "../../types/notes";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import { filterNotes, useNotesStore } from "../../state/notesStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
+
+/** The orderings offered, in the order the menu lists them. */
+const SORTS: { value: NoteSort; labelKey: TranslationKey }[] = [
+  { value: "manual", labelKey: "notes.sortManual" },
+  { value: "updated", labelKey: "notes.sortUpdated" },
+  { value: "created", labelKey: "notes.sortCreated" },
+  { value: "title", labelKey: "notes.sortTitle" },
+  { value: "words", labelKey: "notes.sortWords" },
+];
 
 /**
  * What the main pane shows when no note is open: **the shelf**.
@@ -42,6 +54,7 @@ export function NoteGallery() {
   const galleryView = useNotesStore((s) => s.galleryView);
   const bookFilter = useNotesStore((s) => s.bookFilter);
   const setSort = useNotesStore((s) => s.setSort);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const setGalleryView = useNotesStore((s) => s.setGalleryView);
   const setBookFilter = useNotesStore((s) => s.setBookFilter);
   const openNote = useNotesStore((s) => s.openNote);
@@ -110,24 +123,38 @@ export function NoteGallery() {
           <Breadcrumb trail={trail} onOpen={setBookFilter} rootLabel={t("notes.allBooks")} />
           <h2 className="shrink-0 truncate text-[12px] text-[var(--cf-text-muted)]">{heading}</h2>
         </div>
-        <Select
-          value={sort}
-          onChange={(value) => setSort(value as NoteSort)}
-          ariaLabel={t("notes.sortBy")}
-          size="sm"
-          className="shrink-0"
-          style={{ width: "auto" }}
-          options={[
-            // First and default: the order the user arranged in the sidebar. The other four are
-            // views onto the same notes — this one is the only one a drag can write, and the only
-            // one that doesn't rearrange itself while a note is being typed into.
-            { value: "manual", label: t("notes.sortManual") },
-            { value: "updated", label: t("notes.sortUpdated") },
-            { value: "created", label: t("notes.sortCreated") },
-            { value: "title", label: t("notes.sortTitle") },
-            { value: "words", label: t("notes.sortWords") },
-          ]}
-        />
+        {/* A menu behind one icon rather than a select, so this header matches the Diagrams
+            gallery's — the two are the same screen over different documents, and a control that is
+            a dropdown in one and a button in the other reads as two apps.
+
+            The active ordering is marked with a tick, which is the one thing a select gave for
+            free and an icon does not: the button alone cannot say what the list is sorted by. */}
+        <button
+          type="button"
+          className={`${ICON_BUTTON} shrink-0`}
+          title={t("notes.sortBy")}
+          aria-label={t("notes.sortBy")}
+          onClick={(event) =>
+            setMenu({
+              x: event.clientX,
+              y: event.clientY,
+              // First and default: the order the user arranged in the sidebar. The other four are
+              // views onto the same notes — this one is the only one a drag can write, and the
+              // only one that doesn't rearrange itself while a note is being typed into.
+              items: SORTS.map((option) => ({
+                label: t(option.labelKey),
+                leading: (
+                  <span className="flex h-3 w-3 items-center justify-center">
+                    {sort === option.value && <Check size={11} className="text-[var(--cf-accent)]" />}
+                  </span>
+                ),
+                onClick: () => setSort(option.value),
+              })),
+            })
+          }
+        >
+          <ArrowUpDown size={13} />
+        </button>
         <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
           <ViewButton
             icon={LayoutGrid}
@@ -233,6 +260,10 @@ export function NoteGallery() {
             )
           )}
         </div>
+      )}
+
+      {menu && (
+        <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />
       )}
     </div>
   );
