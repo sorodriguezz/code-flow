@@ -52,8 +52,8 @@ export function customModelPlaceholder(providerId: string, fallback: string): st
       return "e.g. anthropic/claude-opus-5";
     case "claude":
       return "e.g. opus — or claude-opus-5";
-    case "ollama":
-      return "e.g. qwen2.5-coder";
+    case "cline":
+      return "e.g. ollama/qwen2.5-coder";
     default:
       return fallback;
   }

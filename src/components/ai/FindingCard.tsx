@@ -217,8 +217,9 @@ export function ResolveWithAiButton({
    * "I'm done typing", not "throw that away", and a re-run usually wants the same note. */
   const [extra, setExtra] = useState("");
   const [noteOpen, setNoteOpen] = useState(false);
-  // "Fix with AI" needs a write-capable agentic engine — hidden entirely for local models (Ollama)
-  // so there's no dead button, unless there's already a resolution to show from an earlier run.
+  // "Fix with AI" needs a write-capable agentic engine — hidden entirely for a text-only engine so
+  // there's no dead button, unless there's already a resolution to show from an earlier run.
+  // Local models are no longer in that group: Cline drives them and can edit files.
   // Keyed on the *fix* task's provider, which routing may point somewhere other than the default.
   const providerId = useTaskProvider("fix");
   const hideAi = !showAi || (!isAgenticProvider(providerId) && !resolution);

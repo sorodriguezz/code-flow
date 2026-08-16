@@ -560,7 +560,7 @@ export interface ProviderStatus {
   binary: string;
 }
 
-/** Whether a provider's CLI is installed (or Ollama's endpoint answers), for the Settings badge. */
+/** Whether a provider's CLI is installed (or an HTTP provider's endpoint answers), for the Settings badge. */
 export const checkAiProvider = (provider: string) =>
   invoke<ProviderStatus>("check_ai_provider", { provider });
 

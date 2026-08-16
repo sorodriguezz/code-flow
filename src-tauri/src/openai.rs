@@ -9,10 +9,12 @@
 //! `/v1/chat/completions` is used rather than OpenAI's newer Responses API precisely because it's
 //! the one every other provider implements — compatibility beats access to OpenAI-only extras here.
 //!
-//! Shape-wise this is Ollama's sibling: [`Transport::OpenAiCompatible`] instead of a subprocess,
-//! and non-agentic (a plain completion endpoint has no tool loop), so "fix with AI" is
-//! hidden for it in the UI. Unlike Ollama, the key is a real credential and lives in the OS
-//! keyring — `crate::ai::engine_for` reads it and hands it over via the transport.
+//! Shape-wise this is the odd one out: [`Transport::OpenAiCompatible`] instead of a subprocess,
+//! and non-agentic (a plain completion endpoint has no tool loop), so "fix with AI" is hidden for
+//! it in the UI. It is now the app's only non-agentic engine — the local-model slot moved to the
+//! Cline CLI, which drives a model rather than just completing text. The key here is a real
+//! credential and lives in the OS keyring — `crate::ai::engine_for` reads it and hands it over via
+//! the transport.
 
 use serde::Deserialize;
 use tokio::process::Command;

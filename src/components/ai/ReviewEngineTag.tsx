@@ -12,6 +12,7 @@
  */
 
 import { AI_PROVIDERS, DEFAULT_AI_PROVIDER } from "../../lib/aiProviders";
+import { ProviderGlyph } from "./ProviderGlyph";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useT } from "../../state/languageStore";
 
@@ -26,7 +27,6 @@ export function ReviewEngineTag() {
 
   const providerId = routed?.trim() || defaultProvider || DEFAULT_AI_PROVIDER;
   const provider = AI_PROVIDERS.find((entry) => entry.id === providerId);
-  const Icon = provider?.icon;
   // Blank is a real state, not a missing read: neither the task override nor the provider's base
   // model is set, so the CLI picks — and saying that is more useful than showing nothing.
   const modelLabel = model?.trim() || t("pr.reviewEngineDefaultModel");
@@ -38,7 +38,7 @@ export function ReviewEngineTag() {
       className="ml-auto flex min-w-0 shrink items-center gap-1 rounded border border-[var(--cf-border)] px-1.5 py-px text-[10px] text-[var(--cf-text-muted)]"
       title={t("pr.reviewEngineHint", { provider: provider?.label ?? providerId, model: modelLabel })}
     >
-      {Icon && <Icon size={10} className="shrink-0" />}
+      <ProviderGlyph providerId={providerId} size={10} />
       <span className="truncate">{modelLabel}</span>
     </span>
   );

@@ -446,15 +446,6 @@ pub struct AiInvocation<'a> {
     /// Runs are headless (no TTY), so an interactive permission prompt can never be answered —
     /// the write-capable flows (chat, "fix with AI") set this so they can actually change files.
     pub auto_approve_edits: bool,
-    /// The answer to this run has to be a JSON object, not prose.
-    ///
-    /// The prompt already says so, and a CLI engine has nothing better than that — which is why
-    /// this is a hint rather than a contract. The HTTP transports do have something better:
-    /// Ollama's `format` constrains decoding to valid JSON, so a model that would have answered
-    /// "Hola, ¿en qué puedo ayudarte?" cannot. Set it on the stages whose reply goes through
-    /// [`json_answer`]; everywhere else it stays off, because a free-text stage forced into JSON
-    /// would come back as an object nobody reads.
-    pub expects_json: bool,
     /// Which feature is spending the tokens — one of [`task`]'s constants.
     ///
     /// Recorded alongside the usage, and *only* used for that. Every operation in this file sets
@@ -524,7 +515,6 @@ impl<'a> AiInvocation<'a> {
             skills_note: String::new(),
             resume_session_id: None,
             auto_approve_edits: false,
-            expects_json: false,
             task: task::OTHER,
         }
     }
@@ -540,12 +530,17 @@ impl<'a> AiInvocation<'a> {
 /// grow an `api_key` parameter.
 pub enum Transport {
     Subprocess,
-    /// A local Ollama server — no credential.
-    Ollama,
     /// Any endpoint speaking OpenAI's `/v1/chat/completions`: OpenAI itself, Azure OpenAI,
     /// OpenRouter, Groq, a local vLLM… Only the base URL and key differ.
     OpenAiCompatible { api_key: String },
 }
+
+/// A model list an engine has to go and fetch. See [`AiEngine::fetch_models`].
+///
+/// Spelled out as a boxed future rather than reached for through `async_trait`: it is the only
+/// asynchronous thing any engine needs, and one type alias is a smaller price than a proc macro
+/// over the whole trait.
+pub type ModelListing = std::pin::Pin<Box<dyn std::future::Future<Output = Vec<String>> + Send>>;
 
 /// A headless AI CLI. Implementors describe how to launch their binary and how to read its
 /// output; everything else (spawning, piping stdin, quota handling) is shared in [`run`].
@@ -601,6 +596,34 @@ pub trait AiEngine: Send + Sync {
         None
     }
 
+    /// Whether a failed run is worth one more attempt, unchanged.
+    ///
+    /// For the failures that are the *model's* rather than the request's — the answer that came
+    /// back with nothing in it. Asking again is the whole remedy for those, and it is what a person
+    /// does anyway; the alternative is showing an error for a run that would have worked.
+    ///
+    /// **Once, and only for what the engine can name.** A blanket retry would double the bill on
+    /// every genuine failure and hide the ones worth seeing, so the default is never, and an engine
+    /// that opts in matches on the message it knows. Cancellation is already excluded by [`run`] —
+    /// a stopped run is not a failed one.
+    fn retry_once_on(&self, _error: &str) -> bool {
+        false
+    }
+
+    /// Models this engine can only learn by *asking* — a request rather than a file or a process.
+    ///
+    /// Its own hook because the other two cannot express it: [`AiEngine::cached_models`] is
+    /// synchronous and [`AiEngine::list_models_args`] spawns the CLI. Cline needs neither and both:
+    /// what it keeps on disk is which providers are configured, and what each one currently serves
+    /// has to be asked of the provider. Returning a future keeps that engine-side rather than
+    /// teaching this module about model servers.
+    ///
+    /// An empty result is "nothing to offer", not an error — the picker then falls back to its
+    /// curated examples, exactly as it does for an engine that has no listing at all.
+    fn fetch_models(&self) -> Option<ModelListing> {
+        None
+    }
+
     /// Arguments of a second, read-only command that reports what the run just spent — for the CLIs
     /// that do not say so on the run itself.
     ///
@@ -618,15 +641,16 @@ pub trait AiEngine: Send + Sync {
         None
     }
 
-    /// How this engine reaches its model. Defaults to a CLI subprocess; only the local Ollama
-    /// engine overrides this to [`Transport::Http`].
+    /// How this engine reaches its model. Defaults to a CLI subprocess; only the engines that talk
+    /// to a completion API over HTTP override this.
     fn transport(&self) -> Transport {
         Transport::Subprocess
     }
 
-    /// Whether this engine can run an agentic tool loop (read/edit/write files, MCP). The CLI
-    /// engines can; a plain local completion model (Ollama) cannot, so the "fix with AI" and MCP
-    /// features are hidden for it in the UI and refused defensively in the backend.
+    /// Whether this engine can run an agentic tool loop (read/edit/write files, MCP). Every CLI
+    /// engine can — a local model reached through `cline -P ollama` included. A bare completion
+    /// endpoint cannot, so for those the "fix with AI" and MCP features are hidden in the UI and
+    /// refused defensively in the backend.
     fn agentic(&self) -> bool {
         true
     }
@@ -649,9 +673,9 @@ pub trait AiEngine: Send + Sync {
     }
 
     /// Whether the engine carries a conversation forward on its own side between turns (the CLIs'
-    /// `--resume` / `--continue` sessions). Ollama doesn't — each HTTP request stands alone — so
-    /// [`chat_with_repo`] re-sends the system prompt and project context on every turn for it,
-    /// instead of only on the first.
+    /// `--resume` / `--continue` sessions). Cline doesn't expose one to a headless caller, and a
+    /// bare completion endpoint has none at all — so for those [`chat_with_repo`] re-sends the
+    /// system prompt and project context on every turn, instead of only on the first.
     fn resumes_sessions(&self) -> bool {
         true
     }
@@ -665,7 +689,12 @@ pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
         "grok" => Box::new(crate::grok::GrokEngine),
         "opencode" => Box::new(crate::opencode::OpenCodeEngine),
         "codex" => Box::new(crate::codex::CodexEngine),
-        "ollama" | "local" => Box::new(crate::ollama::OllamaEngine),
+        // `ollama`/`local` are the ids of the HTTP engine Cline replaced. A migration rewrites the
+        // stored settings (see `db::migrations`), so these aliases only ever catch what the
+        // migration could not reach — a chain or an agent row carrying an old id — and they point
+        // it at the engine that can still run a local model, rather than letting it fall through to
+        // Claude and quietly change which machine the code is sent to.
+        "cline" | "ollama" | "local" => Box::new(crate::cline::ClineEngine),
         // The key is read here, from the OS keyring, so it rides along in the engine's transport
         // and no operation signature needs an extra parameter for it.
         "openai" => Box::new(crate::openai::OpenAiEngine {
@@ -838,10 +867,6 @@ pub(crate) fn find_on_path(binary: &str) -> Option<std::path::PathBuf> {
 /// when not — the frontend wraps it in a translated label rather than showing it bare.
 pub async fn probe(engine: &dyn AiEngine, binary: &str) -> (bool, String) {
     match engine.transport() {
-        Transport::Ollama => match crate::ollama::fetch_tags(binary).await {
-            Ok(models) => (true, format!("{} · {} modelos", binary, models.len())),
-            Err(e) => (false, e),
-        },
         Transport::OpenAiCompatible { api_key } => {
             if api_key.trim().is_empty() {
                 return (false, "missing-api-key".to_string());
@@ -1122,19 +1147,9 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     // no live output (a single request answers all at once) but they do get cancellation, by
     // dropping the in-flight request.
     match engine.transport() {
-        Transport::Ollama => {
-            let outcome = tokio::select! {
-                result = crate::ollama::complete(binary, &inv) => without_reasoning(mark_quota(result)),
-                _ = ai_runs::cancelled(&mut cancel) => Err(ai_runs::CANCELLED_MARKER.to_string()),
-            };
-            // Recorded here as well as at the bottom, and that is the whole reason this branch is
-            // written out rather than left as a bare `return`: an HTTP engine never reaches the
-            // subprocess path, so a recorder that lived only down there could never see one. Ollama
-            // spent nothing in money and real tokens, and a meter that omits it is a meter that
-            // silently answers "which engine am I using" wrongly.
-            record_usage(engine, &inv, &outcome, None);
-            return outcome;
-        }
+        // Recorded here as well as at the bottom, and that is the whole reason this branch is
+        // written out rather than left as a bare `return`: an HTTP engine never reaches the
+        // subprocess path, so a recorder that lived only down there could never see one.
         Transport::OpenAiCompatible { api_key } => {
             let outcome = tokio::select! {
                 result = crate::openai::complete(binary, &api_key, &inv) => without_reasoning(mark_quota(result)),
@@ -1146,9 +1161,33 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
         Transport::Subprocess => {}
     }
 
+    // One attempt, and a second only for the engines that ask for it — see
+    // [`AiEngine::retry_once_on`]. Nothing else is changed between the two: the point is a failure
+    // that belonged to the model rather than to the request, and a retry that altered the request
+    // would be answering a different question.
+    let outcome = spawn_once(engine, binary, &inv, &ctx, &mut cancel).await;
+    match &outcome {
+        Err(error) if error != ai_runs::CANCELLED_MARKER && engine.retry_once_on(error) => {
+            spawn_once(engine, binary, &inv, &ctx, &mut cancel).await
+        }
+        _ => outcome,
+    }
+}
+
+/// One spawn of the engine's CLI, from building the command to reading what it said.
+///
+/// Split out of [`run`] so a run can be attempted twice without any of the work above it — the
+/// skills note, the engine banner, the cancellation subscription — happening twice too.
+async fn spawn_once(
+    engine: &dyn AiEngine,
+    binary: &str,
+    inv: &AiInvocation<'_>,
+    ctx: &Option<RunCtx>,
+    cancel: &mut Option<tokio::sync::watch::Receiver<bool>>,
+) -> Result<AiRun, String> {
     let dirs = search_dirs();
     let program = resolve_binary(binary, &dirs);
-    let mut cmd = engine.build_command(&program, &inv);
+    let mut cmd = engine.build_command(&program, inv);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     apply_path(&mut cmd, &dirs);
     // The engines build their own `Command`, so the no-console-window flag is applied here —
@@ -1166,7 +1205,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     //     the write just fails with `BrokenPipe` when the child exits, which we ignore.
     // (2) an engine that *does* read stdin still needs EOF to start producing output — dropping the
     //     handle at the end of the task sends it. Doing both concurrently is correct either way.
-    let stdin_content = engine.stdin_payload(&inv);
+    let stdin_content = engine.stdin_payload(inv);
     let mut stdin_handle = child.stdin.take();
     let writer = tokio::spawn(async move {
         if let Some(mut stdin) = stdin_handle.take() {
@@ -1183,7 +1222,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
 
     let status = tokio::select! {
         status = child.wait() => status.map_err(|e| e.to_string())?,
-        _ = ai_runs::cancelled(&mut cancel) => {
+        _ = ai_runs::cancelled(cancel) => {
             ai_runs::kill_tree(&mut child).await;
             // The pumps end on their own once the pipes close with the process; awaiting them
             // keeps the tasks from outliving the run and emitting into a finished one.
@@ -1218,7 +1257,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     // that spends tokens can forget to say so. Only successful runs: a refused or crashed one has
     // no account of itself, and recording a zero for it would make the meter read as though the
     // work had been free rather than as though it had not happened.
-    record_usage(engine, &inv, &outcome, Some(&program));
+    record_usage(engine, inv, &outcome, Some(&program));
     outcome
 }
 
@@ -1294,7 +1333,6 @@ pub(crate) fn aux_command(binary: &str) -> tokio::process::Command {
 pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<String>, String> {
     // The HTTP engines list over their own API, not via a CLI subcommand.
     match engine.transport() {
-        Transport::Ollama => return crate::ollama::list_models(binary).await,
         Transport::OpenAiCompatible { api_key } => return crate::openai::list_models(binary, &api_key).await,
         Transport::Subprocess => {}
     }
@@ -1302,6 +1340,10 @@ pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<Stri
     // with no listing subcommand).
     if let Some(models) = engine.cached_models() {
         return Ok(models);
+    }
+    // Then the engines that have to ask a service instead of a file or a process.
+    if let Some(listing) = engine.fetch_models() {
+        return Ok(listing.await);
     }
     let Some(args) = engine.list_models_args() else {
         return Ok(Vec::new());
@@ -1986,7 +2028,7 @@ pub const DEFAULT_INLINE_EDIT_PROMPT: &str =
 
 /// Rewrites the selected fragment of a file according to a natural-language instruction — the
 /// editor's inline edit. Text-in/text-out on purpose: no tools, no file writes, so it works with
-/// every provider (a local Ollama model included) and the result lands in the editor's buffer as
+/// every provider (a local model behind Cline included) and the result lands in the editor's buffer as
 /// a normal, undoable edit rather than as a change made behind the user's back.
 pub async fn inline_edit(
     engine: &dyn AiEngine,
@@ -2152,10 +2194,20 @@ pub async fn draw_diagram(
     inv.model = model;
     inv.task = task::DIAGRAM_DRAW;
     let run = run(engine, binary, inv).await?;
-    // Fences are stripped here rather than in the frontend so that every engine's habit of wrapping
-    // JSON in ```json lands in one place. What comes back is still only *probably* JSON — the
-    // frontend validates it against the schema before anything is drawn.
-    Ok(strip_code_fence(&run.text).trim().to_string())
+    // **The object is dug out of whatever the model wrapped it in**, with the same
+    // [`json_answer`] every other JSON-expecting stage here uses. This used to strip a code fence
+    // and nothing else, which only works when the fence is the *whole* answer — and the common
+    // failure was not a malformed graph, it was a perfectly good one with a sentence in front of it
+    // and a bulleted summary after ("El diagrama es el siguiente: ```json … ``` Este diagrama
+    // incluye: …"). The frontend then parsed the prose, found no object, and told the user the
+    // engine had not described a diagram, while a usable diagram sat in the middle of the reply.
+    //
+    // Falls back to the fence-stripped text so a model that answered with a bare object is
+    // unaffected, and so a genuinely unusable reply still reaches the frontend as itself rather
+    // than as an empty string. What comes back is still only *probably* JSON — the frontend
+    // validates it against the schema before anything is drawn.
+    let text = strip_code_fence(&run.text);
+    Ok(json_answer(&text).map(|json| json.into_owned()).unwrap_or(text).trim().to_string())
 }
 
 /// Unwraps a reply that put the *whole* answer in one fence, and leaves every other reply alone.
@@ -2805,7 +2857,7 @@ pub fn user_stories_prompt(prompt_template: &str) -> &str {
 /// review pipeline: the source is documentation the caller already gathered (an Azure DevOps wiki,
 /// a handful of Markdown files, pasted text), never something the engine goes and finds. That is
 /// what lets this run in a workspace with no repository open at all, on any provider including a
-/// local Ollama model.
+/// local model behind Cline.
 ///
 /// Returns the model's raw answer; the caller parses it with [`extract_json_block`], because what
 /// to do with a malformed answer (retry, show it, keep the previous batch) is not this layer's call.
@@ -2826,7 +2878,6 @@ pub async fn generate_user_stories(
 
     let mut inv = AiInvocation::new(prompt, &stdin_payload);
     inv.model = model;
-    inv.expects_json = true;
     inv.task = task::STORIES;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
@@ -2879,7 +2930,6 @@ pub async fn verify_stories_against_code(
     inv.model = model;
     inv.allowed_tools = allowed_tools;
     inv.cwd = Some(cwd);
-    inv.expects_json = true;
     inv.task = task::STORIES_VERIFY;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
@@ -2961,7 +3011,6 @@ pub async fn review_work_item(
         None => &[],
     };
     inv.cwd = cwd;
-    inv.expects_json = true;
     // The whole run, not just its text: the caller stamps the answer with the model that actually
     // produced it, which is the only place the CLI's own choice is reported when none was forced.
     inv.task = task::WORK_ITEM_REVIEW;
@@ -3381,7 +3430,6 @@ pub async fn repair_json(
 
     let mut inv = AiInvocation::new(&prompt, &stdin_payload);
     inv.model = model;
-    inv.expects_json = true;
     inv.task = task::REPAIR_JSON;
     let run = run(engine, binary, inv).await?;
     Ok(run.text)
@@ -3915,7 +3963,7 @@ pub async fn chat_with_repo(
     // Project context and the system prompt only need to be established once — a resumed session
     // already carries the earlier turns forward. `-p` carries the user's actual message; stdin
     // is just the one-time context (stdin = data, `-p` = ask). An engine that doesn't resume
-    // sessions server-side (Ollama) has nothing carrying them forward, so it gets them every turn.
+    // sessions server-side (Cline) has nothing carrying them forward, so it gets them every turn.
     let needs_context = session_id.is_none() || !engine.resumes_sessions();
     let mut stdin_payload = String::new();
     if needs_context && !contexts.is_empty() {
@@ -4301,6 +4349,29 @@ mod tests {
     fn an_unrecognisable_reply_is_left_as_the_model_wrote_it() {
         let reply = "Actualiza el explorador de base de datos\ny ajusta el store";
         assert_eq!(clean_commit_message(reply, false), reply);
+    }
+
+    /// The reply that broke "Dibujar con IA", verbatim from a local qwen2.5:7b run.
+    ///
+    /// Note what it is: a **correct** graph, wrapped in a sentence and a summary. The old path
+    /// stripped a leading fence and nothing else, so the whole thing reached the frontend, failed
+    /// `JSON.parse`, and was reported as "the engine's answer was not a diagram description" — the
+    /// one message that is not true of it. Any engine that says a word before its JSON hits this,
+    /// so the fix belongs here rather than in a prompt.
+    #[test]
+    fn a_diagram_wrapped_in_prose_is_still_a_diagram() {
+        let reply = "Perfecto, entonces procederemos a crear el diagrama.\n\n\
+             El diagrama es el siguiente:\n\n\
+             ```json\n\
+             {\"nodes\":[{\"id\":\"start\",\"label\":\"Inicio\",\"kind\":\"start\"}],\
+             \"edges\":[]}\n\
+             ```\n\n\
+             Este diagrama incluye:\n- Un nodo de tipo `start`.\n\n\
+             Si necesitas algún cambio, házmelo saber.";
+        let text = strip_code_fence(reply);
+        let extracted = json_answer(&text).expect("the object is in there").into_owned();
+        let value: serde_json::Value = serde_json::from_str(&extracted).expect("and it parses");
+        assert_eq!(value["nodes"][0]["id"], "start");
     }
 
     /// Every wrapper a model has actually put around "respond with JSON only".

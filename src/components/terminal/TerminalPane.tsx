@@ -115,6 +115,9 @@ export function TerminalPane({
   // a visibility change must not tear down a live shell.
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
+  /** Which mode the xterm instance is actually painted in, so a pane can tell whether it slept
+   *  through a theme change. Seeded by the construction effect below. */
+  const themedAs = useRef<"light" | "dark" | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -128,6 +131,7 @@ export function TerminalPane({
       cursorBlink: visibleRef.current,
       scrollback: SCROLLBACK_LINES,
     });
+    themedAs.current = resolved;
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
     term.open(containerRef.current);
@@ -186,9 +190,28 @@ export function TerminalPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
+  /**
+   * Repaints the terminal in the mode on screen — for the pane on screen, and nobody else.
+   *
+   * Same reasoning as the `cursorBlink` and WebGL effects below, and the same reason it mattered
+   * here: no pane is ever unmounted, so a dozen terminals from tabs nobody is looking at were all
+   * assigned a new `options.theme` on every light/dark flip. That is not a cheap assignment —
+   * xterm rebuilds its colour set and refreshes every row of the buffer, and under the WebGL
+   * renderer it throws away the glyph atlas too. All of it ran synchronously inside the theme
+   * wipe's `flushSync`, so a long-lived session's worth of hidden terminals was paid for as a
+   * freeze before the animation could start, to repaint panes at `display: none`.
+   *
+   * Keyed on `visible` as well, so a pane that slept through a flip is corrected the moment it is
+   * shown — before its first frame, since this runs on the same commit that reveals it. `themedAs`
+   * is what makes that safe to defer: it records the mode xterm is actually wearing, so waking is
+   * a no-op for a pane that happens to already be right (two flips back to where it started).
+   */
   useEffect(() => {
-    if (termRef.current) termRef.current.options.theme = resolved === "dark" ? DARK_THEME : LIGHT_THEME;
-  }, [resolved]);
+    const term = termRef.current;
+    if (!term || !visible || themedAs.current === resolved) return;
+    term.options.theme = resolved === "dark" ? DARK_THEME : LIGHT_THEME;
+    themedAs.current = resolved;
+  }, [resolved, visible]);
 
   /**
    * The cursor blinks in the pane you are looking at, and only there.

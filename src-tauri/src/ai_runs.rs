@@ -95,7 +95,7 @@ struct AiOutputBatchEvent {
 #[derive(Clone, Serialize)]
 struct AiEngineEvent {
     run_id: String,
-    /// The engine's display name — "Claude", "Codex", "Ollama"…
+    /// The engine's display name — "Claude", "Codex", "Cline"…
     engine: String,
     /// The model id this run forces. Empty when nothing was configured and the CLI picks its own
     /// default, which is a real state and shows as the engine alone rather than as a guess.

@@ -5,6 +5,7 @@ import {
   MonitorSmartphone,
   NotebookPen,
   Send,
+  Workflow,
   type LucideIcon,
 } from "lucide-react";
 import type { TranslationKey } from "../i18n/translations";
@@ -68,7 +69,15 @@ export interface TourStep {
  * everything inside an app is behind that app's own launcher, taken when and if that app is the one
  * you are about to use.
  */
-export type TourId = "main" | "api" | "db" | "agents" | "stories" | "remote" | "notes";
+export type TourId =
+  | "main"
+  | "api"
+  | "db"
+  | "agents"
+  | "stories"
+  | "remote"
+  | "notes"
+  | "diagrams";
 
 /**
  * The one-screen tour of the main window.
@@ -786,6 +795,144 @@ const NOTES_TOUR: TourStep[] = [
   ),
 ];
 
+const DIAGRAMS_STAGE: TourStage = { view: "diagrams" };
+
+/** The same stage with the "Draw with AI" window up. Four steps share it, and a stage is applied
+ *  whole — so it is written once rather than spread inline and drifting by a field. */
+const DIAGRAMS_AI_STAGE: TourStage = { ...DIAGRAMS_STAGE, diagramsAi: true };
+
+/**
+ * The Diagrams tour.
+ *
+ * **Weighted towards drawing with an engine, deliberately.** The rest of this app is a drawing
+ * canvas, and a drawing canvas explains itself the moment you drag a box out of the palette — the
+ * tour would be telling you what you can already see. What it cannot show you is that you can
+ * describe an architecture in a sentence and have it drawn; that doing so *adds to* what is on the
+ * canvas rather than replacing it; that there is an undo for it which is not draw.io's own; and
+ * what does and does not leave the machine when you press Generate. Four of these steps are that,
+ * and the four are the reason the tour exists.
+ *
+ * The canvas itself is draw.io in an iframe, which sets the one hard constraint on the whole tour:
+ * **nothing inside that frame can be spotlighted.** The three buttons this app injects into the
+ * editor's toolbar — save as template, export, the AI sparkle — are in another document, where a
+ * selector from here reaches nothing and a rectangle means something else. So the steps about them
+ * point at what they *produce* (the AI window, which the stage opens) or at the pane that holds
+ * them, and say where the button is in words.
+ */
+const DIAGRAMS_TOUR: TourStep[] = [
+  {
+    id: "diagrams.intro",
+    chapterKey: "tour.chapter.diagrams",
+    titleKey: "tour.diagrams.intro.title",
+    bodyKey: "tour.diagrams.intro.body",
+    anchors: ['[data-tour="diagrams-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: DIAGRAMS_STAGE,
+  },
+  {
+    id: "diagrams.tree",
+    chapterKey: "tour.chapter.diagrams",
+    titleKey: "tour.diagrams.tree.title",
+    bodyKey: "tour.diagrams.tree.body",
+    anchors: ['[data-tour="diagrams-tree"]', '[data-tour="diagrams-view"]'],
+    stage: DIAGRAMS_STAGE,
+  },
+  {
+    id: "diagrams.new",
+    chapterKey: "tour.chapter.diagrams",
+    titleKey: "tour.diagrams.new.title",
+    bodyKey: "tour.diagrams.new.body",
+    anchors: ['[data-tour="diagrams-new"]', '[data-tour="diagrams-view"]'],
+    padding: 6,
+    stage: DIAGRAMS_STAGE,
+  },
+  {
+    id: "diagrams.search",
+    chapterKey: "tour.chapter.diagrams",
+    titleKey: "tour.diagrams.search.title",
+    bodyKey: "tour.diagrams.search.body",
+    anchors: ['[data-tour="diagrams-search"]', '[data-tour="diagrams-view"]'],
+    padding: 6,
+    stage: DIAGRAMS_STAGE,
+  },
+  {
+    id: "diagrams.gallery",
+    chapterKey: "tour.chapter.diagrams",
+    titleKey: "tour.diagrams.gallery.title",
+    bodyKey: "tour.diagrams.gallery.body",
+    // Only on screen with no diagram open — the gallery *is* the "nothing open" state. A tour taken
+    // with one open falls back to the view, which is where the cards would be.
+    anchors: ['[data-tour="diagrams-gallery"]', '[data-tour="diagrams-view"]'],
+    placement: "inside",
+    stage: DIAGRAMS_STAGE,
+  },
+  {
+    id: "diagrams.canvas",
+    chapterKey: "tour.chapter.diagrams",
+    titleKey: "tour.diagrams.canvas.title",
+    bodyKey: "tour.diagrams.canvas.body",
+    anchors: ['[data-tour="diagrams-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: DIAGRAMS_STAGE,
+  },
+  {
+    id: "diagrams.ai",
+    chapterKey: "tour.chapter.diagramsAi",
+    titleKey: "tour.diagrams.ai.title",
+    bodyKey: "tour.diagrams.ai.body",
+    // The window the stage just opened — but only if a diagram is open, since it lives over the
+    // canvas. From the gallery this lands on the view and the copy still reads.
+    anchors: ['[data-tour="diagrams-ai"]', '[data-tour="diagrams-view"]'],
+    padding: 6,
+    stage: DIAGRAMS_AI_STAGE,
+  },
+  {
+    id: "diagrams.aiApply",
+    chapterKey: "tour.chapter.diagramsAi",
+    titleKey: "tour.diagrams.aiApply.title",
+    bodyKey: "tour.diagrams.aiApply.body",
+    anchors: ['[data-tour="diagrams-ai"]', '[data-tour="diagrams-view"]'],
+    padding: 6,
+    stage: DIAGRAMS_AI_STAGE,
+  },
+  {
+    id: "diagrams.aiPrivacy",
+    chapterKey: "tour.chapter.diagramsAi",
+    titleKey: "tour.diagrams.aiPrivacy.title",
+    bodyKey: "tour.diagrams.aiPrivacy.body",
+    anchors: ['[data-tour="diagrams-ai"]', '[data-tour="diagrams-view"]'],
+    padding: 6,
+    stage: DIAGRAMS_AI_STAGE,
+  },
+  {
+    id: "diagrams.aiUndo",
+    chapterKey: "tour.chapter.diagramsAi",
+    titleKey: "tour.diagrams.aiUndo.title",
+    bodyKey: "tour.diagrams.aiUndo.body",
+    // Drawn only while undoing a generation is still what "undo" would mean, so the header behind
+    // it and then the view stand in when there is nothing to undo — which is most of the time.
+    anchors: ['[data-tour="diagrams-undo"]', '[data-tour="diagrams-view"]'],
+    padding: 6,
+    stage: DIAGRAMS_STAGE,
+  },
+  {
+    id: "diagrams.export",
+    chapterKey: "tour.chapter.diagrams",
+    titleKey: "tour.diagrams.export.title",
+    bodyKey: "tour.diagrams.export.body",
+    anchors: ['[data-tour="diagrams-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: DIAGRAMS_STAGE,
+  },
+  closingStep(
+    "diagrams",
+    "tour.chapter.diagrams",
+    "tour.diagrams.done.title",
+    "tour.diagrams.done.body",
+    DIAGRAMS_STAGE,
+  ),
+];
+
 export const TOURS: Record<TourId, TourStep[]> = {
   main: MAIN_TOUR,
   api: API_TOUR,
@@ -794,6 +941,7 @@ export const TOURS: Record<TourId, TourStep[]> = {
   stories: STORIES_TOUR,
   remote: REMOTE_TOUR,
   notes: NOTES_TOUR,
+  diagrams: DIAGRAMS_TOUR,
 };
 
 /**
@@ -818,8 +966,10 @@ export interface AppTour {
   icon: LucideIcon;
 }
 
-/** The five, in the order the workspace menu lists them — Settings offers them in that order too,
- * because a reader who knows where an app sits in the menu should not have to re-find it here. */
+/** Every app tour, in the order the workspace menu lists the apps — Settings offers them in that
+ * order too, because a reader who knows where an app sits in the menu should not have to re-find it
+ * here. Append rather than insert: a new app goes at the end of the rail, so it goes at the end of
+ * this. */
 export const APP_TOURS: AppTour[] = [
   { tour: "api", view: "api", workspace: "requests", labelKey: "tabbar.api", icon: Send },
   { tour: "db", view: "api", workspace: "database", labelKey: "tabbar.databases", icon: Database },
@@ -827,6 +977,7 @@ export const APP_TOURS: AppTour[] = [
   { tour: "stories", view: "stories", labelKey: "tabbar.stories", icon: ClipboardList },
   { tour: "remote", view: "remote", labelKey: "tabbar.remote", icon: MonitorSmartphone },
   { tour: "notes", view: "notes", labelKey: "tabbar.notes", icon: NotebookPen },
+  { tour: "diagrams", view: "diagrams", labelKey: "tabbar.diagrams", icon: Workflow },
 ];
 
 /** The app tour for the current view, or `null` on the three repository views — which are what the

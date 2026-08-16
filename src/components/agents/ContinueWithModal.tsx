@@ -5,7 +5,8 @@ import { Note } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { Field } from "../settings/modelPicker";
-import { AI_PROVIDERS, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { isRunnableAgent, useAgentsStore } from "../../state/agentsStore";
 import { useChainStore } from "../../state/chainStore";
 import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
@@ -115,7 +116,7 @@ export function ContinueWithModal({ taskId, onClose }: { taskId: string; onClose
                 a.model,
                 t,
               )}`,
-              icon: AI_PROVIDERS.find((p) => p.id === a.provider)?.icon,
+              leading: <ProviderGlyph providerId={a.provider} size={13} />,
               disabled: !isProviderReady(statuses, a.provider),
             }))}
           />

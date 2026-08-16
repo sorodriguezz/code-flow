@@ -8,15 +8,15 @@ import { Tooltip } from "../common/Tooltip";
 /**
  * The way into the tour of whatever is on screen.
  *
- * **One button for all six tours**, at the foot of the app rail. It used to be two: this one for the
- * five workspace apps, and a second graduation cap in the title bar for the main tour. Two controls
- * with the same glyph, in two corners, whose only distinction was which of them you happened to
- * reach for — and a reader who wanted "the tour" had no way to know that the answer depended on
- * where they clicked. Here it is always the same button and always means "explain what I am looking
- * at": the app's tour on the five app screens, the main tour on the three repository views, which
- * are what the main tour is about.
+ * **One button for every tour there is**, at the foot of the app rail. It used to be two: this one
+ * for the workspace apps, and a second graduation cap in the title bar for the main tour. Two
+ * controls with the same glyph, in two corners, whose only distinction was which of them you
+ * happened to reach for — and a reader who wanted "the tour" had no way to know that the answer
+ * depended on where they clicked. Here it is always the same button and always means "explain what
+ * I am looking at": the app's own tour on an app screen, the main tour on the three repository
+ * views, which are what the main tour is about.
  *
- * It sits under the very buttons that open those five apps, so what it points at is never in doubt.
+ * It sits under the very buttons that open those apps, so what it points at is never in doubt.
  */
 export function TourLauncher() {
   const activeView = useUiStore((s) => s.activeView);

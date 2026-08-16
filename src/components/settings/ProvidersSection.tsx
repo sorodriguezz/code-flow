@@ -22,6 +22,7 @@ import {
   setSetting,
 } from "../../lib/tauri/commands";
 import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, type AiProviderOption } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
@@ -90,7 +91,7 @@ function customModelHint(providerId: string, t: (key: TranslationKey) => string)
   if (providerId === "claude") return t("settings.modelIdHintClaude");
   if (providerId === "codex") return t("settings.modelIdHintCodex");
   if (providerId === "opencode") return t("settings.modelIdHintOpencode");
-  if (providerId === "ollama") return t("settings.modelIdHintOllama");
+  if (providerId === "cline") return t("settings.modelIdHintCline");
   if (providerId === "openai") return t("settings.modelIdHintOpenai");
   return t("settings.modelIdHintGeneric");
 }
@@ -372,7 +373,6 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
 
   const options = modelOptionsFor(provider.id, dynamicModels);
   const modelLabel = resolvedModel ? modelDisplayLabel(provider.id, resolvedModel, t) : t("settings.modelDefault");
-  const Icon = provider.icon;
   const inputClass =
     "w-full rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 text-[13px] outline-none focus:border-[var(--cf-accent)]";
 
@@ -388,7 +388,9 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
             size={14}
             className={`shrink-0 text-[var(--cf-text-muted)] transition-transform ${expanded ? "" : "-rotate-90"}`}
           />
-          <Icon size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
+          {/* The brand mark where the provider has one — see `ProviderGlyph`. Untinted on
+              purpose: a logo whose colour is muted grey is a logo nobody recognises. */}
+          <ProviderGlyph providerId={provider.id} size={14} />
           <span className="shrink-0 text-[13px] font-medium">{label}</span>
           <StatusBadge providerId={provider.id} />
           {loaded && <span className="min-w-0 truncate text-[11px] text-[var(--cf-text-muted)]">{modelLabel}</span>}
@@ -455,13 +457,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
 
               <Field
                 label={isEndpoint ? t("settings.endpointLabel") : t("settings.binaryLabel")}
-                hint={
-                  provider.id === "ollama"
-                    ? t("settings.ollamaEndpointHint")
-                    : isEndpoint
-                      ? t("settings.endpointHint")
-                      : t("settings.binaryHint")
-                }
+                hint={isEndpoint ? t("settings.endpointHint") : t("settings.binaryHint")}
               >
                 <div className="flex gap-1.5">
                   <input

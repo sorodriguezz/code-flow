@@ -5,7 +5,8 @@ import { Note } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { Field } from "../settings/modelPicker";
-import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { isAgenticProvider, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { isRunnableAgent, useAgentsStore } from "../../state/agentsStore";
 import { useChainStore } from "../../state/chainStore";
 import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
@@ -475,7 +476,7 @@ export function NewChainModal({
                           a.model,
                           t,
                         )}`,
-                        icon: AI_PROVIDERS.find((p) => p.id === a.provider)?.icon,
+                        leading: <ProviderGlyph providerId={a.provider} size={13} />,
                         disabled: !isProviderReady(statuses, a.provider),
                       }))}
                     />
@@ -511,8 +512,9 @@ export function NewChainModal({
                 {/* Only once a text-only engine has actually been picked for this step, and only on
                     that step. A permanent note explaining which engines can write would be a
                     paragraph everybody scrolls past; this is the one moment it is the answer to a
-                    question the user just asked. Not a block, either — Ollama is a fine analyst or
-                    reviewer, and the step it is wrong for is the one that has to change files. */}
+                    question the user just asked. Not a block, either — a text-only engine is a fine
+                    analyst or reviewer, and the step it is wrong for is the one that has to change
+                    files. */}
                 {step.agent_id !== "" &&
                   !isAgenticProvider(runnable.find((a) => a.id === step.agent_id)?.provider ?? "") && (
                     <p className="mb-1.5 text-[11px] leading-snug text-[var(--cf-warning)]">

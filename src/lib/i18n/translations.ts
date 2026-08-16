@@ -1339,7 +1339,7 @@ const en = {
   // answers at a glance.
   "quota.title": "Plan limits",
   "quota.hint":
-    "How much of each provider's plan you have got through, as the provider itself reports it. An engine that publishes no limit — Ollama, or an endpoint billed per token — is absent rather than shown at zero.",
+    "How much of each provider's plan you have got through, as the provider itself reports it. An engine that publishes no limit — Cline, or an endpoint billed per token — is absent rather than shown at zero.",
   "quota.loading": "Reading limits…",
   "quota.reading": "Reading…",
   "battery.title": "Battery",
@@ -1778,7 +1778,6 @@ const en = {
   "settings.modelIdHintCodex": "An id your ChatGPT plan exposes. The list comes from Codex's own catalog.",
   "settings.modelIdHintOpencode":
     "`provider/model` — including opencode's own: `opencode/…` for Zen and `opencode-go/…` for Go.",
-  "settings.providerMissingOllama": "No answer from the endpoint ({detail}). Start it with `ollama serve`.",
   "settings.providerRecheck": "Re-check",
   "settings.providerDefault": "Default",
   "settings.providerDefaultTitle": "Used by every task set to inherit",
@@ -1786,7 +1785,8 @@ const en = {
   "settings.setupTitle": "How to install it",
   "settings.setupDocs": "Official documentation",
   "settings.setupRestartHint": "Restart CodeFlow after installing so it picks up the new PATH.",
-  "settings.modelIdHintOllama": "Any model you've pulled — run `ollama list` to see them.",
+  "settings.modelIdHintCline":
+    "`provider/model`, as Cline addresses them — e.g. `ollama/qwen2.5-coder`. Run `cline auth` to add a provider.",
   "settings.taskRoutingTitle": "Model per task",
   "settings.taskRoutingHint":
     "Point each action at its own provider and model. Anything left on \"inherit\" uses the default above.",
@@ -1829,11 +1829,8 @@ const en = {
   "task.wiki": "Wiki · documentation",
   "task.wikiHint":
     "Reads a repository and writes its technical documentation. The longest run in the app, and it needs an engine with tools.",
-  "settings.ollamaEndpointLabel": "Ollama endpoint",
-  "settings.ollamaEndpointHint":
-    "URL of your local Ollama server. Start it with `ollama serve` and pull a model with `ollama pull <model>`.",
   "settings.localProviderNote":
-    "Local models handle commit messages, PR descriptions, analysis, review and conflict resolution. Anything that needs to run tools (Fix with AI, MCP) needs a CLI engine.",
+    "This endpoint only completes text: it handles commit messages, PR descriptions, analysis, review and conflict resolution. Anything that needs to run tools (Fix with AI, MCP) needs a CLI engine — for local models, that is Cline.",
   "settings.baseModel": "Base model",
   "settings.baseModelHint": "Used by chat, and the default for the tasks below.",
   "settings.localModel": "Local model",
@@ -2893,10 +2890,12 @@ const en = {
   "notifications.diagramDrawn": "Diagram drawn",
   "notifications.diagramDrawFailed": "Could not draw the diagram",
   "diagrams.exported": "Saved",
+  "diagrams.exportEmpty": "The editor returned an empty diagram — nothing was saved.",
   "diagrams.export": "Export",
   "diagrams.exportAs.png": "Export as PNG",
   "diagrams.exportAs.svg": "Export as SVG",
   "diagrams.exportAs.pdf": "Export as PDF",
+  "diagrams.exportAs.drawio": "Export as .drawio",
   "diagrams.import": "Open a .drawio file",
   "diagrams.imported": "Imported {name}",
   "diagrams.undoGeneration": "Undo the generated shapes",
@@ -5231,6 +5230,45 @@ const en = {
   "tour.notes.done.title": "That's Notes",
   "tour.notes.done.body":
     "Anything you write is saved as you go and travels with your backups. A note can be exported as a plain `.md` from its ⋯ menu, so nothing here is locked in. This tour is always in the cap beside the app rail if you want it again.",
+  "tour.chapter.diagrams": "Diagrams",
+  "tour.chapter.diagramsAi": "Drawing with AI",
+
+  "tour.diagrams.intro.title": "The drawing that goes around the code",
+  "tour.diagrams.intro.body":
+    "Flowcharts, architecture, sequences, ER — kept in the workspace rather than in any one repository, because the picture of how four services fit together does not belong inside one of them. The canvas is the whole of draw.io, shipped inside the app and running on your machine: no account, no network, and it works on a plane. The tree on the left is what you have drawn; it saves as you draw, and there is no save button.",
+  "tour.diagrams.tree.title": "Folders, and what deleting one takes with it",
+  "tour.diagrams.tree.body":
+    "Folders nest as deep as you like, take a colour from their right-click menu, and diagrams can be dragged between them. Read this twice, because it is the opposite of what Notes does: **deleting a folder deletes every diagram inside it**, and its subfolders with it. You are asked first, and it cannot be undone. Pinning from the same menu floats a diagram to the top of the tree.",
+  "tour.diagrams.new.title": "Start from a shape, not a blank sheet",
+  "tour.diagrams.new.body":
+    "This opens a picker rather than making an empty diagram outright — blank is simply its first entry. Five drawings ship with it: flowchart, C4 containers, sequence, entity relationship and network, each a real diagram you edit rather than a stencil. Any drawing of your own becomes a template from the editor's toolbar, so the second architecture diagram starts where the first ended up. New diagrams are filed into whichever folder the tree is showing.",
+  "tour.diagrams.search.title": "Titles and tags",
+  "tour.diagrams.search.body":
+    "Filters as you type, across titles and tags. It does **not** read what is inside the drawings — unlike the search in Notes, which does read bodies. So name things the way you would look for them later, and lean on tags for the cut that folders cannot make: one diagram is in one folder, but it can carry `onboarding` and `payments` at once.",
+  "tour.diagrams.gallery.title": "The wall of what you have drawn",
+  "tour.diagrams.gallery.body":
+    "With nothing open you get cards instead of an empty canvas, each showing the diagram itself — the picture is re-exported every time you edit, so a card is never a drawing from last week. Switch between grid and list, filter by folder or tag, and reorder by hand if the order means something. Opening a card is what puts the editor on screen.",
+  "tour.diagrams.canvas.title": "All of draw.io, and it saves itself",
+  "tour.diagrams.canvas.body":
+    "The shape palette, the format panel, the right-click menu, every shape library including the cloud sets — none of it is a reduced version. What this app adds is at the far end of the editor's own toolbar: save this drawing as a template, export it, and a sparkle. Edits are written for you a moment after you stop moving things, and the header tells you when the last one landed.",
+  "tour.diagrams.ai.title": "Describe the diagram, and it draws it",
+  "tour.diagrams.ai.body":
+    "The sparkle opens this window over the canvas — drag it by its header if it covers what you are looking at. Write what you want in a sentence: *\"the review pipeline: fetch the diff, scan for secrets, send it to the engine, comment on the PR\"*. Enter sends, Shift+Enter breaks the line, and while it is thinking the button becomes Stop — it is a normal run, so it shows up with your other AI work and can be abandoned. Which engine answers is set once, in Settings → AI, per task.",
+  "tour.diagrams.aiApply.title": "Nothing is drawn until you say so",
+  "tour.diagrams.aiApply.body":
+    "The answer comes back as a count — *12 shapes · 9 arrows* — and stays there. The canvas is untouched until you press **Add to canvas**, so an answer you do not like costs you a rephrase and nothing else. And it *adds*: what is already drawn is never replaced, and the new shapes are given ids of their own so they cannot land on top of a box you drew by hand. Laying out a rough shape yourself and asking for the rest is a perfectly good way to use it.",
+  "tour.diagrams.aiPrivacy.title": "What actually leaves the machine",
+  "tour.diagrams.aiPrivacy.body":
+    "Three things: the diagram's title, the sentence you wrote, and a list of the **labels** already on the canvas — the words in the boxes, so the answer connects to what is there instead of drawing a second copy of it. The document itself is never sent. Nothing is uploaded when you simply draw, either; the editor is local, and the only moment anything is transmitted is the one where you press Generate.",
+  "tour.diagrams.aiUndo.title": "The undo that ⌘Z cannot do",
+  "tour.diagrams.aiUndo.body":
+    "Handing a document to draw.io resets its undo stack, so its own undo cannot take a generation back out — this arrow, next to the title, is what does. It appears once something has been generated and **disappears on your next real edit**: by then, going back would be throwing away what you drew on top rather than what the engine drew. If a generation is not what you wanted, take it back before you build on it.",
+  "tour.diagrams.export.title": "Out, and back in",
+  "tour.diagrams.export.body":
+    "The download button in the editor's toolbar writes the drawing as PNG, SVG or PDF, at twice the resolution, wherever you choose. In the other direction, a `.drawio` file from anywhere — a colleague, diagrams.net in a browser, an old repository — is imported from the tree's toolbar and opens here as an ordinary diagram. It is the same format underneath, which is what keeps any of this from being a place drawings go and do not come back from.",
+  "tour.diagrams.done.title": "That's Diagrams",
+  "tour.diagrams.done.body":
+    "Everything is stored in the workspace and travels with your backups. The one habit worth forming: when a drawing is going to take a while, describe it first and correct what comes back — starting from twelve roughly-right boxes is faster than starting from none. This tour is always in the cap beside the app rail.",
 } as const;
 
 export type Language = "en" | "es";

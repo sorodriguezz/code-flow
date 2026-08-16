@@ -5,10 +5,12 @@ import { ViewSkeleton } from "../common/ViewSkeleton";
 import {
   editorConfig,
   embedUrl,
+  forwardFramePresses,
   injectToolbarButtons,
   parseEmbedMessage,
   seedEditorLibraries,
   postToEditor,
+  setEditorDarkMode,
   THUMBNAIL_EXPORT,
   THUMBNAIL_MAX_CHARS,
 } from "../../lib/diagrams/embed";
@@ -17,6 +19,7 @@ import { useDiagramsStore } from "../../state/diagramsStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { useThemeStore } from "../../state/themeStore";
+import { afterThemeTransition } from "../../lib/themeTransition";
 
 /**
  * The canvas: draw.io, in an iframe, wired to this workspace's store.
@@ -27,10 +30,15 @@ import { useThemeStore } from "../../state/themeStore";
  * does the same with Monaco for the same reason; this is that decision applied to something an
  * order of magnitude heavier.
  *
- * **The frame is keyed on theme and language**, because neither can be changed after load — they
- * are URL parameters the editor reads once while booting. Changing either remounts the iframe,
- * which reboots the editor and reloads the document from the store. That is why the store's draft
- * is the source of truth rather than whatever is inside the frame: a remount must not lose an edit.
+ * **The frame is keyed on language**, which is a URL parameter the editor reads once while booting.
+ * Changing it remounts the iframe, which reboots the editor and reloads the document from the
+ * store. That is why the store's draft is the source of truth rather than whatever is inside the
+ * frame: a remount must not lose an edit.
+ *
+ * **Theme is not part of that key.** It starts as one — the frame boots light or dark — but a later
+ * light/dark switch is handed to the running editor instead (`setEditorDarkMode`), which repaints
+ * it in a frame rather than rebooting it. `bootTheme` below is what the URL carries, and it only
+ * moves if that live switch ever reports failure.
  *
  * **Every edit arrives as `autosave`.** The store debounces the write; this component only forwards.
  * After each one it asks for a fresh PNG, which is what the gallery draws.
@@ -66,7 +74,10 @@ export function DrawioFrame({
    */
   const actions = useRef({ onSaveAsTemplate, onExport, onAskAi });
   actions.current = { onSaveAsTemplate, onExport, onAskAi };
+  /** The editor has booted and will accept messages — it has been sent its document. */
   const [ready, setReady] = useState(false);
+  /** Which boot of the editor — see `frameKey` — has a drawing on its canvas. */
+  const [paintedFrame, setPaintedFrame] = useState<string | null>(null);
   /**
    * Whether the editor was ever reachable.
    *
@@ -91,8 +102,56 @@ export function DrawioFrame({
     seedEditorLibraries();
   }
 
-  const dark = theme === "dark";
+  /**
+   * The mode the frame is *booted* in — normally the mode the app was in when the diagram was
+   * opened, and from then on a mode the running editor is simply told about.
+   *
+   * It moves only when `setEditorDarkMode` reports that it could not do the live switch, which is
+   * the reload this used to do every time. Even then it waits for the theme wipe to finish:
+   * rebooting draw.io inside the transition's synchronous commit put a blank iframe in the "after"
+   * photograph the wipe animates towards, and then had a cold boot competing with the animation for
+   * the main thread for the whole half-second.
+   */
+  const [bootTheme, setBootTheme] = useState(theme);
+  /**
+   * What the editor is actually wearing, which is not the same question as what it booted in — the
+   * whole point of the live switch is that the two come apart. A ref because nothing renders from
+   * it: it exists so a flip to dark and back to light is recognised as leaving the editor already
+   * correct, rather than as two changes to apply.
+   */
+  const wearing = useRef(theme);
+
+  const dark = bootTheme === "dark";
   const url = embedUrl({ dark, language });
+
+  /**
+   * One boot of the editor. Every change to it throws the iframe's document away and starts
+   * another: the URL covers theme and language, and `diagramId` covers the rest, because switching
+   * diagrams unmounts the frame through the draft guard further down rather than by changing `src`.
+   */
+  const frameKey = `${url}|${diagramId}`;
+  const frameKeyRef = useRef(frameKey);
+  frameKeyRef.current = frameKey;
+
+  /**
+   * Whether the editor has *drawn* its document, as opposed to having been handed it.
+   *
+   * This used to be one flag with `ready`, set in the same tick the `load` action was posted, and
+   * that tick is far too early: `postMessage` only queues the document, so lifting the cover there
+   * uncovered an editor mid-boot — an empty canvas at whatever scale it had guessed, the format
+   * panel and toolbar still arriving, the drawing snapping into place a moment later. That settling
+   * is what opening a diagram looked like.
+   *
+   * draw.io answers a completed `load` with a `load` event of its own whenever `proto=json` is in
+   * the URL, which it always is here — checked in the vendored build, not assumed — so the cover
+   * comes off on that instead. See the fallback below for what happens if it never arrives.
+   *
+   * **Derived from `frameKey` rather than reset by an effect**, which is the difference between a
+   * remount being covered and a remount being covered *one frame late*. An effect runs after the
+   * commit that swapped the iframe, so a boolean would have left the new, blank frame briefly
+   * uncovered — a white flash in the canvas, on exactly the theme change this was meant to smooth.
+   */
+  const painted = paintedFrame === frameKey;
 
   const labels = useRef({ template: "", export: "", ai: "" });
   labels.current = {
@@ -111,10 +170,43 @@ export function DrawioFrame({
   const currentDoc = useCallback(() => useDiagramsStore.getState().draft?.doc ?? "", []);
 
   useEffect(() => {
-    // A remount — theme, language, or a different diagram — starts from nothing.
+    // A remount — language, a different diagram, or the fallback reboot — starts from nothing.
+    // `painted` is not here: it is derived from `frameKey`, so it is already false by the time this
+    // runs. A fresh editor wears what its URL asked for, whatever the last one had been told.
     setReady(false);
     setMissing(false);
-  }, [url, diagramId]);
+    wearing.current = bootTheme;
+  }, [url, diagramId, bootTheme]);
+
+  /**
+   * A light/dark switch, handed to the editor that is already running.
+   *
+   * Gated on `painted` rather than `ready`, and that is not fussiness: `ready` is turned off in an
+   * effect, so on the commit that swaps the iframe it is still reading `true` for one pass — long
+   * enough for this to try to theme a frame that is empty, fail, and conclude the live route is
+   * broken. `painted` is derived from `frameKey`, so it is already false in that same render.
+   *
+   * A `false` from `setEditorDarkMode` means the editor's internals moved under us; the reboot is
+   * still there, and takes the same wipe-shaped detour it always did.
+   */
+  /**
+   * Lets the rest of the app hear a click on the diagram — see `forwardFramePresses`. Bound as
+   * soon as the editor is up rather than once it has drawn: a press on a booting canvas is still a
+   * press, and a menu left open over it should close on that one too.
+   */
+  useEffect(() => {
+    if (!ready) return;
+    return forwardFramePresses(frame.current);
+  }, [ready, frameKey]);
+
+  useEffect(() => {
+    if (!painted || wearing.current === theme) return;
+    if (setEditorDarkMode(frame.current, theme === "dark")) {
+      wearing.current = theme;
+      return;
+    }
+    return afterThemeTransition(() => setBootTheme(theme));
+  }, [painted, theme, frameKey]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -179,6 +271,18 @@ export function DrawioFrame({
           });
           break;
 
+        case "load": {
+          // The drawing is on the canvas and fitted. One frame further on before the cover comes
+          // off, because this message is built and posted while the editor is still inside the call
+          // that laid the document out — the frame after it is the first one that has been painted.
+          //
+          // The boot this answers is read *now* and not inside the frame: a remount landing in
+          // between would otherwise have this stale confirmation uncover it.
+          const booted = frameKeyRef.current;
+          requestAnimationFrame(() => setPaintedFrame(booted));
+          break;
+        }
+
         case "autosave": {
           const xml = typeof message.xml === "string" ? message.xml : null;
           if (xml === null) break;
@@ -207,7 +311,10 @@ export function DrawioFrame({
           const wanted = awaitingFile.current;
           if (wanted) {
             awaitingFile.current = null;
-            void writeExport(data, wanted);
+            // `.drawio` answers on `xml` and leaves `data` unset — there is no picture to render,
+            // the document *is* the file. Everything else arrives as a `data:` URI.
+            const xml = typeof message.xml === "string" ? message.xml : "";
+            void writeExport(wanted === "drawio" ? xml : data, wanted);
             break;
           }
           // Oversized pictures are dropped rather than stored — see `THUMBNAIL_MAX_CHARS`. An empty
@@ -238,12 +345,22 @@ export function DrawioFrame({
    */
   const awaitingFile = useRef<ExportFormat | null>(null);
 
-  /** Turns an exported `data:` URI into a file the user chose a place for. */
+  /**
+   * Turns what the editor exported into a file the user chose a place for.
+   *
+   * `exported` is a `data:` URI for the rendered formats and the document's own markup for
+   * `.drawio` — the one case where there is nothing to decode, because the text is already the
+   * file. An empty answer is refused rather than written: a zero-byte `.drawio` on disk looks like
+   * a saved diagram and opens as nothing.
+   */
   const writeExport = useCallback(
-    async (data: string, format: ExportFormat) => {
+    async (exported: string, format: ExportFormat) => {
       try {
+        if (!exported) throw new Error(t("diagrams.exportEmpty"));
+        const bytes =
+          format === "drawio" ? new TextEncoder().encode(exported) : bytesFromDataUri(exported);
         const title = useDiagramsStore.getState().diagrams.find((d) => d.id === diagramId)?.title;
-        const saved = await saveBytes(bytesFromDataUri(data), format, title || "diagram");
+        const saved = await saveBytes(bytes, format, title || "diagram");
         if (saved) useToastStore.getState().pushToast(t("diagrams.exported"), "success");
       } catch (error) {
         pushErrorToast(String(error));
@@ -258,18 +375,32 @@ export function DrawioFrame({
    * PDF goes through the editor rather than through `pdfmake`, which the app already carries: the
    * editor is the only thing that knows how the diagram is drawn, and a second renderer would be a
    * second answer to "what does this look like".
+   *
+   * `.drawio` goes through the editor too, and that is a choice worth stating: the store already
+   * holds the document, so it could be written straight from `draft.doc`. It isn't, because the
+   * draft is only as current as the last `autosave`, which draw.io debounces — exporting a second
+   * after a stroke would save the drawing as it was before it. Asking the canvas is what makes
+   * every format mean "what is on screen right now". It also hands back the full `<mxfile>`
+   * wrapper, which is what other tools open, rather than the bare model the store keeps.
    */
   const pendingExport = useDiagramsStore((s) => s.pendingExport);
   useEffect(() => {
     if (!pendingExport || !ready) return;
     awaitingFile.current = pendingExport;
     useDiagramsStore.getState().clearPendingExport();
-    postToEditor(frame.current, {
-      action: "export",
-      format: pendingExport === "pdf" ? "pdf" : pendingExport,
-      background: pendingExport === "svg" ? "none" : "#ffffff",
-      scale: 2,
-    });
+    // Nothing is rendered for `.drawio`, so the picture options are left off rather than sent and
+    // ignored — a background and a scale on a text export would only read as if they did something.
+    postToEditor(
+      frame.current,
+      pendingExport === "drawio"
+        ? { action: "export", format: "xml" }
+        : {
+            action: "export",
+            format: pendingExport,
+            background: pendingExport === "svg" ? "none" : "#ffffff",
+            scale: 2,
+          },
+    );
   }, [pendingExport, ready]);
 
   /**
@@ -304,6 +435,42 @@ export function DrawioFrame({
     return () => clearTimeout(timer);
   }, [ready, url]);
 
+  /**
+   * The cover comes off anyway, a second after the editor took its document.
+   *
+   * `painted` waits on a message from inside the iframe, and the failure mode of waiting on a
+   * message is waiting forever — a bumped draw.io that stops answering `load` would leave a
+   * skeleton over a perfectly working editor, which is a far worse bug than the flicker this
+   * replaced. So the confirmation makes the reveal *accurate*, and this makes it *certain*. A
+   * second is long past a local load and short enough to be recoverable if it is ever reached.
+   */
+  useEffect(() => {
+    if (!ready || painted) return;
+    const timer = setTimeout(() => setPaintedFrame(frameKey), 1000);
+    return () => clearTimeout(timer);
+  }, [ready, painted, frameKey]);
+
+  /**
+   * Holds the cover in the tree for the length of its fade, so the editor arrives by turning up
+   * rather than by replacing a skeleton between two frames. Only ever *extends* the cover — what
+   * puts it on screen is `!painted`, which is synchronous with the remount.
+   *
+   * Armed while still covered rather than on the reveal, and that ordering is the whole trick: set
+   * on the way *out* it would arrive a commit after the veil had already been dropped from the
+   * tree, and an element that is unmounted and remounted at `opacity-0` does not transition — it
+   * blinks. Armed on the way in, the same node is on screen across the flip and only its class
+   * changes, which is what a CSS transition needs.
+   */
+  const [fading, setFading] = useState(false);
+  useEffect(() => {
+    if (!painted) {
+      setFading(true);
+      return;
+    }
+    const timer = setTimeout(() => setFading(false), 260);
+    return () => clearTimeout(timer);
+  }, [painted]);
+
   // The document has not arrived from the database yet. The frame is deliberately not mounted
   // before it does: the editor takes its document once, at `init`, and booting it against an empty
   // string would show a blank canvas for a diagram that has content.
@@ -321,14 +488,27 @@ export function DrawioFrame({
 
   return (
     <div className="relative h-full min-h-0 w-full">
-      {!ready && (
-        <div className="absolute inset-0 z-10">
+      {(!painted || fading) && (
+        <div
+          // **Opaque, unlike everywhere else `ViewSkeleton` is used.** It is a set of shimmer bars
+          // on a transparent container — fine as a stand-in for a view that has not rendered, but
+          // here it is laid over an iframe that is very much rendering, and a booting draw.io is a
+          // sheet of white. Without a background of its own the cover showed that white between
+          // its bars, which on a dark theme was most of what "opening a diagram flashes" was.
+          //
+          // `pointer-events-none` from the moment it starts fading: it is still on top for a
+          // quarter of a second after the editor is usable, and a click swallowed by a skeleton
+          // nobody can see any more is the kind of dead first click that reads as a hung app.
+          className={`absolute inset-0 z-10 bg-[var(--cf-bg)] transition-opacity duration-[250ms] ease-out ${
+            painted ? "pointer-events-none opacity-0" : "opacity-100"
+          }`}
+        >
           <ViewSkeleton />
         </div>
       )}
       <iframe
-        // Remounts on theme or language change — both are read once, while booting. See the
-        // component comment.
+        // Remounts on theme or language change — both are read once, while booting. The theme in
+        // here is `frameTheme`, which is the app's a wipe later; see the component comment.
         key={url}
         ref={frame}
         src={url}

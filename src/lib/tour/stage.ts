@@ -2,6 +2,7 @@ import { useAgentsStore } from "../../state/agentsStore";
 import { useBenchStore } from "../../state/benchStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
 import { useDbModalStore, type DbModal } from "../../state/dbModalStore";
+import { useDiagramsStore } from "../../state/diagramsStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useTerminalStore } from "../../state/terminalStore";
 import {
@@ -54,6 +55,16 @@ export interface TourStage {
    * other step closes it again.
    */
   dbDataSources?: boolean;
+  /**
+   * The diagrams workspace's "Draw with AI" window.
+   *
+   * The one control a tour cannot point at from outside: it is opened by a sparkle this app injects
+   * into draw.io's own toolbar, which lives **inside the iframe** — another document, whose elements
+   * no selector here can reach and whose rectangles are in their own coordinate space. So the step
+   * about drawing with an engine opens the window and spotlights that instead, which is the thing
+   * worth seeing anyway. Default `false`, so every other step puts it away.
+   */
+  diagramsAi?: boolean;
   /** AI panel docked open. Default `false`. */
   ai?: boolean;
   /** Terminal dock open. Default `false`. */
@@ -85,6 +96,7 @@ export interface AppSnapshot {
   agentsRosterOpen: boolean;
   agentsBenchOpen: boolean;
   dbModal: DbModal | null;
+  diagramsAiOpen: boolean;
 }
 
 /**
@@ -117,6 +129,7 @@ export function captureAppState(): AppSnapshot {
     agentsRosterOpen: useAgentsStore.getState().rosterOpen,
     agentsBenchOpen: useBenchStore.getState().open,
     dbModal: useDbModalStore.getState().modal,
+    diagramsAiOpen: useDiagramsStore.getState().aiOpen,
   };
 }
 
@@ -135,6 +148,7 @@ export function restoreAppState(snapshot: AppSnapshot): void {
   useAgentsStore.setState({ rosterOpen: snapshot.agentsRosterOpen });
   useBenchStore.setState({ open: snapshot.agentsBenchOpen });
   useDbModalStore.setState({ modal: snapshot.dbModal });
+  useDiagramsStore.setState({ aiOpen: snapshot.diagramsAiOpen });
 }
 
 /**
@@ -166,4 +180,7 @@ export function applyStage(stage: TourStage | undefined): void {
   // `kind: "connections"` is the dialog opened from the workspace rather than from one connection's
   // menu — nothing preselected, which is the state a tour wants: the list first, then the form.
   useDbModalStore.setState({ modal: stage?.dbDataSources ? { kind: "connections" } : null });
+  // Straight onto the store like the rest: `setAiOpen` is the view's own way in, and nothing
+  // about a tour opening a panel for one step should look to the app like the user did it.
+  useDiagramsStore.setState({ aiOpen: stage?.diagramsAi ?? false });
 }

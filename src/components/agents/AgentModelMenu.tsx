@@ -2,7 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Loader2, Lock, Settings2 } from "lucide-react";
 import { modelOptionsFor } from "../settings/modelPicker";
-import { AI_PROVIDERS, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useUiStore } from "../../state/uiStore";
@@ -94,8 +95,6 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
 
   if (!task) return null;
 
-  const providerMeta = AI_PROVIDERS.find((p) => p.id === provider) ?? null;
-  const ProviderIcon = providerMeta?.icon;
 
   const openMenu = () => {
     setOpen(true);
@@ -125,7 +124,7 @@ export function AgentModelMenu({ taskId }: { taskId: string }) {
         title={t("agents.agentLocked")}
         className="flex min-w-0 max-w-[60%] items-center gap-1 rounded-md border border-transparent px-1.5 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] hover:border-[var(--cf-border)] hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
       >
-        {ProviderIcon && <ProviderIcon size={11} className="shrink-0" />}
+        {provider && <ProviderGlyph providerId={provider} size={11} />}
         <span className="shrink-0">{task.agent_name || t("settings.sddNewAgent")}</span>
         <span className="text-[var(--cf-text-muted)]/50">·</span>
         <span className="truncate font-medium text-[var(--cf-text)]/70">

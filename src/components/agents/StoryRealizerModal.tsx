@@ -5,7 +5,8 @@ import { Note } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { Field } from "../settings/modelPicker";
-import { AI_PROVIDERS, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { loadAdoConnections } from "../../lib/adoConnections";
 import { loadJiraConnections } from "../../lib/jiraConnections";
 import { boardGetWorkItem, boardParseItemRef, openExternalUrl } from "../../lib/tauri/commands";
@@ -201,7 +202,7 @@ export function StoryRealizerModal({
       a.model,
       t,
     )}`,
-    icon: AI_PROVIDERS.find((p) => p.id === a.provider)?.icon,
+    leading: <ProviderGlyph providerId={a.provider} size={13} />,
     disabled: !isProviderReady(statuses, a.provider),
   }));
 

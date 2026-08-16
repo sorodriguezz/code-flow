@@ -29,7 +29,7 @@ const TICK_MS = 30_000;
  * disagreement nobody notices until they trust the wrong one.
  *
  * A provider with nothing to report and nothing to say about why is not rendered at all. That is
- * the rule the module behind this is built on: Ollama has no plan to be out of, and a metered API
+ * the rule the module behind this is built on: Cline publishes no plan window, and a metered API
  * key has no cap, so a row for either would be an invention.
  *
  * Every number here is **consumption** — how far into the window you are. One direction throughout,

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { GripHorizontal, Sparkles, X } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { AI_PROVIDERS, DEFAULT_AI_PROVIDER } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { notesWriteWithAi } from "../../lib/tauri/notesCommands";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { useAiProviderStore } from "../../state/aiProviderStore";
@@ -69,7 +70,6 @@ export function NoteAiPanel({
   const provider = AI_PROVIDERS.find((entry) => entry.id === providerId);
   const providerLabel = provider?.label ?? (provider?.labelKey ? t(provider.labelKey) : providerId);
   const modelLabel = routedModel?.trim() || t("notes.ai.defaultModel");
-  const EngineIcon = provider?.icon;
 
   /** Keeps the window inside the editor pane. Called while dragging and whenever the pane resizes
    *  — opening the outline or dragging the split narrows it under a window already placed. */
@@ -253,7 +253,7 @@ export function NoteAiPanel({
           className="flex items-center gap-1 text-[10px] text-[var(--cf-text-muted)]"
           title={t("notes.ai.engineHint", { provider: providerLabel, model: modelLabel })}
         >
-          {EngineIcon && <EngineIcon size={10} className="shrink-0" />}
+          <ProviderGlyph providerId={providerId} size={10} />
           <span className="truncate">
             {providerLabel} · {modelLabel}
           </span>

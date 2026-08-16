@@ -56,7 +56,10 @@ export function DiagramsView() {
   const commitSize = useLayoutStore((s) => s.commitSize);
   const language = useLanguageStore((s) => s.language);
   const t = useT();
-  const [aiOpen, setAiOpen] = useState(false);
+  // In the store rather than here, so the guided tour can put this window on screen for the step
+  // that is about it. See `aiOpen` in `diagramsStore`.
+  const aiOpen = useDiagramsStore((s) => s.aiOpen);
+  const setAiOpen = useDiagramsStore((s) => s.setAiOpen);
   const [exportMenu, setExportMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(
     null,
   );
@@ -77,6 +80,10 @@ export function DiagramsView() {
     return () => {
       document.removeEventListener("visibilitychange", onHide);
       void useDiagramsStore.getState().flush();
+      // The AI window does not survive leaving the app, which is what it did for free while this
+      // was component state. It focuses its box as it opens, so a panel left up in March would
+      // otherwise take the caret the next time this view is walked into.
+      useDiagramsStore.getState().setAiOpen(false);
     };
   }, []);
 
@@ -115,7 +122,9 @@ export function DiagramsView() {
     setExportMenu({
       x: at.x,
       y: at.y,
-      items: (["png", "svg", "pdf"] as const).map((format) => ({
+      // `.drawio` last, after the three pictures: it is the one that leaves with the diagram still
+      // editable, so it reads as "or take the whole thing elsewhere" rather than as a fourth image.
+      items: (["png", "svg", "pdf", "drawio"] as const).map((format) => ({
         label: t(`diagrams.exportAs.${format}`),
         onClick: () => requestExport(format),
       })),
@@ -176,6 +185,9 @@ export function DiagramsView() {
                   title={t("diagrams.undoGeneration")}
                   aria-label={t("diagrams.undoGeneration")}
                   onClick={() => undoLastGeneration()}
+                  // The tour has a step about this button. It is conditional, so that step lists
+                  // the editor pane behind it as a fallback — see `DIAGRAMS_TOUR`.
+                  data-tour="diagrams-undo"
                 >
                   <Undo2 size={14} />
                 </button>

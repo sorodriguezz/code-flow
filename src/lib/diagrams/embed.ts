@@ -14,7 +14,8 @@
  *    change signal we use. Note that it does *not* fire for a programmatic `merge`, which is why
  *    the AI path has to save explicitly rather than trusting this.
  * 5. `export` — the answer to `{ action: "export", format }`, carrying `data` as a **`data:` URI**
- *    (not raw markup) plus the `xml` it was rendered from.
+ *    (not raw markup) plus the `xml` it was rendered from. The one exception is `format: "xml"`,
+ *    which has nothing to render and answers on `xml` alone.
  *
  * There is deliberately no `save` handling: the Save button is turned off in the URL, because a
  * document that autosaves has nothing for one to do, and a button that looks like it might not have
@@ -36,8 +37,8 @@ const EDITOR_PATH = "/drawio/index.html";
  *   draw.io rather than draw our own boxes.
  * - `noSaveBtn=1&noExitBtn=1&saveAndExit=0` — **all three**, verified together: with only the first
  *   two, the editor still draws a combined "Save and exit" button.
- * - `dark` — the theme, which cannot be changed after load, so the frame is remounted on a theme
- *   change (see `DrawioFrame`).
+ * - `dark` — the theme the editor *boots* in. It can be changed afterwards without a reload; see
+ *   [`setEditorDarkMode`], which is what a light/dark switch actually goes through.
  * - `lang` — the editor's own UI language, following the app's.
  * - `noDevice=1` — no device/telemetry ping.
  */
@@ -176,6 +177,117 @@ export function editorConfig(dark: boolean): Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
+// Dark mode, without a reload
+// ---------------------------------------------------------------------------
+
+/**
+ * The parts of the editor's own window this module reaches for. Deliberately the smallest possible
+ * surface, and every field optional: this is a description of somebody else's runtime, and the only
+ * honest thing to assume about it is that any of it may be gone after a version bump.
+ */
+interface EditorUiLike {
+  setDarkMode?: (dark: boolean) => void;
+}
+
+interface DrawioWindow extends Window {
+  Editor?: { darkMode?: boolean };
+  mxUtils?: { lightDarkColorSupported?: boolean };
+  Draw?: { loadPlugin?: (plugin: (ui: EditorUiLike) => void) => void };
+  App?: {
+    prototype: { initializeEmbedMode?: () => void };
+    embedModePluginsCount?: number;
+  };
+}
+
+/** One editor instance per frame window, found once. Weak so a remounted frame is not held alive. */
+const EDITOR_UIS = new WeakMap<Window, EditorUiLike>();
+
+/**
+ * The editor's own `EditorUi` instance, which draw.io keeps entirely to itself.
+ *
+ * It is a local inside `App.main` — nothing is hung on the window — so there is exactly one door:
+ * in embed mode draw.io publishes `Draw.loadPlugin`, which calls back with the instance. That door
+ * has a spring on it. Its `finally` decrements the plugin counter and calls `initializeEmbedMode()`
+ * again, and that method *installs a second message handler* — the app would then receive every
+ * `autosave` and `export` twice, and save the document twice for each edit.
+ *
+ * So the spring is held for the length of the call: `initializeEmbedMode` is stubbed on
+ * `App.prototype` (the override that would actually run — `EditorUi.prototype` has its own, which
+ * is not the one reached), and the counter is put back. Both are restored in a `finally` of our
+ * own, so a plugin callback that threw could not leave the editor without its initialiser.
+ *
+ * Verified against the vendored build by driving a real embed handshake and confirming the protocol
+ * log was unchanged across the call — `configure, init, load` before and after, no repeats.
+ */
+function editorUi(win: DrawioWindow): EditorUiLike | null {
+  const cached = EDITOR_UIS.get(win);
+  if (cached) return cached;
+
+  const loadPlugin = win.Draw?.loadPlugin;
+  const app = win.App;
+  if (typeof loadPlugin !== "function" || !app?.prototype) return null;
+
+  // A holder rather than a bare `let`, because the assignment happens inside a callback and the
+  // compiler cannot see through that — it would narrow the variable to `null` for the read below.
+  const found: { ui: EditorUiLike | null } = { ui: null };
+  const initializer = app.prototype.initializeEmbedMode;
+  const plugins = app.embedModePluginsCount;
+  app.prototype.initializeEmbedMode = () => {};
+  try {
+    loadPlugin((ui) => {
+      found.ui = ui;
+    });
+  } finally {
+    app.prototype.initializeEmbedMode = initializer;
+    app.embedModePluginsCount = plugins;
+  }
+
+  if (typeof found.ui?.setDarkMode !== "function") return null;
+  EDITOR_UIS.set(win, found.ui);
+  return found.ui;
+}
+
+/**
+ * Repaints the open editor light or dark, in place.
+ *
+ * **Why this is worth reaching into the iframe for.** The theme is a URL parameter, so the obvious
+ * way to change it is to remount the frame — and that reboots draw.io: tens of megabytes of
+ * JavaScript, the document re-sent, the view refitted, a second or so of skeleton over the canvas
+ * every time the app goes light or dark. Modern draw.io does not need any of that. Its dark mode is
+ * a class on the container plus a `color-scheme`, with the whole editor stylesheet and the drawing
+ * itself written in CSS `light-dark()` — so `setDarkMode` recolours the toolbar, the shape palette,
+ * the format panel and the shapes on the canvas in one frame, with the document, the zoom and the
+ * scroll position untouched. That is a reload replaced by a repaint.
+ *
+ * **Returns whether it worked, and the caller must respect a `false`.** Everything here is somebody
+ * else's private runtime: `Draw.loadPlugin`, `App.prototype`, `Editor.darkMode`. A version bump is
+ * entitled to move any of it, and the answer to that is a diagram that still changes theme by the
+ * old, slow route (see `DrawioFrame`) — never a diagram stuck in the wrong one. The result is read
+ * back from `Editor.darkMode` rather than inferred from "nothing threw", because the editor's own
+ * `setDarkMode` is a no-op when the engine has no `light-dark()` and would otherwise report success
+ * for having done nothing.
+ */
+export function setEditorDarkMode(frame: HTMLIFrameElement | null, dark: boolean): boolean {
+  try {
+    const win = frame?.contentWindow as DrawioWindow | null | undefined;
+    // No `Editor` means the frame is between documents — booting, or already gone.
+    if (!win?.Editor) return false;
+    if (win.Editor.darkMode === dark) return true;
+    if (!win.mxUtils?.lightDarkColorSupported) return false;
+
+    const ui = editorUi(win);
+    if (!ui?.setDarkMode) return false;
+    ui.setDarkMode(dark);
+    return win.Editor.darkMode === dark;
+  } catch {
+    // A cross-origin frame, a document swapped out mid-call, an internal that moved. All of them
+    // mean the same thing to the caller, and none of them is worth an error over: the reload is
+    // still there.
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Messages
 // ---------------------------------------------------------------------------
 
@@ -216,8 +328,15 @@ export type EmbedAction =
       action: "export";
       /** `xmlsvg` embeds the document inside the SVG, so the file reopens as an editable diagram
        *  rather than as a picture of one. That is what makes it the right choice for a save and
-       *  the wrong one for a thumbnail. */
-      format: "png" | "svg" | "xmlsvg" | "pdf";
+       *  the wrong one for a thumbnail.
+       *
+       *  `xml` is the odd one out and the reply says so: it answers on `xml` and leaves `data`
+       *  unset, because there is nothing to render — the document *is* the file. Verified against
+       *  the vendored build, which handles it as `message.xml = getFileData(true)`, i.e. the whole
+       *  `<mxfile>` wrapper, uncompressed (`Editor.defaultCompressed` is false and nothing here
+       *  turns it back on). That is what makes the saved file readable by anything, not just by
+       *  draw.io. */
+      format: "png" | "svg" | "xmlsvg" | "pdf" | "xml";
       background?: string;
       scale?: number;
       width?: number;
@@ -267,6 +386,70 @@ export const THUMBNAIL_EXPORT: EmbedAction = {
  * fetch. Dropped silently on purpose: nothing the user did was wrong.
  */
 export const THUMBNAIL_MAX_CHARS = 128_000;
+
+// ---------------------------------------------------------------------------
+// Presses, forwarded back out of the frame
+// ---------------------------------------------------------------------------
+
+/**
+ * Echoes a press inside the editor as a press on the `<iframe>` itself, so the app can see it.
+ *
+ * **Why anything is needed at all.** Every popover in this app closes the same way: a `mousedown`
+ * listener on `document` or `window` that asks whether the press landed inside its own panel and
+ * dismisses itself when it did not — the battery and usage meters, the notification panel, every
+ * right-click menu in every tree, the model pickers, `useDismissOnOutside`. Events inside an iframe
+ * are delivered in *that* document and do not cross into this one, so as far as all of them are
+ * concerned, clicking on a diagram is not a click at all. Open the battery popover, click into the
+ * canvas, and it stays there over the drawing — while clicking anywhere else in the window closes
+ * it, which is what makes it read as the app ignoring the diagram rather than as a rule.
+ *
+ * So the press is repeated on the iframe element, which is a real node in this document. Nothing
+ * has to know about diagrams: the echo bubbles to `document` and `window` like any other press, and
+ * `event.target` is an element no popover contains — which is exactly the question every one of
+ * those listeners was already asking.
+ *
+ * Three details do the work:
+ *
+ * - **Capture phase**, so an editor that stops the press on its way down cannot also stop the app
+ *   from hearing that it happened. Whether draw.io swallows a click is its business; whether this
+ *   window's menus close is not.
+ * - **Coordinates translated out of the frame's space.** They are what a hit test would read, and
+ *   `overlayDragRegion` runs one on every press: left unmapped, a click in the middle of a diagram
+ *   arrives at the parent as a press near the window's top-left corner — the title bar.
+ * - **`cancelable: false`.** This is a notification that something already happened. There is
+ *   nothing left for a `preventDefault` to prevent, and saying so keeps a listener from believing
+ *   it suppressed a press it never had.
+ *
+ * `mousedown` only, and deliberately not `click`: `startExternalLinks` opens anchors on a
+ * document-level click, and an echo carrying the iframe as its target has no business anywhere near
+ * that. Dismissal is what this is for, and dismissal is a `mousedown`.
+ *
+ * Returns the unsubscribe.
+ */
+export function forwardFramePresses(frame: HTMLIFrameElement | null): () => void {
+  const doc = frame?.contentDocument;
+  if (!frame || !doc) return () => {};
+
+  const echo = (event: MouseEvent) => {
+    const box = frame.getBoundingClientRect();
+    frame.dispatchEvent(
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        cancelable: false,
+        button: event.button,
+        buttons: event.buttons,
+        // A real press, as far as anything counting clicks is concerned — the editor only ever
+        // reaches this window through a press that genuinely landed on it.
+        detail: 1,
+        clientX: box.left + event.clientX,
+        clientY: box.top + event.clientY,
+      }),
+    );
+  };
+
+  doc.addEventListener("mousedown", echo, true);
+  return () => doc.removeEventListener("mousedown", echo, true);
+}
 
 // ---------------------------------------------------------------------------
 // This app's own toolbar buttons

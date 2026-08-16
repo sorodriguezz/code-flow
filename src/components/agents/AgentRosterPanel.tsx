@@ -5,7 +5,8 @@ import { ToolbarButton } from "../db/dbChrome";
 import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
 import { deleteWorkspaceAgent, upsertWorkspaceAgent } from "../../lib/tauri/commands";
-import { AI_PROVIDERS, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { isRunnableAgent, useAgentsStore } from "../../state/agentsStore";
 import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -114,8 +115,6 @@ export function AgentRosterPanel({
           <div className="overflow-hidden rounded-lg border border-[var(--cf-border)] divide-y divide-[var(--cf-border)]">
             {roster.map((agent, at) => {
               const runnable = isRunnableAgent(agent);
-              const providerMeta = AI_PROVIDERS.find((p) => p.id === agent.provider) ?? null;
-              const Icon = providerMeta?.icon ?? Bot;
               const missing = agent.provider !== "" && !isProviderReady(statuses, agent.provider);
               const summary = agent.provider
                 ? `${providerDisplayLabel(agent.provider, t)} · ${
@@ -139,7 +138,11 @@ export function AgentRosterPanel({
                     title={agent.role || agent.name}
                   >
                     <span className="flex items-center gap-1.5">
-                      <Icon size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+                      {agent.provider ? (
+                        <ProviderGlyph providerId={agent.provider} size={11} />
+                      ) : (
+                        <Bot size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+                      )}
                       <span
                         className={`min-w-0 truncate text-[13px] ${
                           agent.enabled ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"

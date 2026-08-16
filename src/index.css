@@ -1119,42 +1119,63 @@ body {
  * view transition; the rules below are what the browser plays between its
  * before/after photographs.
  *
- * The default cross-fade is replaced deliberately: both snapshots are held
- * still, the new one stacked on top, and revealed left to right with an
- * animated clip-path — a curtain drawn across. `mix-blend-mode: normal`
- * matters, because the default `plus-lighter` is built for a cross-fade and
- * would wash the two themes into each other while they overlap.
+ * The default cross-fade is replaced deliberately: one snapshot is held still,
+ * the other clipped across it left to right — a curtain drawn across.
+ * `mix-blend-mode: normal` matters, because the default `plus-lighter` is built
+ * for a cross-fade and would wash the two themes into each other while they
+ * overlap.
+ *
+ * **The *old* view is the one that animates, and that is a performance
+ * decision, not a stylistic one.** The two pseudo-elements are not the same
+ * kind of thing: `::view-transition-old` is a photograph — a flat, immutable
+ * texture the compositor can push around for free — while
+ * `::view-transition-new` is a *live* view of the real document. Clipping the
+ * live one, as this used to, means the browser re-rasterises the whole window
+ * on every frame of the wipe, and it does so at the single worst moment the app
+ * ever has: right after a theme flip, when `data-theme` has just invalidated
+ * every `dark:` rule in the document, the ambient gradients behind the main
+ * panes have to be redrawn, Monaco is re-tokenising and any spinner or status
+ * pulse on screen is dirtying the layer again each frame. Half a second of that
+ * is what made the light/dark switch stutter while the accent and code-theme
+ * switches — which change far less per frame — looked smooth through the very
+ * same wipe.
+ *
+ * Stacking the old snapshot on top and clipping *it* away leaves an identical
+ * picture (new colours arriving from the left edge) with the moving layer being
+ * a static bitmap and the live one sitting still underneath, painted once.
  * ================================================================== */
 ::view-transition-old(root),
 ::view-transition-new(root) {
   animation: none;
   mix-blend-mode: normal;
 }
-::view-transition-old(root) {
+::view-transition-new(root) {
   z-index: 0;
 }
-::view-transition-new(root) {
+::view-transition-old(root) {
   z-index: 1;
 }
 
 @media (prefers-reduced-motion: no-preference) {
-  ::view-transition-new(root) {
+  ::view-transition-old(root) {
     animation: cf-theme-wipe 0.55s cubic-bezier(0.65, 0, 0.35, 1) both;
   }
 }
 
 @keyframes cf-theme-wipe {
-  /* inset(top right bottom left) — a right inset of 100% leaves a zero-width
-     sliver pinned to the left edge, which then grows across to full width.
+  /* inset(top right bottom left) — the old snapshot starts unclipped, covering
+     the window, and its left edge is then pushed across to the right until
+     nothing of it is left, uncovering the new colours behind it in the same
+     left-to-right order.
      Sideways rather than downward because the window is wider than it is tall
      and every band of it — sidebar, tree, editor, panel — is a vertical one:
      travelling across, the wipe hands the new colour to them in the order they
      are read, instead of cutting every one of them in half at once. */
   from {
-    clip-path: inset(0 100% 0 0);
+    clip-path: inset(0 0 0 0);
   }
   to {
-    clip-path: inset(0 0 0 0);
+    clip-path: inset(0 0 0 100%);
   }
 }
 

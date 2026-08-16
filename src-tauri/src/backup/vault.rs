@@ -27,7 +27,7 @@ use super::snapshot::SecretEntry;
 /// The AI providers a key can be stored for. Mirrors `AI_PROVIDERS` in `src/lib/aiProviders.ts`;
 /// the subscription-based engines are listed too because an install can be pointed at an
 /// OpenAI-compatible endpoint for any of them.
-const AI_PROVIDERS: &[&str] = &["claude", "gemini", "codex", "grok", "opencode", "ollama", "openai"];
+const AI_PROVIDERS: &[&str] = &["claude", "gemini", "codex", "grok", "opencode", "cline", "openai"];
 
 /// Reads a JSON `app_settings` blob and pulls one string field out of each of its entries — the
 /// shape both `ado_connections` (`[{org}]`) and `github_connections` (`[{host}]`) use.

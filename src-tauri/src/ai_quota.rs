@@ -27,8 +27,9 @@
 //! quieter option was ruled out first and why scraping is allowed to come up empty.
 //!
 //! Everything else is **absent on purpose**, and absence here is a claim this module is willing to
-//! make. Ollama runs on the user's own machine and has no plan to be out of; an OpenAI-compatible
-//! endpoint on an API key is metered, not capped, so a percentage would be an invention.
+//! make. Cline publishes no plan window of its own, and the local models it usually drives run on
+//! the user's machine with no plan to be out of; an OpenAI-compatible endpoint on an API key is
+//! metered, not capped, so a percentage would be an invention.
 //!
 //! **Two rules this file does not break.**
 //!
@@ -208,7 +209,7 @@ fn remember(provider: &str, quota: ProviderQuota) {
     }
 }
 
-/// One client for the process, cloned per call — same reasoning as [`crate::ollama::client`]: a
+/// One client for the process, cloned per call — same reasoning as [`crate::openai::client`]: a
 /// fresh `reqwest::Client` per request rebuilds the whole rustls config and throws away the
 /// connection pool.
 ///

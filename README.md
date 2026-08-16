@@ -11,7 +11,7 @@ let AI write your commits, find bugs and resolve conflicts — all in a fast, na
 And when you're done, test the endpoint you just changed and query the database behind it
 without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-1.16.0-6C5CE7)
+![version](https://img.shields.io/badge/version-1.16.1-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -65,7 +65,7 @@ what's missing, instead of leaving you to guess why something doesn't work.
 | **Gemini** | CLI (Antigravity), with tools | A strong alternative on a Google account |
 | **Grok** | CLI, with tools | Resumes the exact conversation, not "the last one" |
 | **Open Code** | CLI, any model you configure | Mixing providers however you like |
-| **Ollama** | 🔒 **Local**, no cloud | Full privacy, offline, no cost |
+| **Cline** | CLI, with tools — 🔒 **local** via Ollama | Full privacy, offline, no cost — and it still edits files |
 | **OpenAI** | API key, editable endpoint | OpenRouter, Groq, DeepSeek, Azure or vLLM |
 
 The **OpenAI** entry speaks the usual `/v1/chat/completions` and the URL is yours to set,
@@ -99,10 +99,11 @@ the chat itself, without going through Settings.
 - **Create pull requests** with a title and description generated from the diff.
 - **Customizable templates** for all five actions, shared across providers.
 
-> 🔒 **Code that can't leave the company?** Set Ollama as your provider and everything
-> above runs on your machine, offline and with no cost per token.
-> *(Features that edit files — fixing findings — need an engine with tools, meaning
-> one of the five CLIs; the app says so and hides what doesn't apply.)*
+> 🔒 **Code that can't leave the company?** Set Cline as your provider, point it at a local
+> model (`cline auth ollama`) and everything above runs on your machine, offline and with no
+> cost per token — fixing findings included, because Cline drives the model instead of just
+> completing text.
+> *(Only the OpenAI entry is text-only: it has no tools, and the app hides what doesn't apply.)*
 
 ### Nothing is lost by looking away
 
@@ -264,7 +265,7 @@ The query you need to check is one tab away from the migration you just wrote.
 
 - **Secret scanning before every commit** — catches API keys, tokens and private keys, and stops you in time. Deterministic rules, nothing sent anywhere.
 - Your **tokens live in the system keychain**, never in plain text.
-- A **100% local option** with Ollama: your code never leaves the machine.
+- A **100% local option** with Cline over Ollama: your code never leaves the machine.
 - It's a desktop app: no server, no account, no telemetry.
 
 ## 🎨 Make it yours
@@ -291,7 +292,7 @@ you like and group them into workspaces.
 **2. Choose your AI assistant**
 **Settings › AI Assistant › Providers** shows the seven engines with their status
 (*Available* / *Not found*). Expand the one you want, check its binary — or its endpoint,
-for Ollama and OpenAI — and pick a model. Mark it as **default** and you're done.
+for OpenAI — and pick a model. Mark it as **default** and you're done.
 
 **3. Tune it per task (optional)**
 Under **Model per task**, give each action a different engine. Everything starts on
@@ -304,8 +305,9 @@ and review pull requests — and, on Azure DevOps, to read wikis. **Jira** and
 not for pull requests. Tokens are stored in your operating system's keychain, never in the app's own
 database.
 
-> 💡 Want to try it without installing any CLI? Install [Ollama](https://ollama.com), run
-> `ollama pull qwen2.5-coder` and select it in Settings. No accounts, no keys.
+> 💡 Want to try it without an account? Install [Ollama](https://ollama.com), run
+> `ollama pull qwen2.5-coder`, then `npm install -g cline` and `cline auth ollama`. Select
+> **Cline** in Settings with the model `ollama/qwen2.5-coder`. No accounts, no keys.
 
 ## 💾 Download
 

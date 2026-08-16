@@ -5,7 +5,8 @@ import { Note } from "../api/settingsChrome";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { Field } from "../settings/modelPicker";
-import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { isAgenticProvider, modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { isRunnableAgent, useAgentsStore } from "../../state/agentsStore";
 import { isProviderReady, useProviderStatusStore } from "../../state/providerStatusStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
@@ -182,7 +183,7 @@ export function NewTaskModal({
                 a.model,
                 t,
               )}`,
-              icon: AI_PROVIDERS.find((p) => p.id === a.provider)?.icon,
+              leading: <ProviderGlyph providerId={a.provider} size={13} />,
               disabled: !isProviderReady(statuses, a.provider),
             }))}
           />

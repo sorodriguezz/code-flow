@@ -95,7 +95,7 @@ export const onAiOutputBatch = (handler: (event: AiOutputBatchEvent) => void) =>
 
 export interface AiEngineEvent {
   run_id: string;
-  /** Display name of the engine — "Claude", "Codex", "Ollama"… */
+  /** Display name of the engine — "Claude", "Codex", "Cline"… */
   engine: string;
   /** Model id forced for this run; empty when the CLI is picking its own default. */
   model: string;

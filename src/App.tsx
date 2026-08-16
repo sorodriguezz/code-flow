@@ -269,8 +269,6 @@ export default function App() {
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const setRepoPath = useRepoStore((s) => s.setRepoPath);
   const autoFetchSeconds = usePreferencesStore((s) => s.autoFetchSeconds);
-  const resolvedTheme = useThemeStore((s) => s.resolved);
-  const accentId = useAccentStore((s) => s.accentId);
   const activeView = useUiStore((s) => s.activeView);
   // Subscribed to for the background fetch below and nothing else: the API tab is two tools behind
   // one view, so opening the database side from the rail is an arrival that `activeView` alone
@@ -355,11 +353,13 @@ export default function App() {
     initRequirements,
   ]);
 
-  // Re-apply the chosen accent whenever the resolved theme or the accent selection changes,
-  // since the actual hex differs per theme (a lighter shade is used on dark backgrounds).
-  useEffect(() => {
-    useAccentStore.getState().apply(resolvedTheme);
-  }, [resolvedTheme, accentId]);
+  // The accent used to be re-applied from here, on a `[resolved, accentId]` effect. Both writers
+  // already do it themselves — `applyToDocument` in `themeStore` and `setAccent` in `accentStore`,
+  // in the same synchronous block as the colours they belong to — so all this added was a *root*
+  // subscription to two stores that change during a theme wipe. Every light/dark flip and every
+  // accent pick therefore re-rendered the whole component tree, synchronously, inside
+  // `withThemeTransition`'s `flushSync` — which is the browser's deadline for photographing the
+  // new state and starting the wipe. Boot is covered by the explicit `apply` after the init batch.
 
   // Single source of truth for which repo the git engine points at — covers manual
   // sidebar clicks *and* the auto-selected first project on load/reload, which

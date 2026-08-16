@@ -12,7 +12,7 @@ app rápida y nativa. Y cuando termines, prueba el endpoint que acabas de cambia
 la base de datos que hay detrás sin salir de la ventana. **Y decides qué modelo hace cada
 cosa.**
 
-![versión](https://img.shields.io/badge/versión-1.16.0-6C5CE7)
+![versión](https://img.shields.io/badge/versión-1.16.1-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-ES%20%7C%20EN-0984E3)
@@ -66,7 +66,7 @@ falta, en vez de dejarte adivinar por qué algo no funciona.
 | **Gemini** | CLI (Antigravity), con herramientas | Alternativa potente con cuenta de Google |
 | **Grok** | CLI, con herramientas | Retoma la conversación exacta, no «la última» |
 | **Open Code** | CLI, cualquier modelo que configures | Mezclar proveedores a tu gusto |
-| **Ollama** | 🔒 **Local**, sin nube | Privacidad total, sin conexión y sin coste |
+| **Cline** | CLI, con herramientas — 🔒 **local** vía Ollama | Privacidad total, sin conexión y sin coste — y además edita archivos |
 | **OpenAI** | Clave de API, endpoint editable | OpenRouter, Groq, DeepSeek, Azure o vLLM |
 
 La entrada de **OpenAI** habla el `/v1/chat/completions` de siempre y la URL es tuya, así
@@ -100,10 +100,11 @@ clics**, sin pasar por Ajustes.
 - **Crea pull requests** con título y descripción generados desde el diff.
 - **Plantillas personalizables** para las cinco acciones, compartidas entre proveedores.
 
-> 🔒 **¿Tu código no puede salir de la empresa?** Pon Ollama como proveedor y todo lo
-> anterior corre en tu máquina, sin conexión y sin coste por token.
-> *(Las funciones que editan archivos —corregir hallazgos— necesitan un motor con
-> herramientas, es decir uno de los cinco CLI; la app te lo indica y oculta lo que no
+> 🔒 **¿Tu código no puede salir de la empresa?** Pon Cline como proveedor, apúntalo a un
+> modelo local (`cline auth ollama`) y todo lo anterior corre en tu máquina, sin conexión y sin
+> coste por token — corregir hallazgos incluido, porque Cline conduce el modelo en vez de solo
+> completar texto.
+> *(La única entrada sin herramientas es OpenAI; la app te lo indica y oculta lo que no
 > aplica.)*
 
 ### Nada se pierde por mirar a otro lado
@@ -273,7 +274,7 @@ La consulta que necesitas comprobar está a una pestaña de la migración que ac
 
 - **Escaneo de secretos antes de cada commit** — detecta claves de API, tokens y llaves privadas, y te para a tiempo. Reglas deterministas, sin enviar nada a ningún sitio.
 - Tus **tokens viven en el llavero del sistema**, nunca en texto plano.
-- **Opción 100% local** con Ollama: tu código nunca sale del equipo.
+- **Opción 100% local** con Cline sobre Ollama: tu código nunca sale del equipo.
 - Es una app de escritorio: sin servidor, sin cuenta, sin telemetría.
 
 ## 🎨 Hazlo tuyo
@@ -300,7 +301,7 @@ añadir todos los que quieras y agrúpalos en espacios de trabajo.
 **2. Elige tu asistente de IA**
 En **Ajustes › Asistente de IA › Proveedores** verás los siete motores con su estado
 (*Disponible* / *No encontrado*). Despliega el que quieras usar, comprueba su binario —o
-el endpoint, si es Ollama u OpenAI— y elige su modelo. Márcalo como **predeterminado** y
+el endpoint, si es OpenAI— y elige su modelo. Márcalo como **predeterminado** y
 listo.
 
 **3. Afina por tarea (opcional)**
@@ -313,8 +314,9 @@ revisar pull requests — y, en Azure DevOps, para leer wikis. **Jira** y **mond
 la misma pantalla: como no alojan código, aparecen para tu backlog y no para los pull requests. Los
 tokens se guardan en el llavero de tu sistema operativo, nunca en la base de datos de la app.
 
-> 💡 ¿Quieres probarlo sin instalar ningún CLI? Instala [Ollama](https://ollama.com),
-> ejecuta `ollama pull qwen2.5-coder` y selecciónalo en Ajustes. Sin cuentas ni claves.
+> 💡 ¿Quieres probarlo sin cuentas? Instala [Ollama](https://ollama.com), ejecuta
+> `ollama pull qwen2.5-coder` y luego `npm install -g cline` y `cline auth ollama`. Elige
+> **Cline** en Ajustes con el modelo `ollama/qwen2.5-coder`. Sin cuentas ni claves.
 
 ## 💾 Descarga
 

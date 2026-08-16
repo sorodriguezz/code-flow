@@ -11,8 +11,8 @@ interface ProviderStatusState {
   byProvider: Record<string, ProviderStatus>;
   /** True while a full sweep is in flight — drives the list's initial skeleton. */
   checking: boolean;
-  /** Re-checks every selectable provider. Safe to call repeatedly; it's a cheap PATH lookup plus
-   * one local HTTP request for Ollama. */
+  /** Re-checks every selectable provider. Safe to call repeatedly; it's a cheap PATH lookup for the
+   * CLI engines plus one request for each HTTP one. */
   checkAll: () => Promise<void>;
   /** Re-checks a single provider — used after its binary/endpoint is edited. */
   check: (providerId: string) => Promise<void>;

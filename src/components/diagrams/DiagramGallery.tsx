@@ -153,39 +153,39 @@ export function DiagramGallery() {
 
   return (
     <div className="flex h-full min-h-0 flex-col" data-tour="diagrams-gallery">
-      <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
-        <nav
-          className="flex min-w-0 flex-1 items-center gap-1 text-[12px]"
-          aria-label={t("diagrams.breadcrumb")}
-        >
-          <button
-            type="button"
-            onClick={() => setFolderFilter(null)}
-            className={`truncate rounded px-1 py-0.5 transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.05] ${
-              folderFilter === null ? "font-semibold" : "text-[var(--cf-text-muted)]"
-            }`}
+      {/* The Notes shelf's header, to the pixel — same padding, same trail-then-count grouping,
+          same crumbs, same segmented view switch. The two are one screen over different documents,
+          and a bar that is 3px narrower on one side with a different kind of view toggle reads as
+          two apps rather than as two rooms of the same one. The count is the deliberate exception:
+          it keeps its own wording, because "n diagrams" is not the sentence Notes tells. */}
+      <header className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-4 py-2">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <nav
+            className="flex min-w-0 items-center gap-0.5 text-[13px]"
+            aria-label={t("diagrams.breadcrumb")}
           >
-            {t("diagrams.allDiagrams")}
-          </button>
-          {crumbs.map((folder, index) => (
-            <span key={folder.id} className="flex min-w-0 items-center gap-1">
-              <ChevronRight size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
-              <button
-                type="button"
-                onClick={() => setFolderFilter(folder.id)}
-                className={`truncate rounded px-1 py-0.5 transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.05] ${
-                  index === crumbs.length - 1 ? "font-semibold" : "text-[var(--cf-text-muted)]"
-                }`}
-              >
-                {folder.name}
-              </button>
-            </span>
-          ))}
-        </nav>
+            <Crumb
+              label={t("diagrams.allDiagrams")}
+              current={crumbs.length === 0}
+              onClick={() => setFolderFilter(null)}
+            />
+            {crumbs.map((folder, index) => (
+              <span key={folder.id} className="flex min-w-0 items-center gap-0.5">
+                <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-muted)]" aria-hidden />
+                <Crumb
+                  label={folder.name}
+                  tint={folderInk(folder.color)}
+                  current={index === crumbs.length - 1}
+                  onClick={() => setFolderFilter(folder.id)}
+                />
+              </span>
+            ))}
+          </nav>
 
-        <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
-          {t("diagrams.count", { count: String(shown.length) })}
-        </span>
+          <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
+            {t("diagrams.count", { count: String(shown.length) })}
+          </span>
+        </div>
 
         <button
           type="button"
@@ -213,16 +213,24 @@ export function DiagramGallery() {
           <ArrowUpDown size={13} />
         </button>
 
-        <button
-          type="button"
-          className={ICON_BUTTON}
-          title={galleryView === "grid" ? t("diagrams.viewList") : t("diagrams.viewGrid")}
-          aria-label={galleryView === "grid" ? t("diagrams.viewList") : t("diagrams.viewGrid")}
-          onClick={() => setGalleryView(galleryView === "grid" ? "list" : "grid")}
-        >
-          {galleryView === "grid" ? <List size={13} /> : <LayoutGrid size={13} />}
-        </button>
-
+        {/* Both options shown at once, as in Notes, rather than one button that swaps to the other.
+            A toggle wearing the icon of the view you are *not* in has to be read twice — the list
+            glyph meaning "you are in grid" is the same picture as "you are in list" — and it never
+            says which of the two is current. Two buttons, one of them lit, answer that by looking. */}
+        <div className="flex shrink-0 items-center gap-0.5 rounded-md bg-black/[0.04] p-0.5 dark:bg-white/[0.06]">
+          <ViewButton
+            icon={LayoutGrid}
+            label={t("diagrams.viewGrid")}
+            active={galleryView === "grid"}
+            onClick={() => setGalleryView("grid")}
+          />
+          <ViewButton
+            icon={List}
+            label={t("diagrams.viewList")}
+            active={galleryView === "list"}
+            onClick={() => setGalleryView("list")}
+          />
+        </div>
       </header>
 
       {tagFilter.length > 0 && (
@@ -313,6 +321,80 @@ interface ItemProps {
   shapesLabel: string;
   onSelect: () => void;
   onMenu: (event: React.MouseEvent) => void;
+}
+
+/**
+ * One side of the segmented view switch. Notes has the same pair, and the two are kept as twins on
+ * purpose — the lit half is drawn as a raised tile in `--cf-surface` so "which view am I in" is
+ * answered by depth rather than by working out which icon is missing.
+ */
+function ViewButton({
+  icon: Icon,
+  label,
+  active,
+  onClick,
+}: {
+  icon: typeof LayoutGrid;
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      onClick={onClick}
+      className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
+        active
+          ? "bg-[var(--cf-surface)] text-[var(--cf-text)] shadow-sm"
+          : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+      }`}
+    >
+      <Icon size={13} />
+    </button>
+  );
+}
+
+/**
+ * One step of the folder trail.
+ *
+ * The last crumb is where you already are, so it is text rather than a button — a control that does
+ * nothing when pressed is worse than no control. The folder's own colour is carried through, which
+ * is what makes the trail recognisable as the same folder you picked the colour for in the tree.
+ */
+function Crumb({
+  label,
+  current,
+  tint,
+  onClick,
+}: {
+  label: string;
+  current: boolean;
+  tint?: string;
+  onClick: () => void;
+}) {
+  if (current) {
+    return (
+      <span
+        className="min-w-0 truncate font-semibold text-[var(--cf-text)]"
+        style={tint ? { color: tint } : undefined}
+        aria-current="page"
+      >
+        {label}
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="min-w-0 truncate rounded px-1 py-0.5 text-[var(--cf-text-muted)] transition-colors hover:bg-black/[0.04] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.05]"
+    >
+      {label}
+    </button>
+  );
 }
 
 /**

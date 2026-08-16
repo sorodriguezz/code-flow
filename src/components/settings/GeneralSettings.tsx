@@ -87,8 +87,8 @@ export function GeneralSettings() {
         <p className="mb-2 mt-4 text-[11px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
           {t("tour.settingsApps")}
         </p>
-        {/* Two columns: five rows in one column is a long thin list for five short names, and the
-            settings pane is wide enough that a single column wastes most of it. */}
+        {/* Two columns: one row per app in a single column is a long thin list for a handful of
+            short names, and the settings pane is wide enough that one column wastes most of it. */}
         <div className="grid grid-cols-2 gap-2">
           {APP_TOURS.map(({ tour, labelKey, icon: Icon }) => (
             <button

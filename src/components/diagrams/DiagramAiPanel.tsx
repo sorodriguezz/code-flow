@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { GripHorizontal, Sparkles, X } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { AI_PROVIDERS, DEFAULT_AI_PROVIDER } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { diagramsDrawWithAi } from "../../lib/tauri/diagramsCommands";
 import { documentOutline, graphToMxGraph, parseAiGraph, type AiGraph } from "../../lib/diagrams/aiLayout";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
@@ -63,7 +64,6 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
   const provider = AI_PROVIDERS.find((entry) => entry.id === providerId);
   const providerLabel = provider?.label ?? (provider?.labelKey ? t(provider.labelKey) : providerId);
   const modelLabel = routedModel?.trim() || t("diagrams.ai.defaultModel");
-  const EngineIcon = provider?.icon;
 
   /** Keeps the window inside the editor pane. Called while dragging and whenever the pane resizes. */
   const clamp = useCallback((x: number, y: number) => {
@@ -145,7 +145,21 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
       if ("error" in parsed) {
         // A model answering with something unusable is an ordinary outcome, so it is a message in
         // the panel rather than a thrown error: the instruction is still there to be adjusted.
+        //
+        // **Recorded in the bell all the same**, which it was not: the toast is the only place this
+        // was ever said, and a toast is gone in seconds. A run that spent tokens and drew nothing is
+        // exactly what the bell is for — and leaving it out made the two ways this can fail behave
+        // differently for no reason a user could see. The reason travels in `detail`, because "could
+        // not draw the diagram" on its own does not say whether to retry or to reword.
         pushErrorToast(t(`diagrams.ai.error.${parsed.error}`));
+        notify({
+          source: "diagrams",
+          titleKey: "notifications.diagramDrawFailed",
+          target: { view: "diagrams", select: { kind: "diagram", id: diagram.id } },
+          status: "error",
+          detail: `${diagram.title} · ${t(`diagrams.ai.error.${parsed.error}`)}`,
+          workspaceId,
+        });
         return;
       }
       setResult(parsed.graph);
@@ -189,6 +203,7 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
   return (
     <div
       ref={panel}
+      data-tour="diagrams-ai"
       className="absolute z-30 w-[340px] overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
       style={pos ? { left: pos.x, top: pos.y } : { right: MARGIN, top: MARGIN }}
     >
@@ -250,7 +265,7 @@ export function DiagramAiPanel({ onClose }: { onClose: () => void }) {
 
         <div className="flex items-center gap-2">
           <span className="flex min-w-0 flex-1 items-center gap-1 text-[10px] text-[var(--cf-text-muted)]">
-            {EngineIcon && <EngineIcon size={11} className="shrink-0" />}
+            <ProviderGlyph providerId={providerId} size={11} />
             <span className="truncate">
               {providerLabel} · {modelLabel}
             </span>

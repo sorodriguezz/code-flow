@@ -10,11 +10,12 @@ export interface AiProviderOption {
    * "coming soon" badge so the picker reads as real infrastructure, not a placeholder. */
   available: boolean;
   /** Default binary name shown in Settings when the user hasn't set a path — mirrors each
-   * engine's `default_binary()` on the Rust side. For Ollama this is the HTTP endpoint. */
+   * engine's `default_binary()` on the Rust side. For an HTTP provider this is the endpoint. */
   defaultBinary?: string;
-  /** Whether this provider can run an agentic tool loop (edit/write files, read a skill). A local
-   * completion model (Ollama) can't, so the "fix with AI" buttons and tool settings key off this.
-   * Absent → treated as `true` (every CLI engine is agentic). */
+  /** Whether this provider can run an agentic tool loop (edit/write files, read a skill). A bare
+   * completion endpoint can't, so the "fix with AI" buttons and tool settings key off this.
+   * Absent → treated as `true` (every CLI engine is agentic, local models included — Cline drives
+   * them rather than just completing text). */
   agentic?: boolean;
   /** Authenticates with an API key (stored in the OS keyring) rather than a CLI login, so Settings
    * shows a key field for it. */
@@ -108,17 +109,22 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     defaultBinary: "opencode",
     setup: { url: "https://opencode.ai/docs/" },
   },
-  // Local models via Ollama (HTTP, not a CLI). Non-agentic: no tool use, so those features
-  // are hidden when it's active. `defaultBinary` is the endpoint. See `ollama.rs`.
+  // Cline is the local-model slot, and it replaced talking to Ollama directly. The reason is
+  // capability: Ollama's HTTP API only completes text, so a local model could draft a commit
+  // message but never open a file or apply a fix. Cline is an agent that *drives* a model, so
+  // `cline auth ollama` gets the same local model the whole feature set — and its other providers
+  // work the same way. Models are addressed as `provider/model`. See `cline.rs`.
   {
-    id: "ollama",
-    label: "Ollama",
+    id: "cline",
+    label: "Cline",
     icon: HardDrive,
     available: true,
-    defaultBinary: "http://localhost:11434",
-    agentic: false,
-    isEndpoint: true,
-    setup: { url: "https://ollama.com/download", postCommand: "ollama pull qwen2.5-coder" },
+    defaultBinary: "cline",
+    setup: {
+      url: "https://cline.bot",
+      command: "npm install -g cline",
+      postCommand: "cline auth ollama",
+    },
   },
   // Any endpoint speaking OpenAI's `/v1/chat/completions` — OpenAI itself by default, but the URL
   // is editable, so Azure OpenAI / OpenRouter / Groq / DeepSeek / vLLM all work here. Authenticated
@@ -139,7 +145,8 @@ export const AI_PROVIDERS: AiProviderOption[] = [
 export const DEFAULT_AI_PROVIDER = "claude";
 
 /** Whether a provider can run agentic write/tool flows. Unknown or unset → `true` (the CLI
- * engines all are); only a provider explicitly marked `agentic: false` (Ollama) gates off. */
+ * engines all are); only a provider explicitly marked `agentic: false` (a bare completion
+ * endpoint) gates off. */
 export function isAgenticProvider(providerId: string): boolean {
   return AI_PROVIDERS.find((p) => p.id === providerId)?.agentic !== false;
 }
@@ -194,8 +201,6 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "openai/gpt-5", label: "GPT-5" },
     { id: "opencode-go/kimi-k3", label: "Kimi K3 (opencode Go)" },
   ],
-  // Fallback only — the real list is fetched live from the local server's `/api/tags`. These are
-  // common coding models the user may have pulled; shown when Ollama isn't reachable.
   // Fallback only — the real list comes live from `GET /v1/models` once a key is set, and depends
   // entirely on which endpoint the provider points at.
   openai: [
@@ -203,11 +208,12 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "gpt-5-mini", label: "GPT-5 mini" },
     { id: "o3", label: "o3" },
   ],
-  ollama: [
-    { id: "qwen2.5-coder", label: "Qwen2.5 Coder" },
-    { id: "llama3.1", label: "Llama 3.1" },
-    { id: "deepseek-coder-v2", label: "DeepSeek Coder V2" },
-  ],
+  // **Deliberately absent.** Cline's list is real — the providers `cline auth` configured, each
+  // asked what it currently serves — so there is nothing here to fall back to. A curated list would
+  // only ever appear when that came back empty, which is exactly the moment it does most harm: it
+  // named three models the machine did not have while hiding the one it did. When there is nothing
+  // to offer the picker shows "CLI default" and "Custom", and the field's own hint teaches the
+  // `provider/model` shape.
 };
 
 /** Display name for a provider id — its own label, its translated one, or the raw id for a

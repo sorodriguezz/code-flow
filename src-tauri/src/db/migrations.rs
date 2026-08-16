@@ -1379,6 +1379,86 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_tab_to_workspace_terminals(conn)?;
     align_project_ado_org_with_connections(conn)?;
     file_loose_notes_into_a_book(conn)?;
+    move_ollama_settings_to_cline(conn)?;
+    Ok(())
+}
+
+/// Carries an install that was running local models on the old Ollama engine over to Cline.
+///
+/// The Ollama engine was an HTTP client for `POST /api/chat` — a completion endpoint, so it could
+/// never edit a file. Cline drives the *same* local models through `-P ollama` and can, which is
+/// why it replaced it outright rather than joining it. What it does not share is the shape of the
+/// settings: the old engine's "binary" was a base URL, and its model was a bare `qwen2.5-coder`,
+/// while Cline is a real executable addressed with `provider/model`. Left alone, an install that
+/// had Ollama selected would come back up trying to *launch* `http://localhost:11434`.
+///
+/// So three things move, and nothing is invented:
+///  - every `ai_provider*` setting reading `ollama`/`local` now reads `cline`,
+///  - `ollama_model` (and the per-task overrides) becomes `cline_model` as `ollama/<model>`, which
+///    is the same model on the same machine, now named the way Cline names it,
+///  - `ollama_binary_path` is dropped rather than copied: a URL is not a path to anything, and
+///    leaving it would point the new engine at a binary that does not exist. Its absence means
+///    "use the default", which is the `cline` on `PATH`.
+///
+/// An existing `cline_*` value always wins — this only fills gaps. Idempotent: the second run finds
+/// no `ollama` rows left to move.
+fn move_ollama_settings_to_cline(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "app_settings")? {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE app_settings SET value = 'cline'
+         WHERE (key = 'ai_provider' OR key LIKE 'ai_provider\\_%' ESCAPE '\\')
+           AND value IN ('ollama', 'local')",
+        [],
+    )?;
+    // `ollama_model` → `cline_model`, `ollama_review_model` → `cline_review_model`, … The model id
+    // gains the `ollama/` prefix Cline needs to route it; an id that somehow already carries a
+    // provider is left as it is.
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM app_settings
+         WHERE key = 'ollama_model' OR (key LIKE 'ollama\\_%\\_model' ESCAPE '\\')",
+    )?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    for (key, value) in rows {
+        let model = value.trim();
+        if !model.is_empty() {
+            let qualified =
+                if model.contains('/') { model.to_string() } else { format!("ollama/{model}") };
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
+                params![key.replacen("ollama_", "cline_", 1), qualified],
+            )?;
+        }
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+    }
+    conn.execute("DELETE FROM app_settings WHERE key = 'ollama_binary_path'", [])?;
+
+    // The roster agents and the chain steps pin a provider + model of their own, so they need the
+    // same rewrite or they would run the old id. Only these two: `agent_tasks` and `story_batches`
+    // also carry a provider, but theirs is a record of what *did* run. Rewriting those would not
+    // fix anything — they are never executed again — and would leave the history claiming a run
+    // happened on an engine that did not exist that day.
+    for table in ["workspace_agents", "agent_chain_steps"] {
+        if !table_exists(conn, table)? || !has_column(conn, table, "provider")? {
+            continue;
+        }
+        conn.execute(
+            &format!(
+                "UPDATE {table}
+                    SET model = CASE
+                            WHEN TRIM(model) = '' OR INSTR(model, '/') > 0 THEN model
+                            ELSE 'ollama/' || model
+                        END,
+                        provider = 'cline'
+                  WHERE provider IN ('ollama', 'local')"
+            ),
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -2567,6 +2647,95 @@ mod tests {
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_collections"), 0);
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_requests"), 0);
         assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM api_cookies"), 0);
+    }
+
+    fn text(conn: &Connection, sql: &str) -> Option<String> {
+        conn.query_row(sql, [], |row| row.get(0)).optional().unwrap()
+    }
+
+    /// An install that was running local models on the retired Ollama engine has to come back up on
+    /// Cline pointed at the same model — and must not come back up trying to launch a URL.
+    #[test]
+    fn an_ollama_install_moves_to_cline_without_losing_which_model_it_ran() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        conn.execute_batch(
+            r#"
+            INSERT OR REPLACE INTO app_settings (key, value) VALUES
+                ('ai_provider', 'ollama'),
+                ('ai_provider_review', 'claude'),
+                ('ai_provider_commit', 'local'),
+                ('ollama_model', 'qwen2.5-coder'),
+                ('ollama_commit_model', 'llama3.1'),
+                ('ollama_binary_path', 'http://localhost:11434');
+            INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                VALUES ('w1', 'W', 'folder', '#111', 0, 't');
+            INSERT INTO workspace_agents (id, workspace_id, name, provider, model, created_at)
+                VALUES ('a1', 'w1', 'Dev', 'ollama', 'qwen2.5-coder', 't');
+            "#,
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        assert_eq!(text(&conn, "SELECT value FROM app_settings WHERE key = 'ai_provider'").as_deref(), Some("cline"));
+        // `local` was the same engine under its other id.
+        assert_eq!(
+            text(&conn, "SELECT value FROM app_settings WHERE key = 'ai_provider_commit'").as_deref(),
+            Some("cline")
+        );
+        // A provider that was never Ollama is left exactly as the user set it.
+        assert_eq!(
+            text(&conn, "SELECT value FROM app_settings WHERE key = 'ai_provider_review'").as_deref(),
+            Some("claude")
+        );
+        // Same model, same machine — now addressed the way Cline addresses it.
+        assert_eq!(
+            text(&conn, "SELECT value FROM app_settings WHERE key = 'cline_model'").as_deref(),
+            Some("ollama/qwen2.5-coder")
+        );
+        assert_eq!(
+            text(&conn, "SELECT value FROM app_settings WHERE key = 'cline_commit_model'").as_deref(),
+            Some("ollama/llama3.1")
+        );
+        // The endpoint is dropped rather than carried over: it is not a path to any executable, and
+        // an engine pointed at it could only fail to launch.
+        assert_eq!(text(&conn, "SELECT value FROM app_settings WHERE key = 'ollama_binary_path'"), None);
+        assert_eq!(text(&conn, "SELECT value FROM app_settings WHERE key = 'ollama_model'"), None);
+        // A pinned agent runs on the new engine, still on its own model.
+        assert_eq!(text(&conn, "SELECT provider FROM workspace_agents WHERE id = 'a1'").as_deref(), Some("cline"));
+        assert_eq!(
+            text(&conn, "SELECT model FROM workspace_agents WHERE id = 'a1'").as_deref(),
+            Some("ollama/qwen2.5-coder")
+        );
+
+        // Idempotent: a second launch finds nothing left to move and changes nothing.
+        run(&conn).unwrap();
+        assert_eq!(
+            text(&conn, "SELECT value FROM app_settings WHERE key = 'cline_model'").as_deref(),
+            Some("ollama/qwen2.5-coder")
+        );
+    }
+
+    /// A Cline setting the user already has is theirs; the migration only fills gaps.
+    #[test]
+    fn an_existing_cline_model_is_never_overwritten_by_the_old_ollama_one() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES
+                ('cline_model', 'cline/anthropic/claude-sonnet-4-5'),
+                ('ollama_model', 'qwen2.5-coder');",
+        )
+        .unwrap();
+
+        run(&conn).unwrap();
+
+        assert_eq!(
+            text(&conn, "SELECT value FROM app_settings WHERE key = 'cline_model'").as_deref(),
+            Some("cline/anthropic/claude-sonnet-4-5")
+        );
+        assert_eq!(text(&conn, "SELECT value FROM app_settings WHERE key = 'ollama_model'"), None);
     }
 
     #[test]

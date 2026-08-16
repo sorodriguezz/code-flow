@@ -23,13 +23,22 @@ import { flushSync } from "react-dom";
  *    motion that setting exists to suppress.
  */
 
+interface ViewTransitionLike {
+  /** Settles when every animation on the pseudo-elements is over — and *rejects* when the
+   *  transition is skipped, which is a finish as far as anything waiting on it is concerned. */
+  finished?: Promise<unknown>;
+}
+
 type TransitionCapableDocument = Document & {
-  startViewTransition?: (callback: () => void) => unknown;
+  startViewTransition?: (callback: () => void) => ViewTransitionLike;
 };
 
 function prefersReducedMotion(): boolean {
   return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 }
+
+/** The wipe on screen right now, or `null` between them. See [`afterThemeTransition`]. */
+let playing: Promise<void> | null = null;
 
 /**
  * Runs `apply` — the writes that actually change the theme — inside a view transition when the
@@ -50,7 +59,75 @@ export function withThemeTransition(apply: () => void): void {
     return;
   }
 
-  doc.startViewTransition(() => {
-    flushSync(apply);
+  // Published *before* the transition is started rather than from the object it returns, because
+  // `apply` is where the React commit happens: an effect in that commit calling
+  // `afterThemeTransition` has to be able to see that a wipe is in progress, and nothing in the API
+  // promises the callback runs later than this function does.
+  let finish = () => {};
+  const wipe = new Promise<void>((resolve) => {
+    finish = resolve;
   });
+  playing = wipe;
+  const settle = () => {
+    if (playing === wipe) playing = null;
+    finish();
+  };
+
+  let transition: ViewTransitionLike;
+  try {
+    transition = doc.startViewTransition(() => {
+      flushSync(apply);
+    });
+  } catch {
+    // The callback cannot have run — this throws before it is reached — so the theme still has to
+    // be applied. Same instant swap as a webview without the API, which is this module's contract.
+    settle();
+    apply();
+    return;
+  }
+
+  // `finished` rejects on a skipped transition (a second theme change landing on top of this one is
+  // the ordinary way that happens), so both settlements clear it. A wipe that never resolved would
+  // leave everything waiting on it parked forever.
+  if (transition.finished) void Promise.resolve(transition.finished).then(settle, settle);
+  else settle();
+}
+
+/**
+ * Defers `task` until the wipe currently on screen is over — or runs it straight away when there
+ * isn't one. Returns a cancel function, so an effect can drop the work when it re-runs first.
+ *
+ * For the work a theme change triggers that is *too expensive to do underneath the animation*, as
+ * opposed to the ordinary recolouring that has to happen inside it. The diagrams canvas is the
+ * case: draw.io takes its theme from a URL parameter it reads once, so a light/dark flip reboots
+ * the whole embedded editor — tens of megabytes of JavaScript — and doing that inside the
+ * transition put a blank iframe in the "after" photograph and a cold editor boot on the main
+ * thread for the whole half-second the wipe was trying to play. Held back, the wipe runs over the
+ * canvas as it was and the reboot starts on a window that has stopped moving.
+ *
+ * The deferred work must be genuinely invisible under the curtain: this is for things that would
+ * otherwise *replace* a region wholesale, not for colours, which have to be in the photograph.
+ */
+export function afterThemeTransition(task: () => void): () => void {
+  let cancelled = false;
+
+  // Re-checked after each wipe rather than chained to the one playing when this was called. A
+  // second theme change lands on top of the first and *skips* it, which settles the first wipe
+  // early — so waiting on that one alone would drop the work into the middle of the second
+  // animation, which is the situation this whole function exists to avoid.
+  const wait = () => {
+    const wipe = playing;
+    if (!wipe) {
+      task();
+      return;
+    }
+    void wipe.then(() => {
+      if (!cancelled) wait();
+    });
+  };
+  wait();
+
+  return () => {
+    cancelled = true;
+  };
 }

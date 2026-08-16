@@ -48,8 +48,8 @@ pub(crate) fn active_provider(conn: &Connection) -> Result<String, String> {
 /// Which AI action a command is performing — selects both the provider and the model for it.
 /// Each task can be routed to its own provider (`ai_provider_{key}`, falling back to the global
 /// `ai_provider`) and its own model within that provider (`{provider}_{key}_model`, falling back
-/// to that provider's base model). That's what lets one repo draft commits on a local Ollama
-/// model, review PRs on Opus, and fix findings through opencode.
+/// to that provider's base model). That's what lets one repo draft commits on a local model
+/// through Cline, review PRs on Opus, and fix findings through opencode.
 #[derive(Clone, Copy)]
 pub(crate) enum AiTask {
     /// Commit-message generation — defaults to the engine's fast model, not the base model.
@@ -235,8 +235,8 @@ pub(crate) fn load_ai_config(conn: &Connection, task: AiTask) -> Result<AiConfig
         .collect();
 
     // Per-task model override → (for commits) the engine's dedicated fast model → the base model.
-    // The last fallback matters for engines with no fast model (Ollama), which need *some* explicit
-    // model or the request fails.
+    // The last fallback matters for engines with no fast model of their own (Cline, opencode),
+    // whose model depends entirely on what the user configured inside them.
     let model = match nonblank(get(&format!("{}_model", task.key()))?) {
         Some(override_model) => override_model,
         None => match task {
@@ -370,9 +370,9 @@ pub struct ProviderStatus {
     binary: String,
 }
 
-/// Checks whether `provider`'s CLI is actually installed (or, for Ollama, whether its endpoint
-/// answers), so Settings can show "available / not found" instead of letting the user discover it
-/// when an action fails.
+/// Checks whether `provider`'s CLI is actually installed (or, for the HTTP engines, whether its
+/// endpoint answers), so Settings can show "available / not found" instead of letting the user
+/// discover it when an action fails.
 #[tauri::command]
 pub async fn check_ai_provider(db: State<'_, Db>, provider: String) -> Result<ProviderStatus, String> {
     let (engine, binary) = {
@@ -861,12 +861,12 @@ mod tests {
         let conn = install();
         queries::set_setting(&conn, "ai_provider", "claude").unwrap();
         queries::set_setting(&conn, "ai_provider_review", "codex").unwrap();
-        queries::set_setting(&conn, "ai_provider_commit", "ollama").unwrap();
+        queries::set_setting(&conn, "ai_provider_commit", "cline").unwrap();
 
         let routed = routed_providers(&conn).unwrap();
         assert_eq!(
             routed,
-            ["claude", "codex", "ollama"].map(String::from).into_iter().collect()
+            ["claude", "codex", "cline"].map(String::from).into_iter().collect()
         );
     }
 

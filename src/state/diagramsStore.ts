@@ -24,6 +24,7 @@ import {
 } from "../lib/tauri/diagramsCommands";
 import { builtInTemplates, toTemplate } from "../lib/diagrams/builtinTemplates";
 import { DEFAULT_FORMAT, emptyDoc } from "../lib/diagrams/doc";
+import type { ExportFormat } from "../lib/diagrams/exportFile";
 import { appendCells } from "../lib/diagrams/mxgraph";
 import { descendantIds } from "../lib/diagrams/tree";
 // Reused rather than copied: these take `string[]` and `{ tags: string[] }[]`, so nothing about
@@ -179,8 +180,24 @@ interface DiagramsState {
    * The same one-way channel as `pendingLoad`, and for the same reason: the toolbar that offers
    * "Export as PNG" is not the component holding the iframe. `DrawioFrame` picks this up, asks the
    * editor, and writes the file when the answer comes back.
+   *
+   * Typed from `ExportFormat` rather than spelled out again, so a format cannot be offered by the
+   * menu and be unknown here — the two lists drifting apart is how `.drawio` came to be a filter
+   * with nothing that could ask for it.
    */
-  pendingExport: "png" | "svg" | "pdf" | null;
+  pendingExport: ExportFormat | null;
+
+  /**
+   * Whether the "Draw with AI" window is up over the canvas.
+   *
+   * In the store rather than in `DiagramsView`'s own state, where it started, because two things
+   * outside that component now decide it: the sparkle injected into the editor's toolbar, which
+   * lives in another document entirely, and the guided tour, whose stage has to be able to put the
+   * panel on screen to point at it — and to take it away again on the step after, in both
+   * directions. A `useState` can be set by a callback handed downwards; it cannot be *described*
+   * by a tour step. See `TourStage`.
+   */
+  aiOpen: boolean;
 
   /** The search box. Matches titles and tags — there is no document search yet. */
   query: string;
@@ -228,12 +245,14 @@ interface DiagramsState {
   applyGenerated: (doc: string) => void;
   /** Called by the frame once it has posted the document. */
   clearPendingLoad: () => void;
+  /** Opens or closes the "Draw with AI" window. See `aiOpen`. */
+  setAiOpen: (open: boolean) => void;
   /** Puts the drawing back as it was before the last generation. */
   undoLastGeneration: () => void;
   /** Called on a real user edit, which is what makes the generation no longer the last thing done. */
   clearGenerationUndo: () => void;
-  /** Asks the editor for a rendered file. See `pendingExport`. */
-  requestExport: (format: "png" | "svg" | "pdf") => void;
+  /** Asks the editor for a file. See `pendingExport`. */
+  requestExport: (format: ExportFormat) => void;
   /**
    * Opens a `.drawio` file from disk as a new diagram, and opens it. Returns its title, or `null`
    * when the dialog was dismissed or the read failed.
@@ -332,6 +351,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   pendingLoad: null,
   undoGeneration: null,
   pendingExport: null,
+  aiOpen: false,
   query: "",
   tagFilter: [],
   folderFilter: null,
@@ -653,6 +673,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   },
 
   clearPendingLoad: () => set({ pendingLoad: null }),
+
+  setAiOpen: (open) => set({ aiOpen: open }),
 
   undoLastGeneration: () => {
     const { draft, undoGeneration } = get();

@@ -1333,7 +1333,7 @@ export const es = {
   // usó: la pregunta es «cuánto me queda», y de un vistazo las dos direcciones se leen al revés.
   "quota.title": "Límites del plan",
   "quota.hint":
-    "Cuánto llevas ocupado del plan de cada proveedor, tal como lo reporta el proveedor. Un motor que no publica límite — Ollama, o un endpoint que se cobra por token — no aparece, en vez de salir en cero.",
+    "Cuánto llevas ocupado del plan de cada proveedor, tal como lo reporta el proveedor. Un motor que no publica límite — Cline, o un endpoint que se cobra por token — no aparece, en vez de salir en cero.",
   "quota.loading": "Leyendo los límites…",
   "quota.reading": "Leyendo…",
   "battery.title": "Batería",
@@ -1769,7 +1769,6 @@ export const es = {
   "settings.modelIdHintCodex": "Un id que exponga tu plan de ChatGPT. La lista sale del propio catálogo de Codex.",
   "settings.modelIdHintOpencode":
     "`proveedor/modelo` — incluidos los propios de opencode: `opencode/…` para Zen y `opencode-go/…` para Go.",
-  "settings.providerMissingOllama": "El endpoint no responde ({detail}). Arráncalo con `ollama serve`.",
   "settings.providerRecheck": "Volver a comprobar",
   "settings.providerDefault": "Predeterminado",
   "settings.providerDefaultTitle": "Lo usan todas las tareas puestas en heredar",
@@ -1777,7 +1776,8 @@ export const es = {
   "settings.setupTitle": "Cómo instalarlo",
   "settings.setupDocs": "Documentación oficial",
   "settings.setupRestartHint": "Reinicia CodeFlow tras instalarlo para que tome el PATH nuevo.",
-  "settings.modelIdHintOllama": "Cualquier modelo que hayas descargado — ejecuta `ollama list` para verlos.",
+  "settings.modelIdHintCline":
+    "`proveedor/modelo`, como los nombra Cline — p. ej. `ollama/qwen2.5-coder`. Ejecuta `cline auth` para añadir un proveedor.",
   "settings.taskRoutingTitle": "Modelo por tarea",
   "settings.taskRoutingHint":
     "Asigna a cada acción su propio proveedor y modelo. Lo que dejes en \"heredar\" usa el predeterminado de arriba.",
@@ -1820,11 +1820,8 @@ export const es = {
   "task.wiki": "Wiki · documentación",
   "task.wikiHint":
     "Lee un repositorio y escribe su documentación técnica. Es la ejecución más larga de la app, y necesita un motor con herramientas.",
-  "settings.ollamaEndpointLabel": "Endpoint de Ollama",
-  "settings.ollamaEndpointHint":
-    "URL de tu servidor Ollama local. Arráncalo con `ollama serve` y descarga un modelo con `ollama pull <modelo>`.",
   "settings.localProviderNote":
-    "Los modelos locales cubren mensajes de commit, descripciones de PR, análisis, review y resolución de conflictos. Todo lo que necesite ejecutar herramientas (Corregir con IA, MCP) requiere un motor de línea de comandos.",
+    "Este endpoint solo completa texto: cubre mensajes de commit, descripciones de PR, análisis, review y resolución de conflictos. Todo lo que necesite ejecutar herramientas (Corregir con IA, MCP) requiere un motor de línea de comandos — para modelos locales, ese motor es Cline.",
   "settings.baseModel": "Modelo base",
   "settings.baseModelHint": "Lo usa el chat y es el valor por defecto de las tareas de abajo.",
   "settings.localModel": "Modelo local",
@@ -2864,10 +2861,12 @@ export const es = {
   "notifications.diagramDrawn": "Diagrama dibujado",
   "notifications.diagramDrawFailed": "No se pudo dibujar el diagrama",
   "diagrams.exported": "Guardado",
+  "diagrams.exportEmpty": "El editor devolvió un diagrama vacío — no se guardó nada.",
   "diagrams.export": "Exportar",
   "diagrams.exportAs.png": "Exportar como PNG",
   "diagrams.exportAs.svg": "Exportar como SVG",
   "diagrams.exportAs.pdf": "Exportar como PDF",
+  "diagrams.exportAs.drawio": "Exportar como .drawio",
   "diagrams.import": "Abrir un archivo .drawio",
   "diagrams.imported": "Importado {name}",
   "diagrams.undoGeneration": "Deshacer lo generado",
@@ -5203,4 +5202,43 @@ export const es = {
   "tour.notes.done.title": "Eso es Notas",
   "tour.notes.done.body":
     "Todo lo que escribas se guarda sobre la marcha y viaja con tus copias de seguridad. Una nota se puede exportar como `.md` normal desde su menú ⋯, así que aquí nada queda encerrado. Este tour está siempre en el birrete junto a la barra de apps si lo quieres otra vez.",
+  "tour.chapter.diagrams": "Diagramas",
+  "tour.chapter.diagramsAi": "Dibujar con IA",
+
+  "tour.diagrams.intro.title": "El dibujo que rodea al código",
+  "tour.diagrams.intro.body":
+    "Diagramas de flujo, arquitectura, secuencias, ER — guardados en el espacio de trabajo y no dentro de un repositorio, porque el dibujo de cómo encajan cuatro servicios no pertenece a ninguno de ellos. El lienzo es draw.io entero, incluido dentro de la app y ejecutándose en tu máquina: sin cuenta, sin red, y funciona en un avión. El árbol de la izquierda es lo que has dibujado; se guarda mientras dibujas y no hay botón de guardar.",
+  "tour.diagrams.tree.title": "Carpetas, y qué se lleva por delante borrar una",
+  "tour.diagrams.tree.body":
+    "Las carpetas anidan tanto como quieras, toman color desde su menú contextual, y los diagramas se arrastran entre ellas. Lee esto dos veces, porque es justo lo contrario que en Notas: **borrar una carpeta borra todos los diagramas que hay dentro**, y sus subcarpetas con ellos. Se te pregunta antes, y no tiene vuelta atrás. Fijar desde ese mismo menú sube un diagrama a lo alto del árbol.",
+  "tour.diagrams.new.title": "Empieza por una forma, no por una hoja en blanco",
+  "tour.diagrams.new.body":
+    "Esto abre un selector en vez de crear un diagrama vacío directamente — «en blanco» es simplemente su primera entrada. Vienen cinco dibujos incluidos: diagrama de flujo, contenedores C4, secuencia, entidad-relación y red, y cada uno es un diagrama de verdad que editas, no una plantilla rígida. Cualquier dibujo tuyo se convierte en plantilla desde la barra del editor, así que el segundo diagrama de arquitectura empieza donde acabó el primero. Los diagramas nuevos se archivan en la carpeta que el árbol esté mostrando.",
+  "tour.diagrams.search.title": "Títulos y etiquetas",
+  "tour.diagrams.search.body":
+    "Filtra mientras escribes, por títulos y etiquetas. **No** lee lo que hay dentro de los dibujos — a diferencia del buscador de Notas, que sí lee los cuerpos. Así que nombra las cosas como las buscarías después, y apóyate en las etiquetas para el corte que las carpetas no pueden hacer: un diagrama está en una carpeta, pero puede llevar `onboarding` y `pagos` a la vez.",
+  "tour.diagrams.gallery.title": "El muro de lo que has dibujado",
+  "tour.diagrams.gallery.body":
+    "Sin nada abierto tienes tarjetas en lugar de un lienzo vacío, y cada una muestra el diagrama real — la imagen se vuelve a exportar cada vez que editas, así que una tarjeta nunca es un dibujo de la semana pasada. Cambia entre cuadrícula y lista, filtra por carpeta o etiqueta, y reordena a mano si el orden significa algo. Abrir una tarjeta es lo que pone el editor en pantalla.",
+  "tour.diagrams.canvas.title": "Todo draw.io, y se guarda solo",
+  "tour.diagrams.canvas.body":
+    "La paleta de formas, el panel de formato, el menú contextual, todas las librerías de formas incluidas las de nube — nada de esto es una versión recortada. Lo que añade esta app está al final de la barra del propio editor: guardar el dibujo como plantilla, exportarlo, y una chispa. Los cambios se escriben solos un momento después de que dejes de mover cosas, y la cabecera te dice cuándo entró el último.",
+  "tour.diagrams.ai.title": "Describe el diagrama y lo dibuja",
+  "tour.diagrams.ai.body":
+    "La chispa abre esta ventana sobre el lienzo — arrástrala por su cabecera si tapa lo que estás mirando. Escribe lo que quieres en una frase: *«el pipeline de revisión: traer el diff, escanear secretos, mandarlo al motor, comentar en la PR»*. Enter envía, Shift+Enter salta de línea, y mientras piensa el botón pasa a ser Detener — es una ejecución normal, así que aparece junto al resto de tu trabajo con IA y se puede abandonar. Qué motor responde se configura una vez, en Ajustes → IA, por tarea.",
+  "tour.diagrams.aiApply.title": "No se dibuja nada hasta que tú lo digas",
+  "tour.diagrams.aiApply.body":
+    "La respuesta vuelve como un recuento — *12 formas · 9 flechas* — y ahí se queda. El lienzo sigue intacto hasta que pulsas **Añadir al lienzo**, así que una respuesta que no te gusta te cuesta reformular la frase y nada más. Y *añade*: lo que ya está dibujado no se reemplaza nunca, y las formas nuevas reciben identificadores propios para que no puedan caer encima de una caja que dibujaste a mano. Montar tú el esqueleto y pedir el resto es una forma perfectamente buena de usarlo.",
+  "tour.diagrams.aiPrivacy.title": "Qué sale realmente de la máquina",
+  "tour.diagrams.aiPrivacy.body":
+    "Tres cosas: el título del diagrama, la frase que escribiste, y una lista de las **etiquetas** que ya hay en el lienzo — las palabras dentro de las cajas, para que la respuesta enlace con lo que hay en vez de dibujar una segunda copia. El documento en sí no se envía nunca. Tampoco se sube nada por el hecho de dibujar; el editor es local, y el único momento en que se transmite algo es aquel en el que pulsas Generar.",
+  "tour.diagrams.aiUndo.title": "El deshacer que ⌘Z no puede hacer",
+  "tour.diagrams.aiUndo.body":
+    "Entregarle un documento a draw.io reinicia su pila de deshacer, así que su propio deshacer no puede sacar una generación — esta flecha, junto al título, es la que sí. Aparece en cuanto se ha generado algo y **desaparece con tu siguiente edición real**: para entonces, volver atrás sería tirar lo que dibujaste encima y no lo que dibujó el motor. Si una generación no es lo que querías, quítala antes de construir sobre ella.",
+  "tour.diagrams.export.title": "Salir, y volver a entrar",
+  "tour.diagrams.export.body":
+    "El botón de descarga de la barra del editor escribe el dibujo como PNG, SVG o PDF, al doble de resolución, donde tú elijas. En el otro sentido, un archivo `.drawio` de donde sea — un compañero, diagrams.net en el navegador, un repositorio viejo — se importa desde la barra del árbol y se abre aquí como un diagrama normal. Por debajo es el mismo formato, que es lo que evita que esto sea un sitio al que los dibujos entran y del que no salen.",
+  "tour.diagrams.done.title": "Eso es Diagramas",
+  "tour.diagrams.done.body":
+    "Todo se guarda en el espacio de trabajo y viaja con tus copias de seguridad. La costumbre que merece la pena coger: cuando un dibujo vaya a llevar rato, descríbelo primero y corrige lo que vuelva — empezar con doce cajas aproximadamente bien es más rápido que empezar sin ninguna. Este tour está siempre en el birrete junto a la barra de apps.",
 } satisfies Record<TranslationKey, string>;
