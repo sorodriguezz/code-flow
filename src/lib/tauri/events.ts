@@ -40,6 +40,86 @@ export const onRemoteTransfer = (handler: (event: RemoteTransferEvent) => void) 
 export const onRepoFsChanged = (handler: (event: { repo_path: string }) => void) =>
   listen<{ repo_path: string }>("repo:fs-changed", (e) => handler(e.payload));
 
+/**
+ * The `origin` a change made in this window carries.
+ *
+ * Must match `DESKTOP_ORIGIN` in `src-tauri/src/remotectl/bridge.rs`. Each client skips the frames
+ * whose origin is itself: the desktop skips this one, a phone skips its own device id. Without that
+ * both ends act on their own echo — the phone refetching what it just drew, and this window
+ * reloading a store over the write that is still settling into it.
+ */
+export const DESKTOP_ORIGIN = "desktop";
+
+/** Which slice of in-memory state somebody else just made stale, and who made it so. */
+export interface StateInvalidateEvent {
+  /** Absent when the action changed nothing that any store holds — opening a terminal, say. The
+   *  event still arrives, because `action` is worth announcing on its own.
+   *
+   *  `remote` is the odd one out and has no `Invalidate` variant behind it: it is not "your copy of
+   *  something is stale", it is a *setting* being pushed to the phones on the channel they are
+   *  already reading. This window ignores it — it changed the setting, so it has the answer. */
+  domain?: "repo" | "chains" | "tasks" | "reviews" | "chat" | "remote";
+  /** Who caused it: a remote device's id, or [`DESKTOP_ORIGIN`] for this window's own changes.
+   *  Present so each client can ignore the echo of its own action. */
+  origin?: string;
+  /** What that device calls itself, for the notification centre. Absent for a desktop change —
+   *  the person who made it is sitting in front of the window. */
+  device?: string;
+  /** A `remote.action.*` translation key naming what was done, when it is worth telling the user
+   *  about. Absent for the many calls that are not — staging a file, a keystroke. */
+  action?: string;
+  /** Which project the call named, when it named one. Job history and chat transcripts are both
+   *  stored per project, so the domain alone cannot say what to re-read. */
+  project?: string;
+  /** Which conversation a `chat` change belongs to. A project holds dozens, and the domain alone
+   *  cannot say whether the transcript on screen is the one that moved. */
+  conversation?: string;
+  /** Which chain a `chains` change moved, and the workspace that chain belongs to.
+   *
+   *  Both, because this window is the thing that actually *advances* a chain — the executor is
+   *  `chainStore.ts` — and it holds one workspace at a time. The id says what to advance; the
+   *  workspace says whether reloading the list already in memory would even find it. A gate
+   *  approved from a phone pointed at another workspace used to reload a list the chain is not in
+   *  and then look for queued chains in it, so nothing ran and the plan sat there.
+   *
+   *  Absent on a `chains` frame from a client too old to send them, which the reader treats as
+   *  "pump whatever is queued here" — the behaviour it had before they existed. */
+  chain?: string;
+  workspace?: string;
+  /** The job id a review or an analysis filed its output under, so the notification it raises can
+   *  open that result instead of only mentioning it. */
+  job?: string;
+  /** Present, and `"error"`, only when the action *failed* and still left something durable — a
+   *  review or an analysis that errored writes its `job_history` row either way. Absent means the
+   *  action succeeded, which is what every emitter used to imply by saying nothing. */
+  status?: "error";
+  /** The new value of the shell grant, on a `remote` frame. Pushed rather than left to be polled:
+   *  a phone learns this once, at bootstrap, and re-probing for it is what used to unpair devices —
+   *  see `remotectl_set_allow_terminal`. */
+  allowTerminal?: boolean;
+}
+
+/**
+ * A change this window did not make and could not otherwise find out about.
+ *
+ * It exists because two of the three ways state travels already worked and the third did not: a
+ * phone that commits moves bytes on disk, so `repo:fs-changed` fires; a phone that cancels a run is
+ * the same process, so `ai:output-batch` fires. But a phone that approves a chain gate writes SQLite
+ * and touches nothing else — no watcher sees it, and the zustand copy of those rows would stay wrong
+ * until the user navigated away and back.
+ *
+ * There are two emitters, and for a while there was only one. `remotectl/server.rs` raises it for
+ * every mutating call a phone makes; `notifyStateChange` raises it for the same changes made *here*,
+ * so a phone hears about them too. Anything that subscribes must therefore check [`DESKTOP_ORIGIN`]
+ * before acting, or this window will reload its own stores on top of its own writes.
+ *
+ * The payload names a *domain* rather than carrying the new value, so the reload goes through the
+ * same loader the view already uses. Sending the row itself would mean the backend knowing the
+ * shape of every store, and would be wrong the moment two clients act at once.
+ */
+export const onStateInvalidate = (handler: (event: StateInvalidateEvent) => void) =>
+  listen<StateInvalidateEvent>("state:invalidate", (e) => handler(e.payload));
+
 export const onSkillsProgress = (handler: (event: { line: string }) => void) =>
   listen<{ line: string }>("skills:progress", (e) => handler(e.payload));
 
@@ -105,6 +185,19 @@ export interface AiEngineEvent {
  * doing the work rather than leaving the user to guess from the settings screen. */
 export const onAiEngine = (handler: (event: AiEngineEvent) => void) =>
   listen<AiEngineEvent>("ai:engine", (e) => handler(e.payload));
+
+/**
+ * A run finishing, announced by the run itself.
+ *
+ * Redundant for anything this window started — its `invoke` promise resolving says the same thing,
+ * earlier. It exists for the runs this window did *not* start: a chat turn or a review kicked off
+ * from a paired phone reaches the same engine through the same code, but there is no promise here
+ * to resolve, so without this the desktop would show an agent working and never stop.
+ *
+ * Emitted after the run's final output batch, so a listener can treat it as final.
+ */
+export const onAiDone = (handler: (event: { run_id: string }) => void) =>
+  listen<{ run_id: string }>("ai:done", (e) => handler(e.payload));
 
 export interface DebugPausedEvent {
   /** `breakpoint`, `step`, `exception`… */

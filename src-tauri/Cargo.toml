@@ -32,6 +32,18 @@ crate-type = ["rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+[dev-dependencies]
+# `tauri::test::mock_app`, used by exactly one test — `remotectl::bridge::tests`, which verifies
+# that `Emitter::emit` reaches a Rust listener registered with `listen_any` and not only the
+# webviews.
+#
+# That is the single runtime assumption the remote-control feature rests on: it is how a phone sees
+# a live agent run at all. Everything else in that module is pure enough to test directly, but this
+# one is a claim about Tauri's delivery semantics, and the only honest way to check a claim about a
+# framework is to run it. Without this the failure mode is silent and misleading — RPC calls work,
+# pairing works, and the event stream is simply empty forever.
+tauri = { version = "2", features = ["test"] }
+
 # Release builds are optimized for how the app actually feels, not for how long CI takes: cross-crate
 # inlining is what lets the hot paths (git2 diffing, the PTY read loop, JSON (de)serialization on
 # every IPC call) stop paying a call through a crate boundary per iteration.
@@ -226,6 +238,37 @@ mongodb = { version = "3", default-features = false, features = [
     "rustls-tls",
 ] }
 tauri-plugin-single-instance = "2.4.3"
+
+# ---------------- Remote control (phone / tablet on the same network) ----------------
+# The first *server* in this binary. Everything else that binds a port here is an ephemeral
+# localhost socket serving one client for one exchange — the OAuth callback (`oauth.rs`), the DAP
+# adapter (`debugger.rs`), an SSH forward (`remotes/forward.rs`) — whereas this one listens on the
+# LAN, for as long as the user leaves it on, for clients it has never met. That difference is why
+# it gets a real HTTP stack instead of a hand-rolled read loop: content negotiation, range requests
+# for the static bundle, and correct WebSocket framing are all things a phone browser will exercise
+# and none of them are worth writing twice.
+#
+# `axum` over `warp`/`actix` because it is `hyper` + `tower` with no runtime of its own — it uses
+# the tokio already here — and because `tower-http` is the same crate family, so the static-file
+# service below is not a second vendor's idea of a middleware.
+#
+# `ws` is not a default feature and is the whole point of the event channel; `macros` gives the
+# `#[debug_handler]` attribute that turns axum's famously opaque "handler does not implement
+# Handler" into a line number.
+axum = { version = "0.8", features = ["ws", "macros"] }
+# `fs` alone: `ServeDir`/`ServeFile` for the mobile bundle. Deliberately no `cors` — the mobile
+# client is served from this same origin, so there is no cross-origin request to allow, and a
+# permissive layer here would let any web page the user happens to visit reach the pairing
+# endpoint. See `remotectl/server.rs`.
+#
+# `set-header` is what lets the two halves of that bundle be cached differently: the hashed assets
+# forever, the entry document never. Without it a phone holds a stale `index.html` pointing at
+# chunk names that no longer exist, which is a white screen rather than an old UI.
+tower-http = { version = "0.6", features = ["fs", "set-header"] }
+# Only for `ServiceBuilder`, to stack those header layers onto the two static services without
+# layering them onto the API routes as well. Already in the tree as axum's own foundation, so this
+# is a name, not a dependency.
+tower = "0.5"
 russh-sftp = "2.4.0"
 # FTP/FTPS — the one file transport that is *not* a subsystem of the user's `ssh`, so unlike
 # `russh-sftp` this crate owns its socket. `tokio-rustls-ring` rather than any native-tls or

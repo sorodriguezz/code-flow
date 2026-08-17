@@ -1,0 +1,149 @@
+@import "tailwindcss" source(none);
+
+/* Only this client's own sources are scanned.
+ *
+ * Tailwind v4 detects content from the project root by default, and the root here is the whole
+ * repository — so without this it generates utilities for all 169,000 lines of the desktop UI and
+ * ships them to a phone that has three screens. That is not hypothetical: it was 92 kB of CSS for
+ * a client that needs a fraction of it.
+ *
+ * `source(none)` turns the automatic detection off and the `@source` below turns it back on for
+ * exactly one directory. Anything added under `src/mobile/` is picked up; nothing else is. */
+@source "../../src/mobile";
+
+/**
+ * The mobile client's stylesheet.
+ *
+ * Separate from `src/index.css`, which is 1,900 lines describing a desktop: title-bar gradients,
+ * split-pane handles, Monaco overrides, xterm surfaces, drag-and-drop affordances, ambient washes
+ * behind a graph view. None of that exists here, and shipping it to a phone would be most of a
+ * stylesheet for none of a UI.
+ *
+ * What *is* shared is the palette, reproduced below under the same token names so the two clients
+ * are recognisably one product and a component copied between them keeps its colours. Keep the
+ * values in step with `src/index.css` when the brand moves.
+ *
+ * The theme follows the phone rather than the desktop's setting: the desktop's choice is not in the
+ * command allowlist, and whoever is holding the phone at midnight wants dark regardless of how the
+ * machine on their desk is configured.
+ */
+
+/* The system font on whichever phone is holding this. `-apple-system` covers iOS, `Roboto` covers
+   Android, and the rest are there so a desktop browser opening the same URL to check something
+   does not fall all the way to Times. No web font is loaded on purpose: this page is fetched over
+   somebody's wifi on demand, and a font file is the largest thing it could possibly wait for. */
+@theme {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+:root {
+  --cf-bg: #f7f7fb;
+  --cf-surface: #ffffff;
+  --cf-border: #e7e7ef;
+  --cf-text: #1c1c26;
+  --cf-text-muted: #6b6b7d;
+  --cf-accent: #6366f1;
+  --cf-field: #ffffff;
+  --cf-field-border: #cfcfdd;
+  --cf-success: #16a34a;
+  --cf-danger: #dc2626;
+  --cf-warning: #d97706;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --cf-bg: #16161d;
+    --cf-surface: #1e1e27;
+    --cf-border: #313140;
+    --cf-text: #eceef5;
+    --cf-text-muted: #9797ab;
+    --cf-accent: #818cf8;
+    --cf-field: #131320;
+    --cf-field-border: #3d3d50;
+    --cf-success: #4ade80;
+    --cf-danger: #f87171;
+    --cf-warning: #fbbf24;
+  }
+}
+
+html,
+body {
+  height: 100%;
+}
+
+/* The app's box is the *visual* viewport, not the layout one.
+ *
+ * `--cf-vh` and `--cf-vt` are written by `viewport.ts` from `window.visualViewport`, which is the
+ * only thing that shrinks when the phone's keyboard slides up. With `height: 100%` here the shell
+ * kept describing the full screen and everything anchored to its bottom — the terminal's key row,
+ * the chat send button, the tab bar — sat underneath the keyboard, unreachable. `100dvh` is not the
+ * fix: dvh follows the browser's own chrome, not the keyboard.
+ *
+ * `fixed` rather than static because the offset has to be able to push the whole shell back down on
+ * the browsers that scroll the layout viewport under the keyboard instead of resizing it. The
+ * fallbacks are what an old browser with no `visualViewport` gets, and they are exactly the old
+ * behaviour. */
+#root {
+  position: fixed;
+  top: var(--cf-vt, 0px);
+  left: 0;
+  right: 0;
+  height: var(--cf-vh, 100%);
+}
+
+body {
+  margin: 0;
+  background: var(--cf-bg);
+  color: var(--cf-text);
+  font-family: var(--font-sans);
+  /* iOS inflates text in landscape unless told not to, which reflows a layout built around a
+     fixed column width. */
+  -webkit-text-size-adjust: 100%;
+  /* The page itself never scrolls — the screen bodies do (see `.cf-scroll`). Without this, iOS
+     rubber-bands the whole document behind a fixed tab bar and the bar appears to float away. */
+  overscroll-behavior-y: none;
+}
+
+/* Every tappable thing is at least this big. 44px is Apple's own minimum and the number below
+   which a control on a phone starts being missed — this app is used one-handed, walking, which is
+   exactly the case that minimum was measured for. */
+.cf-tap {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* iOS zooms the whole page when a focused input's text is under 16px, and never zooms back out.
+   Every input here is therefore at least 16px, regardless of how small the surrounding UI is. */
+input,
+textarea,
+select {
+  font-size: 16px;
+}
+
+.cf-scroll {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* The home-indicator strip on a modern iPhone. `env()` resolves to 0 everywhere else, so this is
+   safe unconditionally — and without it the tab bar's last row of pixels sits under the gesture
+   area, where taps go to the OS instead. */
+.cf-safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.cf-safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+/* A run's output. Monospace and pre-wrap: agent CLIs align things in columns, and reflowing that
+   as prose makes a table unreadable — but a phone is too narrow to scroll horizontally for it, so
+   wrapping wins over alignment where they conflict. */
+.cf-log {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

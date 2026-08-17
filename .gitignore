@@ -33,6 +33,15 @@ dist-ssr
 src-tauri/resources/iris/*
 !src-tauri/resources/iris/README.md
 
+# Built by `pnpm build:mobile` (vite.mobile.config.ts): the remote-control client a paired phone
+# loads. A build output like the two above, reproducible from src/mobile/.
+#
+# Same shape as the IRIS block for the same reason — the directory is listed under
+# `bundle.resources`, so ignoring it rather than its contents would break `cargo check` on a fresh
+# clone.
+src-tauri/resources/mobile/*
+!src-tauri/resources/mobile/README.md
+
 # Built by scripts/build-drawio-webapp.mjs: the draw.io webapp the Diagrams workspace embeds
 # (~98 MB, Apache-2.0, pinned by version and hash in that script). A build output like the IRIS
 # runtime above — vendored third-party code has no business in the history, and `pnpm drawio:webapp`

@@ -125,8 +125,14 @@ pub fn get_staged_diff(
     diff::get_staged_diff_with_context(&repo_path, context_lines)
 }
 
-/// One file's diff at full file context, for the views that reconstruct both sides of the file:
-/// the Changes screen's split mode, the editor's diff tab, an expanded row.
+/// One file's diff. Same contract as [`get_working_diff`]: absent `context_lines` means full-file
+/// context, which is what the views that reconstruct both sides of the file need — the Changes
+/// screen's split mode, the editor's diff tab, an expanded row. Every desktop caller omits it and
+/// so gets byte-for-byte what it always got.
+///
+/// A caller that only *reads* a unified diff may pass a small number. That is not a shortcut for
+/// the split views: lowering it there renders almost the whole file as deleted, see
+/// `git::diff::FULL_FILE_CONTEXT_LINES`.
 ///
 /// `null` when the path no longer has a diff on that side — the file was staged, discarded or
 /// committed between the list being drawn and the row being opened.
@@ -135,8 +141,9 @@ pub fn get_file_diff(
     repo_path: String,
     path: String,
     staged: bool,
+    context_lines: Option<u32>,
 ) -> Result<Option<diff::FileDiffInfo>, String> {
-    diff::get_file_diff(&repo_path, &path, staged)
+    diff::get_file_diff(&repo_path, &path, staged, context_lines)
 }
 
 #[tauri::command]

@@ -86,6 +86,9 @@ import type {
   DocPage,
   DocResult,
   DocScope,
+  RemoteDevice,
+  RemoteTerminal,
+  RemoteStatus,
 } from "../../types/domain";
 import type { FindingLocation } from "../parseAnalysis";
 
@@ -712,8 +715,14 @@ export const runChainStepCheck = (stepId: string) =>
 export const rerunChainFrom = (chainId: string, stepIndex: number, note: string) =>
   invoke<AgentChain | null>("rerun_chain_from", { chainId, stepIndex, note });
 
-export const approveChainGate = (chainId: string, input: string) =>
-  invoke<AgentChain | null>("approve_chain_gate", { chainId, input });
+/** Clears the gate a chain is parked at.
+ *
+ * `stepId` is a **precondition**, not a target: it names the step the caller had on screen, and the
+ * command refuses with `chain.gateMoved` when the chain has since moved past it. Pass it whenever
+ * the gate was drawn from a step that is in memory — the alternative is a stale click clearing a
+ * gate nobody read and forcing a chain that is mid-run back to `queued`. */
+export const approveChainGate = (chainId: string, input: string, stepId?: string) =>
+  invoke<AgentChain | null>("approve_chain_gate", { chainId, input, stepId: stepId ?? null });
 
 export const skipChainStep = (chainId: string) => invoke<AgentChain | null>("skip_chain_step", { chainId });
 
@@ -2001,3 +2010,87 @@ export const saveWorkItemReview = (input: {
 }) => invoke<void>("save_work_item_review", input);
 
 export const deleteWorkItemReview = (id: string) => invoke<void>("delete_work_item_review", { id });
+
+// ---------------------------------------------------------------------------
+// Remote control — driving this install from a phone on the same network
+// ---------------------------------------------------------------------------
+//
+// Administering the server is deliberately desktop-only: none of these commands appear in the
+// allowlist a paired device can reach (`src-tauri/src/remotectl/dispatch.rs`), so a phone cannot
+// open a pairing window, move the port, or revoke the device sitting next to it.
+
+/** Everything the settings panel draws, in one read. */
+export const remotectlStatus = () => invoke<RemoteStatus>("remotectl_status");
+
+/** Turns the server on or off and records the choice for the next launch. Rejects with the bind
+ *  error — a port already in use is the common one — so the toggle can report it. */
+export const remotectlSetEnabled = (enabled: boolean) =>
+  invoke<RemoteStatus>("remotectl_set_enabled", { enabled });
+
+/** Rebinds immediately when the server is already up. */
+export const remotectlSetPort = (port: number) => invoke<RemoteStatus>("remotectl_set_port", { port });
+
+/** Opens a pairing window and returns the six digits to show. Rejects when the server is off,
+ *  because a code for a door that is shut can only ever fail on the phone. */
+export const remotectlStartPairing = () => invoke<string>("remotectl_start_pairing");
+
+export const remotectlCancelPairing = () => invoke<void>("remotectl_cancel_pairing");
+
+export const remotectlListDevices = () => invoke<RemoteDevice[]>("remotectl_list_devices");
+
+/**
+ * The shells paired devices have running on this machine right now.
+ *
+ * Live processes and nothing more — there is no stored row behind them, so this is empty after a
+ * restart. Read on the same poll as the device list, because it answers the same question about the
+ * same machine and a shell somebody left running is the more urgent half of it.
+ */
+export const remotectlListTerminals = () => invoke<RemoteTerminal[]>("remotectl_list_terminals");
+
+/** Revokes one device and returns the list as it now stands, so the panel never re-reads. */
+export const remotectlRevokeDevice = (id: string) =>
+  invoke<RemoteDevice[]>("remotectl_revoke_device", { id });
+
+/** The "I lost my phone" button. */
+export const remotectlRevokeAll = () => invoke<RemoteDevice[]>("remotectl_revoke_all");
+
+/** Grants or withdraws shell access for every paired device at once. Takes effect on the next
+ *  request in both directions — nothing is cached and no session is torn down. */
+export const remotectlSetAllowTerminal = (allowed: boolean) =>
+  invoke<RemoteStatus>("remotectl_set_allow_terminal", { allowed });
+
+/** Removes one already-revoked device from the list for good. Cannot touch a live device — the
+ *  backend's SQL is what guarantees that, so cutting off and forgetting stay two separate acts. */
+export const remotectlForgetDevice = (id: string) =>
+  invoke<RemoteDevice[]>("remotectl_forget_device", { id });
+
+/** Clears every revoked row at once. */
+export const remotectlForgetAllRevoked = () =>
+  invoke<RemoteDevice[]>("remotectl_forget_all_revoked");
+
+/**
+ * Tells every connected phone that this window just changed something they hold a copy of.
+ *
+ * The outbound half of `state:invalidate`, and the direction that did not exist: a phone's actions
+ * reached the desktop through `remotectl/server.rs`, and the desktop's reached nothing at all. A
+ * gate approved here, a chat turn sent here, a finding dismissed here — none of them move a byte on
+ * disk, so no watcher fires and every phone watching that chain sat on an answered gate.
+ *
+ * Fire-and-forget on purpose. Nothing the caller does depends on a phone hearing it, and awaiting
+ * would put a round trip in front of the store write the user is waiting for. Errors are swallowed
+ * for the same reason — the only one reachable is an unknown domain, which is a programming mistake
+ * this file's own callers cannot make.
+ *
+ * `conversationId` is for `chat`, where a project holds dozens and "chat is stale" is not enough to
+ * say whether the transcript on screen is the one that moved.
+ */
+export const notifyStateChange = (
+  domain: "repo" | "chains" | "tasks" | "reviews" | "chat",
+  projectId?: string | null,
+  conversationId?: string | null,
+) =>
+  void invoke<void>("notify_state_change", {
+    domain,
+    projectId: projectId ?? null,
+    conversationId: conversationId ?? null,
+  }).catch(() => undefined);

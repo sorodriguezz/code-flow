@@ -32,6 +32,8 @@ mod power;
 mod pr_link;
 mod proc;
 mod remote;
+/// Driving this install from a phone on the same network. Off unless the user turns it on.
+mod remotectl;
 mod remotes;
 mod repo_identity;
 mod requirements;
@@ -223,6 +225,7 @@ pub fn run() {
         .manage(WatcherRegistry::default())
         .manage(tray::QuittingFlag::default())
         .manage(window_state::WindowTracker::default())
+        .manage(remotectl::RemoteCtl::default())
         .setup(|app| {
             // First, and before anything that can fail out of this closure: the window is created
             // hidden (`"visible": false` in `tauri.conf.json`) so that being resized and maximized
@@ -258,6 +261,18 @@ pub fn run() {
             // Here for the same reason as everything above it — `setup` is where the `AppHandle`
             // is — and cheap when the bench is empty, which is most installs most of the time.
             commands::terminal_cmd::spawn_transcript_flush(app.handle().clone());
+            // The remote-control server, in two halves that must happen in this order.
+            //
+            // `attach` registers the Rust-side listeners that republish app events onto the
+            // WebSocket fan-out. It is unconditional and does not depend on the server being on:
+            // the listeners cost nothing with no phone connected, and registering them once here
+            // means toggling the server later cannot leak a subscription or miss one.
+            //
+            // `autostart` is the half that binds a port, and only when the stored setting says so.
+            // It cannot fail out of `setup` — a port taken by something else must not stop the app
+            // from launching — so it reports through the settings screen instead. See its comment.
+            remotectl::bridge::attach(app.handle());
+            remotectl::autostart(app.handle());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -395,6 +410,19 @@ pub fn run() {
             commands::git_ops::git_fetch,
             commands::git_ops::git_pull,
             commands::git_ops::git_push,
+            commands::remotectl_cmd::remotectl_status,
+            commands::remotectl_cmd::remotectl_set_enabled,
+            commands::remotectl_cmd::remotectl_set_port,
+            commands::remotectl_cmd::remotectl_set_allow_terminal,
+            commands::remotectl_cmd::remotectl_start_pairing,
+            commands::remotectl_cmd::remotectl_cancel_pairing,
+            commands::remotectl_cmd::remotectl_list_devices,
+            commands::remotectl_cmd::remotectl_list_terminals,
+            commands::remotectl_cmd::remotectl_revoke_device,
+            commands::remotectl_cmd::remotectl_revoke_all,
+            commands::remotectl_cmd::remotectl_forget_device,
+            commands::remotectl_cmd::remotectl_forget_all_revoked,
+            commands::remotectl_cmd::notify_state_change,
             commands::settings::get_setting,
             commands::settings::get_settings,
             commands::settings::set_setting,

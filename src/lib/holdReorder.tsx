@@ -1,4 +1,5 @@
 import { useCallback, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { setDragCursor } from "./pointerDrag";
 
 /**
@@ -43,6 +44,31 @@ import { setDragCursor } from "./pointerDrag";
  */
 export const HOLD_MS = 1000;
 
+/**
+ * How long a press is left unanswered before the indicator appears.
+ *
+ * The indicator used to be mounted on `pointerdown`, which meant *every* click on every one of these
+ * items flashed a ring that started filling and vanished a moment later. A click is around 100ms, so
+ * what the user saw was a flicker on a control they had merely used — the gesture announcing itself
+ * to people who were not making it, on the app rail's most-clicked buttons, all day.
+ *
+ * A quarter of a second is comfortably past an ordinary click (~100ms) and past a slow one, and it
+ * is still early enough that a press being *held* is answered long before anyone would conclude the
+ * button is dead. What it buys is that the announcement now only reaches the person it is for.
+ *
+ * The wait itself is unchanged at [`HOLD_MS`]: this only moves when the drawing starts, so the
+ * indicator sweeps [`HOLD_PROGRESS_MS`] and still finishes exactly as the item lifts.
+ */
+const HOLD_REVEAL_MS = 250;
+
+/**
+ * How long the indicator has to sweep — the hold minus the silence before it.
+ *
+ * Handed to the animation inline, so the drawing and the timer it draws cannot drift apart: a full
+ * ring means the item is lifting *now*, not "some time after this filled up".
+ */
+export const HOLD_PROGRESS_MS = HOLD_MS - HOLD_REVEAL_MS;
+
 /** How far the pointer may drift during the hold and still count as a press on one item. */
 const HOLD_SLOP = 6;
 
@@ -58,6 +84,20 @@ export interface HoldDrag {
   /** The average distance between two slots. Meaningful for a list of equal-sized items, which is
    *  the only kind that can use it to preview a reorder by sliding things about. */
   pitch: number;
+  /**
+   * The slot the item will land in, as a box in the list container's own coordinates — enough to
+   * draw a marker in the gap the neighbours have opened up.
+   *
+   * The gap is always at the *original* position of slot `to`, whichever way the drag went: the
+   * items between `from` and `to` have each stepped one slot toward `from`, so the one place
+   * nothing is covering is where the held item is going. Which is exactly what a drop marker has to
+   * say, and what sliding neighbours alone only implies.
+   *
+   * Measured once when the item lifts and then indexed, never re-measured — the boxes are moving
+   * under the pointer by then. Relative to the container's border box, so the container it is drawn
+   * in must be `relative` and must not scroll or carry a border.
+   */
+  ghost: { top: number; height: number };
 }
 
 export interface HoldReorder {
@@ -98,12 +138,25 @@ export function slotShift(index: number, drag: HoldDrag): number {
   return 0;
 }
 
-/** Every item's centre, in document order. */
-function centres(list: HTMLElement | null): number[] {
-  return Array.from(list?.querySelectorAll<HTMLElement>("[data-reorder]") ?? []).map((el) => {
+/**
+ * Every slot, in document order: centres in viewport coordinates for hit-testing, and boxes in the
+ * container's coordinates for drawing into.
+ *
+ * One pass rather than two. Both readings come off the same `getBoundingClientRect()` per item, and
+ * they are taken at the same instant by construction — measuring the centres and the boxes
+ * separately would be two layout reads of a list that is about to start moving.
+ */
+function measure(list: HTMLElement | null): { centres: number[]; boxes: { top: number; height: number }[] } {
+  const items = Array.from(list?.querySelectorAll<HTMLElement>("[data-reorder]") ?? []);
+  const origin = list?.getBoundingClientRect().top ?? 0;
+  const centres: number[] = [];
+  const boxes: { top: number; height: number }[] = [];
+  for (const el of items) {
     const box = el.getBoundingClientRect();
-    return box.top + box.height / 2;
-  });
+    centres.push(box.top + box.height / 2);
+    boxes.push({ top: box.top - origin, height: box.height });
+  }
+  return { centres, boxes };
 }
 
 /** The slot whose centre is nearest `y`. Nearest-centre rather than "which box is the pointer in",
@@ -151,7 +204,13 @@ export function useHoldReorder(commit: (from: number, to: number) => void): Hold
      *  pointer as the preview updates, and hit-testing against boxes that are themselves moving is
      *  what makes a list flicker between two orders. */
     let slots: number[] = [];
+    /** The same slots as boxes to draw in — see `HoldDrag.ghost`. */
+    let boxes: { top: number; height: number }[] = [];
     let timer: number | null = null;
+    /** The countdown's *appearance*, which lands a quarter of a second before anything else does.
+     *  Its own handle because `stop()` has to be able to cancel a press that ends inside that
+     *  quarter second — which is every ordinary click on one of these items. */
+    let revealTimer: number | null = null;
     let armed = false;
     let to = index;
     let dy = 0;
@@ -159,6 +218,8 @@ export function useHoldReorder(commit: (from: number, to: number) => void): Hold
     const stop = () => {
       if (timer !== null) window.clearTimeout(timer);
       timer = null;
+      if (revealTimer !== null) window.clearTimeout(revealTimer);
+      revealTimer = null;
       setArming(null);
       if (armed) setDragCursor(false);
       window.removeEventListener("pointermove", onMove);
@@ -194,7 +255,7 @@ export function useHoldReorder(commit: (from: number, to: number) => void): Hold
       if (nextTo === to && nextDy === dy) return;
       to = nextTo;
       dy = nextDy;
-      setDrag((d) => (d ? { ...d, to, dy } : d));
+      setDrag((d) => (d ? { ...d, to, dy, ghost: boxes[to] ?? d.ghost } : d));
     };
 
     const onUp = () => {
@@ -220,7 +281,9 @@ export function useHoldReorder(commit: (from: number, to: number) => void): Hold
 
     timer = window.setTimeout(() => {
       timer = null;
-      slots = centres(list.current);
+      const measured = measure(list.current);
+      slots = measured.centres;
+      boxes = measured.boxes;
       // Nothing to swap with — leave the press a plain click rather than starting a drag with no
       // second slot to end in.
       if (slots.length < 2 || index >= slots.length) {
@@ -238,10 +301,17 @@ export function useHoldReorder(commit: (from: number, to: number) => void): Hold
         // Averaged rather than taken from the first gap, so a rule or a badge landing between two
         // items one day doesn't quietly make every shift the wrong height.
         pitch: (slots[slots.length - 1] - slots[0]) / (slots.length - 1),
+        ghost: boxes[index],
       });
     }, HOLD_MS);
 
-    setArming(key);
+    // Not `setArming(key)` on the spot: the indicator waits out `HOLD_REVEAL_MS`, so an ordinary
+    // click never puts one on screen at all. The countdown itself started above and is unaffected.
+    revealTimer = window.setTimeout(() => {
+      revealTimer = null;
+      setArming(key);
+    }, HOLD_REVEAL_MS);
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onCancel);
@@ -263,6 +333,10 @@ export function useHoldReorder(commit: (from: number, to: number) => void): Hold
  * it alone; on a wide row that same circle would be a small disc marooned in the middle, so `bar`
  * sweeps the row's full width instead. Both are the same fact drawn to fit.
  *
+ * Mounted by the caller only once [`HOLD_REVEAL_MS`] has passed, so this draws a press somebody is
+ * holding rather than flickering on every click — see the note there. It sweeps
+ * [`HOLD_PROGRESS_MS`], the remainder, and so still fills exactly as the item lifts.
+ *
  * The host element needs `relative` and, for `bar`, its own rounded clipping.
  */
 export function HoldProgress({ shape }: { shape: "ring" | "bar" }) {
@@ -271,7 +345,7 @@ export function HoldProgress({ shape }: { shape: "ring" | "bar" }) {
       <span
         aria-hidden
         className="cf-hold-bar pointer-events-none absolute inset-y-0 left-0 w-full origin-left rounded-[inherit] bg-[var(--cf-accent)] opacity-[0.14]"
-        style={{ animationDuration: `${HOLD_MS}ms` }}
+        style={{ animationDuration: `${HOLD_PROGRESS_MS}ms` }}
       />
     );
   }
@@ -292,8 +366,37 @@ export function HoldProgress({ shape }: { shape: "ring" | "bar" }) {
         strokeWidth="2"
         strokeLinecap="round"
         className="cf-hold-ring"
-        style={{ animationDuration: `${HOLD_MS}ms` }}
+        style={{ animationDuration: `${HOLD_PROGRESS_MS}ms` }}
       />
     </svg>
+  );
+}
+
+/**
+ * Everything except the list, dimmed — the moment the item lifts, and not a frame before.
+ *
+ * The hold and the drag are two different states of the same gesture, and until now they looked
+ * nearly alike: the ring filled, the icon grew a shadow, and the rest of the window carried on as if
+ * nothing had happened. So "am I dragging yet?" was answered by a shadow the width of a hairline, on
+ * a 32px button, in the corner of the eye. This answers it with the whole window.
+ *
+ * It is also what turns the list into a *destination*. A drag has to say where the thing may be put
+ * down, and the honest answer for this gesture is "back in this list, nowhere else" — dropping the
+ * scrim over everything else and leaving the list lit says exactly that, without inventing a drop
+ * zone that does not exist.
+ *
+ * `pointer-events-none`, always: the drag is driven from `window` listeners and the scrim must not
+ * become the target of the pointer that is mid-gesture. It is decoration, and it has to stay
+ * decoration even while it covers the screen.
+ *
+ * The caller raises its own list above this — `z-[9998]` here, so a `z-[9999]` on the container is
+ * what lights it. A portal rather than a fixed child of the list, so no `overflow` or stacking
+ * context between the list and the window can clip it down to the list's own box.
+ */
+export function HoldScrim({ active }: { active: boolean }) {
+  if (!active) return null;
+  return createPortal(
+    <div aria-hidden className="cf-hold-scrim pointer-events-none fixed inset-0 z-[9998] bg-black/55" />,
+    document.body,
   );
 }

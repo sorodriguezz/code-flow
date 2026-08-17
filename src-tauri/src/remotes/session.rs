@@ -25,7 +25,22 @@ pub fn open(
     spec.require_shell()?;
     // Not recorded: a transcript here would be a copy of somebody else's machine talking, kept in
     // this one's database. See `terminal::TerminalSession::transcript`.
-    terminal::open_pty(app, registry, "ssh", &args(spec), None, None).map_err(|e| explain(spec, e))
+    terminal::open_pty(
+        app,
+        registry,
+        "ssh",
+        &args(spec),
+        None,
+        None,
+        // No owner, and that is load-bearing rather than a default: an owner is what lets a paired
+        // phone write to a session, and this one is a live login on somebody else's server. The
+        // Remote workspace is explicitly out of scope for the control surface (see
+        // `remotectl::dispatch`), and an `ssh -t` reachable by id from a phone would be the whole
+        // exclusion undone. A blank `cwd` because the local one says nothing about where this shell
+        // actually is.
+        terminal::Origin { cwd: String::new(), profile: "ssh".into(), owner: None },
+    )
+    .map_err(|e| explain(spec, e))
 }
 
 /// The command line. Its own function so it can be asserted on without a host to connect to.

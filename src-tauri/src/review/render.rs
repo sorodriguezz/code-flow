@@ -116,6 +116,57 @@ fn render_finding(finding: &Finding) -> String {
     out
 }
 
+/// One finding as the body of a pull-request comment.
+///
+/// # Why this is not [`render_finding`]
+///
+/// The report block and the comment block are deliberately different documents. The report is read
+/// inside CodeFlow next to every other finding, so it carries the severity label and the location
+/// line that anchors it. A comment is read on GitHub/Azure/GitLab *already attached to the line it
+/// is about*, so repeating the location under it is noise, and the severity is carried by the
+/// emoji. This mirrors `formatFindingAsComment` in `src/lib/parseAnalysis.ts` field for field —
+/// they must stay in step, because a finding posted from the desktop and the same finding posted
+/// from a phone have to read as the same comment, not as two tools disagreeing.
+///
+/// # Why it is rendered here and stored
+///
+/// The durable memory keeps [`crate::review_memory::MemoryFinding`], a slim projection that drops
+/// `por_que`, `sugerencia` and `ejemplo_*` — everything a comment is actually made of. A client
+/// holding only that projection (the mobile one does; it never sees a `Finding`) can therefore not
+/// build this body, and the one that tried posted `subtitulo` alone. That is worse than it sounds:
+/// `apply_post_outcome` writes the resulting thread id back onto the finding, so a one-line comment
+/// posted once becomes the thread every *future* desktop publish replies to — the full finding
+/// never gets written anywhere. Rendering it at save time is what lets any client publish the same
+/// comment the desktop would have.
+pub fn comment_markdown(finding: &Finding) -> String {
+    let mut out = format!(
+        "### {} [{}] {} · {}",
+        finding.severity.emoji(),
+        finding.tipo.label(),
+        if finding.categoria.is_empty() { "hallazgo" } else { &finding.categoria },
+        finding.id,
+    );
+    if !finding.subtitulo.is_empty() {
+        out.push_str(&format!("\n\n{}", finding.subtitulo));
+    }
+    if !finding.por_que.is_empty() {
+        out.push_str(&format!("\n\n💭 **Por qué:** {}", finding.por_que));
+    }
+    if !finding.sugerencia.is_empty() {
+        out.push_str(&format!("\n\n💡 **Sugerencia:** {}", finding.sugerencia));
+    }
+    if !finding.ejemplo_code.is_empty() {
+        out.push_str(&format!(
+            "\n\n🛠️ Ejemplo de solución:\n```{}\n{}\n```",
+            finding.ejemplo_lang, finding.ejemplo_code
+        ));
+    }
+    if let Some(confidence) = finding.confianza {
+        out.push_str(&format!("\n\n🎯 Confianza: {confidence}/100"));
+    }
+    out
+}
+
 /// The scope line: what this review actually looked at.
 ///
 /// It exists so that "found nothing" is checkable. Without it, an empty review and a review whose
@@ -313,6 +364,29 @@ mod tests {
         let md = review_markdown(&[finding(Severity::Mayor, FindingType::Bug, "F-001")], &ctx(&c, &[], ""));
         assert!(md.contains("📍 Ubicación: a.ts:1-2"));
         assert!(!md.contains("📍 Ubicación: `"), "no backticks: the value is parsed literally");
+    }
+
+    /// The whole reason `comentario_md` is stored: the slim memory a phone reads drops `por_que`,
+    /// `sugerencia` and `ejemplo_*`, so a comment built from the memory alone would be the subtitle
+    /// and nothing else — and the thread id that comes back would pin every later publish to it.
+    #[test]
+    fn a_comment_carries_the_fields_the_stored_memory_drops() {
+        let body = comment_markdown(&finding(Severity::Mayor, FindingType::Bug, "F-007"));
+        assert!(body.contains("F-007"), "the reconciled id, not the pre-reconciliation one");
+        assert!(body.contains("**Por qué:** p"));
+        assert!(body.contains("**Sugerencia:** s"));
+        assert!(body.contains("🎯 Confianza: 80/100"));
+    }
+
+    /// A comment is posted *attached to* the line it is about, so repeating the location inside it
+    /// is noise — and the desktop's own `formatFindingAsComment` leaves it out for that reason.
+    /// The two have to agree, or the same finding reads as two different comments depending on
+    /// which device published it.
+    #[test]
+    fn a_comment_leaves_out_the_location_the_report_block_carries() {
+        let f = finding(Severity::Mayor, FindingType::Bug, "F-001");
+        assert!(!comment_markdown(&f).contains("📍 Ubicación"));
+        assert!(render_finding(&f).contains("📍 Ubicación: a.ts:1-2"));
     }
 
     #[test]

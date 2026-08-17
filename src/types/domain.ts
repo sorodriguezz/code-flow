@@ -181,6 +181,10 @@ export interface FileDiffInfo {
   old_path: string | null;
   new_path: string | null;
   status: string;
+  /** libgit2's own binary flag. `status` cannot stand in for it — a changed PNG is `"modified"`
+   *  just like a changed source file, and both arrive with no hunks — so this is the only thing
+   *  that lets a viewer say "binary file" instead of guessing from an empty diff. */
+  binary: boolean;
   hunks: DiffHunkInfo[];
 }
 
@@ -307,6 +311,17 @@ export interface SavedFinding {
   resuelto_en_iter?: number | null;
   motivo_descarte?: string | null;
   delta?: string | null;
+  /**
+   * This finding rendered as a pull-request comment, written when the run was saved.
+   *
+   * Optional because it is read out of a JSON blob that may have been written by an older build:
+   * runs recorded before the field existed, and findings carried forward from one, simply do not
+   * have it. A client that publishes from the stored memory rather than from the parsed review — the
+   * mobile one — must treat its absence as "this finding cannot be published from here" rather than
+   * substituting the subtitle, which posts an unanchored one-liner and then owns the thread for
+   * good (see `apply_post_outcome`).
+   */
+  comentario_md?: string;
 }
 
 /** A standing "this is a known false positive" rule for one repository (mirrors the Rust
@@ -1601,4 +1616,74 @@ export interface SystemLoad {
   app_mem_percent: number;
   /** How many processes that tree came to — the line that explains the two figures above it. */
   app_processes: number;
+}
+
+// ---------------------------------------------------------------------------
+// Remote control
+// ---------------------------------------------------------------------------
+
+/**
+ * The remote-control server, as the settings panel sees it.
+ *
+ * `enabled` and `running` are two different facts and the panel shows both: the first is the
+ * stored preference (what happens at the next launch), the second is whether a socket is bound
+ * right now. They disagree when the port was taken at startup — a real case on a developer's
+ * machine — and collapsing them into one boolean would make that look like the toggle not working.
+ */
+export interface RemoteStatus {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  /** The address to type into a phone. Absent when the server is off, or when this machine has no
+   *  non-loopback address to advertise (offline, or every interface is a VPN). */
+  url: string | null;
+  /** Whether a pairing code is on screen right now. */
+  pairing: boolean;
+  /**
+   * Whether paired devices may open and drive a shell.
+   *
+   * Its own switch rather than part of `enabled`, because it is its own decision: everything else
+   * a phone can do is a specific act with a specific blast radius, and a shell is arbitrary code
+   * execution on this machine. Turning the server on must not silently mean this too.
+   */
+  allow_terminal: boolean;
+}
+
+/**
+ * A shell a paired device has running on this machine right now.
+ *
+ * There is no stored row behind this and there deliberately is not one: it is a live pty and nothing
+ * else, so the list is empty the moment the app restarts. It exists because a shell started from a
+ * phone left no trace anywhere in the desktop UI — not the dock, not the bench — and "what is
+ * running on my computer" is a question the person at the machine is entitled to an answer to.
+ */
+export interface RemoteTerminal {
+  id: string;
+  /** Where the shell started. The resolved directory, so a session opened with no path shows the
+   *  home directory it actually landed in rather than an empty string. */
+  cwd: string;
+  /** The shell profile's name — "zsh", "PowerShell" — not the command line. */
+  profile: string;
+  /** The device that opened it, by id. Resolved against the device list for a name to show; the raw
+   *  id is the fallback rather than a placeholder, because a session whose device has been forgotten
+   *  is still a real process and mislabelling it would be worse than showing a uuid. */
+  owner: string | null;
+}
+
+/** A phone or tablet that has been paired. Carries no credential — see the `remote_devices` table. */
+export interface RemoteDevice {
+  id: string;
+  name: string;
+  created_at: string;
+  last_seen_at: string | null;
+  revoked: boolean;
+  /**
+   * Whether the device is holding an open event socket right now.
+   *
+   * The question `last_seen_at` cannot answer: a WebSocket authenticates once, when it is opened,
+   * so a phone driving the machine all afternoon writes that column exactly once and then looks
+   * like a device that connected at lunchtime and left. This comes from the desktop's live socket
+   * map instead, and it is the field the panel's dot is drawn from.
+   */
+  connected: boolean;
 }

@@ -71,6 +71,11 @@ impl Finding {
             resuelto_en_iter: self.resuelto_en_iter,
             motivo_descarte: self.motivo_descarte.clone(),
             delta: self.delta.clone(),
+            // Left empty here and filled after reconciliation, because the comment's heading carries
+            // the finding's id and the id is not final yet: `reconcile` hands a persisting finding
+            // its previous run's id and mints a fresh one for anything new. Rendering it now would
+            // stamp the pre-reconciliation number into a comment that gets posted under another.
+            comentario_md: String::new(),
         }
     }
 

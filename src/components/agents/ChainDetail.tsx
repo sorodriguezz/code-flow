@@ -303,7 +303,11 @@ export function ChainDetail({ chainId }: { chainId: string }) {
             second button beside it that approved only the next one would be a trap. */}
         {gated && !planGate && (
           <>
-            <Action primary icon={Check} label={t("agents.approveContinue")} onClick={() => void store.approve(chainId, draft ?? "")} />
+            {/* `waiting` is the step this gate was drawn from, and it goes with the approval as a
+                precondition: the pane can be minutes old (a phone may have answered the same gate
+                from the sofa), and clearing a gate that has already moved on would force a chain
+                mid-run back to `queued`. */}
+            <Action primary icon={Check} label={t("agents.approveContinue")} onClick={() => void store.approve(chainId, draft ?? "", waiting?.id)} />
             <Action icon={GitCompare} label={t("agents.openChanges")} onClick={openChanges} />
             <Action icon={SkipForward} label={t("agents.skipStep")} onClick={() => void store.skip(chainId)} />
           </>

@@ -753,6 +753,93 @@ const en = {
   "api.settings.off": "Off",
   "api.settings.globalValue": "Global: {value}",
 
+  // ---- Remote control (phone / tablet on the same network) ----
+  "remote.title": "Remote control",
+  // The section's groups. Short and noun-shaped on purpose: they are set in uppercase by `Group`,
+  // where a sentence turns into shouting and a long one truncates. The sentences those replaced
+  // still open their group as a line of body text.
+  "remote.groupServer": "Server",
+  "remote.groupPairing": "Pairing",
+  "remote.groupTerminal": "Terminal",
+  "remote.groupAccess": "Access",
+  "remote.alphaNote":
+    "This feature is new and still settling. Settings here may be renamed or behave differently in a coming version, so read the release notes before relying on it — and turn the server off when you are not using it.",
+  "remote.subtitle":
+    "Drive this install from your phone or tablet on the same network — watch agent runs, answer a chain's gate, commit and push without coming back to the desk.",
+  "remote.enable": "Enable the server",
+  "remote.enableHint":
+    "Off by default. While it is on, this machine accepts connections from paired devices on your local network — and only from paired devices.",
+  "remote.port": "Port",
+  "remote.portHint": "Above 1024. Change it if something else on this machine already answers here.",
+  "remote.running": "Listening",
+  "remote.stopped": "Off",
+  "remote.enabledButNotRunning":
+    "It is meant to be on, but the port could not be opened — something else is probably using it. Try another port.",
+  "remote.noAddress":
+    "The server is up, but this machine has no network address to advertise. Check that you are on a wifi or wired network.",
+  "remote.firewallWindows":
+    "Windows will ask once whether to let CodeFlow accept connections — allow it on private networks. If you dismissed that prompt, the address below will not answer from your phone until you allow CodeFlow through Windows Defender Firewall.",
+  "remote.openOnPhone": "Open this on your phone",
+  "remote.scanHint": "Scan the code, or type the address into the browser.",
+  "remote.pair": "Pair a device",
+  "remote.pairAgain": "Pair another device",
+  "remote.pairCancel": "Cancel",
+  "remote.pairCodeLabel": "Enter this code on the device",
+  "remote.pairCodeHint":
+    "Valid for three minutes, and for one device. Five wrong attempts cancel it — ask for a new one if that happens.",
+  "remote.devices": "Paired devices",
+  "remote.devicesEmpty": "No device has been paired yet.",
+  "remote.revoke": "Revoke",
+  "remote.revokeAll": "Revoke every device",
+  "remote.revoked": "Revoked",
+  // Said in the present tense on purpose: this is a socket that is open right now, not a
+  // timestamp. It is the only thing on the row that answers "is my phone still connected".
+  "remote.connected": "Connected now",
+  "remote.lastSeen": "Last seen {when}",
+  "remote.neverSeen": "Never connected",
+  "remote.pairedOn": "Paired {when}",
+  "remote.safety": "What a paired device can and cannot do",
+  "remote.safetyAllowed":
+    "It can read your repositories and diffs, run the pre-commit review, stage and commit, push and pull, switch branch, review pull requests, chat with an engine, and answer or abort a chain.",
+  "remote.safetyDenied":
+    "It can never read or write your credentials, reach your databases or SSH hosts, delete anything, or discard your work. That list is fixed in the app, not a setting.",
+  // What a paired device did, announced in the notification centre. The device's own name travels
+  // as the entry's `detail`, so these name the act and nothing else.
+  "remote.action.commit": "Committed from a device",
+  "remote.action.push": "Pushed from a device",
+  "remote.action.pull": "Pulled from a device",
+  "remote.action.fetch": "Fetched from a device",
+  "remote.action.checkout": "Switched branch from a device",
+  "remote.action.branch": "Created a branch from a device",
+  "remote.action.gateApproved": "Gate answered from a device",
+  "remote.action.stepSkipped": "Step skipped from a device",
+  "remote.action.chainAborted": "Chain aborted from a device",
+  "remote.action.chainResumed": "Chain resumed from a device",
+  "remote.action.stepRetried": "Step retried from a device",
+  "remote.action.runCancelled": "Run cancelled from a device",
+  "remote.action.prReviewed": "Pull request reviewed from a device",
+  "remote.action.prActed": "Pull request voted on from a device",
+  "remote.action.prCommented": "Review published from a device",
+  "remote.action.threadResolved": "Comment thread resolved from a device",
+  "remote.action.findingDiscarded": "Finding discarded from a device",
+  "remote.action.analyzed": "Changes reviewed from a device",
+  "remote.action.chat": "Message sent from a device",
+  "remote.action.terminalOpened": "Terminal opened from a device",
+  "remote.action.terminalClosed": "Terminal closed from a device",
+  "remote.forget": "Remove from the list",
+  "remote.forgetAllRevoked": "Clear revoked",
+
+  "remote.terminal": "Allow terminals",
+  "remote.terminalHint":
+    "Off by default, and separate from the switch above on purpose. Everything else a paired device can do is one specific action; a shell is not — it can run anything on this machine, as you. Turn it on if that is what you want from your phone, and turn it off when you are done.",
+  "remote.terminalOnWarning":
+    "Terminals are on. A device holding a valid token can run commands on this computer. The connection is plain HTTP on your local network, so prefer a network you trust.",
+  "remote.liveTerminals": "Shells open from a device",
+  "remote.liveTerminalsNone": "No paired device has a shell open right now.",
+  "remote.liveTerminalsHint":
+    "Real processes on this computer, started from a phone. They keep running when the device disconnects — briefly, so a locked screen does not kill a build — and are closed for good when you revoke the device or turn terminals off.",
+  "remote.killTerminal": "Close this shell",
+
   // ---- Backup (whole install, encrypted) ----
   "backup.title": "Backup",
   "backup.subtitle":
@@ -1462,6 +1549,7 @@ const en = {
   "settings.skills": "Skills",
   "settings.collapseNav": "Collapse to icons",
   "settings.expandNav": "Show section names",
+  "settings.alpha": "ALPHA",
   "settings.globalGroup": "Global",
   "settings.workspaceGroup": "Workspace — {name}",
   "settings.workspaceGroupGeneric": "Workspace",
@@ -2540,6 +2628,9 @@ const en = {
   "terminal.rename": "Rename tab (or double-click it)",
   "terminal.hide": "Hide panel",
   "terminal.toggle": "Toggle terminal panel",
+  "terminal.copy": "Copy",
+  "terminal.paste": "Paste",
+  "terminal.copied": "Copied",
 
   "chat.title": "Chat with AI",
   "chat.hint": "Ask anything about this repository — the AI can read files, search code, and check git state to answer. Configure review contexts below for extra background.",
@@ -4275,6 +4366,9 @@ const en = {
   "agents.liveKindInline": "Inline edit",
   "agents.liveKindDb": "Database assistant",
   "agents.liveKindUnknown": "AI run",
+  /** A run this window did not start — kicked off from a paired phone or tablet. Registered from
+   *  the engine banner, since there is no local caller to register it. */
+  "agents.liveKindRemote": "Run from a device",
   "agents.selectTask": "No task selected",
   "agents.selectTaskHint": "Pick a task on the left, or start a new one.",
   "agents.tasksEmpty": "No tasks yet",
@@ -4482,6 +4576,9 @@ const en = {
   "chain.emptyOutput": "a step returned nothing — check before continuing",
   "chain.stopped": "you stopped it",
   "chain.timedOut": "the step took too long and was stopped",
+  // Not a `last_reason` like the ten above: this one is refused *before* anything is written, so it
+  // is a sentence to a person rather than a note on a row. It reads as one.
+  "chain.gateMoved": "This gate was already answered — the chain has moved on.",
   "chain.noSteps": "A chain needs at least one step.",
   "chain.tooManySteps": "A chain can hold at most 8 steps.",
   "chain.noRepos": "Pick at least one repository.",
@@ -4693,6 +4790,10 @@ const en = {
   "db.noResultYet": "No result yet",
   "db.noColumns": "This statement returned no columns.",
   "db.noFields": "This command returned no fields.",
+  "db.statementOk": "Ran successfully",
+  "db.statementOkHint": "It returned no result set — writes and DDL report how much they changed, not rows.",
+  "db.batchOk": "{n} of {total} succeeded",
+  "db.batchFailed": "{n} failed",
   "db.rowsN": "{n} rows",
   "db.rowsAffected": "{n} rows affected",
   "db.rowsOfTotal": "{n} of {total} rows",

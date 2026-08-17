@@ -9,6 +9,7 @@ import {
   Database,
   Download,
   Copy,
+  FolderCode,
   Layers,
   List,
   Loader2,
@@ -121,6 +122,9 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 
   const engine = connection ? engineInfo(connection.kind) : null;
   const isSql = engine?.sql ?? true;
+  /** The connection's folder, shown ahead of its name in the toolbar. Trimmed and empty for the
+   *  ungrouped bucket, which is the same `""` the tree keys that bucket by — see `UNGROUPED`. */
+  const group = connection?.group_name.trim() ?? "";
 
   // What the pickers offer: the databases and schemas read for this connection. The nodes are the
   // explorer's own, so expanding the tree and opening a picker feed each other — and a picker
@@ -308,6 +312,21 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
         {connection && <EngineBadge kind={connection.kind} label={engine?.label ?? ""} />}
+        {/* The group, ahead of the connection it holds — the same order the explorer draws them in,
+            so a console opened from the tree reads as the path you clicked down. Muted and with the
+            tree's own folder icon, because the connection is the subject here and the group is where
+            it lives; the slash is what says so without a second line of chrome.
+
+            Absent when the connection is ungrouped rather than rendered as "Sin grupo /": that is a
+            bucket, not a folder, and naming it here would put a word in front of every console
+            belonging to somebody who never made a group. */}
+        {group && (
+          <span className="flex min-w-0 items-center gap-1 text-[12px] text-[var(--cf-text-muted)]">
+            <FolderCode size={11} className="shrink-0" />
+            <span className="max-w-[110px] truncate">{group}</span>
+            <span aria-hidden>/</span>
+          </span>
+        )}
         <span className="max-w-[160px] truncate text-[12px] font-medium text-[var(--cf-text)]">
           {connection?.name ?? t("db.connectionGone")}
         </span>
@@ -776,6 +795,8 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
     );
   }
 
+  const failedCount = result.results.filter((entry) => entry.error !== null).length;
+
   const active = result.results[tab.activeResult] ?? result.results[0];
   if (!active) {
     return (
@@ -863,6 +884,26 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
       {/* Status line */}
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)]">
         <span className="tabular-nums">{formatDuration(active.duration_ms)}</span>
+        {/* How the batch as a whole went, next to how the selected statement went. Without it a run
+            of twenty writes is twenty numbered tabs and no answer to "did that work" — you would
+            have to click each one. Counted over the results that came *back*: the engines stop at
+            the first failure, so a batch that broke at 5 returns five results and this says four of
+            five, which is what actually ran. The tabs are what show which one broke. */}
+        {result.results.length > 1 && (
+          <>
+            <span className="tabular-nums">
+              {t("db.batchOk", {
+                n: String(result.results.length - failedCount),
+                total: String(result.results.length),
+              })}
+            </span>
+            {failedCount > 0 && (
+              <span className="tabular-nums text-[var(--cf-danger)]">
+                {t("db.batchFailed", { n: String(failedCount) })}
+              </span>
+            )}
+          </>
+        )}
         {active.rows_affected !== null ? (
           <span className="tabular-nums">
             {t(counts.affected, { n: formatCount(active.rows_affected) })}
@@ -952,6 +993,23 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
         ) : (
           <DocumentsView id={tab.id} documents={active.documents} />
         )
+      ) : active.columns.length === 0 && active.documents.length === 0 ? (
+        /* A statement that succeeded and projected nothing — an INSERT, a DELETE, a CREATE TABLE.
+           The grid's own empty state ("returned no columns") is *true* here and reads as a failure,
+           which is the wrong answer to the only question being asked: did it work. It did, so the
+           panel says so, and the row count that was already in the status line above is repeated
+           here because that line is a strip of grey 11px numbers nobody reads after a write. */
+        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-1 p-3 text-center">
+          <Check size={20} className="text-[var(--cf-success)]" />
+          <p className="text-[13px] font-medium text-[var(--cf-text)]">
+            {active.rows_affected !== null
+              ? t(counts.affected, { n: formatCount(active.rows_affected) })
+              : t("db.statementOk")}
+          </p>
+          <p className="max-w-[30rem] text-[11px] leading-snug text-[var(--cf-text-muted)]">
+            {t("db.statementOkHint")}
+          </p>
+        </div>
       ) : (
         <div className="min-h-0 flex-1">
           <ResultGrid

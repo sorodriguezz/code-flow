@@ -129,12 +129,20 @@ pub const TABLES: &[&str] = &[
 /// It stays in the local database, which is the whole of what was asked for: survive a restart,
 /// travel nowhere.
 ///
+/// `remote_devices` is the second, and its reason is about authority rather than usefulness. Each
+/// row is a credential that lets a phone drive **this** installation's server. Carrying it into a
+/// restore would mean the new machine silently accepting a device somebody paired with the old
+/// one — access quietly widening to a second computer through an operation the user thinks of as
+/// "get my settings back". Re-pairing is a six-digit code and thirty seconds; a restored token is
+/// a door nobody remembers opening.
+///
 /// Read only by [`covers_every_table`], and that is the point rather than an oversight: nothing at
 /// runtime consults this, because excluding a table is *not* an action the exporter takes — it is
 /// [`TABLES`] not naming it. This list is the written-down reason, and the test is what makes
 /// writing it down compulsory.
 #[allow(dead_code)]
-pub const NEVER_BACKED_UP: &[&str] = &["workspace_terminals", "workspace_bench_tabs"];
+pub const NEVER_BACKED_UP: &[&str] =
+    &["workspace_terminals", "workspace_bench_tabs", "remote_devices"];
 
 // ---------------------------------------------------------------------------
 // What the user chose to include

@@ -15,6 +15,7 @@ import { RequirementsModal } from "./components/layout/RequirementsModal";
 import { UpdateAlert } from "./components/layout/UpdateAlert";
 import { EmptyState } from "./components/common/EmptyState";
 import { ToastContainer } from "./components/common/Toast";
+import { NotificationPopups } from "./components/layout/NotificationPopups";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
 import { TourOverlay } from "./components/tour/TourOverlay";
@@ -41,11 +42,19 @@ import { useIconRulesStore } from "./state/iconRulesStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
 import { useBlameStore } from "./state/blameStore";
+import { useChainStore } from "./state/chainStore";
+import { useAgentsStore } from "./state/agentsStore";
+import { notify } from "./state/notificationStore";
+import { useJobsStore } from "./state/jobsStore";
+import { useAiRunStore } from "./state/aiRunStore";
+import { useChatHistoryStore } from "./state/activityStore";
+import { useChatStore } from "./state/chatStore";
+import type { TranslationKey } from "./lib/i18n/translations";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { backgroundFetch } from "./lib/backgroundFetch";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
-import { onAppForeground, onRepoFsChanged } from "./lib/tauri/events";
+import { DESKTOP_ORIGIN, onAppForeground, onRepoFsChanged, onStateInvalidate } from "./lib/tauri/events";
 
 /**
  * Everything below is split out of the entry chunk rather than compiled into it.
@@ -139,6 +148,45 @@ const WARM_CHUNKS = [
  * the app showing a state that had never existed. A trailing edge can be late but it cannot be
  * wrong — the timer only ever fires after the last event, so what it reads is the final state.
  */
+/**
+ * The `remote.action.*` keys the backend is allowed to name.
+ *
+ * A payload from `remotectl` is the one place a `TranslationKey` arrives from outside this
+ * codebase, and a newer desktop paired with an older one — or the reverse — can send a key this
+ * build has no string for. Checking against the list here means an unknown one is dropped rather
+ * than rendered as its own raw key in the notification centre, which is what `translate` would do
+ * with it.
+ *
+ * Kept in step with `announce_for` in `src-tauri/src/remotectl/dispatch.rs`.
+ */
+const REMOTE_ACTION_KEYS = new Set<string>([
+  "remote.action.commit",
+  "remote.action.push",
+  "remote.action.pull",
+  "remote.action.fetch",
+  "remote.action.checkout",
+  "remote.action.branch",
+  "remote.action.gateApproved",
+  "remote.action.stepSkipped",
+  "remote.action.chainAborted",
+  "remote.action.chainResumed",
+  "remote.action.stepRetried",
+  "remote.action.runCancelled",
+  "remote.action.prReviewed",
+  "remote.action.prActed",
+  "remote.action.prCommented",
+  "remote.action.threadResolved",
+  "remote.action.findingDiscarded",
+  "remote.action.analyzed",
+  "remote.action.chat",
+  "remote.action.terminalOpened",
+  "remote.action.terminalClosed",
+]);
+
+function isRemoteActionKey(key: string): key is TranslationKey {
+  return REMOTE_ACTION_KEYS.has(key);
+}
+
 const FS_NEAR_WAIT_MS = 600;
 const FS_FAR_WAIT_MS = 3000;
 /**
@@ -485,16 +533,159 @@ export default function App() {
       FS_FAR_WAIT_MS,
       FS_FAR_MAX_WAIT_MS,
     );
+    // Attaches the run-event listeners before anything can need them.
+    //
+    // `aiRunStore` used to subscribe lazily, from its own `start` — fine while every run in the
+    // app began with a local `start` call, and wrong the moment one could begin somewhere else. A
+    // review or a chat turn launched from a paired phone reaches the same engine through the same
+    // code, but this window never calls `start` for it, so with the old lazy subscription a
+    // desktop that had not itself run anything was not listening: the engine banner, the live
+    // output and the completion event all arrived with nobody attached. That is why a phone-started
+    // review showed no working row and left no trace here.
+    useAiRunStore.getState().init();
+
     const unlisten = onRepoFsChanged((e) => {
       const activePath = useWorkspaceStore.getState().activeProject()?.local_path;
       if (e.repo_path !== activePath) return;
       refreshNear();
       refreshFar();
     });
+
+    // The same refreshes, for the changes no watcher can see.
+    //
+    // A phone driving this install (`src-tauri/src/remotectl/`) runs the same commands the buttons
+    // here run, so most of its work is already covered: it moves bytes on disk and the watcher
+    // above fires. What it does *not* cover is anything whose only effect is a row — approving a
+    // chain gate, pinning a task — and `state:invalidate` is the backend saying so explicitly.
+    //
+    // `repo` deliberately reuses the two debouncers rather than refreshing directly: this effect
+    // owns how often the repository views may be re-read, and a second policy for the same data
+    // would be one to keep in step. The other two domains have no burst behaviour to smooth —
+    // one gate approval is one event — so they reload straight away.
+    const unlistenInvalidate = onStateInvalidate(async (e) => {
+      // This window's own change, coming back through the global emit that carried it to the
+      // phones. Acting on it would mean reloading each store on top of the write that is still
+      // settling into it — a chain list re-read mid-`applyChain`, a chat history reloaded while the
+      // optimistic bubble is up. The comment on `origin` claimed this filter existed long before it
+      // did; adding the desktop as an emitter is what made its absence matter.
+      if (e.origin === DESKTOP_ORIGIN) return;
+
+      switch (e.domain) {
+        case "repo":
+          refreshNear();
+          refreshFar();
+          break;
+        // A chain moved somewhere else — almost always a gate answered from a phone.
+        //
+        // **Reloading is only half of it, and it was the half that did nothing.** `approve_chain_gate`
+        // is pure SQL: it clears the gate and puts the chain back to `queued`, and that is where the
+        // chain sits forever unless somebody claims its next step. The claimer is `chainStore.pump`,
+        // and it lives here, in this window — so a gate answered from the sofa used to redraw the
+        // Agents tab with the gate gone and then leave the plan parked until the user walked back to
+        // the desk. This is the line that finishes the action.
+        case "chains": {
+          const store = useChainStore.getState();
+          // `reloadChains` reads the *loaded* workspace and discards everything else, so for a chain
+          // belonging elsewhere it would be a round trip whose answer cannot contain the row that
+          // moved. The id is what advances it; the list is what this window draws.
+          const here = !e.workspace || e.workspace === store.workspaceId;
+          if (here) {
+            await store.reloadChains();
+            // The open chain as well as the list: the gate that was just answered is very likely
+            // the one on screen, and the list carries the chain row without its steps.
+            const selected = store.selectedId;
+            if (selected) void store.refresh(selected);
+          }
+          // The chain that actually moved, `remote` because it did: somebody asked for this from
+          // another device, and that is what earns the exemption from the tray guard. It is pumped
+          // by id and not out of the list, which is the whole reason the frame carries one — a chain
+          // in another workspace is not in any list this window holds.
+          if (e.chain) void useChainStore.getState().pump(e.chain, { remote: true });
+          // And anything else here that is ready to move. A phone's action can unblock a chain it
+          // did not name — finishing one plan frees the repository a second was queued on — and this
+          // is the same sweep `app:foreground` runs. **Not** `remote`: nobody asked about these, so
+          // they keep the tray guard, and a client too old to name its chain lands here.
+          if (here) {
+            for (const chain of useChainStore.getState().chains) {
+              if (chain.status === "queued" && chain.id !== e.chain) {
+                void useChainStore.getState().pump(chain.id);
+              }
+            }
+          }
+          break;
+        }
+        case "tasks":
+          void useAgentsStore.getState().reloadTasks();
+          break;
+        // A review or an analysis run from a phone. Both write a `job_history` row on the Rust
+        // side exactly as the desktop's own do — `review_pull_request` and
+        // `analyze_working_changes` each call `add_job_history` themselves — so the result is
+        // already durable by the time this arrives. What was missing was anyone re-reading it:
+        // `jobsStore` is filled from the database at load and then only ever appended to by
+        // *this* window's own jobs, which a remote run is not.
+        // `refresh` and not `load`: `load` runs once per bucket by design (the AI panel calls it
+        // on every mount) and returns immediately for any project whose panel has been opened, so
+        // it could never pick up a row written by another device. See `jobsStore.refresh`.
+        //
+        // Awaited, and that ordering is load-bearing: the notification below carries a target that
+        // selects this job, and `showJobInAiPanel` looks it up in `byProject` and returns silently
+        // when it is absent. Raising the notification first would produce a row that does nothing
+        // when tapped — which is the same "it says it happened and nothing happens" in a smaller
+        // shape.
+        case "reviews":
+          if (e.project) await useJobsStore.getState().refresh(e.project);
+          break;
+        // A chat turn sent from a phone. The Activity list is what gains a row — a new
+        // conversation, or a newer timestamp on an existing one — and it is loaded per project
+        // and then cached, so without this the panel keeps showing the list as it was when the
+        // panel was opened.
+        //
+        // The open transcript gets the turn too, when the frame says which conversation it belongs
+        // to. This used to be the Activity row alone, on the reasoning that rewriting a transcript
+        // under somebody would move what they are reading — true of a *reload*, and the reason
+        // `chatStore.reconcile` appends instead and refuses to touch a conversation mid-turn. What
+        // the old behaviour actually produced was a chat you could hold a conversation in from your
+        // phone while the desk showed only your half of it.
+        case "chat":
+          if (e.project) {
+            void useChatHistoryStore.getState().load(e.project);
+            if (e.conversation) void useChatStore.getState().reconcile(e.project, e.conversation);
+          }
+          break;
+      }
+
+      // Refreshing silently was not enough: work appearing on screen with no explanation reads as
+      // the app doing something on its own. The backend names the actions worth surfacing (see
+      // `announce_for` in `remotectl/dispatch.rs`) — the many that are not, like staging a file or
+      // a keystroke in a shell, arrive with no `action` and pass through here unremarked.
+      if (e.action && isRemoteActionKey(e.action)) {
+        notify({
+          source: "remote",
+          titleKey: e.action,
+          // The device is the subject of the sentence, which is why it is the detail rather than
+          // part of the key: "iPhone de Sebastián" is user data and is never translated.
+          detail: e.device,
+          // A review or an analysis that failed still files its row and still arrives here, so the
+          // row it raises has to say which of the two happened. Anything without a status is a
+          // success, which is what every emitter used to mean by saying nothing.
+          status: e.status === "error" ? "error" : "info",
+          // Somewhere to *go*, when the action produced something to look at. Without this the
+          // row is inert — which is most of what "it says it happened and nothing happens" meant.
+          // The job id is the one the run filed its output under, so selecting it opens the very
+          // review or analysis the phone asked for.
+          target:
+            e.job && e.project
+              ? { openAiPanel: true, projectId: e.project, select: { kind: "job", id: e.job } }
+              : undefined,
+        });
+      }
+    });
+
     return () => {
       refreshNear.cancel();
       refreshFar.cancel();
       void unlisten.then((f) => f());
+      void unlistenInvalidate.then((f) => f());
     };
   }, []);
 
@@ -637,6 +828,9 @@ export default function App() {
           something broken. Silent on a clean machine and on every launch after. */}
       <RequirementsModal />
       <ToastContainer />
+      {/* Watches the notification store rather than being pushed to, so every `notify` gets a card
+          — including the ones a paired phone raises, which no call site here knows about. */}
+      <NotificationPopups />
       <ConfirmModal />
       <PromptModal />
       {/* Last, and above everything: the guided tour dims the whole window and drives the panels

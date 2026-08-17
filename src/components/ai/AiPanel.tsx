@@ -27,7 +27,12 @@ import {
 } from "lucide-react";
 import { renderMarkdown } from "../../lib/markdown";
 import { CONFIRM_POST_KEYS, POSTED_KEYS, VIEW_ON_KEYS } from "../../lib/providerLabels";
-import { discardPrFinding, getReviewRun, REVIEW_SKIPPED } from "../../lib/tauri/commands";
+import {
+  discardPrFinding,
+  getReviewRun,
+  notifyStateChange,
+  REVIEW_SKIPPED,
+} from "../../lib/tauri/commands";
 import { parseClaudeError } from "../../lib/claudeError";
 import {
   listCommentThreads,
@@ -667,6 +672,10 @@ function PrReviewSection({ target, pr }: { target: PrTarget; pr: PullRequestSumm
       else if (outcome.rule_added) useToastStore.getState().pushToast(t("finding.discardRuleAdded"), "success");
       else if (outcome.host_notified) useToastStore.getState().pushToast(t("finding.discardHostNotified"), "success");
       await loadRunMemory();
+      // The mark is durable and changes what the review *is* — a finding ruled a false positive
+      // stops being one the phone should be offering to publish. Nothing about it touches disk, so
+      // this emit is the only way another client hears about the ruling.
+      notifyStateChange("reviews", projectId);
     } catch (e) {
       pushErrorToast(String(e));
     } finally {

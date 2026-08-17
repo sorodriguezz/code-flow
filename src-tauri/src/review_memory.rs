@@ -46,6 +46,20 @@ pub struct MemoryFinding {
     /// Only set on a re-review: `nuevo` | `persiste` | `resuelto` relative to the previous run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<String>,
+    /// This finding as the body of a pull-request comment — see [`crate::review::render::comment_markdown`].
+    ///
+    /// The one field here that is not a projection of something smaller. It exists because the rest
+    /// of this struct deliberately drops `por_que`, `sugerencia` and `ejemplo_*`, and those are what
+    /// a comment is made of: a client that holds only the stored findings (the mobile one) could
+    /// otherwise publish nothing better than the subtitle — and because `apply_post_outcome` records
+    /// the thread id, that one-line comment would become the thread every later desktop publish
+    /// replies to. Written once, at save time, from the same findings the report was rendered from.
+    ///
+    /// Empty on runs recorded before this was tracked, and on findings carried forward from one.
+    /// That is read as "this run cannot be published from a client that only has the memory" — never
+    /// filled in with a substitute, because a comment nobody wrote is not a comment.
+    #[serde(default)]
+    pub comentario_md: String,
 }
 
 fn default_estado() -> String {
@@ -587,6 +601,7 @@ mod tests {
             resuelto_en_iter: None,
             motivo_descarte: Some("no aplica aquí".into()),
             delta: None,
+            comentario_md: String::new(),
         }
     }
 

@@ -1,14 +1,17 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import { Check, ClipboardPaste, Copy, X } from "lucide-react";
 import { resizeTerminal, writeTerminal } from "../../lib/tauri/commands";
 import { registerTerminalSink } from "../../state/terminalStore";
 import { useThemeStore } from "../../state/themeStore";
 import { TypedLineBuffer } from "../../lib/remote/typedLines";
 import { isMac } from "../../lib/platform";
 import { pushErrorToast } from "../../state/toastStore";
+import { useT } from "../../state/languageStore";
+import { ContextMenu } from "../api/CollectionTree";
 
 const LIGHT_THEME = { background: "#ffffff", foreground: "#1c1c26", cursor: "#1c1c26" };
 const DARK_THEME = { background: "#1e1e27", foreground: "#eceef5", cursor: "#eceef5" };
@@ -21,6 +24,10 @@ const DARK_THEME = { background: "#1e1e27", foreground: "#eceef5", cursor: "#ece
  * of each one's history the user is allowed to scroll back to.
  */
 const SCROLLBACK_LINES = 1000;
+
+/** How long the "Copied" badge sits in the corner of the pane. Long enough to be read out of the
+ *  corner of the eye while dragging a second selection, short enough never to be in the way. */
+const COPIED_BADGE_MS = 1200;
 
 /**
  * Copy and paste, wired by hand.
@@ -37,10 +44,11 @@ const SCROLLBACK_LINES = 1000;
  * nothing selected is passed through rather than swallowed, so it stays whatever the shell makes
  * of it.
  *
- * Paste writes to the pty directly instead of going through xterm, because the pty is where typed
- * input goes: `term.paste()` would echo locally and hand the shell a line it never saw typed.
+ * The two actions themselves live on the component, because the right-click menu and copy-on-select
+ * are the same two actions reached another way — one implementation, so a copy from the keyboard
+ * flashes the same badge as a copy from the mouse.
  */
-function clipboardKeys(term: Terminal, sessionId: string) {
+function clipboardKeys(term: Terminal, actions: { copy: () => boolean; paste: () => void }) {
   term.attachCustomKeyEventHandler((event) => {
     if (event.type !== "keydown" || event.altKey) return true;
     const combo = isMac() ? event.metaKey && !event.ctrlKey : event.ctrlKey && event.shiftKey;
@@ -48,19 +56,13 @@ function clipboardKeys(term: Terminal, sessionId: string) {
 
     const key = event.key.toLowerCase();
     if (key === "c") {
-      const selection = term.getSelection();
-      if (!selection) return true;
-      void navigator.clipboard.writeText(selection).catch((e: unknown) => pushErrorToast(String(e)));
+      // `copy` reports whether there was anything to copy, so an empty ⌘C stays the shell's.
+      if (!actions.copy()) return true;
       event.preventDefault();
       return false;
     }
     if (key === "v") {
-      void navigator.clipboard
-        .readText()
-        .then((text) => {
-          if (text) return writeTerminal(sessionId, text);
-        })
-        .catch((e: unknown) => pushErrorToast(String(e)));
+      actions.paste();
       event.preventDefault();
       return false;
     }
@@ -79,6 +81,8 @@ export function TerminalPane({
   visible,
   replay,
   onCommand,
+  onClose,
+  closeLabel,
 }: {
   sessionId: string;
   visible: boolean;
@@ -101,7 +105,20 @@ export function TerminalPane({
    * whether or not anyone is listening, so a local shell behaves exactly as it always did.
    */
   onCommand?: (line: string) => void;
+  /**
+   * What the right-click menu's close entry does, and whether it is there at all.
+   *
+   * Left to the parent because "close this terminal" means something different in each of the three
+   * places a pane is mounted — a tab in the repository dock, one tile of an agent bench, a session
+   * tab in the Remote workspace — and none of that is this component's business. A pane with no
+   * `onClose` simply gets a menu of copy and paste.
+   */
+  onClose?: () => void;
+  /** Overrides the close entry's wording, for a surface where closing is not what it is called —
+   *  the bench, where removing a tile deletes the terminal rather than putting it away. */
+  closeLabel?: string;
 }) {
+  const t = useT();
   const resolved = useThemeStore((s) => s.resolved);
   const containerRef = useRef<HTMLDivElement>(null);
   const onCommandRef = useRef(onCommand);
@@ -119,6 +136,61 @@ export function TerminalPane({
    *  through a theme change. Seeded by the construction effect below. */
   const themedAs = useRef<"light" | "dark" | null>(null);
 
+  /** Whether the "Copied" badge is showing. */
+  const [copied, setCopied] = useState(false);
+  /** The open right-click menu and where it goes. `hasSelection` is sampled when the menu opens
+   *  rather than read during render, because it lives in xterm, not in React. */
+  const [menu, setMenu] = useState<{ x: number; y: number; hasSelection: boolean } | null>(null);
+  const badgeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /**
+   * Flashes the badge.
+   *
+   * Restarted rather than queued: copying twice in a row is one badge that stays a moment longer,
+   * not two overlapping ones. Cleared on unmount by the construction effect's teardown, so a pane
+   * closed inside the window cannot call `setCopied` on a gone component.
+   */
+  const flashCopied = useCallback(() => {
+    setCopied(true);
+    if (badgeTimer.current) clearTimeout(badgeTimer.current);
+    badgeTimer.current = setTimeout(() => setCopied(false), COPIED_BADGE_MS);
+  }, []);
+
+  /**
+   * The pane's one copy. Returns whether there was a selection to take — the keyboard handler needs
+   * to know, so that ⌘C over nothing stays SIGINT's business rather than being swallowed.
+   *
+   * Stable across renders (it reads the terminal through a ref), which is what lets the construction
+   * effect hand it to xterm once and keep depending on `sessionId` alone.
+   */
+  const copySelection = useCallback((): boolean => {
+    const selection = termRef.current?.getSelection();
+    if (!selection) return false;
+    void navigator.clipboard
+      .writeText(selection)
+      .then(flashCopied)
+      .catch((e: unknown) => pushErrorToast(String(e)));
+    return true;
+  }, [flashCopied]);
+
+  /** Paste writes to the pty directly instead of going through xterm, because the pty is where typed
+   *  input goes: `term.paste()` would echo locally and hand the shell a line it never saw typed. */
+  const pasteClipboard = useCallback(() => {
+    void navigator.clipboard
+      .readText()
+      .then((text) => {
+        if (text) return writeTerminal(sessionId, text);
+      })
+      .catch((e: unknown) => pushErrorToast(String(e)));
+  }, [sessionId]);
+
+  // The menu is portalled to `document.body`, and a pane is hidden with a class rather than
+  // unmounted — so a pane that goes away with its menu open would leave the menu floating over
+  // whatever took its place, pointing at a terminal that is no longer on screen.
+  useEffect(() => {
+    if (!visible) setMenu(null);
+  }, [visible]);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -130,6 +202,12 @@ export function TerminalPane({
       // hidden terminals are still mounted.
       cursorBlink: visibleRef.current,
       scrollback: SCROLLBACK_LINES,
+      // xterm defaults this to `true` on macOS, and that default is wrong for a pane whose
+      // right-click opens a Copy menu: selecting a paragraph and then right-clicking it would
+      // throw the paragraph away and select the one word under the pointer, so Copy would hand
+      // back something the user never highlighted. Off, right-click leaves the selection alone
+      // and the menu acts on what is on screen.
+      rightClickSelectsWord: false,
     });
     themedAs.current = resolved;
     const fitAddon = new FitAddon();
@@ -137,7 +215,7 @@ export function TerminalPane({
     term.open(containerRef.current);
     termRef.current = term;
     fitRef.current = fitAddon;
-    clipboardKeys(term, sessionId);
+    clipboardKeys(term, { copy: copySelection, paste: pasteClipboard });
 
     // Before `onData` is wired and before the output listener is attached, so the replay can never
     // interleave with what the live shell is saying — the whole of the past, then the present.
@@ -179,8 +257,47 @@ export function TerminalPane({
     // container can have been laid out at a non-zero height.
     const fitFrame = requestAnimationFrame(() => fitAndReport(term, fitAddon));
 
+    /**
+     * Copy on select, the way every terminal emulator on a Unix desktop does it: let go of the drag
+     * and what you highlighted is on the clipboard.
+     *
+     * **Bound to mouse-up rather than to xterm's `onSelectionChange`.** That event fires on every
+     * cell the pointer crosses, so a drag across ten lines would be a hundred clipboard writes and a
+     * hundred badge flashes for one selection. Mouse-up is the moment a selection is finished, and
+     * it is also the moment a double-click (word) and a triple-click (line) have made theirs.
+     *
+     * The pair is deliberately split across two targets. `mousedown` is on the container, in the
+     * **capture** phase — so a drag has to have started inside *this* pane, and xterm's own handlers
+     * cannot stop it from reaching us. `mouseup` has to be on the document, because a drag that runs
+     * off the bottom of a short pane ends over whatever is underneath it, and that selection counts
+     * too — but it is attached only for the duration of a drag rather than for the life of the pane.
+     * Every terminal ever opened stays mounted, and a dozen hidden panes holding a permanent
+     * document listener each is the shape of cost this file spends the rest of its effects avoiding.
+     * Re-adding the same function is a no-op, so a mousedown with no mouseup cannot stack them up.
+     *
+     * The read is deferred by a tick rather than taken inline: xterm finishes the selection in its
+     * own `mouseup` listener, and this must not race it. A plain click therefore reads an empty
+     * selection and copies nothing — clicking to place focus never touches the clipboard.
+     */
+    const box = containerRef.current;
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    const onMouseUp = (event: MouseEvent) => {
+      if (event.button !== 0) return;
+      document.removeEventListener("mouseup", onMouseUp, true);
+      if (settleTimer) clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => copySelection(), 0);
+    };
+    const onMouseDown = (event: MouseEvent) => {
+      if (event.button === 0) document.addEventListener("mouseup", onMouseUp, true);
+    };
+    box.addEventListener("mousedown", onMouseDown, true);
+
     return () => {
       cancelAnimationFrame(fitFrame);
+      box.removeEventListener("mousedown", onMouseDown, true);
+      document.removeEventListener("mouseup", onMouseUp, true);
+      if (settleTimer) clearTimeout(settleTimer);
+      if (badgeTimer.current) clearTimeout(badgeTimer.current);
       dataDisposable.dispose();
       unregister();
       term.dispose();
@@ -315,5 +432,61 @@ export function TerminalPane({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, sessionId]);
 
-  return <div ref={containerRef} className="h-full w-full overflow-hidden p-2" />;
+  return (
+    // The wrapper is exactly the box the container used to be, so nothing about xterm's geometry
+    // changes — it exists to be the badge's positioning parent, and to keep the badge out of the
+    // node xterm owns the children of.
+    <div
+      className="relative h-full w-full"
+      onContextMenu={(event) => {
+        // Claims the right-click before `contextMenuGuard`'s document listener sees it, which is
+        // what stops the webview's own Reload/Back menu from appearing over a terminal.
+        event.preventDefault();
+        setMenu({
+          x: event.clientX,
+          y: event.clientY,
+          hasSelection: termRef.current?.hasSelection() ?? false,
+        });
+      }}
+    >
+      <div ref={containerRef} className="h-full w-full overflow-hidden p-2" />
+
+      {/* Bottom-right, where terminal output isn't: a shell's cursor sits at the *start* of the
+          last line, so the corner opposite it is the one square of the pane a badge can occupy
+          without covering what was just copied. Inert to the mouse, so it can never eat a click
+          landing on the terminal underneath it. */}
+      {copied && (
+        <div className="cf-fade-in pointer-events-none absolute bottom-3 right-3 z-10 flex items-center gap-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2 py-1 text-[11px] text-[var(--cf-text-muted)] shadow-[var(--cf-shadow)]">
+          <Check size={11} className="text-[var(--cf-success)]" />
+          {t("terminal.copied")}
+        </div>
+      )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={[
+            // Shown greyed rather than hidden when there is nothing selected: the menu keeps the
+            // same shape and the same entry in the same place whichever way you opened it.
+            //
+            // `leading` rather than `icon` because `ContextMenu` spins a disabled item's icon — it
+            // reads `disabled` as "in flight", which is what it means where that came from. Here it
+            // means "nothing to copy", and a copy glyph turning in circles would say the opposite.
+            {
+              label: t("terminal.copy"),
+              leading: <Copy size={13} className="shrink-0 opacity-70" />,
+              disabled: !menu.hasSelection,
+              onClick: () => copySelection(),
+            },
+            { label: t("terminal.paste"), icon: ClipboardPaste, onClick: pasteClipboard },
+            ...(onClose
+              ? [{ label: closeLabel ?? t("terminal.close"), icon: X, danger: true, separated: true, onClick: onClose }]
+              : []),
+          ]}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </div>
+  );
 }

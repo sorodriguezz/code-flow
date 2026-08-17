@@ -11,6 +11,7 @@ import { TerminalPane } from "./TerminalPane";
 import { useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { EmptyState } from "../common/EmptyState";
+import { pushErrorToast } from "../../state/toastStore";
 import { listShellProfiles } from "../../lib/tauri/commands";
 import type { ShellProfile } from "../../types/domain";
 
@@ -157,6 +158,37 @@ export function TerminalDock() {
   const activeProjectId = project?.id ?? null;
   const activeProj = activeProjectId ? byProject[activeProjectId] : undefined;
   const visibleIds = activeGroup(activeProj);
+
+  /**
+   * Opening the dock opens a shell — the default one, the same the `+` button starts.
+   *
+   * A terminal panel with nothing in it is a panel that has not finished opening: the reason to
+   * press ⌃` is to type a command, and "no terminals open — click + to start one" is a second
+   * button press standing between the user and that. So the empty dock starts the configured
+   * default profile itself (no `profileId`, which is how the backend is asked for the default).
+   *
+   * **Keyed on the project, not on the tab count** — and that distinction is the whole design.
+   * Firing whenever `tabs` hits zero would make the × on the last terminal unpressable: closing it
+   * would spawn its replacement on the spot, and there would be no way to have an empty dock at all.
+   * Keyed this way, an automatic terminal is only ever the answer to a question the user asked —
+   * opening the panel, or moving to a project that has none — and closing what it started stays
+   * closed. `autoOpened` is what holds that line across a project switch and back; it lives for as
+   * long as this component does, which is exactly as long as the panel is open (App.tsx unmounts
+   * the dock when it closes), so re-opening the panel is a fresh start and gets a fresh shell.
+   *
+   * It is also what makes this safe under StrictMode's double-invoked effects, which would
+   * otherwise spawn two shells for every one this opens.
+   */
+  const autoOpened = useRef(new Set<string>());
+  useEffect(() => {
+    if (!project || autoOpened.current.has(project.id)) return;
+    if ((activeProj?.tabs.length ?? 0) > 0) return;
+    autoOpened.current.add(project.id);
+    // Caught, unlike the `+` button's: nobody pressed anything here, so a shell that fails to start
+    // would otherwise be an empty dock with no explanation for why it stayed empty.
+    void openNew(project.id, project.local_path).catch((e: unknown) => pushErrorToast(String(e)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProjectId]);
 
   // Inline tab renaming — same start/commit-on-blur-or-Enter/cancel-on-Escape shape the
   // activity list uses, so both rename affordances in the app behave identically.
@@ -326,7 +358,7 @@ export function TerminalDock() {
             <EmptyState icon={TerminalSquare} title={t("terminal.emptyHint")} />
           </div>
         ) : null}
-        {allPanes.map(({ tab, visible }) => (
+        {allPanes.map(({ projectId, tab, visible }) => (
           <div
             key={tab.id}
             className={
@@ -335,7 +367,14 @@ export function TerminalDock() {
                 : "hidden"
             }
           >
-            <TerminalPane sessionId={tab.id} visible={visible} />
+            {/* The pane's own project, not the selected one: every project's terminals are mounted
+                here at once, and closing one from its right-click menu has to go to the store under
+                the id it actually belongs to. */}
+            <TerminalPane
+              sessionId={tab.id}
+              visible={visible}
+              onClose={() => void closeTab(projectId, tab.id)}
+            />
           </div>
         ))}
       </div>

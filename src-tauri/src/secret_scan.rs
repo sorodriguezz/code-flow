@@ -195,6 +195,7 @@ mod tests {
             old_path: None,
             new_path: Some("config.ts".into()),
             status: "modified".into(),
+            binary: false,
             hunks: vec![DiffHunkInfo {
                 header: "@@".into(),
                 lines: vec![DiffLine {

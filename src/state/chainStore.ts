@@ -16,6 +16,7 @@ import {
   listAgentChains,
   listChainTemplates,
   listWorkspaceChainSteps,
+  notifyStateChange,
   resumeChain,
   rerunChainFrom,
   retryChainStep,
@@ -29,7 +30,9 @@ import {
 import { onTurnSettled } from "./agentEvents";
 import { useAgentsStore } from "./agentsStore";
 import { newRunId, useAiRunStore } from "./aiRunStore";
+import { translate } from "./languageStore";
 import { notify } from "./notificationStore";
+import { pushErrorToast } from "./toastStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type {
   AgentChain,
@@ -41,6 +44,10 @@ import type {
   NewChainStep,
   NewStoryWorkItem,
 } from "../types/domain";
+
+/** What `approve_chain_gate` answers when the step the caller named is not the one the chain is
+ *  parked at. A wire constant — it must match `queries::GATE_MOVED`. */
+const GATE_MOVED = "chain.gateMoved";
 
 /** How often a step whose run outlived the webview is re-checked for its turn landing. */
 const HARVEST_POLL_MS = 5_000;
@@ -86,6 +93,14 @@ interface ChainState {
   /** Opens a template in the middle column. Mirrors `select`, including which store clears which. */
   selectTemplate: (templateId: string | null) => void;
   refresh: (chainId: string) => Promise<void>;
+  /** Re-reads the whole chain list and its step briefs for the workspace already loaded, keeping
+   *  the selection. The list-level counterpart to `refresh`, which reloads a single chain.
+   *
+   *  Same reason as `agentsStore.reloadTasks`: `setWorkspace(currentId)` early-returns, and
+   *  forcing it past that throws away `selectedId`, `stepsByChain` and every harvest timer with
+   *  it. Used when the rows moved underneath a view nobody navigated — a gate approved from a
+   *  phone (see `state:invalidate` in `App.tsx`). */
+  reloadChains: () => Promise<void>;
   create: (input: {
     /** The whole repository set, first one first. */
     projectIds: string[];
@@ -120,9 +135,27 @@ interface ChainState {
     chainId: string,
     decisions: Array<{ stepId: string; include: boolean; input: string }>,
   ) => Promise<void>;
-  /** Advances a chain by at most one step. Safe to call repeatedly and concurrently. */
-  pump: (chainId: string) => Promise<void>;
-  approve: (chainId: string, input: string) => Promise<void>;
+  /**
+   * Advances a chain by at most one step. Safe to call repeatedly and concurrently.
+   *
+   * `remote: true` means a person asked for this from somewhere other than this window — a phone
+   * approving a gate — and it is what lets the step run with the window hidden in the tray. See the
+   * `background` guard inside.
+   *
+   * The chain does **not** have to belong to the loaded workspace. It is claimed and run by id, and
+   * a chain from anywhere else is deliberately not filed into this window's lists — see
+   * [`applyChain`] and `refresh`.
+   */
+  pump: (chainId: string, opts?: { remote?: boolean }) => Promise<void>;
+  /**
+   * Clears the gate the chain is parked at.
+   *
+   * `stepId` is the step whose gate the caller drew, checked by the backend against the step the
+   * chain is actually waiting on. Pass it from anything showing a gate; omit it only when the caller
+   * has just rewritten the step set itself and its copy of the statuses is deliberately behind
+   * disk — see `approvePlan`.
+   */
+  approve: (chainId: string, input: string, stepId?: string) => Promise<void>;
   skip: (chainId: string) => Promise<void>;
   retry: (chainId: string) => Promise<void>;
   /** "Do that again, but…" — back to one step, carrying the user's own words, and moving. */
@@ -164,6 +197,26 @@ interface ChainState {
 /** One advance per chain at a time. A second `pump` while one is in flight would claim the same
  * step twice — the backend would refuse the second, but the wasted round trip is avoidable. */
 const inFlight = new Set<string>();
+
+/**
+ * Chains a person is driving from somewhere other than this window.
+ *
+ * # Why the flag outlives the tap that set it
+ *
+ * `background` stops this window dispatching engines while it is hidden in the tray, and that guard
+ * is right: an agent turn rewrites a real working copy, and starting one with nothing on screen
+ * gives the user no way to watch it or stop it. A gate approved from a phone is the one case where
+ * both halves of that reasoning are false — somebody *did* ask, and the phone is showing the run's
+ * output with a stop button under it.
+ *
+ * But a plan is what was approved, not a step. Marking only the one `pump` the invalidation
+ * triggered would run step 4 and then park again the moment it settled, because `settleStep`'s own
+ * pump would find `background` still set — a ten-step chain approved from the sofa would advance
+ * once and stop, which is the same "it says it happened and nothing happens" this whole batch is
+ * about. So the chain stays marked until it stops moving on its own, and the next thing that parks
+ * it (a gate, a failure, the end of the plan) clears it: a second approval re-marks it.
+ */
+const drivenRemotely = new Set<string>();
 /** Poll timers for steps adopted after a reload, keyed by step id. */
 const harvesting = new Map<string, ReturnType<typeof setInterval>>();
 
@@ -244,7 +297,24 @@ export const useChainStore = create<ChainState>((set, get) => ({
     if (templateId) useAgentsStore.setState({ selectedId: null });
   },
 
+  reloadChains: async () => {
+    const id = get().workspaceId;
+    if (!id) return;
+    const [chains, briefs] = await Promise.all([
+      listAgentChains(id).catch(() => [] as AgentChain[]),
+      listWorkspaceChainSteps(id).catch(() => [] as ChainStepBrief[]),
+    ]);
+    // Templates are deliberately not re-read: nothing reachable from a phone can edit one, so
+    // asking for them would be a query per invalidation that can never come back different.
+    set((s) => (s.workspaceId === id ? { chains, briefsByChain: groupBriefs(briefs) } : s));
+  },
+
   refresh: async (chainId) => {
+    // A chain this window's list does not hold belongs to another workspace, and it is here only
+    // because a phone asked for it to be advanced (see `pump`). Reading its steps would be a round
+    // trip whose answer goes into `stepsByChain` — the map the detail pane draws for the workspace
+    // that *is* loaded — so it is skipped rather than filed somewhere it does not belong.
+    if (!get().chains.some((c) => c.id === chainId)) return;
     const detail = await getChainDetail(chainId).catch(() => null);
     if (!detail) return;
     set((s) => ({
@@ -309,11 +379,28 @@ export const useChainStore = create<ChainState>((set, get) => ({
     }
     // `""`, deliberately: the message for the gated step was just written by the loop above, and
     // approving with an empty input is what tells the backend to send exactly that.
+    //
+    // And no step id, equally deliberately: the loop above just moved several steps in and out of
+    // `pending` on disk, and this store's copy of their statuses is a plan ago. Naming a step from
+    // it would name one this call itself had skipped, and the precondition would refuse the very
+    // approval it exists to protect. Nothing is lost — this dialog *is* the read of the gate, and
+    // it was open across the writes.
     await get().approve(chainId, "");
   },
 
-  pump: async (chainId) => {
-    if (inFlight.has(chainId) || get().background) return;
+  pump: async (chainId, opts) => {
+    // Recorded before either guard, and that ordering matters twice over. What follows may leave the
+    // chain queued for `settleStep` to pick up minutes from now, by which time the tap that
+    // authorised it is long over — and an approval that lands while this chain is already mid-advance
+    // returns at the very next line, which would otherwise throw the authorisation away with it.
+    if (opts?.remote) drivenRemotely.add(chainId);
+    if (inFlight.has(chainId)) return;
+    // The tray guard, with the one exemption it always needed. `background` exists so a hidden
+    // window does not start engines nobody asked for — and a phone tap *is* somebody asking, from a
+    // screen that shows the run's output and offers to stop it. Without the exemption this feature
+    // did nothing at all in its most common setting: the desktop is closed to the tray, which is
+    // exactly why the user is answering the gate from a phone.
+    if (get().background && !drivenRemotely.has(chainId)) return;
     inFlight.add(chainId);
     let stepId: string | null = null;
     try {
@@ -326,11 +413,21 @@ export const useChainStore = create<ChainState>((set, get) => ({
         // "Nothing to run" is not "nothing happened": the claim may have frozen a gate's message
         // onto its step, failed one for an unroutable agent, or marked the plan finished. Applying
         // only the chain would leave the pane showing a gate with no message in it.
+        //
+        // It is also where a remotely driven chain stops moving, so the mark goes with it: whatever
+        // parked it wants a person again, and that person's next answer re-marks it.
+        drivenRemotely.delete(chainId);
         await get().refresh(chainId);
         return;
       }
       stepId = claim.step.id;
-      useAgentsStore.getState().adopt(claim.task);
+      // The task list is the loaded workspace's, and a chain pumped for a phone need not be from it.
+      // Adopting a foreign row would put a task in the tree whose repository is not in the workspace
+      // the tree is drawn for; `runTurn` is handed the row directly instead, which is all it needed
+      // the store for.
+      const agents = useAgentsStore.getState();
+      const foreign = claim.task.workspace_id !== agents.workspaceId;
+      if (!foreign) agents.adopt(claim.task);
       // Both copies of the step, or the tree would draw the running step as still pending for as
       // long as the turn takes — the next write to either is `settleStep`, minutes later.
       set((s) => ({
@@ -350,6 +447,8 @@ export const useChainStore = create<ChainState>((set, get) => ({
 
       await useAgentsStore.getState().runTurn(claim.task.id, claim.message, {
         runId,
+        // Only when the store has no row of its own to find — see `foreign` above.
+        task: foreign ? claim.task : undefined,
         // The plan, not the step. Both are true of this run, and the plan is the one worth
         // offering: it is where the whole sequence is readable, and the step's own task is one
         // click further in from there.
@@ -381,11 +480,24 @@ export const useChainStore = create<ChainState>((set, get) => ({
     }
   },
 
-  approve: async (chainId, input) => {
-    const chain = await approveChainGate(chainId, input);
+  approve: async (chainId, input, stepId) => {
+    // The one command here that can be refused on a precondition, so the one that has to say so.
+    // Every caller invokes this as a bare `void`, and a rejection would be an unhandled one — which
+    // is the worst possible shape for "your click did nothing": no message, no reload, and a pane
+    // still showing the gate it just failed to clear.
+    const chain = await approveChainGate(chainId, input, stepId).catch((e: unknown) => {
+      const message = e instanceof Error ? e.message : String(e);
+      // A refused precondition comes back as a translation key, the same convention `last_reason`
+      // uses and for the same reason — the language is the reader's, not the writer's. Anything
+      // else is a real failure and is shown as it arrived.
+      pushErrorToast(message === GATE_MOVED ? translate("chain.gateMoved") : message);
+      return null;
+    });
     if (chain) applyChain(chain, set);
+    // The refresh runs either way, and it is the point of the refusal: nothing was written, so the
+    // gate that is actually open is the one this re-read brings back.
     await get().refresh(chainId);
-    void get().pump(chainId);
+    if (chain) void get().pump(chainId);
   },
 
   skip: async (chainId) => {
@@ -419,6 +531,9 @@ export const useChainStore = create<ChainState>((set, get) => ({
     // Every timer this chain owns, before anything else: an aborted step has no result to harvest,
     // and a poller left behind here is one that never stops (see `stopHarvesting`).
     stopHarvesting((get().stepsByChain[chainId] ?? []).map((s) => s.id));
+    // "Stop" is the one answer that cannot be followed by another step, so whoever was driving this
+    // remotely is no longer driving anything.
+    drivenRemotely.delete(chainId);
     // Stop the live step first, or the engine keeps editing a working copy for a plan that no
     // longer exists — the same reason `agentsStore.remove` cancels before deleting.
     const step = (get().stepsByChain[chainId] ?? []).find((s) => s.status === "running");
@@ -585,12 +700,37 @@ function groupBriefs(briefs: ChainStepBrief[]): Record<string, ChainStepBrief[]>
   return byChain;
 }
 
+/**
+ * Files a chain row that just moved, and tells the phones it moved.
+ *
+ * # Why the notification lives here and not at the seven callers
+ *
+ * Every way a chain changes on this side ends in this function: approve, skip, retry, resume,
+ * abort, rerun, the claim that starts a step, and `settleStep` when one finishes. That makes it the
+ * one place where "the chain is not what your copy says" is unambiguously true, and the one place
+ * that cannot be forgotten when an eighth path is added.
+ *
+ * The gap it closes is the whole of the desktop→phone direction for chains. `approve_chain_gate` is
+ * pure SQL and the executor is right here in the webview, so a chain advancing at the desk moved no
+ * bytes on disk and printed nothing a phone was subscribed to — the Agents tab kept showing a gate
+ * that had been answered, until somebody switched tabs.
+ *
+ * # Why an unknown chain is dropped rather than inserted
+ *
+ * `chains` means "the chains of the loaded workspace" — `reloadChains` reads exactly that and
+ * `setWorkspace` empties it. Since `pump` now runs chains from *any* workspace on behalf of a phone,
+ * inserting whatever came back would draw another workspace's plan in a list that claims to be this
+ * one's, with no briefs behind it and no way for the user to reach the repository it names.
+ *
+ * Nothing loses a row to this: the one caller that files a genuinely new chain is `create`, and it
+ * goes through `adoptDetail` first — every other caller is acting on a chain that is already on
+ * screen. The notification is unconditional either way, because a chain did move.
+ */
 function applyChain(chain: AgentChain, set: SetState) {
   set((s) => ({
-    chains: s.chains.some((c) => c.id === chain.id)
-      ? s.chains.map((c) => (c.id === chain.id ? chain : c))
-      : [chain, ...s.chains],
+    chains: s.chains.map((c) => (c.id === chain.id ? chain : c)),
   }));
+  notifyStateChange("chains");
 }
 
 /** Reports a finished step and, when the chain is ready to move again, moves it. */
@@ -625,6 +765,10 @@ async function settleStep(
     chain = await completeChainStep(stepId, "error", "", outcome.message).catch(() => null);
   }
   if (chain) applyChain(chain, set);
+  // The chain row did not come back, but the *step* still moved — and a phone with the chain detail
+  // open is reading step rows, not the chain's. `applyChain` is the only other notifier, so without
+  // this the one case where it did not run would go out silently.
+  else notifyStateChange("chains");
   await get().refresh(chainId);
   // The plan reaching its end, as opposed to one of its steps. Each turn already files its own
   // "agent task finished" through `agentsStore`, but a ten-step chain is the longest-running thing
@@ -645,7 +789,12 @@ async function settleStep(
   // it is picked up here like any other move. Which attempt it is on is counted in Rust, by the
   // claim — this side never decides to retry, it only carries out a chain that is ready to move.
   // A gate, an exhausted step or a stop all still wait for the user.
-  if (chain?.status === "queued") void get().pump(chainId);
+  //
+  // `remote` carries whatever the last person to ask said, so a plan approved from a phone keeps
+  // going with the window in the tray for the whole of its remaining steps rather than for one. It
+  // is cleared here the moment the chain stops on something a person has to answer.
+  if (chain?.status === "queued") void get().pump(chainId, { remote: drivenRemotely.has(chainId) });
+  else drivenRemotely.delete(chainId);
 }
 
 /**

@@ -1259,6 +1259,9 @@ function GroupSection({
   const [renaming, setRenaming] = useState(false);
 
   const label = group || t("db.ungrouped");
+  // `FolderOpen` for the bucket that is the *absence* of a group, `FolderCode` for a real one — see
+  // the icon on the heading below.
+  const GroupIcon = group === UNGROUPED ? FolderOpen : FolderCode;
 
   /**
    * Deleting a folder, with the one thing worth confirming spelled out.
@@ -1331,6 +1334,11 @@ function GroupSection({
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         </span>
+        {/* The same two icons the "move to group" menu uses for the same two things — a named folder
+            and the loose bucket. Picking a different pair here would mean the tree and the menu
+            disagreed about what a group looks like, which is the one thing a chooser must not do.
+            Outside the rename branch: the row is still that group while its name is being typed. */}
+        <GroupIcon size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
         {renaming ? (
           <GroupNameInput
             value={group}

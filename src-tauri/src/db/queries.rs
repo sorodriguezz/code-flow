@@ -1536,6 +1536,24 @@ pub fn list_agent_chains(conn: &Connection, workspace_id: &str) -> rusqlite::Res
     rows.collect()
 }
 
+/// Which workspace a chain belongs to, through the same join [`list_agent_chains`] uses.
+///
+/// Exists for the invalidation a phone's chain action raises: the desktop window has exactly one
+/// workspace loaded, and "a chain moved" means two different things depending on whether it is that
+/// one. Without the answer the desktop can only reload the list it already has, which silently drops
+/// every chain belonging to anywhere else — see the `chains` arm in `src/App.tsx`.
+///
+/// `None` for a chain that has been deleted, or whose first repository has left the app.
+pub fn workspace_of_chain(conn: &Connection, chain_id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT p.workspace_id FROM agent_chains c JOIN projects p ON p.id = c.project_id
+         WHERE c.id = ?1",
+        params![chain_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 /// Every step of every chain of the workspace, slim enough to load them all at once — the task list
 /// draws a chain as a group of its steps, so it needs all of them and none of their text.
 ///
@@ -2437,21 +2455,63 @@ pub fn complete_chain_step(
     chain_row(conn, &chain_id)
 }
 
+/// The translation key an approval that arrived too late is refused with.
+///
+/// A key rather than a sentence, like `chain.repoBusy` and every other reason this module writes
+/// into `last_reason`: the message is rendered by whichever client is showing it, in the language
+/// that client is set to, and a phone in another room is not necessarily set to the same one as the
+/// desktop.
+pub const GATE_MOVED: &str = "chain.gateMoved";
+
+/// What [`approve_chain_gate`] did.
+// `Moved` carries nothing while `Approved` carries a chain row, which clippy reads as a lopsided
+// enum. Boxing it to even the variants out would put an allocation on the path every approval takes,
+// to avoid moving a value that is produced once per button press.
+#[allow(clippy::large_enum_variant)]
+pub enum GateApproval {
+    /// The gate was cleared and the chain let go, with the chain row as it now stands.
+    Approved(Option<AgentChain>),
+    /// The chain is not parked where the caller thought it was, so nothing was written.
+    Moved,
+}
+
 /// Approves the gate the chain is parked at and lets it go. `input` overrides the frozen message
 /// when the user edited it, and is written before the state changes so the preview can never
 /// disagree with what runs.
-pub fn approve_chain_gate(conn: &Connection, chain_id: &str, input: &str) -> rusqlite::Result<Option<AgentChain>> {
+///
+/// # Why `expected_step_id` exists
+///
+/// This function acts on "whatever step is pending next", which is the right thing to act on and
+/// the wrong thing to act on *blindly*. A phone screen showing a gate is a photograph of a moment:
+/// the chain may have been approved at the desk, run two more steps and parked on a second gate by
+/// the time a thumb reaches the button — and without a precondition that tap would clear a gate
+/// nobody read and force a chain the desktop is mid-run back to `queued`.
+///
+/// So a caller that knows which step it was looking at says so, and a mismatch is refused loudly
+/// rather than absorbed. `None` keeps the old behaviour, deliberately: a client that cannot name a
+/// step is not lying about which one it saw, and there is nothing to check it against.
+pub fn approve_chain_gate(
+    conn: &Connection,
+    chain_id: &str,
+    input: &str,
+    expected_step_id: Option<&str>,
+) -> rusqlite::Result<GateApproval> {
     let Some(step) = next_pending_step(conn, chain_id)? else {
+        // Nothing left to approve. Not a mismatch even when the caller named a step: the plan ran
+        // out, which is a state the chain reached on its own rather than one somebody raced.
         set_chain_state(conn, chain_id, "done", "")?;
-        return chain_row(conn, chain_id);
+        return chain_row(conn, chain_id).map(GateApproval::Approved);
     };
+    if expected_step_id.is_some_and(|expected| expected != step.id) {
+        return Ok(GateApproval::Moved);
+    }
     let message = if input.trim().is_empty() { step.pending_input.clone() } else { input.to_string() };
     conn.execute(
         "UPDATE agent_chain_steps SET gate_cleared = 1, pending_input = ?2, updated_at = ?3 WHERE id = ?1",
         params![step.id, message, now()],
     )?;
     set_chain_state(conn, chain_id, "queued", "")?;
-    chain_row(conn, chain_id)
+    chain_row(conn, chain_id).map(GateApproval::Approved)
 }
 
 /// Marks the step the chain is waiting on as deliberately not run. Composition then walks back
@@ -4692,6 +4752,76 @@ mod tests {
         detail
     }
 
+
+    fn gate_cleared_of(conn: &Connection, step_id: &str) -> i64 {
+        conn.query_row(
+            "SELECT gate_cleared FROM agent_chain_steps WHERE id = ?1",
+            params![step_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// An approval that names a step the chain has already moved past is refused, and writes nothing.
+    ///
+    /// The bug it pins: this function acts on "whatever step is pending next" and used to have no
+    /// opinion about which one the caller had *seen*. A phone screen showing a gate is a photograph —
+    /// the gate may have been answered at the desk and two more steps run since — so that tap cleared
+    /// a gate nobody read and pulled a chain the desktop was mid-run back to `queued`.
+    #[test]
+    fn approving_a_gate_the_chain_has_moved_past_is_refused() {
+        let (conn, project) = fixture();
+        let detail = queued_chain(&conn, &project, 2);
+        let chain_id = detail.chain.id;
+        let waiting = detail.steps[0].id.clone();
+        let ahead = detail.steps[1].id.clone();
+
+        assert!(
+            matches!(
+                approve_chain_gate(&conn, &chain_id, "", Some(&ahead)).unwrap(),
+                GateApproval::Moved
+            ),
+            "step 2 is not the step this chain is parked on"
+        );
+        assert_eq!(gate_cleared_of(&conn, &waiting), 0, "and the real gate is untouched");
+
+        assert!(matches!(
+            approve_chain_gate(&conn, &chain_id, "", Some(&waiting)).unwrap(),
+            GateApproval::Approved(_)
+        ));
+        assert_eq!(gate_cleared_of(&conn, &waiting), 1);
+    }
+
+    /// No step id means no precondition, deliberately: a client that cannot name the step it saw is
+    /// not lying about which one it was, and there is nothing to check it against.
+    #[test]
+    fn an_approval_naming_no_step_keeps_the_behaviour_it_always_had() {
+        let (conn, project) = fixture();
+        let detail = queued_chain(&conn, &project, 2);
+        assert!(matches!(
+            approve_chain_gate(&conn, &detail.chain.id, "", None).unwrap(),
+            GateApproval::Approved(_)
+        ));
+        assert_eq!(gate_cleared_of(&conn, &detail.steps[0].id), 1);
+    }
+
+    /// A chain reaches its workspace through its first repository, and the invalidation a phone's
+    /// approval raises carries the answer so the desktop can tell "advance this" from "reload the
+    /// list you already have".
+    #[test]
+    fn a_chain_names_the_workspace_of_its_first_repository() {
+        let (conn, project) = fixture();
+        let workspace: String = conn
+            .query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0))
+            .unwrap();
+        let chain_id = queued_chain(&conn, &project, 1).chain.id;
+
+        assert_eq!(workspace_of_chain(&conn, &chain_id).unwrap(), Some(workspace));
+        // A chain that is gone is answered as "no opinion", not as an error: the caller is filling in
+        // one field of a notification, and a just-deleted chain is an ordinary thing to name.
+        delete_chain(&conn, &chain_id).unwrap();
+        assert_eq!(workspace_of_chain(&conn, &chain_id).unwrap(), None);
+    }
 
     /// Deleting a chain takes its steps' tasks with it.
     ///

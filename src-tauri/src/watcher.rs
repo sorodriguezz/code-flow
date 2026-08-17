@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::sync::Mutex;
@@ -8,10 +8,49 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// One native watcher per currently-open repo. Dropping the `RecommendedWatcher` value
-/// stops it, which is what removing it from the map on `stop_watching` achieves.
+use crate::remotectl::RemoteCtl;
+
+/// The desktop window's claim on a repository, as one holder among several.
+///
+/// A single string rather than one per window because there is one window: `src/App.tsx` watches
+/// whichever project is active and releases it when that changes.
+pub const DESKTOP_HOLDER: &str = "desktop-window";
+
+/// A paired device's claim, namespaced so it can never collide with [`DESKTOP_HOLDER`] and so
+/// [`watched_by_a_device`] can tell the two apart by inspection.
+pub fn device_holder(device_id: &str) -> String {
+    format!("device:{device_id}")
+}
+
+fn is_device_holder(holder: &str) -> bool {
+    holder.starts_with("device:")
+}
+
+/// One native watcher and everyone who currently depends on it.
+struct Watched {
+    /// Never read, and that is the whole of its job: dropping this value is what stops the native
+    /// watcher, and dropping the channel sender it owns is what ends the thread below. Removing
+    /// the entry from the map is therefore the teardown, with nothing to call.
+    _watcher: RecommendedWatcher,
+    /// [`DESKTOP_HOLDER`] and/or one [`device_holder`] per paired device looking at this repo.
+    holders: HashSet<String>,
+}
+
+/// One native watcher per currently-open repo, **reference counted by holder**.
+///
+/// # Why holders and not a plain map
+///
+/// The desktop window is no longer the only thing that wants a repository watched. A paired phone
+/// drives this same process and reads the same working copy, and until it could ask for a watcher
+/// of its own it was watching whatever the desk happened to have open — so a phone on another
+/// project saw no filesystem events at all.
+///
+/// Counting is what makes that safe to add. `src/App.tsx` releases its watcher on every project
+/// change, unconditionally; without holders that teardown would silently stop the watcher a phone
+/// on the same repository is depending on, which is a worse bug than the one being fixed. Each
+/// party names itself, and the watcher goes away when the last of them lets go.
 #[derive(Default)]
-pub struct WatcherRegistry(Mutex<HashMap<String, RecommendedWatcher>>);
+pub struct WatcherRegistry(Mutex<HashMap<String, Watched>>);
 
 #[derive(Clone, Serialize)]
 struct RepoChangedEvent {
@@ -123,22 +162,108 @@ fn is_noise(root: &Path, event: &Event) -> bool {
     !event.paths.is_empty() && event.paths.iter().all(|p| is_noise_path(root, p))
 }
 
-pub fn start_watching(app: AppHandle, registry: &WatcherRegistry, repo_path: String) -> Result<(), String> {
-    stop_watching(registry, &repo_path);
+/// Whether the window is on screen.
+///
+/// Both conditions, matching `window_state`: on Windows a minimised window still answers
+/// `is_visible() == true`. Defaulting to "seen" when the window cannot be queried at all keeps the
+/// old behaviour on any path where there is no main window.
+fn window_seen(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .map(|w| !(!w.is_visible().unwrap_or(true) || w.is_minimized().unwrap_or(false)))
+        .unwrap_or(true)
+}
 
+/// Whether there is anyone to emit to at all.
+///
+/// # Why the window alone is not the question any more
+///
+/// Suppressing the emit while the window is hidden is right when the webview is the only reader —
+/// there is nobody to redraw for, and a branch switch can produce hundreds of these. But a phone
+/// driving this install reads the same event through `remotectl::bridge`, and *tray* is precisely
+/// the state the machine is in while somebody drives it from the sofa. So a hidden window with a
+/// connected device used to mean the phone waiting on the desktop being restored to find out that
+/// a commit had landed.
+///
+/// `receiver_count` is the honest test: every live WebSocket subscribes to `events` for exactly as
+/// long as it is open (see `server::events`), so this is a count of phones listening right now and
+/// not of devices somebody once paired. `RemoteCtl` is managed unconditionally in `lib.rs`, so the
+/// lookup cannot fail.
+fn watched(app: &AppHandle) -> bool {
+    window_seen(app) || app.state::<RemoteCtl>().events.receiver_count() > 0
+}
+
+/// Whether any *paired device* is depending on this repository being watched.
+///
+/// Read by the event bridge: a repository only the desk has open produces filesystem churn no
+/// phone asked for and none can use, and forwarding it means a frame per burst per device for a
+/// working copy nobody on the other end is looking at.
+pub fn watched_by_a_device(registry: &WatcherRegistry, repo_path: &str) -> bool {
+    registry
+        .0
+        .lock()
+        .map(|watchers| {
+            watchers
+                .get(repo_path)
+                .is_some_and(|entry| entry.holders.iter().any(|h| is_device_holder(h)))
+        })
+        .unwrap_or(false)
+}
+
+/// Records `holder`'s claim on `repo_path`, building the native watcher only when this is the
+/// first one. Answers whether it built it — i.e. whether the caller still owes the emitter thread.
+///
+/// The bookkeeping is split out from [`start_watching`] because it is the whole of the reference
+/// counting and the tests have to reach it: constructing an `AppHandle` outside a running Tauri app
+/// is not possible, and a correctness rule nobody can test is a correctness rule that decays.
+fn install<F>(
+    registry: &WatcherRegistry,
+    repo_path: &str,
+    holder: &str,
+    build: F,
+) -> Result<bool, String>
+where
+    F: FnOnce() -> Result<RecommendedWatcher, String>,
+{
+    let mut watchers = registry.0.lock().map_err(|e| e.to_string())?;
+    // Already watched: record the new holder and leave the running watcher exactly as it is.
+    // Re-arming it here — which is what this used to do for every call — would drop the thread
+    // mid-burst and lose whatever it had marked pending.
+    if let Some(entry) = watchers.get_mut(repo_path) {
+        entry.holders.insert(holder.to_string());
+        return Ok(false);
+    }
+    watchers.insert(
+        repo_path.to_string(),
+        Watched {
+            _watcher: build()?,
+            holders: HashSet::from([holder.to_string()]),
+        },
+    );
+    Ok(true)
+}
+
+/// Adds `holder` to the repository's watcher, starting one if this is the first claim on it.
+pub fn start_watching(
+    app: AppHandle,
+    registry: &WatcherRegistry,
+    repo_path: String,
+    holder: &str,
+) -> Result<(), String> {
     let (tx, rx) = channel::<notify::Result<Event>>();
-    let mut watcher = notify::recommended_watcher(move |res| {
-        let _ = tx.send(res);
-    })
-    .map_err(|e| e.to_string())?;
-
-    watcher
-        .watch(Path::new(&repo_path), RecursiveMode::Recursive)
+    let started = install(registry, &repo_path, holder, || {
+        let mut watcher = notify::recommended_watcher(move |res| {
+            let _ = tx.send(res);
+        })
         .map_err(|e| e.to_string())?;
-
-    {
-        let mut watchers = registry.0.lock().map_err(|e| e.to_string())?;
-        watchers.insert(repo_path.clone(), watcher);
+        watcher
+            .watch(Path::new(&repo_path), RecursiveMode::Recursive)
+            .map_err(|e| e.to_string())?;
+        Ok(watcher)
+    })?;
+    // Somebody else's thread is already reading this repository. `rx` drops here, which is
+    // harmless: its sender belongs to the watcher that was *not* built.
+    if !started {
+        return Ok(());
     }
 
     // Kept as a `PathBuf` so `is_noise_path` can strip the repo root off every event path
@@ -162,22 +287,16 @@ pub fn start_watching(app: AppHandle, registry: &WatcherRegistry, repo_path: Str
         let mut last_emit = Instant::now() - Duration::from_secs(10);
         let mut pending = false;
 
-        /// Whether there is anyone to emit to.
-        ///
-        /// Both conditions, matching `window_state`: on Windows a minimised window still answers
-        /// `is_visible() == true`. Defaulting to "seen" when the window cannot be queried at all
-        /// keeps the old behaviour on any path where there is no main window.
-        fn window_seen(app: &AppHandle) -> bool {
-            app.get_webview_window("main")
-                .map(|w| !(!w.is_visible().unwrap_or(true) || w.is_minimized().unwrap_or(false)))
-                .unwrap_or(true)
-        }
-
         loop {
             // Read here only to choose how long to wait. The emit below re-reads it, because this
             // answer can be minutes old by the time a blocking `recv` returns — the window may well
-            // have been hidden or restored while the thread sat in it.
-            let seen = window_seen(&app);
+            // have been hidden or restored, and a phone may well have connected or gone, while the
+            // thread sat in it.
+            //
+            // The same predicate as the emit, deliberately. When these two disagreed, a change made
+            // while the window was hidden but a phone was connected took the "waiting on a person"
+            // branch below and sat for up to a second before the emit it was already entitled to.
+            let seen = watched(&app);
 
             // The timeout exists only to flush a *pending* change once its burst goes quiet, so
             // with nothing pending there is nothing a tick could do and the thread blocks on the
@@ -204,16 +323,16 @@ pub fn start_watching(app: AppHandle, registry: &WatcherRegistry, repo_path: Str
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
-            // Nothing is emitted into a window nobody can see. The webview's handler for this
-            // event refreshes the repository — a git status walk and the panels that redraw from
-            // it — and while the app is parked in the tray, or minimised, there is no reader for
-            // any of it. A branch switch or a long build can produce hundreds of these.
+            // Nothing is emitted when nobody is reading. The webview's handler for this event
+            // refreshes the repository — a git status walk and the panels that redraw from it —
+            // and while the app is parked in the tray with no phone connected there is no reader
+            // for any of it. A branch switch or a long build can produce hundreds of these.
             //
             // `pending` is deliberately left standing rather than cleared, and `last_emit` is not
-            // touched: an arbitrary number of hidden bursts therefore collapse into exactly one
-            // change, which fires on the first loop iteration after the window comes back — so
+            // touched: an arbitrary number of unread bursts therefore collapse into exactly one
+            // change, which fires on the first loop iteration after somebody comes back — so
             // restoring the window lands on a fully refreshed repository rather than a stale one.
-            if pending && window_seen(&app) && last_emit.elapsed() >= Duration::from_millis(400) {
+            if pending && watched(&app) && last_emit.elapsed() >= Duration::from_millis(400) {
                 pending = false;
                 last_emit = Instant::now();
                 let _ = app.emit("repo:fs-changed", RepoChangedEvent { repo_path: repo_path.clone() });
@@ -224,10 +343,68 @@ pub fn start_watching(app: AppHandle, registry: &WatcherRegistry, repo_path: Str
     Ok(())
 }
 
-pub fn stop_watching(registry: &WatcherRegistry, repo_path: &str) {
+/// Drops `holder`'s claim, stopping the watcher only when it was the last one.
+pub fn stop_watching(registry: &WatcherRegistry, repo_path: &str, holder: &str) {
     if let Ok(mut watchers) = registry.0.lock() {
-        watchers.remove(repo_path);
+        if let Some(entry) = watchers.get_mut(repo_path) {
+            entry.holders.remove(holder);
+            if entry.holders.is_empty() {
+                watchers.remove(repo_path);
+            }
+        }
     }
+}
+
+/// Drops `holder`'s claim on every repository it holds.
+///
+/// The teardown for a party that goes away all at once rather than repository by repository — a
+/// phone whose socket closed. Without it a device that browsed five projects during a session
+/// would leave five native watchers running for a client that is no longer there.
+pub fn release_holder(registry: &WatcherRegistry, holder: &str) {
+    release_holder_except(registry, holder, "");
+}
+
+/// The same, sparing one path.
+///
+/// [`follow`] is the only caller with something to spare, and it needs this rather than a plain
+/// release because the common case is re-claiming the repository it already holds: the mobile
+/// client calls `watch_project` on *every* socket reopen, and a phone reconnects constantly — a
+/// screen lock, a wifi handover, a tab evicted in the background. Releasing unconditionally would
+/// empty the holder set, drop the `RecommendedWatcher` and end its emitter thread, and the
+/// reinstall a line later would build a fresh one: a full recursive re-walk of the tree on every
+/// reconnect, plus a window in which filesystem changes are silently missed. Precisely the case
+/// `watch_project` exists for — a phone on a project the desk does not have open — is the case
+/// where the phone is the sole holder and the teardown therefore actually happens.
+fn release_holder_except(registry: &WatcherRegistry, holder: &str, keep: &str) {
+    if let Ok(mut watchers) = registry.0.lock() {
+        watchers.retain(|path, entry| {
+            if path == keep {
+                return true;
+            }
+            entry.holders.remove(holder);
+            !entry.holders.is_empty()
+        });
+    }
+}
+
+/// Points `holder` at exactly one repository, releasing whatever else it was holding.
+///
+/// The shape a phone needs: the mobile client shows one project at a time, so its previous claim is
+/// dead the moment it picks another. Written as replace-then-take rather than left to the caller
+/// because forgetting the release is invisible — everything keeps working, and the machine simply
+/// accumulates a native watcher per project the user ever tapped.
+pub fn follow(
+    app: AppHandle,
+    registry: &WatcherRegistry,
+    holder: &str,
+    repo_path: String,
+) -> Result<(), String> {
+    // Everything *except* the one being claimed, so re-following the repository already followed is
+    // a no-op instead of a teardown and rebuild. See `release_holder_except`; `install` already
+    // handles "already watched, just add the holder" correctly, so the spared entry needs nothing
+    // more than to survive to reach it.
+    release_holder_except(registry, holder, &repo_path);
+    start_watching(app, registry, repo_path, holder)
 }
 
 #[cfg(test)]
@@ -305,5 +482,89 @@ mod tests {
     fn ordinary_source_edits_are_never_noise() {
         assert!(!is_noise_path(&root(), &under_root(&["src", "App.tsx"])));
         assert!(!is_noise_path(&root(), &under_root(&["README.md"])));
+    }
+
+    /// [`install`] with the native half stubbed out.
+    ///
+    /// A `RecommendedWatcher` that watches nothing is enough for every claim below: the reference
+    /// counting is pure bookkeeping over the map, and the only thing the watcher value contributes
+    /// to it is being dropped when the last holder lets go. Building one avoids the test needing a
+    /// directory on disk — and avoids it needing an `AppHandle`, which cannot be constructed outside
+    /// a running Tauri app.
+    fn claim(registry: &WatcherRegistry, repo_path: &str, holder: &str) {
+        install(registry, repo_path, holder, || {
+            notify::recommended_watcher(|_: notify::Result<Event>| {}).map_err(|e| e.to_string())
+        })
+        .unwrap();
+    }
+
+    /// **The regression the holder set exists to prevent.**
+    ///
+    /// `src/App.tsx` releases the active project's watcher on every project change, and it does so
+    /// unconditionally — it has no way to know that a phone is looking at the same repository. Under
+    /// the old map that teardown stopped the watcher outright, so switching projects at the desk
+    /// silently froze the Repo tab of every phone on the repository just left.
+    #[test]
+    fn the_desktop_letting_go_does_not_stop_a_watcher_a_phone_is_holding() {
+        let registry = WatcherRegistry::default();
+        let phone = device_holder("phone-1");
+
+        claim(&registry, "/repos/api", DESKTOP_HOLDER);
+        claim(&registry, "/repos/api", &phone);
+
+        stop_watching(&registry, "/repos/api", DESKTOP_HOLDER);
+        assert!(
+            watched_by_a_device(&registry, "/repos/api"),
+            "the phone's claim must outlive the desktop's"
+        );
+
+        // And the last holder letting go is still what stops it — a refcount that never reaches
+        // zero is a leak, not a fix.
+        stop_watching(&registry, "/repos/api", &phone);
+        assert!(registry.0.lock().unwrap().is_empty());
+    }
+
+    /// A phone shows one project at a time, so `follow` releases before it claims — otherwise a
+    /// session spent browsing leaves one native watcher per project ever tapped. Tested through the
+    /// release half, which is the half that has to happen.
+    #[test]
+    fn a_device_following_another_repo_lets_go_of_the_first() {
+        let registry = WatcherRegistry::default();
+        let phone = device_holder("phone-1");
+
+        claim(&registry, "/repos/api", &phone);
+        release_holder(&registry, &phone);
+        claim(&registry, "/repos/web", &phone);
+
+        assert!(!watched_by_a_device(&registry, "/repos/api"));
+        assert!(watched_by_a_device(&registry, "/repos/web"));
+
+        // The socket closing releases whatever is left, wherever it is.
+        release_holder(&registry, &phone);
+        assert!(registry.0.lock().unwrap().is_empty());
+    }
+
+    /// Releasing one device must leave the others alone — the same rule the revocation channel
+    /// follows, for the same reason: one phone going away is not every phone going away.
+    #[test]
+    fn releasing_one_device_does_not_disturb_another() {
+        let registry = WatcherRegistry::default();
+        let first = device_holder("phone-1");
+        let second = device_holder("phone-2");
+
+        claim(&registry, "/repos/api", &first);
+        claim(&registry, "/repos/api", &second);
+
+        release_holder(&registry, &first);
+        assert!(watched_by_a_device(&registry, "/repos/api"));
+    }
+
+    /// The desktop's own hold must not read as a device's, or the bridge would forward filesystem
+    /// churn for a repository only the person at the desk has open.
+    #[test]
+    fn the_desktop_window_is_not_a_device() {
+        let registry = WatcherRegistry::default();
+        claim(&registry, "/repos/api", DESKTOP_HOLDER);
+        assert!(!watched_by_a_device(&registry, "/repos/api"));
     }
 }

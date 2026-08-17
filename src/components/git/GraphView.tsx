@@ -337,11 +337,23 @@ const CommitTable = memo(function CommitTable() {
         className="cf-rise relative min-w-full"
         style={{ width: totalWidth, minHeight: svgHeight }}
       >
+        {/* Above the rows, which is not where it was.
+            Both layers are absolutely positioned at `z-index: auto`, so they painted in DOM order —
+            and the rows are written after this, so every row background landed on top of the graph.
+            Hovering got away with it because that wash is 3% black; selection did not, because
+            `--cf-accent-soft` is an opaque colour, and it erased the lane and the dot of the one
+            commit the user had just pointed at. The line stopping exactly where you are looking is
+            the worst place for it to stop.
+            `z-[1]` rather than a larger number: it only has to clear the rows beside it, and the
+            column header above is `z-10` and has to keep winning when the list scrolls under it.
+            Safe to raise precisely because it is `pointer-events-none` and transparent between its
+            strokes — the row underneath is still the click target across its whole width, including
+            the part of it this covers. */}
         <svg
           width={svgWidth}
           height={svgHeight}
           style={{ left: textColumnsWidth, top: 0 }}
-          className="pointer-events-none absolute"
+          className="pointer-events-none absolute z-[1]"
         >
           {visibleEdges.map((edge) => {
             const x1 = laneX(edge.fromLane);

@@ -1337,6 +1337,40 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_diagram_templates_workspace
             ON diagram_templates (workspace_id, sort_order);
+
+        -- A phone or tablet that has been paired with the remote-control server.
+        --
+        -- Deliberately NOT scoped to a workspace: pairing is a property of this *install* — the
+        -- device drives the whole app, and the workspace it happens to be looking at is a thing it
+        -- chooses per request, exactly as the desktop window does.
+        --
+        -- **`token_hash`, never the token.** The token is minted once, shown once to the device
+        -- that is pairing, and never recoverable afterwards — what stays here is a SHA-256 of it,
+        -- so a copy of `codeflow.db` (a backup, a synced folder, a stolen laptop) does not hand
+        -- anybody a working credential. Verification hashes the presented bearer and compares, so
+        -- losing a device means revoking a row rather than rotating anything.
+        --
+        -- Not in the OS keychain, which is where `secrets.rs` puts everything else, and the
+        -- difference is what the secret is *for*: a keychain entry holds a credential this app
+        -- presents to somebody else (a PAT, a database password) and must be able to read back. A
+        -- hash is not a credential and is never read back — only compared — so the keychain would
+        -- buy nothing and cost a round trip per request on the hot path.
+        --
+        -- Revoked rows are kept rather than deleted so the settings screen can still say which
+        -- device was cut off and when, instead of silently forgetting it existed.
+        CREATE TABLE IF NOT EXISTS remote_devices (
+            id           TEXT PRIMARY KEY,
+            -- What the device called itself when it paired ("iPhone de Sebastián"). Free text from
+            -- the device, so it is display-only and never trusted for anything.
+            name         TEXT NOT NULL DEFAULT '',
+            token_hash   TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            last_seen_at TEXT,
+            revoked      INTEGER NOT NULL DEFAULT 0
+        );
+        -- Every authenticated request is a lookup by hash, and it is the only lookup there is.
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_devices_token
+            ON remote_devices (token_hash);
         "#,
     )?;
 

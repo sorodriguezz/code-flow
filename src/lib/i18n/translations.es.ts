@@ -746,6 +746,88 @@ export const es = {
   "api.settings.off": "Desactivado",
   "api.settings.globalValue": "Global: {value}",
 
+  // ---- Control remoto (celular / tablet en la misma red) ----
+  "remote.title": "Control remoto",
+  "remote.groupServer": "Servidor",
+  "remote.groupPairing": "Emparejamiento",
+  "remote.groupTerminal": "Terminal",
+  "remote.groupAccess": "Acceso",
+  "remote.alphaNote":
+    "Esta función es nueva y todavía se está asentando. Los ajustes de aquí pueden cambiar de nombre o de comportamiento en una versión próxima, así que revisa las notas de la versión antes de depender de ella — y apaga el servidor cuando no lo estés usando.",
+  "remote.subtitle":
+    "Maneja esta instalación desde tu celular o tablet en la misma red — mira las corridas de agentes, responde el gate de una cadena, haz commit y push sin volver al escritorio.",
+  "remote.enable": "Activar el servidor",
+  "remote.enableHint":
+    "Apagado por defecto. Mientras esté encendido, este equipo acepta conexiones de dispositivos emparejados en tu red local — y solo de dispositivos emparejados.",
+  "remote.port": "Puerto",
+  "remote.portHint": "Sobre 1024. Cámbialo si algo más en este equipo ya responde ahí.",
+  "remote.running": "Escuchando",
+  "remote.stopped": "Apagado",
+  "remote.enabledButNotRunning":
+    "Debería estar encendido, pero no se pudo abrir el puerto — lo más probable es que algo más lo esté usando. Prueba con otro.",
+  "remote.noAddress":
+    "El servidor está arriba, pero este equipo no tiene una dirección de red que anunciar. Revisa que estés conectado a wifi o por cable.",
+  "remote.firewallWindows":
+    "Windows te va a preguntar una vez si deja que CodeFlow acepte conexiones — permítelo en redes privadas. Si cerraste ese aviso, la dirección de abajo no va a responder desde tu celular hasta que permitas CodeFlow en el Firewall de Windows Defender.",
+  "remote.openOnPhone": "Abre esto en tu celular",
+  "remote.scanHint": "Escanea el código, o escribe la dirección en el navegador.",
+  "remote.pair": "Emparejar dispositivo",
+  "remote.pairAgain": "Emparejar otro dispositivo",
+  "remote.pairCancel": "Cancelar",
+  "remote.pairCodeLabel": "Escribe este código en el dispositivo",
+  "remote.pairCodeHint":
+    "Vale por tres minutos, y para un solo dispositivo. Cinco intentos fallidos lo anulan — pide uno nuevo si pasa.",
+  "remote.devices": "Dispositivos emparejados",
+  "remote.devicesEmpty": "Todavía no has emparejado ningún dispositivo.",
+  "remote.revoke": "Revocar",
+  "remote.revokeAll": "Revocar todos los dispositivos",
+  "remote.revoked": "Revocado",
+  "remote.connected": "Conectado ahora",
+  "remote.lastSeen": "Visto {when}",
+  "remote.neverSeen": "Nunca se conectó",
+  "remote.pairedOn": "Emparejado {when}",
+  "remote.safety": "Qué puede y qué no puede hacer un dispositivo emparejado",
+  "remote.safetyAllowed":
+    "Puede leer tus repositorios y diffs, correr la revisión pre-commit, hacer stage y commit, push y pull, cambiar de rama, revisar pull requests, chatear con un motor, y responder o abortar una cadena.",
+  "remote.safetyDenied":
+    "Nunca puede leer ni escribir tus credenciales, llegar a tus bases de datos o hosts SSH, borrar nada, ni descartar tu trabajo. Esa lista está fija en la app, no es un ajuste.",
+  // Lo que hizo un dispositivo emparejado, anunciado en el centro de notificaciones. El nombre del
+  // dispositivo viaja como `detail` de la entrada, así que estas nombran el acto y nada más.
+  "remote.action.commit": "Commit desde un dispositivo",
+  "remote.action.push": "Push desde un dispositivo",
+  "remote.action.pull": "Pull desde un dispositivo",
+  "remote.action.fetch": "Fetch desde un dispositivo",
+  "remote.action.checkout": "Cambio de rama desde un dispositivo",
+  "remote.action.branch": "Rama creada desde un dispositivo",
+  "remote.action.gateApproved": "Gate respondido desde un dispositivo",
+  "remote.action.stepSkipped": "Paso saltado desde un dispositivo",
+  "remote.action.chainAborted": "Cadena abortada desde un dispositivo",
+  "remote.action.chainResumed": "Cadena reanudada desde un dispositivo",
+  "remote.action.stepRetried": "Paso reintentado desde un dispositivo",
+  "remote.action.runCancelled": "Corrida cancelada desde un dispositivo",
+  "remote.action.prReviewed": "Pull request revisado desde un dispositivo",
+  "remote.action.prActed": "Voto en pull request desde un dispositivo",
+  "remote.action.prCommented": "Revisión publicada desde un dispositivo",
+  "remote.action.threadResolved": "Hilo resuelto desde un dispositivo",
+  "remote.action.findingDiscarded": "Hallazgo descartado desde un dispositivo",
+  "remote.action.analyzed": "Cambios revisados desde un dispositivo",
+  "remote.action.chat": "Mensaje enviado desde un dispositivo",
+  "remote.action.terminalOpened": "Terminal abierto desde un dispositivo",
+  "remote.action.terminalClosed": "Terminal cerrado desde un dispositivo",
+  "remote.forget": "Quitar de la lista",
+  "remote.forgetAllRevoked": "Limpiar revocados",
+
+  "remote.terminal": "Permitir terminales",
+  "remote.terminalHint":
+    "Apagado por defecto, y separado del switch de arriba a propósito. Todo lo demás que puede hacer un dispositivo emparejado es una acción concreta; una shell no lo es — puede ejecutar cualquier cosa en este equipo, como tú. Enciéndelo si eso es lo que quieres desde tu celular, y apágalo cuando termines.",
+  "remote.terminalOnWarning":
+    "Los terminales están encendidos. Un dispositivo con un token válido puede ejecutar comandos en este computador. La conexión es HTTP plano en tu red local, así que prefiere una red en la que confíes.",
+  "remote.liveTerminals": "Shells abiertas desde un dispositivo",
+  "remote.liveTerminalsNone": "Ningún dispositivo emparejado tiene una shell abierta ahora mismo.",
+  "remote.liveTerminalsHint":
+    "Procesos reales en este computador, iniciados desde un celular. Siguen vivos cuando el dispositivo se desconecta — un rato, para que bloquear la pantalla no mate una compilación — y se cierran del todo cuando revocas el dispositivo o apagas los terminales.",
+  "remote.killTerminal": "Cerrar esta shell",
+
   // ---- Respaldo (toda la instalación, cifrado) ----
   "backup.title": "Respaldo",
   "backup.subtitle":
@@ -1456,6 +1538,7 @@ export const es = {
   "settings.skills": "Skills",
   "settings.collapseNav": "Contraer a iconos",
   "settings.expandNav": "Mostrar nombres de sección",
+  "settings.alpha": "ALFA",
   "settings.globalGroup": "Global",
   "settings.workspaceGroup": "Workspace — {name}",
   "settings.workspaceGroupGeneric": "Workspace",
@@ -2511,6 +2594,9 @@ export const es = {
   "terminal.rename": "Renombrar pestaña (o doble clic)",
   "terminal.hide": "Ocultar panel",
   "terminal.toggle": "Mostrar/ocultar panel de terminal",
+  "terminal.copy": "Copiar",
+  "terminal.paste": "Pegar",
+  "terminal.copied": "Copiado",
 
   "chat.title": "Chat con IA",
   "chat.hint": "Pregunta lo que sea sobre este repositorio — la IA puede leer archivos, buscar código y revisar el estado de git para responder. Configura contextos de revisión abajo para darle más contexto.",
@@ -4252,6 +4338,7 @@ export const es = {
   "agents.liveKindInline": "Edición en línea",
   "agents.liveKindDb": "Asistente de base de datos",
   "agents.liveKindUnknown": "Ejecución de IA",
+  "agents.liveKindRemote": "Ejecución desde un dispositivo",
   "agents.selectTask": "Ninguna tarea seleccionada",
   "agents.selectTaskHint": "Elige una tarea a la izquierda, o empieza una nueva.",
   "agents.tasksEmpty": "Todavía no hay tareas",
@@ -4461,6 +4548,7 @@ export const es = {
   "chain.emptyOutput": "un paso no devolvió nada — revisa antes de continuar",
   "chain.stopped": "lo detuviste tú",
   "chain.timedOut": "el paso tardó demasiado y se detuvo",
+  "chain.gateMoved": "Esta pausa ya fue respondida — la cadena siguió adelante.",
   "chain.noSteps": "Una cadena necesita al menos un paso.",
   "chain.tooManySteps": "Una cadena admite como mucho 8 pasos.",
   "chain.noRepos": "Elige al menos un repositorio.",
@@ -4672,6 +4760,10 @@ export const es = {
   "db.noResultYet": "Todavía no hay resultado",
   "db.noColumns": "Esta sentencia no devolvió columnas.",
   "db.noFields": "Este comando no devolvió campos.",
+  "db.statementOk": "Se ejecutó correctamente",
+  "db.statementOkHint": "No devuelve un conjunto de resultados — las escrituras y el DDL informan cuánto cambiaron, no filas.",
+  "db.batchOk": "{n} de {total} sin errores",
+  "db.batchFailed": "{n} con error",
   "db.rowsN": "{n} filas",
   "db.rowsAffected": "{n} filas afectadas",
   "db.rowsOfTotal": "{n} de {total} filas",

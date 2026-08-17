@@ -21,7 +21,11 @@ export type NotificationSource =
   | "chat"
   | "editor"
   | "notes"
-  | "diagrams";
+  | "diagrams"
+  /** Something a paired phone or tablet did. Its own source rather than being filed under the
+   *  feature it touched, because *where it came from* is the interesting part: a commit you made
+   *  is not news, and the same commit arriving from a device in your pocket is. */
+  | "remote";
 
 /**
  * The menu each source is called in the rest of the app.
@@ -40,6 +44,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   editor: "tabbar.editor",
   notes: "tabbar.notes",
   diagrams: "tabbar.diagrams",
+  remote: "remote.title",
 };
 
 /**

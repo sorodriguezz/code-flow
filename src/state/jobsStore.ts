@@ -140,6 +140,19 @@ interface JobsState {
    * through `drainHistory`, which is what lets the panel paint without waiting for the whole
    * table. */
   load: (projectId: string) => Promise<void>;
+  /**
+   * Re-reads page zero of a bucket that has already been loaded, merging in anything new.
+   *
+   * The counterpart to `load` for the case its guard exists to prevent: `load` deliberately runs
+   * once per bucket, because the AI panel calls it on every mount. This is for a row that appeared
+   * in the database because something *other than this window* wrote it — a review run started
+   * from a paired phone (see the `reviews` case of `state:invalidate` in `App.tsx`). Without it
+   * those rows are unreachable for the whole session.
+   *
+   * Merges by id and never duplicates, so calling it when nothing changed costs one query and
+   * writes nothing.
+   */
+  refresh: (projectId: string) => Promise<void>;
   /** Reads the next page of a bucket's history and **appends** it, so nothing already on screen
    * moves or is replaced. A no-op while `hasMore[projectId]` is false. */
   loadMore: (projectId: string) => Promise<void>;
@@ -375,6 +388,40 @@ export const useJobsStore = create<JobsState>((set, get) => ({
         [projectId]: [job, ...(s.byProject[projectId] ?? []).filter((j) => j.id !== job.id)],
       },
     }));
+  },
+
+  refresh: async (projectId) => {
+    // `load` with its once-per-bucket guard removed.
+    //
+    // That guard is right for what `load` is: a bootstrap the AI panel fires on mount, which must
+    // not re-read (or double-append) every time a component remounts. It is wrong for the case
+    // this exists to serve — a row appearing in `job_history` because *another device* put it
+    // there. `loaded[projectId]` is set on the first call and never reset, so once the panel has
+    // been opened for a project, every later `load` returns immediately and a review run from a
+    // phone could never reach `byProject`. That is precisely "it says it happened and nothing
+    // shows up".
+    //
+    // The merge below is the same one `load` does, keyed by id, so re-reading a page whose rows
+    // are already held changes nothing and cannot duplicate.
+    const rows = await fetchActivityPage(projectId, 0);
+    // Deliberately not touching `fetchedRows` or `hasMore`: this re-reads page zero only, and
+    // rewriting the paging bookkeeping from it would make the next `loadMore` skip or repeat a
+    // page depending on how much arrived in between.
+    set((s) => {
+      const existing = s.byProject[projectId] ?? [];
+      const existingIds = new Set(existing.map((j) => j.id));
+      const fresh = rows.map((row) => toJob(projectId, row)).filter((j) => !existingIds.has(j.id));
+      if (fresh.length === 0) return s;
+      return {
+        byProject: {
+          ...s.byProject,
+          [projectId]: [...fresh, ...existing].sort((a, b) => b.createdAt - a.createdAt),
+        },
+        // A bucket that had never been bootstrapped now holds real rows, and saying so keeps a
+        // later `load` from reading the same page a second time.
+        loaded: { ...s.loaded, [projectId]: true },
+      };
+    });
   },
 
   load: async (projectId) => {

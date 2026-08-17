@@ -34,6 +34,7 @@ export type SettingsSectionId =
   | "azure"
   | "claude"
   | "backup"
+  | "remote"
   | "review"
   | "skills"
   | "api";

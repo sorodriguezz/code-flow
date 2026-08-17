@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 use crate::shell_profiles::ShellProfile;
@@ -58,7 +58,13 @@ struct Outbox {
 struct Transcript {
     /// The `workspace_terminals` row this belongs to. Stable across restarts, unlike the pty
     /// session id, which is minted fresh every time a shell is opened.
-    key: String,
+    ///
+    /// `None` for a recording that is kept **only in memory**, which is what a phone's session gets:
+    /// there is no bench row behind it and there must not be one — a shell opened from a pocket has
+    /// no business appearing as a tab on the desktop's bench, and persisting it would outlive the
+    /// pairing that created it. The buffer is still worth keeping, because a browser tab evicted in
+    /// the background comes back to a live shell it has printed nothing of yet.
+    key: Option<String>,
     buf: String,
     /// Whether `buf` has changed since it was last written to the database. The flush walks every
     /// session on a timer, and a bench of six idle shells should cost it six comparisons, not six
@@ -74,8 +80,9 @@ struct Transcript {
 /// would be gone, and gone from the only copy — the point of the feature, deleted by the act of
 /// using it. Seeding makes the new session a continuation of the record rather than a replacement.
 pub struct Recording {
-    /// The `workspace_terminals` row. Stable across restarts, unlike the pty session id.
-    pub key: String,
+    /// The `workspace_terminals` row. Stable across restarts, unlike the pty session id. `None`
+    /// records into memory only — see [`Transcript::key`].
+    pub key: Option<String>,
     pub seed: String,
 }
 
@@ -102,24 +109,78 @@ struct TerminalSession {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
-    /// `Some` only for the agent console's bench. The repository dock's terminals and the Remote
-    /// workspace's `ssh` sessions are not recorded: neither has anywhere to be replayed into, and
-    /// a remote session's output is somebody else's machine talking.
+    /// `Some` for the agent console's bench and for a phone's session. The repository dock's
+    /// terminals and the Remote workspace's `ssh` sessions are not recorded: neither has anywhere to
+    /// be replayed into, and a remote host's output is somebody else's machine talking.
     transcript: Option<Arc<Mutex<Transcript>>>,
+    /// What this session is, for whoever has to describe one they did not open. See [`Origin`].
+    origin: Origin,
+}
+
+/// What a session is, told by whoever opened it.
+///
+/// The three fields exist for callers that have to reason about a session they did not create: the
+/// remote-control dispatcher deciding whether a phone may write to an id, and the settings panel
+/// listing the shells a phone has left running on this machine. None of it is derivable after the
+/// fact — a pty knows its file descriptors and nothing else.
+pub struct Origin {
+    /// Where the process started, as the caller understands it. Empty for `ssh`, whose local
+    /// working directory means nothing to anybody reading the list.
+    pub cwd: String,
+    /// The shell profile's name, or the program for anything that is not a shell.
+    pub profile: String,
+    /// The paired device that asked for this session, or `None` for one opened at the desk.
+    ///
+    /// **This is an authorisation input**, and the only one in this module. `remotectl/dispatch.rs`
+    /// refuses a `write`/`resize`/`close` for an id whose owner is not the caller — without it a
+    /// phone could drive any pty on the machine by id, including the person-at-the-desk's shell and
+    /// a live `ssh -t` into somebody else's server. It is set exclusively by the remote-control
+    /// path; nothing a phone sends can reach this field.
+    pub owner: Option<String>,
+}
+
+/// One live session, as something that can be listed.
+///
+/// Deliberately without the transcript: a listing of six shells carrying a quarter of a megabyte
+/// each is not a listing. See [`transcript_of`] for the replay, which is asked for one session at a
+/// time and only by whoever is about to draw it.
+#[derive(Clone, Serialize)]
+pub struct TerminalInfo {
+    pub id: String,
+    pub cwd: String,
+    pub profile: String,
+    /// The device that opened it. Always `Some` in every list this type is used for — both the
+    /// desktop panel and a phone's own listing are about remote sessions — but carried rather than
+    /// implied, because "whose" is the entire question the panel is answering.
+    pub owner: Option<String>,
 }
 
 #[derive(Default)]
 pub struct TerminalRegistry(Mutex<HashMap<String, TerminalSession>>);
 
+/// The bytes one session printed, and who is entitled to them.
+///
+/// `owner` travels on the event rather than being looked up when the event is routed, and both
+/// halves of that are deliberate. Looking it up would mean taking the registry lock for every frame
+/// of a `cargo build` — and, worse, it would be *impossible* for the exit: a session is struck from
+/// the registry before `terminal:exit` is emitted (see [`open_pty`]), so the lookup would answer "no
+/// owner" for precisely the frame that says the shell is gone, and a phone would sit forever on a
+/// terminal whose process had ended. Stamped at spawn, it is correct at both ends of the session's
+/// life.
+///
+/// `None` is a shell opened at the desk, which no paired device may see. See
+/// `remotectl::bridge::TERMINAL_EVENTS`.
 #[derive(Clone, Serialize)]
 struct TerminalOutputEvent {
     id: String,
     data: String,
+    owner: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
 struct TerminalExitEvent {
     id: String,
+    owner: Option<String>,
 }
 
 /// Which shell to run is decided by [`crate::shell_profiles`]; this only turns the answer into a
@@ -146,14 +207,23 @@ pub fn open_terminal(
     cwd: String,
     profile: &ShellProfile,
     record: Option<Recording>,
+    owner: Option<String>,
 ) -> Result<String, String> {
+    let start = start_dir(&cwd);
     open_pty(
         app,
         registry,
         &profile.command,
         &profile.args,
-        start_dir(&cwd).as_deref(),
+        start.as_deref(),
         record,
+        Origin {
+            // The resolved directory rather than the argument, so a session opened with a blank
+            // `cwd` lists as the home directory it actually started in instead of as nothing.
+            cwd: start.clone().unwrap_or_default(),
+            profile: profile.name.clone(),
+            owner,
+        },
     )
 }
 
@@ -174,6 +244,7 @@ pub fn open_pty(
     args: &[String],
     cwd: Option<&str>,
     record: Option<Recording>,
+    origin: Origin,
 ) -> Result<String, String> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -217,6 +288,10 @@ pub fn open_pty(
     let transcript = record
         .map(|Recording { key, seed }| Arc::new(Mutex::new(Transcript { key, buf: seed, dirty: true })));
 
+    // Copied out before the origin moves into the registry: the emitter thread stamps it on every
+    // frame it sends, and it must go on being able to do so after the session is gone from the map.
+    let emitter_owner = origin.owner.clone();
+
     {
         let mut sessions = registry.0.lock().map_err(|e| e.to_string())?;
         sessions.insert(
@@ -226,6 +301,7 @@ pub fn open_pty(
                 master: pair.master,
                 child,
                 transcript: transcript.clone(),
+                origin,
             },
         );
     }
@@ -297,10 +373,46 @@ pub fn open_pty(
             last_flush = Instant::now();
             let _ = emitter_app.emit(
                 "terminal:output",
-                TerminalOutputEvent { id: emitter_id.clone(), data },
+                TerminalOutputEvent {
+                    id: emitter_id.clone(),
+                    data,
+                    owner: emitter_owner.clone(),
+                },
             );
         }
-        let _ = emitter_app.emit("terminal:exit", TerminalExitEvent { id: emitter_id });
+        // **Struck from the registry before the exit is announced**, and the ordering is the whole
+        // point of doing it here rather than leaving it to whoever notices.
+        //
+        // Until this existed a naturally-exited shell stayed in the map forever: `close_terminal` is
+        // the only thing that removed a row, so a session the user simply typed `exit` into leaked
+        // its entry — and, worse, kept answering. A `write_terminal` to that id found a live
+        // `TerminalSession`, wrote into a master fd whose child was gone, and returned `Ok`. Every
+        // keystroke a phone sent to a dead shell therefore vanished silently and looked like a
+        // network problem. Removing first means the next write says "no such terminal session",
+        // which is both true and actionable.
+        //
+        // `try_state` rather than `state`: this thread outlives nothing in particular, and a panic
+        // here would take the exit announcement with it.
+        //
+        // **The transcript is written down first.** `drain_transcripts` walks this same registry and
+        // is the only path that persists a recorded session, on a four-second timer — so removing
+        // the row here without flushing meant everything printed since the last tick was never
+        // written. The shape that costs: a bench shell prints `BUILD SUCCESSFUL` and exits, all
+        // within microseconds of the reader pushing those bytes into the `Transcript`, and the next
+        // tick finds nothing to save. `resume_workspace_terminal` would then reseed from a truncated
+        // record — losing exactly the tail somebody backgrounded the shell to collect, which is the
+        // thing the `Transcript` doc comment says the feature exists to prevent. Remote sessions
+        // carry no key and are unaffected; this is the desktop bench's guarantee.
+        crate::commands::terminal_cmd::flush_transcripts(&emitter_app);
+        if let Some(registry) = emitter_app.try_state::<TerminalRegistry>() {
+            if let Ok(mut sessions) = registry.0.lock() {
+                sessions.remove(&emitter_id);
+            }
+        }
+        let _ = emitter_app.emit(
+            "terminal:exit",
+            TerminalExitEvent { id: emitter_id, owner: emitter_owner },
+        );
     });
 
     Ok(id)
@@ -365,13 +477,112 @@ pub fn drain_transcripts(registry: &TerminalRegistry) -> Vec<(String, String)> {
     for session in sessions.values() {
         let Some(transcript) = &session.transcript else { continue };
         let Ok(mut recorded) = transcript.lock() else { continue };
+        // A recording with no row is a phone's session: there is nothing to write it *to*, and
+        // clearing the dirty flag for it would be a lie the bench never reads anyway. Skipped
+        // before the flag rather than after, so the in-memory buffer stays the live one.
+        let Some(key) = recorded.key.clone() else { continue };
         if !recorded.dirty {
             continue;
         }
         recorded.dirty = false;
-        changed.push((recorded.key.clone(), recorded.buf.clone()));
+        changed.push((key, recorded.buf.clone()));
     }
     changed
+}
+
+/// What one live session has printed, for a client that is attaching to it rather than opening it.
+///
+/// The reason a remote session is recorded at all. A phone's browser tab is evicted the moment it
+/// goes into the background on a device under memory pressure, and a wifi handover costs the socket
+/// — in both cases the shell is still running and still printing, and reattaching to it without this
+/// would show a blank screen with a cursor in it, which is indistinguishable from a broken terminal.
+///
+/// `None` for a session that is not recorded (the desktop dock, an `ssh` pane) and for one that no
+/// longer exists, which are the same answer to the only caller: there is nothing to replay.
+pub fn transcript_of(registry: &TerminalRegistry, id: &str) -> Option<String> {
+    let sessions = registry.0.lock().ok()?;
+    let transcript = sessions.get(id)?.transcript.as_ref()?;
+    let recorded = transcript.lock().ok()?;
+    Some(recorded.buf.clone())
+}
+
+/// Who opened session `id`, or `None` when there is no such session.
+///
+/// Two nested `Option`s because the two answers are genuinely different and the caller acts on the
+/// difference: an unknown id must fall through to the command itself (so a write to a shell that has
+/// exited reads as the failure it is), while a known id with somebody else's owner is a refusal. See
+/// `remotectl::dispatch`.
+#[allow(clippy::option_option)]
+pub fn owner_of(registry: &TerminalRegistry, id: &str) -> Option<Option<String>> {
+    let sessions = registry.0.lock().ok()?;
+    Some(sessions.get(id)?.origin.owner.clone())
+}
+
+/// Every session a device opened, or — with `owner: None` — every session *any* device opened.
+///
+/// The second form is what the settings panel draws: shells a phone left running on this machine,
+/// which nothing on the desktop would otherwise show. Sessions opened at the desk are never in
+/// either list; they belong to the dock and the bench, which draw their own.
+pub fn list_owned(registry: &TerminalRegistry, owner: Option<&str>) -> Vec<TerminalInfo> {
+    let Ok(sessions) = registry.0.lock() else { return Vec::new() };
+    sessions
+        .iter()
+        .filter(|(_, session)| match (&session.origin.owner, owner) {
+            (Some(held), Some(wanted)) => held == wanted,
+            (Some(_), None) => true,
+            (None, _) => false,
+        })
+        .map(|(id, session)| TerminalInfo {
+            id: id.clone(),
+            cwd: session.origin.cwd.clone(),
+            profile: session.origin.profile.clone(),
+            owner: session.origin.owner.clone(),
+        })
+        .collect()
+}
+
+/// Kills every shell one device opened, and reports how many were running.
+///
+/// The counterpart to [`close_recorded`], keyed on the owner rather than on stored rows, and the
+/// answer to the question a phone cannot answer for itself: a device that is revoked, that has its
+/// shell access withdrawn, or that simply walks out of wifi range leaves live processes behind with
+/// nothing on either side still able to reach them. The desktop has no tab for them and the phone
+/// has no token, so without this a `cargo watch` started from a pocket runs until the app is quit.
+///
+/// Deliberately *not* called the moment a socket drops — see `remotectl::DeviceConnection`, where
+/// the grace window lives. A phone locking its screen disconnects constantly, and killing a build
+/// because somebody put their phone down would be the same class of bug as an effect cleanup doing
+/// it.
+pub fn close_owned(registry: &TerminalRegistry, owner: &str) -> usize {
+    let Ok(mut sessions) = registry.0.lock() else { return 0 };
+    let doomed: Vec<String> = sessions
+        .iter()
+        .filter(|(_, session)| session.origin.owner.as_deref() == Some(owner))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in &doomed {
+        if let Some(mut session) = sessions.remove(id) {
+            let _ = session.child.kill();
+        }
+    }
+    doomed.len()
+}
+
+/// Kills every shell opened by *any* device. The switch being turned off, and the server being
+/// stopped: both mean "no phone drives this machine any more", and a shell nobody can reach is not
+/// a shell anybody meant to keep.
+pub fn close_all_owned(registry: &TerminalRegistry) -> usize {
+    let owners: Vec<String> = {
+        let Ok(sessions) = registry.0.lock() else { return 0 };
+        let mut owners: Vec<String> = sessions
+            .values()
+            .filter_map(|session| session.origin.owner.clone())
+            .collect();
+        owners.sort();
+        owners.dedup();
+        owners
+    };
+    owners.iter().map(|owner| close_owned(registry, owner)).sum()
 }
 
 /// Every live recording, keyed by `workspace_terminals` row: its pty session id and what it has
@@ -392,7 +603,10 @@ pub fn recorded_state(registry: &TerminalRegistry) -> HashMap<String, (String, S
     for (id, session) in sessions.iter() {
         let Some(transcript) = &session.transcript else { continue };
         let Ok(recorded) = transcript.lock() else { continue };
-        found.insert(recorded.key.clone(), (id.clone(), recorded.buf.clone()));
+        // Only the bench's own recordings are keyed by a row, and this map *is* the bench's lookup.
+        // A phone's in-memory recording has no row to be found under.
+        let Some(key) = recorded.key.clone() else { continue };
+        found.insert(key, (id.clone(), recorded.buf.clone()));
     }
     found
 }
@@ -410,7 +624,11 @@ pub fn close_recorded(registry: &TerminalRegistry, keys: &[String]) -> usize {
             session
                 .transcript
                 .as_ref()
-                .and_then(|t| t.lock().ok().map(|recorded| keys.contains(&recorded.key)))
+                .and_then(|t| {
+                    t.lock()
+                        .ok()
+                        .map(|recorded| recorded.key.as_ref().is_some_and(|key| keys.contains(key)))
+                })
                 .unwrap_or(false)
         })
         .map(|(id, _)| id.clone())
@@ -428,7 +646,7 @@ mod tests {
     use super::*;
 
     fn transcript() -> Transcript {
-        Transcript { key: "row".into(), buf: String::new(), dirty: false }
+        Transcript { key: Some("row".into()), buf: String::new(), dirty: false }
     }
 
     /// The ordinary case: output accumulates, and appending marks the row for the next flush.

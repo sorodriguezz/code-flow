@@ -1,6 +1,12 @@
 import { create } from "zustand";
 import { cancelAiRun } from "../lib/tauri/commands";
-import { onAiEngine, onAiOutputBatch, type AiEngineEvent, type AiOutputBatchEvent } from "../lib/tauri/events";
+import {
+  onAiDone,
+  onAiEngine,
+  onAiOutputBatch,
+  type AiEngineEvent,
+  type AiOutputBatchEvent,
+} from "../lib/tauri/events";
 import { formatAgentLogLine } from "../lib/agentLog";
 // Types only, so neither of these is a module this one depends on at runtime — `notificationStore`
 // in particular reaches back into half the app, and importing it for real here would close a cycle.
@@ -105,7 +111,21 @@ interface AiRunState {
 }
 
 const EMPTY_LINES: AiRunLine[] = [];
-let unlisten: (() => void) | null = null;
+
+/**
+ * Whether [`init`] has already run, and the handles to undo it.
+ *
+ * Three separate `listen` calls, and all three belong here. Only the first one used to be kept,
+ * which meant `unlisten` claimed to detach the subscription while two others carried on — harmless
+ * today because nothing tears this store down, and precisely the kind of thing that is not
+ * harmless the first time something does.
+ *
+ * `subscribed` is a flag rather than "is the array non-empty" because the array fills
+ * asynchronously: the guard has to hold from the first synchronous line of `init`, or a second
+ * call in the same tick (React StrictMode mounting effects twice) registers everything twice.
+ */
+let subscribed = false;
+const offs: (() => void)[] = [];
 
 /** Run ids in the order they started, oldest first — the eviction order for `start`. Bookkeeping
  * rather than state: nothing renders it, so putting it in the store would only make every run
@@ -130,11 +150,26 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
   active: {},
   cancelling: {},
 
+  /**
+   * Subscribes to the backend's run events. Idempotent.
+   *
+   * # This must be called at boot, not only from `start`
+   *
+   * It used to be reached from exactly one place — `start`, below — which was sound while every
+   * run in the app began with a local `start` call. A run kicked off from a paired phone does not:
+   * the command is invoked over HTTP and the engine events are the *only* thing this window ever
+   * hears about it. With the subscription deferred until the first local run, a desktop that had
+   * been open all morning without running anything itself was not listening at all, so a phone
+   * could drive an engine against this machine's working copy with nothing on screen to say so.
+   *
+   * Called from `App`'s boot effect for that reason. Costs two `listen` registrations on a window
+   * that may never use them, which is the correct trade against silently missing every remote run.
+   */
   init: () => {
-    if (unlisten) return;
-    // Assigned before the listener resolves so a second call in the same tick (React StrictMode
+    if (subscribed) return;
+    // Set before the listeners resolve so a second call in the same tick (React StrictMode
     // mounting effects twice) can't register a duplicate subscription.
-    unlisten = () => {};
+    subscribed = true;
     // The batched event and not the per-line `ai:output`: a busy agentic turn prints 20-60 lines a
     // second, and the old subscription paid one IPC callback, one zustand `set` and one full array
     // copy *per line* — sixty renders a second of a list nobody can read at that rate. The backend
@@ -168,13 +203,51 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
         };
       });
     }).then((off) => {
-      unlisten = off;
+      offs.push(off);
     });
     // Announced once per run, before its first line: which engine and model are doing the work.
     void onAiEngine((event: AiEngineEvent) => {
-      set((s) => ({
-        engineByRun: { ...s.engineByRun, [event.run_id]: { engine: event.engine, model: event.model } },
-      }));
+      set((s) => {
+        const engineByRun = {
+          ...s.engineByRun,
+          [event.run_id]: { engine: event.engine, model: event.model },
+        };
+        // A run this window never started.
+        //
+        // `active` is written by `start`, and `start` is called by whoever invoked the command —
+        // which, for a turn kicked off from a paired phone, is nobody here. The engine banner is
+        // the first this window hears of it, so it is where the run gets registered; otherwise the
+        // status bar would sit empty while a model ran against this machine's working copy, which
+        // is exactly the thing that panel exists to prevent.
+        //
+        // Named as remote rather than left unnamed: `aboutByRun` being absent is a supported state
+        // (the panel falls back to "unknown"), but "somebody's phone started this" is the single
+        // most useful thing to say about a run you did not start yourself.
+        if (s.active[event.run_id]) {
+          return { engineByRun };
+        }
+        return {
+          engineByRun,
+          active: { ...s.active, [event.run_id]: true },
+          aboutByRun: {
+            ...s.aboutByRun,
+            [event.run_id]: {
+              kindKey: "agents.liveKindRemote" as const,
+              detail: event.model ? `${event.engine} · ${event.model}` : event.engine,
+            },
+          },
+        };
+      });
+    }).then((off) => {
+      offs.push(off);
+    });
+    // The counterpart. Harmless for a run this window started — `finish` is idempotent and its own
+    // caller is about to call it anyway — and load-bearing for one it did not, which has no
+    // promise here to resolve. See `onAiDone`.
+    void onAiDone((event) => {
+      set((s) => (s.active[event.run_id] ? { active: { ...s.active, [event.run_id]: false } } : s));
+    }).then((off) => {
+      offs.push(off);
     });
   },
 

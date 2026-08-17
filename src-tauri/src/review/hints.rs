@@ -149,6 +149,7 @@ mod tests {
             resuelto_en_iter: None,
             motivo_descarte: motivo.map(str::to_string),
             delta: None,
+            comentario_md: String::new(),
         }
     }
 

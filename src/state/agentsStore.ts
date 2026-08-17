@@ -9,6 +9,7 @@ import {
   listAgentProjects,
   listAgentTasks,
   listWorkspaceAgents,
+  notifyStateChange,
   renameAgentTask,
   sendChatMessage,
   setAgentTaskGroup,
@@ -154,6 +155,14 @@ interface AgentsState {
 
   setWorkspace: (id: string | null) => Promise<void>;
   reloadRoster: () => Promise<void>;
+  /** Re-reads the task list for the workspace already loaded, keeping the selection and every
+   *  live turn exactly where they are.
+   *
+   *  Deliberately not `setWorkspace(currentId)`: that call early-returns on an unchanged id, and
+   *  the path that would defeat the early return also clears `selectedId`. This exists for the
+   *  case where the rows changed underneath a view nobody navigated — a phone editing the same
+   *  database (see `state:invalidate` in `App.tsx`). */
+  reloadTasks: () => Promise<void>;
   /** Creates a folder when `id` is absent, edits it otherwise. Rejects with the backend's reason —
    * `agents.projectNameRequired` for a blank name — which the dialog renders translated. */
   saveProject: (input: { id?: string; name: string; description: string; color: string }) => Promise<void>;
@@ -192,6 +201,15 @@ interface AgentsState {
       /** What the status bar should call this run. Defaults to the task; a chain passes its own,
        * so a ten-step plan reads as one thing rather than as whichever step is mid-turn. */
       about?: AiRunAbout;
+      /** The row, for a task this store does not hold.
+       *
+       * `tasks` is the *loaded workspace's* list, and the chain scheduler now runs steps on behalf
+       * of a phone that may be pointed somewhere else entirely — see `chainStore.pump`. Adopting
+       * such a row to make this lookup succeed would put a task in the tree whose repository is not
+       * in the workspace the tree is drawn for, so it is handed over instead. Everything downstream
+       * already copes: `settle` falls back to exactly this copy when the row is absent, which is the
+       * case a workspace switch mid-turn has always produced. */
+      task?: AgentTask;
       onSettle?: (outcome: TurnOutcome) => void;
     },
   ) => Promise<void>;
@@ -278,6 +296,17 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     if (!id) return;
     const roster = await listWorkspaceAgents(id).catch(() => [] as WorkspaceAgent[]);
     set((s) => (s.workspaceId === id ? { roster } : s));
+  },
+
+  reloadTasks: async () => {
+    const id = get().workspaceId;
+    if (!id) return;
+    const tasks = await listAgentTasks(id).catch(() => [] as AgentTask[]);
+    // The workspace check is the same guard every async load here uses: the user may have moved on
+    // while this was in flight, and writing rows from the old workspace over the new ones is the
+    // bug it prevents. `live` is untouched on purpose — a turn in flight belongs to this session,
+    // not to the database.
+    set((s) => (s.workspaceId === id ? { tasks } : s));
   },
 
   // Written on the backend first, unlike every other write here: a new folder's id and its place
@@ -436,7 +465,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
    */
   runTurn: async (taskId, message, opts) => {
     const trimmed = message.trim();
-    const task = get().tasks.find((candidate) => candidate.id === taskId);
+    const task = get().tasks.find((candidate) => candidate.id === taskId) ?? opts?.task;
     if (!task || !trimmed) {
       opts?.onSettle?.({ kind: "error", message: "task not found", busy: false });
       return;
@@ -571,6 +600,10 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
           model: reply.model,
           createdAt: reply.created_at,
         });
+        // A task turn is a chat turn: it is persisted into the task's own conversation, which is
+        // what the mobile client's Chat tab reads. Nothing about it moves a byte on disk, so this
+        // emit is the only thing that tells a phone the transcript grew.
+        notifyStateChange("chat", task.project_id, task.conversation_id);
         // The reason this whole panel exists: an agent turn is the longest-running thing the app
         // does, and the user is usually somewhere else by the time it lands.
         notify({
@@ -712,6 +745,11 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       tasks: s.tasks.map((candidate) => (candidate.id === taskId ? { ...candidate, pinned } : candidate)),
     }));
     await setAgentTaskPinned(taskId, pinned);
+    // The one domain with no reader on the other side yet — the mobile client has no task screen,
+    // and this window skips its own origin. Emitted anyway because the *inbound* half already
+    // exists: `set_agent_task_pinned` is in the phone's allowlist and raises exactly this, so
+    // leaving the desktop silent would make the two directions disagree about what a pin is.
+    notifyStateChange("tasks");
   },
 
   setStatus: async (taskId, status) => {

@@ -9,7 +9,7 @@ import {
   Workflow,
   type LucideIcon,
 } from "lucide-react";
-import { HoldProgress, slotShift, useHoldReorder } from "../../lib/holdReorder";
+import { HoldProgress, HoldScrim, slotShift, useHoldReorder } from "../../lib/holdReorder";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useUiStore, type ApiWorkspace, type MainView } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -229,11 +229,30 @@ export function AppRail() {
   return (
     <aside
       aria-label={t("tabbar.workspaceTools")}
-      className="flex w-11 shrink-0 flex-col items-center border-l border-[var(--cf-border)] bg-[var(--cf-surface)] py-2"
+      // `relative` unconditionally, so nothing about the rail's own layout depends on whether
+      // something is being dragged; only the z-index does, and only while it has to out-stack the
+      // scrim. The accent edge replaces the border for the same moment: the rail stops being a
+      // divider between two columns and becomes the one surface still taking input.
+      className={`relative flex w-11 shrink-0 flex-col items-center border-l bg-[var(--cf-surface)] py-2 ${
+        drag
+          ? "z-[9999] border-[var(--cf-accent)] shadow-[-10px_0_28px_rgba(0,0,0,0.35)]"
+          : "border-[var(--cf-border)]"
+      }`}
     >
+      {/* The rest of the window, dimmed, for as long as an icon is off the ground. It is the whole
+          announcement that the hold has *become* a drag — and, since the rail is the only thing
+          left lit, it is also the answer to "where can I put this down".
+
+          Declared here rather than beside the rail because it is a portal: where it sits in this
+          tree decides nothing, and inside the thing it exists for is where it is found. */}
+      <HoldScrim active={drag !== null} />
+
       {/* The tour anchors this cluster rather than the whole rail: the rail is as tall as the
-          window, and a spotlight that size says "look everywhere". */}
-      <div ref={reorder.listRef} data-tour="workspace-tools" className="flex flex-col items-center gap-1">
+          window, and a spotlight that size says "look everywhere".
+          `relative` is also what the drop marker below is positioned against — see `HoldDrag.ghost`,
+          which is measured in this container's coordinates. It has no border and never scrolls,
+          which is what makes those coordinates the same ones `top` is resolved in. */}
+      <div ref={reorder.listRef} data-tour="workspace-tools" className="relative flex flex-col items-center gap-1">
         <Tooltip side="left" label={scopeHint} description={t("tabbar.scopeWorkspaceReset")}>
           <button
             type="button"
@@ -248,6 +267,20 @@ export function AppRail() {
         </Tooltip>
 
         <span className="my-1 h-px w-5 bg-[var(--cf-border)]" />
+
+        {/* Where it lands, drawn in the hole the neighbours have opened up.
+            The sliding was already saying this, but only by implication — you had to read six icons
+            and work out which gap was new. An outline in the gap says it outright, and it is the one
+            square on the rail that is neither an app nor the icon in your hand.
+            Dashed and washed rather than filled: it is a place, not a thing, and a solid tile there
+            would read as a seventh app. */}
+        {drag && (
+          <span
+            aria-hidden
+            className="pointer-events-none absolute left-1/2 w-8 -translate-x-1/2 rounded-md border border-dashed border-[var(--cf-accent)] bg-[var(--cf-accent)]/12"
+            style={{ top: drag.ghost.top, height: drag.ghost.height }}
+          />
+        )}
 
         {apps.map((app, index) => {
           const Icon = app.icon;

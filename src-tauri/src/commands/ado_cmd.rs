@@ -2203,7 +2203,7 @@ fn finalize_review(
     let mut findings = std::mem::take(&mut outcome.findings);
     let projected: Vec<mem::MemoryFinding> = findings.iter().map(|f| f.to_memory()).collect();
 
-    let (remembered, delta) = if prior > 0 {
+    let (mut remembered, delta) = if prior > 0 {
         let prev: Vec<mem::MemoryFinding> = queries::latest_review_findings(conn, &project.id, pr.id, repo)
             .ok()
             .flatten()
@@ -2239,6 +2239,20 @@ fn finalize_review(
         finding.delta = stored.delta.clone();
     }
     crate::review::merge::sort(&mut findings);
+
+    // The comment body each finding would be published as, stored alongside it.
+    //
+    // Here rather than in `to_memory` because only now are the ids the reconciled ones, and the id
+    // is in the heading. Keyed the same way the carry-back above is, so a finding and its comment
+    // cannot end up describing different defects. A `remembered` entry with no counterpart in
+    // `findings` is one carried forward from an earlier run — it was not re-rendered, so it keeps
+    // whatever body it was stored with (empty, for a run written before this existed).
+    for stored in remembered.iter_mut() {
+        let key = mem::finding_identity(stored.archivo.as_deref(), &stored.categoria);
+        if let Some(finding) = findings.iter().find(|f| f.identity() == key) {
+            stored.comentario_md = render::comment_markdown(finding);
+        }
+    }
 
     let plan = &outcome.plan;
     let body = render::review_markdown(

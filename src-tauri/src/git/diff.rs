@@ -25,6 +25,13 @@ pub struct FileDiffInfo {
     pub old_path: Option<String>,
     pub new_path: Option<String>,
     pub status: String,
+    /// libgit2's own answer to "is either side of this delta binary".
+    ///
+    /// It exists because `status` cannot answer it: a changed PNG is `"modified"` exactly as a
+    /// changed source file is, and both arrive with an empty `hunks` list. Without this flag the
+    /// only honest thing a viewer could say about an empty diff was "there is no text to show",
+    /// because naming the cause would have been a guess printed as a fact.
+    pub binary: bool,
     pub hunks: Vec<DiffHunkInfo>,
 }
 
@@ -55,6 +62,7 @@ fn collect_diff(diff: &Diff) -> Result<Vec<FileDiffInfo>, String> {
                 old_path: delta.old_file().path().map(|p| p.display().to_string()),
                 new_path: delta.new_file().path().map(|p| p.display().to_string()),
                 status: diff_status_label(delta.status()).to_string(),
+                binary: delta.flags().is_binary(),
                 hunks: Vec::new(),
             });
             true
@@ -153,19 +161,31 @@ pub fn get_staged_diff(path: &str) -> Result<Vec<FileDiffInfo>, String> {
     get_staged_diff_with_context(path, None)
 }
 
-/// One file's diff, always at full file context — the split view's and the editor diff tab's
-/// supply, and what an expanded row in the Changes list asks for.
+/// One file's diff — the split view's and the editor diff tab's supply, and what an expanded row in
+/// the Changes list asks for.
 ///
 /// The point is that the *whole-file* context nobody can do without stays available without
 /// paying for it across every changed file at once: libgit2 is told the pathspec up front, so it
 /// never walks, reads or diffs the rest of the tree.
 ///
+/// `context_lines` is `None` for [`FULL_FILE_CONTEXT_LINES`], which is what every desktop caller
+/// wants and must keep getting: `src/lib/diffText.ts` rebuilds both complete file texts out of the
+/// hunk list, and it can only do that when every context line is in there. A caller that renders a
+/// *unified* diff and reconstructs nothing — the mobile client — passes a small number instead,
+/// because at full context one file of a big repository is megabytes of JSON over wifi to draw a
+/// screenful.
+///
 /// `Ok(None)` when that path has no diff on the requested side — the file was staged, discarded or
 /// committed between the list being drawn and the row being opened, which is a race, not a failure.
-pub fn get_file_diff(path: &str, file_path: &str, staged: bool) -> Result<Option<FileDiffInfo>, String> {
+pub fn get_file_diff(
+    path: &str,
+    file_path: &str,
+    staged: bool,
+    context_lines: Option<u32>,
+) -> Result<Option<FileDiffInfo>, String> {
     let repo = open(path)?;
     let mut opts = DiffOptions::new();
-    opts.context_lines(FULL_FILE_CONTEXT_LINES);
+    opts.context_lines(context_lines.unwrap_or(FULL_FILE_CONTEXT_LINES));
     opts.pathspec(file_path);
 
     let diff = if staged {
@@ -595,7 +615,7 @@ mod tests {
             narrow.iter().flat_map(|f| f.hunks.iter()).map(|h| h.lines.len()).sum();
         assert!(narrow_lines < 20, "a narrow list diff must not carry the whole file, got {narrow_lines}");
 
-        let whole = get_file_diff(path, "wide.txt", false).unwrap().expect("the edited file");
+        let whole = get_file_diff(path, "wide.txt", false, None).unwrap().expect("the edited file");
         // Exactly what `reconstructSides` does for the left-hand side.
         let original: Vec<&str> = whole
             .hunks
@@ -686,7 +706,7 @@ mod tests {
     fn a_file_with_no_diff_on_that_side_is_none() {
         let (dir, _repo) = fixture();
         let path = dir.to_str().unwrap();
-        assert!(get_file_diff(path, "tracked.txt", false).unwrap().is_none());
+        assert!(get_file_diff(path, "tracked.txt", false, None).unwrap().is_none());
         fs::remove_dir_all(&dir).ok();
     }
 

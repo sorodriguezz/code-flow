@@ -271,7 +271,24 @@ export function DiagramGallery() {
             )}
 
             {galleryView === "grid" ? (
-              <div className="grid grid-cols-[repeat(auto-fill,minmax(180px,1fr))] gap-3">
+              // Fixed 180px columns, not `minmax(180px, 1fr)`, and the pictures are the whole
+              // reason.
+              //
+              // Stretchy columns divide whatever the pane has left over among however many fit, so
+              // a card's width is a fraction of the pane's — 192.33px, 191.67px, 190.5px. That is
+              // invisible until something *animates* the pane's width, which the AI panel does on
+              // every open and close: eleven frames, eleven fractional card widths, and inside each
+              // card an `object-contain` raster re-centred on a different fraction of a pixel every
+              // one of them. The thumbnail visibly shakes. Nothing else on the screen does, because
+              // nothing else on the screen is a hard-edged bitmap being resampled.
+              //
+              // A fixed track cannot be a fraction of anything. The panel is on the right and this
+              // column's left edge never moves, so a card at track `k` sits at `k × 192px` before
+              // the animation and at `k × 192px` after it — the picture is not repainted at all,
+              // rather than repainted smoothly. Widening the pane now adds a column instead of
+              // fattening the existing ones, which is what a gallery of same-sized tiles should do
+              // anyway; the cost is up to one track of ragged space at the right edge.
+              <div className="grid grid-cols-[repeat(auto-fill,180px)] gap-3">
                 {shown.map((diagram) => (
                   <Card
                     key={diagram.id}

@@ -339,10 +339,28 @@ pub fn complete_chain_step(
     Ok(chain)
 }
 
+/// Clears the gate a chain is parked at.
+///
+/// `step_id` is the step the caller was *looking at* when it decided to approve, and it is checked
+/// against the step the chain is actually parked on. It is optional only because a client that has
+/// no step id to offer cannot be wrong about one; every caller that draws a gate has it and should
+/// send it. See [`queries::approve_chain_gate`] for what a mismatch costs.
 #[tauri::command]
-pub fn approve_chain_gate(db: State<Db>, chain_id: String, input: String) -> Result<Option<AgentChain>, String> {
+pub fn approve_chain_gate(
+    db: State<Db>,
+    chain_id: String,
+    input: String,
+    step_id: Option<String>,
+) -> Result<Option<AgentChain>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::approve_chain_gate(&conn, &chain_id, &input).map_err(|e| e.to_string())
+    match queries::approve_chain_gate(&conn, &chain_id, &input, step_id.as_deref())
+        .map_err(|e| e.to_string())?
+    {
+        queries::GateApproval::Approved(chain) => Ok(chain),
+        // Loud, and with nothing written: the caller's screen is describing a moment that has
+        // passed, and the honest thing is to say so and let it re-read rather than to act on it.
+        queries::GateApproval::Moved => Err(queries::GATE_MOVED.to_string()),
+    }
 }
 
 #[tauri::command]

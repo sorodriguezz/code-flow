@@ -56,6 +56,7 @@ export function RemoteView() {
   const pollForwards = useRemoteStore((s) => s.pollForwards);
   const markExited = useRemoteStore((s) => s.markExited);
   const recordCommand = useRemoteStore((s) => s.recordCommand);
+  const closeTab = useRemoteStore((s) => s.closeTab);
   const activeView = useUiStore((s) => s.activeView);
   const t = useT();
 
@@ -135,6 +136,7 @@ export function RemoteView() {
                           sessionId={tab.sessionId}
                           visible={tab.id === activeTabId}
                           onCommand={(line) => recordCommand(tab.sessionId, line)}
+                          onClose={() => void closeTab(tab.id)}
                         />
                       </div>
                     ) : null,

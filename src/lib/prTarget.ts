@@ -1,5 +1,6 @@
 import * as api from "./tauri/commands";
 import type { PrAction, PostFindingItem } from "./tauri/commands";
+import { isCancellation } from "../state/aiRunStore";
 import type {
   JobHistoryEntry,
   PrDecision,
@@ -128,9 +129,17 @@ export function postFindings(
   postSummary: boolean,
   summary: string | null,
 ): Promise<void> {
-  return target.kind === "project"
-    ? api.postPrReviewComment(target.projectId, prId, runId, items, postSummary, summary)
-    : api.postPrLinkReviewComment(target.url, items, postSummary, summary);
+  if (target.kind !== "project") return api.postPrLinkReviewComment(target.url, items, postSummary, summary);
+  return api
+    .postPrReviewComment(target.projectId, prId, runId, items, postSummary, summary)
+    // Publishing rewrites the run's saved findings — each one gains the host thread it was posted
+    // under — so a phone holding that review is now showing findings it would offer to publish
+    // again. Only the project-backed half emits: a link review saves no run, so there is nothing
+    // for another client to be stale about.
+    .then((result) => {
+      api.notifyStateChange("reviews", target.projectId);
+      return result;
+    });
 }
 
 /**
@@ -145,8 +154,23 @@ export function review(
   level: string,
   force = false,
 ): Promise<string> {
-  return target.kind === "project"
-    ? api.reviewPullRequest(target.projectId, prId, jobId, level, force)
-    // A review with no clone builds no plan, so nothing there can decide to stop and ask.
-    : api.reviewPrFromLink(target.url, jobId, level, target.workspaceId);
+  // A review with no clone builds no plan, so nothing there can decide to stop and ask — and saves
+  // no run for another client to go stale on, which is why only the project half emits.
+  if (target.kind !== "project") return api.reviewPrFromLink(target.url, jobId, level, target.workspaceId);
+  const projectId = target.projectId;
+  return api.reviewPullRequest(projectId, prId, jobId, level, force).then(
+    (result) => {
+      api.notifyStateChange("reviews", projectId);
+      return result;
+    },
+    (e: unknown) => {
+      // Both outcomes, not just the success: a review that fails still writes its `job_history`
+      // row with the error in it, so a phone's copy of that history is exactly as out of date
+      // either way. The mirror of what `remotectl/server.rs` does for a review a phone started —
+      // including the two exceptions, which are the two failures that write *nothing*: a run the
+      // user stopped, and a repository somebody else's turn already holds.
+      if (!isCancellation(e) && !api.isRepoBusy(e)) api.notifyStateChange("reviews", projectId);
+      throw e;
+    },
+  );
 }

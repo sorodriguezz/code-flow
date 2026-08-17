@@ -12,6 +12,7 @@ import {
   PackagePlus,
   Palette,
   ShieldCheck,
+  Smartphone,
   TerminalSquare,
   X,
   Zap,
@@ -26,6 +27,7 @@ import { GitSettings } from "./GitSettings";
 import { TerminalSettings } from "./TerminalSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { BackupSettings } from "./BackupSettings";
+import { RemoteSettings } from "./RemoteSettings";
 import { ShortcutsSettings } from "./ShortcutsSettings";
 import { ApiSettingsBody } from "../api/ApiSettingsPanel";
 import { ActivePill } from "../common/ActivePill";
@@ -54,10 +56,28 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
   { id: "azure", labelKey: "settings.integrationsSection", icon: Blocks },
   { id: "claude", labelKey: "settings.aiSection", icon: Bot },
   { id: "api", labelKey: "api.settings.title", icon: Zap },
+  // Beside Backup for the same reason: both are set up once and then left alone. This one sits
+  // above it because turning it on is a thing you do *before* you need it, whereas a backup is
+  // consulted on the day something went wrong.
+  { id: "remote", labelKey: "remote.title", icon: Smartphone },
   // Last of the global list on purpose: it is the section you visit twice — once to set it up, and
   // once on the day something went wrong — rather than one you pass through.
   { id: "backup", labelKey: "backup.title", icon: DatabaseBackup },
 ];
+
+/**
+ * Sections still finding their shape, marked as such wherever they are listed.
+ *
+ * Not a disabled state and not a feature flag — the section works and is reachable. It is a promise
+ * being withheld: that the settings here will keep their names, that the behaviour will not move
+ * under a user who has come to rely on it. Remote control opens a port on the user's machine and
+ * hands a phone real authority over it, which is precisely the kind of feature where somebody
+ * deserves to know it is young before they build a habit on it.
+ *
+ * A set rather than a field on each entry so the answer to "what is still alpha" is one line to
+ * read and one line to change when a section graduates.
+ */
+const ALPHA_SECTIONS = new Set<SettingsSectionId>(["remote"]);
 
 /** Sections that carry a sub-nav and scroll the pane beside it rather than the whole column, so
  * their heading and rail stay put while you read down a long list. They need a definite height to
@@ -84,6 +104,7 @@ function SectionButton({
   icon: Icon,
   active,
   collapsed,
+  alpha,
   onSelect,
 }: {
   id: SettingsSectionId;
@@ -91,6 +112,8 @@ function SectionButton({
   icon: typeof Palette;
   active: boolean;
   collapsed: boolean;
+  /** Marks the section as not finished yet — see the `ALPHA_SECTIONS` note. */
+  alpha?: boolean;
   onSelect: (id: SettingsSectionId) => void;
 }) {
   const t = useT();
@@ -99,8 +122,10 @@ function SectionButton({
     <button
       onClick={() => onSelect(id)}
       aria-current={active ? "page" : undefined}
-      // Collapsed, the tooltip is the only place the name exists, so it stops being a courtesy.
-      title={label}
+      // Collapsed, the tooltip is the only place the name exists, so it stops being a courtesy —
+      // and it is the only place the alpha mark can be spelled out, since what fits beside a 14px
+      // icon is a dot and a dot cannot say which word it stands for.
+      title={alpha ? `${label} · ${t("settings.alpha")}` : label}
       // Selection changes colour and nothing else — no weight change, exactly like the tabs.
       // Bolding on select re-measures the text (here: 140px → 143px against 141px of room), which
       // wrapped "Workspaces & projects" onto a second line and made the row jump every time it was
@@ -120,7 +145,37 @@ function SectionButton({
           either. The full label is on the tooltip. */}
       <span className="relative flex min-w-0 items-center gap-1.5">
         <Icon size={14} className="shrink-0" />
-        {!collapsed && <span className="truncate">{label}</span>}
+        {collapsed
+          ? alpha && (
+              // The badge, shrunk to the only thing that survives at rail width: a dot on the
+              // corner of the icon, in the same warning hue the full badge is written in, so the
+              // two read as one mark seen at two sizes rather than as two different signals.
+              //
+              // A dot rather than a glyph. "ALFA" set small enough to fit here would be four
+              // letters around 5px tall — at that size a word stops being read and starts being a
+              // smudge, and a smudge on an icon reads as a rendering fault, not as a warning. The
+              // word itself is a hover away, on the tooltip that already carries the section name
+              // for exactly the same reason. `aria-hidden` because the accessible name says it in
+              // full and a screen reader has no use for the miniature.
+              <span
+                aria-hidden
+                className="absolute -right-1 -top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-warning)]"
+              />
+            )
+          : (
+              <>
+                {/* The label keeps the truncation and the badge does not: the badge is three
+                    characters and shrinking it to an ellipsis would leave a row that says a section is
+                    unfinished without saying how. `min-w-0` on the label alone is what makes the name
+                    give way first when the nav is dragged narrow. */}
+                <span className="min-w-0 truncate">{t(labelKey)}</span>
+                {alpha && (
+                  <span className="shrink-0 rounded-sm bg-[var(--cf-warning)]/15 px-1 py-px text-[9px] font-semibold uppercase leading-tight tracking-wide text-[var(--cf-warning)]">
+                    {t("settings.alpha")}
+                  </span>
+                )}
+              </>
+            )}
       </span>
     </button>
   );
@@ -202,6 +257,7 @@ export function SettingsView() {
                 {...item}
                 active={section === item.id}
                 collapsed={collapsed}
+                alpha={ALPHA_SECTIONS.has(item.id)}
                 onSelect={setSection}
               />
             ))}
@@ -221,6 +277,7 @@ export function SettingsView() {
                 {...item}
                 active={section === item.id}
                 collapsed={collapsed}
+                alpha={ALPHA_SECTIONS.has(item.id)}
                 onSelect={setSection}
               />
             ))}
@@ -308,6 +365,7 @@ export function SettingsView() {
               {section === "azure" && <GitHostingSettings />}
               {section === "claude" && <ClaudeSettings />}
               {section === "api" && <ApiSettingsBody />}
+              {section === "remote" && <RemoteSettings />}
               {section === "backup" && <BackupSettings />}
               {section === "review" && <ReviewSettings />}
               {section === "skills" && <SkillsSettings />}

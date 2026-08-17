@@ -313,9 +313,11 @@ body {
 }
 
 /* The hold that unlocks a reorder, drawn — see `HoldProgress` in `lib/holdReorder.tsx`, which owns
-   both of these and supplies the duration inline (from `HOLD_MS`, the one place it is written down)
-   so the wait and the indicator cannot drift apart. Without one of them the hold is a control that
-   appears not to have registered the click.
+   both of these and supplies the duration inline (from `HOLD_PROGRESS_MS`, the one place it is
+   written down) so the wait and the indicator cannot drift apart. Note that this is the hold *minus*
+   the quarter second of silence before either of these is mounted at all — a click must not flash a
+   progress indicator at somebody who was only using the button. Without one of them, though, the
+   hold is a control that appears not to have registered the press.
 
    Two shapes, because they sit on two shapes. The ring traces a square control's own edge and
    leaves its glyph alone; `pathLength="100"` on the circle is what lets these keyframes count in
@@ -357,6 +359,28 @@ body {
   animation-name: cf-hold-bar;
   animation-timing-function: linear;
   animation-fill-mode: forwards;
+}
+
+/* The window going dark behind a lifted item — see `HoldScrim`.
+
+   Its own keyframe rather than `cf-fade-in`, which travels 2px on the way in. On a card that reads
+   as the card arriving; on something pinned to all four edges of the window it is a 2px band of
+   undimmed screen sliding up the bottom edge, which is the one place a scrim must not have a seam.
+
+   Fast, and faster than it looks: the item has already lifted by the time this starts, so the
+   dimming is confirming a state rather than announcing one, and a slow fade would put the
+   confirmation behind the first few pixels of the drag. */
+@keyframes cf-hold-scrim {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.cf-hold-scrim {
+  animation: cf-hold-scrim 0.12s ease-out;
 }
 
 /* The seam of a *folded* panel, and the fold button riding it.

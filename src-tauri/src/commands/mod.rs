@@ -15,6 +15,7 @@ pub mod github_cmd;
 pub mod gitlab_cmd;
 pub mod notes_cmd;
 pub mod remote_cmd;
+pub mod remotectl_cmd;
 pub mod repos;
 pub mod review_pipeline;
 pub mod secret_scan_cmd;

@@ -102,6 +102,13 @@ struct AiEngineEvent {
     model: String,
 }
 
+/// "That run is over." See the emit at the end of [`scoped_with_trace`] for why this exists at all
+/// when every desktop caller already knows.
+#[derive(Clone, Serialize)]
+struct AiDoneEvent {
+    run_id: String,
+}
+
 type Registry = Mutex<HashMap<String, watch::Sender<bool>>>;
 
 fn registry() -> &'static Registry {
@@ -133,6 +140,9 @@ pub async fn scoped_with_trace<F: Future>(
         map.insert(run_id.clone(), tx);
     }
     let trace = Arc::new(Mutex::new(VecDeque::new()));
+    // Kept aside because `app` is about to move into the `RunCtx`, and the completion event below
+    // is emitted after that context has been dropped along with the ticker.
+    let app_for_done = app.clone();
     let ctx = RunCtx {
         app,
         run_id: run_id.clone(),
@@ -166,6 +176,17 @@ pub async fn scoped_with_trace<F: Future>(
     if let Ok(mut map) = registry().lock() {
         map.remove(&run_id);
     }
+    // "This run is over", said by the run itself.
+    //
+    // Every desktop caller already knows this — its `invoke` promise resolves — which is why there
+    // was no event here. A run started from a *paired phone* has no such promise on this machine:
+    // the desktop sees `ai:engine`, shows an agent working, and would then have nothing to tell it
+    // the work had finished. The row would sit in the running-agents panel forever.
+    //
+    // Emitted after `drop(ticker)` on purpose, and the ordering is the whole point: dropping the
+    // ticker is what flushes the last partial batch, so the tail of the output is already on the
+    // wire before anything says the run is done. A listener can therefore treat this as final.
+    let _ = app_for_done.emit("ai:done", AiDoneEvent { run_id: run_id.clone() });
     let collected = trace.lock().map(|t| t.iter().cloned().collect()).unwrap_or_default();
     (output, collected)
 }
@@ -214,6 +235,23 @@ pub fn current() -> Option<RunCtx> {
 /// (or already finished), in which case callers should never cancel.
 pub fn subscribe(run_id: &str) -> Option<watch::Receiver<bool>> {
     registry().lock().ok()?.get(run_id).map(watch::Sender::subscribe)
+}
+
+/// Every run that is registered right now, by id.
+///
+/// The registry is the authority on "is this still going": a run is inserted before its process
+/// starts and removed in [`scoped_with_trace`] before `ai:done` is emitted, so anything absent here
+/// has finished, whatever a listener that missed the event believes.
+///
+/// That is what this is for. A phone tails runs from the frames it receives, and a phone whose
+/// screen was locked when a run ended never received `ai:done` — the card sat there spinning, with
+/// a stop button wired to a run that no longer exists. Asking for the live set on reconnect is the
+/// only way to settle it, and it costs one lock and a handful of strings.
+pub fn active() -> Vec<String> {
+    registry()
+        .lock()
+        .map(|map| map.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Signals cancellation. `false` means there was no such live run — already finished, or the id

@@ -19,6 +19,11 @@ pub fn list_shell_profiles(db: State<Db>) -> Result<Vec<ShellProfile>, String> {
 
 /// `profile_id` is the id of a profile from [`list_shell_profiles`]; omitting it opens the
 /// configured default. The frontend never passes a command line — see `shell_profiles` for why.
+///
+/// No owner: a shell opened through this command was opened at the machine, by the person sitting at
+/// it. The remote-control path goes through [`open_owned_terminal`] instead, which is the only way
+/// an owner is ever set — a command a phone could reach that took an owner as an argument would let
+/// it claim, or disclaim, whatever it liked.
 #[tauri::command]
 pub fn open_terminal(
     app: AppHandle,
@@ -27,8 +32,44 @@ pub fn open_terminal(
     cwd: String,
     profile_id: Option<String>,
 ) -> Result<TerminalOpened, String> {
-    let profile = shell_profiles::resolve(&db, profile_id.as_deref())?;
-    let id = terminal::open_terminal(app, &registry, cwd, &profile, None)?;
+    open_shell(app, &registry, &db, cwd, profile_id, None)
+}
+
+/// The same shell, opened **for a paired device**.
+///
+/// Not a `#[tauri::command]` and deliberately not reachable from the webview: `owner` is an
+/// authorisation input (see `terminal::Origin::owner`), so the only caller is
+/// `remotectl::dispatch`, which fills it from the bearer token it already resolved.
+///
+/// Recorded, where the dock's own terminals are not. A phone is a client that disappears — a browser
+/// tab evicted in the background, a screen locked, a wifi handover — and comes back to a shell that
+/// has been printing the whole time. Without the recording it would reattach to a blank screen; the
+/// buffer is kept in memory only, because there is no bench row behind it and a shell opened from a
+/// pocket must not turn into a tab on the desktop's bench. See `terminal::Transcript::key`.
+pub fn open_owned_terminal(
+    app: AppHandle,
+    registry: &TerminalRegistry,
+    db: &State<'_, Db>,
+    cwd: String,
+    profile_id: Option<String>,
+    owner: String,
+) -> Result<TerminalOpened, String> {
+    open_shell(app, registry, db, cwd, profile_id, Some(owner))
+}
+
+fn open_shell(
+    app: AppHandle,
+    registry: &TerminalRegistry,
+    db: &State<'_, Db>,
+    cwd: String,
+    profile_id: Option<String>,
+    owner: Option<String>,
+) -> Result<TerminalOpened, String> {
+    let profile = shell_profiles::resolve(db, profile_id.as_deref())?;
+    let record = owner
+        .is_some()
+        .then(|| terminal::Recording { key: None, seed: String::new() });
+    let id = terminal::open_terminal(app, registry, cwd, &profile, record, owner)?;
     // The resolved profile goes back with the session id so the tab can be titled after the shell
     // that actually started — which is not necessarily the one asked for, since an unset default
     // resolves here rather than on the frontend.
@@ -176,8 +217,8 @@ pub fn add_workspace_terminal(
         queries::add_workspace_terminal(&conn, &workspace_id, &tab_id, &profile.name, &cwd, &profile.id)
             .map_err(|e| e.to_string())?
     };
-    let recording = terminal::Recording { key: row.id.clone(), seed: String::new() };
-    let session_id = terminal::open_terminal(app, &registry, cwd, &profile, Some(recording))?;
+    let recording = terminal::Recording { key: Some(row.id.clone()), seed: String::new() };
+    let session_id = terminal::open_terminal(app, &registry, cwd, &profile, Some(recording), None)?;
     Ok(BenchTerminal { row, session_id: Some(session_id) })
 }
 
@@ -222,7 +263,14 @@ pub fn resume_workspace_terminal(
     } else {
         format!("{transcript}\r\n\x1b[2m{}\x1b[0m\r\n", "─".repeat(40))
     };
-    terminal::open_terminal(app, &registry, cwd, &profile, Some(terminal::Recording { key: id, seed }))
+    terminal::open_terminal(
+        app,
+        &registry,
+        cwd,
+        &profile,
+        Some(terminal::Recording { key: Some(id), seed }),
+        None,
+    )
 }
 
 #[tauri::command]

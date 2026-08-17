@@ -512,6 +512,10 @@ function Pane({
             sessionId={terminal.session_id}
             visible={visible}
             replay={terminal.transcript}
+            onClose={onClose}
+            // The tile's × deletes the terminal rather than putting it away, so the menu says so
+            // too — same wording as the button right above it.
+            closeLabel={t("bench.removeTerminal")}
           />
         ) : (
           // No shell behind this pane. Rather than starting one on sight — which would mean opening

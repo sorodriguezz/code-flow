@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   getChatConversation,
   isRepoBusy,
+  notifyStateChange,
   sendChatMessage,
   REPO_BUSY_MARKER,
 } from "../lib/tauri/commands";
@@ -254,6 +255,26 @@ interface ChatState {
    * (so new turns keep filing under the same activity) and the engine session its last turn ran
    * under (so the CLI continues where it left off). */
   switchTo: (projectId: string, conversationId: string) => Promise<void>;
+  /**
+   * Folds turns another device added into a conversation this window is already holding.
+   *
+   * # Why this is append-only and not a reload
+   *
+   * The obvious implementation is `switchTo`'s read, applied unconditionally. It is wrong here for a
+   * reason `switchTo` never has to face: this runs *unprompted*, off an event, while somebody may be
+   * reading the transcript. Replacing the array would scroll the pane, drop a trace that is open,
+   * and — if a turn were in flight — take the optimistic bubble off the screen and put it back a
+   * second later. So only rows the session does not already have are added, in the order the backend
+   * returned them, and a session mid-turn is left entirely alone until it settles.
+   *
+   * Dedup is by the persisted `created_at`: one stored row is one exchange, and both halves of a
+   * locally-sent turn already carry the reply's own timestamp. The question bubble is stamped
+   * client-side, which is exactly why the *assistant* messages are what the set is built from.
+   *
+   * A conversation this store has never opened is not loaded here — the Activity row is the honest
+   * place for it, and opening that row reads it from disk anyway.
+   */
+  reconcile: (projectId: string, conversationId: string) => Promise<void>;
   /** Forgets a conversation entirely — for one deleted from history, which has nothing left to
    * come back to. */
   discard: (conversationId: string) => void;
@@ -365,6 +386,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
           persisted: true,
         }));
         void useChatHistoryStore.getState().load(projectId);
+        // The turn is persisted by the time this resolves, so a phone can go and read it. Nothing
+        // about a chat turn moves a byte on disk, and its output stream is one no phone subscribes
+        // to unless it already knows the run — so this emit is the only thing that tells one the
+        // transcript grew.
+        notifyStateChange("chat", projectId, conversationId);
         // This store is explicitly built around an answer arriving while the user is looking
         // somewhere else (see `settle` above), which is exactly when nobody sees the reply land.
         notify({
@@ -440,6 +466,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // The failed turn was logged server-side — pick it up so it shows in the activity list.
         if (!cancelled) {
           void useChatHistoryStore.getState().load(projectId);
+          // Persisted for the same reason the activity list is reloaded: a failure is a row too,
+          // and a phone's copy of the transcript is as stale after one as after a success.
+          notifyStateChange("chat", projectId, conversationId);
           notify({
             source: "chat",
             titleKey: "notifications.chatFailed",
@@ -463,14 +492,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   switchTo: async (projectId, conversationId) => {
     touchConversation(conversationId);
-    // Already in memory: just point at it. This is what makes returning to a conversation that is
-    // still answering free — its messages, its run id and its "sending" flag were never touched.
-    if (get().byConversation[conversationId]) {
+    const cached = get().byConversation[conversationId];
+    // The two cases where memory is the *only* copy, and pointing at it is the whole of the work.
+    //
+    // `sending`: the turn is in flight, so disk does not have it yet and re-reading would replace a
+    // live transcript — run id, stop button and all — with the state it had before the question.
+    // `!persisted`: nothing was ever written, by design (a stopped first turn, or one that errored),
+    // so a read would come back empty and blank a conversation the user can still see.
+    if (cached && (cached.sending || !cached.persisted)) {
       set((s) => ({ activeByProject: { ...s.activeByProject, [projectId]: conversationId } }));
       pruneConversations();
       return;
     }
 
+    // Everything else is re-read, including conversations this store already holds — which used to
+    // be the early return above, unconditionally. That was wrong the moment a second device could
+    // add a turn: reopening the row showed the copy this window happened to have when it last
+    // looked, so even "close it and open it again" did not surface a turn sent from a phone. The
+    // read is one indexed query against a conversation the user just asked to see.
     const entries = await getChatConversation(projectId, conversationId);
     // One stored row is one exchange, so both halves carry its timestamp — the question wasn't
     // recorded separately, and splitting hairs there would mean inventing a time.
@@ -496,9 +535,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const firstAt = entries[0]?.created_at;
     const lastAt = entries[entries.length - 1]?.created_at;
     set((s) => {
-      // Re-checked after the await: a turn could have been started in this conversation while the
-      // read was in flight, and the freshly loaded copy would clobber it.
-      if (s.byConversation[conversationId]) {
+      // Re-checked after the await: a turn could have been *started* in this conversation while the
+      // read was in flight, and the freshly loaded copy would clobber it. Only `sending` blocks now,
+      // not mere presence — presence is the ordinary case since this re-reads what it holds.
+      const live = s.byConversation[conversationId];
+      if (live?.sending) {
         return { activeByProject: { ...s.activeByProject, [projectId]: conversationId } };
       }
       return {
@@ -510,8 +551,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             sessionId: engineSession,
             // No model recorded for archived turns — the chip falls back to the configured
             // setting until this conversation gets a fresh reply. Unless this is a conversation
-            // the memory cap collapsed a moment ago, which remembered what it was answering on.
-            model: modelOfCollapsed.get(conversationId) ?? null,
+            // the memory cap collapsed a moment ago, or one still in memory from its own last
+            // reply, either of which remembers what it was answering on.
+            model: live?.model ?? modelOfCollapsed.get(conversationId) ?? null,
             title: liveTitle(entries[0]?.question ?? ""),
             createdAt: firstAt ? new Date(firstAt).getTime() : Date.now(),
             updatedAt: lastAt ? new Date(lastAt).getTime() : Date.now(),
@@ -522,6 +564,59 @@ export const useChatStore = create<ChatState>((set, get) => ({
       };
     });
     pruneConversations();
+  },
+
+  reconcile: async (projectId, conversationId) => {
+    const before = get().byConversation[conversationId];
+    if (!before || before.sending) return;
+
+    const entries = await getChatConversation(projectId, conversationId).catch(() => null);
+    if (!entries) return;
+
+    set((s) => {
+      const session = s.byConversation[conversationId];
+      // Re-checked after the await for the same reason `switchTo` re-checks: a turn started in the
+      // meantime owns this conversation, and its reply is about to land in it.
+      if (!session || session.sending) return s;
+      const known = new Set(
+        session.messages
+          .filter((m) => m.role === "assistant" && m.createdAt !== undefined)
+          .map((m) => m.createdAt),
+      );
+      const added = entries.filter((e) => !known.has(e.created_at));
+      if (added.length === 0) return s;
+      const messages: ChatMessage[] = added.flatMap((e) => [
+        { role: "user" as const, content: e.question, createdAt: e.created_at },
+        {
+          role: "assistant" as const,
+          content: e.answer,
+          responseTimeMs: e.response_time_ms ?? undefined,
+          createdAt: e.created_at,
+          provider: e.provider ?? undefined,
+          model: e.model ?? undefined,
+          engineVersion: e.engine_version ?? undefined,
+          isError: e.is_error,
+          trace: parseTrace(e.trace),
+        },
+      ]);
+      return {
+        byConversation: {
+          ...s.byConversation,
+          [conversationId]: {
+            ...session,
+            messages: [...session.messages, ...messages],
+            // The engine session moved with the turn that was just added, and this window is the one
+            // that would `--resume` next. Left at the old token, the desk's next message would ask
+            // the CLI to continue from before the phone's turn — the two clients would fork the
+            // engine's context while sharing the transcript.
+            sessionId: added.reduce<string | null>((last, e) => e.engine_session_id ?? last, session.sessionId),
+            model: added[added.length - 1]?.model ?? session.model,
+            persisted: true,
+            updatedAt: Date.now(),
+          },
+        },
+      };
+    });
   },
 
   discard: (conversationId) => {

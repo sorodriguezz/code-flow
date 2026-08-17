@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CodeFlow</title>
+
+    <!-- `viewport-fit=cover` is what puts the page under the notch and the home indicator, which
+         is the only way `env(safe-area-inset-*)` in mobile.css resolves to anything. `user-scalable=no`
+         is deliberate on a control panel: pinch-zoom here only ever happens by accident mid-tap,
+         and every control is already at the 44px minimum.
+
+         `interactive-widget=resizes-content` asks the browser to shrink the *layout* viewport when
+         the virtual keyboard opens, instead of drawing the keyboard over a page that was told
+         nothing. Where it is honoured this is the whole fix for the terminal's key row sitting under
+         the keyboard; where it is not, `viewport.ts` measures `window.visualViewport` and does the
+         same job from JavaScript. Both are needed, and neither can be feature-detected. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no, interactive-widget=resizes-content"
+    />
+
+    <!-- "Add to Home Screen", twice, because the two platforms read different things.
+         Android reads the manifest; iOS ignores it for this and reads the `apple-` meta tags
+         below. Omitting either one degrades that platform to a plain bookmark that opens in a
+         browser tab with the address bar showing.
+
+         Note that this is *not* a service-worker PWA on either platform — that needs a secure
+         context and this is plain HTTP on a local network. There is no offline mode, which is
+         correct: an offline control panel has nothing to control. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icon-512.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="CodeFlow" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#6366f1" />
+
+    <!-- Nothing here should ever be indexed; it is somebody's desk on their home network. -->
+    <meta name="robots" content="noindex, nofollow" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/mobile/main.tsx"></script>
+  </body>
+</html>
