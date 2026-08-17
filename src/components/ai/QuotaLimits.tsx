@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AI_PROVIDERS } from "../../lib/aiProviders";
+import { providerDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "./ProviderGlyph";
 import { useT } from "../../state/languageStore";
 import { formatResetIn, formatUsed, severityOf, useQuotaStore } from "../../state/quotaStore";
@@ -21,6 +21,15 @@ const BAR_COLOUR: Record<ReturnType<typeof severityOf>, string> = {
  * data, and a minute is the smallest unit any of them shows. */
 const TICK_MS = 30_000;
 
+/** The rule between two providers.
+ *
+ * Half-strength on purpose: with several engines listed, whitespace alone stopped saying where one
+ * provider's windows ended and the next one's began — three bars and then three more read as six.
+ * A full `--cf-border` line in a 300px panel turns the same list into a table with rows, which is
+ * heavier than the job needs. This is a hairline you notice only when you are looking for the
+ * boundary. */
+const DIVIDER = "color-mix(in oklab, var(--cf-border) 55%, transparent)";
+
 /**
  * What is left of each provider's plan, drawn the same way wherever it appears.
  *
@@ -29,9 +38,17 @@ const TICK_MS = 30_000;
  * disagree about rounding or about which end of the bar is full — which is exactly the kind of
  * disagreement nobody notices until they trust the wrong one.
  *
- * A provider with nothing to report and nothing to say about why is not rendered at all. That is
- * the rule the module behind this is built on: Cline publishes no plan window, and a metered API
- * key has no cap, so a row for either would be an invention.
+ * **Every provider the backend was able to ask is drawn, in order, whatever it answered.** The list
+ * is the machine's installed engines that publish a limit at all — routing does not thin it, and
+ * neither does a provider having come back empty. Both filters were tried and both produced the
+ * same complaint: a panel titled "plan limits" that silently omitted an engine the user has
+ * installed and signed into, which reads as the app having lost it rather than as the app being
+ * tidy. So an engine with no numbers keeps its heading and says why underneath — reading, signed
+ * out, or nothing published on this plan.
+ *
+ * What is still absent is what cannot have a limit at all: Cline publishes no plan window and a
+ * metered API key has no cap, so neither is asked, and a row for either would be an invention
+ * rather than an omission.
  *
  * Every number here is **consumption** — how far into the window you are. One direction throughout,
  * decided in the backend, so a bar and the figure beside it can never end up describing opposite
@@ -55,44 +72,44 @@ export function QuotaLimits({ compact = false }: { compact?: boolean }) {
     return <p className="text-[11px] text-[var(--cf-text-muted)]">{t("quota.loading")}</p>;
   }
 
-  // A provider still being read is shown *saying so*, not omitted. The ones that answer by running
-  // their CLI (Gemini, Grok) take seconds and are fetched behind the answer, so on the first open
-  // they have nothing yet — and leaving them out made a working engine look like a missing one for
-  // a minute. Omitting is still right for a provider with genuinely nothing to report; it is only
-  // wrong while an answer is on its way.
-  const shown = providers.filter((p) => p.limits.length > 0 || p.error || isPending(p));
-  if (shown.length === 0) {
+  // Nothing at all means no engine on this machine publishes a limit — the one case with nothing to
+  // list. Anything the backend did ask is listed, including what it asked and got nothing from.
+  if (providers.length === 0) {
     return <p className="text-[11px] text-[var(--cf-text-muted)]">{t("quota.none")}</p>;
   }
 
   return (
     <div className={compact ? "space-y-2.5" : "space-y-3.5"}>
-      {shown.map((quota) => (
-        <ProviderBlock key={quota.provider} quota={quota} compact={compact} />
+      {providers.map((quota, index) => (
+        <ProviderBlock key={quota.provider} quota={quota} compact={compact} first={index === 0} />
       ))}
     </div>
   );
 }
 
-function ProviderBlock({ quota, compact }: { quota: ProviderQuota; compact: boolean }) {
+function ProviderBlock({
+  quota,
+  compact,
+  first,
+}: {
+  quota: ProviderQuota;
+  compact: boolean;
+  /** The first block draws no rule above it — a line under the panel's own header would be a
+   * second one. */
+  first: boolean;
+}) {
   const t = useT();
-  const provider = AI_PROVIDERS.find((p) => p.id === quota.provider);
-
-  // Which window kinds this provider splits further. Anthropic reports the whole week *and* one
-  // model's slice of it, so its unscoped weekly row has to say it means all of them; opencode
-  // reports one weekly window and nothing under it, where "· all models" would be noise about a
-  // distinction that does not exist. Read off the data rather than hardcoded per provider, so a
-  // provider that starts or stops splitting a window is right without a change here.
-  const narrowed = new Set(
-    quota.limits.filter((limit) => limit.scope).map((limit) => limit.kind),
-  );
+  const narrowed = narrowedKinds(quota);
 
   return (
-    <section>
+    <section
+      className={first ? undefined : compact ? "border-t pt-2.5" : "border-t pt-3.5"}
+      style={first ? undefined : { borderColor: DIVIDER }}
+    >
       <div className="mb-1 flex items-center gap-1.5">
         <ProviderGlyph providerId={quota.provider} size={12} />
         <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold text-[var(--cf-text)]">
-          {provider?.label ?? quota.provider}
+          {providerDisplayLabel(quota.provider, t)}
         </span>
         {quota.plan && (
           <span className="shrink-0 text-[10px] uppercase tracking-wide text-[var(--cf-text-muted)]">
@@ -102,11 +119,12 @@ function ProviderBlock({ quota, compact }: { quota: ProviderQuota; compact: bool
       </div>
 
       {quota.limits.length === 0 ? (
-        // The error — or the wait — is the row. A provider that answered "you are signed out" has
-        // told the user something actionable, and one that has not answered yet has to say *that*
-        // rather than vanish, or a five-second read looks like a broken engine.
+        // Whatever it has instead of bars *is* its row. "You are signed out" is something the user
+        // can act on; "reading…" is a five-second CLI read that otherwise looks like a broken
+        // engine; and a plan that simply publishes no window — opencode without Go — says so, which
+        // is a different sentence from having failed and a much better one than a missing heading.
         <p className="text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
-          {isPending(quota) ? t("quota.reading") : errorMessage(quota.error, t)}
+          {isPending(quota) ? t("quota.reading") : emptyMessage(quota.error, t)}
         </p>
       ) : (
         <div className={compact ? "space-y-1.5" : "space-y-2"}>
@@ -169,7 +187,30 @@ function LimitRow({ limit, narrowed }: { limit: QuotaLimit; narrowed: Set<string
  * `narrowed` is the set of kinds this provider also reports per model. It only affects the
  * *unscoped* row: where a week is split, that row has to say it covers all of them, or the total
  * and its slice read as two unrelated weeks. Where nothing is split, the suffix would be noise. */
-function limitLabel(limit: QuotaLimit, narrowed: Set<string>, t: Translate): string {
+/** Which of one provider's window kinds it also reports *per model*.
+ *
+ * Anthropic reports the whole week **and** one model's slice of it, so its unscoped weekly row has
+ * to say it means all of them; opencode reports one weekly window and nothing under it, where
+ * "· all models" would be noise about a distinction that does not exist. Read off the data rather
+ * than hardcoded per provider, so a provider that starts or stops splitting a window is labelled
+ * right without a change here.
+ *
+ * Exported because the status-bar picker builds the same labels this panel draws, and two ways of
+ * naming the same window would eventually disagree — the name in the dropdown has to be the name on
+ * the row it points at. */
+/** One limit named the way a human would name it across two providers: "Claude Code · Weekly ·
+ * Fable". The status bar puts it in a tooltip and the picker puts it in a dropdown, and both have
+ * to say exactly what the row in the panel says — a menu entry that names a window differently
+ * from the bar it selects is a menu you cannot trust. */
+export function limitTitle(quota: ProviderQuota, limit: QuotaLimit, t: Translate): string {
+  return `${providerDisplayLabel(quota.provider, t)} · ${limitLabel(limit, narrowedKinds(quota), t)}`;
+}
+
+export function narrowedKinds(quota: ProviderQuota): Set<string> {
+  return new Set(quota.limits.filter((limit) => limit.scope).map((limit) => limit.kind));
+}
+
+export function limitLabel(limit: QuotaLimit, narrowed: Set<string>, t: Translate): string {
   const base =
     limit.kind === "session"
       ? t("quota.session")
@@ -194,11 +235,20 @@ function isPending(quota: ProviderQuota): boolean {
   return quota.limits.length === 0 && !quota.error && !quota.fetched_at;
 }
 
-/** The reason a provider has no numbers, said in a way that names the way out. The keys are the
- * backend's `reason` constants; anything else is a transport failure and gets the generic line —
- * an HTTP status code in a status bar helps nobody. */
-function errorMessage(error: string, t: Translate): string {
+/** The reason a provider has no numbers, said in a way that names the way out where there is one.
+ *
+ * The keys are the backend's `reason` constants, and the five answers are five genuinely different
+ * situations — which is the point of splitting them. **An empty `error` is not a failure**: it is
+ * the provider having answered, successfully, that there is no window to report — opencode on Zen
+ * credits, where a prepaid balance has no denominator to be a percentage of. `no_plan` is the
+ * account being on the free tier of something that *does* publish windows. `unreadable` is this app
+ * failing to parse what it got, which is the only one of the five that is nobody's problem but
+ * ours. Anything unrecognised falls in with that last one, because an HTTP status code in a 300px
+ * panel helps nobody. */
+function emptyMessage(error: string, t: Translate): string {
+  if (!error) return t("quota.noLimits");
   if (error === "signed_out") return t("quota.signedOut");
   if (error === "stale") return t("quota.stale");
+  if (error === "no_plan") return t("quota.noPlan");
   return t("quota.unreadable");
 }

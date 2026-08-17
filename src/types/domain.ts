@@ -1534,6 +1534,21 @@ export interface ProviderQuota {
 }
 
 /**
+ * One reading of every installed provider that publishes limits, plus which of them this install
+ * routes work to.
+ *
+ * Two surfaces, two answers to "whose plan is this". The panel draws every provider — an engine
+ * installed and signed in is one of yours whether or not a task points at it today. The status pill
+ * is one worst number and compares `routed` only, so it cannot go red over a plan nobody is
+ * spending.
+ */
+export interface QuotaReport {
+  providers: ProviderQuota[];
+  /** Provider ids the global default or a per-task override points at. */
+  routed: string[];
+}
+
+/**
  * The machine's power situation, when it has one.
  *
  * The command returns `null` for a machine with no battery — a desktop — and the UI draws nothing

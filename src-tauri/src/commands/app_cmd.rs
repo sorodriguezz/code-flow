@@ -51,28 +51,30 @@ pub fn ai_usage_stats(db: State<Db>, window_hours: i64) -> Result<crate::ai_usag
 /// background timer must never do: on Windows that flashes a console window at whatever the user
 /// was doing. Anything unrecognised is treated as a poll, the most conservative of the three.
 ///
-/// **Two filters decide who is asked, and both are subtractive.**
+/// **One filter decides who is asked: is the CLI on this machine.** The binary is resolved exactly
+/// as a run would resolve it — the user's `{provider}_binary_path` first, the engine's default
+/// second — and a provider whose CLI is nowhere is dropped before any credential is read. That is
+/// what stops the panel giving impossible advice: a leftover `auth.json` from an uninstalled CLI
+/// still answers "your token expired", and the row then told the user to run an engine they do not
+/// have.
 ///
-/// *Routed.* Only providers this install actually sends work to — the global `ai_provider` plus
-/// every per-task override (see [`crate::commands::claude_cmd::routed_providers`]). An engine you
-/// do not route anything to has no bearing on whether you are about to run out of anything, so
-/// asking it spends a keychain prompt, an HTTPS call or a subprocess on a number nobody will act
-/// on, and then puts that number on screen where it competes with — and, in the status pill, can
-/// outrank — the plans you are actually using.
+/// **Routing no longer decides who is asked, only who the pill may compare.** It used to be a
+/// second subtractive filter — ask nothing but the global `ai_provider` and the per-task overrides
+/// — and the cost of that was a panel titled "plan limits" that quietly omitted plans the user has:
+/// an engine you have installed and signed into is one you are about to route something to, and its
+/// week not being on screen until you do is the panel losing an engine rather than saving a
+/// request. So every installed provider is read and drawn, and the routed set travels beside them
+/// (see [`crate::ai_quota::QuotaReport`]) for the one place the distinction still matters — the
+/// single number in the status bar, which must not go red over a plan nobody is spending.
 ///
-/// *Installed.* The binary is resolved exactly as a run would resolve it — the user's
-/// `{provider}_binary_path` first, the engine's default second — and a provider whose CLI is
-/// nowhere on the machine is dropped before any credential is read. That is what stops the panel
-/// giving impossible advice: a leftover `auth.json` from an uninstalled CLI still answers "your
-/// token expired", and the row then told the user to run an engine they do not have.
-///
-/// Order matters only for cost: routing is a few settings reads and installation is a filesystem
-/// walk per provider, so the cheap question goes first.
+/// The price is honest and paid only while somebody is looking: an unrouted CLI-driven engine now
+/// costs its subprocess too, which is why that read still happens on `open`/`refresh` alone and
+/// caches for half an hour (see [`crate::ai_quota::Trigger`]).
 #[tauri::command]
 pub async fn ai_quota_status(
     db: State<'_, Db>,
     trigger: Option<String>,
-) -> Result<Vec<crate::ai_quota::ProviderQuota>, String> {
+) -> Result<crate::ai_quota::QuotaReport, String> {
     use crate::ai_quota::Trigger;
     let trigger = match trigger.as_deref() {
         Some("refresh") => Trigger::Refresh,
@@ -80,14 +82,13 @@ pub async fn ai_quota_status(
         _ => Trigger::Poll,
     };
 
-    let engines = {
+    let (engines, routed) = {
         // Scoped so the lock is released before the awaits below — the reads are a few settings
         // rows, and holding the global mutex across a network call would stall every other command.
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let routed = crate::commands::claude_cmd::routed_providers(&conn)?;
-        crate::ai_quota::QUOTA_PROVIDERS
+        let engines = crate::ai_quota::QUOTA_PROVIDERS
             .iter()
-            .filter(|provider| routed.contains(**provider))
             .filter_map(|provider| {
                 let configured = crate::db::queries::get_setting(&conn, &format!("{provider}_binary_path"))
                     .ok()
@@ -100,10 +101,18 @@ pub async fn ai_quota_status(
                     binary,
                 })
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        // Sorted so the payload is stable between reads: it is compared as a set on the other side,
+        // and a `HashSet`'s order is not.
+        let mut routed = routed.into_iter().collect::<Vec<_>>();
+        routed.sort();
+        (engines, routed)
     };
 
-    Ok(crate::ai_quota::fetch_all(engines, trigger).await)
+    Ok(crate::ai_quota::QuotaReport {
+        providers: crate::ai_quota::fetch_all(engines, trigger).await,
+        routed,
+    })
 }
 
 /// Battery level and whether the machine is on mains, or `None` on a machine with no battery.

@@ -24,11 +24,6 @@ use crate::secrets;
 
 use super::snapshot::SecretEntry;
 
-/// The AI providers a key can be stored for. Mirrors `AI_PROVIDERS` in `src/lib/aiProviders.ts`;
-/// the subscription-based engines are listed too because an install can be pointed at an
-/// OpenAI-compatible endpoint for any of them.
-const AI_PROVIDERS: &[&str] = &["claude", "gemini", "codex", "grok", "opencode", "cline", "openai"];
-
 /// Reads a JSON `app_settings` blob and pulls one string field out of each of its entries — the
 /// shape both `ado_connections` (`[{org}]`) and `github_connections` (`[{host}]`) use.
 fn field_of_each(conn: &Connection, key: &str, field: &str) -> Vec<String> {
@@ -140,10 +135,9 @@ pub fn secret_keys(conn: &Connection) -> Vec<String> {
         push_unique(&mut keys, secrets::gitlab_token_key(&host.trim().to_ascii_lowercase()));
     }
 
-    // AI providers: the API key of every HTTP-based engine.
-    for provider in AI_PROVIDERS {
-        push_unique(&mut keys, secrets::ai_api_key(provider));
-    }
+    // No AI family here on purpose: every engine the app drives is a CLI that holds its own login,
+    // so there is no AI credential of ours to carry. The one that existed — the API key of the
+    // OpenAI-compatible engine — went with that engine.
 
     // The backup's own passphrase, and the one it replaced. Circular only in appearance: whoever
     // can open the file already knows it, and carrying it is what lets the restored machine keep
@@ -296,8 +290,6 @@ mod tests {
             "github-token:github.com",
             "github-token:github.acme.com",
             "gitlab-token:gitlab.com",
-            "ai-api-key:claude",
-            "ai-api-key:openai",
             "gdrive-client-secret",
             "gdrive-refresh-token",
             "onedrive-refresh-token",

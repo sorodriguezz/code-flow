@@ -8,19 +8,12 @@ import {
   Copy,
   ExternalLink,
   FolderOpen,
-  KeyRound,
   Loader2,
   RotateCw,
   Star,
   X,
 } from "lucide-react";
-import {
-  deleteAiApiKey,
-  getSetting,
-  hasAiApiKey,
-  setAiApiKey,
-  setSetting,
-} from "../../lib/tauri/commands";
+import { getSetting, setSetting } from "../../lib/tauri/commands";
 import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, type AiProviderOption } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { openExternalUrl } from "../../lib/tauri/commands";
@@ -92,92 +85,7 @@ function customModelHint(providerId: string, t: (key: TranslationKey) => string)
   if (providerId === "codex") return t("settings.modelIdHintCodex");
   if (providerId === "opencode") return t("settings.modelIdHintOpencode");
   if (providerId === "cline") return t("settings.modelIdHintCline");
-  if (providerId === "openai") return t("settings.modelIdHintOpenai");
   return t("settings.modelIdHintGeneric");
-}
-
-/** API key field for the providers that authenticate with one. The stored value is never sent to
- * the frontend — this only knows *whether* a key exists, and writes a new one. */
-function ApiKeyField({ providerId, onSaved }: { providerId: string; onSaved: () => void }) {
-  const t = useT();
-  const [hasKey, setHasKey] = useState<boolean | null>(null);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    void hasAiApiKey(providerId)
-      .then((v) => !cancelled && setHasKey(v))
-      .catch(() => !cancelled && setHasKey(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [providerId]);
-
-  const save = async () => {
-    const key = draft.trim();
-    if (!key) return;
-    setBusy(true);
-    try {
-      await setAiApiKey(providerId, key);
-      setDraft("");
-      setHasKey(true);
-      onSaved();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const remove = async () => {
-    setBusy(true);
-    try {
-      await deleteAiApiKey(providerId);
-      setHasKey(false);
-      onSaved();
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Field label={t("settings.apiKeyLabel")} hint={t("settings.apiKeyHint")}>
-      {hasKey ? (
-        <div className="flex items-center gap-2">
-          <span className="flex flex-1 items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text-muted)]">
-            <KeyRound size={12} className="text-[var(--cf-success)]" />
-            {t("settings.apiKeyStored")}
-          </span>
-          <button
-            onClick={() => void remove()}
-            disabled={busy}
-            className="rounded-md border border-[var(--cf-border)] px-2.5 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:text-[var(--cf-danger)] disabled:opacity-50"
-          >
-            {t("settings.apiKeyRemove")}
-          </button>
-        </div>
-      ) : (
-        <div className="flex gap-1.5">
-          <input
-            type="password"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void save()}
-            placeholder="sk-…"
-            autoComplete="off"
-            spellCheck={false}
-            className="flex-1 rounded-md border border-[var(--cf-border)] bg-transparent px-2.5 py-1.5 font-mono text-[13px] outline-none focus:border-[var(--cf-accent)]"
-          />
-          <button
-            onClick={() => void save()}
-            disabled={busy || !draft.trim()}
-            className="rounded-md bg-[var(--cf-accent)] px-2.5 text-[12px] font-medium text-white disabled:opacity-40"
-          >
-            {t("common.save")}
-          </button>
-        </div>
-      )}
-    </Field>
-  );
 }
 
 /** A copyable one-line command. Installing is the user's call, so this hands them the exact string
@@ -279,8 +187,6 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
   const dynamicModels = useAiModelsStore((s) => s.byProvider[provider.id]);
   const modelsLoaded = dynamicModels !== undefined;
 
-  // HTTP providers configure an endpoint instead of a binary; only some of them need a key.
-  const isEndpoint = provider.isEndpoint === true;
   const agentic = isAgenticProvider(provider.id);
   const label = provider.label ?? (provider.labelKey ? t(provider.labelKey) : provider.id);
   const isDefault = provider.id === defaultProviderId;
@@ -425,11 +331,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
             <>
               {status && !status.available && (
                 <p className="rounded-md border border-[color-mix(in_oklab,var(--cf-warning)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-2 text-[11.5px] leading-snug text-[var(--cf-text)]">
-                  {status.detail === "missing-api-key"
-                    ? t("settings.providerMissingKey")
-                    : isEndpoint
-                      ? t("settings.providerMissingEndpoint", { detail: status.detail })
-                      : t("settings.providerMissingBinary", { binary: status.binary })}
+                  {t("settings.providerMissingBinary", { binary: status.binary })}
                 </p>
               )}
 
@@ -443,22 +345,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                   below the config once it is, where it's reference rather than a to-do. */}
               {status && !status.available && <SetupHelp provider={provider} />}
 
-              {provider.needsApiKey && (
-                <ApiKeyField
-                  providerId={provider.id}
-                  onSaved={() => {
-                    void recheck(provider.id);
-                    // Which models the endpoint serves depends on the key, so the list fetched
-                    // before it existed (empty → curated fallback) is now wrong.
-                    invalidateModels(provider.id);
-                  }}
-                />
-              )}
-
-              <Field
-                label={isEndpoint ? t("settings.endpointLabel") : t("settings.binaryLabel")}
-                hint={isEndpoint ? t("settings.endpointHint") : t("settings.binaryHint")}
-              >
+              <Field label={t("settings.binaryLabel")} hint={t("settings.binaryHint")}>
                 <div className="flex gap-1.5">
                   <input
                     value={binaryPath}
@@ -466,16 +353,14 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
                     onBlur={(e) => void saveBinary(e.target.value)}
                     className={`${inputClass} flex-1 font-mono`}
                   />
-                  {!isEndpoint && (
-                    <button
-                      onClick={browseBinary}
-                      title={t("settings.selectClaudeBinaryTitle")}
-                      className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-                    >
-                      <FolderOpen size={13} />
-                      {t("settings.browse")}
-                    </button>
-                  )}
+                  <button
+                    onClick={browseBinary}
+                    title={t("settings.selectClaudeBinaryTitle")}
+                    className="flex items-center gap-1 rounded-md border border-[var(--cf-border)] px-2.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
+                  >
+                    <FolderOpen size={13} />
+                    {t("settings.browse")}
+                  </button>
                 </div>
               </Field>
 

@@ -1339,7 +1339,7 @@ const en = {
   // answers at a glance.
   "quota.title": "Plan limits",
   "quota.hint":
-    "How much of each provider's plan you have got through, as the provider itself reports it. An engine that publishes no limit — Cline, or an endpoint billed per token — is absent rather than shown at zero.",
+    "How much of each provider's plan you have got through, as the provider itself reports it. Every installed engine that publishes limits is listed, whether or not you route work to it. An engine that publishes no limit — Cline, or an endpoint billed per token — is absent rather than shown at zero.",
   "quota.loading": "Reading limits…",
   "quota.reading": "Reading…",
   "battery.title": "Battery",
@@ -1368,9 +1368,16 @@ const en = {
   "quota.monthly": "Monthly",
   "quota.allModels": "All models",
   "quota.none": "No connected provider publishes a limit.",
+  "quota.noLimits": "This plan publishes no limits — it is billed per use, not by window.",
+  "quota.noPlan": "No paid plan — this engine publishes its limits to subscribers only.",
   "quota.signedOut": "Not signed in — sign in from its CLI.",
   "quota.stale": "Its token has expired — run this engine once to refresh it.",
   "quota.unreadable": "Its limits could not be read.",
+  "quota.pillLabel": "Show in the status bar",
+  "quota.pillHint":
+    "Which of the limits above the percentage next to the gauge reports. On automatic it is whichever is fullest, so it changes as windows roll over.",
+  "quota.pillAuto": "The fullest limit (automatic)",
+  "quota.pillMissing": "{limit} — not being reported right now",
   "quota.refresh": "Refresh",
   "quota.refreshing": "Reading the providers…",
   "quota.updatedNow": "Updated just now",
@@ -1764,17 +1771,7 @@ const en = {
   "settings.providerReady": "Available",
   "settings.providerMissing": "Not found",
   "settings.providerMissingBinary": "Couldn't find \"{binary}\". Install its CLI, or point the field below at the binary.",
-  "settings.providerMissingEndpoint": "The endpoint didn't answer ({detail}).",
-  "settings.providerMissingKey": "Add an API key below to use this provider.",
-  "settings.endpointLabel": "Endpoint",
-  "settings.endpointHint":
-    "Any API compatible with OpenAI's /v1/chat/completions — OpenAI, Azure OpenAI, OpenRouter, Groq, a local vLLM…",
-  "settings.apiKeyLabel": "API key",
-  "settings.apiKeyHint": "Stored in your system keychain, never in plain text or sent to the frontend.",
   "settings.refreshModels": "Refresh",
-  "settings.apiKeyStored": "Key stored",
-  "settings.apiKeyRemove": "Remove",
-  "settings.modelIdHintOpenai": "Any id this endpoint serves — the list is fetched once a key is set.",
   "settings.modelIdHintCodex": "An id your ChatGPT plan exposes. The list comes from Codex's own catalog.",
   "settings.modelIdHintOpencode":
     "`provider/model` — including opencode's own: `opencode/…` for Zen and `opencode-go/…` for Go.",
@@ -1830,7 +1827,7 @@ const en = {
   "task.wikiHint":
     "Reads a repository and writes its technical documentation. The longest run in the app, and it needs an engine with tools.",
   "settings.localProviderNote":
-    "This endpoint only completes text: it handles commit messages, PR descriptions, analysis, review and conflict resolution. Anything that needs to run tools (Fix with AI, MCP) needs a CLI engine — for local models, that is Cline.",
+    "This engine only completes text: it handles commit messages, PR descriptions, analysis, review and conflict resolution. Anything that needs to run tools (Fix with AI, MCP) needs an agent engine — for local models, that is Cline.",
   "settings.baseModel": "Base model",
   "settings.baseModelHint": "Used by chat, and the default for the tasks below.",
   "settings.localModel": "Local model",

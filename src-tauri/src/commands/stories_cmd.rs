@@ -1065,7 +1065,7 @@ pub async fn review_work_item(
             true => config.model.clone(),
             false => answered_by,
         },
-        version: ai::engine_version(&*config.engine, &config.binary).await.unwrap_or_default(),
+        version: ai::engine_version(&config.binary).await.unwrap_or_default(),
         elapsed_ms: started.elapsed().as_millis() as u64,
         repos_read: projects.len(),
     })
@@ -1416,7 +1416,7 @@ pub async fn generate_doc_page(
     })
     .await;
 
-    let version = ai::engine_version(&*config.engine, &config.binary).await.unwrap_or_default();
+    let version = ai::engine_version(&config.binary).await.unwrap_or_default();
     let engine_label = config.engine.label().to_string();
     let model = match answered_by.is_empty() {
         true => config.model.clone(),

@@ -1333,7 +1333,7 @@ export const es = {
   // usó: la pregunta es «cuánto me queda», y de un vistazo las dos direcciones se leen al revés.
   "quota.title": "Límites del plan",
   "quota.hint":
-    "Cuánto llevas ocupado del plan de cada proveedor, tal como lo reporta el proveedor. Un motor que no publica límite — Cline, o un endpoint que se cobra por token — no aparece, en vez de salir en cero.",
+    "Cuánto llevas ocupado del plan de cada proveedor, tal como lo reporta el proveedor. Aparecen todos los motores instalados que publican límites, los uses o no. Un motor que no publica límite — Cline, o un endpoint que se cobra por token — no aparece, en vez de salir en cero.",
   "quota.loading": "Leyendo los límites…",
   "quota.reading": "Leyendo…",
   "battery.title": "Batería",
@@ -1362,9 +1362,16 @@ export const es = {
   "quota.monthly": "Mensual",
   "quota.allModels": "Todos los modelos",
   "quota.none": "Ningún proveedor conectado publica límites.",
+  "quota.noLimits": "Este plan no publica límites: se cobra por uso, no por ventana.",
+  "quota.noPlan": "Sin plan de pago — este motor publica sus límites solo a suscriptores.",
   "quota.signedOut": "Sin sesión — inicia sesión desde su CLI.",
   "quota.stale": "Su token caducó — ejecuta este motor una vez para renovarlo.",
   "quota.unreadable": "No se pudieron leer sus límites.",
+  "quota.pillLabel": "Mostrar en la barra de estado",
+  "quota.pillHint":
+    "Cuál de los límites de arriba reporta el porcentaje que va junto al medidor. En automático es el que esté más lleno, así que va cambiando a medida que las ventanas se reinician.",
+  "quota.pillAuto": "El límite más lleno (automático)",
+  "quota.pillMissing": "{limit} — ahora mismo no se está reportando",
   "quota.refresh": "Actualizar",
   "quota.refreshing": "Consultando a los proveedores…",
   "quota.updatedNow": "Actualizado justo ahora",
@@ -1755,17 +1762,7 @@ export const es = {
   "settings.providerReady": "Disponible",
   "settings.providerMissing": "No encontrado",
   "settings.providerMissingBinary": "No se encontró \"{binary}\". Instala su CLI, o apunta el campo de abajo al binario.",
-  "settings.providerMissingEndpoint": "El endpoint no respondió ({detail}).",
-  "settings.providerMissingKey": "Añade una API key abajo para usar este proveedor.",
-  "settings.endpointLabel": "Endpoint",
-  "settings.endpointHint":
-    "Cualquier API compatible con /v1/chat/completions de OpenAI — OpenAI, Azure OpenAI, OpenRouter, Groq, un vLLM local…",
-  "settings.apiKeyLabel": "API key",
-  "settings.apiKeyHint": "Se guarda en el llavero del sistema, nunca en texto plano ni se envía al frontend.",
   "settings.refreshModels": "Actualizar",
-  "settings.apiKeyStored": "Clave guardada",
-  "settings.apiKeyRemove": "Quitar",
-  "settings.modelIdHintOpenai": "Cualquier id que sirva este endpoint — la lista se carga al guardar la clave.",
   "settings.modelIdHintCodex": "Un id que exponga tu plan de ChatGPT. La lista sale del propio catálogo de Codex.",
   "settings.modelIdHintOpencode":
     "`proveedor/modelo` — incluidos los propios de opencode: `opencode/…` para Zen y `opencode-go/…` para Go.",
@@ -1821,7 +1818,7 @@ export const es = {
   "task.wikiHint":
     "Lee un repositorio y escribe su documentación técnica. Es la ejecución más larga de la app, y necesita un motor con herramientas.",
   "settings.localProviderNote":
-    "Este endpoint solo completa texto: cubre mensajes de commit, descripciones de PR, análisis, review y resolución de conflictos. Todo lo que necesite ejecutar herramientas (Corregir con IA, MCP) requiere un motor de línea de comandos — para modelos locales, ese motor es Cline.",
+    "Este motor solo completa texto: cubre mensajes de commit, descripciones de PR, análisis, review y resolución de conflictos. Todo lo que necesite ejecutar herramientas (Corregir con IA, MCP) requiere un motor agente — para modelos locales, ese motor es Cline.",
   "settings.baseModel": "Modelo base",
   "settings.baseModelHint": "Lo usa el chat y es el valor por defecto de las tareas de abajo.",
   "settings.localModel": "Modelo local",

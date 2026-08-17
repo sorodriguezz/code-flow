@@ -12,7 +12,7 @@ app rápida y nativa. Y cuando termines, prueba el endpoint que acabas de cambia
 la base de datos que hay detrás sin salir de la ventana. **Y decides qué modelo hace cada
 cosa.**
 
-![versión](https://img.shields.io/badge/versión-1.16.2-6C5CE7)
+![versión](https://img.shields.io/badge/versión-1.16.3-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-ES%20%7C%20EN-0984E3)
@@ -56,7 +56,7 @@ si tu código no puede salir de tu máquina.
 
 ## 🧠 La IA, a tu manera
 
-Elige entre siete motores. CodeFlow **detecta cuáles tienes instalados** y te dice qué
+Elige entre seis motores. CodeFlow **detecta cuáles tienes instalados** y te dice qué
 falta, en vez de dejarte adivinar por qué algo no funciona.
 
 | Proveedor | Cómo funciona | Ideal para |
@@ -66,12 +66,12 @@ falta, en vez de dejarte adivinar por qué algo no funciona.
 | **Gemini** | CLI (Antigravity), con herramientas | Alternativa potente con cuenta de Google |
 | **Grok** | CLI, con herramientas | Retoma la conversación exacta, no «la última» |
 | **Open Code** | CLI, cualquier modelo que configures | Mezclar proveedores a tu gusto |
-| **Cline** | CLI, con herramientas — 🔒 **local** vía Ollama | Privacidad total, sin conexión y sin coste — y además edita archivos |
-| **OpenAI** | Clave de API, endpoint editable | OpenRouter, Groq, DeepSeek, Azure o vLLM |
+| **Cline** | CLI, con herramientas — 🔒 **local** vía Ollama, o cualquier API a la que lo apuntes | Privacidad total sin conexión, o OpenAI / OpenRouter / Groq / Azure con herramientas |
 
-La entrada de **OpenAI** habla el `/v1/chat/completions` de siempre y la URL es tuya, así
-que cualquier servicio compatible entra por ahí sin esperar a que le hagamos un hueco
-propio. La clave va al llavero del sistema.
+**Cline es además la puerta a cualquier endpoint compatible con OpenAI.** `cline auth openai`
+—o cualquier base URL compatible configurada dentro de él— llega a los mismos servicios que
+llegaría una entrada con clave de API, y llega *con herramientas*, así que corregir un
+hallazgo también funciona ahí.
 
 ### Un motor distinto para cada tarea
 
@@ -104,8 +104,6 @@ clics**, sin pasar por Ajustes.
 > modelo local (`cline auth ollama`) y todo lo anterior corre en tu máquina, sin conexión y sin
 > coste por token — corregir hallazgos incluido, porque Cline conduce el modelo en vez de solo
 > completar texto.
-> *(La única entrada sin herramientas es OpenAI; la app te lo indica y oculta lo que no
-> aplica.)*
 
 ### Nada se pierde por mirar a otro lado
 
@@ -299,10 +297,9 @@ Pulsa **+** en la barra lateral y elige una carpeta con un repositorio Git. Repi
 añadir todos los que quieras y agrúpalos en espacios de trabajo.
 
 **2. Elige tu asistente de IA**
-En **Ajustes › Asistente de IA › Proveedores** verás los siete motores con su estado
-(*Disponible* / *No encontrado*). Despliega el que quieras usar, comprueba su binario —o
-el endpoint, si es OpenAI— y elige su modelo. Márcalo como **predeterminado** y
-listo.
+En **Ajustes › Asistente de IA › Proveedores** verás los seis motores con su estado
+(*Disponible* / *No encontrado*). Despliega el que quieras usar, comprueba su binario y
+elige su modelo. Márcalo como **predeterminado** y listo.
 
 **3. Afina por tarea (opcional)**
 En **Modelo por tarea** asigna un motor distinto a cada acción. Todo empieza en

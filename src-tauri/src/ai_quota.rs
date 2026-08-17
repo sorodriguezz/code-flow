@@ -22,14 +22,24 @@
 //!   these: opencode Zen is pay-as-you-go credits and publishes nothing, which is correct — a
 //!   prepaid balance has no window to be a fraction of.
 //!
-//! The fifth is **Grok Build**, which has no such back end and is read by running its own `/usage`
-//! panel in a pseudo-terminal and scraping the frame — see [`grok`], which documents both why every
-//! quieter option was ruled out first and why scraping is allowed to come up empty.
-//!
 //! Everything else is **absent on purpose**, and absence here is a claim this module is willing to
-//! make. Cline publishes no plan window of its own, and the local models it usually drives run on
-//! the user's machine with no plan to be out of; an OpenAI-compatible endpoint on an API key is
-//! metered, not capped, so a percentage would be an invention.
+//! make.
+//!
+//! - **Grok Build** publishes no quota anything can ask for. Every quieter route was ruled out on a
+//!   signed-in account — no quota route in the binary, OIDC discovery with nothing past the
+//!   standard endpoints, `cli-chat-proxy.grok.com/v1/{usage,quota,limits,rate_limits,me,
+//!   subscription,account}` all 404 with a valid token, `/v1/models` with no rate-limit headers,
+//!   and `grok -p --output-format json` reporting `usage` and `total_cost_usd` with no limit field.
+//!   The number exists in exactly one place: the TUI's own `/usage` panel. This module *did* scrape
+//!   it — `grok --minimal /usage` in a pty, frame regexed — and that came out in favour of not
+//!   having it: a whole terminal UI booting per read, a console window this app cannot suppress on
+//!   Windows (portable-pty's ConPTY backend takes no `CREATE_NO_WINDOW`), and a reading that goes
+//!   quiet the day Grok rewords a label, in a panel whose entire value is being trusted. What Grok
+//!   spends is still measured per run and lives in Uso.
+//! - **Cline** drives whatever provider `cline auth` configured, and none of them is a window: its
+//!   own account is a prepaid **balance** (`api.cline.bot/api/v1/users/{id}/balance` — money, no
+//!   denominator, no reset), a metered API key has no cap, Ollama is local, and a Cline pointed at
+//!   a Claude or Gemini plan would duplicate the row that plan already has under its own name.
 //!
 //! **Two rules this file does not break.**
 //!
@@ -83,6 +93,23 @@ pub struct ProviderQuota {
     pub fetched_at: String,
 }
 
+/// One reading of every provider that could be asked, plus which of them this install routes work
+/// to.
+///
+/// The two halves feed two surfaces that want different answers to "whose plan is this". The panel
+/// draws `providers` whole: the engines installed on the machine are the ones the user thinks of as
+/// theirs, and one nothing is routed to today is one that may be routed to this afternoon — hiding
+/// it made the panel look like it had lost an engine. The status pill is a single worst number, and
+/// *that* one cannot be a plan nobody is spending, so it compares only what `routed` names.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuotaReport {
+    /// Every installed provider that publishes limits, in [`QUOTA_PROVIDERS`] order.
+    pub providers: Vec<ProviderQuota>,
+    /// The provider ids the global default or some per-task override points at — a subset of the
+    /// ids in `providers`, except for the routed engines that are not installed.
+    pub routed: Vec<String>,
+}
+
 /// Why a provider has nothing to show. Stable keys, translated in the frontend: the difference
 /// between "sign in" and "run it once" is the difference between a broken panel and a panel
 /// waiting for something ordinary to happen.
@@ -92,11 +119,24 @@ pub mod reason {
     /// A credential is there but has expired. The CLI refreshes it whenever it runs, and this app
     /// deliberately will not do it on the CLI's behalf, so the way out is to use the engine once.
     pub const STALE: &str = "stale";
+    /// Signed in, read fine, and the account has no paid plan behind it — opencode answering
+    /// `403 EntitlementError` to a key with no Go subscription.
+    ///
+    /// **Not the same as publishing nothing**, which is what an empty `error` means. opencode on
+    /// Zen credits has no window to report and never will; the same account on a lapsed Go plan has
+    /// windows that exist and are simply not yours today. Both used to come out as the same shrug,
+    /// and the two facts point at different next steps — one at the pricing page, one at nowhere.
+    pub const NO_PLAN: &str = "no_plan";
+    /// The provider answered with something this could not make sense of: a CLI too old to have a
+    /// `/usage` command, a TUI whose wording moved under the scraper. Distinct from every reason
+    /// above because it is *this app's* problem to fix, and distinct from an empty `error` because
+    /// "I could not read it" must never be reported as "there is nothing to read".
+    pub const UNREADABLE: &str = "unreadable";
 }
 
 /// Providers whose back end publishes a plan limit at all. Everything outside this list is absent
 /// from the panel entirely rather than shown empty — see the module docs.
-pub const QUOTA_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "grok", "opencode"];
+pub const QUOTA_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "opencode"];
 
 /// One engine to ask, as the caller resolved it.
 ///
@@ -116,10 +156,10 @@ pub struct QuotaEngine {
 
 /// Who asked for a reading, which governs two decisions the caller cannot make for itself.
 ///
-/// The distinction that matters is **may this start a process**. Reading Claude's or Codex's quota
-/// is one HTTPS call and can happen on a timer without anyone noticing; reading Gemini's or Grok's
-/// runs their CLI, which on Windows flashes a console window as it starts. A timer doing that every
-/// few minutes is the app interrupting the user to answer a question nobody asked.
+/// The distinction that matters is **may this start a process**. Reading Claude's, Codex's or
+/// opencode's quota is one HTTPS call and can happen on a timer without anyone noticing; reading
+/// Gemini's runs its CLI, which on Windows flashes a console window as it starts. A timer doing
+/// that every few minutes is the app interrupting the user to answer a question nobody asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     /// The background poll. Serves cache, and never starts a CLI.
@@ -164,17 +204,17 @@ const FRESH_FOR: Duration = Duration::from_secs(60);
 
 /// How long a CLI-driven reading stays good, which is much longer and has to be.
 ///
-/// Every other provider costs one HTTPS call. These cost a **process**: Grok a whole terminal user
-/// interface inside a pty, Gemini its CLI booting and reaching the back end — seconds of work each,
-/// for a weekly number that moves by fractions of a percent an hour. Half an hour, and only when
-/// the panel is open (see [`Trigger`]), is what keeps a Windows user from being shown a console
-/// window flashing over their work to re-read a bar that has not moved.
+/// Every other provider costs one HTTPS call. Gemini costs a **process** — its CLI booting and
+/// reaching the back end, seconds of work for a weekly number that moves by fractions of a percent
+/// an hour. Half an hour, and only when the panel is open (see [`Trigger`]), is what keeps a
+/// Windows user from being shown a console window flashing over their work to re-read a bar that
+/// has not moved.
 const CLI_FRESH_FOR: Duration = Duration::from_secs(1800);
 
 fn fresh_for(provider: &str) -> Duration {
     match provider {
-        // The two that read their quota by *running the CLI* rather than by asking a back end.
-        "grok" | "gemini" => CLI_FRESH_FOR,
+        // The one that reads its quota by *running the CLI* rather than by asking a back end.
+        "gemini" => CLI_FRESH_FOR,
         _ => FRESH_FOR,
     }
 }
@@ -209,9 +249,8 @@ fn remember(provider: &str, quota: ProviderQuota) {
     }
 }
 
-/// One client for the process, cloned per call — same reasoning as [`crate::openai::client`]: a
-/// fresh `reqwest::Client` per request rebuilds the whole rustls config and throws away the
-/// connection pool.
+/// One client for the process, cloned per call: a fresh `reqwest::Client` per request rebuilds the
+/// whole rustls config and throws away the connection pool.
 ///
 /// The timeout is short and deliberate. This is a status widget: an answer that arrives after the
 /// user has closed the panel is worth nothing, and hanging on a stalled provider would hold the
@@ -287,12 +326,12 @@ pub async fn fetch(engine: QuotaEngine, trigger: Trigger) -> ProviderQuota {
             .unwrap_or_else(|| pending(provider));
     }
 
-    // The slow one never makes the caller wait. Grok's reading costs a whole TUI booting in a pty,
-    // and on an account with nothing to report it costs the full deadline before coming back
-    // empty — twenty seconds during which every other provider's numbers were sitting ready and
-    // the panel still said "reading". So it refreshes *behind* the answer: this call returns what
-    // is already known (usually nothing, the first time) and the next poll finds the fresh value
-    // waiting in the cache. Eventually consistent, which a five-minute window can well afford.
+    // The slow one never makes the caller wait. Gemini's reading costs its CLI booting and
+    // reaching the back end — seconds during which every other provider's numbers are already
+    // sitting ready, with the panel still saying "reading". So it refreshes *behind* the answer:
+    // this call returns what is already known (usually nothing, the first time) and the next poll
+    // finds the fresh value waiting in the cache. Eventually consistent, which a weekly window can
+    // well afford.
     //
     // A forced refresh does not change that — waiting fifteen seconds on a button press is worse
     // than updating a second later — but it does drop the cached copy first, so the detached read
@@ -332,8 +371,8 @@ fn pending(provider: &str) -> ProviderQuota {
 
 /// Starts a background read, unless one is already running.
 ///
-/// The guard is the point: without it every poll while a twenty-second read is in flight would
-/// start another, and a panel left open would have a queue of Grok processes behind it.
+/// The guard is the point: without it every poll while a multi-second read is in flight would
+/// start another, and a panel left open would have a queue of CLI processes behind it.
 fn refresh_detached(engine: QuotaEngine) {
     static IN_FLIGHT: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
 
@@ -361,10 +400,9 @@ async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
     let fresh = match provider {
         "claude" => claude::quota().await,
         "codex" => codex::quota().await,
-        "gemini" => gemini::quota(&engine.binary).await,
         // The only one handed the binary: it is the only provider whose quota is read by launching
         // the CLI rather than by asking a back end.
-        "grok" => grok::quota(&engine.binary).await,
+        "gemini" => gemini::quota(&engine.binary).await,
         "opencode" => opencode::quota().await,
         other => failed(other, "unsupported"),
     };
@@ -464,9 +502,9 @@ mod live {
 
         // The CLI-driven providers answer *behind* that call, so the forced pass only started them.
         // Waiting and asking again is the only way this test sees their numbers at all — without
-        // it Gemini and Grok always print as pending and a broken subprocess path would look
-        // exactly like a working one. `Open` and not `Poll`: a poll deliberately never starts a CLI
-        // read, so polling here would wait for something nobody asked for.
+        // it Gemini always prints as pending and a broken subprocess path would look exactly like
+        // a working one. `Open` and not `Poll`: a poll deliberately never starts a CLI read, so
+        // polling here would wait for something nobody asked for.
         let slow: Vec<&str> = first
             .iter()
             .filter(|quota| quota.fetched_at.is_empty())
@@ -761,8 +799,9 @@ mod gemini {
     //! rather than the per-model Code Assist buckets, which were a different and staler picture.
     //!
     //! It costs a subprocess (~5s) and **spends nothing**: the run reports `num_turns: 0` and zero
-    //! tokens, because a slash command never reaches a model. That is why it is polled like Grok —
-    //! behind the answer, on a long window — rather than on every panel open.
+    //! tokens, because a slash command never reaches a model. That is why it is read behind the
+    //! answer, on a long window, rather than on every panel open — it is the only provider left
+    //! that costs a process at all.
 
     use super::*;
 
@@ -842,25 +881,15 @@ mod gemini {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let Some(limits) = parse(&stdout) else {
             // The CLI answered with something this does not recognise — an older build without the
-            // `/usage` command, or a sign-in prompt. Nothing to draw and nothing to claim.
-            return silent();
+            // `/usage` command, or a sign-in prompt. Nothing to draw, and the one thing that must
+            // not be drawn is a claim: this is "could not read", never "has no limits", which is
+            // the sentence the empty answer below earns by actually containing a usage payload.
+            return failed("gemini", reason::UNREADABLE);
         };
 
         ProviderQuota {
             provider: "gemini".to_string(),
             limits: tighten(limits),
-            plan: String::new(),
-            error: String::new(),
-            fetched_at: now_rfc3339(),
-        }
-    }
-
-    /// A provider with nothing to say and nothing wrong. An empty `error` is what tells the UI to
-    /// omit the block rather than explain it.
-    fn silent() -> ProviderQuota {
-        ProviderQuota {
-            provider: "gemini".to_string(),
-            limits: Vec::new(),
             plan: String::new(),
             error: String::new(),
             fetched_at: now_rfc3339(),
@@ -1056,10 +1085,11 @@ mod opencode {
         };
 
         // 403 is `EntitlementError: OpenCode Go subscription required` — a valid key on an account
-        // without the subscription. Same answer as having no key: this provider has no windows,
-        // rather than having windows it cannot read.
+        // whose subscription is not active. **Not** the same answer as having no key at all: this
+        // account has windows waiting behind a subscription, where a Zen-only install has none to
+        // wait for. Saying so is the difference between a dead end and a next step.
         if response.status() == reqwest::StatusCode::FORBIDDEN {
-            return silent();
+            return failed("opencode", reason::NO_PLAN);
         }
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             return failed("opencode", reason::SIGNED_OUT);
@@ -1356,376 +1386,4 @@ mod codex {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Grok Build
-// ---------------------------------------------------------------------------------------------
-
-mod grok {
-    //! The odd one out: Grok publishes no quota an HTTP client can ask for, so this reads the one
-    //! surface that does have it — its own `/usage` panel — by running the TUI in a pseudo-terminal
-    //! and scraping what it paints. The approach is borrowed from `sammwyy/orquester`, which solved
-    //! the same problem the same way.
-    //!
-    //! **Everything else was ruled out first**, on a signed-in account: no quota route in the
-    //! binary (only a billing *web* link), OIDC discovery with nothing past the standard endpoints,
-    //! `cli-chat-proxy.grok.com/v1/{usage,quota,limits,rate_limits,me,subscription,account}` all
-    //! 404 with a valid token, `/v1/models` 200 with no rate-limit headers, and — the one that
-    //! settles it — `grok -p --output-format json` reporting `usage` and `total_cost_usd` with no
-    //! limit field at all. Since this app drives Grok as a subprocess, even rate-limit headers on
-    //! the wire would never reach it. The TUI is the only place the number exists.
-    //!
-    //! **It is scraping, and it is treated as such.** No recognised line means no rows, never a
-    //! zero: on an account without a paid plan `/usage` paints an upgrade offer, and inventing
-    //! "0% used" from that would be a fabricated limit. When Grok changes the wording this goes
-    //! quiet, which is the correct failure for a screen-scraper to have.
-
-    use super::*;
-
-    /// How long to let the TUI run before giving up. It has to boot, authenticate and paint; the
-    /// stop pattern below normally ends it in two or three seconds. This is the backstop for a
-    /// build that paints something neither pattern recognises — and it is also, on quit, how long
-    /// a read already in flight can hold the process, which is why it is not generous.
-    const DEADLINE: Duration = Duration::from_secs(15);
-    /// Enough to hold the painted frame. A TUI repaints constantly, so this keeps the *newest*
-    /// bytes and drops the oldest — the last frame is the one that has the numbers.
-    const MAX_OUTPUT: usize = 96_000;
-
-    /// `binary` is the CLI the rest of the app would run — resolved from the user's configured
-    /// path, not re-derived from a bare name here, so a Grok installed somewhere unusual is the
-    /// same Grok in the panel as in a chat turn.
-    pub async fn quota(binary: &std::path::Path) -> ProviderQuota {
-        let binary = binary.to_path_buf();
-        // A pty, a whole TUI and a blocking read loop have no business on an async worker.
-        let output = match tokio::task::spawn_blocking(move || capture(&binary)).await {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => return failed("grok", &e),
-            Err(e) => return failed("grok", &e.to_string()),
-        };
-
-        let limits = parse(&strip_ansi(&output));
-        if limits.is_empty() {
-            // Nothing recognisable. Overwhelmingly this is an account with no paid plan, where
-            // `/usage` paints an upsell rather than a limit — not a failure worth explaining, and
-            // certainly not a zero.
-            return silent();
-        }
-
-        ProviderQuota {
-            provider: "grok".to_string(),
-            limits: tighten(limits),
-            plan: String::new(),
-            error: String::new(),
-            fetched_at: now_rfc3339(),
-        }
-    }
-
-    fn silent() -> ProviderQuota {
-        ProviderQuota {
-            provider: "grok".to_string(),
-            limits: Vec::new(),
-            plan: String::new(),
-            error: String::new(),
-            fetched_at: now_rfc3339(),
-        }
-    }
-
-    /// Runs `grok --minimal /usage` in a pty and returns what it painted.
-    ///
-    /// **The pty must be given a real size.** This is not a detail: a pty created at the default
-    /// 0×0 leaves the TUI with no room to draw, so it boots, emits its terminal-setup escapes and
-    /// then paints precisely nothing, for ever — which reads exactly like a hang. 40×120 is enough
-    /// for the usage panel to fit on one screen without wrapping the numbers.
-    ///
-    /// `--minimal` renders into normal scrollback instead of the alternate screen, so the frame
-    /// survives in the captured bytes rather than being addressed away by cursor moves.
-    fn capture(binary: &std::path::Path) -> Result<String, String> {
-        use std::io::Read as _;
-
-        let pty = portable_pty::native_pty_system()
-            .openpty(portable_pty::PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
-            .map_err(|e| e.to_string())?;
-
-        let mut command = portable_pty::CommandBuilder::new(binary);
-        command.arg("--minimal");
-        command.arg("/usage");
-        // Without this the CLI cannot tell it is on a terminal that understands colour, and some
-        // builds fall back to a layout this parser has never seen.
-        command.env("TERM", "xterm-256color");
-
-        let mut child = pty.slave.spawn_command(command).map_err(|e| e.to_string())?;
-        drop(pty.slave);
-        let mut reader = pty.master.try_clone_reader().map_err(|e| e.to_string())?;
-        let mut writer = pty.master.take_writer().map_err(|e| e.to_string())?;
-
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        std::thread::spawn(move || {
-            let mut chunk = [0u8; 8192];
-            while let Ok(read) = reader.read(&mut chunk) {
-                if read == 0 || tx.send(chunk[..read].to_vec()).is_err() {
-                    break;
-                }
-            }
-        });
-
-        let stop = stop_pattern();
-        let mut output: Vec<u8> = Vec::new();
-        let deadline = Instant::now() + DEADLINE;
-        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-            let Ok(chunk) = rx.recv_timeout(remaining) else { break };
-            output.extend_from_slice(&chunk);
-            if output.len() > MAX_OUTPUT {
-                let excess = output.len() - MAX_OUTPUT;
-                output.drain(0..excess);
-            }
-            if stop.is_match(&String::from_utf8_lossy(&output)) {
-                // Let the frame finish painting before pulling the rug: the percentage and its
-                // reset label are often on separate lines of the same repaint.
-                std::thread::sleep(Duration::from_millis(400));
-                while let Ok(chunk) = rx.try_recv() {
-                    output.extend_from_slice(&chunk);
-                }
-                break;
-            }
-        }
-
-        // Ctrl+C rather than a kill, so the TUI restores the terminal it thinks it owns and exits
-        // on its own; the kill is the backstop for when it does not.
-        use std::io::Write as _;
-        let _ = writer.write_all(b"\x03");
-        std::thread::sleep(Duration::from_millis(200));
-        let _ = child.kill();
-        let _ = child.wait();
-
-        Ok(String::from_utf8_lossy(&output).into_owned())
-    }
-
-    /// What tells us there is nothing more to wait for.
-    ///
-    /// Two ways that happens, and recognising the second is worth as much as the first. Either the
-    /// usage panel painted — *then* stop, having got what we came for — or the account has no paid
-    /// plan and Grok painted its upgrade modal instead, in which case waiting out the deadline is
-    /// fifteen seconds spent confirming an answer already on screen.
-    ///
-    /// The upsell pattern is the modal's own heading and not merely the word "upgrade": a paid
-    /// account still carries a `[Click here to Upgrade]` chip in its status bar, and matching that
-    /// would abandon the read before the numbers arrived.
-    fn stop_pattern() -> &'static regex::Regex {
-        static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        PATTERN.get_or_init(|| {
-            regex::Regex::new(
-                r"(?i)(next reset|current week|weekly limit|% used|unlock all features)",
-            )
-            .unwrap()
-        })
-    }
-
-    /// Removes the escape sequences a TUI is mostly made of, leaving the text it painted.
-    ///
-    /// Order matters: OSC (`ESC ] … BEL`/`ST`) and DCS (`ESC P … ST`) carry their own terminators
-    /// and have to go before the CSI sweep, or the sweep eats their opening and leaves the payload
-    /// — window titles and colour reports — sitting in the text as if it had been printed.
-    fn strip_ansi(raw: &str) -> String {
-        static OSC: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        static DCS: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        static CSI: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        static CHARSET: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let osc = OSC.get_or_init(|| regex::Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)").unwrap());
-        let dcs = DCS.get_or_init(|| regex::Regex::new(r"\x1bP[^\x1b]*\x1b\\").unwrap());
-        let csi = CSI.get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;?<>!]*[a-zA-Z]").unwrap());
-        let charset = CHARSET.get_or_init(|| regex::Regex::new(r"\x1b[()][B0]").unwrap());
-
-        let text = osc.replace_all(raw, "");
-        let text = dcs.replace_all(&text, "");
-        let text = csi.replace_all(&text, "");
-        let text = charset.replace_all(&text, "");
-        text.chars()
-            .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
-            .collect()
-    }
-
-    /// Pulls the weekly window out of the painted panel.
-    ///
-    /// Two shapes, because the CLI has used both: `Current week: N% used · resets <when>` carries
-    /// its own reset label, while a bare `Weekly limit: N%` does not and takes the `Next reset:`
-    /// line near it. Anything else is ignored rather than guessed at.
-    fn parse(clean: &str) -> Vec<QuotaLimit> {
-        static CURRENT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        static WEEKLY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        static RESET: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let current = CURRENT.get_or_init(|| {
-            regex::Regex::new(
-                r"(?i)current week(?:\s*\([^)]*\))?\s*:\s*(\d+(?:\.\d+)?)\s*%\s*used\s*[·\-–]\s*resets?\s+([^\n│┃|]+)",
-            )
-            .unwrap()
-        });
-        let weekly =
-            WEEKLY.get_or_init(|| regex::Regex::new(r"(?i)weekly limit\s*:\s*(\d+(?:\.\d+)?)\s*%").unwrap());
-        let reset = RESET
-            .get_or_init(|| regex::Regex::new(r"(?i)next reset\s*:\s*([^\n│┃|]+)").unwrap());
-
-        let mut limits: Vec<QuotaLimit> = Vec::new();
-        let mut pending_reset: Option<String> = None;
-
-        for line in clean.lines() {
-            let line_reset = reset.captures(line).map(|c| c[1].trim().to_string());
-
-            let found = current
-                .captures(line)
-                .map(|c| {
-                    (
-                        c[1].parse::<f64>().unwrap_or(0.0),
-                        Some(c[2].trim().to_string()),
-                    )
-                })
-                .or_else(|| {
-                    weekly.captures(line).map(|c| {
-                        (
-                            c[1].parse::<f64>().unwrap_or(0.0),
-                            line_reset.clone().or_else(|| pending_reset.clone()),
-                        )
-                    })
-                });
-
-            if let Some((used, label)) = found {
-                limits.push(QuotaLimit {
-                    kind: "weekly".to_string(),
-                    scope: String::new(),
-                    used_percent: used,
-                    resets_at: label.as_deref().and_then(reset_instant).unwrap_or_default(),
-                });
-                pending_reset = None;
-                continue;
-            }
-
-            if let Some(label) = line_reset {
-                // A reset line can arrive *after* the percentage it belongs to, so it back-fills
-                // the row above when that row still has no instant.
-                if let Some(last) = limits.last_mut() {
-                    if last.resets_at.is_empty() {
-                        last.resets_at = reset_instant(&label).unwrap_or_default();
-                    }
-                }
-                pending_reset = Some(label);
-            }
-        }
-
-        limits
-    }
-
-    /// Turns Grok's reset label into an RFC 3339 instant.
-    ///
-    /// Two forms, both seen in the wild. `Mon D, H:MM` is an absolute local time with **no year**
-    /// — the current one is assumed, and a label that lands in the past is rolled forward a year so
-    /// a reset on 2 January read on 31 December is not reported as eleven months ago. `in 2d 17h
-    /// 49m` is relative and resolved against now.
-    fn reset_instant(label: &str) -> Option<String> {
-        use chrono::{Datelike, TimeZone};
-
-        static ABSOLUTE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        static RELATIVE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-        let absolute = ABSOLUTE.get_or_init(|| {
-            regex::Regex::new(r"(?i)^([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{1,2}):(\d{2})").unwrap()
-        });
-        let relative = RELATIVE.get_or_init(|| {
-            regex::Regex::new(r"(?i)(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?").unwrap()
-        });
-
-        let label = label.trim();
-
-        if let Some(captures) = absolute.captures(label) {
-            const MONTHS: [&str; 12] = [
-                "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-            ];
-            let wanted = captures[1].to_lowercase();
-            let month = MONTHS.iter().position(|m| wanted.starts_with(m))? as u32 + 1;
-            let day: u32 = captures[2].parse().ok()?;
-            let hour: u32 = captures[3].parse().ok()?;
-            let minute: u32 = captures[4].parse().ok()?;
-
-            let now = chrono::Local::now();
-            for year in [now.year(), now.year() + 1] {
-                let naive = chrono::NaiveDate::from_ymd_opt(year, month, day)?.and_hms_opt(hour, minute, 0)?;
-                // The label carries no zone, and the CLI prints it for the person reading the
-                // terminal — so it is local time, and is converted rather than assumed to be UTC.
-                let Some(local) = chrono::Local.from_local_datetime(&naive).single() else { continue };
-                if local >= now - chrono::Duration::hours(1) {
-                    return Some(local.to_utc().to_rfc3339());
-                }
-            }
-            return None;
-        }
-
-        // Relative: only accept it when the label actually said "in", so a stray number elsewhere
-        // on the line cannot be read as a countdown.
-        let rest = label.strip_prefix("in ").or_else(|| label.strip_prefix("In "))?;
-        let captures = relative.captures(rest)?;
-        let part = |i: usize| -> i64 { captures.get(i).and_then(|m| m.as_str().parse().ok()).unwrap_or(0) };
-        let (days, hours, minutes) = (part(1), part(2), part(3));
-        if days == 0 && hours == 0 && minutes == 0 {
-            return None;
-        }
-        let at = chrono::Utc::now()
-            + chrono::Duration::days(days)
-            + chrono::Duration::hours(hours)
-            + chrono::Duration::minutes(minutes);
-        Some(at.to_rfc3339())
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn strips_the_escapes_a_tui_is_made_of() {
-            let raw = "\x1b]0;grok\x07\x1b[?25l\x1bP>|xterm\x1b\\\x1b[1;1HWeekly limit: 42%\x1b[0m";
-            assert_eq!(strip_ansi(raw), "Weekly limit: 42%");
-        }
-
-        #[test]
-        fn reads_a_weekly_limit_with_its_own_reset() {
-            let limits = parse("  Current week: 35% used · resets Aug 17, 13:00\n");
-            assert_eq!(limits.len(), 1);
-            assert_eq!(limits[0].kind, "weekly");
-            assert_eq!(limits[0].used_percent, 35.0);
-            assert!(!limits[0].resets_at.is_empty());
-        }
-
-        /// The bare form takes the `Next reset:` line beside it, whichever side it lands on.
-        #[test]
-        fn a_bare_weekly_limit_borrows_the_reset_line() {
-            let after = parse("Weekly limit: 8%\nNext reset: Aug 17, 13:00\n");
-            assert_eq!(after.len(), 1);
-            assert!(!after[0].resets_at.is_empty());
-
-            let before = parse("Next reset: Aug 17, 13:00\nWeekly limit: 8%\n");
-            assert_eq!(before.len(), 1);
-            assert_eq!(before[0].used_percent, 8.0);
-            assert!(!before[0].resets_at.is_empty());
-        }
-
-        /// What an account with no paid plan actually paints: an upsell. It must produce no rows —
-        /// a "0% used" invented from this would be a limit that does not exist.
-        #[test]
-        fn an_upgrade_panel_is_not_a_limit() {
-            let upsell = "Unlock all features with SuperGrok.\n\
-                          1 (o) Upgrade to SuperGrok        For everyday coding tasks\n\
-                          2 (o) Upgrade to SuperGrok Heavy  Highest usage limits.\n";
-            assert!(parse(upsell).is_empty());
-        }
-
-        #[test]
-        fn a_relative_reset_label_resolves_against_now() {
-            let at = reset_instant("in 2d 17h 49m").expect("relative label");
-            let parsed = chrono::DateTime::parse_from_rfc3339(&at).unwrap();
-            let hours = (parsed.to_utc() - chrono::Utc::now()).num_hours();
-            assert!((64..=66).contains(&hours), "expected ~65h, got {hours}");
-        }
-
-        #[test]
-        fn a_label_with_no_recognisable_time_is_no_instant() {
-            assert!(reset_instant("soon").is_none());
-            assert!(reset_instant("in a while").is_none());
-        }
-    }
-}
 

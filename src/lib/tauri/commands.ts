@@ -17,7 +17,7 @@ import type {
   NewChainStep,
   NewStoryWorkItem,
   UsageStats,
-  ProviderQuota,
+  QuotaReport,
   PowerStatus,
   SystemLoad,
   BranchInfo,
@@ -508,15 +508,6 @@ export const defaultLockedBranchRules = () => invoke<string[]>("default_locked_b
  * providers whose CLI has no listing command — the caller falls back to a curated list. */
 export const listAiModels = (provider: string) => invoke<string[]>("list_ai_models", { provider });
 
-// AI provider API keys live in the OS keyring. There's deliberately no "get" — the key is only
-// read backend-side when building a request, so the UI can only ask whether one is set.
-export const setAiApiKey = (provider: string, key: string) =>
-  invoke<void>("set_ai_api_key", { provider, key });
-
-export const hasAiApiKey = (provider: string) => invoke<boolean>("has_ai_api_key", { provider });
-
-export const deleteAiApiKey = (provider: string) => invoke<void>("delete_ai_api_key", { provider });
-
 /** Opens an http(s) link in the default browser — e.g. a provider's billing page from its own
  * error message. Non-http schemes are rejected backend-side. */
 export const openExternalUrl = (url: string) => invoke<void>("open_external_url", { url });
@@ -537,7 +528,7 @@ export const aiUsageStats = (windowHours: number) =>
 export type QuotaTrigger = "poll" | "open" | "refresh";
 
 export const aiQuotaStatus = (trigger: QuotaTrigger = "poll") =>
-  invoke<ProviderQuota[]>("ai_quota_status", { trigger });
+  invoke<QuotaReport>("ai_quota_status", { trigger });
 
 /** Battery level and whether the machine is on mains. `null` on a machine with no battery — a
  * desktop — which the UI draws nothing for. A native read: no subprocess, so unlike the AI quota

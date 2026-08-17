@@ -370,21 +370,19 @@ pub struct ProviderStatus {
     binary: String,
 }
 
-/// Checks whether `provider`'s CLI is actually installed (or, for the HTTP engines, whether its
-/// endpoint answers), so Settings can show "available / not found" instead of letting the user
-/// discover it when an action fails.
+/// Checks whether `provider`'s CLI is actually installed, so Settings can show "available / not
+/// found" instead of letting the user discover it when an action fails.
 #[tauri::command]
 pub async fn check_ai_provider(db: State<'_, Db>, provider: String) -> Result<ProviderStatus, String> {
-    let (engine, binary) = {
+    let binary = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let engine = ai::engine_for(&provider);
-        let binary = queries::get_setting(&conn, &format!("{provider}_binary_path"))
+        queries::get_setting(&conn, &format!("{provider}_binary_path"))
             .map_err(|e| e.to_string())?
             .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| engine.default_binary().to_string());
-        (engine, binary)
+            .unwrap_or_else(|| engine.default_binary().to_string())
     };
-    let (available, detail) = ai::probe(&*engine, &binary).await;
+    let (available, detail) = ai::probe(&binary);
     Ok(ProviderStatus { available, detail, binary })
 }
 
@@ -720,7 +718,7 @@ pub async fn send_chat_message(
     // Read after the run, not before: it's cached per binary, so only the very first turn of an
     // app session pays for the probe, and it never sits between the user pressing send and the
     // engine starting.
-    let engine_version = ai::engine_version(&*config.engine, &config.binary).await;
+    let engine_version = ai::engine_version(&config.binary).await;
     // Kept with the turn so the answer can still show *how* it was reached — which files were
     // read, which commands ran — long after the live log is gone.
     let trace_json = (!trace.is_empty()).then(|| serde_json::to_string(&trace).unwrap_or_default());

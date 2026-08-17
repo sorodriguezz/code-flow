@@ -1,4 +1,4 @@
-import { Bot, Cpu, Gem, HardDrive, Sparkles, SquareTerminal, Zap, type LucideIcon } from "lucide-react";
+import { Bot, Cpu, Gem, HardDrive, SquareTerminal, Zap, type LucideIcon } from "lucide-react";
 import type { TranslationKey } from "./i18n/translations";
 
 export interface AiProviderOption {
@@ -12,22 +12,21 @@ export interface AiProviderOption {
   /** Default binary name shown in Settings when the user hasn't set a path — mirrors each
    * engine's `default_binary()` on the Rust side. For an HTTP provider this is the endpoint. */
   defaultBinary?: string;
-  /** Whether this provider can run an agentic tool loop (edit/write files, read a skill). A bare
-   * completion endpoint can't, so the "fix with AI" buttons and tool settings key off this.
-   * Absent → treated as `true` (every CLI engine is agentic, local models included — Cline drives
-   * them rather than just completing text). */
+  /** Whether this provider can run an agentic tool loop (edit/write files, read a skill) — what
+   * the "fix with AI" buttons, the tool settings and the write-capable task routes key off.
+   *
+   * Absent → treated as `true`, which is every provider here today: each one is a CLI agent, local
+   * models included, because Cline drives the model rather than just completing text. The flag
+   * stays because it is what makes a text-only engine *unroutable* to the flows that must write,
+   * rather than merely expected not to be — the gate has to exist before the engine that needs it
+   * does. It last had a user in the OpenAI-compatible endpoint, removed once Cline could reach the
+   * same endpoints with tools. */
   agentic?: boolean;
-  /** Authenticates with an API key (stored in the OS keyring) rather than a CLI login, so Settings
-   * shows a key field for it. */
-  needsApiKey?: boolean;
   /** The CLI accepts a tool allow-list (Claude Code's `--allowedTools`), so configuring one
    * actually changes what it may do. The other agentic CLIs have no such flag — their access is
    * governed by a permission/sandbox mode the app sets per operation — so offering the field there
    * would be a control that does nothing. */
   usesToolAllowlist?: boolean;
-  /** True when `defaultBinary` is an HTTP endpoint rather than an executable — Settings then labels
-   * the field accordingly and drops the "browse for a file" button. */
-  isEndpoint?: boolean;
   /** Where to go to get this provider working. Shown in its Settings row, and surfaced up front
    * when the provider isn't detected — so "Not found" always comes with a way out. */
   setup?: {
@@ -66,8 +65,8 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     setup: { url: "https://antigravity.google" },
   },
   // OpenAI's CLI, logged in with a **ChatGPT subscription** (`codex login`) rather than metered
-  // API credits — that's what separates it from the `openai` entry below. Headless via
-  // `codex exec`. See `codex.rs`.
+  // API credits — which is what makes it its own entry rather than "OpenAI". A metered key against
+  // an OpenAI-compatible endpoint is Cline's job now. Headless via `codex exec`. See `codex.rs`.
   {
     id: "codex",
     label: "Codex",
@@ -125,20 +124,6 @@ export const AI_PROVIDERS: AiProviderOption[] = [
       command: "npm install -g cline",
       postCommand: "cline auth ollama",
     },
-  },
-  // Any endpoint speaking OpenAI's `/v1/chat/completions` — OpenAI itself by default, but the URL
-  // is editable, so Azure OpenAI / OpenRouter / Groq / DeepSeek / vLLM all work here. Authenticated
-  // with an API key from the OS keyring; non-agentic (no tool loop). See `openai.rs`.
-  {
-    id: "openai",
-    label: "OpenAI",
-    icon: Sparkles,
-    available: true,
-    defaultBinary: "https://api.openai.com/v1",
-    agentic: false,
-    needsApiKey: true,
-    isEndpoint: true,
-    setup: { url: "https://platform.openai.com/api-keys" },
   },
 ];
 
@@ -203,11 +188,6 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
   ],
   // Fallback only — the real list comes live from `GET /v1/models` once a key is set, and depends
   // entirely on which endpoint the provider points at.
-  openai: [
-    { id: "gpt-5", label: "GPT-5" },
-    { id: "gpt-5-mini", label: "GPT-5 mini" },
-    { id: "o3", label: "o3" },
-  ],
   // **Deliberately absent.** Cline's list is real — the providers `cline auth` configured, each
   // asked what it currently serves — so there is nothing here to fall back to. A curated list would
   // only ever appear when that came back empty, which is exactly the moment it does most harm: it

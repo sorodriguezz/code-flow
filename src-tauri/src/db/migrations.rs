@@ -1380,6 +1380,86 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     align_project_ado_org_with_connections(conn)?;
     file_loose_notes_into_a_book(conn)?;
     move_ollama_settings_to_cline(conn)?;
+    move_openai_settings_to_cline(conn)?;
+    Ok(())
+}
+
+/// Carries an install that was talking to an OpenAI-compatible endpoint over to Cline.
+///
+/// The same move the Ollama one above made, one engine later and for the same reason: the HTTP
+/// engine could only *complete text*, so every flow that needed tools was hidden whenever it was
+/// selected. Cline reaches the identical endpoints — `cline auth openai`, or any OpenAI-compatible
+/// base URL configured inside it — and reaches them with tools, which left nothing for a second
+/// implementation to be better at.
+///
+/// Three things move, and again nothing is invented:
+///  - every `ai_provider*` setting reading `openai` now reads `cline`,
+///  - `openai_model` and its per-task siblings become `cline_*` as `openai/<model>`, which is the
+///    same model addressed the way Cline addresses one,
+///  - `openai_binary_path` is dropped: it held a base URL, and a URL is not a path to a binary —
+///    left behind, the new engine would try to *launch* `https://api.openai.com/v1`. Its absence
+///    means "use the default", which is the `cline` on `PATH`.
+///
+/// **The API key is deliberately left where it is.** It lives in the OS credential store, not in
+/// this database, and deleting a credential is not a migration's business — the user may want to
+/// paste it into Cline. Nothing reads it any more; it is inert until removed by hand.
+///
+/// One thing this cannot do for the user: Cline has to be authenticated against that provider once
+/// (`cline auth openai`) or the first run reports it. Same caveat the Ollama move carried.
+///
+/// An existing `cline_*` value always wins — this only fills gaps. Idempotent.
+fn move_openai_settings_to_cline(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "app_settings")? {
+        return Ok(());
+    }
+    conn.execute(
+        "UPDATE app_settings SET value = 'cline'
+         WHERE (key = 'ai_provider' OR key LIKE 'ai_provider\\_%' ESCAPE '\\')
+           AND value = 'openai'",
+        [],
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT key, value FROM app_settings
+         WHERE key = 'openai_model' OR (key LIKE 'openai\\_%\\_model' ESCAPE '\\')",
+    )?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+    for (key, value) in rows {
+        let model = value.trim();
+        if !model.is_empty() {
+            let qualified =
+                if model.contains('/') { model.to_string() } else { format!("openai/{model}") };
+            conn.execute(
+                "INSERT INTO app_settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
+                params![key.replacen("openai_", "cline_", 1), qualified],
+            )?;
+        }
+        conn.execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+    }
+    conn.execute("DELETE FROM app_settings WHERE key = 'openai_binary_path'", [])?;
+
+    // The roster agents and the chain steps pin their own provider + model — same two tables, and
+    // same reason for stopping there: `agent_tasks` and `story_batches` record what *did* run, and
+    // rewriting history would have it claim a run happened on an engine that did not exist.
+    for table in ["workspace_agents", "agent_chain_steps"] {
+        if !table_exists(conn, table)? || !has_column(conn, table, "provider")? {
+            continue;
+        }
+        conn.execute(
+            &format!(
+                "UPDATE {table}
+                    SET model = CASE
+                            WHEN TRIM(model) = '' OR INSTR(model, '/') > 0 THEN model
+                            ELSE 'openai/' || model
+                        END,
+                        provider = 'cline'
+                  WHERE provider = 'openai'"
+            ),
+            [],
+        )?;
+    }
     Ok(())
 }
 

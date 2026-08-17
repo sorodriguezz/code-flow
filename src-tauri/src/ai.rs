@@ -74,19 +74,6 @@ pub(crate) fn refusal_reply(text: &str) -> bool {
     text.chars().count() <= MAX_REFUSAL_CHARS && quota_signal(text)
 }
 
-/// Tags a limit/billing refusal with [`QUOTA_MARKER`] so the frontend renders its dedicated notice
-/// instead of a bare red error. The subprocess engines do this inside their own `interpret`; the
-/// HTTP ones never reach that, so [`run`] applies it to their results here.
-fn mark_quota(result: Result<AiRun, String>) -> Result<AiRun, String> {
-    result.map_err(|e| {
-        if e.starts_with(QUOTA_MARKER) || !quota_signal(&e) {
-            e
-        } else {
-            format!("{QUOTA_MARKER}{e}")
-        }
-    })
-}
-
 /// Removes terminal escape sequences from a CLI's output. The engines run headless but still
 /// colourize (opencode paints its errors red), and those raw `ESC[91m` bytes would otherwise be
 /// rendered literally in the UI. Handles CSI (colour/cursor) and OSC (hyperlink/title) sequences.
@@ -520,21 +507,6 @@ impl<'a> AiInvocation<'a> {
     }
 }
 
-/// How an engine actually talks to its model. Most engines are headless CLI subprocesses; the
-/// HTTP ones are the exception, so [`run`] branches on this instead of forcing them to masquerade
-/// as a process. For every `Http` variant the `binary` argument threaded through
-/// [`run`]/[`list_models`] carries the base URL rather than a path.
-///
-/// The variant is what routes the call, and it carries the credential when there is one — that
-/// way engines stay stateless from the caller's point of view and no operation signature has to
-/// grow an `api_key` parameter.
-pub enum Transport {
-    Subprocess,
-    /// Any endpoint speaking OpenAI's `/v1/chat/completions`: OpenAI itself, Azure OpenAI,
-    /// OpenRouter, Groq, a local vLLM… Only the base URL and key differ.
-    OpenAiCompatible { api_key: String },
-}
-
 /// A model list an engine has to go and fetch. See [`AiEngine::fetch_models`].
 ///
 /// Spelled out as a boxed future rather than reached for through `async_trait`: it is the only
@@ -641,16 +613,13 @@ pub trait AiEngine: Send + Sync {
         None
     }
 
-    /// How this engine reaches its model. Defaults to a CLI subprocess; only the engines that talk
-    /// to a completion API over HTTP override this.
-    fn transport(&self) -> Transport {
-        Transport::Subprocess
-    }
-
-    /// Whether this engine can run an agentic tool loop (read/edit/write files, MCP). Every CLI
-    /// engine can — a local model reached through `cline -P ollama` included. A bare completion
-    /// endpoint cannot, so for those the "fix with AI" and MCP features are hidden in the UI and
-    /// refused defensively in the backend.
+    /// Whether this engine can run an agentic tool loop (read/edit/write files, MCP).
+    ///
+    /// Every engine the app ships answers `true` today — a local model reached through
+    /// `cline -P ollama` included, because Cline drives the model rather than merely completing
+    /// text. The hook stays because it is what the write-capable flows ("fix with AI", MCP, the
+    /// agent chains) gate on, in the UI and defensively in the backend: an engine that cannot use
+    /// tools must be *unable to be routed* to them, not merely expected not to be.
     fn agentic(&self) -> bool {
         true
     }
@@ -694,15 +663,12 @@ pub fn engine_for(provider: &str) -> Box<dyn AiEngine> {
         // migration could not reach — a chain or an agent row carrying an old id — and they point
         // it at the engine that can still run a local model, rather than letting it fall through to
         // Claude and quietly change which machine the code is sent to.
-        "cline" | "ollama" | "local" => Box::new(crate::cline::ClineEngine),
-        // The key is read here, from the OS keyring, so it rides along in the engine's transport
-        // and no operation signature needs an extra parameter for it.
-        "openai" => Box::new(crate::openai::OpenAiEngine {
-            api_key: crate::secrets::get_secret(&crate::secrets::ai_api_key("openai"))
-                .ok()
-                .flatten()
-                .unwrap_or_default(),
-        }),
+        // `openai` joins them for the same reason, one engine later: the OpenAI-compatible HTTP
+        // client that used to serve it was removed once Cline could reach every one of those
+        // endpoints *with tools*, and a migration rewrites the settings. This alias catches the
+        // rows the migration cannot — an agent or chain carrying the old id — and sends them to
+        // the engine that can still talk to that endpoint.
+        "cline" | "ollama" | "local" | "openai" => Box::new(crate::cline::ClineEngine),
         _ => Box::new(crate::claude::ClaudeEngine),
     }
 }
@@ -862,24 +828,14 @@ pub(crate) fn find_on_path(binary: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Whether a provider is usable *right now*, for the Settings "available / not found" badge.
-/// Subprocess engines are checked by locating their binary; the HTTP engine by asking its endpoint
-/// for models. `detail` is the resolved path (or endpoint) when available, and a short raw reason
-/// when not — the frontend wraps it in a translated label rather than showing it bare.
-pub async fn probe(engine: &dyn AiEngine, binary: &str) -> (bool, String) {
-    match engine.transport() {
-        Transport::OpenAiCompatible { api_key } => {
-            if api_key.trim().is_empty() {
-                return (false, "missing-api-key".to_string());
-            }
-            match crate::openai::fetch_models(binary, &api_key).await {
-                Ok(models) => (true, format!("{} · {} modelos", binary, models.len())),
-                Err(e) => (false, e),
-            }
-        }
-        Transport::Subprocess => match find_on_path(binary) {
-            Some(path) => (true, path.to_string_lossy().into_owned()),
-            None => (false, binary.to_string()),
-        },
+///
+/// Every engine is a CLI, so the question is entirely "is the binary there". `detail` is the
+/// resolved path when it is, and the binary that was looked for when it is not — the frontend
+/// wraps that in a translated label rather than showing it bare.
+pub fn probe(binary: &str) -> (bool, String) {
+    match find_on_path(binary) {
+        Some(path) => (true, path.to_string_lossy().into_owned()),
+        None => (false, binary.to_string()),
     }
 }
 
@@ -1015,23 +971,17 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
 /// pipes `stdin_content` in, streams its output while it runs, and hands the result back to the
 /// engine to interpret. Cancellable at any point when the caller wrapped this in
 /// [`ai_runs::scoped`].
-/// How much of the skills is worth inlining for an engine that cannot open a file.
-///
-/// Only spent on the transports with no tools at all. A CLI gets a list of paths instead, which
-/// costs a line each; this budget exists because for a completion API the alternative to spending
-/// it is the skill not existing.
-const MAX_INLINE_SKILL_CHARS: usize = 24_000;
-
 /// Describes the skills sitting in `<cwd>/.claude/skills` for an engine that doesn't look there.
 ///
-/// Two shapes, because "use this skill" means two different things depending on what the engine
-/// can do. A CLI agent gets **pointers** — name, one-line description, path — and opens what it
-/// needs with its own file tools; a skill is a directory of instructions, references and sometimes
-/// scripts, and pasting all of that into every payload would cost more context than the task. A
-/// completion API has no file tools, so a pointer would name something it can never reach: there
-/// the body is inlined, up to [`MAX_INLINE_SKILL_CHARS`], because a skill it cannot read is a skill
-/// it does not have.
-fn skills_note(cwd: &str, inline: bool) -> String {
+/// **Pointers, not bodies** — name, one-line description, path — because every engine the app can
+/// run is an agent with its own file tools and opens what it needs. A skill is a directory of
+/// instructions, references and sometimes scripts; pasting all of that into every payload would
+/// cost more context than the task it is meant to help with.
+///
+/// There used to be a second shape here that inlined the bodies, for the completion-API engine that
+/// had no file tools and for which a pointer named something it could never reach. That engine is
+/// gone (see `cline.rs`), and with it the only caller that ever asked for it.
+fn skills_note(cwd: &str) -> String {
     let root = std::path::Path::new(cwd).join(".claude").join("skills");
     let Ok(entries) = std::fs::read_dir(&root) else {
         return String::new();
@@ -1051,47 +1001,19 @@ fn skills_note(cwd: &str, inline: bool) -> String {
     }
     found.sort_by(|a, b| a.0.cmp(&b.0));
 
-    if !inline {
-        let mut out = String::from(
-            "=== SKILLS DISPONIBLES ===\n\
-             Instrucciones reutilizables ya presentes en este repositorio. Si alguna aplica a lo que \
-             se te pide, ábrela y síguela antes de improvisar.\n\n",
-        );
-        for (name, body) in found {
-            out.push_str(&format!(".claude/skills/{name}/SKILL.md"));
-            if let Some(description) = skill_description(&body) {
-                out.push_str(&format!(" — {description}"));
-            }
-            out.push('\n');
-        }
-        out.push('\n');
-        return out;
-    }
-
     let mut out = String::from(
         "=== SKILLS DISPONIBLES ===\n\
-         Instrucciones reutilizables del equipo, incluidas aquí enteras. Si alguna aplica a lo que \
-         se te pide, síguela antes de improvisar.\n\n",
+         Instrucciones reutilizables ya presentes en este repositorio. Si alguna aplica a lo que \
+         se te pide, ábrela y síguela antes de improvisar.\n\n",
     );
-    let mut budget = MAX_INLINE_SKILL_CHARS;
-    let mut skipped: Vec<String> = Vec::new();
     for (name, body) in found {
-        let body = body.trim();
-        // Whole or not at all: half a procedure read as if it were the whole one is worse than
-        // knowing the skill was left out.
-        if body.is_empty() || body.chars().count() > budget {
-            skipped.push(name);
-            continue;
+        out.push_str(&format!(".claude/skills/{name}/SKILL.md"));
+        if let Some(description) = skill_description(&body) {
+            out.push_str(&format!(" — {description}"));
         }
-        budget -= body.chars().count();
-        out.push_str(&format!("--- SKILL: {name} ---\n{body}\n\n"));
+        out.push('\n');
     }
-    if !skipped.is_empty() {
-        out.push_str(&format!(
-            "(No caben en este envío, y por tanto no las tienes: {}.)\n\n",
-            skipped.join(", ")
-        ));
-    }
+    out.push('\n');
     out
 }
 
@@ -1124,10 +1046,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     // provably on disk, and no flow can forget to mention them.
     if !engine.reads_claude_skills() {
         if let Some(cwd) = inv.cwd {
-            // A transport with no subprocess is a completion API: no file tools, so the skills have
-            // to arrive in the payload or not at all.
-            let inline = !matches!(engine.transport(), Transport::Subprocess);
-            inv.skills_note = skills_note(cwd, inline);
+            inv.skills_note = skills_note(cwd);
         }
     }
 
@@ -1140,25 +1059,6 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     // screen elsewhere believes is configured.
     if let Some(ctx) = &ctx {
         ai_runs::emit_engine(ctx, engine.label(), inv.model);
-    }
-
-    // HTTP engines don't spawn a process — `binary` is the base URL. Everything below (binary
-    // resolution, PATH, stdin piping) is subprocess-only, so hand off before any of it. They get
-    // no live output (a single request answers all at once) but they do get cancellation, by
-    // dropping the in-flight request.
-    match engine.transport() {
-        // Recorded here as well as at the bottom, and that is the whole reason this branch is
-        // written out rather than left as a bare `return`: an HTTP engine never reaches the
-        // subprocess path, so a recorder that lived only down there could never see one.
-        Transport::OpenAiCompatible { api_key } => {
-            let outcome = tokio::select! {
-                result = crate::openai::complete(binary, &api_key, &inv) => without_reasoning(mark_quota(result)),
-                _ = ai_runs::cancelled(&mut cancel) => Err(ai_runs::CANCELLED_MARKER.to_string()),
-            };
-            record_usage(engine, &inv, &outcome, None);
-            return outcome;
-        }
-        Transport::Subprocess => {}
     }
 
     // One attempt, and a second only for the engines that ask for it — see
@@ -1331,11 +1231,6 @@ pub(crate) fn aux_command(binary: &str) -> tokio::process::Command {
 /// for engines with no listing command ([`AiEngine::list_models_args`] is `None`) — no process is
 /// spawned in that case — so the frontend can fall back to its curated per-provider list.
 pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<String>, String> {
-    // The HTTP engines list over their own API, not via a CLI subcommand.
-    match engine.transport() {
-        Transport::OpenAiCompatible { api_key } => return crate::openai::list_models(binary, &api_key).await,
-        Transport::Subprocess => {}
-    }
     // A catalog the CLI already wrote to disk beats spawning it (and is the only option for CLIs
     // with no listing subcommand).
     if let Some(models) = engine.cached_models() {
@@ -1366,12 +1261,8 @@ pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<Stri
 ///
 /// Cached per binary for the life of the process: otherwise every chat turn would pay for an
 /// extra process spawn, and a CLI doesn't change version underneath a running app. A failed probe
-/// is cached too (as `None`), so a missing/older binary isn't re-spawned on every message. HTTP
-/// engines have no CLI to ask, so they report `None` and the stamp simply omits the version.
-pub async fn engine_version(engine: &dyn AiEngine, binary: &str) -> Option<String> {
-    if !matches!(engine.transport(), Transport::Subprocess) {
-        return None;
-    }
+/// is cached too (as `None`), so a missing/older binary isn't re-spawned on every message.
+pub async fn engine_version(binary: &str) -> Option<String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(hit) = cache.lock().ok().and_then(|c| c.get(binary).cloned()) {

@@ -11,7 +11,7 @@ let AI write your commits, find bugs and resolve conflicts — all in a fast, na
 And when you're done, test the endpoint you just changed and query the database behind it
 without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-1.16.2-6C5CE7)
+![version](https://img.shields.io/badge/version-1.16.3-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -55,7 +55,7 @@ if your code can't leave your machine.
 
 ## 🧠 AI, your way
 
-Pick from seven engines. CodeFlow **detects which ones you have installed** and tells you
+Pick from six engines. CodeFlow **detects which ones you have installed** and tells you
 what's missing, instead of leaving you to guess why something doesn't work.
 
 | Provider | How it works | Best for |
@@ -65,12 +65,11 @@ what's missing, instead of leaving you to guess why something doesn't work.
 | **Gemini** | CLI (Antigravity), with tools | A strong alternative on a Google account |
 | **Grok** | CLI, with tools | Resumes the exact conversation, not "the last one" |
 | **Open Code** | CLI, any model you configure | Mixing providers however you like |
-| **Cline** | CLI, with tools — 🔒 **local** via Ollama | Full privacy, offline, no cost — and it still edits files |
-| **OpenAI** | API key, editable endpoint | OpenRouter, Groq, DeepSeek, Azure or vLLM |
+| **Cline** | CLI, with tools — 🔒 **local** via Ollama, or any API you point it at | Full privacy offline, or OpenAI / OpenRouter / Groq / Azure with tools |
 
-The **OpenAI** entry speaks the usual `/v1/chat/completions` and the URL is yours to set,
-so any compatible service works through it without waiting for an entry of its own. The
-key goes to the system keychain.
+**Cline is also the door to every OpenAI-compatible endpoint.** `cline auth openai` — or any
+compatible base URL configured inside it — reaches the same services a bare API-key entry
+would, and reaches them *with tools*, so fixing a finding works there too.
 
 ### A different engine for every task
 
@@ -103,7 +102,6 @@ the chat itself, without going through Settings.
 > model (`cline auth ollama`) and everything above runs on your machine, offline and with no
 > cost per token — fixing findings included, because Cline drives the model instead of just
 > completing text.
-> *(Only the OpenAI entry is text-only: it has no tools, and the app hides what doesn't apply.)*
 
 ### Nothing is lost by looking away
 
@@ -290,9 +288,9 @@ Hit **+** in the sidebar and pick a folder with a Git repository. Repeat for as 
 you like and group them into workspaces.
 
 **2. Choose your AI assistant**
-**Settings › AI Assistant › Providers** shows the seven engines with their status
-(*Available* / *Not found*). Expand the one you want, check its binary — or its endpoint,
-for OpenAI — and pick a model. Mark it as **default** and you're done.
+**Settings › AI Assistant › Providers** shows the six engines with their status
+(*Available* / *Not found*). Expand the one you want, check its binary and pick a model.
+Mark it as **default** and you're done.
 
 **3. Tune it per task (optional)**
 Under **Model per task**, give each action a different engine. Everything starts on

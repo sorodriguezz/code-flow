@@ -2,8 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import { Gauge, RefreshCw } from "lucide-react";
 import { useT } from "../../state/languageStore";
-import { formatUsed, severityOf, tightestLimit, useQuotaStore } from "../../state/quotaStore";
-import { QuotaLimits } from "../ai/QuotaLimits";
+import { formatUsed, pillLimit, severityOf, useQuotaStore } from "../../state/quotaStore";
+import { QuotaLimits, limitTitle } from "../ai/QuotaLimits";
 
 const PANEL_WIDTH = 300;
 
@@ -19,24 +19,30 @@ const PANEL_WIDTH = 300;
  * `ai_quota.rs`); the moment a "% used" is computed from recorded tokens it becomes a guess wearing
  * a limit's clothes.
  *
- * **The pill shows the fullest limit.** One number in a status bar can only honestly be the worst
- * one; the panel is where "each limit" fits. Two things are excluded from that comparison and both
- * are about it being *one* number: providers this install does not route work to are never asked in
- * the first place (backend, `ai_quota_status`), and a window that is a slice of another window
- * already in the list does not compete with its own total (`wholeWindows`) — otherwise one model's
- * share of a week outranks the week, and the pill reports a plan the user is not spending.
+ * **The pill shows one limit: the one the user picked, or the fullest.** A picked one is drawn
+ * whatever its provider and whatever it reads — naming a plan is a statement of interest, and the
+ * whole point of picking is that the number stops moving between windows. With nothing picked the
+ * pill falls back to the worst, which is the only honest automatic answer for a single number, and
+ * two things are then excluded from that comparison: a provider this install routes no work to does
+ * not compete (`routed`, resolved in the backend) even though the panel below lists it, and a
+ * window that is a slice of another already in the list does not compete with its own total
+ * (`wholeWindows`) — otherwise one model's share of a week outranks the week, and the pill reports
+ * a plan the user is not spending. The picker lives in Settings → AI → Plan limits.
  *
  * **Quota is read on open, not on mount.** On macOS, reading Claude Code's token means reading
  * another application's keychain item, and that asks the user for permission the first time. That
  * prompt has to follow something they just did — which is also why the button renders before it has
  * a number to show.
  *
- * A provider that publishes no limit simply is not here. A row reading zero would be a claim, and
- * this has no way to make it.
+ * An engine that *can* publish a limit is listed whatever it answered — including nothing, which it
+ * says in words. One that cannot publish a limit at all is not here, because a bar reading zero for
+ * it would be a claim this has no way to make.
  */
 export function UsageMeter() {
   const t = useT();
   const quotaProviders = useQuotaStore((s) => s.providers);
+  const quotaRouted = useQuotaStore((s) => s.routed);
+  const quotaPick = useQuotaStore((s) => s.pick);
   const quotaLoading = useQuotaStore((s) => s.loading);
   const refreshQuota = useQuotaStore((s) => s.refresh);
   const watchQuota = useQuotaStore((s) => s.watch);
@@ -97,7 +103,12 @@ export function UsageMeter() {
     };
   }, [open]);
 
-  const tightest = tightestLimit(quotaProviders);
+  const shown = pillLimit(quotaProviders, quotaRouted, quotaPick);
+  // Which window it is, for the tooltip only. It stays out of the pill itself: on the automatic
+  // pick it changes as windows roll over, and a label flickering between "week" and "session" is
+  // harder to read than the bare number the panel explains.
+  const shownQuota = shown && quotaProviders.find((quota) => quota.provider === shown.provider);
+  const shownLabel = shown && shownQuota ? limitTitle(shownQuota, shown.limit, t) : null;
 
   return (
     <>
@@ -106,7 +117,7 @@ export function UsageMeter() {
         type="button"
         onClick={() => setOpen((wasOpen) => !wasOpen)}
         aria-expanded={open}
-        title={t("quota.title")}
+        title={shownLabel ? `${t("quota.title")} · ${shownLabel}` : t("quota.title")}
         className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] tabular-nums hover:bg-black/[0.05] dark:hover:bg-white/[0.08] ${
           open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
         }`}
@@ -116,20 +127,17 @@ export function UsageMeter() {
             panel is opened (see above), so a button that waited for a number would be waiting on a
             click it is the only way to make. The bare gauge is the invitation. */}
         <Gauge size={12} className="shrink-0" />
-        {tightest && (
-          // The limit furthest through, coloured only once it is worth looking at. Which limit it
-          // is stays out of the pill: it changes as windows roll over, and a label that flickers
-          // between "week" and "session" is harder to read than the bare number the panel explains.
+        {shown && (
           <span
             className={
-              severityOf(tightest.limit.used_percent) === "critical"
+              severityOf(shown.limit.used_percent) === "critical"
                 ? "text-[#ef4444]"
-                : severityOf(tightest.limit.used_percent) === "low"
+                : severityOf(shown.limit.used_percent) === "low"
                   ? "text-[#f59e0b]"
                   : undefined
             }
           >
-            {formatUsed(tightest.limit.used_percent)}
+            {formatUsed(shown.limit.used_percent)}
           </span>
         )}
       </button>

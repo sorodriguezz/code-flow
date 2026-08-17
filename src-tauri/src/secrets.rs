@@ -329,13 +329,6 @@ pub fn monday_token_key(slug: &str) -> String {
     format!("monday-token:{slug}")
 }
 
-/// API key for an HTTP AI provider (OpenAI and any OpenAI-compatible endpoint). Keyed per
-/// provider id so several can be configured side by side, and kept in the OS credential store
-/// rather than `app_settings` — unlike a binary path or a model id, this is a real credential.
-pub fn ai_api_key(provider: &str) -> String {
-    format!("ai-api-key:{provider}")
-}
-
 /// Passphrase the whole-install backup is sealed with. In the credential store rather than in
 /// `app_settings` for the obvious reason, and there is exactly one: the scheduled backup has to be
 /// able to write the file unattended, which it cannot do if the only copy is in the user's head.

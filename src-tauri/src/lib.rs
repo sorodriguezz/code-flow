@@ -26,7 +26,6 @@ mod github;
 mod gitlab;
 mod oauth;
 mod onedrive;
-mod openai;
 mod opencode;
 mod paths;
 mod power;
@@ -490,9 +489,6 @@ pub fn run() {
             commands::secrets_cmd::set_monday_token,
             commands::secrets_cmd::get_monday_token,
             commands::secrets_cmd::delete_monday_token,
-            commands::secrets_cmd::set_ai_api_key,
-            commands::secrets_cmd::has_ai_api_key,
-            commands::secrets_cmd::delete_ai_api_key,
             commands::claude_cmd::generate_commit_message,
             commands::claude_cmd::draft_pr_comment_reply,
             commands::claude_cmd::list_ai_models,

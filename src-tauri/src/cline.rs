@@ -418,7 +418,8 @@ fn qualify(provider: &ConfiguredProvider, listed: Vec<String>) -> Vec<String> {
     ids
 }
 
-/// One client for the process, cloned per call — same reasoning as [`crate::openai::client`].
+/// One client for the process, cloned per call: a fresh `reqwest::Client` per request rebuilds the
+/// whole rustls config and throws away the connection pool.
 fn client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new).clone()

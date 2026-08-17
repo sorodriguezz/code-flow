@@ -1,10 +1,11 @@
 //! The Codex CLI engine — OpenAI's models driven through `codex`, authenticated with a **ChatGPT
 //! subscription** rather than metered API credits.
 //!
-//! This is the counterpart to the `openai` engine, and the difference is billing, not vendor:
-//! `openai.rs` talks to `/v1/chat/completions` with an API key (pay per token), while this one
-//! shells out to the CLI the user logged into with `codex login` — the same arrangement Claude Code
-//! and Antigravity have, where the flat-fee plan you already pay for does the work.
+//! Billing is what makes it its own entry rather than "OpenAI": this shells out to the CLI the
+//! user logged into with `codex login`, so the flat-fee plan they already pay for does the work —
+//! the same arrangement Claude Code and Antigravity have. Metered API keys against
+//! `/v1/chat/completions` used to be a separate engine here and are now Cline's job, which reaches
+//! those same endpoints *with tools*.
 //!
 //! Headless contract (`codex exec --json`): runs one task to completion, streams progress to
 //! **stderr** and a JSONL event stream to **stdout**, with no approval prompts. Piped stdin is

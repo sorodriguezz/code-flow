@@ -132,7 +132,15 @@ export function TaskRouting() {
                   value={selected}
                   onChange={(v) => void setTaskProvider(task.key, v)}
                   options={[
-                    { value: "", label: t("settings.taskInherit", { provider: providerLabel(defaultProvider) }) },
+                    {
+                      value: "",
+                      label: t("settings.taskInherit", { provider: providerLabel(defaultProvider) }),
+                      // The inherit row names the default provider, so it gets that provider's mark
+                      // too: a row left on inherit is still pointed at something, and the glyph is
+                      // how the table is read at a glance — without it the untouched rows are the
+                      // only ones with a blank where every other row has a brand.
+                      leading: <ProviderGlyph providerId={defaultProvider} size={13} />,
+                    },
                     // Only what can actually run the task. This list used to keep every provider and
                     // grey out the ones that aren't installed, which made it half menu and half
                     // catalogue: "what is available to install" is the Providers tab's job, and it
