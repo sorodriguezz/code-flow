@@ -149,7 +149,12 @@ export interface DbConsoleAi {
   question: string;
   running: boolean;
   /** The **AI** run registry's id — this is `cancelAiRun`'s handle, not `dbCancel`'s. No statement
-   * runs on the database here, so there is nothing on that side to stop. */
+   * runs on the database here, so there is nothing on that side to stop.
+   *
+   * **Kept after the run ends**, which is why `running` exists separately: it is also the key the
+   * answer's engine chip looks the model up by, and `aiRunStore` deliberately holds `engineByRun`
+   * past the end of a run for exactly that read. Clearing it here used to blank that chip the
+   * instant the answer arrived — the one moment somebody wants to know which model wrote it. */
   runId: string | null;
   answer: DbAiAnswer | null;
   /** Kept on the panel rather than shown as a toast: an answer that failed is something you retry
@@ -1456,15 +1461,19 @@ export const useDbStore = create<DbState>((set, get) => ({
       }
     } finally {
       useAiRunStore.getState().finish(runId);
+      // `runId` stays: it is what the answer's engine chip resolves the model through. `running`
+      // is what says the run is over, and the cancel button keys off that, not off this id.
       patchTab<DbConsoleTab>(set, tabId, "console", (current) =>
-        current.ai ? { ...current, ai: { ...current.ai, running: false, runId: null } } : current,
+        current.ai ? { ...current, ai: { ...current.ai, running: false } } : current,
       );
     }
   },
 
   cancelConsoleAi: async (tabId) => {
     const tab = findTab<DbConsoleTab>(get, tabId, "console");
-    if (!tab?.ai?.runId) return;
+    // `running`, not just the id: the id outlives the run now (it is the answer chip's key), so
+    // asking to stop a finished run would be a request to cancel something already over.
+    if (!tab?.ai?.running || !tab.ai.runId) return;
     await useAiRunStore.getState().cancel(tab.ai.runId);
   },
 

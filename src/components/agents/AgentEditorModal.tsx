@@ -7,6 +7,7 @@ import { Select } from "../common/Select";
 import { CUSTOM_MODEL, Field, ModelField, customModelPlaceholder, modelOptionsFor, parseModel } from "../settings/modelPicker";
 import { upsertWorkspaceAgent } from "../../lib/tauri/commands";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useT } from "../../state/languageStore";
@@ -151,7 +152,7 @@ export function AgentEditorModal({
                 ...AI_PROVIDERS.filter((p) => p.available).map((p) => ({
                   value: p.id,
                   label: p.label ?? (p.labelKey ? t(p.labelKey) : p.id),
-                  icon: p.icon,
+                  leading: <ProviderGlyph providerId={p.id} size={13} />,
                 })),
               ]}
             />

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
+import { ProviderGlyph } from "./ProviderGlyph";
 import { useT } from "../../state/languageStore";
 import { formatResetIn, formatUsed, severityOf, useQuotaStore } from "../../state/quotaStore";
 import type { ProviderQuota, QuotaLimit } from "../../types/domain";
@@ -76,7 +77,6 @@ export function QuotaLimits({ compact = false }: { compact?: boolean }) {
 function ProviderBlock({ quota, compact }: { quota: ProviderQuota; compact: boolean }) {
   const t = useT();
   const provider = AI_PROVIDERS.find((p) => p.id === quota.provider);
-  const Icon = provider?.icon;
 
   // Which window kinds this provider splits further. Anthropic reports the whole week *and* one
   // model's slice of it, so its unscoped weekly row has to say it means all of them; opencode
@@ -90,7 +90,7 @@ function ProviderBlock({ quota, compact }: { quota: ProviderQuota; compact: bool
   return (
     <section>
       <div className="mb-1 flex items-center gap-1.5">
-        {Icon && <Icon size={12} className="shrink-0 text-[var(--cf-text-muted)]" />}
+        <ProviderGlyph providerId={quota.provider} size={12} />
         <span className="min-w-0 flex-1 truncate text-[11.5px] font-semibold text-[var(--cf-text)]">
           {provider?.label ?? quota.provider}
         </span>

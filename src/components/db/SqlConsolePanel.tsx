@@ -42,6 +42,13 @@ import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { RunEngineChip } from "../ai/AiRunLog";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
+import {
+  AI_PROVIDERS,
+  DEFAULT_AI_PROVIDER,
+  modelDisplayLabel,
+} from "../../lib/aiProviders";
+import { useAiProviderStore } from "../../state/aiProviderStore";
 import { Markdown } from "../common/Markdown";
 import { apiSaveFile } from "../../lib/tauri/apiCommands";
 import { EXPORT_EXTENSIONS, formatResult, type ExportFormat } from "../../lib/db/resultExport";
@@ -493,6 +500,10 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
  * side and put on stdin, and a proposed statement lands in the editor for the user to read and run
  * — nothing here executes anything.
  */
+/** The routing key this assistant runs under — the same one Settings' "Model per task" writes,
+ *  and `AiTask::DbQuery` on the Rust side. */
+const TASK = "db_query";
+
 function ConsoleAiBar({
   tab,
   ai,
@@ -506,6 +517,9 @@ function ConsoleAiBar({
   const store = useDbStore.getState();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [copied, setCopied] = useState(false);
+  const defaultProvider = useAiProviderStore((s) => s.providerId);
+  const routedProvider = useAiProviderStore((s) => s.taskProviders[TASK]);
+  const engineModel = useAiProviderStore((s) => s.taskModels[TASK]) ?? "";
 
   // Opening the bar puts the caret in it — the point of the shortcut is to type the question, and
   // a second ⌘I with it already open comes back here rather than closing what is being read.
@@ -525,6 +539,13 @@ function ConsoleAiBar({
   };
 
   const answer = ai.answer;
+
+  // Resolved through the same fallback chain the backend uses (`ai_provider_db_query` → the global
+  // default; `{provider}_db_query_model` → the provider's base model), so what this names cannot
+  // disagree with what actually runs.
+  const engineId = routedProvider?.trim() || defaultProvider || DEFAULT_AI_PROVIDER;
+  const engineMeta = AI_PROVIDERS.find((entry) => entry.id === engineId);
+  const engineLabel = engineMeta?.label ?? (engineMeta?.labelKey ? t(engineMeta.labelKey) : engineId);
 
   return (
     <div className="shrink-0 border-b border-[var(--cf-border)] bg-[var(--cf-surface-raised)]">
@@ -572,6 +593,19 @@ function ConsoleAiBar({
           <X size={13} />
         </ToolbarButton>
       </div>
+
+      {/* **One strip, three states, and they answer the same question at three moments.** Idle: the
+          engine this *will* run on. Running: the one it is on. Answered: the one that wrote it, from
+          `RunEngineChip`. Before this, the first and third were simply missing — the panel named an
+          engine only while it was busy, which is the moment nobody is reading. */}
+      {!ai.running && !answer && (
+        <div className="flex items-center gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+          <ProviderGlyph providerId={engineId} size={11} />
+          <span className="min-w-0 truncate">
+            {engineLabel} · {modelDisplayLabel(engineId, engineModel, t)}
+          </span>
+        </div>
+      )}
 
       {ai.running && (
         <div className="flex items-center gap-1.5 border-t border-[var(--cf-border)] px-2 py-1.5 text-[11.5px] text-[var(--cf-text-muted)]">

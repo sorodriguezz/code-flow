@@ -7,6 +7,7 @@ import { JiraSettings } from "./JiraSettings";
 import { MondaySettings } from "./MondaySettings";
 import { ActivePill } from "../common/ActivePill";
 import { HOSTING_PROVIDERS, type HostingProvider } from "../../lib/vcsProviders";
+import { BrandGlyph } from "../ai/ProviderGlyph";
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -89,7 +90,9 @@ export function GitHostingSettings() {
               {provider === id && <ActivePill layoutId="cf-vcs-provider-pill" />}
               {/* Above the pill, which covers the whole button. */}
               <span className="relative flex min-w-0 flex-1 items-center gap-1.5">
-                <Icon size={13} className="shrink-0" />
+                {/* The platform's own mark where one exists, and the registry's Lucide glyph
+                    where it does not — see `brandLogos.ts` on why Azure DevOps has none. */}
+                <BrandGlyph id={id} size={13} fallback={<Icon size={13} className="shrink-0" />} />
                 <span className="truncate">{label}</span>
                 {!available && (
                   <span className="ml-auto shrink-0 rounded bg-black/10 px-1 py-[1px] text-[9px] font-bold uppercase tracking-wide dark:bg-white/10">

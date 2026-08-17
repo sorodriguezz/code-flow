@@ -1,5 +1,5 @@
-import { Cpu } from "lucide-react";
 import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
+import { ProviderGlyph } from "./ProviderGlyph";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -81,7 +81,9 @@ export function ModelTag({
       // button it sits next to onto a second row. It truncates instead; the tooltip has it whole.
       className="inline-flex min-w-0 max-w-[10rem] shrink items-center gap-1 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 py-px text-[10px] text-[var(--cf-text-muted)]"
     >
-      <Cpu size={9} className="shrink-0" />
+      {/* The engine's own mark rather than a generic chip: the chip is capped to one fact, and
+          which engine it is has to survive that cap even when the model id takes the words. */}
+      <ProviderGlyph providerId={providerId} size={9} />
       <span className="min-w-0 truncate font-mono">{label}</span>
     </span>
   );

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Lock, Settings2 } from "lucide-react";
 import { AI_PROVIDERS, modelDisplayLabel } from "../../lib/aiProviders";
+import { ProviderGlyph } from "./ProviderGlyph";
 import { modelOptionsFor } from "../settings/modelPicker";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
@@ -51,7 +52,6 @@ export function ChatModelPicker({ liveModel, chatActive }: { liveModel: string |
   const shownModel = liveModel ?? configuredModel;
   const active = AI_PROVIDERS.find((p) => p.id === providerId) ?? AI_PROVIDERS[0];
   const activeLabel = active.label ?? (active.labelKey ? t(active.labelKey) : active.id);
-  const ActiveIcon = active.icon;
 
   const labelOf = (id: string) => {
     const p = AI_PROVIDERS.find((x) => x.id === id);
@@ -139,7 +139,7 @@ export function ChatModelPicker({ liveModel, chatActive }: { liveModel: string |
         title={t("chat.changeModelTitle")}
         className="flex max-w-full items-center gap-1 rounded-md border border-transparent px-1.5 py-0.5 text-[10.5px] text-[var(--cf-text-muted)] hover:border-[var(--cf-border)] hover:bg-black/[0.03] dark:hover:bg-white/[0.05]"
       >
-        <ActiveIcon size={11} className="shrink-0" />
+        <ProviderGlyph providerId={active.id} size={11} />
         {activeLabel}
         <span className="text-[var(--cf-text-muted)]/50">·</span>
         <span className="truncate font-medium text-[var(--cf-text)]/70">
@@ -176,7 +176,7 @@ export function ChatModelPicker({ liveModel, chatActive }: { liveModel: string |
                             : "text-[var(--cf-text)] hover:bg-black/[0.04] disabled:hover:bg-transparent dark:hover:bg-white/[0.06]"
                         }`}
                       >
-                        <p.icon size={12} className="shrink-0" />
+                        <ProviderGlyph providerId={p.id} size={12} />
                         <span className="min-w-0 flex-1 truncate">{p.label ?? labelOf(p.id)}</span>
                         {unavailable ? (
                           <span className="shrink-0 text-[10px] text-[var(--cf-warning)]">

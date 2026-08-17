@@ -32,6 +32,7 @@ import {
   setWorkspacePrompt,
 } from "../../lib/tauri/commands";
 import { modelRouteLabel } from "../ai/ModelTag";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
@@ -283,6 +284,7 @@ function TemplateRow({
   icon: Icon,
   label,
   sublabel,
+  sublabelProvider,
   custom,
   saved,
   open,
@@ -291,7 +293,11 @@ function TemplateRow({
 }: {
   icon: LucideIcon;
   label: string;
+  /** "Claude Code · Opus 5" — which engine current routing sends this template to. */
   sublabel: string;
+  /** That engine's provider id, so the line can carry its mark. Separate from `sublabel` because
+   *  the label is a sentence and the glyph is not part of it. */
+  sublabelProvider?: string;
   custom: boolean;
   saved: boolean;
   open: boolean;
@@ -309,7 +315,10 @@ function TemplateRow({
         <Icon size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[12.5px] font-medium text-[var(--cf-text)]">{label}</span>
-          <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{sublabel}</span>
+          <span className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)]">
+            {sublabelProvider && <ProviderGlyph providerId={sublabelProvider} size={11} />}
+            <span className="min-w-0 truncate">{sublabel}</span>
+          </span>
         </span>
         {saved ? (
           <span className="shrink-0 text-[10px] font-medium text-[var(--cf-success)]">{t("settings.saved")}</span>
@@ -341,12 +350,14 @@ function WorkspacePromptRow({
   label,
   hint,
   engine,
+  engineProvider,
 }: {
   kind: string;
   icon: LucideIcon;
   label: string;
   hint: string;
   engine: string;
+  engineProvider: string;
 }) {
   const t = useT();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
@@ -418,6 +429,7 @@ function WorkspacePromptRow({
       icon={icon}
       label={label}
       sublabel={engine}
+      sublabelProvider={engineProvider}
       custom={custom}
       saved={saved}
       open={open}
@@ -549,6 +561,8 @@ export function PromptTemplates() {
    * the hook, because this is called once per template inside a map. */
   const engineFor = (task: string) =>
     modelRouteLabel(taskProviders[task]?.trim() || defaultProvider, taskModels[task] ?? "", t);
+  /** The same routing decision as `engineFor`, as the id its mark is looked up by. */
+  const providerFor = (task: string) => taskProviders[task]?.trim() || defaultProvider;
 
   if (!loaded) {
     return (
@@ -573,6 +587,7 @@ export function PromptTemplates() {
             icon={tpl.icon}
             label={t(tpl.labelKey)}
             sublabel={engineFor(tpl.task)}
+            sublabelProvider={providerFor(tpl.task)}
             custom={isCustom}
             saved={savedFlash === tpl.key}
             open={isOpen}
@@ -625,6 +640,7 @@ export function PromptTemplates() {
                 label={t(prompt.labelKey)}
                 hint={t(prompt.hintKey)}
                 engine={engineFor(prompt.task)}
+                engineProvider={providerFor(prompt.task)}
               />
             ))}
           </div>

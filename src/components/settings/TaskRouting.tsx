@@ -3,6 +3,7 @@ import { AlertTriangle } from "lucide-react";
 import { getSetting, setSetting } from "../../lib/tauri/commands";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { AI_PROVIDERS, isAgenticProvider } from "../../lib/aiProviders";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { AI_TASKS } from "../../lib/aiTasks";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
@@ -153,6 +154,9 @@ export function TaskRouting() {
                         return {
                           value: p.id,
                           label: missing ? `${providerLabel(p.id)} — ${t("settings.providerMissing")}` : providerLabel(p.id),
+                          // `leading`, not `icon`: a brand mark whose colour is the information,
+                          // which is the distinction `Select` draws between the two slots.
+                          leading: <ProviderGlyph providerId={p.id} size={13} />,
                         };
                       }),
                   ]}
