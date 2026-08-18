@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
-import { DEFAULT_ICON_RULES, type IconRule } from "../lib/icons/rules";
+import { DEFAULT_ICON_RULES, parseIconRules, type IconRule } from "../lib/icons/rules";
 import { declareIconIds } from "../lib/icons/catalog";
 import {
   BUILT_IN_PROFILES,
@@ -66,6 +66,13 @@ interface IconRulesState {
   addProfile: (name: string) => Promise<void>;
   /** A copy of `id`, which is how you start from Angular and change four rules. */
   duplicateProfile: (id: string, name: string) => Promise<void>;
+  /** A profile that arrived as a file: it is ADDED, never merged into the active one. The reading
+   * and validating is `lib/icons/profileFile.ts`; this is only the write. */
+  importProfile: (incoming: {
+    name: string;
+    rules: IconRule[];
+    defaultFolderIcon: string | null;
+  }) => Promise<void>;
   renameProfile: (id: string, name: string) => Promise<void>;
   removeProfile: (id: string) => Promise<void>;
   /**
@@ -82,27 +89,6 @@ interface IconRulesState {
   resetAll: () => Promise<void>;
 }
 
-/** Anything stored by an older build, or hand-edited, has to survive being wrong. A rule missing a
- * field is dropped rather than defaulted: a half-read rule that silently matched everything would
- * repaint the whole tree with one icon. */
-function parseRules(raw: unknown): IconRule[] | null {
-  if (!Array.isArray(raw)) return null;
-  return raw
-    .filter(
-      (entry): entry is IconRule =>
-        !!entry &&
-        typeof entry === "object" &&
-        typeof (entry as IconRule).id === "string" &&
-        typeof (entry as IconRule).pattern === "string" &&
-        typeof (entry as IconRule).icon === "string" &&
-        ((entry as IconRule).target === "file" || (entry as IconRule).target === "folder") &&
-        ["suffix", "name", "prefix", "contains", "extension"].includes(
-          (entry as IconRule).match as string,
-        ),
-    )
-    .map(migrateRule);
-}
-
 /** The same tolerance one level up. A profile without a usable rule list is dropped whole rather
  * than kept as an empty one the user would have to work out how to fix. */
 function parseProfiles(raw: string): IconProfile[] | null {
@@ -113,7 +99,7 @@ function parseProfiles(raw: string): IconProfile[] | null {
     for (const entry of parsed) {
       if (!entry || typeof entry !== "object") continue;
       const candidate = entry as Partial<IconProfile>;
-      const rules = parseRules(candidate.rules);
+      const rules = parseIconRules(candidate.rules);
       if (typeof candidate.id !== "string" || typeof candidate.name !== "string" || !rules) continue;
       profiles.push({
         id: candidate.id,
@@ -129,16 +115,6 @@ function parseProfiles(raw: string): IconProfile[] | null {
   } catch {
     return null;
   }
-}
-
-/**
- * `extension` was the fifth match kind before patterns were written as one string. It is exactly a
- * suffix of `.` plus the extension — `ts` and `*.ts` match the same set — so a stored rule is
- * rewritten rather than dropped, and nobody's icons move.
- */
-function migrateRule(rule: IconRule): IconRule {
-  if ((rule.match as string) !== "extension") return rule;
-  return { ...rule, match: "suffix", pattern: `.${rule.pattern.replace(/^\./, "")}` };
 }
 
 /**
@@ -250,7 +226,7 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
       let legacy: IconRule[] | null = null;
       if (legacyRaw !== null) {
         try {
-          legacy = parseRules(JSON.parse(legacyRaw) as unknown);
+          legacy = parseIconRules(JSON.parse(legacyRaw) as unknown);
         } catch {
           legacy = null;
         }
@@ -332,6 +308,41 @@ export const useIconRulesStore = create<IconRulesState>((set, get) => {
       await persist(next);
       const { repoPath } = get();
       if (repoPath) await setSetting(selectionKey(repoPath), copy.id).catch(() => {});
+    },
+
+    /**
+     * A profile read out of a file, added to the list and selected here.
+     *
+     * **The file's own id is ignored and a fresh one minted.** A file claiming `id: "angular"` would
+     * make `shippedProfile` answer for it, so the panel would offer to restore the factory rules
+     * over somebody else's list and then do it; and two profiles sharing an id make `profileById`
+     * answer with the first, leaving the second unreachable from the selector that just created it.
+     *
+     * **It is added, not merged.** Folding an imported list into the active one has no correct
+     * answer — the list is first-match-wins, so "before or after the rules already there" changes
+     * which icons the tree draws and neither choice is the one the user meant. And it would not be
+     * undoable: `persist` rewrites the only copy there is. Adding a profile is undone by deleting
+     * it, which is a menu entry away.
+     *
+     * **`loaded` gates the write.** Until `init` lands, `profiles` is still `BUILT_IN_PROFILES`;
+     * persisting from there would write the three shipped profiles plus this one over a settings row
+     * that has the user's own, and the read still in flight would arrive to a blob already replaced.
+     * The panel disables the menu entry for the same reason — this is the belt to that pair of
+     * braces, because the store is where the write actually happens.
+     */
+    importProfile: async (incoming) => {
+      if (!get().loaded) return;
+      const profile: IconProfile = {
+        id: newProfileId(),
+        name: incoming.name.trim() || "Profile",
+        rules: incoming.rules.map((rule) => ({ ...rule })),
+        defaultFolderIcon: incoming.defaultFolderIcon,
+      };
+      const next = [...get().profiles, profile];
+      set(applied(next, profile.id));
+      await persist(next);
+      const { repoPath } = get();
+      if (repoPath) await setSetting(selectionKey(repoPath), profile.id).catch(() => {});
     },
 
     renameProfile: async (id, name) => {

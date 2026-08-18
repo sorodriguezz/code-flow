@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { ShelfCard, ShelfRow } from "../common/ShelfCard";
 import { ICON_BUTTON, TagPill, bookInk, readingMinutes, relativeTime } from "./notesChrome";
 import type { Note, NoteBookRow, NoteSort } from "../../types/notes";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -197,31 +198,43 @@ export function NoteGallery() {
           {!searching && shelf.length > 0 && (
             galleryView === "grid" ? (
               <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
-                {shelf.map((book) => (
-                  <BookCard
-                    key={book.id}
-                    book={book}
-                    // The whole subtree's, not this book's own: a book showing "0" while holding
-                    // forty notes one level down is the one number a closed book must not report.
-                    count={countWithin(notes, books, book.id)}
-                    onOpen={() => setBookFilter(book.id)}
-                    label={t("notes.openBook", { name: book.name })}
-                    countLabel={t("notes.noteCount", { n: countWithin(notes, books, book.id) })}
-                  />
-                ))}
+                {shelf.map((book) => {
+                  // The whole subtree's, not this book's own: a book showing "0" while holding
+                  // forty notes one level down is the one number a closed book must not report.
+                  //
+                  // Held in a variable because it used to be two calls — one for the test, one for
+                  // the sentence — which walked every note in the workspace twice per card to print
+                  // a single number.
+                  const count = countWithin(notes, books, book.id);
+                  return (
+                    <ShelfCard
+                      key={book.id}
+                      icon={Book}
+                      name={book.name}
+                      tint={bookInk(book.color)}
+                      meta={count > 0 ? [t("notes.noteCount", { n: count })] : []}
+                      label={t("notes.openBook", { name: book.name })}
+                      onOpen={() => setBookFilter(book.id)}
+                    />
+                  );
+                })}
               </div>
             ) : (
               <div className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-md border border-[var(--cf-border)]">
-                {shelf.map((book) => (
-                  <BookListRow
-                    key={book.id}
-                    book={book}
-                    count={countWithin(notes, books, book.id)}
-                    onOpen={() => setBookFilter(book.id)}
-                    label={t("notes.openBook", { name: book.name })}
-                    countLabel={t("notes.noteCount", { n: countWithin(notes, books, book.id) })}
-                  />
-                ))}
+                {shelf.map((book) => {
+                  const count = countWithin(notes, books, book.id);
+                  return (
+                    <ShelfRow
+                      key={book.id}
+                      icon={Book}
+                      name={book.name}
+                      tint={bookInk(book.color)}
+                      meta={count > 0 ? [t("notes.noteCount", { n: count })] : []}
+                      label={t("notes.openBook", { name: book.name })}
+                      onOpen={() => setBookFilter(book.id)}
+                    />
+                  );
+                })}
               </div>
             )
           )}
@@ -396,82 +409,6 @@ function Crumb({
     </button>
   );
 }
-
-const BookCard = memo(function BookCard({
-  book,
-  count,
-  onOpen,
-  label,
-  countLabel,
-}: {
-  book: NoteBookRow;
-  count: number;
-  onOpen: () => void;
-  label: string;
-  countLabel: string;
-}) {
-  const tint = bookInk(book.color);
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-label={label}
-      className="group flex min-h-[92px] cursor-pointer flex-col justify-between gap-3 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] p-3 text-left transition-colors hover:border-[var(--cf-accent)]"
-    >
-      <div className="flex items-start gap-2">
-        <Book size={15} className="mt-px shrink-0" style={tint ? { color: tint } : undefined} />
-        <h3 className="min-w-0 flex-1 truncate text-[12.5px] font-semibold text-[var(--cf-text)]">
-          {book.name}
-        </h3>
-        <ChevronRight
-          size={13}
-          className="mt-px shrink-0 text-[var(--cf-text-muted)] transition-transform group-hover:translate-x-0.5"
-          aria-hidden
-        />
-      </div>
-      <span className="text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
-        {count > 0 ? countLabel : ""}
-      </span>
-    </button>
-  );
-});
-
-const BookListRow = memo(function BookListRow({
-  book,
-  count,
-  onOpen,
-  label,
-  countLabel,
-}: {
-  book: NoteBookRow;
-  count: number;
-  onOpen: () => void;
-  label: string;
-  countLabel: string;
-}) {
-  const tint = bookInk(book.color);
-  return (
-    <button
-      type="button"
-      onClick={onOpen}
-      aria-label={label}
-      className="group flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-    >
-      <Book size={14} className="shrink-0" style={tint ? { color: tint } : undefined} />
-      <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-[var(--cf-text)]">
-        {book.name}
-      </span>
-      <span className="shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
-        {count > 0 ? countLabel : ""}
-      </span>
-      <ChevronRight
-        size={13}
-        className="shrink-0 text-[var(--cf-text-muted)] transition-transform group-hover:translate-x-0.5"
-        aria-hidden
-      />
-    </button>
-  );
-});
 
 const NoteCard = memo(function NoteCard({
   note,

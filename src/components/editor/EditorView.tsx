@@ -17,6 +17,7 @@ import {
   FolderInput,
   GitBranch,
   Keyboard,
+  ListTree,
   PanelRightClose,
   Search,
   Tags,
@@ -29,6 +30,7 @@ import { BookmarksPanel } from "./BookmarksPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
 import { IconRulesPanel } from "./IconRulesPanel";
+import { FileNestingPanel } from "./FileNestingPanel";
 import { clearFullDiffCache, EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
 import { ChangesPanel } from "../git/ChangesPanel";
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
@@ -162,7 +164,7 @@ export function EditorView() {
   const [saving, setSaving] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<
-    "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons"
+    "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons" | "nesting"
   >("files");
   /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
    * step into while committing, not a layout preference — the editor's resting state is code. */
@@ -985,10 +987,10 @@ export function EditorView() {
               )}
             </button>
           ))}
-          {/* Below the panels, above the actions. The five above read the code; this one only
-              changes how the tree draws it, so grouping it with them put a preference among five
-              views of the repository. `mt-auto` moves here with it — this is now the first item of
-              the bottom cluster. */}
+          {/* Below the panels, above the actions. The five above read the code; these two only
+              change how the tree draws it, so grouping them with those put preferences among five
+              views of the repository. `mt-auto` stays on the first of the pair and nowhere else —
+              it is what opens the gap, and a second one would split the cluster in half. */}
           <button
             onClick={() => setSidePanel("icons")}
             title={t("icons.title")}
@@ -1000,6 +1002,18 @@ export function EditorView() {
             }`}
           >
             <Palette size={15} />
+          </button>
+          <button
+            onClick={() => setSidePanel("nesting")}
+            title={t("nesting.title")}
+            aria-label={t("nesting.title")}
+            className={`flex h-7 w-7 items-center justify-center rounded-md ${
+              sidePanel === "nesting"
+                ? "text-[var(--cf-accent)]"
+                : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            }`}
+          >
+            <ListTree size={15} />
           </button>
           {/* Go to file lives here rather than in a strip of its own: it's an action, not a
               panel, and it has to be reachable with no file open — which the tab bar isn't. */}
@@ -1044,6 +1058,8 @@ export function EditorView() {
             <BookmarksPanel repoPath={project.local_path} onOpen={openHit} />
           ) : sidePanel === "icons" ? (
             <IconRulesPanel />
+          ) : sidePanel === "nesting" ? (
+            <FileNestingPanel />
           ) : sidePanel === "debug" ? (
             <DebugPanel
               repoPath={project.local_path}
@@ -1058,6 +1074,7 @@ export function EditorView() {
           ) : (
             <FileTree
               repoPath={project.local_path}
+              projectId={project.id}
               selectedPath={activePath}
               onSelectFile={selectFileInTree}
               onOpenFile={openFileInTree}

@@ -15,6 +15,7 @@ import {
   THUMBNAIL_MAX_CHARS,
 } from "../../lib/diagrams/embed";
 import { bytesFromDataUri, saveBytes, type ExportFormat } from "../../lib/diagrams/exportFile";
+import { exportMessage } from "../../lib/diagrams/exportOptions";
 import { useDiagramsStore } from "../../state/diagramsStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -386,20 +387,19 @@ export function DrawioFrame({
   const pendingExport = useDiagramsStore((s) => s.pendingExport);
   useEffect(() => {
     if (!pendingExport || !ready) return;
-    awaitingFile.current = pendingExport;
+    awaitingFile.current = pendingExport.format;
     useDiagramsStore.getState().clearPendingExport();
     // Nothing is rendered for `.drawio`, so the picture options are left off rather than sent and
     // ignored — a background and a scale on a text export would only read as if they did something.
+    // That is also why `.drawio` is the one format the export menu does not open a dialog for:
+    // there would be nothing to ask about. The rule used to live only in this comment, and now
+    // lives in the type — `PendingExport` is a union in which a `.drawio` request has no options
+    // field to carry and a picture request cannot arrive without one.
     postToEditor(
       frame.current,
-      pendingExport === "drawio"
+      pendingExport.format === "drawio"
         ? { action: "export", format: "xml" }
-        : {
-            action: "export",
-            format: pendingExport,
-            background: pendingExport === "svg" ? "none" : "#ffffff",
-            scale: 2,
-          },
+        : exportMessage(pendingExport.format, pendingExport.options),
     );
   }, [pendingExport, ready]);
 

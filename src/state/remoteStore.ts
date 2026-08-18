@@ -248,13 +248,29 @@ interface RemoteState {
   /** Filter over the tree. Session state — a search is a thing you are doing, not a preference. */
   query: string;
   /**
-   * Tags a host must carry to show, ANDed together.
+   * Tags a host must carry to show, combined according to `tagMode`.
    *
-   * AND rather than OR because tags cross the group axis: picking `postgres` and `prod` is asking
+   * The default is AND, because tags cross the group axis: picking `postgres` and `prod` is asking
    * for the production database boxes, not for everything that is either. OR is what the search
    * box already does across every field.
    */
   tagFilter: string[];
+  /**
+   * How two or more selected tags combine.
+   *
+   * AND is right for tags that describe *different things about one machine* — `postgres` and
+   * `prod` — and it is the reading the filter shipped with. It is exactly wrong for tags that name
+   * points on one axis: environments, regions, tiers. Nothing is both DESA and QA, so picking two
+   * of those under AND is guaranteed to return nothing, and a filter that answers "none" to a
+   * perfectly sensible question reads as broken rather than as strict.
+   *
+   * Neither reading can be inferred from the tags themselves — the same estate holds both kinds at
+   * once — so this is a switch rather than a cleverer default. It stays on AND so that no existing
+   * filter changes meaning by itself; the empty state is what offers the other one, at the moment
+   * it is the answer.
+   */
+  tagMode: "all" | "any";
+  setTagMode: (mode: "all" | "any") => void;
   /**
    * How the main area lists hosts when no session is open.
    *
@@ -468,10 +484,22 @@ export function groupHosts(
 
 /** Whether a host matches the tree filter. Matches the name, the group and the address, because
  *  all three are things people remember a machine by — and an IP is often the only one. */
-export function hostMatches(host: RemoteHostRow, query: string, tagFilter: string[] = []): boolean {
+export function hostMatches(
+  host: RemoteHostRow,
+  query: string,
+  tagFilter: string[] = [],
+  tagMode: "all" | "any" = "all",
+): boolean {
   const spec = parseHostSpec(host);
-  // Every selected tag, not any — see `tagFilter`.
-  if (tagFilter.length > 0 && !tagFilter.every((tag) => spec.tags.includes(tag))) return false;
+  // Every selected tag, or any one of them — see `tagMode`. The default keeps every existing caller
+  // on the stricter reading rather than silently widening a filter by adding a parameter.
+  if (tagFilter.length > 0) {
+    const ok =
+      tagMode === "any"
+        ? tagFilter.some((tag) => spec.tags.includes(tag))
+        : tagFilter.every((tag) => spec.tags.includes(tag));
+    if (!ok) return false;
+  }
   const needle = query.trim().toLowerCase();
   if (!needle) return true;
   // The account name too, because a cloud row has no `host` — searching an estate for
@@ -515,6 +543,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   collapsedGroups: [],
   query: "",
   tagFilter: [],
+  // Not cleared with the filter when the workspace changes: this is how you read a filter, not one
+  // of the filters, and it is inert until tags are picked again.
+  tagMode: "all",
   hostView: "grid",
   history: [],
   latency: null,
@@ -621,6 +652,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
     })),
 
   clearTags: () => set({ tagFilter: [] }),
+
+  setTagMode: (tagMode) => set({ tagMode }),
 
   setHostView: (hostView) => {
     set({ hostView });

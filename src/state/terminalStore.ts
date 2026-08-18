@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { closeTerminal, getSetting, openTerminal, setSetting } from "../lib/tauri/commands";
+import { closeTerminal, getSetting, openTerminal, setSetting, writeTerminal } from "../lib/tauri/commands";
 import { onTerminalExit, onTerminalOutput } from "../lib/tauri/events";
 
 export interface TerminalTab {
@@ -10,6 +10,15 @@ export interface TerminalTab {
    * gone. It therefore lives exactly as long as this store does — until the tab is closed or the
    * app exits. */
   title: string;
+  /** Where the shell was started. The dock never draws it; it exists so that anything wanting to
+   * *reuse* a terminal can tell which one is already standing in the right directory. Not
+   * persisted, for the same reason the title isn't — it describes a live shell. */
+  cwd: string;
+  /** Set only on shells the app opened in order to run something specific — see `runCommand`.
+   * Its absence is what protects the terminal the user is typing in: a reuse lookup can only ever
+   * match a shell this store opened on purpose, never one somebody is halfway through a command
+   * in. */
+  reuseKey?: string;
 }
 
 interface ProjectTerminals {
@@ -46,7 +55,22 @@ interface TerminalState {
   /** With `split: true`, adds the new terminal to whichever group is currently active instead
    * of starting a new one — otherwise every new terminal gets its own group. `profileId` picks
    * the shell; omitted, the backend resolves the configured default. */
-  openNew: (projectId: string, cwd: string, opts?: { split?: boolean; profileId?: string }) => Promise<void>;
+  openNew: (
+    projectId: string,
+    cwd: string,
+    opts?: { split?: boolean; profileId?: string; reuseKey?: string; title?: string },
+  ) => Promise<string>;
+  /**
+   * Runs one line in the dock, reusing the terminal this same action opened for it last time.
+   *
+   * The unit of reuse is the caller's `reuseKey`, not the directory: two things run from the same
+   * folder are still two things, and typing `build` into the shell where `dev` is still running
+   * would send it to the dev server's stdin instead of to a prompt.
+   */
+  runCommand: (
+    projectId: string,
+    opts: { cwd: string; command: string; reuseKey: string; title: string },
+  ) => Promise<void>;
   close: (projectId: string, id: string) => Promise<void>;
   /** Shows the group `id` belongs to — never changes group membership by itself. */
   focus: (projectId: string, id: string) => void;
@@ -205,10 +229,11 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     const { id, profile_name } = await openTerminal(cwd, opts?.profileId);
     set((s) => {
       const proj = s.byProject[projectId] ?? emptyProject();
-      // The shell's own name is the useful label; `Terminal N` remains the fallback for a
-      // profile that somehow reports none, so a tab is never nameless.
-      const title = profile_name.trim() || `Terminal ${proj.nextNumber}`;
-      const tabs = [...proj.tabs, { id, title }];
+      // A caller that opened this shell *for* something says what it is for; otherwise the shell's
+      // own name is the useful label, with `Terminal N` remaining the fallback for a profile that
+      // somehow reports none, so a tab is never nameless.
+      const title = opts?.title?.trim() || profile_name.trim() || `Terminal ${proj.nextNumber}`;
+      const tabs = [...proj.tabs, { id, title, cwd, reuseKey: opts?.reuseKey }];
       const current = activeGroup(proj);
       const groups =
         opts?.split && current.length > 0
@@ -220,6 +245,42 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       };
     });
     void setSetting(PANEL_OPEN_KEY, "1");
+    // Returned so a caller that has something to type can address the shell it just asked for,
+    // rather than going back to the store and guessing which of the tabs is the new one.
+    return id;
+  },
+
+  runCommand: async (projectId, { cwd, command, reuseKey, title }) => {
+    // `\r`, not `\n`: a pty is a terminal, and what a terminal receives when Enter is pressed is a
+    // carriage return — the same point `remoteStore.runSnippet` makes. `\n` types a literal
+    // newline into the line editor on some shells instead of submitting the line.
+    const line = `${command}\r`;
+    const existing = get().byProject[projectId]?.tabs.find((tab) => tab.reuseKey === reuseKey);
+    if (existing) {
+      get().focus(projectId, existing.id);
+      // `focus` only decides which group the dock *would* draw; it does not open the dock. Without
+      // this, running a script while the panel is collapsed appears to do nothing at all.
+      set({ panelOpen: true });
+      void setSetting(PANEL_OPEN_KEY, "1");
+      try {
+        await writeTerminal(existing.id, line);
+        return;
+      } catch {
+        // A rejected write is the signal that this shell is gone, not a failure worth showing.
+        // `terminal.rs` removes a session from its registry the moment the child dies — precisely
+        // so the next write answers "no such terminal session" instead of writing into a master fd
+        // with nothing on the other end — so this is what a user typing `exit` looks like from
+        // here. The dead tab is closed before opening its replacement: leaving it would put two
+        // tabs in the dock carrying the same `reuseKey`, and the next run would find the corpse
+        // again.
+        await get().close(projectId, existing.id);
+      }
+    }
+    const id = await get().openNew(projectId, cwd, { reuseKey, title });
+    // Written immediately, with no wait for a prompt. `open_terminal` returns with the child
+    // already spawned, so these bytes sit in the tty's input buffer exactly like anything typed
+    // while a slow `.zshrc` is still running — the shell reads them once it starts reading.
+    await writeTerminal(id, line);
   },
 
   close: async (projectId, id) => {

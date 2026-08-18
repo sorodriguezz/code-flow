@@ -280,7 +280,22 @@ export function declareIconIds(ids: Iterable<string | null | undefined>): void {
  * that point is a pruned copy that `loadSet` would happily consider "loaded". The re-read is a
  * webview cache hit — these are local assets — behind the picker's existing not-ready state.
  */
+/**
+ * How many callers currently need the whole catalogue.
+ *
+ * A count and not a boolean, because there are two borrowers and they overlap. The picker holds it
+ * for as long as it is on screen; `knownIconIds` holds it for the length of one import. With a
+ * single flag, whichever finished first handed back a catalogue the other was still reading — the
+ * picker kept `ready === true`, nothing told it otherwise, and its next keystroke searched the
+ * sixty-odd glyphs the tree had left instead of the ~3,600 it was showing a moment earlier.
+ *
+ * Every `loadIconCatalog` must therefore be paired with exactly one `releaseIconCatalog`, mount
+ * with unmount and call with `finally`.
+ */
+let borrowers = 0;
+
 export function loadIconCatalog(): Promise<void> {
+  borrowers += 1;
   if (pruning) {
     pruning = false;
     for (const prefix of prunedSets) {
@@ -304,6 +319,12 @@ export function loadIconCatalog(): Promise<void> {
  * not to be is recovered by `iconEntry`'s widen — the same path a cold start already uses.
  */
 export function releaseIconCatalog(): void {
+  // Clamped rather than allowed to go negative: a release with no matching borrow still means "I am
+  // done", and letting the count drift below zero would make the *next* genuine borrow release one
+  // short and prune under a live reader.
+  borrowers = Math.max(0, borrowers - 1);
+  // Somebody else is still reading it. The last one out prunes.
+  if (borrowers > 0) return;
   if (pruning || !catalog) return;
   pruning = true;
   for (const id of [...catalog.keys()]) {
@@ -436,4 +457,49 @@ export function searchIcons(query: string, limit = 240): CatalogIcon[] {
 export function openedVariant(id: string): string | null {
   if (id.endsWith("-opened")) return id;
   return catalog?.has(`${id}-opened`) ? `${id}-opened` : null;
+}
+
+/**
+ * Which of these ids the catalogue actually has — or `null` when that cannot be answered yet.
+ *
+ * For the profile importer, which has to decide whether a rule arriving from another machine names
+ * a glyph this build can draw. Three things make it more than `catalog.has()`:
+ *
+ * **`null` is not "none of them".** `loadSet` swallows a failed fetch on purpose (a degraded
+ * explorer beats a broken one), so a caller that could not tell the difference would validate a
+ * perfectly good file against an empty map while offline and report every one of its twelve rules
+ * as unknown. Answering `null` when the sets did not land lets the importer skip the icon check
+ * entirely, which is the right degradation: `iconEntry`'s widen recovers the glyphs later anyway.
+ *
+ * **`pruning` is read *before* the load, not `iconCatalogReady()` after it.** The picker is the
+ * other owner of that flag, and releasing a catalogue we did not open would leave an open picker
+ * searching the ~60 glyphs the tree kept. The raw flag is the only thing that says whether the full
+ * read was ours to give back.
+ *
+ * **`declareIconIds` runs before the release, not after and not at the call site.** At this instant
+ * the catalogue is whole and `prunedSets` is empty, so declaring only widens `wanted` and schedules
+ * no re-read — and the release that follows then keeps exactly the ids just confirmed. Done the
+ * other way round the store would declare against an already-pruned map and buy an 11 MB re-fetch
+ * to get twenty glyphs back.
+ *
+ * `iconEntry` is deliberately not used to answer this: it would write every unknown id into `wanted`
+ * and `attemptedWiden` permanently, so one bad import would leave the allowlist carrying ids that
+ * are in no set at all for the rest of the session.
+ */
+export async function knownIconIds(ids: Iterable<string>): Promise<Set<string> | null> {
+  await loadIconCatalog();
+  try {
+    // A set that never arrived — offline, or the fetch failed. `null` means "cannot say", and the
+    // caller reads that as "do not filter", which is the safe answer for an import.
+    if (!iconCatalogReady()) return null;
+    const known = new Set<string>();
+    for (const id of ids) if (catalog?.has(id)) known.add(id);
+    declareIconIds(known);
+    return known;
+  } finally {
+    // `finally`, because the early return above used to skip the hand-back entirely: one failed
+    // import left the catalogue out of pruned mode for the rest of the session, so every later
+    // widen materialised whole sets — the ~10 MB `releaseIconCatalog` exists to avoid.
+    releaseIconCatalog();
+  }
 }

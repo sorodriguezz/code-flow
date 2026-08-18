@@ -24,7 +24,12 @@ import {
 } from "../lib/tauri/diagramsCommands";
 import { builtInTemplates, toTemplate } from "../lib/diagrams/builtinTemplates";
 import { DEFAULT_FORMAT, emptyDoc } from "../lib/diagrams/doc";
-import type { ExportFormat } from "../lib/diagrams/exportFile";
+import {
+  DEFAULT_EXPORT_OPTIONS,
+  parseExportOptions,
+  type ImageExportOptions,
+  type PendingExport,
+} from "../lib/diagrams/exportOptions";
 import { appendCells } from "../lib/diagrams/mxgraph";
 import { descendantIds } from "../lib/diagrams/tree";
 // Reused rather than copied: these take `string[]` and `{ tags: string[] }[]`, so nothing about
@@ -97,6 +102,11 @@ const galleryViewKey = (workspaceId: string) => `diagrams_gallery_view:${workspa
  *  `templates` is empty" — a workspace someone has deleted every template from must stay empty,
  *  not have the starters reappear on the next launch. */
 const templatesSeededKey = (workspaceId: string) => `diagrams_templates_seeded:${workspaceId}`;
+/** The export dialog's last answer. Deliberately the odd one out among the keys above: no
+ *  `:${workspaceId}` suffix, because a 20-point border or a transparent background is a habit of
+ *  the person exporting, not a property of the project they happen to have open. Scoping it per
+ *  workspace would mean re-answering the same dialog the same way once per project. */
+const EXPORT_OPTIONS_KEY = "diagrams_export_options";
 
 async function loadPref(key: string): Promise<string | null> {
   const { getSetting } = await import("../lib/tauri/commands");
@@ -175,17 +185,29 @@ interface DiagramsState {
    */
   undoGeneration: string | null;
   /**
-   * A format the user asked the editor to export to, or `null`.
+   * An export the user asked the editor for, or `null`.
    *
    * The same one-way channel as `pendingLoad`, and for the same reason: the toolbar that offers
    * "Export as PNG" is not the component holding the iframe. `DrawioFrame` picks this up, asks the
    * editor, and writes the file when the answer comes back.
    *
-   * Typed from `ExportFormat` rather than spelled out again, so a format cannot be offered by the
-   * menu and be unknown here — the two lists drifting apart is how `.drawio` came to be a filter
-   * with nothing that could ask for it.
+   * Its formats come from `ExportFormat` rather than being spelled out again, so a format cannot
+   * be offered by the menu and be unknown here — the two lists drifting apart is how `.drawio`
+   * came to be a filter with nothing that could ask for it.
+   *
+   * It carries the picture options as well as the format, in one object rather than in a second
+   * field beside this one: the request travels in a single `set`, so there is no window in which
+   * the frame could read a new format against the previous dialog's answer. `PendingExport` being
+   * a discriminated union is the other half of that — see `exportOptions.ts`.
    */
-  pendingExport: ExportFormat | null;
+  pendingExport: PendingExport | null;
+  /**
+   * The last answer the export dialog got, so it does not have to be typed again.
+   *
+   * Loaded once with the workspace and written back on every confirm. Not per workspace, and not
+   * reset when one is switched — see `EXPORT_OPTIONS_KEY`.
+   */
+  exportOptions: ImageExportOptions;
 
   /**
    * Whether the "Draw with AI" window is up over the canvas.
@@ -252,7 +274,9 @@ interface DiagramsState {
   /** Called on a real user edit, which is what makes the generation no longer the last thing done. */
   clearGenerationUndo: () => void;
   /** Asks the editor for a file. See `pendingExport`. */
-  requestExport: (format: ExportFormat) => void;
+  requestExport: (request: PendingExport) => void;
+  /** Remembers what the export dialog was told, and writes it through to settings. */
+  setExportOptions: (options: ImageExportOptions) => void;
   /**
    * Opens a `.drawio` file from disk as a new diagram, and opens it. Returns its title, or `null`
    * when the dialog was dismissed or the read failed.
@@ -351,6 +375,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   pendingLoad: null,
   undoGeneration: null,
   pendingExport: null,
+  exportOptions: DEFAULT_EXPORT_OPTIONS,
   aiOpen: false,
   query: "",
   tagFilter: [],
@@ -385,6 +410,12 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
         pendingLoad: null,
         undoGeneration: null,
         pendingExport: null,
+        // `exportOptions` is *not* in this list, and its absence is the point. Everything else here
+        // is dropped so the incoming workspace never briefly wears the outgoing one's state — but
+        // the export dialog's answer does not belong to a workspace at all, and clearing it by
+        // symmetry with its neighbours would make the dialog forget the user's margin every time
+        // they changed project. A bug that only shows up after a switch, and only to whoever
+        // noticed they had set it.
         query: "",
         tagFilter: [],
         folderFilter: null,
@@ -395,15 +426,17 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
         galleryView: "grid",
       });
       try {
-        // In parallel with the tree rather than before it: three settings reads and one tree read
-        // are independent, and serialising them would put three round trips before the first paint.
-        const [tree, expanded, sort, galleryView, templatesSeeded] = await Promise.all([
-          diagramsLoadTree(workspaceId),
-          loadPref(expandedKey(workspaceId)),
-          loadPref(sortKey(workspaceId)),
-          loadPref(galleryViewKey(workspaceId)),
-          loadPref(templatesSeededKey(workspaceId)),
-        ]);
+        // In parallel with the tree rather than before it: the settings reads and the tree read are
+        // independent, and serialising them would put five round trips before the first paint.
+        const [tree, expanded, sort, galleryView, templatesSeeded, storedExportOptions] =
+          await Promise.all([
+            diagramsLoadTree(workspaceId),
+            loadPref(expandedKey(workspaceId)),
+            loadPref(sortKey(workspaceId)),
+            loadPref(galleryViewKey(workspaceId)),
+            loadPref(templatesSeededKey(workspaceId)),
+            loadPref(EXPORT_OPTIONS_KEY),
+          ]);
         // The user may have switched again while all that was in flight.
         if (get().workspaceId !== workspaceId) return;
         set({
@@ -413,6 +446,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
           expanded: parseList(expanded),
           sort: (sort as DiagramSort | null) ?? "manual",
           galleryView: galleryView === "list" ? "list" : "grid",
+          exportOptions: parseExportOptions(storedExportOptions),
         });
 
         /**
@@ -692,9 +726,17 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     set({ undoGeneration: null });
   },
 
-  requestExport: (format) => {
+  requestExport: (request) => {
     if (!get().draft) return;
-    set({ pendingExport: format });
+    set({ pendingExport: request });
+  },
+
+  setExportOptions: (options) => {
+    set({ exportOptions: options });
+    // Fire-and-forget, like every other preference written from this store: the value the user
+    // sees is already in state, and a settings write that loses a race is one dialog re-answered,
+    // not a document lost.
+    void savePref(EXPORT_OPTIONS_KEY, JSON.stringify(options));
   },
 
   clearPendingExport: () => set({ pendingExport: null }),

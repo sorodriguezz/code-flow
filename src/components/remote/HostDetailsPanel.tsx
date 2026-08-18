@@ -104,6 +104,42 @@ export function HostDetailsPanel() {
   const openPrimary = useOpenPrimary();
   const checkCloud = useRemoteStore((s) => s.checkCloud);
   const cloudStatus = useRemoteStore((s) => (hostId ? s.cloudStatus[hostId] : undefined));
+  const closeTab = useRemoteStore((s) => s.closeTab);
+  /**
+   * This host's live connections — what "connected" is allowed to mean here.
+   *
+   * Only three of the seven tab kinds hold anything open. A `session` is a pty and stops being live
+   * the moment it reports `exited`; a `screen` owns the SSH tunnel under the viewer window, which
+   * is why closing it closes that tunnel; an `sftp` tab is an `ssh -s … sftp` child kept alive for
+   * the pair of file panes. The rest are views: `forwards` lists forwards without being one,
+   * `azure` talks to an HTTP API per request, and `log` and `all-forwards` belong to no host at
+   * all — counting any of them would light up "Disconnect" for a panel that has nothing to close.
+   *
+   * Derived with `useMemo` from the whole list rather than filtered inside the selector: a selector
+   * that builds an array returns a new reference every time *any* part of the store moves, and
+   * under `useSyncExternalStore` that is a re-render on every keystroke in the workspace.
+   */
+  const tabs = useRemoteStore((s) => s.tabs);
+  const liveTabs = useMemo(
+    () =>
+      tabs.filter(
+        (entry) =>
+          entry.hostId === hostId &&
+          (entry.kind === "screen" ||
+            entry.kind === "sftp" ||
+            (entry.kind === "session" && !entry.exited)),
+      ),
+    [tabs, hostId],
+  );
+  /**
+   * Whether the button says Connect or Disconnect.
+   *
+   * No cloud check is needed and none is written: a storage account only ever opens an `azure` tab,
+   * which the filter above already excludes, so a cloud row can never reach a non-empty list. That
+   * falls out of what a live connection *is* rather than out of a second rule that could drift away
+   * from the first one.
+   */
+  const connected = liveTabs.length > 0;
 
   const [tab, setTab] = useState<Tab>("connection");
   const [spec, setSpec] = useState<RemoteHostSpec | null>(null);
@@ -458,6 +494,13 @@ export function HostDetailsPanel() {
           <button
             type="button"
             onClick={() => {
+              // Connected and closable: this press is the other half of the toggle. Nothing is
+              // flushed and nothing is opened — disconnecting is about the sessions that are
+              // already running, not about the form's unsaved edits.
+              if (connected) {
+                void Promise.all(liveTabs.map((entry) => closeTab(entry.id)));
+                return;
+              }
               // Flushed first, and that ordering is the point: what opens has to be what is on
               // screen, not what the debounce had got round to saving. A cloud account is read from
               // the row by the backend, so an unsaved key would connect as the old one.
@@ -469,18 +512,53 @@ export function HostDetailsPanel() {
               // a useful place to be sent.
               void checkCloud(host.id).then((ok) => ok && openPrimary(host, spec));
             }}
-            disabled={!hasAddress(spec) || cloudStatus?.checking}
-            className="flex w-full items-center justify-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:brightness-110 disabled:opacity-40"
+            // Disconnect needs no address: the sessions it closes are already open, and a host
+            // whose address was blanked out while a shell ran would otherwise offer a dead button
+            // over a live connection.
+            disabled={(!connected && !hasAddress(spec)) || cloudStatus?.checking}
+            className={`flex w-full items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-opacity disabled:opacity-40 ${
+              connected
+                ? "border border-[var(--cf-border)] text-[var(--cf-text)] hover:bg-black/[0.04] dark:hover:bg-white/[0.05]"
+                : "bg-[var(--cf-accent)] text-white hover:brightness-110"
+            }`}
           >
             {cloudStatus?.checking && <Loader2 size={13} className="animate-spin" />}
             {/* Named for what is missing rather than for a field this kind hasn't got: a storage
                 account reading "no address" was a button pointing at a box that does not exist. */}
-            {!hasAddress(spec)
-              ? t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")
-              : cloudStatus?.checking
-                ? t("remote.connecting")
-                : t("remote.connect")}
+            {connected
+              ? liveTabs.length > 1
+                ? t("remote.disconnectN", { n: String(liveTabs.length) })
+                : t("remote.disconnect")
+              : !hasAddress(spec)
+                ? t(isCloudKind(spec.kind) ? "remote.needsAccount" : "remote.needsAddress")
+                : cloudStatus?.checking
+                  ? t("remote.connecting")
+                  : t("remote.connect")}
           </button>
+
+          {/* Opening *another* one, offered only while the primary button is busy saying
+              "Disconnect".
+
+              A host is not a thing you are either connected to or not — it holds as many shells,
+              file panes and screens as you open, which is why the tab list is per host and not per
+              connection. So the toggle the primary button now performs would, on its own, have
+              taken away the way to open a second shell from the panel you configure the host in.
+              This is that way back, and it stays out of the layout entirely when there is nothing
+              to disambiguate. */}
+          {connected && (
+            <button
+              type="button"
+              onClick={() => {
+                flush();
+                openPrimary(host, spec);
+              }}
+              disabled={!hasAddress(spec)}
+              className="mt-1.5 flex w-full items-center justify-center gap-1.5 rounded-md px-3 py-1 text-[11px] text-[var(--cf-text-muted)] transition-colors hover:text-[var(--cf-text)] disabled:opacity-40"
+            >
+              <Plus size={12} />
+              {t("remote.connectAnother")}
+            </button>
+          )}
 
           {/* What the account said, kept under the button until the next attempt. The green line is
               not decoration: an account with no containers opens an empty panel, and "connected, 0
@@ -764,13 +842,7 @@ function ConnectionTab({
         {/* Edited as text rather than as chips: a comma-separated line is faster to retype than a
             chip editor is to click through, and it is what the user would have written anyway. The
             chips are how tags are *read* — on the cards and in the filter row. */}
-        <Field
-          value={spec.tags.join(", ")}
-          onChange={(value) =>
-            onPatch({ tags: value.split(",").map((tag) => tag.trim()).filter(Boolean) })
-          }
-          placeholder="postgres, prod"
-        />
+        <TagsField tags={spec.tags} onChange={(tags) => onPatch({ tags })} />
       </Row>
 
       <Row label={t("remote.fieldOs")} hint={t("remote.fieldOsHint")}>
@@ -1571,6 +1643,67 @@ function ForwardsTab({
 // ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
+
+/** The tags on the line, as the row stores them. Trailing and repeated commas are what a
+ *  half-typed list looks like, so they produce no tag rather than an empty one. */
+function parseTags(line: string): string[] {
+  return line
+    .split(",")
+    .map((tag) => tag.trim())
+    .filter(Boolean);
+}
+
+/**
+ * The tags line, which has to let a comma survive being typed.
+ *
+ * # The bug this exists to fix
+ *
+ * This was a `Field` driven straight from `spec.tags.join(", ")`, and the round trip through the
+ * row erased the separator as fast as it was pressed. Typing `DESA,` parsed to `["DESA"]` — the
+ * empty tail is dropped, correctly — which joined back to `DESA`, so the comma vanished on the same
+ * keystroke that made it. The second tag was unreachable by the exact gesture the hint tells you to
+ * use, which is why the field looked like it ignored commas altogether.
+ *
+ * So the text being edited is held here, as text, and the row is told about tags. Those are two
+ * different things and conflating them is what broke: `DESA, ` and `DESA,` and `DESA` are three
+ * states of one edit and only one list of tags.
+ *
+ * # Why the resync is conditional
+ *
+ * Name, group and colour are editable from outside this panel, and tags may be too one day — so the
+ * draft still has to follow the row when the row moves on its own. But an unconditional sync would
+ * reintroduce the bug through the back door: every keystroke patches the row, the row comes back,
+ * and the normalised string overwrites what is being typed. Comparing the *parsed* draft against
+ * the row tells the two apart — while a comma is mid-word both sides agree, so nothing is touched,
+ * and a change that did not come from this box disagrees and wins.
+ */
+function TagsField({ tags, onChange }: { tags: string[]; onChange: (tags: string[]) => void }) {
+  const [draft, setDraft] = useState(() => tags.join(", "));
+
+  useEffect(() => {
+    // Compared element by element rather than by joining on a separator. Any separator
+    // would have to be a character no tag can contain, and the only one the parse takes
+    // away is the comma — `prod db` is a legal tag — so joining on a space would let
+    // `["prod db"]` and `["prod", "db"]` compare equal and skip a resync that was needed.
+    const typed = parseTags(draft);
+    const same = typed.length === tags.length && typed.every((tag, at) => tag === tags[at]);
+    if (!same) setDraft(tags.join(", "));
+    // `draft` is deliberately not a dependency: this watches the *row*, and re-running it on every
+    // keystroke is precisely the overwrite described above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tags]);
+
+  return (
+    <Field
+      value={draft}
+      onChange={(value) => {
+        setDraft(value);
+        onChange(parseTags(value));
+      }}
+      placeholder="postgres, prod"
+    />
+  );
+}
 
 function ScreenTab({
   spec,

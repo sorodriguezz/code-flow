@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import {
   Cloud,
   Folder,
+  FolderDot,
   FolderOpen,
   LayoutGrid,
   List,
@@ -15,7 +16,13 @@ import {
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { HostDot, KindGlyph, OsGlyph, Pill } from "./remoteChrome";
 import { useHostMenu, useNewConnectionMenu, useOpenPrimary } from "./hostMenu";
-import { allTags, hostMatches, useHostLiveness, useRemoteStore } from "../../state/remoteStore";
+import {
+  allTags,
+  groupHosts,
+  hostMatches,
+  useHostLiveness,
+  useRemoteStore,
+} from "../../state/remoteStore";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
 import {
@@ -43,6 +50,9 @@ export function HostGallery() {
   const hosts = useRemoteStore((s) => s.hosts);
   const query = useRemoteStore((s) => s.query);
   const tagFilter = useRemoteStore((s) => s.tagFilter);
+  const tagMode = useRemoteStore((s) => s.tagMode);
+  const setTagMode = useRemoteStore((s) => s.setTagMode);
+  const folders = useRemoteStore((s) => s.groups);
   const hostView = useRemoteStore((s) => s.hostView);
   const setHostView = useRemoteStore((s) => s.setHostView);
   const newConnectionMenu = useNewConnectionMenu();
@@ -56,9 +66,34 @@ export function HostGallery() {
   );
 
   const visible = useMemo(
-    () => hosts.filter((host) => hostMatches(host, query, tagFilter)),
-    [hosts, query, tagFilter],
+    () => hosts.filter((host) => hostMatches(host, query, tagFilter, tagMode)),
+    [hosts, query, tagFilter, tagMode],
   );
+
+  /**
+   * The gallery, cut into its groups — the same cut the tree makes, in a view that had none.
+   *
+   * The tree answers "where is that machine" by group, so a gallery that lists the same estate flat
+   * makes the two disagree about how the estate is shaped: three DESA boxes and one QA box read as
+   * four unrelated machines here and as two folders there.
+   *
+   * `folders` is passed only when nothing is filtering, exactly as `HostExplorer` does it. While a
+   * search or a tag filter is on, an empty group heading would be a heading over nothing — it
+   * claims the group has no matches when what it means is that the group is empty to begin with.
+   */
+  const sections = useMemo(() => {
+    const filtering = query.trim().length > 0 || tagFilter.length > 0;
+    let from = 0;
+    return groupHosts(visible, filtering ? [] : folders).map(([group, members]) => {
+      // The entrance stagger is a property of the *page*, not of a section: restarting it per group
+      // would make the first card of every group rise at the same instant, so a four-group gallery
+      // would animate in four columns rather than reading top to bottom. Accumulated here, once,
+      // rather than searched for per card — which is the same answer at O(n) instead of O(n²).
+      const section = { group, members, from };
+      from += members.length;
+      return section;
+    });
+  }, [visible, folders, query, tagFilter]);
 
   const openNewMenu = (x: number, y: number) =>
     setMenu({ x, y, heading: t("remote.newConnection"), items: newConnectionMenu() });
@@ -129,22 +164,60 @@ export function HostGallery() {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
         {visible.length === 0 ? (
-          <p className="py-10 text-center text-[12px] text-[var(--cf-text-muted)]">
-            {t("remote.noHostsMatch")}
-          </p>
-        ) : hostView === "grid" ? (
-          // `auto-fill` rather than `auto-fit`: with two hosts, `auto-fit` collapses the empty
-          // tracks and stretches those two across the whole window, which reads as a layout bug
-          // rather than as a grid. `auto-fill` keeps the column rhythm at any count.
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
-            {visible.map((host, at) => (
-              <HostCard key={host.id} host={host} at={at} onMenu={setMenu} />
-            ))}
+          <div className="flex flex-col items-center gap-2 py-10 text-center">
+            <p className="text-[12px] text-[var(--cf-text-muted)]">{t("remote.noHostsMatch")}</p>
+            {/* The one empty result that is worth explaining rather than just reporting.
+                Two or more tags under AND is the combination that returns nothing for a reason the
+                screen otherwise keeps to itself — nothing is both DESA and QA — and the user has no
+                way to tell "no machine matches" from "this filter cannot match anything". So it
+                says which reading is in force and offers the other one, right here, instead of
+                sending someone off to find a setting for a question they are asking now. */}
+            {tagFilter.length > 1 && tagMode === "all" && (
+              <button
+                type="button"
+                onClick={() => setTagMode("any")}
+                className="rounded-md border border-[var(--cf-border)] px-2.5 py-1 text-[11px] text-[var(--cf-text)] transition-colors hover:border-[var(--cf-accent)]"
+              >
+                {t("remote.tagsTryAny", { tags: tagFilter.join(", ") })}
+              </button>
+            )}
           </div>
         ) : (
-          <div className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-md border border-[var(--cf-border)]">
-            {visible.map((host, at) => (
-              <HostListRow key={host.id} host={host} at={at} onMenu={setMenu} />
+          <div className="flex flex-col gap-4">
+            {sections.map(({ group, members, from }) => (
+              <section key={group || "__ungrouped__"}>
+                {/* Drawn even for a lone group, so the gallery never looks like it grouped some of
+                    the estate and not the rest. The count is on the heading for the same reason the
+                    tree puts it there: it is the one number that says whether you are looking at
+                    all of a group or at what a filter left of it. */}
+                <h3 className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-[var(--cf-text-muted)]">
+                  {group ? (
+                    <Folder size={12} className="shrink-0" />
+                  ) : (
+                    <FolderDot size={12} className="shrink-0" />
+                  )}
+                  <span className="min-w-0 truncate">{group || t("remote.ungrouped")}</span>
+                  <span className="shrink-0 tabular-nums opacity-70">{members.length}</span>
+                </h3>
+                {hostView === "grid" ? (
+                  // `auto-fill` rather than `auto-fit`: with two hosts, `auto-fit` collapses the
+                  // empty tracks and stretches those two across the whole window, which reads as a
+                  // layout bug rather than as a grid. `auto-fill` keeps the column rhythm at any
+                  // count — and now at any count *per group*, which is where it earns it: a group
+                  // of one must not draw one card a screen wide.
+                  <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-2">
+                    {members.map((host, at) => (
+                      <HostCard key={host.id} host={host} at={from + at} onMenu={setMenu} />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-md border border-[var(--cf-border)]">
+                    {members.map((host, at) => (
+                      <HostListRow key={host.id} host={host} at={from + at} onMenu={setMenu} />
+                    ))}
+                  </div>
+                )}
+              </section>
             ))}
           </div>
         )}
@@ -221,6 +294,8 @@ export function TagFilterRow() {
   const tagFilter = useRemoteStore((s) => s.tagFilter);
   const toggleTag = useRemoteStore((s) => s.toggleTag);
   const clearTags = useRemoteStore((s) => s.clearTags);
+  const tagMode = useRemoteStore((s) => s.tagMode);
+  const setTagMode = useRemoteStore((s) => s.setTagMode);
   const t = useT();
 
   const tags = useMemo(() => allTags(hosts), [hosts]);
@@ -246,6 +321,19 @@ export function TagFilterRow() {
           </button>
         );
       })}
+      {/* Only from two tags on, because with one selected there is nothing to combine and the words
+          "all" and "any" would describe the same result — a control that cannot change what you are
+          looking at. It appears exactly when it starts to mean something. */}
+      {tagFilter.length > 1 && (
+        <button
+          type="button"
+          onClick={() => setTagMode(tagMode === "all" ? "any" : "all")}
+          title={t(tagMode === "all" ? "remote.tagsAllHint" : "remote.tagsAnyHint")}
+          className="shrink-0 rounded px-1.5 py-px text-[11px] text-[var(--cf-text-muted)] underline decoration-dotted underline-offset-2 transition-colors hover:text-[var(--cf-text)]"
+        >
+          {t(tagMode === "all" ? "remote.tagsAll" : "remote.tagsAny")}
+        </button>
+      )}
       {tagFilter.length > 0 && (
         <button
           type="button"

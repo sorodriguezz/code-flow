@@ -150,3 +150,66 @@ export function descendantIds(folders: DiagramFolderRow[], rootId: string): Set<
   }
   return found;
 }
+
+/**
+ * What each folder holds, its subfolders included: how many diagrams, and when the newest of them
+ * was last touched. Keyed by folder id, every folder present.
+ *
+ * **It climbs from each diagram instead of descending from each folder.** The descending version is
+ * `NoteGallery`'s `countWithin`, and its cost is a walk of the whole workspace *per card drawn* —
+ * twice per card where it stands today, because the number and the sentence around it are two
+ * separate calls. This walks the diagrams once each, up a chain as deep as the tree, and comes out
+ * of a single `useMemo` that every card on screen then reads.
+ *
+ * **`latest` is compared as an instant, not as a string.** Sorting ISO text only agrees with time
+ * while every row in the table was written in the same format and the same offset, which is a
+ * property of the data nobody is enforcing; epoch milliseconds don't care. A timestamp that won't
+ * parse is `NaN` and therefore never wins the comparison, so one corrupt row loses its own date
+ * rather than capturing the folder's.
+ *
+ * **`walked` bounds the climb.** A cycle in `parent_id` cannot be made through the UI — `moveFolder`
+ * refuses one, and Rust refuses it again — but a hand-edited database is not the place to hang, the
+ * same guard and the same reasoning as `folderPath` above.
+ *
+ * **A diagram whose folder is gone counts for nobody.** `flattenTree` already surfaces that row at
+ * the root rather than hiding it; adding it to some ancestor that isn't its own would be a worse
+ * answer than not counting it, because a wrong number is harder to notice than a missing one.
+ */
+export interface FolderContents {
+  count: number;
+  /** The newest `updated_at` inside, or `""` when the folder holds no diagrams at all. */
+  latest: string;
+}
+
+export function folderContents(
+  folders: DiagramFolderRow[],
+  diagrams: Diagram[],
+): Map<string, FolderContents> {
+  const parentOf = new Map<string, string | null>();
+  for (const folder of folders) parentOf.set(folder.id, folder.parent_id);
+
+  const totals = new Map<string, { count: number; latest: string; latestAt: number }>();
+  for (const folder of folders) totals.set(folder.id, { count: 0, latest: "", latestAt: -Infinity });
+
+  for (const diagram of diagrams) {
+    if (!diagram.folder_id) continue;
+    const at = Date.parse(diagram.updated_at);
+    const walked = new Set<string>();
+    let id: string | null = diagram.folder_id;
+    while (id && !walked.has(id)) {
+      walked.add(id);
+      const total = totals.get(id);
+      if (!total) break;
+      total.count += 1;
+      if (!Number.isNaN(at) && at > total.latestAt) {
+        total.latestAt = at;
+        total.latest = diagram.updated_at;
+      }
+      id = parentOf.get(id) ?? null;
+    }
+  }
+
+  const out = new Map<string, FolderContents>();
+  for (const [id, total] of totals) out.set(id, { count: total.count, latest: total.latest });
+  return out;
+}

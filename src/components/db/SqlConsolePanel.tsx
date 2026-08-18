@@ -31,6 +31,7 @@ import { recordModel } from "../../lib/db/engineModel";
 import { DocumentList } from "./DocumentList";
 import { DocumentsView } from "./DocumentsView";
 import { ResultGrid } from "./ResultGrid";
+import { cellMenuItems } from "./cellMenu";
 import { ScopePicker } from "./ScopePicker";
 import { EngineBadge, ToolbarButton, formatCount, formatDuration } from "./dbChrome";
 import { nodeKey, useDbStore, type DbConsoleAi, type DbConsoleTab } from "../../state/dbStore";
@@ -711,7 +712,15 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
   /** What this engine calls the things it just returned — "50 filas" under a page of documents was
    *  the console describing a Mongo result in SQL's noun. */
   const counts = recordModel(kind).counts;
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * The one floating menu this panel has room for, wherever it was opened from.
+   *
+   * `items` is what distinguishes them: absent means the export menu, which is the toolbar button
+   * this state was originally added for. A right-click on a result cell fills it in instead. One
+   * piece of state rather than two because only one menu can be open at a time — two would let a
+   * cell menu and the export menu sit on screen together, each waiting for a click.
+   */
+  const [menu, setMenu] = useState<{ x: number; y: number; items?: MenuItem[] } | null>(null);
   /** Which of the three document views is up. Mirrors the data tab's switcher exactly, on purpose:
    *  a document looked at from a `find()` and the same document looked at by opening the collection
    *  should not be two different screens. */
@@ -1016,6 +1025,18 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
             engine={kind}
             columns={active.columns}
             rows={active.rows}
+            // A console result is read-only — it is whatever the statement returned, not a table
+            // with a primary key to write back through — so `onSet` is null and the menu comes out
+            // as Copy alone. The three editing entries belong to the data tab, where there is
+            // something to save them to.
+            onCellContextMenu={(row, column, event) => {
+              const columnIndex = active.columns.findIndex((entry) => entry.name === column);
+              setMenu({
+                x: event.clientX,
+                y: event.clientY,
+                items: cellMenuItems({ value: active.rows[row]?.[columnIndex] ?? null, onSet: null }, t),
+              });
+            }}
             selectedRows={selected}
             onSelectRow={selectRow}
             onSelectAllRows={(on) => {
@@ -1031,7 +1052,12 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
       {active.messages.length > 0 && <Messages messages={active.messages} />}
 
       {menu && (
-        <ContextMenu x={menu.x} y={menu.y} items={exportItems} onClose={() => setMenu(null)} />
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menu.items ?? exportItems}
+          onClose={() => setMenu(null)}
+        />
       )}
     </div>
   );

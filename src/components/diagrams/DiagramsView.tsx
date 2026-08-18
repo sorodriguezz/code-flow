@@ -7,10 +7,12 @@ import { DiagramExplorer } from "./DiagramExplorer";
 import { DiagramGallery } from "./DiagramGallery";
 import { DrawioFrame } from "./DrawioFrame";
 import { DiagramAiPanel } from "./DiagramAiPanel";
+import { ExportImageModal } from "./ExportImageModal";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { CARD, ICON_BUTTON } from "./diagramsChrome";
 import { relativeTime } from "../notes/notesChrome";
 import { ensureDiagramsStoreLoaded, useDiagramsStore } from "../../state/diagramsStore";
+import type { ImageExportFormat } from "../../lib/diagrams/exportOptions";
 import { useLayoutStore } from "../../state/layoutStore";
 import { promptAction } from "../../state/promptStore";
 import { useToastStore } from "../../state/toastStore";
@@ -63,6 +65,16 @@ export function DiagramsView() {
   const [exportMenu, setExportMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(
     null,
   );
+  /**
+   * The format whose picture options are being edited, or `null` for "no dialog".
+   *
+   * Local state, like `exportMenu` beside it, and for the same reason: nothing outside this
+   * component has any say in whether the dialog is up, and a store field would be one more thing
+   * to remember to clear on a workspace switch. It also costs nothing here — this component's
+   * selectors are picked so that drawing on the canvas does not re-render it (see above), and a
+   * boolean that changes twice per export does not undo that.
+   */
+  const [optionsFor, setOptionsFor] = useState<ImageExportFormat | null>(null);
 
   useEffect(() => {
     void ensureDiagramsStoreLoaded();
@@ -124,9 +136,15 @@ export function DiagramsView() {
       y: at.y,
       // `.drawio` last, after the three pictures: it is the one that leaves with the diagram still
       // editable, so it reads as "or take the whole thing elsewhere" rather than as a fourth image.
+      // It is also the only one that exports on the click, which is why it is the only label
+      // without an ellipsis — the three pictures open the options dialog first, and `.drawio` has
+      // nothing to ask about because nothing is rendered for it. TypeScript narrows the other
+      // branch to `ImageExportFormat` on its own, so `ExportImageModal` needs no cast to be sure
+      // of that. `ContextMenu` closes itself before running this, so the menu is not left hanging
+      // behind the dialog.
       items: (["png", "svg", "pdf", "drawio"] as const).map((format) => ({
         label: t(`diagrams.exportAs.${format}`),
-        onClick: () => requestExport(format),
+        onClick: () => (format === "drawio" ? requestExport({ format }) : setOptionsFor(format)),
       })),
     });
   };
@@ -232,6 +250,8 @@ export function DiagramsView() {
           onClose={() => setExportMenu(null)}
         />
       )}
+
+      {optionsFor && <ExportImageModal format={optionsFor} onClose={() => setOptionsFor(null)} />}
     </div>
   );
 }

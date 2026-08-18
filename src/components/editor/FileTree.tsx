@@ -9,6 +9,7 @@ import {
   FilePlus,
   FolderOpen,
   FolderPlus,
+  ListTree,
   PenLine,
   RefreshCw,
   Trash2,
@@ -19,13 +20,33 @@ import {
   deletePath,
   listDir,
   movePath,
+  readFileText,
   renamePath,
   revealInFileManager,
 } from "../../lib/tauri/commands";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { HiddenFilesSection } from "./HiddenFilesSection";
+import { PackageScriptRows, type ManagerSource } from "./PackageScriptRows";
+import {
+  detectPackageManager,
+  isPackageJson,
+  parsePackageScripts,
+  scriptCommandLine,
+  type PackageManager,
+  type PackageScript,
+  type PackageScriptsState,
+} from "../../lib/packageScripts";
+import {
+  EMPTY_NESTS,
+  EMPTY_PARENTS,
+  resolveNesting,
+  type NestingLayout,
+} from "../../lib/fileNesting";
 import { confirmAction } from "../../state/confirmStore";
+import { useFileNestingStore } from "../../state/fileNestingStore";
 import { useHiddenFilesStore } from "../../state/hiddenFilesStore";
+import { usePackageManagerStore } from "../../state/packageManagerStore";
+import { useTerminalStore } from "../../state/terminalStore";
 import { SkeletonRows } from "../common/Skeleton";
 import type { FileEntry } from "../../types/domain";
 import { fileStatusColor, fileStatusLabelKey } from "../../lib/fileStatus";
@@ -153,6 +174,54 @@ function DraftRow({
 }
 
 /**
+ * The twisty on a *file* row — the one that unfolds a manifest's scripts, and the one that unfolds
+ * a nest.
+ *
+ * **A `span` with `role="button"`, never a `<button>`.** The row itself is already a `<button>`,
+ * and a button inside a button is invalid HTML that the parser un-nests — which takes the row's own
+ * click target apart. The alternative, turning the row into a `<div role="button">` the way
+ * `EditorTabs` does so it can carry a real close button, would cost every row in this tree the
+ * native keyboard activation that nothing else here provides.
+ *
+ * Both `stopPropagation`s are load-bearing and for different reasons: on `pointerdown` because
+ * without it reaching for the twisty arms a drag of the file (`onBeginDrag`), and on `click`
+ * because without it the same tap also opens the file. It occupies exactly the `w-3` the spacer
+ * did, so every indent measurement and the `data-cf-treepath` the drag hit-test reads are
+ * untouched.
+ *
+ * The cost is that a twisty is not reachable by keyboard — `tabIndex={-1}` keeps it out of the tab
+ * order rather than putting an un-activatable stop in it. Both twisties therefore have an
+ * equivalent in the row's context menu, which is reachable from the keyboard.
+ */
+function RowTwisty({
+  open,
+  title,
+  onToggle,
+}: {
+  open: boolean;
+  title: string;
+  onToggle: () => void;
+}) {
+  return (
+    <span
+      role="button"
+      tabIndex={-1}
+      aria-expanded={open}
+      aria-label={title}
+      title={title}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      className="flex w-3 shrink-0 items-center justify-center"
+    >
+      {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+    </span>
+  );
+}
+
+/**
  * One row, and its subtree when it is an expanded folder.
  *
  * `memo`'d, which is what keeps the tree still while things happen *around* it: opening the context
@@ -169,6 +238,9 @@ const TreeNode = memo(function TreeNode({
   expanded,
   childrenByDir,
   hiddenCountByDir,
+  nestedByDir,
+  nestOpen,
+  onToggleNest,
   draft,
   renaming,
   onToggleDir,
@@ -185,6 +257,11 @@ const TreeNode = memo(function TreeNode({
   changedDirs,
   iconRules,
   defaultFolderIcon,
+  openScripts,
+  scriptsByFile,
+  onToggleScripts,
+  onRunScript,
+  resolveManager,
   at,
 }: {
   entry: FileEntry;
@@ -196,12 +273,25 @@ const TreeNode = memo(function TreeNode({
    * selection, so only ever one row reads as selected. */
   focusedDir: string | null;
   expanded: Set<string>;
-  /** Cached `listDir` results with the hidden rows already removed, keyed by directory
-   *  ("" = repo root). */
+  /** Cached `listDir` results with the hidden rows taken out *and* the nested rows lifted out of
+   *  them, keyed by directory ("" = repo root). */
   childrenByDir: Map<string, FileEntry[]>;
   /** How many rows the filter above took out of each directory, so a folder that only *looks*
    *  empty can say which of the two it is. */
   hiddenCountByDir: Map<string, number>;
+  /**
+   * The rows nested under a file, keyed by the **parent file's own path**.
+   *
+   * Flat and repo-wide rather than one map per directory: paths are unique across the whole tree,
+   * so a single map serves every row and each row does exactly the lookup it wants — no working
+   * out which directory it lives in first. Empty (and the *same* empty map every render) when
+   * nesting is switched off, so the `memo` above still holds.
+   */
+  nestedByDir: ReadonlyMap<string, FileEntry[]>;
+  /** The file rows whose nest is unfolded. Its own set, not `expanded` — see where it is declared
+   *  in `FileTree`. */
+  nestOpen: Set<string>;
+  onToggleNest: (path: string) => void;
   draft: Draft | null;
   /** The path being renamed in place, if it's this one. */
   renaming: string | null;
@@ -224,10 +314,23 @@ const TreeNode = memo(function TreeNode({
    * `FileGlyphView` for why this is a prop and not a store read. */
   iconRules: IconRule[];
   defaultFolderIcon: string | null;
+  /** The `package.json` rows whose scripts are unfolded. Separate from `expanded` on purpose —
+   *  see the note where it is declared in `FileTree`. */
+  openScripts: Set<string>;
+  scriptsByFile: Map<string, PackageScriptsState>;
+  onToggleScripts: (path: string) => void;
+  onRunScript: (packageJsonPath: string, script: PackageScript) => void;
+  resolveManager: (dir: string) => { manager: PackageManager; source: ManagerSource };
 }) {
   const t = useT();
   const isExpanded = entry.is_dir && expanded.has(entry.path);
   const children = childrenByDir.get(entry.path) ?? null;
+  const isManifest = !entry.is_dir && isPackageJson(entry);
+  const scriptsOpen = isManifest && openScripts.has(entry.path);
+  // Folders never nest and are never nested — see `resolveNesting` — so the lookup is skipped for
+  // them rather than relied on to miss.
+  const nested = entry.is_dir ? null : (nestedByDir.get(entry.path) ?? null);
+  const nestShown = nested !== null && nestOpen.has(entry.path);
 
   // Subscribed as *booleans about this row*, never as the raw drag state: `hover(dir)` fires on
   // every folder the pointer crosses, and a row that took `drag`/`overDir` themselves would
@@ -248,7 +351,13 @@ const TreeNode = memo(function TreeNode({
   // into an array and scan it *per directory row, per render*, which on a repo with a few hundred
   // changed files was the single most expensive line in the tree.
   const hasChangedDescendant = entry.is_dir && !ownStatus && changedDirs.has(entry.path);
-  const status = ownStatus ?? (hasChangedDescendant ? "modified" : undefined);
+  // Exactly the symmetry above, applied to the other kind of row that now hides things: a closed
+  // nest holding a modified spec would otherwise put that change in the Changes tab and nowhere in
+  // the tree. Only the *colour* follows — the status letter below stays the file's own, or it
+  // would stop meaning "this file differs" and start meaning "something around here does".
+  const nestHasChange =
+    nested !== null && !nestShown && !ownStatus && nested.some((child) => changedPaths.has(child.path));
+  const status = ownStatus ?? (hasChangedDescendant || nestHasChange ? "modified" : undefined);
   const color = status ? fileStatusColor(status) : undefined;
 
   const draftHere = draft && draft.parent === entry.path ? draft : null;
@@ -266,6 +375,46 @@ const TreeNode = memo(function TreeNode({
       />
     );
   }
+
+  /**
+   * Everything a child row simply inherits, gathered once.
+   *
+   * This component now recurses from two places — a folder's contents and a file's nest — and a
+   * prop added to one hand-written list and forgotten in the other is a subtree that silently
+   * stops responding to it. Spreading an object costs the `memo` nothing: it compares the
+   * resulting props one by one, and every value in here is the same stable reference it was.
+   */
+  const inherited = {
+    selectedPath,
+    focusedDir,
+    expanded,
+    childrenByDir,
+    hiddenCountByDir,
+    nestedByDir,
+    nestOpen,
+    onToggleNest,
+    draft,
+    renaming,
+    onToggleDir,
+    onSelectFile,
+    onOpenFile,
+    onSubmitDraft,
+    onCancelDraft,
+    onSubmitRename,
+    onCancelRename,
+    onContextMenu,
+    onBeginDrag,
+    suppressClick,
+    changedPaths,
+    changedDirs,
+    iconRules,
+    defaultFolderIcon,
+    openScripts,
+    scriptsByFile,
+    onToggleScripts,
+    onRunScript,
+    resolveManager,
+  };
 
   return (
     <div>
@@ -317,7 +466,39 @@ const TreeNode = memo(function TreeNode({
           </>
         ) : (
           <>
-            <span className="w-3 shrink-0" />
+            {/* The leading slot — the one that lines up with every folder's chevron and means the
+                same thing there as here, "this row has rows under it" — belongs to the nest
+                whenever there is one. With nesting off there is never one, so this is exactly the
+                layout that shipped: manifest twisty, or spacer. */}
+            {nested !== null ? (
+              <RowTwisty
+                open={nestShown}
+                title={t(nestShown ? "nesting.collapse" : "nesting.expand", { n: nested.length })}
+                onToggle={() => onToggleNest(entry.path)}
+              />
+            ) : isManifest ? (
+              <RowTwisty
+                open={scriptsOpen}
+                title={t("editor.scriptsToggle")}
+                onToggle={() => onToggleScripts(entry.path)}
+              />
+            ) : (
+              <span className="w-3 shrink-0" />
+            )}
+            {/* `package.json` is the one row that is both: the shipped patterns nest the lockfiles
+                under it, and it is also the row that unfolds scripts. One slot cannot serve both,
+                and dropping either is worse than a second chevron — losing the nest twisty would
+                leave `pnpm-lock.yaml` folded away with nothing on screen to open it, which is the
+                "a file vanished" failure this whole feature has to avoid, and losing the scripts
+                twisty would silently undo a feature that already shipped. So both are drawn, each
+                with its own tooltip, and only ever in this order. */}
+            {nested !== null && isManifest && (
+              <RowTwisty
+                open={scriptsOpen}
+                title={t("editor.scriptsToggle")}
+                onToggle={() => onToggleScripts(entry.path)}
+              />
+            )}
             {/* Git status wins over the language color: a modified file has to read as
                 modified first, the same way it does in the Changes tab. A custom icon is the one
                 exception — it carries its own brand colours and tinting it would make an Angular
@@ -343,6 +524,26 @@ const TreeNode = memo(function TreeNode({
           </span>
         )}
       </button>
+      {scriptsOpen && (
+        <PackageScriptRows
+          filePath={entry.path}
+          depth={depth}
+          state={scriptsByFile.get(entry.path)}
+          {...resolveManager(parentDir(entry.path))}
+          onRun={(script) => onRunScript(entry.path, script)}
+        />
+      )}
+      {/* The nest. One level deep and no further: `resolveNesting` collapses chains, so every key
+          in `nestedByDir` is a row nobody else claimed, and a child handed to this recursion can
+          never have a nest of its own — the recursion bottoms out here by construction rather than
+          by a depth counter. */}
+      {nestShown && nested && (
+        <div>
+          {nested.map((child, index) => (
+            <TreeNode key={child.path} entry={child} depth={depth + 1} at={index} {...inherited} />
+          ))}
+        </div>
+      )}
       {isExpanded && (
         <div>
           {draftHere && (
@@ -354,33 +555,7 @@ const TreeNode = memo(function TreeNode({
             />
           )}
           {children?.map((child, index) => (
-            <TreeNode
-              key={child.path}
-              entry={child}
-              depth={depth + 1}
-              at={index}
-              selectedPath={selectedPath}
-              focusedDir={focusedDir}
-              expanded={expanded}
-              childrenByDir={childrenByDir}
-              hiddenCountByDir={hiddenCountByDir}
-              draft={draft}
-              renaming={renaming}
-              onToggleDir={onToggleDir}
-              onSelectFile={onSelectFile}
-              onOpenFile={onOpenFile}
-              onSubmitDraft={onSubmitDraft}
-              onCancelDraft={onCancelDraft}
-              onSubmitRename={onSubmitRename}
-              onCancelRename={onCancelRename}
-              onContextMenu={onContextMenu}
-              onBeginDrag={onBeginDrag}
-              suppressClick={suppressClick}
-              changedPaths={changedPaths}
-              changedDirs={changedDirs}
-              iconRules={iconRules}
-              defaultFolderIcon={defaultFolderIcon}
-            />
+            <TreeNode key={child.path} entry={child} depth={depth + 1} at={index} {...inherited} />
           ))}
           {children && children.length === 0 && !draftHere && (
             <p style={{ paddingLeft: (depth + 1) * 14 + 6 }} className="text-[11px] text-[var(--cf-text-muted)]">
@@ -399,6 +574,7 @@ const TreeNode = memo(function TreeNode({
 
 export function FileTree({
   repoPath,
+  projectId,
   selectedPath,
   onSelectFile,
   onOpenFile,
@@ -409,6 +585,10 @@ export function FileTree({
   changedDirs,
 }: {
   repoPath: string;
+  /** The project the terminal dock indexes its shells by. Passed in rather than read from the
+   *  project store here: the tree is given its `repoPath` from outside too, and two sources for
+   *  one project is how a script ends up running in the previous project's dock. */
+  projectId: string;
   selectedPath: string | null;
   /** Single click — opens the file as a reusable preview tab. */
   onSelectFile: (path: string) => void;
@@ -435,6 +615,28 @@ export function FileTree({
   // all" and "refresh" can act on the whole tree at once. "" keys the repo root.
   const [childrenByDir, setChildrenByDir] = useState<Map<string, FileEntry[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  /**
+   * The `package.json` rows whose scripts are unfolded.
+   *
+   * Deliberately its own Set rather than more entries in `expanded`. `refresh()` calls `listDir`
+   * on every member of `expanded` and rebuilds the set from whatever answered — a file path in
+   * there would fail that listing, drop out, and take the unfolded scripts with it. The scripts
+   * would collapse themselves on every refresh, including the ones the file watcher triggers, and
+   * nothing on screen would say why.
+   */
+  const [openScripts, setOpenScripts] = useState<Set<string>>(new Set());
+  /**
+   * The file rows whose nest is unfolded.
+   *
+   * Its own Set for exactly the reason `openScripts` is, and the failure is worse here. `refresh()`
+   * calls `listDir` on every member of `expanded`; a *file* path in there reaches
+   * `fsops::list_dir`, which calls `read_dir` on a file and fails — and the `() => null` that
+   * catches it drops that entry, so the directory falls out of the listing cache entirely. On top
+   * of which `refresh` rebuilds `expanded` from whatever answered, which would close every nest on
+   * every refresh, including the ones the file watcher fires.
+   */
+  const [nestOpen, setNestOpen] = useState<Set<string>>(new Set());
+  const [scriptsByFile, setScriptsByFile] = useState<Map<string, PackageScriptsState>>(new Map());
   // The clicked row, which is what decides where a new file/folder lands, mirroring VS Code:
   // inside the clicked directory, or alongside the clicked file, or at the root.
   const [focus, setFocus] = useState<{ path: string; isDir: boolean }>({ path: "", isDir: true });
@@ -458,6 +660,15 @@ export function FileTree({
    * component re-renders as a whole when they change, so the rows can take them as props. */
   const iconRules = useIconRulesStore((s) => s.rules);
   const defaultFolderIcon = useIconRulesStore((s) => s.defaultFolderIcon);
+  /** The nesting preference. No per-repo `load` to go with it, unlike the two above: a pattern
+   *  names filenames rather than paths, so the setting is global and `App` reads it once at
+   *  startup. */
+  const nestingEnabled = useFileNestingStore((s) => s.enabled);
+  const nestingPatterns = useFileNestingStore((s) => s.patterns);
+  /** The repo-wide override, or null while the lockfile decides. Subscribed here so that changing
+   *  it re-resolves every unfolded manifest at once. */
+  const managerChoice = usePackageManagerStore((s) => s.choice);
+  const loadManager = usePackageManagerStore((s) => s.load);
 
   useEffect(() => {
     childrenRef.current = childrenByDir;
@@ -465,7 +676,8 @@ export function FileTree({
 
   useEffect(() => {
     void loadHidden(repoPath);
-  }, [repoPath, loadHidden]);
+    void loadManager(repoPath);
+  }, [repoPath, loadHidden, loadManager]);
 
   const loadDir = useCallback(
     async (path: string) => {
@@ -481,6 +693,9 @@ export function FileTree({
     let cancelled = false;
     setChildrenByDir(new Map());
     setExpanded(new Set());
+    setOpenScripts(new Set());
+    setNestOpen(new Set());
+    setScriptsByFile(new Map());
     setFocus({ path: "", isDir: true });
     setDraft(null);
     setRenaming(null);
@@ -512,6 +727,110 @@ export function FileTree({
     [loadDir],
   );
 
+  /**
+   * Reads a `package.json` and turns it into rows.
+   *
+   * No toast on failure, unlike every other disk operation here. Those are all things the user
+   * asked the filesystem to do — create, rename, delete — where a failure needs answering. This is
+   * a row drawing itself; a manifest that has been deleted since it was listed, or that is a
+   * dangling symlink, should say so in the space where the scripts would have been and nowhere
+   * else.
+   */
+  const loadScripts = useCallback(
+    async (path: string) => {
+      // The placeholder only goes in when there is nothing to show yet. Re-opening a manifest that
+      // was read a moment ago should redraw its scripts immediately and quietly replace them,
+      // rather than flashing "Loading…" over a perfectly good list.
+      setScriptsByFile((prev) => (prev.has(path) ? prev : new Map(prev).set(path, { status: "loading" })));
+      let next: PackageScriptsState;
+      try {
+        next = parsePackageScripts(await readFileText(repoPath, path));
+      } catch (e) {
+        next = { status: "unreadable", error: String(e) };
+      }
+      // The same guard `loadDir` uses: a project switched while this read was in flight owns the
+      // tree now, and this answer describes a file in the old one.
+      if (activeRepoRef.current !== repoPath) return;
+      setScriptsByFile((prev) => new Map(prev).set(path, next));
+    },
+    [repoPath],
+  );
+
+  const toggleScripts = useCallback(
+    (path: string) => {
+      setOpenScripts((prev) => {
+        const next = new Set(prev);
+        if (next.has(path)) next.delete(path);
+        else {
+          next.add(path);
+          // Always re-read on open, on the same reasoning as `toggleDir`: whatever is cached draws
+          // at once so re-opening never flashes empty, and is replaced when the fresh read lands.
+          // A manifest edited in the editor beside this tree is the ordinary case, not the rare one.
+          void loadScripts(path);
+        }
+        return next;
+      });
+    },
+    [loadScripts],
+  );
+
+  /**
+   * Which manager a manifest in `dir` runs under, and why.
+   *
+   * Detection is handed `childrenRef.current` — the *unfiltered* listing cache — rather than the
+   * `visibleByDir` the rows are drawn from. Hiding `pnpm-lock.yaml` from the explorer is a
+   * statement about clutter, and it must not quietly switch the play buttons over to npm.
+   *
+   * npm is the last resort because it is the one manager that can be assumed present: it ships
+   * with Node, so a repository with no lockfile at all still gets a command that has a chance of
+   * running. The `source` travels with it so the header row can say which of the three happened.
+   */
+  const resolveManager = useCallback(
+    (dir: string): { manager: PackageManager; source: ManagerSource } => {
+      if (managerChoice) return { manager: managerChoice, source: "explicit" };
+      const detected = detectPackageManager(dir, childrenRef.current);
+      return detected ? { manager: detected, source: "lockfile" } : { manager: "npm", source: "fallback" };
+    },
+    [managerChoice],
+  );
+
+  /**
+   * Runs one script in the bottom dock.
+   *
+   * **The cwd is the manifest's own directory, not the project root.** In a monorepo those are
+   * different places, and `packages/web`'s `dev` started from the root either runs the root's
+   * script of the same name or nothing at all — the one failure mode a play button next to a
+   * script name must not have.
+   *
+   * The reuse key carries the script name as well as the path, so each script gets its own shell.
+   * Reusing per directory would type `build` into the terminal where `dev` is still running, which
+   * sends it to the dev server's stdin instead of to a prompt.
+   */
+  const runScript = useCallback(
+    (packageJsonPath: string, script: PackageScript) => {
+      const dir = parentDir(packageJsonPath);
+      const { manager } = resolveManager(dir);
+      const command = scriptCommandLine(manager, script.name);
+      // Unreachable from the UI, which greys these rows out — this is the second lock, on the one
+      // path that turns a name off disk into a line typed at a shell. See `packageScripts`.
+      if (!command) return;
+      const cwd = dir ? `${repoPath}/${dir}` : repoPath;
+      const leaf = dir.split("/").pop();
+      void useTerminalStore
+        .getState()
+        .runCommand(projectId, {
+          cwd,
+          command,
+          reuseKey: `scripts:${packageJsonPath}:${script.name}`,
+          // `web · dev` rather than `dev`: a dock holding four scripts from four workspaces needs
+          // the package to tell them apart.
+          title: leaf ? `${leaf} · ${script.name}` : script.name,
+        })
+        .catch((e: unknown) => pushErrorToast(String(e)));
+    },
+    [repoPath, projectId, resolveManager],
+  );
+
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
@@ -537,8 +856,25 @@ export function FileTree({
 
   const collapseAll = useCallback(() => {
     setExpanded(new Set());
+    // Unfolded manifests are folded too: "collapse all" means the tree ends up as flat as it can
+    // be, and leaving a package.json's scripts standing open would be the one row that ignored it.
+    setOpenScripts(new Set());
+    // Nests likewise. They are rows under a row, which is the only thing "collapse" means here.
+    setNestOpen(new Set());
     setDraft((prev) => (prev && prev.parent !== "" ? null : prev));
   }, []);
+
+  /** Deps deliberately empty: `TreeNode` is `memo`'d on the assumption that its callbacks never
+   *  change identity, and this one has nothing to close over. */
+  const toggleNest = useCallback(
+    (path: string) =>
+      setNestOpen((prev) => {
+        const next = new Set(prev);
+        if (!next.delete(path)) next.add(path);
+        return next;
+      }),
+    [],
+  );
 
   const startDraft = useCallback(
     (kind: DraftKind) => {
@@ -644,6 +980,12 @@ export function FileTree({
       const next = new Set([...prev].filter((p) => p !== target && !p.startsWith(`${target}/`)));
       return next;
     });
+    // The same tidy-up for nests: a deleted file leaves its own key behind, and a deleted *folder*
+    // leaves every unfolded nest under it. Neither would ever be drawn again, but both would keep
+    // a path that no longer exists alive in state for the rest of the session.
+    setNestOpen((prev) =>
+      new Set([...prev].filter((p) => p !== target && !p.startsWith(`${target}/`))),
+    );
     await loadDir(parent);
     void useRepoStore.getState().refreshStatus();
     onPathRemoved?.(target);
@@ -656,6 +998,12 @@ export function FileTree({
   startDraftRef.current = startDraft;
   const deleteFocusedRef = useRef(deleteFocused);
   deleteFocusedRef.current = deleteFocused;
+  /** The nesting layout, for the two menu entries that ask about it. Assigned where it is derived,
+   *  far below — see the note there for why it cannot simply be a dependency. */
+  const nestRef = useRef<{ nested: ReadonlyMap<string, FileEntry[]>; open: Set<string> }>({
+    nested: EMPTY_NESTS,
+    open: nestOpen,
+  });
 
   const copyToClipboard = useCallback((text: string) => {
     void navigator.clipboard.writeText(text).catch((e) => pushErrorToast(String(e)));
@@ -714,6 +1062,27 @@ export function FileTree({
           },
         });
       }
+      // Same "view" group as Hide, and offered on the empty space too (`entry === null`): a setting
+      // about the explorer is looked for by right-clicking the explorer, not one of its files. The
+      // label carries the state because `MenuItem` has no checked form.
+      items.push({
+        label: t(nestingEnabled ? "nesting.disable" : "nesting.enable"),
+        icon: ListTree,
+        separated: !entry,
+        onClick: () => useFileNestingStore.getState().setEnabled(!nestingEnabled),
+      });
+      if (entry) {
+        const nested = nestRef.current.nested.get(entry.path);
+        // The keyboard and screen-reader route to the twisty, which is a `span` and out of the tab
+        // order by design — see `RowTwisty`. Only offered where there is actually a nest.
+        if (nested && nested.length > 0) {
+          const open = nestRef.current.open.has(entry.path);
+          items.push({
+            label: t(open ? "nesting.collapse" : "nesting.expand", { n: nested.length }),
+            onClick: () => toggleNest(entry.path),
+          });
+        }
+      }
       items.push({
         label: t("sidebar.revealInFileManager"),
         icon: FolderOpen,
@@ -732,7 +1101,7 @@ export function FileTree({
       }
       return items;
     },
-    [t, revealInOs, copyToClipboard, repoPath, hideEntry],
+    [t, revealInOs, copyToClipboard, repoPath, hideEntry, nestingEnabled, toggleNest],
   );
 
   const handleSelectFile = useCallback(
@@ -923,7 +1292,81 @@ export function FileTree({
     return { visibleByDir: visible, hiddenCountByDir: counts };
   }, [childrenByDir, hiddenEntries]);
 
-  const rootEntries = visibleByDir.get("") ?? null;
+  /**
+   * The same listings again, with derived files lifted out of their directory and onto their parent.
+   *
+   * **It consumes the memo above, and that ordering is the whole story for how the two features
+   * live together.** Running over the already-filtered lists means a hidden parent never gets the
+   * chance to claim anything, so its would-be children simply stay where they were — no special
+   * case, no "was the parent hidden?" branch, and no way for hiding one row to take three more with
+   * it. It also means `hiddenCountByDir` keeps counting what the filter removed and nothing else:
+   * a nested row was not removed, it moved.
+   *
+   * With nesting off this hands back `visibleByDir` *by identity* and the module's shared empty
+   * maps, so not one row's `memo` is invalidated by a feature nobody switched on.
+   */
+  const { rowsByDir, nestedByDir, nestParentOf } = useMemo<{
+    rowsByDir: Map<string, FileEntry[]>;
+    nestedByDir: ReadonlyMap<string, FileEntry[]>;
+    nestParentOf: ReadonlyMap<string, string>;
+  }>(() => {
+    if (!nestingEnabled || nestingPatterns.length === 0) {
+      return { rowsByDir: visibleByDir, nestedByDir: EMPTY_NESTS, nestParentOf: EMPTY_PARENTS };
+    }
+    const rows = new Map<string, FileEntry[]>();
+    const nested = new Map<string, FileEntry[]>();
+    const parents = new Map<string, string>();
+    for (const [dir, entries] of visibleByDir) {
+      const layout: NestingLayout = resolveNesting(entries, nestingPatterns);
+      rows.set(dir, layout.roots);
+      // Flattened into two repo-wide maps: paths are unique across the tree, so a row can look
+      // itself up without first working out which directory it belongs to.
+      for (const [parent, kids] of layout.childrenOf) nested.set(parent, kids);
+      for (const [child, parent] of layout.parentOf) parents.set(child, parent);
+    }
+    return { rowsByDir: rows, nestedByDir: nested, nestParentOf: parents };
+  }, [visibleByDir, nestingEnabled, nestingPatterns]);
+
+  // Behind a ref for the same reason the menu's actions are: `menuItems` is declared above this
+  // point, and a dependency array cannot name a `const` that is still in its temporal dead zone.
+  // The menu is assembled when it opens, by which time this is current — which is also what makes
+  // its labels say what the row is doing *now* rather than when the callback was last built.
+  nestRef.current = { nested: nestedByDir, open: nestOpen };
+
+  /**
+   * Opens the nest holding the file that just became active, and never closes one.
+   *
+   * The case this exists for: creating `user.service.spec.ts` with the new-file button drops it
+   * straight into a closed nest, while `submitDraft` opens it in a tab — so the file is in front of
+   * you in the editor and absent from the tree, which is precisely the "it vanished" reading this
+   * feature cannot afford. Going through the *selected path* rather than through the creation
+   * handler covers the rest of the same class for free: Go to File, a rename that turns a file into
+   * a derived one, and the reveal an external drop asks for, none of which need to know that
+   * nesting exists.
+   */
+  /**
+   * The nest holding the open file, so selecting a nested file reveals it.
+   *
+   * The dependency is the **parent's path** and not the map it came out of, and that is the whole
+   * point. `nestParentOf` is rebuilt with a new identity every time `childrenByDir` changes — which
+   * is every folder expanded, every refresh, every file created or renamed, and every event the
+   * watcher delivers. Depending on the map re-ran this on all of them, and since it only ever
+   * *adds*, a nest the user had just collapsed by hand sprang open again on the next unrelated
+   * listing. While the nested file stayed the active tab there was no way to keep it shut.
+   *
+   * A string compares by value, so this now runs when the selected file's nest actually changes —
+   * a new selection, or a file that becomes nested once its folder finishes loading — and stays out
+   * of the way otherwise.
+   */
+  const nestParent = (selectedPath ? nestParentOf.get(selectedPath) : undefined) ?? null;
+  useEffect(() => {
+    if (!nestParent) return;
+    setNestOpen((prev) => (prev.has(nestParent) ? prev : new Set(prev).add(nestParent)));
+  }, [nestParent]);
+
+  // `?? null` is still what tells "not listed yet" from "listed and empty" — the skeleton depends
+  // on it.
+  const rootEntries = rowsByDir.get("") ?? null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -977,8 +1420,11 @@ export function FileTree({
                 selectedPath={selectedPath}
                 focusedDir={focus.isDir ? focus.path : null}
                 expanded={expanded}
-                childrenByDir={visibleByDir}
+                childrenByDir={rowsByDir}
                 hiddenCountByDir={hiddenCountByDir}
+                nestedByDir={nestedByDir}
+                nestOpen={nestOpen}
+                onToggleNest={toggleNest}
                 draft={draft}
                 renaming={renaming}
                 onToggleDir={toggleDir}
@@ -995,6 +1441,11 @@ export function FileTree({
                 changedDirs={changedDirs}
                 iconRules={iconRules}
                 defaultFolderIcon={defaultFolderIcon}
+                openScripts={openScripts}
+                scriptsByFile={scriptsByFile}
+                onToggleScripts={toggleScripts}
+                onRunScript={runScript}
+                resolveManager={resolveManager}
               />
             ))}
           </>

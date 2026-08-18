@@ -5,6 +5,8 @@ import {
   Cloud,
   Download,
   Bookmark,
+  Folder,
+  FolderDot,
   FolderOpen,
   FolderPlus,
   FolderTree,
@@ -112,6 +114,7 @@ function HostList({ onImport }: { onImport: () => void }) {
   const setQuery = useRemoteStore((s) => s.setQuery);
   const collapsed = useRemoteStore((s) => s.collapsedGroups);
   const tagFilter = useRemoteStore((s) => s.tagFilter);
+  const tagMode = useRemoteStore((s) => s.tagMode);
   const toggleGroup = useRemoteStore((s) => s.toggleGroup);
   const folders = useRemoteStore((s) => s.groups);
   const createGroup = useRemoteStore((s) => s.createGroup);
@@ -143,8 +146,8 @@ function HostList({ onImport }: { onImport: () => void }) {
   }, []);
 
   const visible = useMemo(
-    () => hosts.filter((host) => hostMatches(host, query, tagFilter)),
-    [hosts, query, tagFilter],
+    () => hosts.filter((host) => hostMatches(host, query, tagFilter, tagMode)),
+    [hosts, query, tagFilter, tagMode],
   );
   // The folder rows are passed unfiltered on purpose: a group is hidden by a search only when it
   // has no matching hosts, and an *empty* group has none either way. Dropping it while filtering
@@ -396,6 +399,22 @@ function GroupSection({
         <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--cf-text-muted)]">
           {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
         </span>
+        {/* The mark that says this row is a container rather than a machine.
+            Without it a group heading and a host row differ only by weight and by the count on the
+            right, which is not enough to tell them apart at a glance in a tree that is mostly hosts.
+
+            Deliberately **not** `FolderOpen`: in this workspace that glyph already means "browse
+            this host's files" — it is on the SFTP entry in `hostMenu` and on the files action a few
+            hundred lines down — and one picture meaning two things inside one panel is worse than
+            no picture. `FolderDot` marks the ungrouped bucket, which is not a folder anybody made:
+            it is where hosts with no group fall, and it cannot be renamed or deleted like the rest.
+
+            Outside the rename branch, so the row keeps its shape while the name is being typed. */}
+        {group ? (
+          <Folder size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+        ) : (
+          <FolderDot size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
+        )}
         {renaming ? (
           <InlineInput
             value={group}

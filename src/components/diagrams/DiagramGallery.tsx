@@ -18,7 +18,8 @@ import { folderInk, ICON_BUTTON } from "./diagramsChrome";
 // Reused rather than reimplemented: "how long ago" is not a notes idea, and two implementations of
 // it is how one workspace starts saying "2 days ago" while the other says the date.
 import { relativeTime, TagPill } from "../notes/notesChrome";
-import { folderPath } from "../../lib/diagrams/tree";
+import { folderContents, folderPath, type FolderContents } from "../../lib/diagrams/tree";
+import { ShelfCard, ShelfRow } from "../common/ShelfCard";
 import { filterDiagrams, useDiagramsStore } from "../../state/diagramsStore";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
@@ -27,6 +28,9 @@ import type { Diagram, DiagramSort } from "../../types/diagrams";
 
 /** The orderings offered, in the order the menu lists them. */
 const SORTS: DiagramSort[] = ["manual", "updated", "created", "title"];
+
+/** What a folder the aggregate has nothing to say about reads as — one just created, still empty. */
+const NO_CONTENTS: FolderContents = { count: 0, latest: "" };
 
 /**
  * The main pane: the diagrams of the selected folder, as cards or as rows.
@@ -98,6 +102,40 @@ export function DiagramGallery() {
   );
 
   const crumbs = useMemo(() => folderPath(folders, folderFilter), [folders, folderFilter]);
+
+  /**
+   * What each folder holds, for the cards below.
+   *
+   * **Computed over `diagrams`, never over `shown`.** `shown` has already been narrowed to the
+   * folder you are standing in, so counting it would give every subfolder on screen a zero — which
+   * is the single number a closed container must not report, the same rule `flattenTree` states for
+   * the tree rows and `NoteGallery` states for its books. The card is about what is *inside* the
+   * folder, and nothing about the current filter changes that.
+   *
+   * Once for the whole tree rather than once per card, for the reason `folderContents` documents.
+   */
+  const contents = useMemo(() => folderContents(folders, diagrams), [folders, diagrams]);
+
+  /**
+   * The two lines of small print under a folder's name, in order.
+   *
+   * **An empty folder gets no time at all.** The tempting fallback was the folder's own
+   * `updated_at`, and it lies: that column moves when the folder is renamed and when its colour is
+   * picked, so a folder holding nothing would announce "5 minutes ago" about a diagram that does
+   * not exist. A blank is the honest answer to "when was the last thing in here edited" when there
+   * is no last thing.
+   *
+   * **The count hides itself at zero** rather than saying "0 diagrams", the same call the diagram
+   * cards make about their shape count: a number whose only possible value is nothing is a line of
+   * noise repeated on every card.
+   */
+  const folderMeta = (folderId: string): string[] => {
+    const held = contents.get(folderId) ?? NO_CONTENTS;
+    return [
+      held.count > 0 ? t("diagrams.count", { count: String(held.count) }) : "",
+      held.latest ? relativeTime(held.latest, language) : "",
+    ];
+  };
 
   /**
    * The pictures for the cards on screen.
@@ -254,20 +292,53 @@ export function DiagramGallery() {
           </p>
         ) : (
           <div className="flex flex-col gap-4">
+            {/* Folders are drawn with the Notes shelf's card, not with a card of their own — see
+                `ShelfCard` for why there is only one of it. Only the foot differs: a book says how
+                many notes it holds, a folder says that and when the newest thing inside it was
+                last touched, which is what the two-piece `meta` is for.
+
+                In list view the folders sit inside a bordered, divided box while the diagram rows
+                below stay loose and rounded. That is Notes' shelf exactly, and the `gap-4` on the
+                column already reads the two blocks as two blocks; bringing the diagram rows into
+                the same box would be a change to the *diagram* list, which is not what was asked
+                for here. */}
             {subfolders.length > 0 && (
-              <div className="grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-2">
-                {subfolders.map((folder) => (
-                  <button
-                    key={folder.id}
-                    type="button"
-                    onClick={() => setFolderFilter(folder.id)}
-                    className="flex items-center gap-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-2 text-left text-[12px] transition-colors hover:border-[var(--cf-accent)]"
-                  >
-                    <Folder size={14} style={{ color: folderInk(folder.color) }} />
-                    <span className="min-w-0 flex-1 truncate font-medium">{folder.name}</span>
-                  </button>
-                ))}
-              </div>
+              galleryView === "grid" ? (
+                // Elastic `minmax(240px,1fr)` here, even though the diagram cards below deliberately
+                // ride a fixed 180px track. That fixed track exists for the thumbnails: a stretchy
+                // column makes a card's width a fraction of the pane's, and a raster resampled at a
+                // different fraction of a pixel on each of the eleven frames the AI panel animates
+                // visibly shakes. A folder card draws no bitmap — there is nothing in it to
+                // resample — so the column costs nothing and is what puts this shelf pixel for
+                // pixel on top of the Notes one.
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(240px,1fr))] gap-3">
+                  {subfolders.map((folder) => (
+                    <ShelfCard
+                      key={folder.id}
+                      icon={Folder}
+                      name={folder.name}
+                      tint={folderInk(folder.color)}
+                      meta={folderMeta(folder.id)}
+                      label={t("diagrams.openFolder", { name: folder.name })}
+                      onOpen={() => setFolderFilter(folder.id)}
+                    />
+                  ))}
+                </div>
+              ) : (
+                <div className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-md border border-[var(--cf-border)]">
+                  {subfolders.map((folder) => (
+                    <ShelfRow
+                      key={folder.id}
+                      icon={Folder}
+                      name={folder.name}
+                      tint={folderInk(folder.color)}
+                      meta={folderMeta(folder.id)}
+                      label={t("diagrams.openFolder", { name: folder.name })}
+                      onOpen={() => setFolderFilter(folder.id)}
+                    />
+                  ))}
+                </div>
+              )
             )}
 
             {galleryView === "grid" ? (

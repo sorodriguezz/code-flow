@@ -31,6 +31,7 @@ import { DocumentList, type DocumentActions, type DocumentState } from "./Docume
 import { QueryOptionsPanel } from "./QueryOptionsPanel";
 import { RecordGrid } from "./RecordGrid";
 import { ResultGrid, type GridRowAction } from "./ResultGrid";
+import { cellMenuItems } from "./cellMenu";
 import { nodeLabel } from "./SqlConsolePanel";
 import { EngineBadge, ToolbarButton, ToolbarSeparator, formatCount, formatDuration } from "./dbChrome";
 import {
@@ -68,6 +69,9 @@ const PAGE_SIZES = [50, 100, 200, 500, 1000];
  */
 type PanelMenu =
   | { x: number; y: number; kind: "row"; row: number }
+  /** A right-click that landed on a value. Carries the column as well as the row, because the four
+   *  clipboard entries are about one cell while everything under them is about the record. */
+  | { x: number; y: number; kind: "cell"; row: number; column: string }
   | { x: number; y: number; kind: "export"; rows: number[] }
   | { x: number; y: number; kind: "pageSize" };
 
@@ -692,6 +696,69 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
     return items;
   };
 
+  /**
+   * The cell menu: four clipboard entries about one value, then the whole row menu under them.
+   *
+   * Composed rather than replacing, because a right-click has to keep answering both questions. The
+   * row entries — copy the record, duplicate it, delete it, export it — were the only thing here
+   * before, and dropping them the moment cells got a menu of their own would be a straight loss on
+   * the gesture people already use.
+   */
+  const cellMenu = (row: number, column: string, x: number, y: number): MenuItem[] => {
+    const serverRows = tab.result?.rows.length ?? 0;
+    // Past the server's rows is one of the locally appended ones, which are indexed from zero in
+    // their own list and staged through a different setter — the same split `ResultGrid.commit`
+    // makes, and getting it wrong here would write an edit into an unrelated row.
+    const inserted = row >= serverRows;
+    const columnIndex = (tab.result?.columns ?? []).findIndex((entry) => entry.name === column);
+    const value = inserted
+      ? (tab.inserted[row - serverRows]?.[columnIndex] ?? null)
+      : displayCell(tab, row, column);
+
+    const items = cellMenuItems(
+      {
+        value,
+        onSet: (next) =>
+          inserted
+            ? store.setInsertedCell(tab.id, row - serverRows, column, next)
+            : store.setCell(tab.id, row, column, next),
+      },
+      t,
+    );
+
+    /**
+     * A locally added row gets no row menu, and that is a correctness rule rather than a tidiness
+     * one.
+     *
+     * Every entry `rowMenu` builds is addressed by an index into `tab.result.rows`, which a new row
+     * is past the end of. "Delete row" would stage `serverRows + n` into `tab.deleted`, and
+     * `buildEdits` resolves its key columns through `cellAt` — `undefined` for a row the server
+     * never sent — so the statement that reached the database was `DELETE … WHERE id = NULL`,
+     * against a row the user was only *drafting*. Copy and Export were quieter about it and
+     * produced an empty record.
+     *
+     * The one thing that does make sense on a draft is throwing it away, which is the same action
+     * as the row's own discard button and takes the local index the same way.
+     */
+    if (inserted) {
+      return [
+        ...items,
+        {
+          label: t("db.discardRow"),
+          icon: Trash2,
+          danger: true,
+          separated: true,
+          onClick: () => store.removeInsertedRow(tab.id, row - serverRows),
+        },
+      ];
+    }
+
+    // The hairline that says where "this value" stops and "this record" starts.
+    const rows = rowMenu(row, x, y);
+    if (rows.length > 0) rows[0] = { ...rows[0], separated: true };
+    return [...items, ...rows];
+  };
+
   const exportItems = (rows: number[]): MenuItem[] =>
     (["csv", "tsv", "json", "sql", "markdown"] as ExportFormat[]).map((format) => ({
       label: t("db.exportAs", { format: format.toUpperCase() }),
@@ -906,6 +973,17 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
                 // the row under the pointer and not about rows somewhere else on screen.
                 if (!selected.has(row)) selectRow(row, { range: false, toggle: false });
                 setMenu({ x: event.clientX, y: event.clientY, kind: "row", row });
+              },
+              onCellContextMenu: (row: number, column: string, event: React.MouseEvent) => {
+                // The same selection move as above, but never for a locally added row: the grids
+                // exclude those from the selection by construction (`selected = !inserted && …`),
+                // and putting an out-of-range index in there is what let `rowMenu` believe a draft
+                // was one of the rows being acted on.
+                const serverRows = tab.result?.rows.length ?? 0;
+                if (row < serverRows && !selected.has(row)) {
+                  selectRow(row, { range: false, toggle: false });
+                }
+                setMenu({ x: event.clientX, y: event.clientY, kind: "cell", row, column });
               },
               selectedRows: selected,
               onSelectRow: selectRow,
@@ -1127,7 +1205,9 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           items={
             menu.kind === "row"
               ? rowMenu(menu.row, menu.x, menu.y)
-              : menu.kind === "export"
+              : menu.kind === "cell"
+                ? cellMenu(menu.row, menu.column, menu.x, menu.y)
+                : menu.kind === "export"
                 ? exportItems(menu.rows)
                 : PAGE_SIZES.map((size) => ({
                     label: t("db.perPage", { n: formatCount(size) }),

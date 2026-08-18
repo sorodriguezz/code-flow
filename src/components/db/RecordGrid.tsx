@@ -49,6 +49,7 @@ export function RecordGrid({
   onEditInserted,
   onRemoveInserted,
   onRowContextMenu,
+  onCellContextMenu,
   selectedRows,
   onSelectRow,
   onSelectRange,
@@ -154,8 +155,13 @@ export function RecordGrid({
               <div
                 key={row}
                 onContextMenu={(e) => {
-                  if (!onRowContextMenu || inserted) return;
+                  // Claimed before the menu is decided, so the record strip cannot fall through to
+                  // the webview's own menu either. A locally appended record still has no row menu
+                  // — it is not in the database yet, so "copy this record" and "delete it" have
+                  // nothing to act on — but "no menu" and "the browser's menu" are different
+                  // answers, and only the first one is ours to give.
                   e.preventDefault();
+                  if (!onRowContextMenu || inserted) return;
                   onRowContextMenu(row, e);
                 }}
                 onPointerDown={(e) => {
@@ -249,6 +255,16 @@ export function RecordGrid({
               return (
                 <div
                   key={row}
+                  onContextMenu={(e) => {
+                    // The same claim as `ResultGrid`'s, and for the same reason — see the comment
+                    // there. The record layout transposes the grid, so the element under the
+                    // pointer is a different one, but a cell being edited is the same `<input>`
+                    // and the guard treats it the same way.
+                    e.preventDefault();
+                    if (!onCellContextMenu) return;
+                    e.stopPropagation();
+                    onCellContextMenu(row, column.name, e);
+                  }}
                   onDoubleClick={() => editable && setEditing({ row, column: column.name })}
                   onClick={(e) => {
                     if (!facts.reference || !onFollowForeignKey || !(e.metaKey || e.ctrlKey)) return;

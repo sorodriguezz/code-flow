@@ -39,6 +39,7 @@ import { useNavigationStore } from "./state/navigationStore";
 import { useTerminalStore } from "./state/terminalStore";
 import { useShortcutsStore } from "./state/shortcutsStore";
 import { useIconRulesStore } from "./state/iconRulesStore";
+import { useFileNestingStore } from "./state/fileNestingStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
 import { useBlameStore } from "./state/blameStore";
@@ -311,6 +312,7 @@ export default function App() {
   const initAiProvider = useAiProviderStore((s) => s.init);
   const initShortcuts = useShortcutsStore((s) => s.init);
   const initIconRules = useIconRulesStore((s) => s.init);
+  const initFileNesting = useFileNestingStore((s) => s.init);
   const initTour = useTourStore((s) => s.init);
   const initRequirements = useRequirementsStore((s) => s.init);
   const project = useWorkspaceStore((s) => s.activeProject());
@@ -366,6 +368,11 @@ export default function App() {
         // Read with the rest of the look-and-feel settings: the explorer paints its first tree
         // within a frame or two of this batch, and rules arriving after it would repaint every row.
         initIconRules(),
+        // Same batch and the same argument, one step stronger: file nesting decides which rows
+        // exist at a directory's own indent, so arriving late would not just recolour the first
+        // tree, it would rearrange it in front of the user. Nothing per repository to go with it —
+        // a pattern names filenames, not paths.
+        initFileNesting(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
         startWindowBoundsTracking(),
@@ -397,6 +404,7 @@ export default function App() {
     initAiProvider,
     initShortcuts,
     initIconRules,
+    initFileNesting,
     initTour,
     initRequirements,
   ]);

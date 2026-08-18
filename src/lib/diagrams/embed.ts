@@ -337,9 +337,53 @@ export type EmbedAction =
        *  turns it back on). That is what makes the saved file readable by anything, not just by
        *  draw.io. */
       format: "png" | "svg" | "xmlsvg" | "pdf" | "xml";
+      /** The colour painted behind the drawing. `"none"` is `mxConstants.NONE`, which the handler
+       *  turns straight back into `null` — the vector branch's only way of saying "no rectangle".
+       *
+       *  Careful on PNG: there it is a *fallback*, not an instruction. The canvas branch reads
+       *  `fa = transparent ? null : graph.background` and then `null == fa && (fa = background)`,
+       *  so a `background` sent alongside `transparent: true` fills the hole the flag just made
+       *  and the file comes back opaque with no warning. See `exportMessage`, which is why the key
+       *  is omitted rather than set to `null` in that case. */
       background?: string;
       scale?: number;
+      /** Pixels across, and it **overrides `scale`** rather than combining with it — the canvas
+       *  branch reads the scale, then does `null != width && (V = …width…)` and throws away what
+       *  it just read (and caps the result at 1, so a width larger than the drawing does nothing).
+       *  Two controls where one silently wins is not a dialog anybody can reason about, so the
+       *  export dialog offers zoom and never this. Left in the type because the thumbnail path
+       *  wants a fixed width by design — see `THUMBNAIL_EXPORT`. */
       width?: number;
+      /** Empty space around the drawing, in points. Read by both branches: the canvas one passes
+       *  it as `exportToCanvas`'s `border`, the vector one as `getSvg`'s third argument. */
+      border?: number;
+      /** PNG only, and it is a flag rather than a colour — `exportToCanvas`'s ninth argument. The
+       *  vector branch never looks at it; an SVG or a PDF is made transparent by sending
+       *  `background: "none"` instead. */
+      transparent?: boolean;
+      /** Both branches, with one asymmetry worth knowing: the vector branch computes
+       *  `graph.shadowVisible || shadow`, so on a diagram that already has shadows turned on in
+       *  the editor a `false` here cannot take them off again. PNG has no such `||` and obeys. */
+      shadow?: boolean;
+      /** PNG only. `exportToCanvas` draws the grid itself, onto the canvas, after the drawing —
+       *  there is no equivalent anywhere in the vector branch. */
+      grid?: boolean;
+      /** PNG only, and for a duller reason than `grid`: the canvas branch reaches `getSvg`'s
+       *  thirteenth parameter (`"page"` switches the bounds to `view.getBackgroundPageBounds()`),
+       *  while the vector branch calls `getSvg` with twelve arguments and stops one short of it.
+       *  So an SVG or a PDF is always the drawing's own bounds, whatever is asked for here.
+       *
+       *  `"diagram"` is *not* simply the same as omitting the key, and the difference is one line:
+       *  `"diagram" == size && null != backgroundImage && (bounds.add(…the image…))`. Sent, a
+       *  background image is inside the picture; omitted, the export crops to the cells and cuts
+       *  it away. Sending it is the behaviour draw.io's own dialog has, so this is a fix rather
+       *  than a regression — but it is a difference, and worth knowing before blaming a diagram
+       *  that suddenly exports wider than it used to. */
+      size?: "diagram" | "page";
+      /** SVG and PDF only. It lands on `getSvg`'s twelfth parameter, which the vector branch does
+       *  pass. The canvas branch derives its theme from `keepTheme` and never reads this key, so a
+       *  light/dark choice cannot be expressed for a PNG at all. */
+      theme?: "light" | "dark";
     };
 
 /**

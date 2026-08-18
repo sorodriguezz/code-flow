@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   CopyPlus,
+  Download,
   Eye,
   EyeOff,
   MoreHorizontal,
@@ -13,6 +14,7 @@ import {
   Folder,
   Search,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { IconGlyph } from "../common/FileGlyph";
@@ -28,23 +30,20 @@ import {
 import {
   formatIconPattern,
   iconPatternDescription,
+  newRuleId,
   parseIconPattern,
   ruleMatches,
   ruleMatchesSearch,
   sameRuleTarget,
   type IconRule,
 } from "../../lib/icons/rules";
+import { exportProfileFile, importProfileFile } from "../../lib/icons/profileFile";
 import { shippedProfile } from "../../lib/icons/profiles";
 import { useIconRulesStore } from "../../state/iconRulesStore";
 import { confirmAction } from "../../state/confirmStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
-
-/** Ids only have to be unique within the list, and the list is small and local — a counter off the
- * clock is enough, and it keeps the rules file readable when someone opens it. */
-function newRuleId(): string {
-  return `r${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
-}
 
 /**
  * The picker: 3,600 glyphs behind a search box.
@@ -68,18 +67,25 @@ function IconPicker({
   const [query, setQuery] = useState(seed);
   const [ready, setReady] = useState(iconCatalogReady);
 
-  useEffect(() => {
-    if (ready) return;
-    void loadIconCatalog();
-    return onIconCatalogReady(() => setReady(true));
-  }, [ready]);
-
   // The picker is the only thing in the app that wants all ~3,600 glyphs; everything else draws
   // from the sixty-odd the rules name. Handing the rest back on close is what stops opening this
-  // dialog once from costing ~10 MB of SVG markup for the rest of the session. Safe to call
-  // unconditionally — `releaseIconCatalog` keeps every declared id, and anything it gets wrong is
-  // recovered by `iconEntry` on the next render.
-  useEffect(() => releaseIconCatalog, []);
+  // dialog once from costing ~10 MB of SVG markup for the rest of the session.
+  //
+  // Borrow and hand back in **one** effect, so they are a matched pair for the whole time this is
+  // mounted. They used to be two: the borrow was skipped when the catalogue happened to be loaded
+  // already, while the hand-back ran either way. That is fine for a lone borrower and wrong the
+  // moment there is a second one — an import running alongside this dialog would be counted out by
+  // a release this component never paid for. Unconditional here also survives StrictMode's
+  // mount/unmount/mount, which sees load, release, load.
+  useEffect(() => {
+    void loadIconCatalog();
+    return releaseIconCatalog;
+  }, []);
+
+  useEffect(() => {
+    if (ready) return;
+    return onIconCatalogReady(() => setReady(true));
+  }, [ready]);
 
   const results = useMemo(() => (ready ? searchIcons(query) : []), [query, ready]);
 
@@ -284,6 +290,10 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
   const removeProfile = useIconRulesStore((s) => s.removeProfile);
   const resetProfile = useIconRulesStore((s) => s.resetProfile);
   const resetAll = useIconRulesStore((s) => s.resetAll);
+  const importProfile = useIconRulesStore((s) => s.importProfile);
+  /** Whether the profiles have actually been read yet. Both file actions hang off it — see
+   * `runImport`, and the guard of the same name in the store. */
+  const loaded = useIconRulesStore((s) => s.loaded);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   /** The name being typed, or `null` when the row is showing the select. */
   const [naming, setNaming] = useState<{ mode: "add" | "duplicate" | "rename"; value: string } | null>(
@@ -325,6 +335,61 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
     else void renameProfile(activeId, name);
   };
 
+  const runExport = async () => {
+    if (!active) return;
+    try {
+      const path = await exportProfileFile(active);
+      // `null` is the dialog being dismissed, which is not an outcome worth a toast.
+      if (path) {
+        useToastStore
+          .getState()
+          .pushToast(t("icons.profileExported", { name: active.name, path }), "success");
+      }
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
+  /**
+   * Reading a file, saying what came out of it, and only then writing.
+   *
+   * **The report goes in the confirmation, not in a toast afterwards.** How many rules were dropped
+   * is the only signal that the file did not arrive whole — the profile itself looks perfectly fine
+   * either way — and a toast about it lands while the eye is already back on the tree looking for
+   * the icons it was promised. In the confirmation it is the thing being read at the moment the
+   * decision is made, and declining is still free.
+   *
+   * The sentence is assembled from independent clauses rather than from a key per combination:
+   * renamed, missing icons, unusable entries and a missing folder icon are four flags that occur in
+   * any mix, which is sixteen keys written as thirteen words of overlap. Each clause is a whole
+   * sentence in both languages, so the order they arrive in never produces a fragment.
+   *
+   * `danger: false`, unlike `confirmResetProfile`: nothing is overwritten or lost here. The
+   * imported profile is added to the list, and undoing it is the delete entry in this same menu.
+   */
+  const runImport = async () => {
+    let result;
+    try {
+      result = await importProfileFile(profiles);
+    } catch (e) {
+      return pushErrorToast(String(e));
+    }
+    if (!result) return;
+    if (!result.ok) return pushErrorToast(t(result.error, result.params));
+    const clauses = [
+      t("icons.importConfirm", { name: result.profile.name, n: result.profile.rules.length }),
+    ];
+    if (result.renamedFrom) clauses.push(t("icons.importRenamed", { original: result.renamedFrom }));
+    if (result.droppedIcons) clauses.push(t("icons.importDroppedIcon", { n: result.droppedIcons }));
+    if (result.droppedInvalid) {
+      clauses.push(t("icons.importDroppedInvalid", { n: result.droppedInvalid }));
+    }
+    if (result.droppedFolderIcon) clauses.push(t("icons.importDroppedFolder"));
+    if (await confirmAction(clauses.join(" "), false, t("icons.importAction"))) {
+      void importProfile(result.profile);
+    }
+  };
+
   const items: MenuItem[] = [
     {
       label: t("icons.profileAdd"),
@@ -342,6 +407,27 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
       onClick: () => setNaming({ mode: "rename", value: active?.name ?? "" }),
     },
   ];
+  // Their own group under the three above: those manage *this list*, these move a profile between
+  // machines. Hence `separated` on the first of the pair and not on the second.
+  //
+  // Disabled until the profiles have been read, because until then the list on screen is the shipped
+  // one and writing from it would persist that over the user's own — the same window the store's
+  // `loaded` guard covers, said here so the entry is visibly unavailable rather than silently inert.
+  items.push(
+    {
+      label: t("icons.profileExport"),
+      icon: Upload,
+      separated: true,
+      disabled: !loaded,
+      onClick: () => void runExport(),
+    },
+    {
+      label: t("icons.profileImport"),
+      icon: Download,
+      disabled: !loaded,
+      onClick: () => void runImport(),
+    },
+  );
   // The last profile has no delete: with none left there is no rule list to fall back to.
   if (profiles.length > 1) {
     items.push({

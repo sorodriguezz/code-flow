@@ -132,6 +132,36 @@ export function profileById(profiles: IconProfile[], id: string | null): IconPro
   return profiles.find((profile) => profile.id === id) ?? profiles[0];
 }
 
+/**
+ * A name no profile in the list is already using.
+ *
+ * Not a uniqueness guarantee — the `id` is the key, and `renameProfile` will happily give two
+ * profiles the same name if that is what somebody types. This exists for one gesture: sharing a
+ * profile means receiving it twice, and importing the same file a second time would otherwise leave
+ * the bar's `Select` showing two identical labels with no way to tell which is which. Suffixing at
+ * import is cheaper than making the picker explain itself.
+ *
+ * The ` 2` suffix is the one `duplicateProfile` already proposes, so both ways of ending up with a
+ * second copy read the same in the list. Compared trimmed and lowercased because "Nest" and "nest "
+ * are the same profile to everyone except `===`.
+ *
+ * Untranslated fallback, exactly as `addProfile` has it: a profile name is the user's data, not the
+ * app's copy, and one that changed language under them would look like a different profile.
+ */
+export function uniqueProfileName(profiles: IconProfile[], wanted: string): string {
+  const base = wanted.trim() || "Profile";
+  const taken = new Set(profiles.map((profile) => profile.name.trim().toLowerCase()));
+  if (!taken.has(base.toLowerCase())) return base;
+  // The bound is proved, not guessed: `taken` holds at most `profiles.length` names, so among the
+  // `profiles.length + 1` candidates tried here at least one is free. The loop always finds it and
+  // needs no escape hatch; the return below is there for the type checker.
+  for (let n = 2; n <= profiles.length + 2; n++) {
+    const candidate = `${base} ${n}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${base} ${profiles.length + 3}`;
+}
+
 /** Deep-equal against the rules this app shipped before profiles existed. Decides whether a stored
  * rule list is a customisation worth preserving as a profile of its own, or just the old defaults
  * sitting where `save` left them. */

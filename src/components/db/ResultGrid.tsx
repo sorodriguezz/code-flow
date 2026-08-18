@@ -97,6 +97,16 @@ export interface ResultGridProps {
   /** Right-clicking a row calls this; the caller decides what the menu holds. */
   onRowContextMenu?: (row: number, event: React.MouseEvent) => void;
   /**
+   * Right-clicking a *cell* calls this, with the column under the pointer.
+   *
+   * Separate from `onRowContextMenu` because the two answer different questions — "this record" vs
+   * "this value" — and because only this one can be built without knowing what the grid is showing:
+   * copy, cut, paste and set-NULL are the same four actions on every engine, and `cellMenuItems`
+   * builds them. A caller that sets this takes over the cell entirely; one that doesn't still gets
+   * its row menu, because the event is left to bubble.
+   */
+  onCellContextMenu?: (row: number, column: string, event: React.MouseEvent) => void;
+  /**
    * Selected rows, by index into `rows`.
    *
    * The selection lives with the caller rather than here: what it is *for* — export these, delete
@@ -175,6 +185,7 @@ export function ResultGrid({
   onEditInserted,
   onRemoveInserted,
   onRowContextMenu,
+  onCellContextMenu,
   selectedRows,
   onSelectRow,
   onSelectRange,
@@ -577,6 +588,19 @@ export function ResultGrid({
                       <div
                         key={`${column.name}-${columnIndex}`}
                         style={{ width: widthOf(column.name) }}
+                        onContextMenu={(e) => {
+                          // Claimed unconditionally, before anything is decided about menus. A cell
+                          // being edited is a real `<input>`, and `contextMenuGuard` stands down on
+                          // text fields so the OS editing menu survives in ordinary form boxes — so
+                          // without this the webview's own menu opens over the grid. `preventDefault`
+                          // is what tells the guard this right-click has an owner.
+                          e.preventDefault();
+                          // No cell menu wired: let it bubble, so a grid whose caller only built a
+                          // row menu still gets that row menu.
+                          if (!onCellContextMenu) return;
+                          e.stopPropagation();
+                          onCellContextMenu(row, column.name, e);
+                        }}
                         onDoubleClick={() =>
                           editable && setEditing({ row, column: column.name, inserted })
                         }

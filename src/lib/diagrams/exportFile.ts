@@ -58,7 +58,7 @@ export async function saveBytes(
 ): Promise<boolean> {
   const filter = FILTERS[format];
   const path = await save({
-    defaultPath: `${sanitize(suggestedName)}.${filter.extensions[0]}`,
+    defaultPath: `${safeFileName(suggestedName, "diagram")}.${filter.extensions[0]}`,
     filters: [filter],
   });
   if (!path) return false;
@@ -89,8 +89,14 @@ export async function openDrawioFile(): Promise<{ name: string; xml: string } | 
  * write somewhere else entirely — and the control range. Spaces and hyphens are deliberately kept:
  * stripping them turns "Pipeline de review" into one unreadable word. Trimmed and capped, because
  * a title can be a sentence.
+ *
+ * The fallback is a parameter rather than the constant it used to be, because the second caller is
+ * not saving a diagram: `lib/icons/profileFile.ts` names its file after an icon profile, and an
+ * untitled one landing as "diagram.json" would be a lie about what is inside it. Exported rather
+ * than copied there for the obvious reason — two sanitisers is two answers to "is a colon legal",
+ * and only one of them gets fixed the day it turns out not to be.
  */
-function sanitize(title: string): string {
+export function safeFileName(title: string, fallback: string): string {
   const cleaned = title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, "").trim();
-  return (cleaned || "diagram").slice(0, 80);
+  return (cleaned || fallback).slice(0, 80);
 }

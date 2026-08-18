@@ -56,6 +56,21 @@ export interface IconRule {
   enabled: boolean;
 }
 
+/**
+ * A fresh rule id.
+ *
+ * Ids only have to be unique within the list, and the list is small and local — a counter off the
+ * clock is enough, and it keeps the rules file readable when someone opens it.
+ *
+ * Here rather than in the panel that used to own it, because the panel is no longer the only place
+ * a rule is born: an imported profile arrives with ids somebody else's install minted, and the
+ * importer has to be able to replace the ones it cannot trust. Two minters in two modules would be
+ * two chances to change the shape of an id and only remember one of them.
+ */
+export function newRuleId(): string {
+  return `r${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`;
+}
+
 /** Whether one rule claims this name. `name` is the basename, not the path: a rule about `src` is
  * about folders called src, not about every file under one. */
 export function ruleMatches(rule: IconRule, name: string, isFolder: boolean): boolean {
@@ -183,4 +198,46 @@ export function ruleMatchesSearch(rule: IconRule, query: string): boolean {
   const live = { ...rule, enabled: true };
   if (asFolder) return ruleMatches(live, name, true);
   return ruleMatches(live, name, true) || ruleMatches(live, name, false);
+}
+
+/**
+ * The one definition of "a rule this app will accept".
+ *
+ * Anything stored by an older build, or hand-edited, has to survive being wrong. A rule missing a
+ * field is dropped rather than defaulted: a half-read rule that silently matched everything would
+ * repaint the whole tree with one icon.
+ *
+ * It lives here, and not in the store that reads the settings blob, because reading from disk is no
+ * longer the only way a rule gets in — a profile can arrive as a file somebody else exported. A
+ * second set of checks written by hand in the importer would fork the tolerance the moment either
+ * side gained a field: the `extension` migration below would stop applying to imported rules, and
+ * the store would end up persisting rules its own reader would have refused. The same argument
+ * `lib/api/exporters.ts` makes about parsing a stored `spec` blob anywhere but in its readers.
+ */
+export function parseIconRules(raw: unknown): IconRule[] | null {
+  if (!Array.isArray(raw)) return null;
+  return raw
+    .filter(
+      (entry): entry is IconRule =>
+        !!entry &&
+        typeof entry === "object" &&
+        typeof (entry as IconRule).id === "string" &&
+        typeof (entry as IconRule).pattern === "string" &&
+        typeof (entry as IconRule).icon === "string" &&
+        ((entry as IconRule).target === "file" || (entry as IconRule).target === "folder") &&
+        ["suffix", "name", "prefix", "contains", "extension"].includes(
+          (entry as IconRule).match as string,
+        ),
+    )
+    .map(migrateRule);
+}
+
+/**
+ * `extension` was the fifth match kind before patterns were written as one string. It is exactly a
+ * suffix of `.` plus the extension — `ts` and `*.ts` match the same set — so a stored rule is
+ * rewritten rather than dropped, and nobody's icons move.
+ */
+function migrateRule(rule: IconRule): IconRule {
+  if ((rule.match as string) !== "extension") return rule;
+  return { ...rule, match: "suffix", pattern: `.${rule.pattern.replace(/^\./, "")}` };
 }
