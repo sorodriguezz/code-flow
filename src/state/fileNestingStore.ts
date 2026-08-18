@@ -18,6 +18,19 @@ import { DEFAULT_NESTING_PATTERNS, type NestingPattern } from "../lib/fileNestin
  * The switch travels with the patterns for the same reason: "I don't like file nesting" is a
  * sentence about how somebody reads trees, not about one checkout.
  *
+ * # One switch, and patterns that are not edited
+ *
+ * There was a whole panel for this — parent globs, `${capture}` templates, per-row enable, add,
+ * delete, reset, a live preview — occupying a slot in the editor's side rail. It was taken out. For
+ * "keep the spec next to its source" that is an enormous amount of apparatus to read, and the
+ * question a user actually has is yes-or-no, which the explorer's own context menu already answers
+ * in one click.
+ *
+ * The patterns stay in the stored row and are still honoured if a row is found with them, so nobody
+ * who had customised loses their setup; there is simply nothing in the app that writes them any
+ * more. If pattern editing is ever wanted back, it wants to be a text field holding the whole list,
+ * not fifteen controls.
+ *
  * # Off by default
  *
  * Nesting rearranges a tree people already know how to read, and the first reading of a file that
@@ -43,15 +56,6 @@ interface FileNestingState {
   loaded: boolean;
   init: () => Promise<void>;
   setEnabled: (value: boolean) => void;
-  /**
-   * Replaces the whole list. Every mutation the panel offers — edit a field, toggle a row, delete
-   * one, add one — is a rewrite of the same array, and a per-field API would be four actions that
-   * all end in this one write. The same shape `iconRulesStore.save` has, for the same reason.
-   */
-  save: (patterns: NestingPattern[]) => void;
-  /** Back to the shipped patterns. Leaves the switch alone: restoring the list is not a request to
-   *  turn the feature on or off. */
-  reset: () => void;
 }
 
 /**
@@ -121,16 +125,6 @@ export const useFileNestingStore = create<FileNestingState>((set, get) => {
     setEnabled: (value) => {
       set({ enabled: value });
       persist({ enabled: value, patterns: get().patterns });
-    },
-
-    save: (patterns) => {
-      set({ patterns });
-      persist({ enabled: get().enabled, patterns });
-    },
-
-    reset: () => {
-      set({ patterns: DEFAULT_NESTING_PATTERNS });
-      persist({ enabled: get().enabled, patterns: DEFAULT_NESTING_PATTERNS });
     },
   };
 });

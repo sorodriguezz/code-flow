@@ -17,7 +17,6 @@ import {
   FolderInput,
   GitBranch,
   Keyboard,
-  ListTree,
   PanelRightClose,
   Search,
   Tags,
@@ -30,7 +29,6 @@ import { BookmarksPanel } from "./BookmarksPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
 import { IconRulesPanel } from "./IconRulesPanel";
-import { FileNestingPanel } from "./FileNestingPanel";
 import { clearFullDiffCache, EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
 import { ChangesPanel } from "../git/ChangesPanel";
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
@@ -164,7 +162,7 @@ export function EditorView() {
   const [saving, setSaving] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<
-    "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons" | "nesting"
+    "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons"
   >("files");
   /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
    * step into while committing, not a layout preference — the editor's resting state is code. */
@@ -1003,18 +1001,6 @@ export function EditorView() {
           >
             <Palette size={15} />
           </button>
-          <button
-            onClick={() => setSidePanel("nesting")}
-            title={t("nesting.title")}
-            aria-label={t("nesting.title")}
-            className={`flex h-7 w-7 items-center justify-center rounded-md ${
-              sidePanel === "nesting"
-                ? "text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-            }`}
-          >
-            <ListTree size={15} />
-          </button>
           {/* Go to file lives here rather than in a strip of its own: it's an action, not a
               panel, and it has to be reachable with no file open — which the tab bar isn't. */}
           <button
@@ -1058,8 +1044,6 @@ export function EditorView() {
             <BookmarksPanel repoPath={project.local_path} onOpen={openHit} />
           ) : sidePanel === "icons" ? (
             <IconRulesPanel />
-          ) : sidePanel === "nesting" ? (
-            <FileNestingPanel />
           ) : sidePanel === "debug" ? (
             <DebugPanel
               repoPath={project.local_path}
@@ -1074,7 +1058,6 @@ export function EditorView() {
           ) : (
             <FileTree
               repoPath={project.local_path}
-              projectId={project.id}
               selectedPath={activePath}
               onSelectFile={selectFileInTree}
               onOpenFile={openFileInTree}

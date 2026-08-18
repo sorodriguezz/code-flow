@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Download, Loader2, Save, Send, ShieldAlert, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Download, FileQuestion, Loader2, Save, Send, ShieldAlert, X } from "lucide-react";
 import { Select } from "../common/Select";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { KeyValueTable } from "./KeyValueTable";
@@ -764,6 +764,28 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
             </>
           )}
         </div>
+
+        {/* A request that lives nowhere yet, said rather than left blank.
+            This slot holds the trail to the collection, and a scratch tab has none — so it used to
+            render as empty space, which reads the same as a request whose path simply did not fit.
+            The two are very different: one is filed and one will be lost when the tab closes. It is
+            a button because saying so is only half the job; the other half is the way out, and this
+            is the same picker ⌘S opens. */}
+        {crumbs.length === 0 && (
+          <button
+            type="button"
+            onClick={() => {
+              const first = collections[0];
+              setSavePicker({ collectionId: first?.id ?? "", folderId: "" });
+            }}
+            title={t("api.scratchHint")}
+            className="flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--cf-warning)] transition-colors hover:bg-[var(--cf-warning)]/10"
+          >
+            <FileQuestion size={11} className="shrink-0" />
+            {t("api.scratchBadge")}
+            <ChevronRight size={12} className="shrink-0 opacity-60" />
+          </button>
+        )}
 
         {/* The path, then the name as its last segment — the same trail the explorer shows, with
             the one part you're allowed to change sitting where it actually belongs. */}

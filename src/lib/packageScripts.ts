@@ -156,15 +156,38 @@ export function detectPackageManager(
   dir: string,
   listings: Map<string, FileEntry[]>,
 ): PackageManager | null {
+  return detectPackageManagers(dir, listings)[0] ?? null;
+}
+
+/**
+ * **Every** manager whose lockfile sits at the nearest level that has one.
+ *
+ * The singular version above answers with the first of these and says nothing about the rest, which
+ * is wrong whenever a repository carries more than one lockfile — and that happens: somebody runs
+ * `npm install` in a pnpm project, a migration leaves the old file behind, a template ships with
+ * two. Picking one silently means the play button runs a different manager from the one the person
+ * pressing it expects, and the failure is quiet — a lockfile gets rewritten by the wrong tool.
+ *
+ * Stops at the first directory that has any, rather than collecting all the way up: a workspace
+ * package with its own lockfile has genuinely opted out of the monorepo's manager, and mixing the
+ * two levels would offer a choice that is not really open.
+ *
+ * Ordered by `PACKAGE_MANAGERS`, so a caller that just takes the first gets a stable answer rather
+ * than one that depends on how the directory happened to be listed.
+ */
+export function detectPackageManagers(
+  dir: string,
+  listings: Map<string, FileEntry[]>,
+): PackageManager[] {
   let current = dir;
   for (;;) {
     const entries = listings.get(current);
     if (entries) {
       const names = new Set(entries.filter((entry) => !entry.is_dir).map((entry) => entry.name));
-      const found = PACKAGE_MANAGERS.find((manager) => names.has(LOCKFILE[manager]));
-      if (found) return found;
+      const found = PACKAGE_MANAGERS.filter((manager) => names.has(LOCKFILE[manager]));
+      if (found.length > 0) return found;
     }
-    if (current === "") return null;
+    if (current === "") return [];
     current = splitPath(current).dir;
   }
 }
@@ -228,6 +251,43 @@ export function scriptCommandLine(manager: PackageManager, name: string): string
     case "yarn":
       return YARN_BUILTINS.has(name) ? `yarn run ${name}` : `yarn ${name}`;
   }
+}
+
+/**
+ * A package name, by npm's own grammar, checked before it can become a shell word.
+ *
+ * The mirror of `isRunnableScriptName`, and here for the identical reason: a name that reaches this
+ * app arrives from somewhere it did not write — a registry search, or a `package.json` on disk — and
+ * `install` is a line typed at a prompt. Nothing outside this set can end a command, open a
+ * subshell, redirect, glob or expand, so `pnpm add <name>` stays three tokens whatever the name says.
+ *
+ * Kept as a second lock even though `src-tauri/src/npm.rs` applies the same rule before a name ever
+ * comes back from a search: that one guards a URL, this one guards a shell, and neither should
+ * depend on the other having run.
+ */
+const PACKAGE_NAME = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+
+export function isInstallableName(name: string): boolean {
+  return name.length <= 214 && PACKAGE_NAME.test(name);
+}
+
+/**
+ * The line that installs a package, or `null` when the name is not one this will type.
+ *
+ * `add` in all three: npm has understood it as an alias for `install` since v7, and using the one
+ * word everywhere means the command the terminal shows matches what the dialog said it would run,
+ * whichever manager the repository uses.
+ */
+export function addCommandLine(
+  manager: PackageManager,
+  name: string,
+  dev: boolean,
+): string | null {
+  if (!isInstallableName(name)) return null;
+  // Each manager spells the dev flag differently, and the long forms are the ones that read as what
+  // they do in a transcript somebody scrolls back through a week later.
+  const flag = dev ? (manager === "npm" ? " --save-dev" : " --dev") : "";
+  return `${manager} add ${name}${flag}`;
 }
 
 /**

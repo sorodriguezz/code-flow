@@ -24,6 +24,7 @@ mod git;
 mod grok;
 mod github;
 mod gitlab;
+mod npm;
 mod oauth;
 mod onedrive;
 mod opencode;
@@ -49,6 +50,7 @@ mod sigv4;
 mod supabase;
 mod sysload;
 mod terminal;
+mod tsserver;
 mod tray;
 mod watcher;
 mod window_state;
@@ -318,6 +320,15 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            tsserver::ts_start,
+            tsserver::ts_request,
+            tsserver::ts_notify,
+            tsserver::ts_status,
+            tsserver::ts_stop,
+            npm::npm_package_versions,
+            npm::npm_latest_versions,
+            npm::npm_search,
+            npm::npm_package_sizes,
             commands::app_cmd::quit_app,
             commands::app_cmd::check_requirements,
             commands::app_cmd::reset_app_data,

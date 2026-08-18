@@ -13,8 +13,35 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { ContextMenu } from "../api/CollectionTree";
 
-const LIGHT_THEME = { background: "#ffffff", foreground: "#1c1c26", cursor: "#1c1c26" };
-const DARK_THEME = { background: "#1e1e27", foreground: "#eceef5", cursor: "#eceef5" };
+/**
+ * The selection wash, spelled out rather than left to xterm.
+ *
+ * xterm does ship a default, and it is the reason this looked *almost* right: a flat white at 30%
+ * over `#1e1e27`. Against a terminal whose whole point is coloured text it reads as a smear rather
+ * than as a highlight, and on the light theme the same rule washes out to near-nothing. Worse,
+ * `selectionInactiveBackground` defaults dimmer still, and this pane loses focus constantly — the
+ * dock's own tab strip takes it, so does the editor — which is how "I selected something and see
+ * nothing" happens even where the active colour would have shown.
+ *
+ * Stated as the app's accent so a selection here looks like a selection everywhere else, and given
+ * the same value active and inactive: what is selected does not stop being selected because you
+ * looked at something else. No `selectionForeground`, deliberately — pinning one would flatten the
+ * ANSI colours underneath, and the colours are the information.
+ */
+const LIGHT_THEME = {
+  background: "#ffffff",
+  foreground: "#1c1c26",
+  cursor: "#1c1c26",
+  selectionBackground: "#3b82f659",
+  selectionInactiveBackground: "#3b82f659",
+};
+const DARK_THEME = {
+  background: "#1e1e27",
+  foreground: "#eceef5",
+  cursor: "#eceef5",
+  selectionBackground: "#60a5fa66",
+  selectionInactiveBackground: "#60a5fa66",
+};
 
 /**
  * How far back you can scroll in one terminal. Stated rather than inherited: it used to be
@@ -164,11 +191,24 @@ export function TerminalPane({
    * effect hand it to xterm once and keep depending on `sessionId` alone.
    */
   const copySelection = useCallback((): boolean => {
-    const selection = termRef.current?.getSelection();
+    const term = termRef.current;
+    const selection = term?.getSelection();
     if (!selection) return false;
     void navigator.clipboard
       .writeText(selection)
-      .then(flashCopied)
+      .then(() => {
+        flashCopied();
+        // **The highlight is cleared once it is on the clipboard**, which is what makes the wash
+        // above readable as an event rather than as state. Copy-on-select means a selection is
+        // consumed the instant it is finished, so leaving it lit would put a permanent blue block
+        // over the output for the rest of the session — you would be looking at where you dragged
+        // an hour ago. Clearing it also disambiguates the badge: the flash says "taken", and the
+        // highlight going away is the same sentence said twice.
+        //
+        // Inside `then`, not before it: a clipboard write that fails must leave the selection
+        // standing, or the text would be gone from the screen *and* absent from the clipboard.
+        term?.clearSelection();
+      })
       .catch((e: unknown) => pushErrorToast(String(e)));
     return true;
   }, [flashCopied]);

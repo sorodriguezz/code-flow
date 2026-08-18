@@ -1386,6 +1386,41 @@ body.cf-dragging * {
   background: var(--cf-danger);
 }
 
+/* The run arrow beside a script in a `package.json`.
+ *
+ * Lives in the lines-decorations lane — between the line number and the code — rather than in the
+ * glyph margin, which belongs to breakpoints and sits on the far side of the numbers.
+ *
+ * **Visible at rest, and green.** It was drawn dim-until-hover at 9px on the reasoning that twelve
+ * bright triangles would compete with the code; in the lane that turned out to be a mark you had to
+ * look for to find, which is the wrong trade for the only control on the row. The lane is 20px
+ * (`lineDecorationsWidth`), so the glyph has room to be read at a glance without crowding anything.
+ * Green because that is what it does — it runs something — and because the colour is what separates
+ * it at a glance from the breakpoint dot two lanes over. */
+.cf-script-glyph {
+  cursor: pointer;
+}
+
+.cf-script-glyph::before {
+  content: "▶";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 12px;
+  line-height: 1;
+  color: var(--cf-success);
+  opacity: 0.75;
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.cf-script-glyph:hover::before {
+  opacity: 1;
+  /* A touch larger under the pointer, so the row you are about to run is unambiguous in a column
+     of otherwise identical arrows. */
+  transform: translate(-50%, -50%) scale(1.15);
+}
+
 /* Where execution is stopped right now. */
 .cf-debug-current-line {
   background: color-mix(in oklab, var(--cf-warning) 18%, transparent);
@@ -1921,4 +1956,64 @@ body.cf-dragging * {
   .cf-battery-unplug {
     animation: none;
   }
+}
+
+/* The weight of an imported package, at the end of its import line.
+ *
+ * Dim and small on purpose: it is a footnote on a line whose meaning is the import, and a number
+ * competing with the code for attention would make every import block harder to read than it was
+ * before the number existed. */
+.cf-import-cost {
+  /* `!important` for the reason `.cf-blame-annotation` needs it: this is injected text, so the span
+     also carries Monaco's own token class (`mtk1`…), and those land in a `<style>` tag injected
+     after this file — specificity alone loses the colour to whatever the theme paints strings. */
+  color: var(--cf-text-muted) !important;
+  opacity: 0.7;
+  font-size: 0.85em;
+  font-style: italic;
+}
+
+/* The newest published version of a dependency, injected past the end of its line.
+ *
+ * Dim, small and italic, like the import weight above it and for the same reason: it is a footnote
+ * on a line whose meaning is the dependency. At this size it is read when looked for and ignored
+ * otherwise, which is what an annotation on every row of a block has to manage.
+ *
+ * `!important` on the colour — see the note on `.cf-import-cost`. */
+.cf-dep-latest {
+  color: var(--cf-text-muted) !important;
+  opacity: 0.75;
+  font-size: 0.85em;
+  font-style: italic;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+/* The same number when the range refuses it: taking this one means editing the line it sits on.
+ *
+ * Upright and amber rather than dim and italic, because this half is a call to act and the other is
+ * an answer to "what is current?". Amber rather than the danger colour: being behind is a fact to
+ * act on when you choose, not a fault — nothing is broken. */
+.cf-dep-latest-stale {
+  color: var(--cf-warning) !important;
+  opacity: 0.95;
+  font-style: normal;
+}
+
+/* The same dependency, marked in the gutter and tinted across the row, so which ones are behind can
+ * be seen down the block instead of read off the right-hand edge line by line. */
+.cf-dep-outdated::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: var(--cf-warning);
+}
+
+.cf-dep-outdated-line {
+  background: color-mix(in oklab, var(--cf-warning) 8%, transparent);
 }

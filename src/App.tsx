@@ -7,6 +7,7 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { TabBar } from "./components/layout/TabBar";
 import { AppRail } from "./components/layout/AppRail";
 import { StatusBar } from "./components/layout/StatusBar";
+import { AddDependencyModal } from "./components/editor/AddDependencyModal";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
 import { AiPanel } from "./components/ai/AiPanel";
@@ -752,7 +753,13 @@ export default function App() {
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       <TitleBar />
-      <div className="flex min-h-0 flex-1">
+      {/* `overflow-hidden` is load-bearing, not tidiness.
+          This row is `min-h-0` so the column inside it can shrink, but nothing was clipping that
+          column's *content*. With the terminal dock dragged tall, `min-h-[120px]` on the view above
+          it plus the dock's own height can exceed the row, and the excess was painted below the
+          row's bottom edge — straight under the status bar, which is a later sibling and therefore
+          paints on top. The symptom was the shell's last line disappearing behind the bar. */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
         <Sidebar />
         <div className="flex min-w-0 flex-1 flex-col">
           <TabBar />
@@ -789,10 +796,17 @@ export default function App() {
       </div>
       {/* The update notice hangs off the top edge of the status bar, so it's anchored to the bar
           itself instead of to a viewport offset that would have to be kept in sync by hand. */}
-      <div className="relative">
+      {/* `shrink-0`: the bar is a fixed 24px strip and must never be squeezed by a tall dock above
+          it. As a plain flex item it had `flex-shrink: 1`, so with the column overflowing it was
+          the bar that gave way — which is the other half of the last line ending up underneath it. */}
+      <div className="relative shrink-0">
         <UpdateAlert />
         <StatusBar />
       </div>
+      {/* Mounted at the top rather than inside the editor: the request comes from a CodeLens, which
+          reaches React through a Monaco command id rather than through the component tree, and the
+          dialog outlives whichever pane raised it. It draws nothing until the store holds a target. */}
+      <AddDependencyModal />
       {/* Gated on `settingsOpen` here rather than mounted always and returning `null` from inside,
           which is what it used to do. The two are equivalent — a component that returns `null`
           renders no children either — and the gate is what lets the panel be a lazy chunk at all:

@@ -12,10 +12,12 @@ import {
   ChevronRight,
   Code2,
   Columns2,
+  Copy,
   Eye,
   FileCode,
   GitCompare,
   Loader2,
+  Play,
   Save,
   SplitSquareHorizontal,
   X,
@@ -50,6 +52,21 @@ import { useShortcutsStore } from "../../state/shortcutsStore";
 import { BouncingDots } from "../common/BouncingDots";
 import { EmptyState } from "../common/EmptyState";
 import type { BlameHunkInfo, FileDiffInfo, Project } from "../../types/domain";
+import { usePackageJsonLens } from "./usePackageJsonLens";
+import { ContextMenu, type MenuItem } from "../api/CollectionTree";
+import { useTypeScript } from "./useTypeScript";
+import { useImportCost } from "./useImportCost";
+import { useManagerFor } from "../../lib/useManagerFor";
+import {
+  PACKAGE_JSON,
+  PACKAGE_MANAGERS,
+  scriptCommandLine,
+  type PackageManager,
+} from "../../lib/packageScripts";
+import { usePackageManagerStore } from "../../state/packageManagerStore";
+import { useTerminalStore } from "../../state/terminalStore";
+import { useNpmInstallStore } from "../../state/npmInstallStore";
+import { pushErrorToast } from "../../state/toastStore";
 
 /**
  * The DBML parser, once any pane has pulled it in.
@@ -549,6 +566,25 @@ export function EditorPane({
   const shortcutHint = useShortcutHint();
   const editorRef = useRef<MonacoEditorNS.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
+  /**
+   * The directory the open `package.json` lives in, or `null` for any other file.
+   *
+   * **Its own directory, not the project root.** In a monorepo those are different places, and a
+   * `dev` script from `packages/web` started at the root runs the root's script of the same name or
+   * nothing at all — the one failure a play button beside a script name must not have. Same reason
+   * the tree computes it this way.
+   */
+  const manifestDir = useMemo(() => {
+    if (!activePath) return null;
+    const parts = activePath.split(/[/\\]/);
+    if (parts.pop() !== PACKAGE_JSON) return null;
+    return parts.join("/");
+  }, [activePath]);
+  const managerFor = useManagerFor(project.local_path, manifestDir);
+  /** The menu a gutter arrow opened, and the script it belongs to. Positioned at the arrow, so the
+   *  answer is given where the question was asked — see `scriptMenuItems` for what is in it. */
+  const [scriptMenu, setScriptMenu] = useState<{ x: number; y: number; script: string } | null>(null);
+  const manager = managerFor.manager;
   // Decoration ids are per *model*, so they have to be tracked per open file — reusing one
   // list across tabs would try to replace ids that belong to another tab's model.
   const decorationIdsRef = useRef<Map<string, string[]>>(new Map());
@@ -563,6 +599,57 @@ export function EditorPane({
   // effects keyed on `[ranges]`/`[viewMode]` alone reading a stale/disposed `editorRef.current`
   // if they happened to fire before the new instance was ready.
   const [editorReady, setEditorReady] = useState(0);
+
+  /**
+   * The `package.json` annotations: a run arrow beside every script, a box over each dependency
+   * block.
+   *
+   * `editorReady` is what gates the instances rather than the refs being read directly. A ref does
+   * not re-render when it is filled, so on the pass where Monaco mounts these would still be null
+   * and the hook would register nothing; `editorReady` is bumped in `handleMount` precisely so
+   * effects like this one get a pass with the instance in hand. Every other Monaco add-on in this
+   * file already depends on it for the same reason.
+   */
+  /**
+   * TypeScript's own language service, for every JS/TS file this pane shows.
+   *
+   * Same `editorReady` gate and for the same reason as the lens below. It registers its providers
+   * against the Monaco *instance*, so they serve every model this editor opens rather than only the
+   * active one — which is what a go-to-definition landing in a file you had not opened needs.
+   */
+  useTypeScript(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {
+    repoPath: project.local_path,
+    projectId: project.id,
+    activePath,
+  });
+
+  // The weight of each imported package, at the end of its import line.
+  useImportCost(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {
+    repoPath: project.local_path,
+    activePath,
+  });
+
+  usePackageJsonLens(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {
+    activePath,
+    // The arrow opens the menu below rather than starting anything. Everything about *how* to run
+    // — which manager, or just give me the line — lives there, and `runScriptWith` is the one path
+    // from a script name to a shell.
+    onScriptArrow: (name, at) => setScriptMenu({ x: at.x, y: at.y, script: name }),
+    manager: managerFor,
+    onChooseManager: (next) => usePackageManagerStore.getState().choose(next as PackageManager | null),
+    onAddDependency: (block) => {
+      if (manifestDir === null || !activePath) return;
+      useNpmInstallStore.getState().open({
+        projectId: project.id,
+        repoPath: project.local_path,
+        manifestPath: activePath,
+        dir: manifestDir,
+        block,
+        manager,
+      });
+    },
+    t,
+  });
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.path === activePath) ?? null, [tabs, activePath]);
   const content = activeTab?.content ?? "";
@@ -957,6 +1044,15 @@ export function EditorPane({
       if (event.target.type !== mon.editor.MouseTargetType.GUTTER_LINE_DECORATIONS) return;
       const line = event.target.position?.lineNumber;
       if (!line) return;
+      // A line carrying a script's run arrow belongs to the arrow. Monaco notifies every
+      // `onMouseDown` subscriber independently — there is no stopping one from another — so the
+      // yielding has to be explicit, and it is done here because this lane was the peek's first
+      // and the arrow is the newcomer. Without it, pressing run on a script line you had also
+      // edited would start the script *and* open the diff over it.
+      const owned = ed
+        .getLineDecorations(line)
+        ?.some((d) => d.options.linesDecorationsClassName === "cf-script-glyph");
+      if (owned) return;
       const mark = marksRef.current.find((m) => line >= m.start && line <= m.end);
       if (mark) openPeekRef.current(mark.blockIndex);
     });
@@ -1323,6 +1419,13 @@ export function EditorPane({
             // feel like text you can put a cursor in.
             cursorStops: mon.editor.InjectedTextCursorStops.None,
           },
+          // The range above is zero-width, and Monaco drops injected text on an empty range unless
+          // this says otherwise — `getInjectedTextInInterval` filters on exactly
+          // `showIfCollapsed || !range.isEmpty()`. Without it the decoration is created, survives
+          // `getAllDecorations`, and never reaches the view: the annotation simply never appeared.
+          // See the long note in `usePackageJsonLens`, where the same omission cost the dependency
+          // versions.
+          showIfCollapsed: true,
           // Typing at the end of the annotated line is the exact common case, and the default
           // stickiness would drag the decoration along with the insertion.
           stickiness: mon.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
@@ -1535,6 +1638,89 @@ export function EditorPane({
 
   const onFocusRef = useRef(onFocus);
   onFocusRef.current = onFocus;
+
+  /** Runs one script with a given manager. Shared by the arrow and by the chooser below. */
+  const runScriptWith = (name: string, chosen: PackageManager) => {
+    const command = scriptCommandLine(chosen, name);
+    if (!command || manifestDir === null) return;
+    const cwd = manifestDir ? `${project.local_path}/${manifestDir}` : project.local_path;
+    const leaf = manifestDir.split("/").pop();
+    void useTerminalStore
+      .getState()
+      .runCommand(project.id, {
+        cwd,
+        command,
+        reuseKey: `scripts:${activePath}:${name}`,
+        title: leaf ? `${leaf} · ${name}` : name,
+      })
+      .catch((e: unknown) => pushErrorToast(String(e)));
+  };
+
+  /**
+   * What the arrow beside a script opens.
+   *
+   * # Why a menu, when one of its entries is what the click used to do on its own
+   *
+   * Because the arrow had one behaviour and no way to ask for another. Running `dev` with the
+   * repository's manager is the common case and is still one item away — but "run this one with
+   * yarn to check something", and "give me the line so I can paste it somewhere with a flag on the
+   * end", had no answer at all, and *which* manager the arrow would use was only visible in the lens
+   * over the block, which scrolls off. This is the shape every editor with a gutter arrow settles
+   * on, and for the same reasons.
+   *
+   * # Two shapes, because one question is genuinely open
+   *
+   * With the manager settled — a single lockfile, or a choice already made — the first item runs it
+   * and the rest are alternatives to it.
+   *
+   * With more than one lockfile and nothing chosen, there is no right answer available to the app,
+   * so the menu asks instead: the candidates are the only entries, and picking one *records* the
+   * choice, because being asked the same question on every script in the same repository is its own
+   * kind of wrong. `detectPackageManagers` returns them in a fixed order, so taking the first would
+   * at least be consistent — and consistently wrong half the time, in a way whose cost is not a
+   * wasted click but the wrong tool rewriting a lockfile.
+   */
+  const scriptMenuItems = (script: string): MenuItem[] => {
+    if (managerFor.candidates.length > 1) {
+      return managerFor.candidates.map((option) => ({
+        label: t("npm.runWith", { manager: option }),
+        icon: Play,
+        onClick: () => {
+          usePackageManagerStore.getState().choose(option);
+          runScriptWith(script, option);
+        },
+      }));
+    }
+    const items: MenuItem[] = [
+      {
+        label: t("scripts.menuRun", { name: script }),
+        icon: Play,
+        onClick: () => runScriptWith(script, manager),
+      },
+      // A one-off, and deliberately not recorded: `run` rewrites no lockfile, so there is nothing to
+      // undo, and wanting one script run another way is not a statement about which manager the
+      // repository belongs to. That is what the lens over the `scripts` block is for.
+      ...PACKAGE_MANAGERS.filter((option) => option !== manager).map((option, at) => ({
+        label: t("npm.runWith", { manager: option }),
+        separated: at === 0,
+        onClick: () => runScriptWith(script, option),
+      })),
+    ];
+    const command = scriptCommandLine(manager, script);
+    // `null` only for a name the whitelist refuses — which the arrow is never drawn for, so this is
+    // the same second lock `runScriptWith` applies, not a case anyone will meet.
+    if (command) {
+      items.push({
+        label: t("scripts.menuCopy"),
+        icon: Copy,
+        separated: true,
+        onClick: () => {
+          void navigator.clipboard.writeText(command).catch((e: unknown) => pushErrorToast(String(e)));
+        },
+      });
+    }
+    return items;
+  };
 
   const handleMount: OnMount = (editorInstance, monacoInstance) => {
     editorRef.current = editorInstance;
@@ -1998,6 +2184,18 @@ export function EditorPane({
           {dropOverlay}
           <EmptyState icon={FileCode} title={t("editor.selectFile")} subtitle={t("editor.selectFileHint")} />
         </div>
+      )}
+      {/* The script menu, at the arrow that opened it. Its heading is the ambiguity when there is
+          one — with a settled manager the items name themselves and a heading would only repeat
+          them. */}
+      {scriptMenu && (
+        <ContextMenu
+          x={scriptMenu.x}
+          y={scriptMenu.y}
+          heading={managerFor.candidates.length > 1 ? t("npm.whichManager") : undefined}
+          items={scriptMenuItems(scriptMenu.script)}
+          onClose={() => setScriptMenu(null)}
+        />
       )}
     </div>
   );

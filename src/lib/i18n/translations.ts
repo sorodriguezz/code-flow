@@ -200,6 +200,7 @@ const en = {
 
   "api.title": "API Client",
   "api.newCollection": "New collection",
+  "api.newLabel": "New…",
   "api.newFolder": "New folder",
   "api.newRequest": "New request",
   "api.protocol": "Protocol",
@@ -228,6 +229,8 @@ const en = {
   "api.history.yesterday": "Yesterday",
   "api.history.clearConfirm": "Delete every history entry in this workspace? This can't be undone.",
   "api.untitledRequest": "Untitled request",
+  "api.scratchBadge": "Not saved",
+  "api.scratchHint": "This request lives only in this tab. Click to file it in a collection.",
   "api.untitledCollection": "New Collection",
   "api.untitledFolder": "New Folder",
   "api.rename": "Rename",
@@ -2436,28 +2439,10 @@ const en = {
   // this only changes WHERE a row is drawn, never where the file is. The alternative reading of a
   // file that appears to have moved is that something is broken — so "nothing moves" is in the
   // hint, and every string here talks about drawing rather than about files being anywhere.
-  "nesting.title": "File nesting",
-  "nesting.hint":
-    "Files a pattern calls derived — a spec, a lockfile, a compiled .js — are drawn under the file they come from. Nothing moves: the paths on disk, in git and in search are exactly what they were.",
-  "nesting.enabledLabel": "Nest related files in the explorer",
   "nesting.enable": "Nest related files",
   "nesting.disable": "Stop nesting related files",
-  "nesting.offNote": "Nesting is off. These patterns are saved and do nothing until you turn it back on.",
   "nesting.expand": "Show the {n} files nested here",
   "nesting.collapse": "Hide the {n} files nested here",
-  "nesting.parentPlaceholder": "*.ts",
-  "nesting.childrenPlaceholder": "${capture}.spec.ts, ${capture}.js",
-  "nesting.preview": "{parent} takes in {children}",
-  "nesting.previewNothing": "Write a parent and at least one child — *.ts takes in ${capture}.spec.ts",
-  "nesting.addPattern": "New pattern",
-  "nesting.removePattern": "Delete pattern",
-  "nesting.enableRow": "Use this pattern again",
-  "nesting.disableRow": "Turn this pattern off without deleting it",
-  "nesting.reset": "Restore the patterns this app ships with",
-  "nesting.resetConfirm":
-    "Replace every nesting pattern with the ones this app ships with? Patterns you wrote are lost.",
-  "nesting.resetConfirmAction": "Restore",
-  "nesting.empty": "No patterns yet",
   "nesting.emptyHint": "Nothing is nested until a pattern says so. Add one, or restore the shipped set.",
 
   "shortcuts.title": "Keyboard shortcuts",
@@ -2656,18 +2641,13 @@ const en = {
   // explanation a user gets for a button that is drawn and does nothing, so it says what is wrong
   // with the name rather than apologising — and points at the shell, which is where such a script
   // can still legitimately be run.
-  "editor.scriptsToggle": "Show the scripts in this package.json",
   "editor.scriptsNone": "No scripts in this package.json",
-  "editor.scriptsInvalid": "This package.json isn't valid JSON, so its scripts can't be read",
-  "editor.scriptsUnreadable": "This package.json couldn't be read",
   "editor.scriptsShowAll": "Show the other {n} scripts",
   "editor.scriptRun": "Run {command}",
   "editor.scriptUnsafe":
     "This script's name contains characters a shell would read as syntax, so it can't be typed into a terminal safely. Run it from a shell you drive yourself.",
   "editor.pmHeading": "Package manager",
   "editor.pmChange": "Change the package manager for this repository",
-  "editor.pmAuto": "Automatic (from the lockfile)",
-  "editor.pmFromLock": "from {file}",
   "editor.pmNoLock": "no lockfile found",
   "editor.pmPinned": "set for this repository",
 
@@ -3259,6 +3239,39 @@ const en = {
   "remote.fieldTags": "Tags",
   "remote.fieldTagsHint": "Comma separated. The axis the one-level tree doesn't have — postgres, k8s, pci.",
   "remote.connect": "Connect",
+  "npm.lensCount": "{n} dependencies",
+  "npm.addTitle": "Add a dependency",
+  "npm.addDevTitle": "Add a dev dependency",
+  "npm.addSubtitle": "Installs with {manager} in {dir}",
+  "npm.searchPlaceholder": "Search the npm registry…",
+  "npm.searching": "Searching…",
+  "npm.searchHint": "Type to search the registry",
+  "npm.noResults": "Nothing matched",
+  "npm.install": "Install",
+  "npm.installNamed": "Install {name}",
+  "npm.installTitle": "install",
+  "npm.installRefused": "{name} is not a name this will type at a shell",
+  "npm.lensCheck": "Check versions",
+  "npm.lensChecking": "Checking…",
+  "npm.lensOutdated": "{n} out of date",
+  "npm.lensCurrent": "All up to date",
+  "npm.lensFailed": "{n} could not be checked",
+  "npm.lensAdd": "Add dependency…",
+  "npm.managerChosen": "Runs with {manager} — your choice",
+  "npm.managerFromLock": "Runs with {manager}, from the lockfile",
+  "npm.managerFallback": "Runs with {manager} — no lockfile found",
+  "npm.managerAuto": "detect again",
+  "npm.whichManager": "This project has more than one lockfile",
+  "npm.runWith": "Run with {manager}",
+  // The two halves of "there is a newer one". The first needs a hand on the file; the second is
+  // already allowed by the range and is shown only because "what is current?" is what was asked.
+  "npm.hoverOutOfRange":
+    "`{name}` — this manifest allows `{range}`, and `{latest}` is published. Taking it means editing this line.",
+  "npm.hoverInRange":
+    "`{name}` — `{latest}` is published and `{range}` already accepts it, so an install takes it without this file changing.",
+  "scripts.runGlyph": "Run `{name}`",
+  "scripts.menuRun": "Run '{name}'",
+  "scripts.menuCopy": "Copy the command",
   "remote.tagsAll": "all tags",
   "remote.tagsAny": "any tag",
   "remote.tagsAllHint": "Showing hosts that carry every selected tag. Click for any of them.",

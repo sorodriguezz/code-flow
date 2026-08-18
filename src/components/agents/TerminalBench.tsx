@@ -17,6 +17,8 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { EmptyState } from "../common/EmptyState";
 import { TerminalPane } from "../terminal/TerminalPane";
+import { agentFromCommand } from "../../lib/agentInTerminal";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { PaneTree } from "./PaneTree";
 import { ContextMenu } from "../api/CollectionTree";
 import { listShellProfiles } from "../../lib/tauri/commands";
@@ -454,6 +456,16 @@ function Pane({
 }) {
   const t = useT();
   const [editing, setEditing] = useState(false);
+  /**
+   * The agent last started in this shell, if any — the mark on the tile's own header.
+   *
+   * Component state and not persisted: it describes what is running *now*, and a badge restored
+   * from disk would claim a shell is driving Codex when all that was restored is its scrollback.
+   * It also survives a quit, deliberately — see `agentFromCommand`: a shell where you ran claude,
+   * exited it and typed `ls` is still the one you were using claude in, and clearing the mark on
+   * every unrelated command would make it flicker rather than inform.
+   */
+  const [agent, setAgent] = useState<string | null>(null);
 
   return (
     <div
@@ -468,6 +480,15 @@ function Pane({
             terminal.session_id ? "bg-[var(--cf-success)]" : "bg-[var(--cf-text-muted)]/40"
           }`}
         />
+        {/* Between the liveness dot and the name, where a file icon sits in the explorer: it says
+            *what kind of thing* this shell is, which is the question the dot and the name both
+            leave open.
+            `ProviderGlyph` and not the provider's `icon`: that field is a Lucide fallback — a gem, a
+            cpu, a lightning bolt — while this draws the real brand mark, the same one Settings shows
+            in its provider list. Untinted for the reason that component gives: a logo recoloured to
+            match the chrome is a logo nobody recognises, and recognising it at a glance is the whole
+            job of this mark. */}
+        {agent && <ProviderGlyph providerId={agent} size={12} className="shrink-0" />}
         {editing ? (
           <input
             autoFocus
@@ -512,6 +533,14 @@ function Pane({
             sessionId={terminal.session_id}
             visible={visible}
             replay={terminal.transcript}
+            // Only the bench listens for this. The dock's shells are where you run builds and git,
+            // and marking one of those with a model's glyph because you happened to try `claude` in
+            // it would say something about the terminal that isn't true. Here it is the whole point:
+            // a bench of four identical shells is exactly where "which one is Codex" is asked.
+            onCommand={(line) => {
+              const found = agentFromCommand(line);
+              if (found) setAgent(found);
+            }}
             onClose={onClose}
             // The tile's × deletes the terminal rather than putting it away, so the menu says so
             // too — same wording as the button right above it.

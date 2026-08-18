@@ -2,7 +2,9 @@ import { useMemo, useState } from "react";
 import {
   Check,
   Cookie,
+  Boxes,
   Download,
+  FileCode2,
   Globe,
   MoreHorizontal,
   Play,
@@ -231,7 +233,13 @@ export function ApiSidebar() {
 
   const [section, setSection] = useState<Section>("collections");
   const [query, setQuery] = useState("");
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /**
+   * The one floating menu this sidebar has room for.
+   *
+   * `items` is what tells the two apart: absent means the overflow menu behind the ellipsis, which
+   * is what this state was added for. The `+` fills it in with its own two entries.
+   */
+  const [menu, setMenu] = useState<{ x: number; y: number; items?: MenuItem[] } | null>(null);
 
   const sections: { id: Section; label: string }[] = [
     { id: "collections", label: t("api.collections") },
@@ -278,7 +286,32 @@ export function ApiSidebar() {
           <span className="mr-auto truncate text-[10px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">
             {t("api.title")}
           </span>
-          <ToolbarButton onClick={() => void newCollection()} title={t("api.newCollection")}>
+          {/* Two things can be created here and the button used to assume one of them.
+              A collection is the container; a request is the thing you actually came to make — and
+              needing a collection before you can try a URL is the friction scratch requests exist to
+              remove. So it asks, with the request first because that is the common errand. */}
+          <ToolbarButton
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setMenu({
+                x: rect.left,
+                y: rect.bottom + 2,
+                items: [
+                  {
+                    label: t("api.newRequest"),
+                    icon: FileCode2,
+                    onClick: () => useApiStore.getState().openScratchTab(),
+                  },
+                  {
+                    label: t("api.newCollection"),
+                    icon: Boxes,
+                    onClick: () => void newCollection(),
+                  },
+                ],
+              });
+            }}
+            title={t("api.newLabel")}
+          >
             <Plus size={13} />
           </ToolbarButton>
           <ToolbarButton
@@ -397,7 +430,7 @@ export function ApiSidebar() {
       />
 
       {menu && (
-        <ContextMenu x={menu.x} y={menu.y} items={overflowItems} onClose={() => setMenu(null)} />
+        <ContextMenu x={menu.x} y={menu.y} items={menu.items ?? overflowItems} onClose={() => setMenu(null)} />
       )}
     </>
   );
