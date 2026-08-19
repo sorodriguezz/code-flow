@@ -23,6 +23,15 @@ export interface NpmInstallTarget {
   /** Which block was clicked, which is what decides `--save-dev`. */
   block: string;
   manager: PackageManager;
+  /**
+   * What to search for the moment the dialog opens.
+   *
+   * Set when the request already names a package — the quick fix on a missing import knows it is
+   * `pg`, and making somebody retype a name the editor just read off their own file is the kind of
+   * step that makes a fix not worth taking. Empty for the "add a dependency" lens, which is a
+   * question rather than an answer.
+   */
+  query?: string;
 }
 
 interface NpmInstallState {

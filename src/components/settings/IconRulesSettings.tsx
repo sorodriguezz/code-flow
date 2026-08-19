@@ -117,7 +117,15 @@ function IconPicker({
         // Fixed height rather than growing with the results: the picker opens inside a rule row in a
         // scrolling panel, and a list that resized with every keystroke moved the row under the
         // pointer while it was being aimed at.
-        <div className="mt-1.5 grid max-h-[220px] grid-cols-7 gap-0.5 overflow-y-auto">
+        //
+        // Columns from the width rather than a fixed seven, which is what the 280px rail this came
+        // from wanted. In the Settings pane seven columns are ~70px each and the glyphs float in
+        // the middle of them; `auto-fill` keeps the cells the size of an icon and puts as many on a
+        // row as fit, at either width.
+        <div
+          className="mt-1.5 grid max-h-[220px] gap-0.5 overflow-y-auto"
+          style={{ gridTemplateColumns: "repeat(auto-fill, minmax(30px, 1fr))" }}
+        >
           {results.map((icon) => (
             <button
               key={icon.id}
@@ -451,7 +459,7 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
   });
 
   return (
-    <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
+    <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] pb-2">
       {naming ? (
         <input
           autoFocus
@@ -517,14 +525,21 @@ function ProfileBar({ onAddRule }: { onAddRule: () => void }) {
 }
 
 /**
- * The explorer's iconography, configured from the rail beside the tree it changes.
+ * The explorer's iconography: the profiles, the rules in the active one, and the folder icon that
+ * applies when no rule claims a name.
  *
- * In the rail and not in Settings, because this is edited *while looking at the tree* — you notice
- * that every `.service.ts` looks like every other TypeScript file, and the fix should not be three
- * screens and a lost place away. Every edit writes through immediately and the tree behind it
- * repaints, so the panel is its own preview.
+ * This lived in the editor's rail for a while, beside the tree it repaints, and the argument for
+ * that was a good one: you notice every `.service.ts` looks like every other TypeScript file while
+ * you are looking at them, and the fix should not be three screens away. What settled it the other
+ * way is scope. **The profiles are global** — one list, shared by every repository in every
+ * workspace, with only the *selection* filed per repo (see `iconRulesStore`). A rail that answers
+ * for one checkout was the wrong place to edit a preference that belongs to all of them, and it was
+ * also the only control in that rail you could not reach without a repository open.
+ *
+ * Every edit still writes through immediately, so any tree already drawn behind the Settings window
+ * repaints as you type.
  */
-export function IconRulesPanel() {
+export function IconRulesSettings() {
   const t = useT();
   const rules = useIconRulesStore((s) => s.rules);
   const save = useIconRulesStore((s) => s.save);
@@ -604,21 +619,19 @@ export function IconRulesPanel() {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      {/* The title alone. Both buttons that used to sit here act on one profile's list, and up here
-          they read as acting on file icons as a whole — see `ProfileBar`, which is where they are. */}
-      <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cf-border)] px-2 py-1.5">
-        <span className="flex-1 truncate text-[12px] font-medium text-[var(--cf-text)]">
-          {t("icons.title")}
-        </span>
-      </div>
-
+    // No height of its own and no scroll of its own: the pane in `EditorSettings` owns both. In the
+    // rail this was `h-full` with the rule list scrolling inside it, which here would have produced
+    // a short box scrolling within a column that also scrolls.
+    //
+    // No title bar either — the section rail beside it already says "File icons", and a heading
+    // repeated one pane over reads as a second, narrower thing.
+    <div className="flex flex-col">
       <ProfileBar onAddRule={add} />
 
       {/* What every folder no rule claims looks like. A row of its own above the list and not a
           rule in it, because it is the opposite of a rule: it has no pattern, it cannot be
           reordered, and it is what happens when nothing matches. */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1.5">
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] py-2">
         <button
           onClick={() => setPickingFolder((v) => !v)}
           title={t("icons.pickIcon")}
@@ -647,7 +660,7 @@ export function IconRulesPanel() {
         )}
       </div>
       {pickingFolder && (
-        <div className="shrink-0 px-2">
+        <div className="shrink-0 pt-2">
           {/* Seeded on "folder" so the 199 folder types are the first thing offered. */}
           <IconPicker
             seed="folder"
@@ -663,7 +676,7 @@ export function IconRulesPanel() {
       {/* Above the list, because it filters it. Takes a pattern *or* a name — see
           `ruleMatchesSearch`; typing `src` finds the rule for `src/`, the one for `src*` that would
           claim `srctest`, and any rule that would claim `src.ts`. */}
-      <div className="shrink-0 px-2 py-1.5">
+      <div className="shrink-0 py-2">
         <div className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] px-1.5 focus-within:border-[var(--cf-accent)]">
           <Search size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
           <input
@@ -685,7 +698,7 @@ export function IconRulesPanel() {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-1 overflow-y-auto px-2 pb-2">
+      <div className="space-y-1 pb-1">
         {rules.length === 0 ? (
           <p className="px-1 py-6 text-center text-[11px] text-[var(--cf-text-muted)]">
             {t("icons.emptyProfile", { name: profileName })}

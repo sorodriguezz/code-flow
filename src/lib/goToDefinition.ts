@@ -8,6 +8,8 @@ import {
   type DefinitionHit,
 } from "./definitions";
 import { MODEL_SCHEME, modelPathFor, relPathFromModelUri } from "./editorModel";
+import { TS_LANGUAGES, tsKnows } from "./tsserver";
+import { lspCanDefine } from "./lsp/client";
 import { listRepoFiles, searchRepo } from "./tauri/commands";
 import type { Project } from "../types/domain";
 
@@ -51,6 +53,37 @@ async function findDefinition(
   const { project } = context;
   const fromPath = relPathFromModelUri(model.uri, project.id);
   if (!fromPath) return null;
+
+  /**
+   * The compiler outranks the guess.
+   *
+   * Everything below is a repo-wide text search with a ranking on top: it finds `class Foo` by
+   * looking for the words, which is the best available answer in a shell script or a Rust file and
+   * a poor one in TypeScript, where a real language service knows which `Foo` this name is bound
+   * to. Both providers are registered, and Monaco concatenates their results in registration
+   * order — this one first, because it is installed at startup — so with a compiler running its
+   * answer would sit *behind* a guess that the editor is configured to jump to. Standing aside is
+   * what puts the right file first.
+   *
+   * Only for files the server actually holds: a `.ts` file in a repo with no TypeScript installed
+   * still gets the search, which is the whole reason it exists.
+   */
+  if (TS_LANGUAGES.includes(model.getLanguageId()) && tsKnows(project.local_path, fromPath)) {
+    return null;
+  }
+
+  // The same stand-aside, for every other language — but only for a server that *advertises*
+  // definitions. Standing aside merely because some server holds the file is how F12 stopped
+  // working in a Python repo with only `ruff` running, or in any CSS file next to a Tailwind
+  // config: those servers hold the file and answer nothing. A file with no capable server, or none
+  // running at all, still gets the ranked search below, which is the whole reason it exists.
+  //
+  // Note this is not about winning the ordering, which an earlier version of this comment had
+  // backwards. Monaco breaks provider ties by registration time and the *later* one sorts first
+  // (`_compareByScoreAndTime`), and the LSP providers are registered from a React effect long after
+  // this one is installed at startup — so a compiler's answer was already first. What standing
+  // aside buys is keeping a low-quality duplicate out of Peek Definition and the result list.
+  if (lspCanDefine(fromPath)) return null;
 
   const lineText = model.getLineContent(position.lineNumber);
 

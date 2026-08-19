@@ -1123,4 +1123,52 @@ mod tests {
             .collect();
         assert_eq!(matched, "configuración");
     }
+
+    /// Every read in this module is filtered by workspace, and this is the test that says so out
+    /// loud.
+    ///
+    /// It locks a contract the backend already kept and the frontend did not: the store that calls
+    /// `load_tree` holds its own `workspace_id` and sends it back on every write, so a store left
+    /// pointing at the workspace it was first opened in files new notes there while the user is
+    /// looking at another one. The fix for that lives in `notesStore.ts`, but the reason it works
+    /// is this — `load_tree('w2')` owes the caller `w2`'s shelf and nothing else.
+    #[test]
+    fn a_workspace_sees_only_its_own_notes_books_and_templates() {
+        let conn = workspace();
+        conn.execute_batch(
+            "INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                 VALUES ('w2', 'Otro', 'book', '#222', 1, '2026-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+
+        let here = create_book(&conn, "w1", None, "Aqui", "").unwrap();
+        let there = create_book(&conn, "w2", None, "Alla", "").unwrap();
+        create_note(&conn, "w1", &here.id, "Nota de w1", "cuerpo", "[]").unwrap();
+        create_note(&conn, "w2", &there.id, "Nota de w2", "cuerpo", "[]").unwrap();
+        create_template(&conn, "w1", "Plantilla de w1", "", "file-text", "", "[]").unwrap();
+        create_template(&conn, "w2", "Plantilla de w2", "", "file-text", "", "[]").unwrap();
+
+        let second = load_tree(&conn, "w2").unwrap();
+        assert_eq!(
+            second.notes.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(),
+            ["Nota de w2"],
+        );
+        assert_eq!(
+            second.books.iter().map(|b| b.name.as_str()).collect::<Vec<_>>(),
+            ["Alla"],
+        );
+        assert_eq!(
+            second.templates.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["Plantilla de w2"],
+        );
+
+        // And the other way round, so a passing test cannot mean "load_tree returns nothing".
+        let first = load_tree(&conn, "w1").unwrap();
+        assert_eq!(
+            first.notes.iter().map(|n| n.title.as_str()).collect::<Vec<_>>(),
+            ["Nota de w1"],
+        );
+        assert!(first.books.iter().any(|b| b.name == "Aqui"));
+        assert!(first.books.iter().all(|b| b.name != "Alla"));
+    }
 }

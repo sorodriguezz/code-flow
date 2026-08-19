@@ -29,7 +29,6 @@ import { useRepoStore } from "./state/repoStore";
 import { useApiStore } from "./state/apiStore";
 import { useDbStore } from "./state/dbStore";
 import { useRemoteStore } from "./state/remoteStore";
-import { useNotesStore } from "./state/notesStore";
 import { usePreferencesStore } from "./state/preferencesStore";
 import { useAiProviderStore } from "./state/aiProviderStore";
 import { useLanguageStore } from "./state/languageStore";
@@ -462,9 +461,12 @@ export default function App() {
     if (useRemoteStore.getState().workspaceId !== null || useRemoteStore.getState().loading) {
       void useRemoteStore.getState().setWorkspace(workspaceId);
     }
-    if (useNotesStore.getState().workspaceId !== null || useNotesStore.getState().loading) {
-      void useNotesStore.getState().setWorkspace(workspaceId);
-    }
+    // Notes and Diagrams are not here, and that is the fix rather than an omission: each keeps this
+    // same guard in a `useWorkspaceStore.subscribe` at the bottom of its own store, the way
+    // `docsStore` and `chainStore` already did. Diagrams is why. It was added after this effect was
+    // written, never got its line here, and so kept showing — and filing — its drawings under the
+    // workspace it was first opened in. A store's own file is the only place that rule cannot be
+    // forgotten from.
   }, [workspaceId]);
 
   // Looks for a newer release: once on launch, then every hour for as long as the app is open.

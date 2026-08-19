@@ -70,6 +70,7 @@ export type ShortcutId =
   | "editor.find"
   | "editor.goToLine"
   | "editor.toggleComment"
+  | "editor.formatDocument"
   | "editor.selectNextOccurrence"
   | "editor.moveLineUp"
   | "editor.moveLineDown"
@@ -555,6 +556,31 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     defaultChord: "Mod+S",
     // Not the editor's alone, despite the group it is listed under: see `saveActive`.
     run: saveActive,
+    /**
+     * And an editor action as well, which is what makes ⌘S reliable *with the caret in the code*.
+     *
+     * `run` above reaches the file through two hops — a store, then whichever group `EditorView`
+     * believes is active — and every one of its conditions (the Editor being the visible view, the
+     * active group ref pointing where you think it does) is a way for a press to land on nothing.
+     * With focus in an editor, `installEditorShortcuts` dispatches to this action instead, and the
+     * pane saves *its own* file. The registry still owns the chord, so rebinding moves both.
+     */
+    monacoCommand: "cf-save",
+  },
+  /**
+   * Format the document.
+   *
+   * Monaco ships this on ⇧⌥F and it was reachable — but only in the languages something can format,
+   * and when nothing can it does nothing at all, silently, which reads as a broken key rather than
+   * as a missing formatter. Routed through an action of ours so the key is rebindable like every
+   * other, and so the silence can be answered (see `cf-format` in `EditorPane`).
+   */
+  {
+    id: "editor.formatDocument",
+    group: "editor",
+    labelKey: "shortcuts.formatDocument",
+    defaultChord: "Shift+Alt+F",
+    monacoCommand: "cf-format",
   },
   {
     id: "editor.closeTab",

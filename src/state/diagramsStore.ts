@@ -233,7 +233,14 @@ interface DiagramsState {
   expanded: string[];
   galleryView: DiagramGalleryView;
 
-  setWorkspace: (workspaceId: string) => Promise<void>;
+  /**
+   * Points the whole workspace at `workspaceId`, dropping everything the outgoing one had on
+   * screen. `null` — the state a deleted workspace leaves behind — empties it and loads nothing.
+   *
+   * Called on mount through `ensureDiagramsStoreLoaded` and, for every switch after that, from the
+   * subscription at the bottom of this file.
+   */
+  setWorkspace: (workspaceId: string | null) => Promise<void>;
   refresh: () => Promise<void>;
 
   setQuery: (query: string) => void;
@@ -360,6 +367,43 @@ function scheduleSave(get: () => DiagramsState): void {
   }, SAVE_DEBOUNCE_MS);
 }
 
+/**
+ * Everything on screen that belongs to the workspace being left.
+ *
+ * One definition rather than two literals, because `setWorkspace` has two ways out — it loads the
+ * incoming workspace, or it empties the view because there is no incoming workspace — and a field
+ * cleared in one path and forgotten in the other is exactly how the new workspace ends up wearing
+ * the old one's state.
+ *
+ * `exportOptions` is deliberately absent, and its absence is the point: everything here is dropped
+ * so the incoming workspace never briefly wears the outgoing one's state, but the export dialog's
+ * answer does not belong to a workspace at all. Clearing it by symmetry with its neighbours would
+ * make the dialog forget the user's margin every time they changed workspace — a bug that only
+ * shows up after a switch, and only to whoever noticed they had set it.
+ */
+function clearedWorkspaceState(): Partial<DiagramsState> {
+  return {
+    diagrams: [],
+    folders: [],
+    templates: [],
+    activeId: null,
+    draft: null,
+    openingId: null,
+    savedAt: null,
+    thumbnails: {},
+    pendingLoad: null,
+    undoGeneration: null,
+    pendingExport: null,
+    query: "",
+    tagFilter: [],
+    folderFilter: null,
+    // Back to the defaults; the stored values arrive with the tree, when there is one.
+    expanded: [],
+    sort: "manual",
+    galleryView: "grid",
+  };
+}
+
 export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   workspaceId: null,
   loading: false,
@@ -393,38 +437,22 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     await get().flush();
     requestedThumbnails = new Set();
 
+    // No workspace to load — what a deleted workspace leaves behind. The view empties rather than
+    // keeping the drawings of the one that is gone, and nothing is fetched.
+    if (!workspaceId) {
+      // Dropped along with the state it was going to fill. Leaving it would strand the workspace it
+      // names: coming back to that same one is a `pendingLoad?.workspaceId === workspaceId` hit on
+      // the first line above, which hands back a promise whose own guard now sees a different
+      // `workspaceId` and writes nothing — an empty view that no further switch repairs.
+      pendingLoad = null;
+      set({ workspaceId: null, loading: false, ...clearedWorkspaceState() });
+      return;
+    }
+
     const promise = (async () => {
-      set({
-        workspaceId,
-        loading: true,
-        // Cleared eagerly rather than on arrival, so a switch never shows the previous workspace's
-        // diagrams under the new workspace's name.
-        diagrams: [],
-        folders: [],
-        templates: [],
-        activeId: null,
-        draft: null,
-        openingId: null,
-        savedAt: null,
-        thumbnails: {},
-        pendingLoad: null,
-        undoGeneration: null,
-        pendingExport: null,
-        // `exportOptions` is *not* in this list, and its absence is the point. Everything else here
-        // is dropped so the incoming workspace never briefly wears the outgoing one's state — but
-        // the export dialog's answer does not belong to a workspace at all, and clearing it by
-        // symmetry with its neighbours would make the dialog forget the user's margin every time
-        // they changed project. A bug that only shows up after a switch, and only to whoever
-        // noticed they had set it.
-        query: "",
-        tagFilter: [],
-        folderFilter: null,
-        // Reset to the defaults first; the stored values arrive with the tree below. Without this
-        // the incoming workspace briefly wears the outgoing one's view.
-        expanded: [],
-        sort: "manual",
-        galleryView: "grid",
-      });
+      // Cleared eagerly rather than on arrival, so a switch never shows the previous workspace's
+      // diagrams under the new workspace's name.
+      set({ workspaceId, loading: true, ...clearedWorkspaceState() });
       try {
         // In parallel with the tree rather than before it: the settings reads and the tree read are
         // independent, and serialising them would put five round trips before the first paint.
@@ -488,7 +516,11 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
       } catch (error) {
         pushErrorToast(String(error));
       } finally {
-        set({ loading: false });
+        // Guarded on the workspace still being this one, the way `dbStore` does it. A switch made
+        // while this load was in flight has its own load running: clearing the flag unconditionally
+        // would report *that* one finished, and the view would draw the empty tree it has so far as
+        // though it were the whole workspace.
+        if (get().workspaceId === workspaceId) set({ loading: false });
       }
     })();
 
@@ -1223,6 +1255,32 @@ export function ensureDiagramsStoreLoaded(): Promise<void> {
   if (workspaceId === null) return Promise.resolve();
   return useDiagramsStore.getState().setWorkspace(workspaceId);
 }
+
+/**
+ * A diagram belongs to the workspace it was drawn in, so switching workspace swaps the whole board.
+ *
+ * This is the line that was missing. Every other workspace-scoped store had one — `apiStore`,
+ * `dbStore`, `remoteStore` and `notesStore` through `App`'s switch effect, `docsStore` and
+ * `chainStore` through a subscription like this one — and Diagrams, added last, had neither. The
+ * result was not a stale list you could refresh away: `createDiagram` and `createFolder` send
+ * `get().workspaceId` to the backend, so with the store still pointing at the workspace it was
+ * first opened in, every drawing made after a switch was *written* to that first workspace. It then
+ * showed up in whichever workspace you happened to be in, because the store never reloaded — which
+ * is what "the diagrams are global" looks like from the outside.
+ *
+ * Here rather than in `App`, for the reason `notesStore`'s copy of this comment gives: a rule kept
+ * in `App` is a rule the next store can be shipped without.
+ *
+ * The guard keeps the load lazy — a store that has never hydrated has nothing to show from the
+ * wrong workspace, and switching it here would pull the draw.io bundle in behind a workspace change
+ * the user made for some other reason.
+ */
+useWorkspaceStore.subscribe((state, previous) => {
+  if (state.activeWorkspaceId === previous.activeWorkspaceId) return;
+  const { workspaceId, loading } = useDiagramsStore.getState();
+  if (workspaceId === null && !loading) return;
+  void useDiagramsStore.getState().setWorkspace(state.activeWorkspaceId);
+});
 
 /**
  * The diagrams the list should show, filtered and ordered.

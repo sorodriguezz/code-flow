@@ -175,6 +175,10 @@ export const onAiOutputBatch = (handler: (event: AiOutputBatchEvent) => void) =>
 
 export interface AiEngineEvent {
   run_id: string;
+  /** Stable provider id — `"claude"`, `"gemini"`, `"codex"`… What `ProviderGlyph` keys its brand
+   *  mark off, and what `AI_PROVIDERS` is indexed by. Sent beside `engine` rather than instead of
+   *  it: that one is the word a person reads and is allowed to be renamed. */
+  provider: string;
   /** Display name of the engine — "Claude", "Codex", "Cline"… */
   engine: string;
   /** Model id forced for this run; empty when the CLI is picking its own default. */
@@ -224,3 +228,24 @@ export const onApiStreamMessage = (handler: (event: ApiStreamMessage) => void) =
 
 export const onApiStreamStatus = (handler: (event: ApiStreamStatusEvent) => void) =>
   listen<ApiStreamStatusEvent>("api:stream-status", (e) => handler(e.payload));
+
+/** A server's verdict on one file, pushed rather than asked for — which is why diagnostics are the
+ *  one LSP feature that is an event and not a request. `uri` is a `file://` URI. */
+export interface LspDiagnosticsEvent {
+  session_id: string;
+  uri: string;
+  diagnostics: unknown[];
+}
+
+export const onLspDiagnostics = (handler: (event: LspDiagnosticsEvent) => void) =>
+  listen<LspDiagnosticsEvent>("lsp:diagnostics", (e) => handler(e.payload));
+
+/** Indexing. `rust-analyzer` spends its first minute here and answers nothing useful until it is
+ *  done, so this is the difference between a status line and an editor that looks broken. */
+export const onLspProgress = (handler: (event: { session_id: string; params: unknown }) => void) =>
+  listen<{ session_id: string; params: unknown }>("lsp:progress", (e) => handler(e.payload));
+
+/** The server's process ended — crashed, killed, or exited. Whatever was registered against it is
+ *  now answering nothing. */
+export const onLspExited = (handler: (event: { session_id: string }) => void) =>
+  listen<{ session_id: string }>("lsp:exited", (e) => handler(e.payload));

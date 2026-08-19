@@ -80,12 +80,40 @@ function dropTargetAt(x: number, y: number): TabDropTarget | null {
 
   const body = el.closest<HTMLElement>("[data-cf-panebody]");
   const groupId = body?.dataset.cfPanebody;
-  if (groupId) {
+  if (groupId && body) {
     // Dropping on the body means "this group", with no opinion about where — so, the end.
     const target = document.querySelector<HTMLElement>(`[data-cf-tabstrip="${CSS.escape(groupId)}"]`);
-    return { groupId, index: target?.querySelectorAll("[data-cf-tab]").length ?? 0, zone: "body" };
+    return {
+      groupId,
+      index: target?.querySelectorAll("[data-cf-tab]").length ?? 0,
+      zone: edgeOf(body.getBoundingClientRect(), x, y),
+    };
   }
   return null;
+}
+
+/**
+ * Which band of a pane the pointer is in: an edge, or its middle.
+ *
+ * A quarter of the pane on each side, and the *nearest* edge wins in the corners — so a drop is
+ * never ambiguous about which of two splits it meant. The middle half keeps the old meaning ("put
+ * it in this group"), which has to stay reachable: it is the only way to move a tab into a pane
+ * whose strip is scrolled out of view.
+ *
+ * A quarter rather than a thin strip because this is a pointer gesture on a moving target — with a
+ * 40px band you have to aim, and aiming is exactly what a drag is bad at. It is also what the panes
+ * are wide enough for: the smallest one is `GROUP_MIN` (320px), so the narrowest band is 80px.
+ */
+function edgeOf(rect: DOMRect, x: number, y: number): TabDropTarget["zone"] {
+  const left = (x - rect.left) / rect.width;
+  const top = (y - rect.top) / rect.height;
+  const horizontal = Math.min(left, 1 - left);
+  const vertical = Math.min(top, 1 - top);
+  if (horizontal >= 0.25 && vertical >= 0.25) return "body";
+  // The closer of the two, measured as a fraction, so a tall thin pane and a short wide one behave
+  // the same way in their corners.
+  if (horizontal <= vertical) return left < 0.5 ? "left" : "right";
+  return top < 0.5 ? "top" : "bottom";
 }
 
 export function EditorTabs({
@@ -106,9 +134,9 @@ export function EditorTabs({
   onClose: (path: string) => void;
   /** Promotes a preview tab to a permanent one — VS Code's "keep open", not the pin in `menu`. */
   onPin: (path: string) => void;
-  /** `targetIndex` is an insertion point in the *target* group's tab order. The parent decides
-   * whether that's a reorder or a move between splits. */
-  onDropTab: (payload: TabDrag, targetGroupId: string, targetIndex: number) => void;
+  /** The whole target: which group, which slot in its strip, and which band of it the pointer was
+   * in. The parent decides whether that is a reorder, a move between splits, or a new split. */
+  onDropTab: (payload: TabDrag, target: TabDropTarget) => void;
   menu: TabMenuActions;
   actions?: ReactNode;
 }) {
@@ -182,7 +210,7 @@ export function EditorTabs({
       setDragCursor(false);
       useTabDragStore.getState().end();
       // Dropped on nothing droppable — the tab stays where it was, like every editor.
-      if (target) onDropTab({ groupId, path }, target.groupId, target.index);
+      if (target) onDropTab({ groupId, path }, target);
     };
 
     window.addEventListener("pointermove", onMove);

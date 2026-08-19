@@ -44,7 +44,7 @@ import { useBlameStore } from "../../state/blameStore";
 import { useCursorBlameStore } from "../../state/cursorBlameStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { useRepoStore } from "../../state/repoStore";
-import { useTabDragStore, type TabDrag } from "../../state/tabDragStore";
+import { useTabDragStore, type TabDrag, type TabDropTarget } from "../../state/tabDragStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { installEditorShortcuts } from "../../lib/editorKeybindings";
@@ -55,6 +55,7 @@ import type { BlameHunkInfo, FileDiffInfo, Project } from "../../types/domain";
 import { usePackageJsonLens } from "./usePackageJsonLens";
 import { ContextMenu, type MenuItem } from "../api/CollectionTree";
 import { useTypeScript } from "./useTypeScript";
+import { useLanguageServer } from "./useLanguageServer";
 import { useImportCost } from "./useImportCost";
 import { useManagerFor } from "../../lib/useManagerFor";
 import {
@@ -530,7 +531,7 @@ export function EditorPane({
   onPin: (path: string) => void;
   /** A tab was dropped somewhere — passed straight through to the strip, which owns the gesture
    * and therefore knows which group the drop landed in. */
-  onDropTab: (payload: TabDrag, targetGroupId: string, targetIndex: number) => void;
+  onDropTab: (payload: TabDrag, target: TabDropTarget) => void;
   onChange: (path: string, value: string) => void;
   onViewMode: (path: string, mode: ViewMode) => void;
   onSave: () => void;
@@ -581,6 +582,9 @@ export function EditorPane({
     return parts.join("/");
   }, [activePath]);
   const managerFor = useManagerFor(project.local_path, manifestDir);
+  /** The manager at the repository root, for installs that are not about a manifest on screen — the
+   *  quick fix on a missing import. Detected the same way, from the root's own lockfile. */
+  const rootManager = useManagerFor(project.local_path, "");
   /** The menu a gutter arrow opened, and the script it belongs to. Positioned at the arrow, so the
    *  answer is given where the question was asked — see `scriptMenuItems` for what is in it. */
   const [scriptMenu, setScriptMenu] = useState<{ x: number; y: number; script: string } | null>(null);
@@ -617,10 +621,40 @@ export function EditorPane({
    * against the Monaco *instance*, so they serve every model this editor opens rather than only the
    * active one — which is what a go-to-definition landing in a file you had not opened needs.
    */
+  // Everything tsserver does not cover — see the header of `useLanguageServer` for why they are
+  // two hooks and not one. No editor instance: its providers are global to Monaco.
+  useLanguageServer(editorReady ? monacoRef.current : null, {
+    repoPath: project.local_path,
+    projectId: project.id,
+  });
+
   useTypeScript(editorReady ? editorRef.current : null, editorReady ? monacoRef.current : null, {
     repoPath: project.local_path,
     projectId: project.id,
     activePath,
+    /**
+     * "Install it" on an import the project does not have — the quick fix's other half.
+     *
+     * Opens the same picker the dependency lens opens, with the name already searched, rather than
+     * running an install straight from a lightbulb: the package may not be the one meant, may not
+     * exist, and writing a lockfile is a thing to be looked at before it happens.
+     *
+     * **The root manifest**, not the nearest one. A file deep in `src` has no manifest of its own,
+     * and picking one by walking up would be a second, quieter answer to the question
+     * `useManagerFor` already answers for the lens — the dialog says where it will install, so the
+     * one case this gets wrong in a monorepo is visible before anything is written.
+     */
+    onInstallPackage: (name, dev) =>
+      useNpmInstallStore.getState().open({
+        projectId: project.id,
+        repoPath: project.local_path,
+        manifestPath: PACKAGE_JSON,
+        dir: "",
+        block: dev ? "devDependencies" : "dependencies",
+        manager: rootManager.manager,
+        query: name,
+      }),
+    t,
   });
 
   // The weight of each imported package, at the end of its import line.
@@ -1638,6 +1672,8 @@ export function EditorPane({
 
   const onFocusRef = useRef(onFocus);
   onFocusRef.current = onFocus;
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
 
   /** Runs one script with a given manager. Shared by the arrow and by the chooser below. */
   const runScriptWith = (name: string, chosen: PackageManager) => {
@@ -1732,6 +1768,42 @@ export function EditorPane({
     // editor, so it only ever fires with the caret in the code and Monaco swallows it before the
     // browser or another panel sees it — but the *key* now comes from the shortcut registry via
     // `applyEditorKeybindings`, which is what makes it rebindable like everything else.
+    /**
+     * Save, as an action on this editor.
+     *
+     * No keybinding of its own: the chord comes from the registry through
+     * `installEditorShortcuts`, like every other editor key. What it buys is that a ⌘S pressed with
+     * the caret in the code saves *this* pane's file directly, instead of travelling through a
+     * store and a guess about which group is active.
+     */
+    editorInstance.addAction({
+      id: "cf-save",
+      label: tRef.current("editor.save"),
+      run: () => onSaveRef.current(),
+    });
+    /**
+     * Format the document — and say so when nothing can.
+     *
+     * `isSupported()` is Monaco's own answer to "is there a formatter for this language": it is the
+     * precondition on the built-in action. Without this branch, ⇧⌥F in a `.rs`, `.py` or `.yml`
+     * file does nothing at all and gives no reason, which is indistinguishable from a broken
+     * keybinding — and it is why the key "doesn't always work". It always works; there is not always
+     * a formatter behind it, and now it says which of the two you are looking at.
+     */
+    editorInstance.addAction({
+      id: "cf-format",
+      label: tRef.current("shortcuts.formatDocument"),
+      contextMenuGroupId: "1_modification",
+      contextMenuOrder: 1.5,
+      run: (ed) => {
+        const action = ed.getAction("editor.action.formatDocument");
+        if (!action || !action.isSupported()) {
+          pushErrorToast(tRef.current("editor.noFormatter", { language: ed.getModel()?.getLanguageId() ?? "" }));
+          return;
+        }
+        void action.run();
+      },
+    });
     editorInstance.addAction({
       id: "cf-inline-edit",
       label: tRef.current("shortcuts.inlineEdit"),
@@ -1883,11 +1955,32 @@ export function EditorPane({
    * `data-` attribute (see `dropTargetAt`), so there is nothing to wire up here beyond marking
    * the box and reacting to the shared drag state. */
   const dropOver = useTabDragStore((s) => s.over);
-  const dropActive = dropOver?.groupId === groupId && dropOver.zone === "body";
+  const dropZone = dropOver?.groupId === groupId && dropOver.zone !== "strip" ? dropOver.zone : null;
   const bodyDropProps = { "data-cf-panebody": groupId };
 
-  const dropOverlay = dropActive ? (
-    <div className="pointer-events-none absolute inset-1 z-20 rounded-lg border-2 border-dashed border-[var(--cf-accent)] bg-[var(--cf-accent)]/10" />
+  /**
+   * Where the file would land, drawn on the pane it would land in.
+   *
+   * The middle keeps the outline it always had — the whole pane, meaning "into this group". An edge
+   * paints the *half* the new pane would occupy, because that is the only part of the answer that
+   * is not obvious: which side, and how much of the screen it takes. Half is not an approximation;
+   * a new column or a new row starts at an even share (see `EditorView`), so the shape shown is the
+   * shape you get.
+   */
+  const dropOverlay = dropZone ? (
+    <div
+      className={`pointer-events-none absolute z-20 rounded-lg border-2 border-dashed border-[var(--cf-accent)] bg-[var(--cf-accent)]/10 ${
+        dropZone === "body"
+          ? "inset-1"
+          : dropZone === "left"
+            ? "bottom-1 left-1 top-1 w-1/2"
+            : dropZone === "right"
+              ? "bottom-1 right-1 top-1 w-1/2"
+              : dropZone === "top"
+                ? "left-1 right-1 top-1 h-1/2"
+                : "bottom-1 left-1 right-1 h-1/2"
+      }`}
+    />
   ) : null;
 
   const tabItems = useMemo<EditorTabItem[]>(

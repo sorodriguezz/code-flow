@@ -386,56 +386,18 @@ export function TerminalPane({
   }, [visible]);
 
   /**
-   * GPU rendering, with the DOM renderer as the safety net — and only for the pane on screen.
+   * Repaints every row xterm is already holding.
    *
-   * xterm's default renderer builds a `<div>` per visible row and a `<span>` per style run and
-   * re-lays that text out on every output frame. In a webview that text is not GPU-accelerated,
-   * so a chatty command (a build log, `npm install`) turned into a layout storm that stuttered
-   * the whole window, not just this pane. WebGL draws the same glyphs off a texture atlas.
-   *
-   * It is visually identical *here* specifically because the themes above are opaque hex with
-   * no alpha and `allowTransparency` is off — WebGL's known divergences are transparency and
-   * custom glyph rendering, and this pane uses neither.
-   *
-   * **Keyed on `visible`, not on `sessionId`.** The addon used to be built beside the terminal and
-   * disposed with it, which is to say never: no pane is ever unmounted, so every terminal the user
-   * had ever opened held a live WebGL context, a 1024×1024-per-page glyph atlas and a canvas
-   * backing store of its own — the last of which is the pane's CSS size × devicePixelRatio² × 4
-   * bytes, so on a Retina panel a single hidden pane was megabytes of pixels nothing could draw.
-   * The dock mounts a pane per tab of *every* project, so those multiply. The terminal itself,
-   * its buffer and its scrollback are untouched by this and stay exactly as they were; only the
-   * renderer comes and goes, and a pane brought back gets a new one before its first frame.
-   *
-   * Building it only while visible has a second benefit the old placement could not have: the
-   * container is guaranteed to have a real box, where a pane constructed behind a `hidden` class
-   * built its GL canvas at 0×0.
-   *
-   * `onContextLoss` is not paranoia: a browser only keeps a handful of live WebGL contexts, and
-   * disposing the addon hands that pane back to the DOM renderer — exactly what it used to be —
-   * rather than leaving it blank.
-   *
-   * Declared after the construction effect (so `termRef.current` is set — effects in one commit run
-   * in declaration order) and before the refit below (so `fitAndReport` runs with the renderer
-   * already in place).
+   * Not a redraw of new output — the buffer is untouched and correct throughout. This is for the
+   * case where the *renderer* has nothing on it while the buffer does: one built or torn down
+   * while this pane was `display: none`, or a WebGL context the browser took back. `refresh`
+   * marks the rows dirty and lets xterm draw them on the next frame, which is the only public way
+   * to say "what you are showing is not what you are holding".
    */
-  useEffect(() => {
+  const repaint = () => {
     const term = termRef.current;
-    if (!term || !visible) return;
-    let webgl: WebglAddon | null = null;
-    try {
-      const addon = new WebglAddon();
-      addon.onContextLoss(() => addon.dispose());
-      term.loadAddon(addon);
-      webgl = addon;
-    } catch {
-      // No WebGL in this webview, or `loadAddon` refused it. Nothing to do: not having the addon
-      // *is* the DOM renderer. Disposed rather than dropped, in case it was `loadAddon` that threw
-      // after the addon had already taken a context.
-      webgl?.dispose();
-      return;
-    }
-    return () => webgl?.dispose();
-  }, [visible, sessionId]);
+    if (term) term.refresh(0, term.rows - 1);
+  };
 
   /**
    * Fits xterm to its box and tells the PTY — but only once the box has one.
@@ -460,16 +422,119 @@ export function TerminalPane({
     if (term && fitAddon) fitAndReport(term, fitAddon);
   };
 
-  // Panes hidden via CSS report zero size, so xterm needs an explicit refit right when it
-  // reappears — plus a live ResizeObserver for dock-height drags / split-ratio changes while
-  // actually visible.
+  /**
+   * What a pane needs on the way back from `display: none`, which is more than a refit.
+   *
+   * **The renderer comes back holding nothing, and only an option change tells it so.**
+   *
+   * The buffer is intact throughout — it is the renderer that is empty. The WebGL addon is disposed
+   * when this pane is hidden and built again when it returns (see the effect below), and a renderer
+   * that has just replaced another has drawn no rows yet.
+   *
+   * Writing `fontSize` to a different value and straight back is the public way to say so. xterm's
+   * `RenderService` subscribes the font options to `clear()` + `handleResize()` + `_fullRefresh()`,
+   * and `OptionsService`'s setter fires on each write that differs from the current value — so this
+   * asks for that sequence twice, the second landing on the value that was already there. Both
+   * writes happen inside one synchronous block, so nothing is ever laid out at the intermediate size.
+   *
+   * It is *not* about a stale cell measurement, which is what this comment used to claim. xterm 6
+   * measures through `TextMetricsMeasureStrategy` (an `OffscreenCanvas`, no DOM node), falls back to
+   * a span only if that constructor throws, and `_validateAndSet` keeps the previous value when a
+   * measurement comes back zero — commented, in xterm's own source, for exactly the `display: none`
+   * case. The cell never zeroes. The refresh is the whole of what this buys.
+   *
+   * Only on the way *back into view*, never from the `ResizeObserver`: a drag never passes through
+   * `display: none`, so its measurement is live, and nudging on every frame of a resize would be
+   * two full re-measures a frame for nothing.
+   */
+  const revive = () => {
+    const term = termRef.current;
+    const fitAddon = fitRef.current;
+    const box = containerRef.current;
+    if (!term || !fitAddon || !box || box.clientHeight < 1 || box.clientWidth < 1) return;
+    const { fontSize } = term.options;
+    if (fontSize) {
+      term.options.fontSize = fontSize + 1;
+      term.options.fontSize = fontSize;
+    }
+    fitAndReport(term, fitAddon);
+    repaint();
+  };
+
+  /**
+   * Panes hidden via CSS report zero size, so xterm needs putting back together right when one
+   * reappears — plus a live `ResizeObserver` for dock-height drags and split-ratio changes while
+   * it is actually visible.
+   *
+   * **Declared before the WebGL effect below, and that order is the fix.** Effects in one commit
+   * run in declaration order, so this measures and fits *before* the renderer is rebuilt against
+   * the result. The other way round — which is how this used to read — builds the new renderer on
+   * the zero-cell measurement `revive` describes, and the pane comes back blank.
+   */
   useEffect(() => {
-    refit();
+    if (visible) revive();
     if (!containerRef.current) return;
     const observer = new ResizeObserver(refit);
     observer.observe(containerRef.current);
     return () => observer.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, sessionId]);
+
+  /**
+   * GPU rendering, with the DOM renderer as the safety net — and only for the pane on screen.
+   *
+   * xterm's default renderer builds a `<div>` per visible row and a `<span>` per style run and
+   * re-lays that text out on every output frame. In a webview that text is not GPU-accelerated,
+   * so a chatty command (a build log, `npm install`) turned into a layout storm that stuttered
+   * the whole window, not just this pane. WebGL draws the same glyphs off a texture atlas.
+   *
+   * It is visually identical *here* specifically because the themes above are opaque hex with
+   * no alpha and `allowTransparency` is off — WebGL's known divergences are transparency and
+   * custom glyph rendering, and this pane uses neither.
+   *
+   * **Keyed on `visible`, not on `sessionId`.** The addon used to be built beside the terminal and
+   * disposed with it, which is to say never: no pane is ever unmounted, so every terminal the user
+   * had ever opened held a live WebGL context, a 1024×1024-per-page glyph atlas and a canvas
+   * backing store of its own — the last of which is the pane's CSS size × devicePixelRatio² × 4
+   * bytes, so on a Retina panel a single hidden pane was megabytes of pixels nothing could draw.
+   * The dock mounts a pane per tab of *every* project, so those multiply. The terminal itself,
+   * its buffer and its scrollback are untouched by this and stay exactly as they were; only the
+   * renderer comes and goes, and a pane brought back gets a new one before its first frame.
+   *
+   * **Every path out of here repaints, and that is the other half of the fix.** A renderer that
+   * has just replaced another one has drawn nothing yet — it holds no rows, it was handed a
+   * terminal mid-life, and nothing about loading an addon tells it to catch up. The buffer is
+   * whole; saying so is this effect's job on the way in, and `onContextLoss`'s on the way out.
+   *
+   * Declared *after* the refit above (so the renderer is built against a terminal that has already
+   * been measured for the box it is reappearing in) and after the construction effect (so
+   * `termRef.current` is set).
+   */
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term || !visible) return;
+    let webgl: WebglAddon | null = null;
+    try {
+      const addon = new WebglAddon();
+      // A lost context hands this pane back to the DOM renderer — exactly what it used to be —
+      // and that renderer starts empty. The repaint is part of the handover, not an extra.
+      addon.onContextLoss(() => {
+        addon.dispose();
+        repaint();
+      });
+      term.loadAddon(addon);
+      webgl = addon;
+    } catch {
+      // No WebGL in this webview, or `loadAddon` refused it. Nothing to dispose: `webgl` is assigned
+      // on the try's *last* line, so anything that throws leaves it null — the addon that took a
+      // context, if one did, is unreachable from here and this used to pretend otherwise. What is
+      // left is the DOM renderer, which is what not having the addon *is*, and it needs telling that
+      // what it shows is not what the buffer holds.
+      repaint();
+      return;
+    }
+    repaint();
+    return () => webgl?.dispose();
   }, [visible, sessionId]);
 
   return (

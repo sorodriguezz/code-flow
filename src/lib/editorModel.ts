@@ -16,13 +16,23 @@ export const MODEL_SCHEME = "cf-editor";
  * Monaco bootstrap — long before any component is mounted.
  */
 export function modelPathFor(project: Project, relPath: string): string {
+  return modelPathForId(project.id, relPath);
+}
+
+/**
+ * The same URI, for callers that hold an id rather than the whole `Project`.
+ *
+ * `useTypeScript` is one: it turns the absolute paths tsserver answers with back into models this
+ * app can open, and it never needs anything else off the project.
+ */
+export function modelPathForId(projectId: string, relPath: string): string {
   // Encoded **per segment**, keeping the separators as real path separators. Encoding the whole
   // relative path in one go turns its slashes into `%2F`, and `Uri.parse` decodes those straight
   // back — so the URI that came out the other side had more segments than went in, and reading
   // "the second segment" as the file path yielded the top-level folder instead. That's what
   // opened `lib` as a file.
   const encoded = relPath.split("/").map(encodeURIComponent).join("/");
-  return `${MODEL_SCHEME}:/${encodeURIComponent(project.id)}/${encoded}`;
+  return `${MODEL_SCHEME}:/${encodeURIComponent(projectId)}/${encoded}`;
 }
 
 /** The repo-relative path a model URI refers to, or `null` for anything that isn't one of ours

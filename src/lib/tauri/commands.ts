@@ -1551,6 +1551,40 @@ export const debugProperties = (objectId: string) =>
 export const debugEvaluate = (frameId: string, expression: string) =>
   invoke<DebugVariable>("debug_evaluate", { frameId, expression });
 
+// ---------------------------------------------------------------------------
+// Language servers
+// ---------------------------------------------------------------------------
+//
+// Two calls carry every feature — see `lsp_cmd.rs`. The backend is transport: the meaning of a
+// `method` and its `params` lives in `lib/lsp/protocol.ts`, next to the Monaco types they become.
+
+/** Launches a server and resolves with its `capabilities`. `sessionId` is `{projectId}:{serverId}`. */
+export const lspStart = (
+  sessionId: string,
+  root: string,
+  command: string,
+  args: string[],
+  initializationOptions: unknown,
+  settings: unknown,
+) => invoke<Record<string, unknown> | null>("lsp_start", { sessionId, root, command, args, initializationOptions, settings });
+
+export const lspStop = (sessionId: string) => invoke<void>("lsp_stop", { sessionId });
+
+/** Every server this project started. */
+export const lspStopProject = (projectId: string) => invoke<void>("lsp_stop_project", { projectId });
+
+export const lspRequest = <T>(sessionId: string, method: string, params: unknown) =>
+  invoke<T>("lsp_request", { sessionId, method, params });
+
+export const lspNotify = (sessionId: string, method: string, params: unknown) =>
+  invoke<void>("lsp_notify", { sessionId, method, params });
+
+export const lspRunning = (sessionId: string) => invoke<boolean>("lsp_running", { sessionId });
+
+/** The version string a server printed, or a rejection naming what was missing. */
+export const lspProbe = (command: string, args: string[]) =>
+  invoke<string>("lsp_probe", { command, args });
+
 // ---------- filesystem watcher ----------
 
 export const startWatching = (repoPath: string) => invoke<void>("start_watching", { repoPath });

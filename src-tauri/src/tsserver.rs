@@ -94,7 +94,12 @@ pub async fn ts_start(repo_path: String) -> Result<String, String> {
     let script = tsserver_script(&repo_path)
         .ok_or_else(|| format!("No TypeScript in {repo_path}/node_modules — install it to get completions"))?;
 
-    let mut child = tokio::process::Command::new("node")
+    // `proc::command`, not `Command::new`: on Windows every console child this app starts gets
+    // its own `conhost` window unless `CREATE_NO_WINDOW` is set, and `node` is a console binary.
+    // Starting a TypeScript project flashed a black window on screen every time. See `proc.rs`,
+    // whose whole reason for existing is that a spawn site added later must not be able to
+    // reintroduce this by forgetting the flag.
+    let mut child = crate::proc::command("node")
         .arg(&script)
         // Single-threaded is deliberate: the separate syntax/semantic servers buy responsiveness in
         // an editor with many open files and cost a second process plus its own project load, which

@@ -1058,7 +1058,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, mut inv: AiInvocation<'_>) -> 
     // which is what keeps the answer honest — it is the invocation itself, not what a settings
     // screen elsewhere believes is configured.
     if let Some(ctx) = &ctx {
-        ai_runs::emit_engine(ctx, engine.label(), inv.model);
+        ai_runs::emit_engine(ctx, engine.id(), engine.label(), inv.model);
     }
 
     // One attempt, and a second only for the engines that ask for it — see

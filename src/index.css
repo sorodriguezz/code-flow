@@ -1958,6 +1958,19 @@ body.cf-dragging * {
   }
 }
 
+/* Code TypeScript reports as unnecessary — an import nobody uses, a variable never read.
+ *
+ * Dimmed, not underlined. It is not an error: the file compiles and the build passes, so a red
+ * squiggle would be the editor disagreeing with the compiler. This is the same answer VS Code gives
+ * (`editorUnnecessaryCode`), and at this strength the code stays readable while the import block
+ * shows at a glance which lines are dead.
+ *
+ * `opacity` rather than a colour, deliberately: the span keeps whatever the theme paints it, so this
+ * reads the same in all 21 palettes and needs no per-theme token. */
+.cf-unused {
+  opacity: 0.55;
+}
+
 /* The weight of an imported package, at the end of its import line.
  *
  * Dim and small on purpose: it is a footnote on a line whose meaning is the import, and a number

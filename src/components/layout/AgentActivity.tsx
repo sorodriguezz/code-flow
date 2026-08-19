@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from "react-dom";
 import { ArrowUpRight, PauseCircle } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
+import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useChainStore } from "../../state/chainStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -30,6 +31,18 @@ interface LiveRun {
   /** Parked on the user rather than on an engine: a gate. It is still in progress — nothing moves
    * until it is answered — which is exactly why it is worth a section of its own. */
   attention: boolean;
+  /**
+   * Which engine is doing it, as a provider id — for the brand mark on the row.
+   *
+   * `null` in the two cases where there is honestly nothing to draw: a gate, which is waiting on a
+   * person and has no engine running at all, and the sliver before the backend's engine banner
+   * arrives for a run that has only just started. Both fall back to the plain status dot rather
+   * than to a placeholder mark, because a logo that means "we don't know yet" is worse than none.
+   */
+  providerId: string | null;
+  /** "Claude Code · Opus 5", for the row's tooltip. Empty when the engine has not announced itself
+   *  yet, in which case the row carries no tooltip rather than an empty one. */
+  engineLabel: string;
 }
 
 /**
@@ -168,6 +181,12 @@ export function AgentActivity() {
   );
 }
 
+/** `anthropic/claude-opus-5` → `claude-opus-5`. The provider prefix repeats what the mark beside it
+ *  already says, which is the same trim `RunEngineChip` makes for the same reason. */
+function shortModel(model: string): string {
+  return model.includes("/") ? model.slice(model.lastIndexOf("/") + 1) : model;
+}
+
 function Section({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="mb-0.5">
@@ -182,11 +201,24 @@ function Section({ label, children }: { label: string; children: React.ReactNode
 function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
   const body = (
     <>
-      <span
-        className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-          run.attention ? "bg-[#f59e0b]" : "bg-[var(--cf-accent)]"
-        }`}
-      />
+      {/* A fixed slot, whatever goes in it. The mark arrives one event after the row does, and a
+          6px dot growing into a 14px logo would shunt the title sideways on a panel the user is
+          already reading. Sizing the slot for the larger of the two costs nothing and the swap is
+          then invisible. */}
+      <span className="flex h-3.5 w-3.5 shrink-0 items-center justify-center">
+        {run.providerId ? (
+          // The engine's own mark, the same one Settings → AI → Providers draws. It replaces the
+          // dot rather than joining it: "this is running" is already said by the section heading
+          // above and the orb in the bar below, and the logo says the thing neither of them can.
+          <ProviderGlyph providerId={run.providerId} size={14} />
+        ) : (
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              run.attention ? "bg-[#f59e0b]" : "bg-[var(--cf-accent)]"
+            }`}
+          />
+        )}
+      </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[12px] text-[var(--cf-text)]">{run.kind}</span>
         {run.detail && (
@@ -199,7 +231,11 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
   // A row with nowhere to go is drawn as a row, not as a dead button: it is still saying "a model
   // is running", and a hover state that leads nowhere is a promise the row cannot keep.
   if (!run.go) {
-    return <div className="flex w-full items-center gap-2 px-3 py-1.5">{body}</div>;
+    return (
+      <div title={run.engineLabel || undefined} className="flex w-full items-center gap-2 px-3 py-1.5">
+        {body}
+      </div>
+    );
   }
   return (
     <button
@@ -208,6 +244,9 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
         onOpen();
         run.go?.();
       }}
+      // The engine and model behind the mark. On the `title` rather than on the row, because the
+      // row is already two lines of text in 268px and a third would be the one that gets truncated.
+      title={run.engineLabel || undefined}
       className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-black/[0.04] dark:hover:bg-white/[0.06]"
     >
       {body}
@@ -231,6 +270,9 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
 function useLiveRuns(): LiveRun[] {
   const active = useAiRunStore((s) => s.active);
   const aboutByRun = useAiRunStore((s) => s.aboutByRun);
+  // Announced by the backend once per run, just before its first line — so a row drawn in the same
+  // tick the run started shows the dot, and picks up its mark a moment later. See `AiRunEngine`.
+  const engineByRun = useAiRunStore((s) => s.engineByRun);
   const chains = useChainStore((s) => s.chains);
   const briefsByChain = useChainStore((s) => s.briefsByChain);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
@@ -257,6 +299,9 @@ function useLiveRuns(): LiveRun[] {
         kind: t("agents.liveKindGate"),
         detail: chain.title || chain.goal,
         attention: true,
+        // A gate has no engine running behind it — that is what makes it a gate.
+        providerId: null,
+        engineLabel: "",
         go: follow(activeWorkspaceId, {
           view: "agents",
           projectId: at?.project_id || chain.project_id || undefined,
@@ -268,6 +313,7 @@ function useLiveRuns(): LiveRun[] {
     for (const [runId, running] of Object.entries(active)) {
       if (!running) continue;
       const about = aboutByRun[runId];
+      const engine = engineByRun[runId];
       rows.push({
         key: `run:${runId}`,
         // A run that started without describing itself still counts. It should not happen — every
@@ -276,11 +322,15 @@ function useLiveRuns(): LiveRun[] {
         kind: about ? t(about.kindKey) : t("agents.liveKindUnknown"),
         detail: about?.detail ?? "",
         attention: false,
+        providerId: engine?.providerId || null,
+        // The engine's own words, not a lookup: this is what ran, as the backend reported it, and
+        // the model is worth saying because routing sends different tasks to different ones.
+        engineLabel: engine ? (engine.model ? `${engine.engine} · ${shortModel(engine.model)}` : engine.engine) : "",
         go: about?.target ? follow(about.workspaceId, about.target) : null,
       });
     }
 
     // Gates first: they are the only rows waiting on the reader.
     return rows.sort((a, b) => Number(b.attention) - Number(a.attention));
-  }, [active, aboutByRun, chains, briefsByChain, activeWorkspaceId, t]);
+  }, [active, aboutByRun, engineByRun, chains, briefsByChain, activeWorkspaceId, t]);
 }

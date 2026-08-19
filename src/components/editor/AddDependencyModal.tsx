@@ -41,12 +41,16 @@ export function AddDependencyModal() {
   /** Which request the newest answer must belong to for it to be drawn. */
   const sequence = useRef(0);
 
-  // A fresh dialog every time it opens: the previous search belonged to another question.
+  // A fresh dialog every time it opens: the previous search belonged to another question. The name
+  // the caller already knows is the one exception — see `NpmInstallTarget.query`.
   useEffect(() => {
     if (!target) return;
-    setQuery("");
+    setQuery(target.query ?? "");
     setHits([]);
-    setPicked(null);
+    // Pre-picked as well, so a quick fix that named the package is one press from installing it.
+    // The row still has to come back from the registry for the button to mean anything, and the
+    // search below runs on the same tick.
+    setPicked(target.query ?? null);
   }, [target]);
 
   useEffect(() => {
@@ -133,7 +137,10 @@ export function AddDependencyModal() {
           />
         </div>
 
-        <div className="cf-scroll min-h-0 flex-1 rounded-md border border-[var(--cf-border)]">
+        {/* `overflow-y-auto` and not `cf-scroll`: that class is defined in `mobile/mobile.css`, which
+            the desktop bundle never loads — so the list was clipped at whatever the panel
+            height allowed and the rest of the results were unreachable. */}
+        <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[var(--cf-border)]">
           {searching && hits.length === 0 ? (
             <p className="flex items-center justify-center gap-2 py-10 text-[12px] text-[var(--cf-text-muted)]">
               <Loader2 size={13} className="animate-spin" />

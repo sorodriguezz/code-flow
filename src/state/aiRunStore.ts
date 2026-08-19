@@ -46,6 +46,11 @@ export interface AiRunLine {
  * id. An empty `model` means the CLI is choosing for itself — shown as the engine alone rather than
  * as an invented model name. */
 export interface AiRunEngine {
+  /** Stable provider id — `"claude"`, `"gemini"`, `"codex"`… For the brand mark and for anything
+   *  that needs to look the provider up; `engine` is the label to print. Empty for a run whose
+   *  engine banner predates this field, which is only ever a run already in flight across a
+   *  reload — `ProviderGlyph` falls back on its own for an id it does not know. */
+  providerId: string;
   engine: string;
   model: string;
 }
@@ -210,7 +215,7 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
       set((s) => {
         const engineByRun = {
           ...s.engineByRun,
-          [event.run_id]: { engine: event.engine, model: event.model },
+          [event.run_id]: { providerId: event.provider, engine: event.engine, model: event.model },
         };
         // A run this window never started.
         //

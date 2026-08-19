@@ -29,6 +29,26 @@ export const tsRequest = <T>(command: string, args: unknown) =>
 export const tsNotify = (command: string, args: unknown) =>
   invoke<void>("ts_notify", { command, arguments: args });
 
+/**
+ * The files handed to the running server, as absolute paths.
+ *
+ * Module state rather than a ref inside `useTypeScript`, because the other reader is not a
+ * component: the text-search "go to definition" in `lib/goToDefinition` is registered once at
+ * startup and has to know whether the compiler can answer for a file, so that its own ranked guess
+ * stays out of the way when a real answer is available. Emptied when a server restarts — every
+ * `open` the previous one was told about died with it.
+ */
+export const tsOpenFiles = new Set<string>();
+
+/** tsserver wants absolute, forward-slashed paths, and this is the one place that spelling is
+ *  decided — the set above is keyed by it, so every caller must build it the same way. */
+export const tsAbsolute = (repoPath: string, relPath: string) =>
+  `${repoPath}/${relPath}`.replace(/\\/g, "/");
+
+/** Whether the compiler holds this file and can be asked about it. */
+export const tsKnows = (repoPath: string, relPath: string) =>
+  tsOpenFiles.has(tsAbsolute(repoPath, relPath));
+
 // ---------------------------------------------------------------------------
 // The shapes this app reads back
 // ---------------------------------------------------------------------------
@@ -108,6 +128,24 @@ export interface TsDefinitionInfo {
 }
 
 /** Flattens tsserver's part list into the text a tooltip shows. */
+/**
+ * One diagnostic, as the `*DiagnosticsSync` commands answer.
+ *
+ * `reportsUnnecessary` is the interesting field and the reason these are requested at all: it is
+ * what TypeScript sets on "declared but never read", and it is exactly the set VS Code fades rather
+ * than underlines. The rest is carried so the hover can say *why* a span is dimmed.
+ */
+export interface TsDiagnostic {
+  start: { line: number; offset: number };
+  end: { line: number; offset: number };
+  text: string;
+  code?: number;
+  category?: string;
+  /** Truthy — an empty object in the protocol — when the span is unused rather than wrong. */
+  reportsUnnecessary?: unknown;
+  reportsDeprecated?: unknown;
+}
+
 export const partsToText = (parts?: TsSymbolDisplayPart[]) =>
   (parts ?? []).map((part) => part.text).join("");
 

@@ -25,6 +25,7 @@ mod grok;
 mod github;
 mod gitlab;
 mod npm;
+mod lsp;
 mod oauth;
 mod onedrive;
 mod opencode;
@@ -789,6 +790,13 @@ pub fn run() {
             commands::debug_cmd::debug_properties,
             commands::debug_cmd::debug_evaluate,
             commands::debug_cmd::debug_is_running,
+            commands::lsp_cmd::lsp_start,
+            commands::lsp_cmd::lsp_stop,
+            commands::lsp_cmd::lsp_stop_project,
+            commands::lsp_cmd::lsp_request,
+            commands::lsp_cmd::lsp_notify,
+            commands::lsp_cmd::lsp_running,
+            commands::lsp_cmd::lsp_probe,
             commands::watcher_cmd::start_watching,
             commands::watcher_cmd::stop_watching,
             // ---- API client (global: no repo, workspace or project involved) ----
@@ -936,6 +944,10 @@ pub fn run() {
                 // holding a forwarded port, and an `ssh -s … sftp` holding a channel on somebody
                 // else's machine, both reparented to init.
                 tauri::async_runtime::block_on(remotes::hold::release_all());
+                // And every language server, for exactly the reason above: each is a separate
+                // process holding an index of the repository, and a reparented `rust-analyzer`
+                // keeps several hundred megabytes that nothing is left to reap.
+                tauri::async_runtime::block_on(lsp::stop_all());
             }
         });
 }

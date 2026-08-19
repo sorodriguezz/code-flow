@@ -60,6 +60,7 @@ const SETTINGS_ITEMS: { id: SettingsSectionId; labelKey: TranslationKey }[] = [
   { id: "appearance", labelKey: "settings.appearance" },
   { id: "general", labelKey: "settings.general" },
   { id: "keybindings", labelKey: "shortcuts.title" },
+  { id: "editor", labelKey: "settings.editorSection" },
   { id: "projects", labelKey: "settings.projects" },
   { id: "git", labelKey: "settings.git" },
   { id: "azure", labelKey: "settings.integrationsSection" },

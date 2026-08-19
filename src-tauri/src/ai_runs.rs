@@ -95,6 +95,12 @@ struct AiOutputBatchEvent {
 #[derive(Clone, Serialize)]
 struct AiEngineEvent {
     run_id: String,
+    /// The engine's stable provider id — `"claude"`, `"gemini"`, `"codex"`… Sent beside the label
+    /// rather than instead of it because the two are for different readers: the label is the word a
+    /// person sees, and this is what the frontend keys its brand mark off. Deriving one from the
+    /// other would mean matching on a string that [`AiEngine::label`] is explicitly allowed to
+    /// rename.
+    provider: String,
     /// The engine's display name — "Claude", "Codex", "Cline"…
     engine: String,
     /// The model id this run forces. Empty when nothing was configured and the CLI picks its own
@@ -284,10 +290,15 @@ pub async fn cancelled(rx: &mut Option<watch::Receiver<bool>>) {
 
 /// Announces the engine and model a run is starting with. Fire-and-forget, like every other event
 /// here: a run whose banner never arrives still runs, it just shows as "working…" with no name.
-pub fn emit_engine(ctx: &RunCtx, engine: &str, model: &str) {
+pub fn emit_engine(ctx: &RunCtx, provider: &str, engine: &str, model: &str) {
     let _ = ctx.app.emit(
         "ai:engine",
-        AiEngineEvent { run_id: ctx.run_id.clone(), engine: engine.to_string(), model: model.to_string() },
+        AiEngineEvent {
+            run_id: ctx.run_id.clone(),
+            provider: provider.to_string(),
+            engine: engine.to_string(),
+            model: model.to_string(),
+        },
     );
 }
 

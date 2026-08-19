@@ -13,6 +13,20 @@
  */
 export interface EditorGroup {
   id: string;
+  /**
+   * Which column of the grid this group sits in.
+   *
+   * The list stays flat and ordered; this is the second axis laid over it. Groups sharing a column
+   * are **contiguous in the list** and are stacked top to bottom inside it; each distinct column, in
+   * first-appearance order, is one vertical slice of the editor. Every function here maintains that
+   * contiguity, and the layout in `EditorView` reads it straight off the list.
+   *
+   * A tree of nested splits — VS Code's model — buys arbitrary nesting for a large amount of
+   * bookkeeping in every operation. Two levels covers "put this beside that" and "put this under
+   * that", which is what the gesture actually asks for, and leaves every existing function working
+   * on a plain array.
+   */
+  column: string;
   /** Open paths, in tab order. Pinned ones are always the head of it — see `pinned`. */
   paths: string[];
   activePath: string | null;
@@ -30,9 +44,19 @@ export interface EditorGroup {
 }
 
 let counter = 0;
-export function newGroup(paths: string[] = [], activePath: string | null = null): EditorGroup {
+/** Column ids are generated apart from group ids: a column outlives the group that opened it when
+ *  more groups are stacked into it, and reusing a group's id would make that read backwards. */
+let columns = 0;
+
+export const newColumn = () => `column-${(columns += 1)}`;
+
+export function newGroup(
+  paths: string[] = [],
+  activePath: string | null = null,
+  column: string = newColumn(),
+): EditorGroup {
   counter += 1;
-  return { id: `group-${counter}`, paths, activePath, pinned: [] };
+  return { id: `group-${counter}`, column, paths, activePath, pinned: [] };
 }
 
 /** Where the pinned run ends in `paths` — the only insertion point both regions agree on. */
@@ -109,9 +133,11 @@ export function splitGroups(
   const source = groups[index];
   const moving = path ?? source?.activePath;
   if (!source || !moving || !source.paths.includes(moving)) return null;
+  // Its own column, so the new group lands *beside* the source rather than under it — which is what
+  // the split button and its shortcut have always meant.
   const created = newGroup([moving], moving);
   const next = [...groups];
-  next.splice(index + 1, 0, created);
+  next.splice(lastIndexOfColumn(groups, source.column) + 1, 0, created);
   return { groups: next, focusId: created.id };
 }
 
@@ -261,6 +287,79 @@ export function moveTabInGroups(
     groups: next.length > 1 ? next.filter((group) => group.paths.length > 0) : next,
     focusId: to.id,
   };
+}
+
+/** The last slot a column occupies in the flat list — where a new column has to go to sit after it
+ *  without breaking the contiguity every reader depends on. */
+function lastIndexOfColumn(groups: EditorGroup[], column: string): number {
+  let last = -1;
+  groups.forEach((group, at) => {
+    if (group.column === column) last = at;
+  });
+  return last;
+}
+
+/** Where a side lands: which way the new group goes relative to the one dropped on. */
+export type SplitSide = "left" | "right" | "top" | "bottom";
+
+/**
+ * Drops a dragged tab against the **edge** of a group, splitting the editor there.
+ *
+ * The gesture VS Code has and this app did not: dragging a tab over another pane offered exactly one
+ * outcome, "put it in that group", so the only way to see two files at once was the split button —
+ * which always splits the *active* file to the right. This is the other half: aim at an edge and the
+ * file goes beside, or under, whatever you aimed at.
+ *
+ * `left`/`right` open a **new column**, so the two panes sit side by side. `top`/`bottom` reuse the
+ * target's column and stack inside it. That is the whole of the grid: a row of columns, each a
+ * stack of groups.
+ *
+ * The tab leaves its old group the way any move does — including the group folding away when it was
+ * the last tab in it, which is what makes dragging the only tab of a pane across the screen a *move*
+ * rather than a way to end up with an empty pane.
+ */
+export function dropIntoSplit(
+  groups: EditorGroup[],
+  source: { groupId: string; path: string },
+  targetGroupId: string,
+  side: SplitSide,
+): { groups: EditorGroup[]; focusId: string } | null {
+  const from = groups.find((g) => g.id === source.groupId);
+  const target = groups.find((g) => g.id === targetGroupId);
+  if (!from || !target || !from.paths.includes(source.path)) return null;
+  // Splitting a group away from itself when it holds nothing else would produce the group it came
+  // from, one pane to the side, and an empty one where it was.
+  if (from.id === target.id && from.paths.length === 1) return null;
+
+  const fromIndex = from.paths.indexOf(source.path);
+  const withoutIt = from.paths.filter((p) => p !== source.path);
+  const trimmed = groups.map((group) =>
+    group.id === from.id
+      ? {
+          ...group,
+          paths: withoutIt,
+          pinned: group.pinned.filter((p) => p !== source.path),
+          activePath:
+            group.activePath === source.path ? neighbourOf(withoutIt, fromIndex) : group.activePath,
+        }
+      : group,
+  );
+  // An emptied source folds away before the insertion point is measured, or the new group lands one
+  // slot off whenever the drag came from a single-tab pane to its left.
+  const surviving = trimmed.filter((group) => group.paths.length > 0);
+
+  const vertical = side === "top" || side === "bottom";
+  const created = newGroup([source.path], source.path, vertical ? target.column : newColumn());
+  const targetAt = surviving.findIndex((group) => group.id === target.id);
+  const at = vertical
+    ? targetAt + (side === "bottom" ? 1 : 0)
+    : side === "right"
+      ? lastIndexOfColumn(surviving, target.column) + 1
+      : surviving.findIndex((group) => group.column === target.column);
+
+  const next = [...surviving];
+  next.splice(at, 0, created);
+  return { groups: next, focusId: created.id };
 }
 
 /**

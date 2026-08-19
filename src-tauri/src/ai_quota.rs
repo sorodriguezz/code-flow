@@ -249,6 +249,34 @@ fn remember(provider: &str, quota: ProviderQuota) {
     }
 }
 
+/// When each CLI-driven provider's binary was last *started*, whatever came back.
+///
+/// [`CLI_FRESH_FOR`] is enforced by [`CACHE`], and until now [`read_now`] filed a reading only when
+/// it *succeeded* — so on a machine where the read fails (signed out, a CLI too old for `/usage`, a
+/// payload this cannot parse, a timeout) there was nothing for the window to be measured from, and
+/// so no window at all: every open of the panel started the CLI again. A process per open, on
+/// exactly the machines where that process is useless — and on Windows, per the note in [`fetch`],
+/// a console window flashing on screen each time.
+///
+/// An *attempt* floor rather than a cache of failures, because those are different claims and
+/// [`CACHE`] owns the second one: its rule that a failed read must not blank a panel that was right
+/// a minute ago depends on it holding the last **good** answer.
+static LAST_ATTEMPT: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+
+fn attempted_recently(provider: &str) -> bool {
+    let Ok(guard) = LAST_ATTEMPT.lock() else { return false };
+    guard
+        .as_ref()
+        .and_then(|seen| seen.get(provider))
+        .is_some_and(|at| at.elapsed() < fresh_for(provider))
+}
+
+fn mark_attempt(provider: &str) {
+    if let Ok(mut guard) = LAST_ATTEMPT.lock() {
+        guard.get_or_insert_with(HashMap::new).insert(provider.to_string(), Instant::now());
+    }
+}
+
 /// One client for the process, cloned per call: a fresh `reqwest::Client` per request rebuilds the
 /// whole rustls config and throws away the connection pool.
 ///
@@ -340,7 +368,14 @@ pub async fn fetch(engine: QuotaEngine, trigger: Trigger) -> ProviderQuota {
         if trigger == Trigger::Refresh {
             forget(provider);
         }
-        refresh_detached(engine.clone());
+        // The button always goes — it is the user saying "go and ask", and a button that does
+        // nothing is worse than a slow one. Everything else is floored on when the CLI was last
+        // *started* rather than on when it last succeeded, so a provider whose read keeps failing
+        // is retried on the same half-hour rhythm as one that works, instead of on every open.
+        if trigger == Trigger::Refresh || !attempted_recently(provider) {
+            mark_attempt(provider);
+            refresh_detached(engine.clone());
+        }
         return cached(provider)
             .map(|(_, previous)| previous)
             .unwrap_or_else(|| pending(provider));
@@ -416,6 +451,14 @@ async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
             if !previous.limits.is_empty() {
                 return previous;
             }
+        }
+        // Nothing better to serve. File it — which is what the note on `CACHE` always said this
+        // did, and what it did not — but only for the CLI-driven providers, whose retry is now
+        // floored by `LAST_ATTEMPT`: an unfiled failure would leave a "reading…" row with no read
+        // behind it. The HTTP providers are re-read by the next poll a minute later, so theirs
+        // stays honest as it is.
+        if fresh_for(provider) > FRESH_FOR {
+            remember(provider, fresh.clone());
         }
         return fresh;
     }
@@ -867,7 +910,12 @@ mod gemini {
             .arg("json")
             .arg("--print-timeout")
             .arg(PRINT_TIMEOUT)
-            .stdin(std::process::Stdio::null());
+            .stdin(std::process::Stdio::null())
+            // The deadline below drops this future, and tokio documents that dropping a `Child`
+            // does *not* kill the process. The CLI is given `--print-timeout` so it should give up
+            // first; this is for the one that ignores it, which would otherwise be left running
+            // with nobody holding a handle to it.
+            .kill_on_drop(true);
 
         let run = tokio::time::timeout(DEADLINE, command.output()).await;
         let output = match run {

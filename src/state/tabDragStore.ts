@@ -23,9 +23,14 @@ export interface TabDropTarget {
   /** Insertion point in the target group's tab order: 0 before the first tab, `length` after the
    * last. */
   index: number;
-  /** Which part of the target pane the pointer is over — the strip aims at a slot, the body just
-   * means "put it in this group". */
-  zone: "strip" | "body";
+  /**
+   * Which part of the target pane the pointer is over.
+   *
+   * The strip aims at a slot; the middle of the body means "put it in this group"; and the four
+   * edges mean *split there* — the file goes beside or under the pane you aimed at, which is the
+   * gesture every editor with split panes has. See `edgeOf` in `EditorTabs`.
+   */
+  zone: "strip" | "body" | "left" | "right" | "top" | "bottom";
 }
 
 interface TabDragState {

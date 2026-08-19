@@ -10,7 +10,6 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import {
   Bookmark,
   Bug,
-  Palette,
   FileCode,
   FileSearch,
   Files,
@@ -28,15 +27,16 @@ import { AnchorsPanel } from "./AnchorsPanel";
 import { BookmarksPanel } from "./BookmarksPanel";
 import { CodeSnapModal, type CodeSnapTarget } from "./CodeSnapModal";
 import { DebugPanel } from "./DebugPanel";
-import { IconRulesPanel } from "./IconRulesPanel";
 import { clearFullDiffCache, EditorPane, type OpenTab, type RevealRequest, type ViewMode } from "./EditorPane";
 import { ChangesPanel } from "../git/ChangesPanel";
 import { MODEL_SCHEME, modelPathFor } from "../../lib/editorModel";
 import { setDefinitionContext } from "../../lib/goToDefinition";
+import { syncSave } from "../../lib/lsp/client";
 import {
   closeAllInGroups,
   closeGroupInGroups,
   closeTabInGroups,
+  dropIntoSplit,
   moveTabInGroups,
   newGroup,
   openInGroups,
@@ -55,7 +55,7 @@ import { useUiStore } from "../../state/uiStore";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useEditorCommandStore } from "../../state/editorCommandStore";
-import type { TabDrag } from "../../state/tabDragStore";
+import type { TabDrag, TabDropTarget } from "../../state/tabDragStore";
 import { useTreeDragStore } from "../../state/treeDragStore";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -90,6 +90,15 @@ const HANDLE_WIDTH = 1;
  * however many times you split.
  */
 const GROUP_MIN = 320;
+
+/**
+ * The shortest a stacked pane gets.
+ *
+ * Its width twin above is about controls being reachable; this one is about the pane still being an
+ * editor: a tab strip, the breadcrumb under it, and enough lines left over to read. Below that a
+ * split is a worse way of showing nothing.
+ */
+const ROW_MIN = 140;
 
 export function EditorView() {
   const t = useT();
@@ -162,7 +171,7 @@ export function EditorView() {
   const [saving, setSaving] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [sidePanel, setSidePanel] = useState<
-    "files" | "search" | "anchors" | "bookmarks" | "debug" | "icons"
+    "files" | "search" | "anchors" | "bookmarks" | "debug"
   >("files");
   /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
    * step into while committing, not a layout preference — the editor's resting state is code. */
@@ -190,6 +199,9 @@ export function EditorView() {
   /** Width of every group but the last, which flexes. Session-only: a split is a transient
    * arrangement, not a setting. */
   const [groupWidths, setGroupWidths] = useState<number[]>([]);
+  /** Heights inside each column, keyed by column id: one entry per group except the last, which
+   *  takes what is left. The row-wise twin of `groupWidths`. */
+  const [groupHeights, setGroupHeights] = useState<Record<string, number[]>>({});
   const groupsRowRef = useRef<HTMLDivElement>(null);
   /** The focused pane's "capture a snapshot" function, re-registered whenever focus moves, so
    * the keyboard shortcut reaches the group the user is looking at even from outside the code. */
@@ -321,10 +333,19 @@ export function EditorView() {
     if (!next.some((g) => g.paths.includes(path))) setTabs((prev) => prev.filter((item) => item.path !== path));
   }, []);
 
-  /** One handler for both gestures: dragging a tab along its own strip and dragging it into
-   * another split are the same move, differing only in the target group. */
-  const dropTab = useCallback((payload: TabDrag, targetGroupId: string, targetIndex: number) => {
-    const outcome = moveTabInGroups(groupsRef.current, payload, targetGroupId, targetIndex);
+  /**
+   * Where a dragged tab lands.
+   *
+   * Three gestures, one handler, because the drag is one gesture and only the *aim* differs:
+   * along its own strip is a reorder, onto another strip or the middle of a pane is a move, and
+   * onto an **edge** is a split — the file opens beside or under what you aimed at. See `edgeOf`
+   * in `EditorTabs` for how the bands are cut, and `dropIntoSplit` for the arithmetic.
+   */
+  const dropTab = useCallback((payload: TabDrag, target: TabDropTarget) => {
+    const outcome =
+      target.zone === "strip" || target.zone === "body"
+        ? moveTabInGroups(groupsRef.current, payload, target.groupId, target.index)
+        : dropIntoSplit(groupsRef.current, payload, target.groupId, target.zone);
     if (!outcome) return;
     setGroups(outcome.groups);
     setActiveGroupId(outcome.focusId);
@@ -412,6 +433,12 @@ export function EditorView() {
       setSaving(true);
       try {
         await writeFileText(project.local_path, path, text);
+        // The language servers are told too. `client_capabilities` asks for `didSave` and this is
+        // the only place that can send it — without it `checkOnSave`, which the rust-analyzer entry
+        // declares twice, never fires: the user gets one round of real cargo errors on workspace
+        // load and never another, however often they save. gopls and Ruff lose their on-save pass
+        // the same way.
+        syncSave(path, text);
         setTabs((prev) => prev.map((item) => (item.path === path ? { ...item, originalContent: text } : item)));
         // The Changes tab (and any conflict-resolution flow) reads git status from
         // repoStore, which has no way to know a file changed on disk outside of a git
@@ -848,21 +875,62 @@ export function EditorView() {
     );
   }, []);
 
+  /**
+   * The flat group list as the grid it describes: columns in order, each holding its stack.
+   *
+   * Groups of one column are contiguous — `editorGroups` maintains that — so this is a single pass
+   * that starts a new column whenever the id changes, and the list stays the single source of order
+   * for everything else in this file.
+   */
+  const columns = useMemo(() => {
+    const out: { id: string; groups: EditorGroup[] }[] = [];
+    for (const group of groups) {
+      const current = out[out.length - 1];
+      if (current && current.id === group.column) current.groups.push(group);
+      else out.push({ id: group.column, groups: [group] });
+    }
+    return out;
+  }, [groups]);
+
   // Splitting (or closing) a group re-divides the row evenly, which is what VS Code does and the
   // only sane answer for an arbitrary number of panes: any other rule has to invent where the new
   // group's width came from. Widths are only reset when the *count* changes, so dragging a
   // boundary sticks until the next split.
-  const groupCount = groups.length;
+  const columnCount = columns.length;
   useLayoutEffect(() => {
     const row = groupsRowRef.current;
-    if (!row || groupCount < 2) {
+    if (!row || columnCount < 2) {
       setGroupWidths([]);
       return;
     }
     // The drag handles sit between the panes and take real space out of the row.
-    const share = (row.clientWidth - HANDLE_WIDTH * (groupCount - 1)) / groupCount;
-    setGroupWidths(Array.from({ length: groupCount - 1 }, () => Math.max(GROUP_MIN, Math.floor(share))));
-  }, [groupCount]);
+    const share = (row.clientWidth - HANDLE_WIDTH * (columnCount - 1)) / columnCount;
+    setGroupWidths(Array.from({ length: columnCount - 1 }, () => Math.max(GROUP_MIN, Math.floor(share))));
+  }, [columnCount]);
+
+  /**
+   * The same even division down each column, and for the same reason.
+   *
+   * Keyed by *how the columns are stacked* rather than by the group count: a tab moving between two
+   * panes that are already there changes neither, so the heights somebody dragged stay put, while
+   * splitting or closing a pane re-divides the column it happened in.
+   */
+  const stacking = columns.map((column) => `${column.id}:${column.groups.length}`).join("|");
+  useLayoutEffect(() => {
+    const row = groupsRowRef.current;
+    if (!row) return;
+    const next: Record<string, number[]> = {};
+    for (const column of columns) {
+      if (column.groups.length < 2) continue;
+      const share = (row.clientHeight - HANDLE_WIDTH * (column.groups.length - 1)) / column.groups.length;
+      next[column.id] = Array.from({ length: column.groups.length - 1 }, () =>
+        Math.max(ROW_MIN, Math.floor(share)),
+      );
+    }
+    setGroupHeights(next);
+    // `columns` is rebuilt on every group change; `stacking` is the part of it this cares about.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stacking]);
 
   /** The tab width Monaco resolved for the file being snapped, so an indented snapshot lines up
    * the way the editor showed it. */
@@ -985,29 +1053,22 @@ export function EditorView() {
               )}
             </button>
           ))}
-          {/* Below the panels, above the actions. The five above read the code; these two only
-              change how the tree draws it, so grouping them with those put preferences among five
-              views of the repository. `mt-auto` stays on the first of the pair and nowhere else —
-              it is what opens the gap, and a second one would split the cluster in half. */}
-          <button
-            onClick={() => setSidePanel("icons")}
-            title={t("icons.title")}
-            aria-label={t("icons.title")}
-            className={`mt-auto flex h-7 w-7 items-center justify-center rounded-md ${
-              sidePanel === "icons"
-                ? "text-[var(--cf-accent)]"
-                : "text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
-            }`}
-          >
-            <Palette size={15} />
-          </button>
-          {/* Go to file lives here rather than in a strip of its own: it's an action, not a
-              panel, and it has to be reachable with no file open — which the tab bar isn't. */}
+          {/* The actions, below the panels. `mt-auto` is on the first of them and nowhere else —
+              it is what opens the gap that separates them from the five views above, and a second
+              one would split the cluster in half.
+
+              Go to file leads them rather than getting a strip of its own: it's an action, not a
+              panel, and it has to be reachable with no file open — which the tab bar isn't.
+
+              The iconography used to sit above this pair and is now a tab under Settings → Editor.
+              It was the one control here that was not about *this* repository — the profiles are
+              global (see `iconRulesStore`), so a preference every repo shares was being edited from
+              a rail that answers for one. */}
           <button
             onClick={() => setPaletteOpen(true)}
             title={shortcutHint("editor.goToFile", t("editor.goToFile"))}
             aria-label={t("editor.goToFile")}
-            className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
+            className="mt-auto flex h-7 w-7 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-black/[0.05] hover:text-[var(--cf-text)] dark:hover:bg-white/[0.08]"
           >
             <FileSearch size={15} />
           </button>
@@ -1042,8 +1103,6 @@ export function EditorView() {
             />
           ) : sidePanel === "bookmarks" ? (
             <BookmarksPanel repoPath={project.local_path} onOpen={openHit} />
-          ) : sidePanel === "icons" ? (
-            <IconRulesPanel />
           ) : sidePanel === "debug" ? (
             <DebugPanel
               repoPath={project.local_path}
@@ -1082,10 +1141,14 @@ export function EditorView() {
             floor — past the point where the panes stop fitting, the row scrolls rather than
             squeezing controls out of reach. */}
         <div ref={groupsRowRef} className="flex min-w-0 flex-1 overflow-x-auto">
-          {groups.map((group, i) => {
-            const last = i === groups.length - 1;
+          {/* A row of columns, each a stack of panes — the two axes a tab can be dropped against.
+              A column with one group in it is exactly the old layout, which is what every split
+              made before this existed still looks like. */}
+          {columns.map((column, i) => {
+            const lastColumn = i === columns.length - 1;
+            const heights = groupHeights[column.id] ?? [];
             return (
-              <Fragment key={group.id}>
+              <Fragment key={column.id}>
                 {i > 0 && (
                   <ResizeHandle
                     axis="x"
@@ -1098,13 +1161,44 @@ export function EditorView() {
                 )}
                 <div
                   style={
-                    last
+                    lastColumn
                       ? { minWidth: GROUP_MIN }
                       : { width: groupWidths[i] ?? GROUP_MIN, minWidth: GROUP_MIN }
                   }
-                  className={last ? "flex flex-1" : "flex shrink-0"}
+                  className={`flex min-w-0 flex-col ${lastColumn ? "flex-1" : "shrink-0"}`}
                 >
-                  {renderGroup(group)}
+                  {column.groups.map((group, j) => {
+                    const lastRow = j === column.groups.length - 1;
+                    return (
+                      <Fragment key={group.id}>
+                        {j > 0 && (
+                          <ResizeHandle
+                            axis="y"
+                            value={heights[j - 1] ?? ROW_MIN}
+                            min={ROW_MIN}
+                            max={GROUP_MAX}
+                            onChange={(h) =>
+                              setGroupHeights((prev) => ({
+                                ...prev,
+                                [column.id]: (prev[column.id] ?? []).map((v, k) => (k === j - 1 ? h : v)),
+                              }))
+                            }
+                            onCommit={() => {}}
+                          />
+                        )}
+                        <div
+                          style={
+                            lastRow
+                              ? { minHeight: ROW_MIN }
+                              : { height: heights[j] ?? ROW_MIN, minHeight: ROW_MIN }
+                          }
+                          className={`flex min-h-0 ${lastRow ? "flex-1" : "shrink-0"}`}
+                        >
+                          {renderGroup(group)}
+                        </div>
+                      </Fragment>
+                    );
+                  })}
                 </div>
               </Fragment>
             );

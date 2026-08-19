@@ -219,7 +219,14 @@ interface NotesState {
   /** The outline panel's visibility. */
   outlineOpen: boolean;
 
-  setWorkspace: (workspaceId: string) => Promise<void>;
+  /**
+   * Points the whole workspace at `workspaceId`, dropping everything the outgoing one had on
+   * screen. `null` — the state a deleted workspace leaves behind — empties it and loads nothing.
+   *
+   * Called on mount through `ensureNotesStoreLoaded` and, for every switch after that, from the
+   * subscription at the bottom of this file.
+   */
+  setWorkspace: (workspaceId: string | null) => Promise<void>;
   refresh: () => Promise<void>;
 
   setQuery: (query: string) => void;
@@ -318,6 +325,38 @@ let pendingLoad: { workspaceId: string; promise: Promise<void> } | null = null;
  */
 let searchToken = 0;
 
+/**
+ * Everything on screen that belongs to the workspace being left.
+ *
+ * One definition rather than two literals, because `setWorkspace` has two ways out — it loads the
+ * incoming workspace, or it empties the view because there is no incoming workspace — and a field
+ * cleared in one path and forgotten in the other is exactly how the new workspace ends up wearing
+ * the old one's state. Which is the bug this whole area exists to prevent.
+ */
+function clearedWorkspaceState(): Partial<NotesState> {
+  return {
+    notes: [],
+    books: [],
+    templates: [],
+    activeId: null,
+    draft: null,
+    bodies: {},
+    bodyOrder: [],
+    openingId: null,
+    savedAt: null,
+    query: "",
+    bodyHits: {},
+    tagFilter: [],
+    untaggedOnly: false,
+    bookFilter: null,
+    // Back to the defaults; the stored values arrive with the tree, when there is one.
+    expanded: [],
+    viewMode: "split",
+    galleryView: "grid",
+    sort: "manual",
+  };
+}
+
 export const useNotesStore = create<NotesState>((set, get) => ({
   workspaceId: null,
   loading: false,
@@ -357,31 +396,22 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     if (searchTimer) clearTimeout(searchTimer);
     searchToken++;
 
+    // No workspace to load — what a deleted workspace leaves behind. The view empties rather than
+    // keeping the notes of the one that is gone, and nothing is fetched.
+    if (!workspaceId) {
+      // Dropped along with the state it was going to fill. Leaving it would strand the workspace it
+      // names: coming back to that same one is a `pendingLoad?.workspaceId === workspaceId` hit on
+      // the first line above, which hands back a promise whose own guard now sees a different
+      // `workspaceId` and writes nothing — an empty view that no further switch repairs.
+      pendingLoad = null;
+      set({ workspaceId: null, loading: false, ...clearedWorkspaceState() });
+      return;
+    }
+
     const promise = (async () => {
-      set({
-        workspaceId,
-        loading: true,
-        // Cleared eagerly rather than on arrival, so a switch never shows the previous
-        // workspace's notes under the new workspace's name.
-        notes: [],
-        books: [],
-        templates: [],
-        activeId: null,
-        draft: null,
-        bodies: {},
-        bodyOrder: [],
-        savedAt: null,
-        query: "",
-        bodyHits: {},
-        tagFilter: [],
-        bookFilter: null,
-        // Reset to the defaults first; the stored values arrive with the tree below. Without this
-        // the incoming workspace briefly wears the outgoing one's view mode.
-        expanded: [],
-        viewMode: "split",
-        galleryView: "grid",
-        sort: "manual",
-      });
+      // Cleared eagerly rather than on arrival, so a switch never shows the previous workspace's
+      // notes under the new workspace's name.
+      set({ workspaceId, loading: true, ...clearedWorkspaceState() });
       try {
         // In parallel with the tree rather than before it: five settings reads and one tree read
         // are independent, and serialising them would put four extra round trips in front of the
@@ -445,7 +475,11 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       } catch (error) {
         pushErrorToast(String(error));
       } finally {
-        set({ loading: false });
+        // Guarded on the workspace still being this one, the way `dbStore` does it. A switch made
+        // while this load was in flight has its own load running: clearing the flag unconditionally
+        // would report *that* one finished, and the view would draw the empty tree it has so far as
+        // though it were the whole workspace.
+        if (get().workspaceId === workspaceId) set({ loading: false });
       }
     })();
 
@@ -1187,6 +1221,30 @@ export function ensureNotesStoreLoaded(): Promise<void> {
   if (workspaceId === null) return Promise.resolve();
   return useNotesStore.getState().setWorkspace(workspaceId);
 }
+
+/**
+ * A note belongs to the workspace it was written in, so switching workspace swaps the whole shelf.
+ *
+ * At module scope, beside the subscriptions `docsStore`, `chainStore` and `workItemReviewStore`
+ * each keep — and *not* as one more line in `App`'s switch effect, which is where this used to
+ * live. The difference is not style. A store whose workspace lifecycle is wired up in `App` is a
+ * store that can be shipped with it forgotten, and that is not hypothetical: `diagramsStore` was
+ * added months after this one and never got its line, so its drawings stayed on the workspace they
+ * were first opened in and every drawing made afterwards was filed there too. Keeping the rule in
+ * the file that owns `workspaceId` is what makes it impossible to add the next such store without
+ * it.
+ *
+ * The guard is the one `App` used to carry, and it earns its place: a store that has never loaded
+ * has nothing to show from the wrong workspace and nothing to tear down, so switching it here would
+ * only re-introduce an eager load — the whole reason this module is behind a lazy import. `loading`
+ * covers the sliver where a first load is in flight but has not written `workspaceId` yet.
+ */
+useWorkspaceStore.subscribe((state, previous) => {
+  if (state.activeWorkspaceId === previous.activeWorkspaceId) return;
+  const { workspaceId, loading } = useNotesStore.getState();
+  if (workspaceId === null && !loading) return;
+  void useNotesStore.getState().setWorkspace(state.activeWorkspaceId);
+});
 
 /**
  * The notes the list should show, filtered and ordered.

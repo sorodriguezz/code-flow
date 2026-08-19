@@ -2,6 +2,7 @@ import * as monaco from "monaco-editor";
 import { loader } from "@monaco-editor/react";
 import { ALL_THEMES, monacoThemeName, tokenRulesFor } from "./codeThemes";
 import { installGoToDefinition } from "./goToDefinition";
+import { installSnippets } from "./monacoSnippets";
 import { registerObjectScript } from "./monacoObjectScript";
 // Subpaths go through the package's own `exports` map (`./*` → `./esm/vs/*.js`), so these are
 // the mapped specifiers, not the on-disk paths.
@@ -111,6 +112,49 @@ for (const theme of ALL_THEMES) {
   });
 }
 
+/**
+ * Decorators get a token of their own, because Monaco's TypeScript grammar has none.
+ *
+ * `@Controller()` tokenizes as **`invalid`** followed by `type.identifier`: `@` is not in the
+ * grammar's `symbols` set and no rule claims it, so it falls through to the catch-all every Monarch
+ * grammar ends with. Themes paint `invalid` in whatever they reserve for broken syntax — red, in all
+ * of ours — so a perfectly good NestJS or Angular file shows a red `@` against an amber name on
+ * every decorator, in every theme. That is why this is fixed in the grammar rather than in a
+ * palette: no colour choice can make "invalid" mean "decorator".
+ *
+ * The rule goes on the *front* of the shared `common` state so it beats the identifier rules, and it
+ * is added to the very definition object Monaco is about to hand Monarch — language modules are
+ * singletons, so mutating one is enough — with an explicit re-register for the case where the
+ * language was already compiled by the time this runs.
+ *
+ * `annotation` is a token the palettes already colour (see `tokenRulesFor`), so nothing else has to
+ * change. Strings and comments keep their tokens: both are separate tokenizer states, so `'@x'` and
+ * `// @param` never reach this rule. Checked against monaco 0.56 with `editor.tokenize`.
+ */
+async function tokenizeDecorators() {
+  for (const id of ["typescript", "javascript"]) {
+    // `loader` is how Monaco itself fetches the grammar the first time the language is needed. It
+    // is on the registry entry but not on its public type, hence the cast.
+    const entry = monaco.languages
+      .getLanguages()
+      .find((language) => language.id === id) as
+      | (monaco.languages.ILanguageExtensionPoint & {
+          loader?: () => Promise<{ language?: monaco.languages.IMonarchLanguage }>;
+        })
+      | undefined;
+    const language = (await entry?.loader?.())?.language;
+    const common = (language?.tokenizer as { common?: unknown[] } | undefined)?.common;
+    if (!language || !Array.isArray(common)) continue;
+    // TypeScript and JavaScript share pieces of one definition, so the second pass would otherwise
+    // insert a duplicate rule.
+    if (common.some((rule) => Array.isArray(rule) && rule[1] === "annotation")) continue;
+    common.unshift([/@[a-zA-Z_$][\w$]*/, "annotation"]);
+    monaco.languages.setMonarchTokensProvider(id, language);
+  }
+}
+
+void tokenizeDecorators();
+
 export { monaco };
 
 // ObjectScript, for `.cls` / `.mac` / `.int` / `.inc`. Registered *above* `installGoToDefinition`,
@@ -122,6 +166,10 @@ registerObjectScript();
 // definition provider and the editor opener) are global to Monaco rather than per-instance —
 // see `installGoToDefinition`.
 installGoToDefinition();
+
+// The user's own snippets, offered in the completion dropdown of every language. Registered after
+// `registerObjectScript` for the same reason as the line above — the language list is read here.
+installSnippets();
 
 /**
  * Options every embedded editor needs so its overlay widgets aren't clipped.

@@ -9,6 +9,7 @@ import {
   GitBranch,
   Globe,
   Keyboard,
+  FileCode2,
   PackagePlus,
   Palette,
   ShieldCheck,
@@ -35,6 +36,7 @@ import { ResizeHandle } from "../common/ResizeHandle";
 import { Tooltip } from "../common/Tooltip";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { EditorSettings } from "./EditorSettings";
 import { useUiStore, type SettingsSectionId } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -50,6 +52,10 @@ const GLOBAL_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: 
   { id: "general", labelKey: "settings.general", icon: Globe },
   { id: "appearance", labelKey: "settings.appearance", icon: Palette },
   { id: "keybindings", labelKey: "shortcuts.title", icon: Keyboard },
+  // Beside the keybindings: both are "what happens when I type this", and somebody looking for one
+  // is as likely to be looking for the other. Snippets and language servers live inside it, for the
+  // reason `EditorSettings` gives.
+  { id: "editor", labelKey: "settings.editorSection", icon: FileCode2 },
   { id: "projects", labelKey: "settings.projects", icon: FolderGit2 },
   { id: "git", labelKey: "settings.git", icon: GitBranch },
   { id: "terminal", labelKey: "settings.terminal", icon: TerminalSquare },
@@ -82,7 +88,7 @@ const ALPHA_SECTIONS = new Set<SettingsSectionId>(["remote"]);
 /** Sections that carry a sub-nav and scroll the pane beside it rather than the whole column, so
  * their heading and rail stay put while you read down a long list. They need a definite height to
  * do that, which is what the `h-full` below hands them. */
-const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>(["claude", "backup", "api"]);
+const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>(["claude", "backup", "api", "editor"]);
 
 const WORKSPACE_SECTIONS: { id: SettingsSectionId; labelKey: TranslationKey; icon: typeof Palette }[] = [
   { id: "review", labelKey: "settings.review", icon: ShieldCheck },
@@ -359,6 +365,7 @@ export function SettingsView() {
               {section === "appearance" && <ThemeSettings />}
               {section === "general" && <GeneralSettings />}
               {section === "keybindings" && <ShortcutsSettings />}
+              {section === "editor" && <EditorSettings />}
               {section === "projects" && <ProjectsSettings />}
               {section === "git" && <GitSettings />}
               {section === "terminal" && <TerminalSettings />}

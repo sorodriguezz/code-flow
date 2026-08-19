@@ -583,3 +583,90 @@ pub fn delete_template(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM diagram_templates WHERE id = ?1", params![id])?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two workspaces, so the isolation below has something to fail against.
+    fn workspaces() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        super::super::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "DELETE FROM workspaces;
+             INSERT INTO workspaces (id, name, icon, color, sort_order, created_at)
+                 VALUES ('w1', 'Flow', 'workflow', '#111', 0, '2026-01-01T00:00:00+00:00'),
+                        ('w2', 'Otro', 'workflow', '#222', 1, '2026-01-01T00:00:00+00:00');",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// Every read in this module is filtered by workspace, and this is the test that says so out
+    /// loud.
+    ///
+    /// It is here because of the bug it does *not* catch, which is worth writing down: the backend
+    /// has always scoped these reads correctly, and Diagrams still behaved as though it had not.
+    /// The store that calls `load_tree` keeps its own `workspace_id` and sends it back on every
+    /// write, and nothing was telling it the workspace had changed — so a board opened in `w1` went
+    /// on showing `w1` while the user was in `w2`, and every drawing made there was filed into
+    /// `w1`. The fix lives in `diagramsStore.ts`; this locks the half it leans on.
+    #[test]
+    fn a_workspace_sees_only_its_own_diagrams_folders_and_templates() {
+        let conn = workspaces();
+
+        let here = create_folder(&conn, "w1", None, "Aqui", "").unwrap();
+        let there = create_folder(&conn, "w2", None, "Alla", "").unwrap();
+        create_diagram(&conn, "w1", Some(&here.id), "Dibujo de w1", "<mxfile/>", "drawio", "[]")
+            .unwrap();
+        create_diagram(&conn, "w2", Some(&there.id), "Dibujo de w2", "<mxfile/>", "drawio", "[]")
+            .unwrap();
+        create_template(&conn, "w1", "Plantilla de w1", "", "workflow", "", "drawio", "[]").unwrap();
+        create_template(&conn, "w2", "Plantilla de w2", "", "workflow", "", "drawio", "[]").unwrap();
+
+        let second = load_tree(&conn, "w2").unwrap();
+        assert_eq!(
+            second.diagrams.iter().map(|d| d.title.as_str()).collect::<Vec<_>>(),
+            ["Dibujo de w2"],
+        );
+        assert_eq!(
+            second.folders.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["Alla"],
+        );
+        assert_eq!(
+            second.templates.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["Plantilla de w2"],
+        );
+
+        // And the other way round, so a passing test cannot mean "load_tree returns nothing".
+        let first = load_tree(&conn, "w1").unwrap();
+        assert_eq!(
+            first.diagrams.iter().map(|d| d.title.as_str()).collect::<Vec<_>>(),
+            ["Dibujo de w1"],
+        );
+        assert_eq!(
+            first.folders.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["Aqui"],
+        );
+    }
+
+    /// Deleting a workspace takes its drawings with it, which is the other half of "a diagram
+    /// belongs to a workspace" — and the half a foreign key, not a query, is responsible for.
+    #[test]
+    fn deleting_a_workspace_takes_its_diagrams_with_it() {
+        let conn = workspaces();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+
+        let folder = create_folder(&conn, "w2", None, "Alla", "").unwrap();
+        create_diagram(&conn, "w2", Some(&folder.id), "Dibujo", "<mxfile/>", "drawio", "[]")
+            .unwrap();
+        create_template(&conn, "w2", "Plantilla", "", "workflow", "", "drawio", "[]").unwrap();
+        create_diagram(&conn, "w1", None, "Sobreviviente", "<mxfile/>", "drawio", "[]").unwrap();
+
+        conn.execute("DELETE FROM workspaces WHERE id = 'w2'", []).unwrap();
+
+        let left = load_tree(&conn, "w2").unwrap();
+        assert!(left.diagrams.is_empty() && left.folders.is_empty() && left.templates.is_empty());
+        assert_eq!(load_tree(&conn, "w1").unwrap().diagrams.len(), 1, "and only its own went");
+    }
+}

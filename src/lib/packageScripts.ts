@@ -284,9 +284,18 @@ export function addCommandLine(
   dev: boolean,
 ): string | null {
   if (!isInstallableName(name)) return null;
-  // Each manager spells the dev flag differently, and the long forms are the ones that read as what
-  // they do in a transcript somebody scrolls back through a week later.
-  const flag = dev ? (manager === "npm" ? " --save-dev" : " --dev") : "";
+  /**
+   * The dev flag, where yarn is the one that spells it differently.
+   *
+   * `--save-dev` for npm and pnpm; `--dev` for yarn, which is the only one of the three that does
+   * not know the long form — Yarn 1 rejects it outright. It does not go the other way: `pnpm add`
+   * has no `--dev` at all (only `pnpm install` does, where it means something else entirely), so
+   * the flag came back as `ERROR Unknown option: 'dev'` and nothing was installed.
+   *
+   * Long forms rather than `-D`, which all three accept: this line is echoed into a terminal the
+   * user keeps, and it should still say what it did when they scroll back to it next week.
+   */
+  const flag = dev ? (manager === "yarn" ? " --dev" : " --save-dev") : "";
   return `${manager} add ${name}${flag}`;
 }
 

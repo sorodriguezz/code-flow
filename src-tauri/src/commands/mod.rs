@@ -14,6 +14,7 @@ pub mod git_ops;
 pub mod github_cmd;
 pub mod gitlab_cmd;
 pub mod notes_cmd;
+pub mod lsp_cmd;
 pub mod remote_cmd;
 pub mod remotectl_cmd;
 pub mod repos;

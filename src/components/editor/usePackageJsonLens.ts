@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import type { editor as MonacoEditorNS, IDisposable, languages } from "monaco-editor";
 import type { Monaco } from "@monaco-editor/react";
 import { dependencyBlocks, scriptLines, scriptsBlockLine } from "../../lib/packageJsonSpans";
@@ -35,7 +35,13 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 
 /** What the hook needs from the pane. */
 interface Options {
-  /** The file on screen. Annotations appear only when this is a `package.json`. */
+  /**
+   * The file on screen.
+   *
+   * Only used to know when the cached versions stop applying — *what* gets annotated is decided
+   * against the editor's own model, so a pane showing something else can never borrow these. See
+   * the note on the lens effect's dependencies.
+   */
   activePath: string | null;
   /**
    * The arrow beside `name` was pressed, at `at`.
@@ -77,17 +83,30 @@ export function usePackageJsonLens(
   const versionMarks = useRef<MonacoEditorNS.IEditorDecorationsCollection | null>(null);
   /** Bumped to make Monaco re-ask the provider once an answer lands. */
   const refresh = useRef<(() => void) | null>(null);
+  /** Redraws the marks above. Held in a ref so the file-change effect can ask for it without owning
+   *  the collection. */
+  const redraw = useRef<(() => void) | null>(null);
+  /**
+   * A suffix that makes this instance's command ids its own.
+   *
+   * Command ids are global to the Monaco instance, and this hook runs once per editor pane. With two
+   * panes open both registered `cf.npm.check`, and the registry answers with one of them — so
+   * pressing "check versions" in one pane could run the *other* pane's handler, filling a map the
+   * pane you are looking at never reads. Scoped ids keep each pane's lenses wired to its own state.
+   */
+  const scope = useId();
   /** Held in refs so the provider — registered once — always calls the current ones. */
   const actions = useRef({ onScriptArrow, onAddDependency, manager, onChooseManager, t });
   actions.current = { onScriptArrow, onAddDependency, manager, onChooseManager, t };
 
-  const isManifest = Boolean(activePath && activePath.split(/[/\\]/).pop() === PACKAGE_JSON);
-
-  // A new file is a new set of answers.
+  // A new file is a new set of answers. Both halves are told: the lenses, which is where the count
+  // and the "check versions" offer live, and the marks — a `→ 1.2.3` left over from the file you
+  // just closed would otherwise sit on this one until its next keystroke.
   useEffect(() => {
     versions.current = new Map();
     loading.current = new Set();
     refresh.current?.();
+    redraw.current?.();
   }, [activePath]);
 
   /**
@@ -107,14 +126,24 @@ export function usePackageJsonLens(
    */
   useEffect(() => {
     if (!editor || !monaco) return;
-    const model = editor.getModel();
-    if (!model || !isManifest) return;
 
     let collection: MonacoEditorNS.IEditorDecorationsCollection | null = null;
+    /** The scripts of whatever is on screen, and where they are. Empty for anything else. */
+    let lines = new Map<string, number>();
 
     const draw = () => {
-      const lines = scriptLines(model.getValue());
+      // Asked of the editor on every pass rather than captured once, for the same reason the lens
+      // below is registered per editor: one pane shows many files over its life, and a `lines` map
+      // left over from the last one would put arrows on lines that have nothing to do with it —
+      // and, worse, would answer a click with the wrong script's name.
+      const model = editor.getModel();
       collection?.clear();
+      if (!model || model.uri.path.split("/").pop() !== PACKAGE_JSON) {
+        collection = null;
+        lines = new Map();
+        return;
+      }
+      lines = scriptLines(model.getValue());
       collection = editor.createDecorationsCollection(
         [...lines.entries()].map(([name, line]) => ({
           range: new monaco.Range(line, 1, line, 1),
@@ -125,16 +154,15 @@ export function usePackageJsonLens(
           },
         })),
       );
-      return lines;
     };
 
-    let lines = draw();
+    draw();
     // Redrawn on edit, because a script added or a line inserted above one moves every arrow below
-    // it. Debounced by Monaco's own change batching rather than a timer: the scan is a single pass
-    // over a file measured in kilobytes.
-    const changed = model.onDidChangeContent(() => {
-      lines = draw();
-    });
+    // it — and on a model change, because that is a different file with different scripts. Debounced
+    // by Monaco's own change batching rather than a timer: the scan is a single pass over a file
+    // measured in kilobytes.
+    const changed = editor.onDidChangeModelContent(() => draw());
+    const swapped = editor.onDidChangeModel(() => draw());
 
     const clicked = editor.onMouseDown((event) => {
       if (event.target.type !== monaco.editor.MouseTargetType.GUTTER_LINE_DECORATIONS) return;
@@ -150,10 +178,11 @@ export function usePackageJsonLens(
 
     return () => {
       changed.dispose();
+      swapped.dispose();
       clicked.dispose();
       collection?.clear();
     };
-  }, [editor, monaco, isManifest]);
+  }, [editor, monaco]);
 
   /**
    * The dependency box: one CodeLens over each block's own line.
@@ -163,7 +192,7 @@ export function usePackageJsonLens(
    * most four of them in a file, so the rows it adds cost nothing.
    */
   useEffect(() => {
-    if (!editor || !monaco || !isManifest) return;
+    if (!editor || !monaco) return;
 
     const disposables: IDisposable[] = [];
 
@@ -205,7 +234,14 @@ export function usePackageJsonLens(
      */
     const drawVersions = () => {
       const model = editor.getModel();
-      if (!model) return;
+      // The model, not `activePath`: this effect now outlives any one file, so what is on screen is
+      // the only thing that can say whether these marks belong. A JSON file that is not a manifest
+      // gets an empty collection, which is also how the old ones are cleared.
+      if (!model || model.uri.path.split("/").pop() !== PACKAGE_JSON) {
+        versionMarks.current?.clear();
+        versionMarks.current = null;
+        return;
+      }
       const raw = model.getValue();
       const lines = raw.split("\n");
       const decorations: MonacoEditorNS.IModelDeltaDecoration[] = [];
@@ -297,7 +333,11 @@ export function usePackageJsonLens(
      * `registerCommand` puts them where the lens looks. Fixed ids, disposed with the effect, so a
      * remount replaces rather than accumulates.
      */
-    const commands = { check: "cf.npm.check", add: "cf.npm.add", manager: "cf.npm.manager" };
+    const commands = {
+      check: `cf.npm.check.${scope}`,
+      add: `cf.npm.add.${scope}`,
+      manager: `cf.npm.manager.${scope}`,
+    };
     disposables.push(
       monaco.editor.registerCommand(commands.check, (_ctx: unknown, block: string, names: string[]) =>
         void check(block, names),
@@ -319,11 +359,18 @@ export function usePackageJsonLens(
         return { dispose: () => (refresh.current = null) };
       },
       provideCodeLenses: (model) => {
-        // Registered for the whole `json` language, so every other JSON file passes through here.
-        // The filename is the gate, and it is checked against the model rather than against
-        // `activePath` so a second editor group showing a different file cannot borrow these.
+        // Registered for the whole `json` language, so every other JSON file passes through here,
+        // and one provider exists per editor pane. Two gates, and both are needed:
+        //
+        // * the filename, because `dependencies` boxes belong to manifests and nothing else;
+        // * `model === editor.getModel()`, because the answer is drawn from *this* pane's state —
+        //   its cached versions, its in-flight checks. Monaco asks every registered provider, so
+        //   without this a second pane would answer for a manifest it is not showing and the file
+        //   would draw every lens twice, one set of them wired to a map nobody is filling.
         const name = model.uri.path.split("/").pop();
-        if (name !== PACKAGE_JSON) return { lenses: [], dispose: () => undefined };
+        if (name !== PACKAGE_JSON || model !== editor.getModel()) {
+          return { lenses: [], dispose: () => undefined };
+        }
 
         const raw = model.getValue();
         // Split once for the whole pass, not once per package.
@@ -452,22 +499,41 @@ export function usePackageJsonLens(
       },
     };
 
+    redraw.current = drawVersions;
     disposables.push(monaco.languages.registerCodeLensProvider("json", provider));
-    // Whatever is already known, drawn now. The effect re-runs when the editor instance changes —
-    // a split, a remount — and without this the versions from a check made before it would be
-    // cleared with the old collection and never come back until something else redrew them.
+    // Whatever is already known, drawn now: the effect also runs on a remount, and the versions from
+    // a check made before it would otherwise be cleared with the old collection and never come back.
     drawVersions();
-    // Lines move when the file is edited, so the marks follow the text they are about.
-    const moved = editor.getModel()?.onDidChangeContent(() => drawVersions());
-    if (moved) disposables.push(moved);
+    // Both events, and both on the *editor* rather than on one model: lines move when the file is
+    // edited, and the file itself changes under this editor every time a tab is clicked.
+    disposables.push(
+      editor.onDidChangeModelContent(() => drawVersions()),
+      editor.onDidChangeModel(() => drawVersions()),
+    );
 
     return () => {
       for (const item of disposables) item.dispose();
       versionMarks.current?.clear();
       versionMarks.current = null;
       refresh.current = null;
+      redraw.current = null;
     };
-  }, [editor, monaco, isManifest]);
+    /**
+     * **Not keyed to the open file**, and that is the fix for lens rows landing on the wrong one.
+     *
+     * With `isManifest` in here, every tab switch away from a manifest unregistered the provider.
+     * That fires the language registry's own change event, which makes each editor schedule a
+     * *debounced* recompute of its lenses — and the model swap for the new tab lands inside that
+     * window. What Monaco then had was a recompute belonging to the manifest and a view showing the
+     * next file, so the lens widgets stayed, unanchored, drawn straight over whatever code was
+     * underneath. Reproduced exactly that way against monaco 0.56, and gone the moment the
+     * registration stops moving.
+     *
+     * Registered once per editor instead, deciding per model. The provider is cheap on a file it has
+     * nothing to say about — one filename comparison — and Monaco already clears a model's lenses
+     * when the model changes, which is the path that was working all along.
+     */
+  }, [editor, monaco, scope]);
 
 }
 

@@ -28,6 +28,7 @@ export type SettingsSectionId =
   | "appearance"
   | "general"
   | "keybindings"
+  | "editor"
   | "projects"
   | "git"
   | "terminal"
